@@ -31,53 +31,60 @@ def fetch_data(start_time, end_time, ADEP, ADES):
         # If the file already exists, do not rerun
         if Path(f"data/daily/borealis-osn-3dpi_{ADEP}_{ADES}_{date_str}_{stop_time_str}.parquet.gz").exists():
             continue
-        df_dep = opensky.history(
+            
+        try: 
+          df_dep = opensky.history(
             start=date_str,
             stop=stop_time_str,
             departure_airport=ADEP,
             arrival_airport=ADES,
             progressbar=False
-        )
+          )
         
-        df_arr = opensky.history(
-            start=date_str,
-            stop=stop_time_str,
-            departure_airport=ADES,
-            arrival_airport=ADEP,
-            progressbar=False
-        )
-        
-        if pd.isnull(df_dep) and pd.isnull(df_arr):
-            df = pd.DataFrame()
-            print("Both are NULL")
 
-        if pd.isnull(df_dep) and not pd.isnull(df_arr):
-            df = df_arr.data
-            print("df_dep is NULL")
+          df_arr = opensky.history(
+              start=date_str,
+              stop=stop_time_str,
+              departure_airport=ADES,
+              arrival_airport=ADEP,
+              progressbar=False
+          )
+        
+          if pd.isnull(df_dep) and pd.isnull(df_arr):
+              df = pd.DataFrame()
+              print("Both are NULL")
 
-        if pd.isnull(df_arr) and not pd.isnull(df_dep):
-            df = df_dep.data
-            print("df_arr is NULL")
-        
-        if not pd.isnull(df_arr) and not pd.isnull(df_dep):
-            print("both not NULL")
-            df = pd.concat([df_dep.data, df_arr.data])
-        
-        # Convert timestamp column(s) to a lower precision (like microseconds)
-        for col in df.columns:
-            if pd.api.types.is_datetime64_any_dtype(df[col]):
-                df[col] = df[col].values.astype('datetime64[us]')
-        
-        # Write to compressed parquet file
-        df.to_parquet(f"data/daily/borealis-osn-3dpi_{ADEP}_{ADES}_{date_str}_{stop_time_str}.parquet.gz", compression="gzip")
-        print("-"*20)
-        print()
+          if pd.isnull(df_dep) and not pd.isnull(df_arr):
+              df = df_arr.data
+              print("df_dep is NULL")
+
+          if pd.isnull(df_arr) and not pd.isnull(df_dep):
+              df = df_dep.data
+              print("df_arr is NULL")
+
+          if not pd.isnull(df_arr) and not pd.isnull(df_dep):
+              print("both not NULL")
+              df = pd.concat([df_dep.data, df_arr.data])
+
+          # Convert timestamp column(s) to a lower precision (like microseconds)
+          for col in df.columns:
+              if pd.api.types.is_datetime64_any_dtype(df[col]):
+                  df[col] = df[col].values.astype('datetime64[us]')
+
+          # Write to compressed parquet file
+          df.to_parquet(f"data/daily/borealis-osn-3dpi_{ADEP}_{ADES}_{date_str}_{stop_time_str}.parquet.gz", compression="gzip")
+          print("-"*20)
+          print()
+        except Exception as e: 
+          print(f"Request failed with exception: {e}")
+          print("-"*20)
+          print()
     return None
 
 
 # Apply the function on all the airport combinations possible 
 #apts = ["EGLL", "EKCH", "BIRK", "ESSA"] # "EIDW",
-apts = ["EIDW", "ESSA"] # "EIDW",
+apts = ["EGLL", "EKCH", "BIRK", "ESSA", "EIDW"]
 # Calculate all the combinations of apt pairs
 start_time = "2023-01-01 00:00"
 end_time = "2023-06-01 00:00"
