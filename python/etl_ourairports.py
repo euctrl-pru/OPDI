@@ -1,5 +1,7 @@
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, DoubleType
+import urllib.request
 from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, DoubleType
+import os
 
 # Set the SparkSession as provided
 spark = SparkSession\
@@ -15,6 +17,7 @@ spark = SparkSession\
     .config("spark.dynamicAllocation.maxExecutors", "6")\
     .getOrCreate()
 
+# Define schemas for each dataset
 # AIRPORTS
 
 schema_airports = StructType([
@@ -38,11 +41,7 @@ schema_airports = StructType([
     StructField("keywords", StringType(), True)
 ])
 
-df_airports = spark.read.csv("https://ourairports.com/data/airports.csv", header=True, schema=schema_airports)
-df_airports.write.mode('overwrite').saveAsTable("ao_airports")
-
 # RUNWAYS
-
 schema_runways = StructType([
     StructField("id", IntegerType(), True),
     StructField("airport_ref", IntegerType(), True),
@@ -66,11 +65,8 @@ schema_runways = StructType([
     StructField("he_displaced_threshold_ft", IntegerType(), True),
 ])
 
-df_runways = spark.read.csv("https://ourairports.com/data/runways.csv", header=True, schema=schema_runways)
-df_runways.write.mode('overwrite').saveAsTable("oa_runways")
 
 # NAVAIDS
-
 schema_navaids = StructType([
     StructField("id", IntegerType(), True),
     StructField("filename", StringType(), True),
@@ -94,11 +90,7 @@ schema_navaids = StructType([
     StructField("associated_airport", StringType(), True)
 ])
 
-df_navaids = spark.read.csv("https://ourairports.com/data/navaids.csv", header=True, schema=schema_navaids)
-df_navaids.write.mode('overwrite').saveAsTable("oa_navaids")
-
 # AIRPORT FREQUENCIES
-
 schema_airport_frequencies = StructType([
     StructField("id", IntegerType(), True),
     StructField("airport_ref", IntegerType(), True),
@@ -108,11 +100,7 @@ schema_airport_frequencies = StructType([
     StructField("frequency_mhz", DoubleType(), True),
 ])
 
-df_airport_frequencies = spark.read.csv("https://ourairports.com/data/airport_frequencies.csv", header=True, schema=schema_airport_frequencies)
-df_airport_frequencies.write.mode('overwrite').saveAsTable("oa_airport_frequencies")
-
 # COUNTRIES
-
 schema_countries = StructType([
     StructField("id", IntegerType(), True),
     StructField("code", StringType(), True),
@@ -122,11 +110,7 @@ schema_countries = StructType([
     StructField("keywords", StringType(), True),
 ])
 
-df_countries = spark.read.csv("https://ourairports.com/data/countries.csv", header=True, schema=schema_countries)
-df_countries.write.mode('overwrite').saveAsTable("oa_countries")
-
 # REGIONS
-
 schema_regions = StructType([
     StructField("id", IntegerType(), True),
     StructField("code", StringType(), True),
@@ -138,7 +122,41 @@ schema_regions = StructType([
     StructField("keywords", StringType(), True),
 ])
 
-df_regions = spark.read.csv("https://ourairports.com/data/regions.csv", header=True, schema=schema_regions)
-df_regions.write.mode('overwrite').saveAsTable("oa_regions")
+
+schemas = {
+    'airports': schema_airports,
+    'runways': schema_runways,
+    'navaids': schema_navaids,
+    'airport_frequencies': schema_airport_frequencies,
+    'countries': schema_countries,
+    'regions': schema_regions
+}
+
+# Define URLs for each dataset
+urls = {
+    'airports': "https://ourairports.com/data/airports.csv",
+    'runways': "https://ourairports.com/data/runways.csv",
+    'navaids': "https://ourairports.com/data/navaids.csv",
+    'airport_frequencies': "https://ourairports.com/data/airport-frequencies.csv",
+    'countries': "https://ourairports.com/data/countries.csv",
+    'regions': "https://ourairports.com/data/regions.csv"
+}
+
+# Define local path where file will be downloaded
+local_path = "data.csv"
+
+# Download each dataset, create corresponding Spark DataFrames, and write them into Spark tables
+for name, url in urls.items():
+    # Download the file from `url` and save it locally under `local_path`
+    urllib.request.urlretrieve(url, local_path)
+
+    # Create a DataFrame from the downloaded CSV file
+    df = spark.read.csv(local_path, header=True, schema=schemas[name])
+
+    # Write the DataFrame into a Spark table
+    df.write.mode('overwrite').insertInto(f"project_aiu.oa_{name}")
+
+# Remove the downloaded file
+os.remove(local_path)
 
 spark.stop()
