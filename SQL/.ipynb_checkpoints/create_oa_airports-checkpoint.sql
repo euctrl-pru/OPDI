@@ -11,13 +11,13 @@ CREATE TABLE oa_airports (
   iso_region STRING COMMENT 'An alphanumeric code for the high-level administrative subdivision of a country where the airport is primarily located (e.g. province, governorate), prefixed by the ISO2 country code and a hyphen.',
   municipality STRING COMMENT 'The primary municipality that the airport serves (when available).',
   scheduled_service STRING COMMENT '"yes" if the airport currently has scheduled airline service; "no" otherwise.',
-  gps_code STRING COMMENT 'The code that an aviation GPS database (such as Jeppesen''s or Garmin''s) would normally use for the airport. This will always be the ICAO code if one exists.',
+  gps_code STRING COMMENT 'The code that an aviation GPS database (such as Jeppesens or Garmins) would normally use for the airport. This will always be the ICAO code if one exists.',
   iata_code STRING COMMENT 'The three-letter IATA code for the airport (if it has one).',
   local_code STRING COMMENT 'The local country code for the airport, if different from the gps_code and iata_code fields (used mainly for US airports).',
-  home_link STRING COMMENT 'URL of the airport''s official home page on the web, if one exists.',
-  wikipedia_link STRING COMMENT 'URL of the airport''s page on Wikipedia, if one exists.',
+  home_link STRING COMMENT 'URL of the airports official home page on the web, if one exists.',
+  wikipedia_link STRING COMMENT 'URL of the airports page on Wikipedia, if one exists.',
   keywords STRING COMMENT 'Extra keywords/phrases to assist with search, comma-separated. May include former names for the airport, alternate codes, names in other languages, nearby tourist destinations, etc.'
 )
-COMMENT 'OurAirports airports data (for PRU) - Monthly updated.'
+COMMENT 'OurAirports airports data (for PRU).'
 STORED AS parquet
 TBLPROPERTIES ('transactional'='false');

@@ -6,6 +6,6 @@ CREATE TABLE oa_airport_frequencies (
   description STRING COMMENT 'A description of the frequency, typically the way a pilot would open a call on it.',
   frequency_mhz DOUBLE COMMENT 'Radio voice frequency in megahertz. Note that the same frequency may appear multiple times for an airport, serving different functions.'
 )
-COMMENT 'OurAirports airport frequencies data (for PRU) - Monthly updated.'
+COMMENT 'OurAirports airport frequencies data (for PRU).'
 STORED AS parquet
 TBLPROPERTIES ('transactional'='false');
