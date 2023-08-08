@@ -57,10 +57,34 @@ bor_dai <- fns %>% map_dfr(.f = ~ arrow::read_parquet(.x))
 
 # helper function for aerodrome pair count
 combo <- function(.adep, .ades){
-    this_cp <- str_sort(c(.adep, .ades)) %>% paste(collapse = "-")
+    this_cp <- str_sort(c(.adep, .ades)) %>% paste(collapse = "-") 
 }
 
-rq <- bor_dai %>% filter(BOR_DAI == "I") %>% group_by(ADEP, ADES) %>% summarise(N = n(), .groups = "drop") 
-rq %>% rowwise() %>% mutate(CP = combo(ADEP, ADES))
+# determine aerodrome pair connections
+count_combos <- function(.combo_cons){
+  .combo_cons %>% 
+  rowwise() %>% mutate(CP = combo(ADEP, ADES)) %>% 
+    mutate(
+        OUTB = ifelse( glue::glue(ADEP,"-",ADES) == CP, N, 0)
+      , BACK = ifelse( glue::glue(ADEP,"-",ADES) != CP, N, 0)
+      , TOT = OUTB + BACK) %>% 
+    group_by(CP) %>% 
+    summarise(across(.cols = OUTB:BACK, .fns = sum)) %>% 
+    mutate(TOT = OUTB + BACK) %>% arrange(desc(TOT))
+}
+
+rq <- bor_dai %>% filter(BOR_DAI == "I") %>% group_by(ADEP, ADES) %>% summarise(N = n(), .groups = "drop")
+
+rq2 <- rq %>% rowwise() %>% mutate(CP = combo(ADEP, ADES)) %>% count_combos()
+#write_csv(rq2, "./data/bor-cps-2023-Q1Q2.csv")
+```
+
+```{r}
+bor_cnts <- read_csv("./data/bor-cps-2023-Q1Q2.csv", show_col_types = FALSE)
+
+bor_cnts %>% slice_head(n = 20) %>% 
+  mutate(CP = fct_reorder(CP, TOT)) %>% 
+  ggplot() +
+  geom_col(aes(x = TOT, y = CP))
 ```
 
