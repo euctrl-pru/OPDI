@@ -32,7 +32,7 @@
 *  `create_osn_*.sql` - Creates table(s) to store OSN data on Hive.
 
 **Milestones ETL**
-*  `create_airport_*.py` - Creates airport grids tables on Hive. 
+*  `create_airport_*.sql` - Creates airport grids tables on Hive. 
 
 
 
