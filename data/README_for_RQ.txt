@@ -1,0 +1,1 @@
+The folders /data/daily, /data/ec-datadump and /data/nm-flt have been added to the gitignore. Other than that, everything in this folder is versioned. If you wish it otherwise, you can modify the .gitignore.
