@@ -1,0 +1,66 @@
+---
+title: "Borealiis 3Di"
+author: "PRU"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+
+```
+
+# Top Borealis Aerodrome Pairs
+
+Based on the NM flight table, we identify a set of top Borealis aerodrome pairs in Q1 and Q2 2023.
+
+```{ nmflighttable, include=FALSE}
+# for the selection of aerodrome pairs check stats with NM flight table
+# uploaded Q1 & Q2 of NM flight table to data/NM-flt
+
+pth    <- here::here("data","nm-flt")
+fns_nm <- fs::dir_ls(path = pth)
+
+nm_flt <- fns_nm %>% purrr::map_dfr(.f = ~ arrow::read_parquet(.x))
+
+# Borealis members - pick 2 ICAO digits
+# Denmark, Estonia, Finland, Iceland, Ireland, Latvia, Norway, Sweden and the UK.
+bor_icao_2d <- c(
+    "Denmark" = "EK", "Estonia" = "EE", "Finland" = "EF"
+  , "Iceland" = "BI", "Ireland" = "EI", "Latvia"  = "EV"
+  , "Norway"  = "EN", "Sweden"  = "ES", "UK" = "EG" )
+
+# get departure, arrival, and internal flights := dai
+bor_dai <- nm_flt %>% 
+  filter( (substr(ADEP,1,2) %in% bor_icao_2d)|(substr(ADES,1,2) %in% bor_icao_2d) ) %>% 
+  select(FLTID = AIRCRAFT_ID, REG = REGISTRATION, ICAO24 = AIRCRAFT_ADDRESS
+         , ADEP, ADES
+         , TYPE = AIRCRAFT_TYPE_ICAO_ID, WTC = WK_TBL_CAT
+         , RFL  = FL_REQ, EET = FLT_DUR_3
+         , EOBT = AOBT_3, ELDT = ARVT_3
+         , ENTRY =IFPZ_ENTRY_TIME_ACT, EXIT = IFPZ_EXIT_TIME_ACT ) %>% 
+  mutate(BOR_DAI = case_when(
+        (substr(ADEP,1,2) %in% bor_icao_2d) & (substr(ADES,1,2) %in% bor_icao_2d) ~ "I"
+      , (substr(ADEP,1,2) %in% bor_icao_2d) & !(substr(ADES,1,2) %in% bor_icao_2d)~ "D"
+      , !(substr(ADEP,1,2) %in% bor_icao_2d)& (substr(ADES,1,2) %in% bor_icao_2d) ~ "A"
+      )
+  )
+
+arrow::write_parquet(bor_dai, "./data/bor-dai-2023-Q1Q2.parquet")
+```
+
+```{r borealis_dai}
+fns     <- fs::dir_ls(path = "./data", regexp = "bor-dai")
+bor_dai <- fns %>% map_dfr(.f = ~ arrow::read_parquet(.x))
+
+# helper function for aerodrome pair count
+combo <- function(.adep, .ades){
+    this_cp <- str_sort(c(.adep, .ades)) %>% paste(collapse = "-")
+}
+
+rq <- bor_dai %>% filter(BOR_DAI == "I") %>% group_by(ADEP, ADES) %>% summarise(N = n(), .groups = "drop") 
+rq %>% rowwise() %>% mutate(CP = combo(ADEP, ADES))
+```
+
