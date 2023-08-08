@@ -19,7 +19,7 @@ mc_alias_command = './mc alias set opensky https://s3.opensky-network.org $OSN_U
 execute_shell_command(mc_alias_command)
 
 # Get the list of already downloaded files
-downloaded_files = os.listdir('../data/ec-datadump/')
+downloaded_files = os.listdir('data/ec-datadump/')
 
 # Execute mc find command to list files
 find_command = './mc find opensky/ec-datadump/ --path "*/states_*.parquet"'

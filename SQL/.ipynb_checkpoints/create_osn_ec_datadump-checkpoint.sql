@@ -18,5 +18,6 @@ CREATE TABLE osn_ec_datadump (
   serials ARRAY<INT> COMMENT 'The serials column is a list of serials of the ADS-B receivers which received the message.'
 )
 COMMENT 'OpenSky Network EUROCONTROL datadump (for PRU) - Weekly updated.'
+CLUSTERED BY (icao24, callsign, squawk, event_time) INTO 256 BUCKETS
 STORED AS parquet
 TBLPROPERTIES ('transactional'='false');

@@ -1,36 +1,59 @@
-import pyspark
 from pyspark.sql import SparkSession
-import pandas as pd
-import numpy as np
-import os
 
 spark = SparkSession\
     .builder\
     .appName("project_aiu")\
     .config("spark.hadoop.fs.azure.ext.cab.required.group","eur-app-aiu-dev")\
     .config("spark.yarn.access.hadoopFileSystems","abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/aiu.db/unmanaged")\
+    .config("spark.driver.cores","1")\
+    .config("spark.driver.memory","8G")\
+    .config("spark.executor.memory","5G")\
+    .config("spark.executor.cores","1")\
+    .config("spark.executor.instances","2")\
+    .config("spark.dynamicAllocation.maxExecutors", "6")\
+    .config("spark.network.timeout", "800s") \
+    .config("spark.executor.heartbeatInterval", "400s") \
+    .config("spark.sql.catalogImplementation","hive")\
     .getOrCreate()
 
-# Truncate the Hive table
-spark.sql("TRUNCATE TABLE project_aiu.osn_ec_datadump;")
+spark.sql("SET spark.sql.hive.convertMetastoreParquet=false")
+spark.sql("SET spark.sql.hive.metastorePartitionPruning=true")
 
 directory_path = "data/ec-datadump/"
 
-for file_name in os.listdir(directory_path):
-    if file_name.endswith('.parquet'):
-        file_path = os.path.join(directory_path, file_name)
-        
-        # read each parquet file in the directory
-        df = pd.read_parquet(file_path)
+# read all parquet files in the directory
+df = spark.read.parquet(directory_path)
 
-        # Convert the NumPy array to a list in the 'serials' column
-        df['serials'] = df['serials'].apply(lambda arr: arr.tolist() if isinstance(arr, np.ndarray) else arr)
+column_name_mapping = {
+    "eventTime": "event_time",
+    "icao24": "icao24",
+    "lat": "lat",
+    "lon": "lon",
+    "velocity": "velocity",
+    "heading": "heading",
+    "vertRate": "vert_rate",
+    "callsign": "callsign",
+    "onGround": "on_ground",
+    "alert": "alert",
+    "spi": "spi",
+    "squawk": "squawk",
+    "baroAltitude": "baro_altitude",
+    "geoAltitude": "geo_altitude",
+    "lastPosUpdate": "last_pos_update",
+    "lastContact": "last_contact",
+    "serials": "serials"
+}
 
-        # Convert the pandas DataFrame to a Spark DataFrame
-        spark_df = spark.createDataFrame(df)
-
-        # Write the Spark DataFrame to the Hive table
-        spark_df.write.mode("ignore").insertInto("project_aiu.osn_ec_datadump")
+# Apply the renaming:
+for camel_case, snake_case in column_name_mapping.items():
+    df = df.withColumnRenamed(camel_case, snake_case)
+    
+# Write the DataFrame to the Hive table
+df.write\
+  .bucketBy(256, "icao24", "callsign", "squawk", "event_time")\
+  .sortBy("icao24", "callsign", "squawk", "event_time")\
+  .mode("ignore")\
+  .saveAsTable("project_aiu.osn_ec_datadump")
 
 # Stop the SparkSession
 spark.stop()
