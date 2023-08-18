@@ -35,7 +35,7 @@ display(HTML(f'<a href="{url}">{url}</a>'))
 
 # Load the necessary tables/dataframes
 osn_ec_datadump_df = spark.sql(
-    "SELECT event_time, icao24, lat as lat_flight, lon as lon_flight, velocity, heading, vert_rate, callsign, on_ground, baro_altitude FROM project_aiu.osn_ec_datadump WHERE baro_altitude <= 3048 LIMIT 10000;"
+    "SELECT event_time, icao24, lat as lat_flight, lon as lon_flight, velocity, heading, vert_rate, callsign, on_ground, baro_altitude FROM project_aiu.osn_ec_datadump WHERE baro_altitude <= 3048 LIMIT 100000000;"
 )
 
 airport_distance_reference_df = spark.sql(
@@ -77,5 +77,5 @@ flights_below_10000_ft_df = merged_df.filter(merged_df['height_above_airport'] <
 flights_below_10000_ft_df = flights_below_10000_ft_df.select("event_time", "icao24", "lat_flight", "lon_flight", "velocity", "heading", "vert_rate", "callsign", "on_ground", "baro_altitude", "airport_ident", "ident", "elevation_ft", "height_above_airport", "distance")
 
 # Now you have a dataframe (flights_below_10000_ft_df) containing only the flights below 10000 feet
-flights_below_10000_ft_df.write.insertInto("project_aiu.airport_proximity_flight_data", overwrite=False)
+flights_below_10000_ft_df.write.insertInto("project_aiu.airport_proximity_flight_data", overwrite=True)
 
