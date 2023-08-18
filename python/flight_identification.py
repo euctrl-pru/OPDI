@@ -109,3 +109,31 @@ grouped_df_spark = compute_distance_event_times_spark(flight_data_spark)
 df_spark = compute_flight_ids_spark(grouped_df_spark)
 df_pivot_spark = process_and_pivot_data_spark(df_spark)
 df_pivot_spark = df_pivot_spark.write.mode('overwrite').insertInto(f"project_aiu.osn_flight_table")
+
+
+from pyspark.sql import functions as F
+from pyspark.sql import Window
+from pyspark.sql import SparkSession
+
+# Assuming you've read in your dataframes
+osn_ec_datadump = spark.table("project_aiu.osn_ec_datadump").dropDuplicates()
+osn_flight_table = spark.table("project_aiu.osn_flight_table").dropDuplicates()
+
+# Assign unique IDs to osn_flight_table
+osn_flight_table_with_id = osn_flight_table.withColumn("unique_id", F.monotonically_increasing_id())
+
+# Persisting the unique_id back to osn_flight_table
+osn_flight_table_with_id.write.mode("overwrite").insertInto("project_aiu.osn_flight_table")
+
+# Join osn_ec_datadump with osn_flight_table_with_id based on the adjusted conditions provided
+# and select the original columns of osn_ec_datadump and the unique_id
+result_df = osn_ec_datadump.join(
+    osn_flight_table_with_id,
+    (osn_ec_datadump.icao24 == osn_flight_table_with_id.icao24) & 
+    (osn_ec_datadump.callsign == osn_flight_table_with_id.flt_id) &
+    (osn_ec_datadump.event_time.between(osn_flight_table_with_id.adep_min_distance_time - 1800, osn_flight_table_with_id.ades_min_distance_time + 1800)),
+    'left'
+).select(osn_ec_datadump["*"], osn_flight_table_with_id["unique_id"])
+
+# Overwrite the `osn_ec_datadump` table with the result
+result_df.write.mode("overwrite").insertInto("project_aiu.osn_ec_datadump")
