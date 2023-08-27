@@ -88,3 +88,60 @@ bor_cnts %>% slice_head(n = 20) %>%
   geom_col(aes(x = TOT, y = CP))
 ```
 
+Let's pick some arbitrary aerodrome pairs for the development
+
+* EGLL-EIDW
+* EKCH-ESSA
+* EFHK-ESSA
+
+```{r}
+picks <- bor_dai %>% 
+  rowwise() %>% mutate(ADP = combo(ADEP, ADES) ) %>% ungroup() %>% 
+  filter(ADP %in% c("EGLL-EIDW","EKCH-ESSA","EFHK-ESSA"))
+```
+
+```{r}
+picks %>% mutate(DOF = lubridate::floor_date(ELDT, unit = "day")) %>% group_by(ADP, DOF) %>% summarise(N = n(), .groups = "drop") %>% ggplot() + geom_path(aes(x = DOF, y = N, group = ADP)) + facet_wrap(. ~ADP)
+```
+
+arbitrary pick for study date: 2023-05-12 (Friday)
+
+ahhhhhh dumps are gone .... stored in hive!
+
+
+ok ... let's go with daily samples
+
+
+```{r}
+read_from_dailies <- function(.aerodrome_pair){
+  tmp <- list.files(path = "./data/daily", pattern = .aerodrome_pair, full.names = TRUE)
+  osn <- tmp %>% purrr::map_dfr(.f = ~ arrow::read_parquet(.x))
+}
+```
+
+```{r}
+egll_eidw <- read_from_dailies("EGLL_EIDW")
+# too big: egll_eidw %>% arrow::write_parquet("EGLL_EIDW.parquet")
+```
+
+
+```{r}
+(
+whatsavailable <- tibble(FN = list.files(path = "./data/daily", full.names = TRUE)) %>% 
+    mutate(
+         ADP = str_extract(FN, pattern = "[A-Z]{4}_[A-Z]{4}")
+        ,DOF = str_extract(FN, pattern = "\\_2023-[0-9]{2}-[0-9]{2}") %>% gsub(pattern = "_", replacement = ""))   
+)
+```
+
+```{r}
+get_svs_from_dailies <- function(.adp, .date_token, .available = whatsavailable) {
+  svs <- .available %>% 
+    filter(ADP %in% .adp, grepl(pattern = .date_token, x = DOF)) %>% 
+    pull(FN) %>% purrr::map_dfr(.f = ~ arrow::read_parquet(.x) )
+}
+
+#get_svs_from_dailies("EGLL_EIDW", "2023-04") %>% arrow::write_parquet("./data/bor-dev-egll-eidw.parquet")
+#get_svs_from_dailies("EKCH_ESSA", "2023-04") %>% arrow::write_parquet("./data/bor-dev-ekch-essa.parquet")
+```
+
