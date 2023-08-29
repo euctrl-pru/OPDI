@@ -1,0 +1,87 @@
+---
+title: "Use Case Study - Borealis 3Di"
+output: pdf_document
+date: "`r Sys.Date()`"
+---
+
+<!--
+as we sync with Azure/cloud, this doc is in Rmd
+-->
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(patchwork)
+
+# functions under development - not yet packaged! ==> source all
+my_funs <- list.files(path = "./R", full.names = TRUE)
+my_funs |> purrr::map(.f = ~ source(.x))
+
+# set default ggplot theme
+ggplot2::theme_set(ggplot2::theme_minimal())
+```
+
+# Overview
+
+The 2nd phase of the Borealis 3Di use case analysis aims at studying 3Di parameterisation for a subset of Borealis aerodromes.
+
+# Data Process
+
+## Data Extraction and Preparation
+
+Principal view - refine with developments
+
+* read-in OSN daily dumps and extract trajectories for Borealis aerodrome pairs - under development
+  + for the development, we extracted aerodrome pair data with traffic
+  + some test data set was produced for 2 aerodrome pairs --> data/bor-dev-...parquet
+* extract flights per aerodrome pair
+* map flights to NM for RFL (or identify max observed FL)
+* establish 3Di milestone table
+* calculate score components per flight
+  + apply "original" 3Di parameterisation
+  + additionally determine flight phase related components
+  + ...
+* calculate 3Di score per flight
+* produce summary stats
+
+## Data Extraction from OSN
+
+Preparatory data extraction - under development - daily downloads - stored in hive / no longer directly available.
+
+A test sample has been extracted from the available state vectors for April 2023.
+The samples are stored in ./data/bor-dev-...parquet.
+
+Note: verify timestamps - check, if we saved in CEST or read_parquet adatps timezones!
+
+```{r}
+fn <- "./data/bor-dev-egll-eidw.parquet"
+ds <- arrow::read_parquet(fn) |> 
+  tibble::tibble() |> 
+  dplyr::mutate(timestamp = lubridate::with_tz(timestamp, tzone = "UTC"))
+```
+
+
+let's play around with a few trajectories
+
+```{r}
+ein151 <- ds |> dplyr::filter(icao24 == "4ca280", substr(day, 1, 10) == "2023-04-01")
+```
+
+```{r}
+p1 <- ein151 |> 
+  ggplot() +
+  geom_point(aes(x = longitude, y = latitude, color = callsign))
+
+p2 <- ein151 |> 
+  ggplot() +
+  geom_point(aes(x = timestamp, y = altitude, color = callsign))
+
+p1 + p2 + plot_layout(guides = "collect") & 
+  theme(legend.position = "top")
+```
+
+```{r}
+ein151 <- ein151 |> mutate(CHECK_ALT = altitude) |> standardise_traj_from_trafficlib()
+```
+
