@@ -1,13 +1,20 @@
-from pyspark.sql import functions as F
-from pyspark.sql import Window
-import pandas as pd
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, pandas_udf, PandasUDFType, lit
+# pyspark.sql imports
+from pyspark.sql import SparkSession, Window
+from pyspark.sql.functions import (
+    udf, pandas_udf, PandasUDFType, lit, col,
+    to_timestamp, expr, from_unixtime
+)
+from pyspark.sql import functions as F, SparkSession, Window
 from pyspark.sql.types import DoubleType, StructType, StructField
+
+# Other imports
+import pandas as pd
 import numpy as np
 from IPython.display import display, HTML
 import time
 import os
+from pyspark.sql.functions import broadcast
+
 
 # Create a Spark session
 spark = SparkSession\
@@ -16,12 +23,13 @@ spark = SparkSession\
     .config("spark.hadoop.fs.azure.ext.cab.required.group","eur-app-aiu-dev")\
     .config("spark.yarn.access.hadoopFileSystems","abfs://storage-fs@cdpdldev0.dfs.core.windows.net/")\
     .config("spark.driver.cores","1")\
-    .config("spark.driver.memory","8G")\
-    .config("spark.executor.memory","5G")\
+    .config("spark.driver.memory","10G")\
+    .config("spark.executor.memory","8G")\
     .config("spark.executor.cores","1")\
     .config("spark.executor.instances","2")\
     .config("spark.dynamicAllocation.maxExecutors", "6")\
     .config("spark.rpc.message.maxSize", "200")\
+    .config("spark.sql.shuffle.partitions", "800")\
     .getOrCreate()
 
 # Get environment variables
@@ -73,9 +81,6 @@ def compute_flight_ids_spark(df):
     df = df.withColumn('flight_id', F.sum('flight_increment').over(window_spec) + 1)
     return df
 
-from pyspark.sql.functions import col
-from pyspark.sql.functions import to_timestamp
-
 def process_and_pivot_data_spark(df):
     """Process the dataframe to remove 'Ambiguous' rows, pivot, and select specific columns."""
     df = df.filter(df.status != "Ambiguous")
@@ -103,17 +108,12 @@ def process_and_pivot_data_spark(df):
     return df_pivot
 
 # Main process
-flight_data_spark = load_flight_data_spark()
-flight_data_spark = categorize_by_vert_rate_spark(flight_data_spark)
-grouped_df_spark = compute_distance_event_times_spark(flight_data_spark)
-df_spark = compute_flight_ids_spark(grouped_df_spark)
-df_pivot_spark = process_and_pivot_data_spark(df_spark)
-df_pivot_spark = df_pivot_spark.write.mode('overwrite').insertInto(f"project_aiu.osn_flight_table")
-
-
-from pyspark.sql import functions as F
-from pyspark.sql import Window
-from pyspark.sql import SparkSession
+#flight_data_spark = load_flight_data_spark()
+#flight_data_spark = categorize_by_vert_rate_spark(flight_data_spark)
+#grouped_df_spark = compute_distance_event_times_spark(flight_data_spark)
+#df_spark = compute_flight_ids_spark(grouped_df_spark)
+#df_pivot_spark = process_and_pivot_data_spark(df_spark)
+#df_pivot_spark = df_pivot_spark.write.mode('overwrite').insertInto(f"project_aiu.osn_flight_table")
 
 # Assuming you've read in your dataframes
 osn_ec_datadump = spark.table("project_aiu.osn_ec_datadump").dropDuplicates()
@@ -123,17 +123,44 @@ osn_flight_table = spark.table("project_aiu.osn_flight_table").dropDuplicates()
 osn_flight_table_with_id = osn_flight_table.withColumn("unique_id", F.monotonically_increasing_id())
 
 # Persisting the unique_id back to osn_flight_table
-osn_flight_table_with_id.write.mode("overwrite").insertInto("project_aiu.osn_flight_table")
+osn_flight_table_with_id.write.mode("overwrite").insertInto("project_aiu.osn_flight_table_with_id")
 
-# Join osn_ec_datadump with osn_flight_table_with_id based on the adjusted conditions provided
-# and select the original columns of osn_ec_datadump and the unique_id
-result_df = osn_ec_datadump.join(
-    osn_flight_table_with_id,
-    (osn_ec_datadump.icao24 == osn_flight_table_with_id.icao24) & 
-    (osn_ec_datadump.callsign == osn_flight_table_with_id.flt_id) &
-    (osn_ec_datadump.event_time.between(osn_flight_table_with_id.adep_min_distance_time - 1800, osn_flight_table_with_id.ades_min_distance_time + 1800)),
-    'left'
-).select(osn_ec_datadump["*"], osn_flight_table_with_id["unique_id"])
+from pyspark.sql.functions import from_unixtime, broadcast, expr
 
-# Overwrite the `osn_ec_datadump` table with the result
-result_df.write.mode("overwrite").insertInto("project_aiu.osn_ec_datadump")
+# Define the batch size based on available memory and resources
+batch_size = 500000000  # Adjust this value as necessary
+
+# Count the total number of rows in osn_ec_datadump
+total_rows = osn_ec_datadump.count()
+
+# Calculate the number of batches
+num_batches = int(total_rows / batch_size) + 1
+
+print(f"Batch size: {batch_size}")
+print(f"Total rows: {total_rows}")
+print(f"Number of batches: {num_batches}")
+
+for i in range(num_batches):
+    # Extract a batch from osn_ec_datadump
+    batch_df = osn_ec_datadump.limit(batch_size)
+
+    # Convert the event_time column of the batch_df to a timestamp
+    event_time_as_timestamp = from_unixtime(batch_df.event_time)
+    
+    # Perform the join operation on the batch
+    result_batch_df = batch_df.join(
+        broadcast(osn_flight_table_with_id),  # Broadcasting smaller DF
+        (batch_df.icao24 == osn_flight_table_with_id.icao24) & 
+        (batch_df.callsign == osn_flight_table_with_id.flt_id) &
+        (event_time_as_timestamp.between(
+            osn_flight_table_with_id.adep_min_distance_time - expr("INTERVAL 1800 SECONDS"),
+            osn_flight_table_with_id.ades_min_distance_time + expr("INTERVAL 1800 SECONDS"))
+        ),
+        'left'
+    ).select(batch_df["*"], osn_flight_table_with_id["unique_id"])
+
+    # Write the results of this batch to the osn_trajectories table
+    result_batch_df.write.mode("append").insertInto("project_aiu.osn_trajectories")
+    
+    # Exclude the processed batch from osn_ec_datadump for the next iteration
+    osn_ec_datadump = osn_ec_datadump.subtract(batch_df)
