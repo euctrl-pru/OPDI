@@ -1,0 +1,247 @@
+---
+title: "Borealis-3Di-NM-v01.Rmd"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(patchwork)
+
+ggplot2::theme_set(ggplot2::theme_minimal())
+```
+
+Read NM flight table
+
+```{r}
+flt_nm <- arrow::read_parquet("./data/borealis-dai-nmflt-2023-Q1Q3p.parquet")
+lvls   <- readRDS(".data/Lvl_seg_012023_072023") # throws warning?!?
+```
+
+```{r}
+in_lvls <- lvls |> select(SAM_ID) |> mutate(LVL = TRUE) 
+flt_nm2 <- flt_nm |> select(SAM_ID , FLTID, ICAO24, ADEP, ADES, BOR_DAI)
+
+has_lvls <- flt_nm2 |> left_join(in_lvls, by = "SAM_ID")
+
+tmp <- has_lvls |> group_by(BOR_DAI) |> 
+  summarise(N = n(), N_LVL = sum(LVL, na.rm = TRUE)) |> 
+  mutate(SHARE = N_LVL / N)
+
+tmp |> 
+ggplot() +
+  geom_col(aes(x = BOR_DAI, y = N), fill = "grey80") +
+  geom_col(aes(x = BOR_DAI, y = N_LVL), fill = "lightgreen") +
+  geom_text(aes(x = BOR_DAI, y = N_LVL + 500, label = SHARE |> round(digits = 2))) +
+  labs(subtitle = "DAI flights and share of flights with level segments")
+```
+
+NM dataset comprises reasonably low number of flights with level segments. 
+
+Load NM trajectories
+
+TODO - need to catch situation when both LAT and LON have only DEGREES
+Time coercion issues for the following SAM_ID/LOBT 260173746 02-04-2023 23:00:00
+260448550 12-04-2023 22:25:00 
+
+```{r}
+standardise_trj_from_NM <- function(trjs_nm){
+  trjs_nm |> 
+    dplyr::rename(TIME = TIME_OVER, FL = FLIGHT_LEVEL) |> 
+    dplyr::mutate(TIME = lubridate::dmy_hms(TIME)
+                  ,DIST_FLOWN = POINT_DIST
+                  ,DIST_FLOWN = DIST_FLOWN / 1.852  # convert km to NM
+                  )
+}
+
+trjs <- read_and_fix_NM_trjs("./data/3Di_042023.csv") |>
+  standardise_trj_from_NM() |> 
+  mutate(SOURCE = "NM", UID = SAM_ID) |> 
+  select(UID, TIME, LAT, LON, FL, DIST_FLOWN, SOURCE, everything())
+  
+
+meta_trjs <- trjs |> group_by(UID) |> 
+  summarise(  N       = n()
+            , LAT_NA  = sum(is.na(LAT))
+            , LON_NA  = sum(is.na(LON))
+            , TIME_NA = sum(is.na(TIME))
+  )
+
+# check
+meta_trjs |> filter(LAT_NA > 0 | LON_NA > 0 | TIME_NA > 0)
+```
+
+Extract flights for 1. April EIDW-EGLL & EGLL-EIDW
+
+```{r}
+ad_pair <- c('EIDW', 'EGLL')
+pick_date <- lubridate::date("2023-04-01")
+picks_flt <- flt_nm |> filter(ADEP %in% ad_pair, ADES %in% ad_pair, lubridate::date(ELDT) == pick_date)
+```
+
+Take 1 =======================
+
+```{r}
+pick_id <- 260164197
+pick_flt <- flt_nm |> filter(SAM_ID == pick_id)
+pick_trj <- trjs   |> filter(SAM_ID == pick_id)
+```
+
+```{r}
+plot_horizontal <- function(.pick_trj){
+  hp <- .pick_trj |> 
+  ggplot() +
+    geom_point(aes(x = LON, y = LAT))
+  return(hp)
+}
+
+plot_vertical <- function(.pick_trj){
+  vp <- .pick_trj |> 
+    ggplot() +
+    geom_point(aes(x = TIME, y = FL))
+  return(vp)
+}
+
+plot_hv <- function(.pick_trj){
+  hp <- plot_horizontal(.pick_trj)
+  vp <- plot_vertical(.pick_trj)
+  patchwork::wrap_plots(hp, vp, ncol = 2)
+}
+
+pick_trj |> plot_hv()
+```
+
+discretise trajectory for 3Di
+
+```{r}
+start_stop <- pick_trj |> filter(TIME %in% c(min(TIME), max(TIME))) |> 
+  mutate(MST = c("START","STOP")) |> 
+  select(UID, TIME, FL, LAT, LON, DIST_FLOWN, MST, everything())
+
+pick_lvls <- lvls |> filter(SAM_ID == pick_id)
+```
+
+```{r}
+ggplot() +
+  geom_point(  data = pick_trj,  aes(x = TIME,y = FL), size = 0.5) +
+  geom_segment(data = pick_lvls, aes(x = TIME_START, xend = TIME_END, y = ALT_START, yend = ALT_END), color = "green", size = 2)
+```
+
+NOTE - WE MISS THE ENROUTE LEVEL SEGMENT ==> need to crunch ourselves
+
+```{r}
+pick_lvls2 <- pick_trj |> get_level_segments()
+
+pick_toc_tod <- pick_lvls2 |> head(2) |> mutate(MST = c("TOC","TOD"))
+```
+
+WRAP THINGS INTO A FUNCTION
+
+```{r}
+pick_mst <- pick_trj |> extract_mst_per_trj()
+```
+
+```{r}
+ggplot() +
+  geom_path( data = pick_trj, aes(x = TIME, y = FL)) +
+  geom_point(data = pick_mst, aes(x = TIME, y = FL), color = "red")
+```
+
+TEST FOR A COUPLE OF TRAJECTORIES
+
+```{r}
+set.seed(seed = 666)
+picks_uid <- meta_trjs |> pull(UID) |> sample(size = 3)
+
+picks <- trjs |> filter(UID %in% picks_uid)
+```
+
+```{r}
+# === put into R script
+
+# trouble_shoot <- function(.trj, ...){
+#   message(paste("Processing ", unique(.trj$UID)))
+#   this_mst <- .trj |> extract_mst_per_trj()
+# }
+# 
+# extract_mst_from_trjectory_set <- function(.trjs, .debug = FALSE, ...){
+#   multi_mst <- .trjs |>
+#     # need to add "outer" UID to make group_modify work (and keep UID in loop)
+#     dplyr::mutate(OUID = UID) |> 
+#     dplyr::group_by(OUID)
+#   
+#   if(.debug){ 
+#     multi_mst <- multi_mst |> dplyr::group_modify(.f = ~ trouble_shoot(.x))
+#   }else{
+#     multi_mst <- multi_mst |> dplyr::group_modify(.f = ~ extract_mst_per_trj(.x))
+#   }
+#   
+#   multi_mst <- multi_mst |> 
+#     dplyr::ungroup() |> 
+#     dplyr::select(-OUID) # remove OUID
+#   return(multi_mst)
+# }
+
+picks_mst <- picks |> extract_mst_from_trjectory_set(.debug = TRUE)
+```
+
+TEST FOR FULL DATASET
+
+set message to FALSE to silence the "endless" list of UIDs (only useful for trouble shooting) -- better put this into safely() workflow.
+
+```{r, message=FALSE}
+mst_202304 <- trjs |> extract_mst_from_trjectory_set()
+#mst_202304 |> arrow::write_parquet("./data/MST-3Di-202304-NM.parquet")
+```
+
+
+CONSTRUCT SCORES PER FLIGHT
+
+
+3Di is a (weighted) composite score. Its components are formed by analysing the (i) horizontal and (ii) vertical (in)efficiency of a flight.
+
+horizontal component
+
+The horizontal component of the 3Di metric represents the route extension $\tau$ making reference to the achieved distance algorithm.
+For a flown trajectory with no origin/destination exclusion zones, the achieved distance equals the route extension.
+For airspace related attributions this would need to be generalised to the achieved distance or another algorithm.
+
+$$\tau = \frac{DIST_{total} - DIST_{GCD}}{DIST_{GCD}}$$
+
+```{r}
+(pick_mst |> filter(UID == 260164197) |> calc_horizontal_comp_flight() )
+```
+
+he vertical component is accounting for level offs in the different flight phases, i.e. climb, cruise, and descent.
+Per phase the vertical component is determined based on offset between the requested flights level and the level at which the flights levels off. This offset is weighted with the time-at-level versus the airborne time the flight is under control.
+For level flights above the requested flight level the component is set to zero.
+
+$$
+v_{phase} =
+\begin{cases}
+\frac{t_i}{T} \frac{(RFL - l_i)}{RFL} = \frac{t_i}{T} * (1 - \frac{l_i}{RFL}) ,& l_i \leq RFL \\
+0 ,& l_i > RFL
+\end{cases}
+$$
+
+$t_i$ time at level
+$l_i$ FL of i-th level segment
+
+```{r}
+(pick_mst |> filter(UID == 260164197) |> calc_vertical_comp_flight() )
+```
+
+calc components for one
+
+```{r}
+(pick_mst |> filter(UID == 260164197) |> calc_3Di_comp_flight() )
+```
+
+run for multiple
+
+```{r}
+(picks_mst |> calc_3Di_comp_flight_multimst(.debug = TRUE))
+```
+

@@ -68,3 +68,41 @@ cast_pts_to_latlon <- function(.df_pts, lat_var=LAT, lon_var=LON, .crs = 4326, .
   }
  return(df)
 }
+
+
+#' @rdname cast_prev_next_to_ls
+#'
+#' @param .df_lat_lon dataframe with lat lons in lat1, lon1 and lat2 and lon2
+#' @param .crs coordinate reference system, defaults to WGS84: crs = 4326
+#'
+#' @return df with linesegment for each prev/next
+#'
+#' @export
+#'
+cast_prev_next_to_ls <- function(.df_lat_lon, .crs = 4326){
+  df <- .df_lat_lon |>
+    dplyr::mutate(NEXT_LAT = dplyr::lead(LAT), NEXT_LON = dplyr::lead(LON)) |>
+    # remove last for which NEXT_LON/NEXT_LAT does not exist
+    head(-1)
+
+  my_names <- c("LON","LAT","NEXT_LON","NEXT_LAT")
+
+  make_line <- function(xy2){
+    sf::st_linestring(matrix(xy2, nrow=2, byrow=TRUE))
+  }
+
+  make_lines <- function(df, .names = my_names){
+    m = as.matrix(df[,.names])
+    lines = apply(m, 1, make_line, simplify=FALSE)
+    sf::st_sfc(lines, crs = .crs)
+  }
+
+  df_lines <- function(df, .names = my_names){
+    geom = make_lines(df, .names)
+    df = sf::st_sf(df, geometry = geom, crs = .crs)
+    df
+  }
+
+  ls_by_row <- df_lines(df)
+  return(ls_by_row)
+}

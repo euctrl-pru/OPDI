@@ -157,8 +157,10 @@ inject_airspace_crossings <- function(.trj, .airspace_poly_sf){
   # Load aircraft trajectory data as an sf object, append airspace volumne, and
   # add sequence id
   trj <- .trj |> cast_latlon_to_pts() |> 
-    select(FLTID, ICAO24, TIME, LAT, LON, FL) |> 
-    sf::st_intersection(.airspace_poly_sf) |> 
+    select(FLTID, ICAO24, TIME, LAT, LON, FL) |>
+    dplyr::arrange(TIME) |> 
+    sf::st_intersection(.airspace_poly_sf) |>
+    dplyr::arrange(TIME) |>      # saw some strange reshuffling after sf
     dplyr::mutate(SEQ_ID = dplyr::row_number())
   
   # calculate intersections - heuristic check for change in airspace valume
