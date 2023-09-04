@@ -149,6 +149,26 @@ ggplot() +
   geom_point(data = pick_mst, aes(x = TIME, y = FL), color = "red")
 ```
 
+CALC AIRSPACE CROSSINGS
+
+* take FIR borders
+
+```{}
+# prepare - read-in and save for future use without pruatlas
+borealis_firs <- get_firs()
+save(borealis_firs, file = "./data/FIR-borealis_firs.rda")
+```
+
+```{r}
+load("./data/FIR-borealis_firs.rda")
+
+pick_edges <- pick_trj |> cast_prev_next_to_ls() |> 
+  select(UID, geometry)
+```
+
+
+
+
 TEST FOR A COUPLE OF TRAJECTORIES
 
 ```{r}
@@ -243,5 +263,18 @@ run for multiple
 
 ```{r}
 (picks_mst |> calc_3Di_comp_flight_multimst(.debug = TRUE))
+```
+
+MOVING TOWARDS PRODUCTION
+
+data prep
+* read in NM traj & interpolate 5sec 
+* create meta flt ==> UID, FLTID, DOF, RFL from flight table
+
+```{r}
+fn <- "./data/3Di_042023.csv"
+
+trjs <- read_and_fix_NM_trjs(fn) |>
+  standardise_traj_from_NM()
 ```
 
