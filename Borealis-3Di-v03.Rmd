@@ -67,7 +67,7 @@ knitr::include_graphics("./figures/conceptual-pipeline-3Di.png")
 
 For this initial run, the NM trajectory for a subset of inter-Borealis flights was extracted.
 
-```{}
+```{txt}
 # DO NOT RUN - FOR DOKU PURPOSES - MIGHT REQUIRE LOCAL DATA NOT IN CLOUD
 # Sam prepared trajectories for the first part of 2023
 # these are read in, some data cleaning and stored as analytical data 
@@ -118,12 +118,47 @@ On average we have 1-3 missing LONs per month.
 TIMEs for midnight appear non-standard and result in NA (about 1-2 in some files).
 TODO - improve cleaning script.
 
+Show the uploaded analytic dataset of NM trajectories
+
+```{r}
+fns <- list.files(path = "./data", pattern = "^NM-TRJ")
+fns
+```
+
+## Flight Table Information
+
+A subset of the NM flight table was extracted to provide basis flight information.
+The wider DAI subset was chosen with a view to add on requirements by Borealis.
+
+Names have been adapted to reflect standard aviation terms.    
+Note: EET should be AET actual elapsed time.
+
+For the Borealis Use Case we require 
+
+* RFL - requested flight level; input to vertical factor calculation
+* NM trajectory
+  + SAM_ID allows to map trajectory data with flight data
+* OSN trajectory - potential mapping keys
+  + ICAO24 - modeS address of airframe
+  + FLTID  - flight identification ~ callsign
+  + further keys
+    + estimated movement times - could allow to check for "time within"
+* optional
+  + ADEP, ADES - can serve for verification purposes, e.g. trajectory start at ADEP
+
+
+```{r}
+flt_bor_dai <- arrow::read_parquet("./data/DAI-borealis.parquet") |> rename(AET = EET)
+glimpse(flt_bor_dai)
+```
+
+
 
 ## Airspace Data
 
 The FIR boundaries were extracted from {pruatlas} and stored as an R data object, i.e. `borealis_firs`.
 
-```{}
+```{txt}
 # DO NOT RUN - FOR DOKU PURPOSES - MIGHT REQUIRE LOCAL DATA NOT IN CLOUD
 # prepare - read-in and save for future use without pruatlas
 source("./R/get_firs.R")
@@ -145,3 +180,80 @@ ggplot() +
   geom_sf(data = borealis_firs)
 ```
 
+
+# Data Processing
+
+Following the data preparatory stage, data is process to generate a milestone/flight event table.
+As presented above, the 3Di metric represents a **trajectory reduction** process.
+Key flight events/milestones are extracted from the trajectory.
+
+**NOTE: WORK IN PROGRESS** The milestons table output is stabilising. 
+However, it needs to be aligned with the overall milestone/flight event table structure.
+The milestone table comprises stil additional processing columns (which will be killed in the final version).
+
+In principle, the following processing steps are performed on a per trajectory basis
+
+* read-in trajectory data (analytic data set) - the data preparatory stage has tackled most issues, clean as appropriate
+* process analytic (trajectory) data - reduce and generate the required milestones
+* calculate 
+  + 3Di results - per use-case/Borealis requirements
+  + address algorithmic issues for discussion
+  
+Flight trajectories are currently archived in form of a milestone/event table.
+
+* UID - unique (study) identification of trajectory point
+* TIME - respective datetime of flight event
+* LAT, LON - latitude and longitude in decimal form WGS84
+* FL - ALT expressed in FL (hectofeet)
+* DIST_FLOWN - cumulative distance along trajectory
+  + **Note** this requires some further thinking/standardisation and/or reference. At the time being a airborne trajectory is assumed to be complete, i.e. covered from START (assumed near take-off) to END event (assumed near landing). DIST_FLOWN is understood at the accumulated point-to-point distance along the trajectory from the START event
+* MST - milestone - characterises the flight event. Currently implemented:
+  + START/STOP - first and last surveillance position for time series
+  + LVL_START/LVL_STOP - first and last position of level segment
+  + airspace crossings denoted by the combination of previous FIR/next FIR
+  
+NOTE: GUT FEELING SUGGESTS A COMMENT COLUMN to keep log of additional information. If "coded" could be parsed and used downstream, alternatively think about additional columns.
+
+Other milestone columns are for debugging purposes and should be ignored (i.e. not shown next).
+
+```{r}
+mst_202304 <- arrow::read_parquet("./data/MST-3Di-202304-NM.parquet")
+mst_202304 |> select(UID, TIME, LAT, LON, FL, DIST_FLOWN, MST)
+```
+
+# Result Generation
+
+The 3Di metric is a weighted composite index.
+
+The horizontal flight efficiency is expressed as the horizontal route extension $\tau$.
+$$
+\tau = \frac{DIST_{FLOWN} - DIST_{GCD}}{DIST_{GCD}} 
+$$
+
+## Measure Per Flight
+
+many lvls 
+260303240
+260453626 
+260780464 
+260866050 
+
+```{r}
+source("./R/x_helper_plot_trj.R")  # some quick plots for trajectories
+
+```
+
+
+## TBD
+
+This section is subject to discussion with Borealis.
+
+# Appendix / Notes
+
+## Trajectory Cleaning / Preprocessing
+
+* **validity verification check** at the time being it is assumed that trajectories are a valid time series, i.e. free of longer coverage outages.
+For OSN trajectories the UID generation entails the notion of a LEG (no larger time step).
+A validity check should ensure "continuity" of the time series of positions.
+Give the nature of the input data, it is feasible that a flight spans midnight, i.e. first part on Day 1 and 2nd part on Day 2.
+In case of coverage outages this temporal trigger needs to be addressed, including "glueing" respective LEGs together (including renaming UID, etc).
