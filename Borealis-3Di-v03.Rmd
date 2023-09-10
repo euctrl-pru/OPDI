@@ -240,7 +240,107 @@ many lvls
 
 ```{r}
 source("./R/x_helper_plot_trj.R")  # some quick plots for trajectories
+source("~/RProjects/borealis-osn-3di/R/components_3Di.R") # 3Di calcs
+```
 
+hori
+
+```{r}
+multi_mst <- mst_202304
+
+horis <- multi_mst |> calc_horizontal_comp_multi()
+horis_meta <- flt_bor_dai |> select(UID = SAM_ID, ADEP, ADES, RFL) |> filter(UID %in% horis$UID)
+# correct horis
+horis <-  horis |> mutate(RTE2 = ifelse(RTE_EXT < 1, 1 + abs(RTE_EXT - 1), RTE_EXT))
+horis <-  horis |> left_join(horis_meta, by = join_by(UID))
+```
+
+horis |> arrow::write_parquet("./data/RES-HORI-202304.parquet")
+
+
+verti
+
+```{r}
+source("./R/components_3Di.R")
+vertis <- mst_202304 |> calc_vertical_comp_multi()
+
+vertis_meta <- flt_bor_dai |> select(UID = SAM_ID, ADEP, ADES, RFL) |> filter(UID %in% vertis$UID)
+
+vertis <- vertis |> left_join(vertis_meta, by = join_by(UID))
+vertis <- vertis |> mutate(WT_T = as.numeric(T_LVL)  / T_TOLD, WT_LVL = 1 -(FL_LVL / RFL), LVL_OK = ifelse(FL_LVL >= RFL,0 , 1), VERT_COMP = WT_T * WT_LVL * LVL_OK)
+```
+
+vertis |> arrow::write_parquet("./data/RES-VERTI-202304.parquet")
+
+```{r}
+vertis |> mutate(WT_T = as.numeric(T_LVL)  / T_TOLD, WT_LVL = 1 -(FL_LVL / RFL), LVL_OK = ifelse(FL_LVL >= RFL,0 , 1), VERT_COMP = WT_T * WT_LVL * LVL_OK) |> filter(T_LVL > 0.01) |> select(UID, ADEP, ADES, everything()) |> gt::gt()
+```
+
+vertis |> arrow::write_parquet("./data/RES-VERTI-202304.parquet")
+
+```{r}
+fns <- list.files(path = "./data", pattern = "RES-HOR", full.names = TRUE)
+h_3Di <- fns |> purrr::map_dfr(.f = ~ arrow::read_parquet(.x))
+
+fns <- list.files(path = "./data", pattern = "RES-VER", full.names = TRUE)
+v_3Di <- fns |> purrr::map_dfr(.f = ~ arrow::read_parquet(.x))
+```
+
+aggregate vertical components per flight and combine with horizontal results
+
+```{r}
+h_3Di_agg <- h_3Di |> 
+  mutate(FLOWN_ACT = FLOWN_ACT / 1.852) |> 
+  mutate(RTE2 = (FLOWN_ACT /GCD) - 1) 
+
+# re-package
+h_3Di_agg <- h_3Di_agg |> 
+  select(UID, ADEP, ADES, PHASE, SCORE = RTE2) |> 
+  mutate(COMP = "H", .after = PHASE)
+
+v_3di_agg <- v_3Di |> 
+  select(UID, ADEP, ADES, PHASE, VERT_COMP ) |> 
+  mutate(COMP = "V") |> 
+  rename(SCORE = VERT_COMP) |> 
+  group_by(UID, ADEP, ADES, PHASE, COMP) |> 
+  summarise(SCORE = sum(SCORE, na.rm = TRUE), .groups = "drop") |> 
+  filter(SCORE > 0)
+v_3di_agg
+```
+
+ping pong
+
+```{r}
+ping_pong <- bind_rows(h_3Di_agg, v_3di_agg)
+```
+
+ping_pong |> arrange(UID, ADEP, ADES) |> filter(ADEP == "EIDW", ADES == "EGLL") |> group_by(UID) |> summarise(N = n()) |> arrange(desc(N))
+pongs with multiple components
+
+ 1 260154199     3
+ 2 260155678     3
+ 3 260156323     3
+ 4 260158078     3
+ 5 260165552     3
+ 6 260186906     3
+
+
+```{r}
+ex_plot <- ping_pong |> 
+  arrange(UID, ADEP, ADES) |> 
+  filter(ADEP == "EIDW", ADES == "EGLL") 
+
+ex_plot_picks <- c(260154199,260155678, 260156323, 260158078, 260165552, 260186906)
+
+ex_plot |> filter(UID %in% ex_plot_picks) |> 
+  ggplot() + geom_col(aes(x = SCORE, y = as.character(UID), fill = PHASE))
+  
+```
+
+small issue to check CLIMB VS DESCENT = currently flipped
+
+```{r}
+knitr::include_graphics("./figures/x-check-phase-comp-CLIMBvsDESCENT.png")
 ```
 
 

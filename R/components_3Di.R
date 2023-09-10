@@ -90,3 +90,19 @@ calc_vertical_comp_flight <- function(.mst_trj, ..., .debug = TRUE){
   return(this_mst)
 }
 
+calc_horizontal_comp_multi <- function(.multimst){
+  horis <- .multimst |>
+    dplyr::mutate(OUID = UID) |>
+    dplyr::group_by(OUID) |>
+    dplyr::group_modify(.f = ~ calc_horizontal_comp_flight(.x)) |>
+    dplyr::ungroup() |> dplyr::select(-OUID)
+}
+
+calc_vertical_comp_multi <-  function(.multimst){
+  vertis <- .multimst |>
+    dplyr::mutate(OUID = UID)  |>
+    dplyr::group_by(OUID) |>
+    dplyr::group_modify(.f = ~ calc_vertical_comp_flight(.x)) |>
+    dplyr::ungroup() |>
+    dplyr::select(-OUID)
+}
