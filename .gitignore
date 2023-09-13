@@ -1,7 +1,12 @@
+# ignore some of the local RQ hack stuff
+data/NM-FLT-2023*
+data/Lvl_seg*
+data/3Di*
+
 # Ignore datadumps (Added by QG)
 data/daily/*
 data/ec-datadump/*
-data/nm-flt/* 
+data/nm-flt/*
 
 # Ignore irrelevant folders (Added by QG)
 .Rprofile
