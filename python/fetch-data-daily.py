@@ -1,15 +1,35 @@
+from dask import delayed, compute
 from traffic.data.adsb.opensky_impala import Impala
 import pandas as pd
 from pathlib import Path
 from traffic.data import opensky
 import itertools
 from datetime import datetime, timedelta
+import logging
+import os
+
+logging.basicConfig(filename="output.log", level=logging.INFO)
 
 cache_dir_path = "/Users/quintengoens/opensky_cache"
 cache_dir = Path(cache_dir_path)
 
+log_file_path = 'output.log'
+if os.path.exists(log_file_path):
+  os.remove(log_file_path)
+
+def setup_logger():
+    logger = logging.getLogger('my_logger')
+    if not logger.hasHandlers():  # Prevent logging setup duplication
+        logger.setLevel(logging.INFO)
+        fh = logging.FileHandler('output.log')
+        formatter = logging.Formatter('%(asctime)s - %(message)s')
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    return logger
+
 def fetch_data(start_time, end_time, ADEP, ADES):
     # Convert to datetime
+    logging = setup_logger()
     start_time = pd.to_datetime(start_time)
     end_time = pd.to_datetime(end_time)
     
@@ -24,12 +44,13 @@ def fetch_data(start_time, end_time, ADEP, ADES):
         # Calculate the stop time for this day
         stop_time_str = (date + timedelta(days=1)).strftime('%Y-%m-%d %H:%M')
         
-        print()
-        print("-"*20)
-        print(f"Fetching data for period {date_str} - {stop_time_str}...")
+        logging.info("")
+        logging.info("-"*20)
+        logging.info(f"Fetching data for period {date_str} - {stop_time_str} for {ADEP} - {ADES}...")
         
         # If the file already exists, do not rerun
         if Path(f"data/daily/borealis-osn-3dpi_{ADEP}_{ADES}_{date_str}_{stop_time_str}.parquet.gz").exists():
+            logging.info(f"File exists already: data/daily/borealis-osn-3dpi_{ADEP}_{ADES}_{date_str}_{stop_time_str}.parquet.gz")
             continue
             
         try: 
@@ -52,18 +73,18 @@ def fetch_data(start_time, end_time, ADEP, ADES):
         
           if pd.isnull(df_dep) and pd.isnull(df_arr):
               df = pd.DataFrame()
-              print("Both are NULL")
+              logging.info("Both are NULL")
 
           if pd.isnull(df_dep) and not pd.isnull(df_arr):
               df = df_arr.data
-              print("df_dep is NULL")
+              logging.info("df_dep is NULL")
 
           if pd.isnull(df_arr) and not pd.isnull(df_dep):
               df = df_dep.data
-              print("df_arr is NULL")
+              logging.info("df_arr is NULL")
 
           if not pd.isnull(df_arr) and not pd.isnull(df_dep):
-              print("both not NULL")
+              logging.info("both not NULL")
               df = pd.concat([df_dep.data, df_arr.data])
 
           # Convert timestamp column(s) to a lower precision (like microseconds)
@@ -73,25 +94,32 @@ def fetch_data(start_time, end_time, ADEP, ADES):
 
           # Write to compressed parquet file
           df.to_parquet(f"data/daily/borealis-osn-3dpi_{ADEP}_{ADES}_{date_str}_{stop_time_str}.parquet.gz", compression="gzip")
-          print("-"*20)
-          print()
+          logging.info("-"*20)
+          logging.info("")
         except Exception as e: 
-          print(f"Request failed with exception: {e}")
-          print("-"*20)
-          print()
+          logging.info(f"Request failed with exception: {e}")
+          logging.info("-"*20)
+          logging.info("")
     return None
 
-
-# Apply the function on all the airport combinations possible 
-#apts = ["EGLL", "EKCH", "BIRK", "ESSA"] # "EIDW",
-apts = ["EGLL", "EKCH", "BIRK", "ESSA", "EIDW"]
-# Calculate all the combinations of apt pairs
-start_time = "2023-01-01 00:00"
-end_time = "2023-06-01 00:00"
-
-for apt1, apt2 in list(itertools.combinations(apts, 2)):
-    print(apt1, apt2, datetime.now())
-    fetch_data(start_time, end_time, apt1, apt2)
+if __name__ == "__main__":
+    # Generate airport combinations
+    start_time = "2023-04-01 00:00"
+    end_time = "2023-08-01 00:00"
+    apts = ["ESSA", "EGLL", "EKCH", "EFHK", "ENGM", "EETN", "EYVA", "BIRK", "EIDW"]
+    combinations = list(itertools.combinations(apts, 2))
     
-    print("Done!")
-    print()
+    # Initialize Dask delayed objects
+    delayed_tasks = []
+    
+    for apt1, apt2 in combinations:
+        print(apt1, apt2, datetime.now())
+        
+        # Use dask.delayed to wrap fetch_data function
+        # Use dask.delayed to wrap fetch_data function
+        delayed_task = delayed(fetch_data)(start_time, end_time, apt1, apt2)
+        
+        delayed_tasks.append(delayed_task)
+    
+    # Run tasks in parallel using 3 processes
+    compute(*delayed_tasks, scheduler="processes", num_workers=3)

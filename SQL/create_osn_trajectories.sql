@@ -1,4 +1,4 @@
-CREATE TABLE project_aiu.osn_trajectories (
+CREATE TABLE project_aiu.osn_tracks (
     event_time BIGINT COMMENT 'This column contains the unix (aka POSIX or epoch) timestamp for which the state vector was valid.',
     icao24 STRING COMMENT 'This column contains the 24-bit ICAO transponder ID which can be used to track specific airframes over different flights.',
     lat DOUBLE COMMENT 'This column contains the last known latitude of the aircraft.',
@@ -16,9 +16,9 @@ CREATE TABLE project_aiu.osn_trajectories (
     last_pos_update DOUBLE COMMENT 'This unix timestamp indicates the age of the position.',
     last_contact DOUBLE COMMENT 'This unix timestamp indicates the time at which OpenSky received the last signal of the aircraft.',
     serials ARRAY<INT> COMMENT 'The serials column is a list of serials of the ADS-B receivers which received the message.',
-    unique_id BIGINT COMMENT 'Unique identifier for the associated flight in osn_flight_table_with_id.'
+    track_id BIGINT COMMENT 'Unique identifier for the associated flight tracks in osn_flight_table_with_id.'
 )
-COMMENT 'Joined table between OpenSky Network EUROCONTROL datadump (for PRU) and flight table with unique IDs.'
+COMMENT 'project_aiu.osn_ec_datadump copy with added track_ids (generated based on callsign, icao24 grouping with 30 min signal gap intolerance.'
 --CLUSTERED BY (icao24, callsign, squawk, event_time) INTO 256 BUCKETS
 STORED AS parquet
 TBLPROPERTIES ('transactional'='false');
