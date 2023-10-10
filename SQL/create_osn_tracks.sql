@@ -1,5 +1,5 @@
 CREATE TABLE project_aiu.osn_tracks--_clustered (
-    event_time TIMESTAMP COMMENT 'This column contains the unix (aka POSIX or epoch) timestamp for which the state vector was valid.',
+    event_time BIGINT COMMENT 'This column contains the unix (aka POSIX or epoch) timestamp for which the state vector was valid.',
     icao24 STRING COMMENT 'This column contains the 24-bit ICAO transponder ID which can be used to track specific airframes over different flights.',
     lat DOUBLE COMMENT 'This column contains the last known latitude of the aircraft.',
     lon DOUBLE COMMENT 'This column contains the last known longitude of the aircraft.',
