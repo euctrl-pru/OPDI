@@ -1,4 +1,4 @@
-# Borealis OSN 3DI
+# OPDI
 
 ## Python scripts
 
