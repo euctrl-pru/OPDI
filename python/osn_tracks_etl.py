@@ -109,7 +109,11 @@ for idx, month_id in enumerate(unique_month_ids):
     df_month = df_month.withColumn("prev_event_time_ts", F.lag(df_month["event_time_ts"]).over(windowSpec))
     df_month = df_month.withColumn("time_gap_minutes", 
                                    (F.unix_timestamp("event_time_ts") - F.unix_timestamp("prev_event_time_ts"))/60)
-    df_month = df_month.withColumn("new_group_flag", F.when(F.col("time_gap_minutes") > 30, 1).otherwise(0))
+    track_split_condition = (
+        (F.col("time_gap_minutes") > 30) | # When the gap is larger than 30 minutes, we identify it as two tracks.. 
+        ((F.col("time_gap_minutes") > 10) & (F.col("geo_altitude") < 1000)) # When the gap is larger than 10 minutes and the geo_altitude is larger than 1000 m, we identify two tracks.
+    )
+    df_month = df_month.withColumn("new_group_flag", F.when(track_split_condition, 1).otherwise(0))
     groupWindowSpec = Window.partitionBy("group_id").orderBy("event_time_ts").rowsBetween(Window.unboundedPreceding, 0)
     df_month = df_month.withColumn("offset", F.sum("new_group_flag").over(groupWindowSpec))
     
