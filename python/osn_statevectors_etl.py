@@ -90,7 +90,7 @@ spark.sql(create_db_sql)
 
 # Initialize path variables
 local_folder_path = 'data/ec-datadump'
-processed_files_path = 'data/processed_files.log'
+processed_files_path = 'data/processed_files_test.log'
 
 # If the clustered table does not exist, we need to start from scratch so we delete the previously used log file...
 if not table_exists(spark, project, "osn_statevectors_clustered"):
@@ -241,7 +241,7 @@ spark.sql(f"""
 """)
 
 # Cleanup
-spark.sql(f"""DROP TABLE IF EXISTS `{project}`.`osn_statevectors`;""")
+#spark.sql(f"""DROP TABLE IF EXISTS `{project}`.`osn_statevectors`;""")
 
 alter_sql = f"""
     ALTER TABLE `{project}`.`osn_statevectors_clustered`
