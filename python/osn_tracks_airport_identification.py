@@ -98,7 +98,7 @@ def compute_distance_event_times_spark(df):
     window_spec = Window.partitionBy(['icao24', 'callsign', 'track_id', 'airport_ident', 'status'])
     df = df.withColumn('min_distance', F.min('distance').over(window_spec))
     df_min = df.filter(df.distance == df.min_distance).select(
-        ['icao24', 'callsign', 'track_id', 'airport_ident', 'status', 'event_time', 'min_distance']).withColumnRenamed('event_time', 'event_time_min_distance')
+        ['icao24', 'callsign', 'track_id', 'airport_ident', 'DOF','first_seen', 'last_seen', 'status', 'event_time', 'min_distance']).withColumnRenamed('event_time', 'event_time_min_distance')
     return df_min
 
 
@@ -109,6 +109,9 @@ def process_and_pivot_data_spark(df):
         F.first('airport_ident').alias('airport_ident'),
         F.first('min_distance').alias('min_distance'),
         F.first('event_time_min_distance').alias('event_time_min_distance'),
+        F.first('DOF').alias('DOF'),  
+        F.first('first_seen').alias('first_seen'),
+        F.first('last_seen').alias('last_seen'),
     )
     
     # Select and rename
@@ -116,6 +119,7 @@ def process_and_pivot_data_spark(df):
         col('track_id').alias('TRACK_ID'),
         col('icao24').alias('ICAO24'),
         col('callsign').alias('FLT_ID'),
+        col('DOF').alias('DOF'),
         col('first_seen').alias('FIRST_SEEN'),
         col('last_seen').alias('LAST_SEEN'),
         col('source').alias('SOURCE'),
