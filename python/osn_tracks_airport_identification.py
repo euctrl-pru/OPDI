@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, pandas_udf, col, PandasUDFType, lit, round
+from pyspark.sql.functions import udf,from_unixtime, min, max, to_date, pandas_udf, col, PandasUDFType, lit, round
 from pyspark.sql.types import DoubleType, StructType, StructField
 from pyspark.sql import functions as F
 from pyspark.sql import Window
@@ -113,9 +113,12 @@ def process_and_pivot_data_spark(df):
     
     # Select and rename
     df_pivot = df_pivot.select(
+        col('track_id').alias('TRACK_ID'),
         col('icao24').alias('ICAO24'),
         col('callsign').alias('FLT_ID'),
-        col('track_id').alias('TRACK_ID'),
+        col('first_seen').alias('FIRST_SEEN'),
+        col('last_seen').alias('LAST_SEEN'),
+        col('source').alias('SOURCE'),
         col('Take-off_airport_ident').alias('ADEP'),
         col('Take-off_min_distance').alias('ADEP_MIN_DISTANCE_KM'),
         col('Take-off_event_time_min_distance').alias('ADEP_MIN_DISTANCE_TIME'),
@@ -131,18 +134,38 @@ def process_and_pivot_data_spark(df):
 
 # Main process
 flight_data_spark = categorize_by_vert_rate_spark(flights_below_10000_ft_df)
+
+# Calculate the DOF and first_seen & last_seen for each track
+window_spec_track = Window.partitionBy('track_id')
+flight_data_spark = flight_data_spark.withColumn('event_date', to_date(from_unixtime('event_time')))
+flight_data_spark = flight_data_spark.withColumn('DOF', min('event_date').over(window_spec_track))
+flight_data_spark = flight_data_spark.withColumn('first_seen', min('event_time').over(window_spec_track))
+flight_data_spark = flight_data_spark.withColumn('last_seen', max('event_time').over(window_spec_track))
+
+# Add a constant column for SOURCE
+flight_data_spark = flight_data_spark.withColumn('source', F.lit('OSN'))
+
+# Continue main process
 df_spark = compute_distance_event_times_spark(flight_data_spark)
 df_pivot_spark = process_and_pivot_data_spark(df_spark)
+
+
+# Insert
 
 spark.sql(f"""DROP TABLE IF EXISTS `{project}`.osn_flight_table""")
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {project}.osn_flight_table (
+    TRACK_ID STRING COMMENT 'Unique identifier for the associated flight tracks in `{project}`.`osn_flight_table`.',
     ICAO24 STRING COMMENT 'Unique ICAO 24-bit address of the transponder in hexadecimal string representation.',
     FLT_ID STRING COMMENT 'Flight trajectory identificator, the callsign.',
-    ADEP STRING COMMENT 'Airport of Departure.',
+    DOF DATE COMMENT 'The date of flight (DOF), this is identified as the date of the first statevector in the available trajectory.', 
+    FIRST_SEEN BIGINT COMMENT 'The timestamp of the first available statevector (unix time)',
+    LAST_SEEN BIGINT COMMENT 'The timestamp of the last available statevector (unix time)',
+    SOURCE STRING COMMENT 'The source from which the flight was extracted (OSN: OpenSky Network, NM: EUROCONTROL Network Manager, ...).',
+    ADEP STRING COMMENT 'The best guess for the aerodrome of departure (ADEP) of the flight based on the available flight trajectory.',
     ADEP_MIN_DISTANCE_KM FLOAT COMMENT 'Minimum distance the ADS-B signal is picked up from the airport of departure in kilometers.',
     ADEP_MIN_DISTANCE_TIME BIGINT COMMENT 'Timestamp at which the minimum distance from ADEP was recorded.',
-    ADES STRING COMMENT 'Airport of Destination.',
+    ADES STRING COMMENT 'The best guess for the aerodrome of destination (ADES) of the flight based on the available flight trajectory.',
     ADES_MIN_DISTANCE_KM FLOAT COMMENT 'Minimum distance the ADS-B signal is picked up from the airport of destination in kilometers.',
     ADES_MIN_DISTANCE_TIME BIGINT COMMENT 'Timestamp at which the minimum distance from ADES was recorded.'
 )
