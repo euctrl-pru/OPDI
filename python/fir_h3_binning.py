@@ -46,7 +46,7 @@ spark = SparkSession.builder \
 
 
 # Read the shapefile
-file_path = '../data/firs_nm_406/firs_nm_406.shp'
+file_path = 'data/firs_nm_406/firs_nm_406.shp'
 gdf = gpd.read_file(file_path)
 
 # Filter out some FIRs which behave oddly - To be examined
