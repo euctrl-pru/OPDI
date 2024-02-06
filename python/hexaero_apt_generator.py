@@ -26,7 +26,7 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 import shapely.geometry
 import h3
-import h3_viz
+from python import h3_viz
 from sklearn.preprocessing import LabelEncoder
 
 # Settings
@@ -75,7 +75,7 @@ airports_df = spark.sql(f"""
 import math
 import json
 
-def generate_circle_polygon(lat, lon, radius_nautical_miles, num_points=360):
+def generate_circle_polygon(lon, lat, radius_nautical_miles, num_points=360):
     """
     Generate a polygon in GeoJSON format around a given latitude and longitude
     with a specified radius in nautical miles.
@@ -94,7 +94,7 @@ def generate_circle_polygon(lat, lon, radius_nautical_miles, num_points=360):
         return degrees * math.pi / 180
     
     # Function to calculate the next point given a distance and bearing
-    def calculate_point(lat, lon, distance_km, bearing):
+    def calculate_point(lon, lat, distance_km, bearing):
         R = 6371.01  # Earth's radius in kilometers
         lat_rad = degrees_to_radians(lat)
         lon_rad = degrees_to_radians(lon)
@@ -114,7 +114,7 @@ def generate_circle_polygon(lat, lon, radius_nautical_miles, num_points=360):
     points = []
     for i in range(num_points):
         bearing = 360 / num_points * i
-        point = calculate_point(lat, lon, radius_km, bearing)
+        point = calculate_point(lon, lat, radius_km, bearing)
         points.append(point)
     points.append(points[0])  # Close the polygon by repeating the first point
     
@@ -130,14 +130,14 @@ def generate_circle_polygon(lat, lon, radius_nautical_miles, num_points=360):
 
 def fill_circle_with_hexagons(polygon_json, resolution=8):
     polygon = json.loads(polygon_json)
-    hexagons = h3.polyfill(polygon, resolution, geo_json_conformant=False)
+    hexagons = h3.polyfill(polygon, resolution, geo_json_conformant=True)
     return list(hexagons)
 
 generate_circle_polygon_udf = udf(generate_circle_polygon, StringType())
 fill_circle_with_hexagons_udf = udf(fill_circle_with_hexagons, ArrayType(StringType()))
 
 num_points = 360
-radius_nm = 35
+radius_nm = 15
 
 
 pdfs = []
@@ -146,35 +146,38 @@ failed_apts = []
 for resolution in [5,6,7]:
     pdfs = []
     failed_apts = []
-    for 
-        print('Resolution:' resolution)
-        for airport in airports_df.toPandas()['ident'].to_list():
-            try:
-                print('Processing airport: ', airport)
-                airports_pdf = airports_df.filter(airports_df.ident == airport).withColumn(
-                    f"circle_polygon",
-                    generate_circle_polygon_udf(
-                        airports_df.longitude_deg,
-                        airports_df.latitude_deg,
-                        lit(radius_nm), 
-                        lit(num_points)
-                    )
-                ).withColumn(
-                    "hex_id",
-                    fill_circle_with_hexagons_udf(
-                        "circle_polygon",
-                        lit(resolution) # Resolution
-                    )).toPandas()
-                
-                airports_pdf['hex_lat'], airports_pdf['hex_lon'] = zip(*airports_pdf['hex_id'].apply(lambda hex_id: h3.h3_to_geo(hex_id)))
-                
-                pdfs.append(airports_pdf)
-            except Exception as e:
-                failed_apts.append(airport)
-                print('Airport FAILED:', airport)
+    print('Resolution:', resolution)
+    for airport in airports_df.toPandas()['ident'].to_list():
+        try:
+            print('Processing airport: ', airport)
+            airports_pdf = airports_df.filter(airports_df.ident == airport).withColumn(
+                "circle_polygon",
+                generate_circle_polygon_udf(
+                    airports_df.longitude_deg,
+                    airports_df.latitude_deg,
+                    lit(radius_nm), 
+                    lit(num_points)
+                )
+            ).withColumn(
+                "hex_id",
+                fill_circle_with_hexagons_udf(
+                    "circle_polygon",
+                    lit(resolution) # Resolution
+                )
+            ).toPandas()
+            
+            airports_pdf = airports_pdf.explode('hex_id')
+            
+            airports_pdf['hex_lat'], airports_pdf['hex_lon'] = zip(*airports_pdf['hex_id'].apply(lambda l: h3.h3_to_geo(l)))
 
-        print(f"Failed airports: {failed_airports}")
+            pdfs.append(airports_pdf)
+        except Exception as e:
+            failed_apts.append(airport)
+            print('Airport FAILED:', airport)
+            print(f'Error: {e}')
 
-        df = pd.concat(pdfs).explode('hex_id')[['id', 'ident', 'latitude_deg', 'longitude_deg', 'elevation_ft', 'type','hex_id']]
+    print(f"Failed airports: {failed_apts}")
 
-        df.to_parquet(f'data/airport_hex/airport_hex_res_{resolution}.parquet')
+    df = pd.concat(pdfs).explode('hex_id')[['id', 'ident', 'latitude_deg', 'longitude_deg', 'elevation_ft', 'type','hex_id', 'hex_lat', 'hex_lon']]
+
+    df.to_parquet(f'data/airport_hex/airport_hex_res_{resolution}.parquet')

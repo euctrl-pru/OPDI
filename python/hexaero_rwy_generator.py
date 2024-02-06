@@ -69,7 +69,7 @@ airports_df = spark.sql(f"""
     SELECT ident, latitude_deg, longitude_deg, elevation_ft, type
     FROM {project}.oa_airports
     WHERE (ident LIKE 'E%' OR ident LIKE 'L%' OR ident LIKE 'U%')
-    AND (type = 'large_airport' OR type = 'medium_airport');
+    AND (type = 'large_airport');
 """).toPandas()
 
 runways_df = spark.sql(f"""
@@ -308,6 +308,10 @@ failed_apts = []
 for apt_icao in airport_idents:
     print("Processing airport: ", apt_icao)
     try: 
+      if os.path.exists(f'data/runway_hex/{apt_icao}.parquet') and os.path.exists(f'data/runway_hex/{apt_icao}.html'):
+        print('AIRPORT EXISTS: ', apt_icao, "-- SKIPPING")
+        continue
+      
       df = create_hex_airport(apt_icao)
       df.to_parquet(f'data/runway_hex/{apt_icao}.parquet')
       map_viz = h3_viz.choropleth_map(
