@@ -69,7 +69,7 @@ airports_df = spark.sql(f"""
     SELECT ident, latitude_deg, longitude_deg, elevation_ft, type
     FROM {project}.oa_airports
     WHERE (ident LIKE 'E%' OR ident LIKE 'L%' OR ident LIKE 'U%')
-    AND (type = 'large_airport');
+    AND (type = 'large_airport' OR type = 'medium_airport');
 """).toPandas()
 
 runways_df = spark.sql(f"""
