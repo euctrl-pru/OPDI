@@ -11,12 +11,12 @@ project = "project_aiu"
 today = datetime.today().strftime('%d %B %Y')
 
 # Spark Session Initialization
-shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
+#shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
 spark = SparkSession.builder \
     .appName("OSN statevectors ETL") \
     .config("spark.log.level", "ERROR")\
-    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu-dev") \
-    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/aiu.db/unmanaged") \
+    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu") \
+    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/aiu.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "8G") \
     .config("spark.executor.memory", "5G") \
@@ -59,6 +59,10 @@ execute_shell_command('./mc alias set opensky https://s3.opensky-network.org $OS
 stdout, _ = execute_shell_command('./mc find opensky/ec-datadump/ --path "*/states_*.parquet"')
 files_to_download = stdout.split('\n')
 
+files_to_download = [file for file in files_to_download if '2023-' in file or '2024-' in file]
+
+print(f"Processing files: {files_to_download}...")
+
 # Create the OSN EC data table to dump in the data
 create_db_sql = f"""
 CREATE TABLE IF NOT EXISTS `{project}`.`osn_statevectors` (
@@ -85,18 +89,12 @@ STORED AS parquet
 TBLPROPERTIES ('transactional'='false');
 """
 
-spark.sql(f"""DROP TABLE IF EXISTS `{project}`.`osn_statevectors`;""") 
-spark.sql(create_db_sql)
+#spark.sql(f"""DROP TABLE IF EXISTS `{project}`.`osn_statevectors`;""") 
+#spark.sql(create_db_sql)
 
 # Initialize path variables
 local_folder_path = 'data/ec-datadump'
 processed_files_path = 'data/processed_files_test.log'
-
-# If the clustered table does not exist, we need to start from scratch so we delete the previously used log file...
-if not table_exists(spark, project, "osn_statevectors_clustered"):
-    # If the table does not exist, remove the log file
-    if os.path.exists(processed_files_path):
-        os.remove(processed_files_path)
 
 # Read the list of processed files if available
 if os.path.exists(processed_files_path):
@@ -184,7 +182,7 @@ for i in range(0, len(files_to_download), chunksize):
                 downloaded_files.append(file_name)
     
     # Prevent partial files to halt upload.. 
-    time.sleep(3)
+    time.sleep(1)
     remove_files_in_directory(directory_path, extension_part) # Delete partially downloaded files -> Will print output
     
     # Perform a bulk read using Spark
@@ -207,9 +205,9 @@ for i in range(0, len(files_to_download), chunksize):
 
 # Create clustered version of osn_statevectorsdump.. 
 
-print("Starting clustering..")
+#print("Starting clustering..")
 
-spark.sql(f"""
+create_clustered_db = f"""
 CREATE TABLE IF NOT EXISTS `{project}`.`osn_statevectors_clustered` (
   event_time BIGINT COMMENT 'This column contains the unix (aka POSIX or epoch) timestamp for which the state vector was valid.',
   icao24 STRING COMMENT 'This column contains the 24-bit ICAO transponder ID which can be used to track specific airframes over different flights.',
@@ -233,21 +231,23 @@ COMMENT 'OpenSky Network EUROCONTROL datadump (for PRU) clustered. Last updated:
 CLUSTERED BY (icao24, callsign, event_time, geo_altitude) INTO 4096 BUCKETS
 STORED AS parquet
 TBLPROPERTIES ('transactional'='false');
-""")
+"""
 
-spark.sql(f"""
-  INSERT INTO TABLE `{project}`.`osn_statevectors_clustered` 
-  SELECT * FROM `{project}`.`osn_statevectors`;
-""")
+#spark.sql(create_clustered_db)
+
+#spark.sql(f"""
+#  INSERT INTO TABLE `{project}`.`osn_statevectors_clustered` 
+#  SELECT * FROM `{project}`.`osn_statevectors`;
+#""")
 
 # Cleanup
-#spark.sql(f"""DROP TABLE IF EXISTS `{project}`.`osn_statevectors`;""")
+#spark.sql(f"""TRUNCATE TABLE `{project}`.`osn_statevectors`;""")
 
-alter_sql = f"""
-    ALTER TABLE `{project}`.`osn_statevectors_clustered`
-    SET TBLPROPERTIES('comment' = 'OpenSky Network EUROCONTROL datadump (for PRU) clustered. Last updated: {today}');
-    """
-spark.sql(alter_sql)
+#alter_sql = f"""
+#    ALTER TABLE `{project}`.`osn_statevectors_clustered`
+#    SET TBLPROPERTIES('comment' = 'OpenSky Network EUROCONTROL datadump (for PRU) clustered. Last updated: {today}');
+#    """
+#spark.sql(alter_sql)
 
 # Stop the SparkSession
 spark.stop()
