@@ -7,7 +7,7 @@ from datetime import datetime
 import h3_pyspark
 
 # Settings
-project = "project_aiu"
+project = "project_opdi"
 max_h3_resolution = 12
 
 # Getting today's date
@@ -18,8 +18,8 @@ spark = SparkSession.builder \
     .appName("OSN statevectors H3 addition") \
     .config("spark.log.level", "ERROR")\
     .config("spark.ui.showConsoleProgress", "false")\
-    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu-dev") \
-    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/aiu.db/unmanaged") \
+    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
+    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "8G") \
     .config("spark.executor.memory", "6G") \
@@ -32,7 +32,7 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 ## Read raw data 
-df = spark.sql(f"SELECT * FROM `{project}`.`osn_statevectors_clustered`;")
+df = spark.sql(f"SELECT * FROM `{project}`.`osn_statevectors`;")
 
 # Create OSN tracks db
 h3_resolution = max_h3_resolution
@@ -75,8 +75,8 @@ create_osn_tracks_sql = f"""
     TBLPROPERTIES ('transactional'='false');
 """
 
-spark.sql(f"DROP TABLE IF EXISTS `{project}`.`osn_h3_statevectors`;")
-spark.sql(create_osn_tracks_sql)
+#spark.sql(f"DROP TABLE IF EXISTS `{project}`.`osn_h3_statevectors`;")
+#spark.sql(create_osn_tracks_sql)
 
 # Save the original column names for later and add track_id
 original_columns = df.columns + h3_res

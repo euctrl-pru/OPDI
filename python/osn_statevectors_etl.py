@@ -5,7 +5,7 @@ import os,shutil
 from datetime import datetime
 
 # Settings
-project = "project_aiu"
+project = "project_opdi"
 
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')
@@ -15,8 +15,8 @@ today = datetime.today().strftime('%d %B %Y')
 spark = SparkSession.builder \
     .appName("OSN statevectors ETL") \
     .config("spark.log.level", "ERROR")\
-    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu") \
-    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/aiu.db/unmanaged") \
+    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
+    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "8G") \
     .config("spark.executor.memory", "5G") \
