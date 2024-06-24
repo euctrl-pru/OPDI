@@ -18,7 +18,7 @@ import pandas as pd
 ## Config
 project = "project_opdi"
 max_h3_resolution = 12
-start_month = date(2023, 1, 1)
+start_month = date(2022, 1, 1)
 
 ## Which months to process
 today = date.today()
@@ -286,7 +286,7 @@ def process_tracks(project, max_h3_resolution, month):
   df_month = calculate_cumulative_distance(df_month)
 
   # Write data for the month to the database
-  df_month.write.mode("append").insertInto(f"`{project}`.`osn_tracks`")
+  df_month.write.mode("overwrite").insertInto(f"`{project}`.`osn_tracks`")
   
   # Write to clustered DB
   spark.sql(f"""
