@@ -13,6 +13,7 @@ import calendar
 import h3_pyspark
 import os
 import pandas as pd
+from helperfunctions import *
 
 # Settings
 ## Config
@@ -132,43 +133,13 @@ def h3_query_prep(project, max_h3_resolution):
   
   return h3_res_sql, h3_res
 
-def generate_months(start_date, end_date):
-    """Generate a list of dates corresponding to the first day of each month between two dates.
-
-    Args:
-    start_date (datetime.date): The starting date.
-    end_date (datetime.date): The ending date.
-
-    Returns:
-    list: A list of date objects for the first day of each month within the specified range.
-    """
-    current = start_date
-    months = []
-    while current <= end_date:
-        months.append(current)
-        # Increment month
-        month = current.month
-        year = current.year
-        if month == 12:
-            current = date(year + 1, 1, 1)
-        else:
-            current = date(year, month + 1, 1)
-    return months
-
-def get_start_end_of_month(date):
-    """Return a datetime object for the first and last second  of the given month and year."""
-    year = date.year
-    month = date.month
-    
-    first_second = datetime(year, month, 1, 0, 0, 0)
-    last_day = calendar.monthrange(year, month)[1]
-    last_second = datetime(year, month, last_day, 23, 59, 59)
-    return first_second.timestamp(), last_second.timestamp()
-
 
 # Distance helper function
 def calculate_cumulative_distance(df: DataFrame) -> DataFrame:
     """
+    
+    DEPRECIATED -> This is now done in step 04
+    
     Calculate the great circle distance between consecutive points in nautical miles
     and the cumulative distance for each track, using native PySpark functions.
 
@@ -283,7 +254,7 @@ def process_tracks(project, max_h3_resolution, month):
   df_month = df_month.select(original_columns)
 
   # Add the distance variables
-  df_month = calculate_cumulative_distance(df_month)
+  #df_month = calculate_cumulative_distance(df_month)
 
   # Write data for the month to the database
   df_month.write.mode("overwrite").insertInto(f"`{project}`.`osn_tracks`")

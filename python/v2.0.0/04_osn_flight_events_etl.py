@@ -15,16 +15,16 @@ from pyspark.sql.types import DoubleType, StructType, StructField, IntegerType, 
 from pyspark.sql.window import Window
 
 # Hotfix
-!cp /runtime-addons/cmladdon-2.0.40-b150/log4j.properties /etc/spark/conf/
+#!cp /runtime-addons/cmladdon-2.0.40-b150/log4j.properties /etc/spark/conf/
 
 # Spark Session Initialization
-shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
+#shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
 spark = SparkSession.builder \
     .appName("OSN flight events ETL") \
     .config("spark.log.level", "ERROR")\
     .config("spark.ui.showConsoleProgress", "false")\
-    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu-dev") \
-    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/aiu.db/unmanaged") \
+    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu") \
+    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive0.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "10G") \
     .config("spark.executor.memory", "10G") \
@@ -36,20 +36,10 @@ spark = SparkSession.builder \
     .enableHiveSupport() \
     .getOrCreate()
 
-# Get environment variables
-engine_id = os.getenv('CDSW_ENGINE_ID')
-domain = os.getenv('CDSW_DOMAIN')
-
-# Format the URL
-url = f"https://spark-{engine_id}.{domain}"
-
-# Display the clickable URL
-display(HTML(f'<a href="{url}">{url}</a>'))
-
 # Database prep
 
 # Settings
-project = "project_aiu"
+project = "project_opdi"
 recreate_milestone_table = False
 recreate_measurement_table = False
 
@@ -120,6 +110,7 @@ def calculate_horizontal_segment_events(sdf_input):
         #StructField("velocity", DoubleType()),
         #StructField("vert_rate", DoubleType()),
         StructField("cumulative_distance_nm", DoubleType()),
+        StructField("cumulative_time_s", IntegerType()),
         StructField("altitude_ft", DoubleType()),
         StructField("roc_ft_min", DoubleType()),
         StructField("speed_kt", DoubleType()),
@@ -128,15 +119,14 @@ def calculate_horizontal_segment_events(sdf_input):
 
     @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
     def get_flight_phases(pdf):
-      
-      try:
+        try:
             fp = FlightPhase()
-        fp.set_trajectory(pdf['event_time'], pdf['altitude_ft'], pdf['speed_kt'], pdf['roc_ft_min'])
-        pdf['flight_phase'] = fp.phaselabel()
-      except: 
-        pdf['flight_phase'] = None
-      
-      return pdf
+            fp.set_trajectory(pdf['event_time'], pdf['altitude_ft'], pdf['speed_kt'], pdf['roc_ft_min'])
+            pdf['flight_phase'] = fp.phaselabel()
+        except: 
+            pdf['flight_phase'] = None
+        
+        return pdf
 
     ## Apply UDF to get flight phases
     df_with_phases = df.groupby("track_id").apply(get_flight_phases)
@@ -192,7 +182,8 @@ def calculate_horizontal_segment_events(sdf_input):
         col('lon'),
         col('lat'),
         col('altitude_ft'),
-        col('cumulative_distance_nm')
+        col('cumulative_distance_nm'),
+        col('cumulative_time_s')
     )
 
     df_openap_events = df_openap_events.dropDuplicates(['track_id', 'milestone_type', 'event_time'])
@@ -282,22 +273,97 @@ def calculate_vertical_crossing_events(sdf_input):
         col('lon'),
         col('lat'),
         col('altitude_ft'),
-        col('cumulative_distance_nm')
+        col('cumulative_distance_nm'),
+        col('cumulative_time_s')
     )
 
-    df_lvl_events = df_lvl_events.dropDuplicates(['track_id', 'milestone_type', 'event_time', 'lon', 'lat', 'altitude_ft', 'cumulative_distance_nm'])
+    df_lvl_events = df_lvl_events.dropDuplicates(['track_id', 'milestone_type', 'event_time', 'lon', 'lat', 'altitude_ft', 'cumulative_distance_nm', 'cumulative_time_s'])
     
     return df_lvl_events
 
+# Measurement helper functions
+
+def add_time_measure(sdf_input):
+    # Define the window spec partitioned by 'track_id'
+    window_spec = Window.partitionBy('track_id')
+
+    # Add a new column 'cumulative_time_s'
+    sdf_input = sdf_input.withColumn(
+        'min_event_time',
+        F.min('event_time').over(window_spec)
+    ).withColumn(
+        'cumulative_time_s',
+        (F.col('event_time') - F.col('min_event_time'))  # Calculate difference in seconds
+    )
+
+    # Drop the 'first_event_time' as it is no longer needed
+    sdf_input = sdf_input.drop('min_event_time')
+    
+    return(sdf_input)
+
+# Distance helper function
+def add_distance_measure(df: DataFrame) -> DataFrame:
+    """
+    Calculate the great circle distance between consecutive points in nautical miles
+    and the cumulative distance for each track, using native PySpark functions.
+
+    Parameters:
+    df (DataFrame): Input Spark DataFrame. Assumes columns "lat", "lon", "track_id", "event_time".
+
+    Returns:
+    DataFrame: DataFrame with additional columns "distance_nm" and "cumulative_distance_nm".
+    """
+
+    # Define a window spec for lag operation and cumulative sum
+    windowSpecLag = Window.partitionBy("track_id").orderBy("event_time")
+    windowSpecCumSum = Window.partitionBy("track_id").orderBy("event_time").rowsBetween(Window.unboundedPreceding, 0)
+
+    # Convert degrees to radians using PySpark native function
+    df = df.withColumn("lat_rad", F.radians(F.col("lat")))
+    df = df.withColumn("lon_rad", F.radians(F.col("lon")))
+
+    # Getting previous row's latitude and longitude
+    df = df.withColumn("prev_lat_rad", F.lag("lat_rad").over(windowSpecLag))
+    df = df.withColumn("prev_lon_rad", F.lag("lon_rad").over(windowSpecLag))
+
+    # Compute the great circle distance using haversine formula in PySpark native functions
+    df = df.withColumn("a", 
+                       F.sin((F.col("lat_rad") - F.col("prev_lat_rad")) / 2)**2 + 
+                       F.cos(F.col("prev_lat_rad")) * F.cos(F.col("lat_rad")) * 
+                       F.sin((F.col("lon_rad") - F.col("prev_lon_rad")) / 2)**2)
+
+    df = df.withColumn("c", 2 * F.atan2(F.sqrt(F.col("a")), F.sqrt(1 - F.col("a"))))
+
+    # Radius of Earth in kilometers is 6371
+    df = df.withColumn("distance_km", 6371 * F.col("c"))
+
+    # Convert distance to nautical miles; 1 nautical mile = 1 / 1.852 km
+    df = df.withColumn("segment_distance_nm", 
+                       F.when(F.col("distance_km").isNull(), 0).otherwise(F.col("distance_km") / 1.852))
+
+    # Calculate the cumulative distance
+    df = df.withColumn("cumulative_distance_nm", F.sum("segment_distance_nm").over(windowSpecCumSum))
+
+    # Drop temporary columns used for calculations
+    df = df.drop("lat_rad", "lon_rad", "prev_lat_rad", "prev_lon_rad", "a", "c", "distance_km")
+
+    return df
+
 # Final ETL - Combining the datasets and writing away.. 
 
-def etl_openap_flight_events(sdf_input, batch_id):
-    df_openap_events = calculate_horizontal_segment_events(sdf_input)
-    #df_lvl_events = calculate_vertical_crossing_events(sdf_input)
-
-    df_events = df_openap_events#df_lvl_events #df_openap_events.union(df_lvl_events)
+def etl_flight_events_and_measures(sdf_input, batch_id):
+    # Add measures
+    sdf_input = add_distance_measure(sdf_input)
+    sdf_input = add_time_measure(sdf_input)
+    
+    # Calculate flight events    
+    df_horizontal_events = calculate_horizontal_segment_events(sdf_input)
+    df_vertical_events = calculate_vertical_crossing_events(sdf_input)
+    
+    # Formatting
+    df_events = df_horizontal_events.union(df_vertical_events)
     df_events = df_events.withColumn('source', F.lit('OSN'))
-    df_events = df_events.withColumn('version', F.lit('milestones_v0.0.1'))
+    df_events = df_events.withColumn('version', F.lit('milestones_v0.0.2'))
     df_events = df_events.withColumn('info', F.lit(''))
 
     df_events = df_events.withColumn("id_tmp", F.concat(F.lit(batch_id),monotonically_increasing_id().cast('string'))).select(
@@ -311,11 +377,11 @@ def etl_openap_flight_events(sdf_input, batch_id):
         col('source'),
         col('version'),
         col('info'),
-        col('cumulative_distance_nm')
+        col('cumulative_distance_nm'),
+        col('cumulative_time_s')
     )
 
     # Milestones table
-
     df_milestones = df_events.select(
         col('id_tmp').alias('id'),
         col('track_id').alias('track_id'),
@@ -328,166 +394,34 @@ def etl_openap_flight_events(sdf_input, batch_id):
         col('version').alias('version'),
         col('info').alias('info'),
     )
-
     df_milestones.write.mode("append").insertInto(f"`{project}`.`osn_milestones`")
 
     # Measurements table 
-
-    df_measurements = df_events.withColumn('type',F.lit('Distance flown (NM)'))
-    df_measurements = df_measurements.withColumn('version',F.lit('distance_v0.0.1'))
-
-    df_measurements = df_measurements.withColumn("id", F.concat(F.lit(batch_id),monotonically_increasing_id().cast('string'))).select(
+    ## Add Distance flown (NM) - df measure
+    df_measurements_df = df_events.withColumn('type',F.lit('Distance flown (NM)'))
+    df_measurements_df = df_measurements_df.withColumn('version',F.lit('distance_v0.0.2'))
+    df_measurements_df = df_measurements_df.withColumn("id", F.concat(F.lit(batch_id),monotonically_increasing_id().cast('string'))).select(
         col('id'),
         col('id_tmp').alias('milestone_id'),
         col('type'),
         col('cumulative_distance_nm').alias('value'),
         col('version')
     )
-
-    df_measurements.write.mode("append").insertInto(f"`{project}`.`osn_measurements`")
-
-def etl_lvl_flight_events(sdf_input, batch_id):
-    #df_openap_events = calculate_horizontal_segment_events(sdf_input)
-    df_lvl_events = calculate_vertical_crossing_events(sdf_input)
-
-    df_events = df_lvl_events
-    df_events = df_events.withColumn('source', F.lit('OSN'))
-    df_events = df_events.withColumn('version', F.lit('milestones_v0.0.1'))
-    df_events = df_events.withColumn('info', F.lit(''))
-
-    df_events = df_events.withColumn("id_tmp", F.concat(F.lit(batch_id),monotonically_increasing_id().cast('string'))).select(
-        col('id_tmp'),
-        col('track_id'),
-        col('milestone_type'),
-        col('event_time'),
-        col('lon'),
-        col('lat'),
-        col('altitude_ft'),
-        col('source'),
-        col('version'),
-        col('info'),
-        col('cumulative_distance_nm')
-    )
-
-    # Milestones table
-
-    df_milestones = df_events.select(
-        col('id_tmp').alias('id'),
-        col('track_id').alias('track_id'),
-        col('milestone_type').alias('milestone_type'),
-        col('event_time').alias('event_time'),
-        col('lon').alias('longitude'),
-        col('lat').alias('latitude'),
-        col('altitude_ft').alias('altitude'),
-        col('source').alias('source'),
-        col('version').alias('version'),
-        col('info').alias('info'),
-    )
-
-    df_milestones.write.mode("append").insertInto(f"`{project}`.`osn_milestones`")
-
-    # Measurements table 
-
-    df_measurements = df_events.withColumn('type',F.lit('Distance flown (NM)'))
-    df_measurements = df_measurements.withColumn('version',F.lit('distance_v0.0.1'))
-
-    df_measurements = df_measurements.withColumn("id", F.concat(F.lit(batch_id),monotonically_increasing_id().cast('string'))).select(
+    df_measurements_df.write.mode("append").insertInto(f"`{project}`.`osn_measurements`")
+    
+    ## Add Time Passed - df measure
+    df_measurements_tp = df_events.withColumn('type',F.lit('Time Passed (s)'))
+    df_measurements_tp = df_measurements_tp.withColumn('version',F.lit('time_v0.0.1'))
+    df_measurements_tp = df_measurements_tp.withColumn("id", F.concat(F.lit(batch_id),monotonically_increasing_id().cast('string'))).select(
         col('id'),
         col('id_tmp').alias('milestone_id'),
         col('type'),
-        col('cumulative_distance_nm').alias('value'),
+        col('cumulative_time_s').alias('value'),
         col('version')
     )
-
-    df_measurements.write.mode("append").insertInto(f"`{project}`.`osn_measurements`")
+    df_measurements_tp.write.mode("append").insertInto(f"`{project}`.`osn_measurements`")
     
 # Run code.. 
-
-#def get_next_month(dt):
-#    """Get the first day of the next month."""
-#    year, month = dt.year + (dt.month // 12), dt.month % 12 + 1
-#    return datetime(year, month, 1)
-
-## Determine the range of event_time
-#time_range = spark.sql(f"SELECT MIN(event_time), MAX(event_time) FROM `{project}`.`osn_tracks`").collect()
-#min_time, max_time = time_range[0]
-
-## Convert min_time and max_time from Unix timestamp to datetime
-#start_date = datetime.utcfromtimestamp(min_time)
-#end_date = datetime.utcfromtimestamp(max_time)
-
-#print('-'*30)
-#print(f'Starting milestone extraction process for timeframe {start_date} until {end_date}...')
-
-
-## Loop through time range in monthly batches
-#current_date = start_date
-#while current_date <= end_date:
-#    next_month_date = get_next_month(current_date)
-#    next_month_timestamp = int(next_month_date.timestamp())
-#    
-#    print(f'Currently processing lvl crossings {current_date} - {next_month_date}')
-#    
-#    # Perform the milestone operation for the current month
-#    sdf_input = spark.sql(f"""
-#        SELECT track_id, icao24, callsign, lat, lon, event_time, baro_altitude, velocity, vert_rate, cumulative_distance_nm
-#        FROM `project_aiu`.`osn_tracks_clustered`
-#        WHERE event_time >= {int(current_date.timestamp())}
-#        AND event_time < {next_month_timestamp}""").persist()
-
-#    etl_lvl_flight_events(sdf_input, batch_id = current_date.strftime("%Y%m") + '_')
-#    sdf_input.unpersist()
-
-#    # Move to the next month
-#    current_date = next_month_date
-
-
-## Loop through time range in daily batches
-#    
-#from datetime import timedelta
-
-#def get_next_day(date):
-#    """
-#    Returns the next day's date for the given date.
-
-#    :param date: The current date.
-#    :return: Date object representing the next day.
-#    """
-#    return date + timedelta(days=1)
-
-#current_date = start_date
-#while current_date <= end_date:
-#    next_day_date = get_next_day(current_date)
-#    next_day_timestamp = int(next_day_date.timestamp())
-#    
-#    print(f'Currently processing {current_date} - {next_day_date}')
-#    
-#    # Perform the ETL operation for the current day
-#    # Adjusting the query to select trajectories starting on the current day
-#    sdf_input = spark.sql(f"""
-#        SELECT track_id, icao24, callsign, lat, lon, event_time, baro_altitude, velocity, vert_rate, cumulative_distance_nm
-#        FROM `project_aiu`.`osn_tracks_clustered`
-#        WHERE event_time >= {int(current_date.timestamp())}
-#        AND event_time < {next_day_timestamp}
-#        AND track_id IN (
-#            SELECT track_id
-#            FROM `project_aiu`.`osn_tracks_clustered`
-#            GROUP BY track_id
-#            HAVING MIN(event_time) BETWEEN {int(current_date.timestamp())} AND {next_day_timestamp}
-#        )""").persist()
-
-#    etl_openap_flight_events(sdf_input, batch_id=current_date.strftime("%Y%m%d") + '_')
-#    sdf_input.unpersist()
-
-#    # Move to the next day
-#    current_date = next_day_date
-
-
-##Cleanup
-##spark.sql(f"""DROP TABLE IF EXISTS `{project}`.`osn_tracks`;""")
-
-## Stop the SparkSession
-#spark.stop()
 
 from datetime import datetime, timedelta
 
@@ -511,40 +445,12 @@ def get_previous_day(date):
     return date - timedelta(days=1)
 
 # Determine the range of event_time
-#time_range = spark.sql(f"SELECT MIN(event_time), MAX(event_time) FROM `{project}`.`osn_tracks_clustered_v001`").collect()
-#min_time, max_time = time_range[0]
-
-## Convert min_time and max_time from Unix timestamp to datetime
-#start_date = datetime.utcfromtimestamp(min_time)
-#end_date = datetime.utcfromtimestamp(max_time)
-
 start_date = datetime.strptime('2023-07-01', '%Y-%m-%d')
 end_date = datetime.strptime('2023-07-31', '%Y-%m-%d')
 
 print('-'*30)
 print(f'Starting milestone extraction process for timeframe {start_date} until {end_date}...')
-#
-## Loop through time range in monthly batches, moving backwards
-#current_date = end_date
-#while current_date >= start_date:
-#    previous_month_date = get_previous_month(current_date)
-#    previous_month_timestamp = int(previous_month_date.timestamp())
-#    
-#    print(f'Currently processing lvl crossings {previous_month_date} - {current_date}')
-#    
-#    # Perform the milestone operation for the current month
-#    sdf_input = spark.sql(f"""
-#        SELECT track_id, icao24, callsign, lat, lon, event_time, baro_altitude, velocity, vert_rate, cumulative_distance_nm
-#        FROM `project_aiu`.`osn_tracks_clustered_v001`
-#        WHERE event_time >= {previous_month_timestamp}
-#        AND event_time < {int(current_date.timestamp())}""").persist()
-#
-#    etl_lvl_flight_events(sdf_input, batch_id = previous_month_date.strftime("%Y%m") + '_')
-#    sdf_input.unpersist()
-#
-#    # Move to the previous month
-#    current_date = previous_month_date
-#
+
 # Loop through time range in daily batches, moving backwards
 current_date = end_date
 while current_date >= start_date:
@@ -557,9 +463,7 @@ while current_date >= start_date:
     sdf_input = spark.sql(f"""
         SELECT track_id, icao24, callsign, lat, lon, event_time, baro_altitude, velocity, vert_rate, cumulative_distance_nm
         FROM `project_aiu`.`osn_tracks_clustered_v001`
-        WHERE event_time >= {previous_day_timestamp}
-        AND event_time < {int(current_date.timestamp())}
-        AND track_id IN (
+        WHERE track_id IN (
             SELECT track_id
             FROM `project_aiu`.`osn_tracks_clustered_v001`
             GROUP BY track_id

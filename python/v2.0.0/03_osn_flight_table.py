@@ -1,180 +1,565 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf,from_unixtime, min, max, to_date, pandas_udf, col, PandasUDFType, lit, round
+# Spark imports
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.functions import udf, pandas_udf, col, PandasUDFType, lit, round, array_contains, from_unixtime
+from pyspark.sql.functions import col, radians, sin, cos, sqrt, atan2, array, collect_list, struct, row_number, expr
+from pyspark.sql.functions import monotonically_increasing_id, row_number, col
 from pyspark.sql.types import DoubleType, StructType, StructField
+from pyspark.sql.functions import when, split, col, concat_ws,  min, max, to_date
 from pyspark.sql import functions as F
-from pyspark.sql import Window
+from pyspark.sql.window import Window
 
+# Regular imports
+from IPython.display import display, HTML
 import os, time
 import subprocess
 import os,shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
+import h3pandas
+import h3
+
+# Custom functions
+from datetime import datetime, date
+import dateutil.relativedelta
+import calendar
+
+def generate_months(start_date, end_date):
+    """Generate a list of dates corresponding to the first day of each month between two dates.
+
+    Args:
+    start_date (datetime.date): The starting date.
+    end_date (datetime.date): The ending date.
+
+    Returns:
+    list: A list of date objects for the first day of each month within the specified range.
+    """
+    current = start_date
+    months = []
+    while current <= end_date:
+        months.append(current)
+        # Increment month
+        month = current.month
+        year = current.year
+        if month == 12:
+            current = date(year + 1, 1, 1)
+        else:
+            current = date(year, month + 1, 1)
+    return months
+
+def get_start_end_of_month(date):
+    """Return a datetime object for the first and last second  of the given month and year."""
+    year = date.year
+    month = date.month
+    
+    first_second = datetime(year, month, 1, 0, 0, 0)
+    last_day = calendar.monthrange(year, month)[1]
+    last_second = datetime(year, month, last_day, 23, 59, 59)
+    return first_second.timestamp(), last_second.timestamp()
 
 # Settings
 project = "project_opdi"
+resolution = 7
 
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')
 
 # Spark Session Initialization
-shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
 spark = SparkSession.builder \
-    .appName("OSN ADEP ADES Identification") \
+    .appName("OSN Flight Table") \
     .config("spark.log.level", "ERROR")\
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
-    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive0.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "8G") \
-    .config("spark.executor.memory", "5G") \
+    .config("spark.executor.memory", "8G") \
     .config("spark.executor.cores", "1") \
     .config("spark.executor.instances", "2") \
-    .config("spark.dynamicAllocation.maxExecutors", "6") \
+    .config("spark.dynamicAllocation.maxExecutors", "20") \
     .config("spark.network.timeout", "800s") \
     .config("spark.executor.heartbeatInterval", "400s") \
+    .config("spark.driver.maxResultSize", "4g") \
     .enableHiveSupport() \
     .getOrCreate()
 
-# Calculate proximity data
+## Query testing sample function
 
-# Load the necessary tables/dataframes
-osn_tracks_df = spark.sql(
-    f"SELECT event_time, icao24, lat as lat_flight, lon as lon_flight, velocity, heading, vert_rate, callsign, on_ground, geo_altitude, track_id FROM {project}.osn_tracks_clustered WHERE baro_altitude <= 3048;" # 3048 m = 10.000 ft 
-)
+def get_data_within_timeframe(spark, table_name, month, time_col = 'event_time', unix_time = True):
+    """
+    Retrieves records from a specified Spark table within the given timeframe.
 
-airport_distance_reference_df = spark.sql(
-    f"SELECT lat as lat_airport, lon as lon_airport, airport_ident, distance FROM {project}.airport_distance_reference WHERE distance <= 50;"
-)
+    Args:
+    spark (SparkSession): The SparkSession object.
+    table_name (str): The name of the Spark table to query.
+    month (str): The start date of a month in datetime format.
 
-oa_airports_df = spark.sql(
-    "SELECT ident, elevation_ft FROM project_aiu.oa_airports;"
-)
+    Returns:
+    pyspark.sql.dataframe.DataFrame: A DataFrame containing the records within the specified timeframe.
+    """
+    # Convert dates to POSIX time (seconds since epoch)
+    start_posix,stop_posix = get_start_end_of_month(month)
 
-# Round 'lat' and 'lon' to 3 decimal places
-osn_tracks_df = osn_tracks_df.withColumn('lat_flight', round(osn_tracks_df['lat_flight'], 3))
-osn_tracks_df = osn_tracks_df.withColumn('lon_flight', round(osn_tracks_df['lon_flight'], 3))
-
-# Join osn_ec_datadump with airport_distance_reference
-merged_df = osn_tracks_df.join(
-    airport_distance_reference_df,
-    (osn_tracks_df['lat_flight'] == airport_distance_reference_df['lat_airport']) &
-    (osn_tracks_df['lon_flight'] == airport_distance_reference_df['lon_airport'])
-)
-
-# Join the resulting dataframe with oa_airports
-merged_df = merged_df.join(
-    oa_airports_df,
-    merged_df['airport_ident'] == oa_airports_df['ident']
-)
-
-# Compute aircraft height above the airport
-# Convert geo_altitude from meters to feet before subtracting elevation_ft
-merged_df = merged_df.withColumn(
-    "height_above_airport",
-    (merged_df['geo_altitude']*3.28084 - merged_df['elevation_ft']).alias('height_above_airport')
-)
-
-# Filter out flights at a height of more than 10,000 feet
-flights_below_10000_ft_df = merged_df.filter(merged_df['height_above_airport'] <= 10000)
-
-# Select all relevant columns
-flights_below_10000_ft_df = flights_below_10000_ft_df.select("event_time", "icao24", "lat_flight", "lon_flight", "velocity", "heading", "vert_rate", "callsign", "on_ground", "geo_altitude", "airport_ident", "ident", "elevation_ft", "height_above_airport", "distance", "track_id")
-
-flights_below_10000_ft_df = flights_below_10000_ft_df.orderBy(['icao24', 'callsign', 'airport_ident', 'event_time', 'track_id']).na.drop(subset=['callsign','track_id'])
-
-# Section to allocate airports... 
-
-def categorize_by_vert_rate_spark(df):
-    """Categorize the vertical rate into 'Take-off', 'Landing', or 'Ambiguous'."""
-    avg_vert_rate = df.groupBy(['icao24', 'callsign', 'track_id', 'airport_ident']).agg(F.avg('vert_rate').alias('avg_vert_rate'))
-    avg_vert_rate = avg_vert_rate.withColumn('status',
-                                            F.when(avg_vert_rate['avg_vert_rate'] > 2, 'Take-off')
-                                            .when(avg_vert_rate['avg_vert_rate'] < 2, 'Landing')
-                                            .otherwise('Ambiguous'))
-    return df.join(avg_vert_rate, on=['icao24', 'callsign', 'track_id', 'airport_ident'], how='left')
-
-def compute_distance_event_times_spark(df):
-    """Compute event times for min and max distances."""
-    window_spec = Window.partitionBy(['icao24', 'callsign', 'track_id', 'airport_ident', 'status'])
-    df = df.withColumn('min_distance', F.min('distance').over(window_spec))
-    df_min = df.filter(df.distance == df.min_distance).select(
-        ['icao24', 'callsign', 'track_id', 'airport_ident', 'DOF','first_seen', 'last_seen', 'status', 'event_time', 'min_distance', 'source']).withColumnRenamed('event_time', 'event_time_min_distance')
-    return df_min
+    # Load the table
+    df = spark.table(table_name)
+    
+    if unix_time == True:
+        # Filter records based on event_time posix column
+        filtered_df = df.filter((col(time_col) >= start_posix) & (col(time_col) < stop_posix))
+    else: 
+        df = df.withColumn('unix_time', unix_timestamp(time_col))
+        filtered_df = df.filter((col('unix_time') >= start_posix) & ((col('unix_time') < stop_posix)))
+                                
+    return filtered_df
 
 
-def process_and_pivot_data_spark(df):
-    """Process the dataframe to remove 'Ambiguous' rows, pivot, and select specific columns."""
-    df = df.filter(df.status != "Ambiguous")
-    df_pivot = df.groupBy(['icao24', 'callsign', 'track_id','DOF', 'first_seen', 'last_seen', 'source']).pivot('status').agg(
-        F.first('airport_ident').alias('airport_ident'),
-        F.first('min_distance').alias('min_distance'),
-        F.first('event_time_min_distance').alias('event_time_min_distance')#,
-        #F.first('DOF').alias('DOF'),  
-        #F.first('first_seen').alias('first_seen'),
-        #F.first('last_seen').alias('last_seen'),
+def load_airports_hex(spark, resolution = 7):
+    """
+    Creates the reference spark dataframe for airports which contains hexaero grids around each airport. 
+    The hexaero grid around the airport has a 30NM radius. 
+
+    Args:
+    spark (SparkSession): The SparkSession object.
+    resolution: The h3 resolution we want to work at. 
+
+    Returns:
+    pyspark.sql.dataframe.DataFrame: A DataFrame containing the hexaero grid for all european airports.
+    """
+    try:
+        # In case I ran the function this dataset should exist.
+        df_apt = pd.read_parquet(f'data/airport_hex/airport_concentric_c_hex_res_{resolution}_processed.arrow')
+        sdf_apt = spark.createDataFrame(df_apt)
+        return sdf_apt
+    
+    except Exception as e:
+        print(e)
+        
+        # Create the dataset if not exists from source
+        df_apt = pd.read_parquet(f'data/airport_hex/airport_concentric_c_hex_res_{resolution}.arrow')
+        
+        # Filter out relevant hexagons
+        df_apt = df_apt[df_apt.max_c_radius_nm<=30]
+        df_apt = df_apt[['ident','hex_id', 'latitude_deg', 'longitude_deg']].explode('hex_id')
+        df_apt = df_apt[~df_apt.hex_id.isna()]
+
+        # Getting h3 positions of hexagons 
+        df_apt['geo'] = df_apt['hex_id'].apply(lambda l:h3.h3_to_geo(l))
+        df_apt['lat'] = df_apt['geo'].apply(lambda l:l[0])
+        df_apt['lon'] = df_apt['geo'].apply(lambda l:l[1])
+        df_apt = df_apt.drop('geo',axis=1)
+
+        # OSN bounding box filter for europe
+        f_lat = np.logical_and(df_apt.lat >=26.74617, df_apt.lat <= 70.25976)  
+        f_lon = np.logical_and(df_apt.lon >=-25.86653, df_apt.lon <= 49.65699)  
+        f = np.logical_and(f_lat, f_lon)
+        df_apt = df_apt[f]
+
+        # Add center hex ids
+        df_apt['center_hex_id'] = df_apt.apply(lambda l: h3.geo_to_h3(l['latitude_deg'], l['longitude_deg'], resolution=resolution), axis=1)
+
+        # Renaming columns 
+        df_apt.columns = ['apt_' + x for x in df_apt.columns]
+
+        def calc_dist(h1,h2):
+            try:
+                return h3.h3_distance(h1,h2)
+            except:
+                return None
+
+        df_apt['distance_from_center'] = df_apt.apply(lambda l:calc_dist(l['apt_hex_id'], l['apt_center_hex_id']), axis=1)
+        df_apt = df_apt[~pd.isnull(df_apt['distance_from_center'])]
+        df_apt = df_apt[['apt_ident', 'apt_hex_id', 'distance_from_center', 'apt_latitude_deg', 'apt_longitude_deg']]
+        df_apt.to_parquet(f'data/airport_hex/airport_concentric_c_hex_res_{resolution}_processed.arrow')
+
+        # Creating spark df
+        sdf_apt = spark.createDataFrame(df_apt)
+        return sdf_apt
+
+def fetch_and_label_sv(spark, project, month, sdf_apt):
+    """
+    A function to 
+        1. Fetch the statevector data (including track_ids) 
+        2. Rename columns & complete flight_ids with ''.
+        3. Add flight levels from baroaltitude.
+        4. Add first_seen, last_seen, DOF
+        5. Filter on height (below 40NM). 
+        6. Merge airports in vicinity (within 30NM of OurAirports airport reference point - i.e., latitude_deg, longitude_deg). 
+    
+    Reasoning: 
+    For an incoming aircraft, landing in the center of this cylinder would be at an angle of 3 degrees. 
+    Assuming we want to see - at least - the flight coming down from FL10 to see the landing, we need thus to have a minimal distance tan(3) = 3048/? => ? = 3048/tan(3) = 58159 meter = 31,403348 nautical miles. 
+    For outgoing landing, the take-off angle is much steeper, up to 15 degrees. Let's say we thus look up to FL40. We'll thus look into concentric circles 30NM around the airport and a max flight level FL40 (which covers higher outgoing angles). 
+
+    Args:
+    spark (SparkSession): The SparkSession object.
+    project (str): The project in which we are working (usually 'project_opdi')
+    month: The first date of the month we want to process (first of january 2023 will process the timeframe 2023-01-01 00:00:00 until 2023-01-31 23:59:59). 
+
+    Returns:
+    pyspark.sql.dataframe.DataFrame: A DataFrame containing the statevectors within the bounds (30NM around airports and below FL40) which are labelled by airport.
+    """
+    
+    # Custom setting, see reasoning above.
+    max_FL = 40
+    
+    # Fetch data
+    sv = get_data_within_timeframe( # State Vectors sv
+        spark = spark, 
+        table_name = f'{project}.osn_tracks_clustered', 
+        month = month)
+
+    # Filter out rows with missing crucial data
+    sv_f = sv.dropna(subset=['lat', 'lon', 'baro_altitude', 'track_id'])
+
+    # Rename callsign to flight_id (official term)
+    sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
+
+    # Replace missing 'flight_id' with empty string
+    sv_f = sv_f.fillna({'flight_id': ''})
+
+    # Convert event_time from posixtime to datetime 
+    sv_f = sv_f.withColumn('event_time', F.to_timestamp(F.col('event_time')))
+
+    # Add flight level proxy extracted from baro_altitude
+    sv_f = sv_f.withColumn('flight_level', (col('baro_altitude') * 3.28084 / 100).cast('int'))
+
+    # Select columns of interest
+    columns_of_interest = [
+        'track_id', 'icao24', 'flight_id', 'event_time', 'lat', 'lon',  'flight_level', 'baro_altitude',
+        'heading', 'vert_rate',  'on_ground', 'h3_res_7', 'h3_res_11'
+    ]
+    sv_f = sv_f.select(columns_of_interest)
+
+    # Calculate the DOF and first_seen & last_seen for each track
+    window_spec_track = Window.partitionBy('track_id')
+    sv_f = sv_f.withColumn('first_seen', min('event_time').over(window_spec_track))
+    sv_f = sv_f.withColumn('last_seen', max('event_time').over(window_spec_track))
+    sv_f = sv_f.withColumn('DOF', to_date('first_seen'))
+
+    # Filter out low altitude statevectors during landing/take-off (below FL20)
+    # Implicitly we filter out any flights which are never noted below FL20
+    sv_low_alt = sv_f.filter(col('flight_level') <= max_FL)
+
+    # Merge airports hexaero grid (sdf_apt) onto statevectors to see which tracks are within 30 NM (+-h3 res 7 inaccuracy). 
+    sv_nearby_apt = sv_low_alt.join(sdf_apt, (sv_low_alt.h3_res_7 == sdf_apt.apt_hex_id), "left")
+    return sv_nearby_apt
+
+# Determine landing or take-off depending on vert_rate
+def categorize_landing_take_off(df):
+    """
+    Categorize the flight into 'take-off', 'landing', or 'ambiguous'.
+    
+    Args:
+    df (spark dataframe): The spark dataframe coming out of fetch_and_label_sv.
+
+    Returns:
+    pyspark.sql.dataframe.DataFrame: The original dataframe with in addition a column 'status' indicating landing/take-off/ambiguous.
+    """
+        
+    
+    # Window specification for rolling average
+    window_spec = Window.partitionBy(['icao24', 'flight_id', 'track_id', 'apt_ident']).orderBy('event_time').rowsBetween(-2, 2)
+
+    # Calculate moving average of altitude
+    df_m = df.withColumn('smoothed_altitude', F.avg('baro_altitude').over(window_spec))
+
+    # Window specification for calculating altitude change
+    window_spec_lag = Window.partitionBy(['icao24', 'flight_id', 'track_id', 'apt_ident']).orderBy('event_time')
+
+    # Calculate change in smoothed altitude
+    df_m = df_m.withColumn('altitude_change', F.col('smoothed_altitude') - F.lag('smoothed_altitude').over(window_spec_lag))
+
+    # Determine if it's a take-off or landing
+    df_m = df_m.withColumn('trajectory_type', 
+                       F.when(F.col('altitude_change') > 0, 'take-off')
+                        .when(F.col('altitude_change') < 0, 'landing')
+                        .otherwise('constant altitude'))
+
+    # Aggregate each track to a single 'flight' to determine overall flight type
+    flight_type_df = df_m.groupBy(['icao24', 'flight_id', 'track_id', 'apt_ident']).agg(
+        F.sum(F.when(F.col('trajectory_type') == 'take-off', 1).otherwise(0)).alias('take_off_count'),
+        F.sum(F.when(F.col('trajectory_type') == 'landing', 1).otherwise(0)).alias('landing_count')
+    )
+
+    # Determine overall flight type based on majority segments including ambiguous count
+    flight_type_df = flight_type_df.withColumn('status', 
+                                               # We get statevectors every 5 sec -> +4 requires at least 20 s in one state
+                                               F.when(F.col('take_off_count') > (F.col('landing_count') + 4), 'take-off')  
+                                              .when(F.col('landing_count') > (F.col('take_off_count') + 4), 'landing')
+                                              .otherwise('ambiguous'))
+    
+    return df.join(flight_type_df, on=['icao24', 'flight_id', 'track_id', 'apt_ident'], how='left')
+
+
+
+def compute_flight_table(df):
+    """
+    Create the flight table .
+    
+    Args:
+    df (spark dataframe): The spark dataframe coming out of categorize_landing_take_off.
+
+    Returns:
+    pyspark.sql.dataframe.DataFrame: The flight table as specified in opdi.aero.
+    """
+    
+    # Filter out ambiguous landings/take-offs from flights (likely helicopters / go-arounds)
+    df = df.filter(df.status != "ambiguous")
+    
+    # Calculate the statevector with the minimal distance from the airport center hex id
+    window_spec = Window.partitionBy(['icao24', 'flight_id', 'track_id', 'status'])
+    df = df.withColumn('min_distance', F.min('distance_from_center').over(window_spec))
+    
+    df_min_distance = df.filter(df.distance_from_center == df.min_distance)
+    
+    df_min_distance = df_min_distance.select(
+        [
+            'icao24', 'flight_id', 'track_id', 
+            'apt_ident', 'apt_longitude_deg', 'apt_latitude_deg', 'DOF','first_seen', 
+            'last_seen', 'status', 'event_time', 'lat', 'lon', 
+            'min_distance', 'take_off_count', 'landing_count'])
+    
+    window_spec = Window.partitionBy(['icao24', 'flight_id', 'track_id', 'apt_ident', 'status'])
+    df_min_distance = df_min_distance.withColumn(
+        'min_time', F.min('event_time').over(window_spec)).withColumn(
+        'max_time', F.max('event_time').over(window_spec))
+    
+    df_take_off = df_min_distance.filter((F.col('status') == F.lit('take-off')) & (F.col('event_time') == F.col('min_time')))
+    df_landing = df_min_distance.filter((F.col('status') == F.lit('landing')) & (F.col('event_time') == F.col('max_time')))
+    df_ambiguous = df_min_distance.filter((F.col('status') == F.lit('ambiguous')) & (F.col('event_time') == F.col('max_time')))
+    
+    flight_table = df_take_off.union(df_landing).union(df_ambiguous)
+    
+    # Sometimes there's still multiple airports for a landing / take-off 
+    # In this case we'll select the airport with the minimal distance in NM  
+
+    # Radius of the Earth in km
+    R = 6371.0
+
+    # Haversine formula implemented in PySpark
+    flight_table = flight_table.withColumn("lat1", radians(col("lat"))) \
+           .withColumn("lon1", radians(col("lon"))) \
+           .withColumn("lat2", radians(col("apt_latitude_deg"))) \
+           .withColumn("lon2", radians(col("apt_longitude_deg"))) \
+           .withColumn("dlat", col("lat2") - col("lat1")) \
+           .withColumn("dlon", col("lon2") - col("lon1")) \
+           .withColumn("a", sin(col("dlat") / 2) ** 2 + cos(col("lat1")) * cos(col("lat2")) * sin(col("dlon") / 2) ** 2) \
+           .withColumn("c", 2 * atan2(sqrt(col("a")), sqrt(1 - col("a")))) \
+           .withColumn("distance_km", R * col("c"))
+
+    # Define the key columns
+    key_columns = ['icao24', 'flight_id', 'track_id', 'status', 'first_seen', 'last_seen']
+
+    # Window specification to find the closest airport
+    windowSpec = Window.partitionBy(key_columns).orderBy(col("distance_km"))
+
+    # Add row numbers to identify the closest airport
+    df_with_row_numbers = flight_table.withColumn("row_number", row_number().over(windowSpec))
+
+    # Filter out the most likely airport and keep the rest as potential airports
+    filtered_df = df_with_row_numbers.withColumn("is_most_likely", col("row_number") == 1)
+
+    # Aggregate to find the most likely airport and collect potential airports
+    result_df = filtered_df.groupBy(key_columns) \
+        .agg(
+            expr("first(apt_ident) as most_likely_airport"),
+            collect_list(expr("case when not is_most_likely then apt_ident end")).alias("potential_airports")
+        )
+
+    # Select the final columns to keep
+    result_df = result_df.select(
+        *key_columns,
+        col("most_likely_airport"),
+        col("potential_airports")
     )
     
-    # Select and rename
-    df_pivot = df_pivot.select(
-        col('track_id').alias('TRACK_ID'),
-        col('icao24').alias('ICAO24'),
-        col('callsign').alias('FLT_ID'),
-        col('DOF').alias('DOF'),
-        col('first_seen').alias('FIRST_SEEN'),
-        col('last_seen').alias('LAST_SEEN'),
-        col('source').alias('SOURCE'),
-        col('Take-off_airport_ident').alias('ADEP'),
-        col('Take-off_min_distance').alias('ADEP_MIN_DISTANCE_KM'),
-        col('Take-off_event_time_min_distance').alias('ADEP_MIN_DISTANCE_TIME'),
-        col('Landing_airport_ident').alias('ADES'),
-        col('Landing_min_distance').alias('ADES_MIN_DISTANCE_KM'),
-        col('Landing_event_time_min_distance').alias('ADES_MIN_DISTANCE_TIME')
+    
+    # Filter take-offs and landings
+    take_offs = result_df.filter(col('status') == 'take-off')
+    landings = result_df.filter(col('status') == 'landing')
+
+    # Rename columns
+    take_offs = take_offs.withColumnRenamed('most_likely_airport', 'ADEP')\
+                         .withColumnRenamed('potential_airports', 'ADEP_P')
+
+    landings = landings.withColumnRenamed('most_likely_airport', 'ADES')\
+                       .withColumnRenamed('potential_airports', 'ADES_P')
+
+    # Define key columns
+    key_cols = ['icao24', 'flight_id', 'track_id', 'first_seen', 'last_seen']
+
+    # Merge the DataFrames
+    flight_table = take_offs.drop('status')\
+                            .join(landings.drop('status'), on=key_cols, how='outer')
+    
+    # Add a new column 'DOF' which is the date part of 'first_seen'
+    flight_table = flight_table.withColumn('DOF', to_date(col('first_seen')))
+    
+    # Rename
+    flight_table = flight_table.withColumnRenamed('track_id', 'id')\
+                                .withColumnRenamed('icao24', 'ICAO24')\
+                                .withColumnRenamed('flight_id', 'FLT_ID')
+    
+    # Add version
+    flight_table = flight_table.withColumn('version', F.lit('v2.0.0'))
+    
+    # Concatenate ADEP_P and ADES_P
+    flight_table = flight_table.withColumn("ADEP_P", concat_ws(", ", col("ADEP_P")))
+    flight_table = flight_table.withColumn("ADES_P", concat_ws(", ", col("ADES_P")))
+    
+    # Final cleaning
+    flight_table = flight_table.select(
+        'id',
+        'ADEP', 
+        'ADES', 
+        'ADEP_P', 
+        'ADES_P', 
+        'ICAO24', 
+        'FLT_ID', 
+        'first_seen', 
+        'last_seen', 
+        'DOF', 
+        'version')
+    return(flight_table)
+
+
+def process_flight_table_DAI(spark, project, month):
+    
+    # Process Departures / Arrivals / Internal flights in the bbox
+
+    sdf_apt = load_airports_hex(spark, resolution = 7)
+
+    sv_nearby_apt = fetch_and_label_sv(spark, project, month, sdf_apt)
+
+    sv_nearby_apt = categorize_landing_take_off(sv_nearby_apt)
+
+    flight_table = compute_flight_table(sv_nearby_apt)
+    
+    flight_table.write.mode("append").insertInto(f"`{project}`.`osn_flight_table`")
+    
+    
+# Overfligths
+
+def fetch_and_aggregate_sv_overflight(spark, project, month):
+    
+    # Fetch statevector data
+    sv = get_data_within_timeframe(
+        spark=spark,
+        table_name=f'{project}.osn_tracks_clustered',
+        month=month
     )
-  
-    #df_pivot = df_pivot.withColumn('ADEP_MIN_DISTANCE_TIME', to_timestamp('ADEP_MIN_DISTANCE_TIME'))
-    #df_pivot = df_pivot.withColumn('ADES_MIN_DISTANCE_TIME', to_timestamp('ADES_MIN_DISTANCE_TIME'))
+    
+    # Fetch established flight table data
+    fl = get_data_within_timeframe(
+        spark=spark,
+        table_name=f'{project}.osn_flight_table',
+        month=month,
+        time_col='first_seen',
+        unix_time=False
+    ).select('id')
 
-    return df_pivot
+    # Define a window specification for track_id partitioning
+    window_spec_track = Window.partitionBy('track_id')
 
-# Main process
-flight_data_spark = categorize_by_vert_rate_spark(flights_below_10000_ft_df)
+    # Add necessary columns and transformations
+    sv = sv.withColumn('event_time', from_unixtime('event_time'))
+    sv = sv.withColumn('first_seen', min('event_time').over(window_spec_track))
+    sv = sv.withColumn('last_seen', max('event_time').over(window_spec_track))
 
-# Calculate the DOF and first_seen & last_seen for each track
-window_spec_track = Window.partitionBy('track_id')
-flight_data_spark = flight_data_spark.withColumn('event_date', to_date(from_unixtime('event_time')))
-flight_data_spark = flight_data_spark.withColumn('DOF', min('event_date').over(window_spec_track))
-flight_data_spark = flight_data_spark.withColumn('first_seen', min('event_time').over(window_spec_track))
-flight_data_spark = flight_data_spark.withColumn('last_seen', max('event_time').over(window_spec_track))
+    # Filter to keep only the rows where first_seen equals event_time
+    sv_f = sv.filter(col('first_seen') == col('event_time'))
 
-# Add a constant column for SOURCE
-flight_data_spark = flight_data_spark.withColumn('source', F.lit('OSN'))
+    # Add the 'DOF' column and rename 'track_id' to 'id'
+    sv_f = sv_f.withColumn('event_date', to_date('event_time'))
+    sv_f = sv_f.withColumn('DOF', min('event_date').over(window_spec_track))
+    sv_f = sv_f.withColumnRenamed('track_id', 'id')
+    sv_f = sv_f.withColumnRenamed('icao24', 'ICAO24')
+    sv_f = sv_f.withColumnRenamed('callsign', 'FLT_ID')
 
-# Continue main process
-df_spark = compute_distance_event_times_spark(flight_data_spark)
-df_pivot_spark = process_and_pivot_data_spark(df_spark)
+    # Add empty columns 'ADEP', 'ADES', 'ADEP_P', 'ADES_P', and a column 'version' with value 'v2.0.0'
+    sv_f = sv_f.withColumn('ADEP', lit(None).cast('string'))
+    sv_f = sv_f.withColumn('ADES', lit(None).cast('string'))
+    sv_f = sv_f.withColumn('ADEP_P', lit(None).cast('string'))
+    sv_f = sv_f.withColumn('ADES_P', lit(None).cast('string'))
+    sv_f = sv_f.withColumn('version', lit('v2.0.0'))
+    
+    # Select columns
+    sv_f = sv_f.select(
+        'id',
+        'ADEP', 
+        'ADES', 
+        'ADEP_P', 
+        'ADES_P', 
+        'ICAO24', 
+        'FLT_ID', 
+        'first_seen', 
+        'last_seen', 
+        'DOF', 
+        'version')
+    
+    # Broadcast the fl dataframe
+    fl_broadcast = broadcast(fl)
+    
+    # Perform the left anti join using the broadcasted fl dataframe
+    sv_f = sv_f.join(fl_broadcast, sv_f.id == fl.id, "left_anti")
+    
+    # Filter out short ADS-B signals < 5 min - There's _a lot_ of garbage <1min points
+    sv_f = sv_f.filter((unix_timestamp("last_seen") - unix_timestamp("first_seen")) >= 300)
+    
+    return sv_f
+                                
+                                  
+def process_flight_table_O(spark, project, month):
+    
+    # Process overflights
+    flight_table_overflights = fetch_and_aggregate_sv_overflight(spark, project, month)
+    
+    flight_table_overflights.write.mode("append").insertInto(f"`{project}`.`osn_flight_table`")
 
+# Actual processing
+start_month = date(2022, 1, 1)
+end_month = date(2024, 5, 1)
 
-# Insert
+to_process_months = generate_months(start_month, end_month)
 
-spark.sql(f"""DROP TABLE IF EXISTS `{project}`.osn_flight_table""")
-spark.sql(f"""
-CREATE TABLE IF NOT EXISTS {project}.osn_flight_table (
-    TRACK_ID STRING COMMENT 'Unique identifier for the associated flight tracks in `{project}`.`osn_flight_table`.',
-    ICAO24 STRING COMMENT 'Unique ICAO 24-bit address of the transponder in hexadecimal string representation.',
-    FLT_ID STRING COMMENT 'Flight trajectory identificator, the callsign.',
-    DOF DATE COMMENT 'The date of flight (DOF), this is identified as the date of the first statevector in the available trajectory.', 
-    FIRST_SEEN BIGINT COMMENT 'The timestamp of the first available statevector (unix time)',
-    LAST_SEEN BIGINT COMMENT 'The timestamp of the last available statevector (unix time)',
-    SOURCE STRING COMMENT 'The source from which the flight was extracted (OSN: OpenSky Network, NM: EUROCONTROL Network Manager, ...).',
-    ADEP STRING COMMENT 'The best guess for the aerodrome of departure (ADEP) of the flight based on the available flight trajectory.',
-    ADEP_MIN_DISTANCE_KM FLOAT COMMENT 'Minimum distance the ADS-B signal is picked up from the airport of departure in kilometers.',
-    ADEP_MIN_DISTANCE_TIME BIGINT COMMENT 'Timestamp at which the minimum distance from ADEP was recorded.',
-    ADES STRING COMMENT 'The best guess for the aerodrome of destination (ADES) of the flight based on the available flight trajectory.',
-    ADES_MIN_DISTANCE_KM FLOAT COMMENT 'Minimum distance the ADS-B signal is picked up from the airport of destination in kilometers.',
-    ADES_MIN_DISTANCE_TIME BIGINT COMMENT 'Timestamp at which the minimum distance from ADES was recorded.'
-)
-COMMENT 'A flight table constructed from OpenSky Netwerk (OSN) ADS-B statevectors. Last updated: {today}.'
-STORED AS parquet
-TBLPROPERTIES ('transactional'='false');""")
+## Load logs
+fpath_DAI = 'logs/03_osn-flight_table-etl-log.parquet'
+if os.path.isfile(fpath_DAI):
+    processed_months_DAI = pd.read_parquet(fpath_DAI).months.to_list()
+else:
+    processed_months_DAI = []
 
-df_pivot_spark = df_pivot_spark.write.mode('overwrite').saveAsTable(f"{project}.osn_flight_table")
+fpath_O = 'logs/03_osn-flight_table-overflights-etl-log.parquet'
+if os.path.isfile(fpath_O):
+    processed_months_O = pd.read_parquet(fpath_O).months.to_list()
+else:
+    processed_months_O = []
+    
+## Process loops
+for month in to_process_months:
+    print(f'Processing DAI month: {month}')
+    if month in processed_months_DAI:
+        print('Month DAI processed already')
+        continue
+    else:
+        process_flight_table_DAI(spark, project, month)
+
+        ## Logging
+        processed_months_DAI.append(month)
+        processed_DAI_df = pd.DataFrame({'months':processed_months_DAI})
+        processed_DAI_df.to_parquet(fpath_DAI)
+
+for month in to_process_months:
+    print(f'Processing O month: {month}')
+    if month in processed_months_O:
+        print('Month O processed already')
+        continue
+    else:
+        process_flight_table_O(spark, project, month)
+
+        ## Logging
+        processed_months_O.append(month)
+        processed_O_df = pd.DataFrame({'months':processed_months_O})
+        processed_O_df.to_parquet(fpath_O)
+
+# Stop the SparkSession
+spark.stop()
