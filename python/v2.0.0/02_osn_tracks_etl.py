@@ -58,7 +58,7 @@ start_month = date(2022, 1, 1)
 
 ## Which months to process
 today = date.today()
-end_month = today - dateutil.relativedelta.relativedelta(months=1) # We work on the d-2months
+end_month = today - dateutil.relativedelta.relativedelta(months=1) # We work on the d-1 months
 
 # Getting today's date formatted
 today = today.strftime('%d %B %Y')
@@ -120,7 +120,7 @@ def h3_query_prep(project, max_h3_resolution):
         last_pos_update DOUBLE COMMENT 'This unix timestamp indicates the age of the position.',
         last_contact DOUBLE COMMENT 'This unix timestamp indicates the time at which OpenSky received the last signal of the aircraft.',
         serials ARRAY<INT> COMMENT 'The serials column is a list of serials of the ADS-B receivers which received the message.',
-        track_id STRING COMMENT 'Unique identifier for the associated flight tracks in osn_flight_table_with_id.',
+        track_id STRING COMMENT 'Unique identifier for the associated flight tracks in opdi_flight_table_with_id.',
         {h3_res_sql}
         segment_distance_nm DOUBLE COMMENT 'The distance from the previous statevector in nautic miles.',
         cumulative_distance_nm DOUBLE COMMENT 'The cumulative distance from the start in nautic miles.'
@@ -149,7 +149,7 @@ def h3_query_prep(project, max_h3_resolution):
         last_pos_update DOUBLE COMMENT 'This unix timestamp indicates the age of the position.',
         last_contact DOUBLE COMMENT 'This unix timestamp indicates the time at which OpenSky received the last signal of the aircraft.',
         serials ARRAY<INT> COMMENT 'The serials column is a list of serials of the ADS-B receivers which received the message.',
-        track_id STRING COMMENT 'Unique identifier for the associated flight tracks in `{project}`.`osn_flight_table`.',
+        track_id STRING COMMENT 'Unique identifier for the associated flight tracks in `{project}`.`opdi_flight_table`.',
         {h3_res_sql}
         segment_distance_nm DOUBLE COMMENT 'The distance from the previous statevector in nautic miles.',
         cumulative_distance_nm DOUBLE COMMENT 'The cumulative distance from the start in nautic miles.'

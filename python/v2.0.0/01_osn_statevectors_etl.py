@@ -18,7 +18,7 @@ cluster_data = True
 
 ## Which months to process
 today = date.today()
-end_month = today - dateutil.relativedelta.relativedelta(months=2) # We work on the d-2months
+end_month = today - dateutil.relativedelta.relativedelta(months=1) # We work on the d-1 months
 
 # Getting today's date formatted
 today = today.strftime('%d %B %Y')
