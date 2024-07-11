@@ -20,7 +20,7 @@ from pyspark.sql.window import Window
 # Spark Session Initialization
 #shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
 spark = SparkSession.builder \
-    .appName("OSN flight events ETL") \
+    .appName("OPDI flight events and measurements ETL") \
     .config("spark.log.level", "ERROR")\
     .config("spark.ui.showConsoleProgress", "false")\
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu") \
@@ -40,15 +40,20 @@ spark = SparkSession.builder \
 
 # Settings
 project = "project_opdi"
-recreate_milestone_table = False
+recreate_flight_event_table = False
 recreate_measurement_table = False
+
+## Range for processing
+start_date = datetime.strptime('2022-01-01', '%Y-%m-%d')
+end_date = datetime.strptime('2023-08-31', '%Y-%m-%d')
+
 
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')
 
-create_milestone_table_sql = f"""
-    CREATE TABLE IF NOT EXISTS `{project}`.`osn_milestones` (
-        
+create_flight_events_table_sql = f"""
+    CREATE TABLE IF NOT EXISTS `{project}`.`opdi_flight_events` (
+
         id STRING COMMENT 'Primary Key: Unique milestone identifier for each record.',
         flight_id STRING COMMENT 'Foreign Key: Identifier linking the flight event to the flight trajectory table.',
 
@@ -62,29 +67,32 @@ create_milestone_table_sql = f"""
         version STRING COMMENT 'Version of the flight event (milestone) determination algorithm.',
         info STRING COMMENT 'Additional information or description of the flight event.'
     )
-    COMMENT '`{project}`.`osn_milestones` table containing various OSN trajectory milestones. Last updated: {today}.'
+    COMMENT '`{project}`.`opdi_flight_events` table containing various OSN trajectory flight events. Last updated: {today}.'
     STORED AS parquet
     TBLPROPERTIES ('transactional'='false');
 """
-if recreate_milestone_table:
-    spark.sql(f"DROP TABLE IF EXISTS `{project}`.`osn_milestones`;")
-    spark.sql(create_milestone_table_sql)
+
+print(f' Query to create OPDI Flight Events table:\n {create_flight_events_table_sql}')
+if recreate_flight_event_table:
+    spark.sql(f"DROP TABLE IF EXISTS `{project}`.`opdi_flight_events`;")
+    spark.sql(create_flight_events_table_sql)
 
 create_measurement_table_sql = f"""
-    CREATE TABLE IF NOT EXISTS `{project}`.`osn_measurements` (
+    CREATE TABLE IF NOT EXISTS `{project}`.`opdi_measurements` (
         
         id STRING COMMENT 'Primary Key: Unique measurement identifier for each record.',
-        milestone_id STRING COMMENT 'Foreign Key: Identifier linking the measurement to the corresponding milestone in the milestone table.',
+        milestone_id STRING COMMENT 'Foreign Key: Identifier linking the measurement to the corresponding event in the flight events table.',
         
         type STRING COMMENT 'Type of measurement, e.g. flown distance or fuel consumption.',
         value DOUBLE COMMENT 'Value of the measurement.',
         version STRING COMMENT 'The version of the measurement calculation.'
     )
-    COMMENT '`{project}`.`osn_measurements` table containing various measurements for OSN milestones. Last updated: {today}.'
+    COMMENT '`{project}`.opdi_measurements` table containing various measurements for OPDI flight events. Last updated: {today}.'
     STORED AS parquet
     TBLPROPERTIES ('transactional'='false');
 """
 
+print(f' Query to create OSN Measurements table:\n {create_measurement_table_sql}')
 if recreate_measurement_table: 
     spark.sql(f"DROP TABLE IF EXISTS `{project}`.`osn_measurements`;")
     spark.sql(create_measurement_table_sql)
@@ -169,15 +177,15 @@ def calculate_horizontal_segment_events(sdf_input):
     )
 
     ## Explode the event_types array to create rows for each event
-    df_exploded = df_with_phases.select("*", explode(col("milestone_types")).alias("milestone_type"))
+    df_exploded = df_with_phases.select("*", explode(col("milestone_types")).alias("type"))
 
     ## Filter out rows with no relevant events
-    df_exploded = df_exploded.filter("milestone_type IS NOT NULL")
+    df_exploded = df_exploded.filter("type IS NOT NULL")
 
     ## Reformat
     df_openap_events = df_exploded.select(
         col('track_id'),
-        col('milestone_type'),
+        col('type'),
         col('event_time'),
         col('lon'),
         col('lat'),
@@ -186,7 +194,7 @@ def calculate_horizontal_segment_events(sdf_input):
         col('cumulative_time_s')
     )
 
-    df_openap_events = df_openap_events.dropDuplicates(['track_id', 'milestone_type', 'event_time'])
+    df_openap_events = df_openap_events.dropDuplicates(['track_id', 'type', 'event_time'])
     
     return df_openap_events
 
@@ -259,8 +267,8 @@ def calculate_vertical_crossing_events(sdf_input):
     last_crossings = last_crossings.drop("row_number_asc", "row_number_desc")
 
     ## Add a label to indicate first or last crossing
-    first_crossings = first_crossings.withColumn("milestone_type", F.concat(F.lit("first-xing-fl"), F.col('crossing').cast("string")))
-    last_crossings = last_crossings.withColumn("milestone_type", F.concat(F.lit("last-xing-fl"), F.col('crossing').cast("string")))
+    first_crossings = first_crossings.withColumn("type", F.concat(F.lit("first-xing-fl"), F.col('crossing').cast("string")))
+    last_crossings = last_crossings.withColumn("type", F.concat(F.lit("last-xing-fl"), F.col('crossing').cast("string")))
 
     ## Combine the first and last crossing data
     all_crossings = first_crossings.union(last_crossings)
@@ -268,7 +276,7 @@ def calculate_vertical_crossing_events(sdf_input):
     ## Clean up
     df_lvl_events = all_crossings.select(
         col('track_id'),
-        col('milestone_type'),
+        col('type'),
         col('event_time'),
         col('lon'),
         col('lat'),
@@ -277,7 +285,7 @@ def calculate_vertical_crossing_events(sdf_input):
         col('cumulative_time_s')
     )
 
-    df_lvl_events = df_lvl_events.dropDuplicates(['track_id', 'milestone_type', 'event_time', 'lon', 'lat', 'altitude_ft', 'cumulative_distance_nm', 'cumulative_time_s'])
+    df_lvl_events = df_lvl_events.dropDuplicates(['track_id', 'type', 'event_time', 'lon', 'lat', 'altitude_ft', 'cumulative_distance_nm', 'cumulative_time_s'])
     
     return df_lvl_events
 
@@ -363,13 +371,13 @@ def etl_flight_events_and_measures(sdf_input, batch_id):
     # Formatting
     df_events = df_horizontal_events.union(df_vertical_events)
     df_events = df_events.withColumn('source', F.lit('OSN'))
-    df_events = df_events.withColumn('version', F.lit('milestones_v0.0.2'))
+    df_events = df_events.withColumn('version', F.lit('events_v0.0.2'))
     df_events = df_events.withColumn('info', F.lit(''))
 
     df_events = df_events.withColumn("id_tmp", F.concat(F.lit(batch_id),monotonically_increasing_id().cast('string'))).select(
         col('id_tmp'),
         col('track_id'),
-        col('milestone_type'),
+        col('type'),
         col('event_time'),
         col('lon'),
         col('lat'),
@@ -385,7 +393,7 @@ def etl_flight_events_and_measures(sdf_input, batch_id):
     df_milestones = df_events.select(
         col('id_tmp').alias('id'),
         col('track_id').alias('track_id'),
-        col('milestone_type').alias('milestone_type'),
+        col('type').alias('type'),
         col('event_time').alias('event_time'),
         col('lon').alias('longitude'),
         col('lat').alias('latitude'),
@@ -394,7 +402,7 @@ def etl_flight_events_and_measures(sdf_input, batch_id):
         col('version').alias('version'),
         col('info').alias('info'),
     )
-    df_milestones.write.mode("append").insertInto(f"`{project}`.`osn_milestones`")
+    df_milestones.write.mode("append").insertInto(f"`{project}`.`opdi_flight_events`")
 
     # Measurements table 
     ## Add Distance flown (NM) - df measure
@@ -407,7 +415,7 @@ def etl_flight_events_and_measures(sdf_input, batch_id):
         col('cumulative_distance_nm').alias('value'),
         col('version')
     )
-    df_measurements_df.write.mode("append").insertInto(f"`{project}`.`osn_measurements`")
+    df_measurements_df.write.mode("append").insertInto(f"`{project}`.`opdi_measurements`")
     
     ## Add Time Passed - df measure
     df_measurements_tp = df_events.withColumn('type',F.lit('Time Passed (s)'))
@@ -419,7 +427,7 @@ def etl_flight_events_and_measures(sdf_input, batch_id):
         col('cumulative_time_s').alias('value'),
         col('version')
     )
-    df_measurements_tp.write.mode("append").insertInto(f"`{project}`.`osn_measurements`")
+    df_measurements_tp.write.mode("append").insertInto(f"`{project}`.`opdi_measurements`")
     
 # Run code.. 
 
@@ -444,35 +452,46 @@ def get_previous_day(date):
     """
     return date - timedelta(days=1)
 
-# Determine the range of event_time
-start_date = datetime.strptime('2023-07-01', '%Y-%m-%d')
-end_date = datetime.strptime('2023-07-31', '%Y-%m-%d')
-
 print('-'*30)
 print(f'Starting milestone extraction process for timeframe {start_date} until {end_date}...')
 
+## Load logs
+fpath = 'logs/04_osn-flight_events-etl-log.parquet'
+if os.path.isfile(fpath):
+    processed_days = pd.read_parquet(fpath).days.to_list()
+else:
+    processed_days = []
+
 # Loop through time range in daily batches, moving backwards
 current_date = end_date
-while current_date >= start_date:
+while current_date >= start_date:        
     previous_day_date = get_previous_day(current_date)
     previous_day_timestamp = int(previous_day_date.timestamp())
     
     print(f'Currently processing {previous_day_date} - {current_date}')
+    if current_date in processed_days:
+        print('Already processed')
+        current_date = previous_day_date
+        continue
     
     # Perform the ETL operation for the current day
     sdf_input = spark.sql(f"""
         SELECT track_id, icao24, callsign, lat, lon, event_time, baro_altitude, velocity, vert_rate, cumulative_distance_nm
-        FROM `project_aiu`.`osn_tracks_clustered_v001`
+        FROM `{project}`.`osn_tracks_clustered`
         WHERE track_id IN (
             SELECT track_id
-            FROM `project_aiu`.`osn_tracks_clustered_v001`
+            FROM `{project}`.`osn_tracks_clustered`
             GROUP BY track_id
             HAVING MIN(event_time) BETWEEN {previous_day_timestamp} AND {int(current_date.timestamp())}
         )""").persist()
 
     etl_openap_flight_events(sdf_input, batch_id=previous_day_date.strftime("%Y%m%d") + '_')
     sdf_input.unpersist()
-
+    
+    processed_days.append(current_date)
+    processed_days_df = pd.DataFrame({'days':processed_days})
+    processed_days_df.to_parquet(fpath)
+    
     # Move to the previous day
     current_date = previous_day_date
 

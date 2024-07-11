@@ -4,7 +4,7 @@ from pyspark.sql.functions import udf, pandas_udf, col, PandasUDFType, lit, roun
 from pyspark.sql.functions import col, radians, sin, cos, sqrt, atan2, array, collect_list, struct, row_number, expr
 from pyspark.sql.functions import monotonically_increasing_id, row_number, col
 from pyspark.sql.types import DoubleType, StructType, StructField
-from pyspark.sql.functions import when, split, col, concat_ws,  min, max, to_date
+from pyspark.sql.functions import when, broadcast, split, col, concat_ws,  min, max, to_date, unix_timestamp
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
@@ -461,7 +461,7 @@ def fetch_and_aggregate_sv_overflight(spark, project, month):
     window_spec_track = Window.partitionBy('track_id')
 
     # Add necessary columns and transformations
-    sv = sv.withColumn('event_time', from_unixtime('event_time'))
+    sv = sv.withColumn('event_time', F.to_timestamp(F.col('event_time')))
     sv = sv.withColumn('first_seen', min('event_time').over(window_spec_track))
     sv = sv.withColumn('last_seen', max('event_time').over(window_spec_track))
 
