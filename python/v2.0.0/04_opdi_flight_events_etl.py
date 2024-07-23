@@ -10,7 +10,7 @@ from IPython.display import display, HTML
 
 # Spark imports
 from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.functions import udf, pandas_udf, PandasUDFType, lit, col, when, lag, lead, min, max, sum as Fsum, explode, array, monotonically_increasing_id, round
+from pyspark.sql.functions import avg, udf, abs, col, avg, lag, when,  pandas_udf, PandasUDFType, lit, col, when, lag, lead, min, max, sum as Fsum, explode, array, monotonically_increasing_id, round
 from pyspark.sql.types import DoubleType, StructType, StructField, IntegerType, StringType
 from pyspark.sql.window import Window
 
@@ -23,16 +23,17 @@ spark = SparkSession.builder \
     .appName("OPDI flight events and measurements ETL") \
     .config("spark.log.level", "ERROR")\
     .config("spark.ui.showConsoleProgress", "false")\
-    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu") \
-    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive0.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
+    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "10G") \
     .config("spark.executor.memory", "10G") \
     .config("spark.executor.cores", "1") \
     .config("spark.executor.instances", "2") \
-    .config("spark.dynamicAllocation.maxExecutors", "5") \
-    .config("spark.network.timeout", "800s") \
+    .config("spark.dynamicAllocation.maxExecutors", "10") \
+    .config("spark.network.timeout", "800s")\
     .config("spark.executor.heartbeatInterval", "400s") \
+    .config('spark.ui.showConsoleProgress', False) \
     .enableHiveSupport() \
     .getOrCreate()
 
@@ -97,14 +98,196 @@ if recreate_measurement_table:
     spark.sql(f"DROP TABLE IF EXISTS `{project}`.`osn_measurements`;")
     spark.sql(create_measurement_table_sql)
 
-def calculate_horizontal_segment_events(sdf_input):
-    df = sdf_input
+def smooth_baro_alt(df):
+    # Define the acceptable rate of climb/descent threshold (25.4 meters per second, i.e. 5000ft/min)
+    rate_threshold = 25.4
 
+    # Calculate the rate of climb/descent in meters per second for each track_id
+    window_spec = Window.partitionBy("track_id").orderBy("event_time")
+    df = df.withColumn("prev_baro_altitude", lag("baro_altitude").over(window_spec))
+    df = df.withColumn("prev_event_time", lag("event_time").over(window_spec))
+
+    df = df.withColumn("time_diff", (col("event_time") - col("prev_event_time")))
+    df = df.withColumn("altitude_diff", (col("baro_altitude") - col("prev_baro_altitude")))
+    df = df.withColumn("rate_of_climb", col("altitude_diff") / col("time_diff"))
+
+    # Create a window for calculating the rolling average
+    # Define a time window for the rolling average (e.g., 300 seconds or 5 min)
+    time_window = 300
+
+    # Create a window specification for calculating the rolling average based on time
+    window_spec_avg = Window.partitionBy("track_id").orderBy("event_time").rangeBetween(-time_window, time_window)
+
+    # Calculate the rolling average (smoothing)
+    df = df.withColumn("smoothed_baro_altitude", avg("baro_altitude").over(window_spec_avg))
+
+    # Replace unrealistic climb/descent points with the smoothed values
+    df = df.withColumn("baro_altitude",
+                       when((abs(col("rate_of_climb")) > rate_threshold),
+                            col("smoothed_baro_altitude")).otherwise(col("baro_altitude")))
+
+    # Drop the temporary columns
+    df = df.drop("smoothed_baro_altitude", "prev_baro_altitude", "prev_event_time", "time_diff", "altitude_diff", "rate_of_climb")
+    return df
+
+from pyspark.sql import Window, functions as F
+from pyspark.sql.functions import col, lag, lead, min, max, when, explode
+
+def zmf(col, a, b):
+    """Zero-order membership function (ZMF)."""
+    return F.when(col <= a, 1).when(col >= b, 0).otherwise((b - col) / (b - a))
+
+def gaussmf(col, mean, sigma):
+    """Gaussian membership function (GaussMF)."""
+    return F.exp(-((col - mean) ** 2) / (2 * sigma ** 2))
+
+def smf(col, a, b):
+    """S-shaped membership function (SMF)."""
+    return F.when(col <= a, 0).when(col >= b, 1).otherwise((col - a) / (b - a))
+
+def calculate_horizontal_segment_events(sdf_input):
+    """
+    Calculate horizontal segment events for flight data.
+    
+    Args:
+        sdf_input (DataFrame): Input Spark DataFrame containing flight data.
+        
+    Returns:
+        DataFrame: DataFrame with calculated segment events.
+    """
+    df = sdf_input.select(
+        "track_id", "lat", "lon", "event_time", "baro_altitude",
+        "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s"
+    )
+
+    # Extracting OpenAP phases
+    df = df.withColumn("alt", col("baro_altitude") * 3.28084)
+    df = df.withColumn("roc", col("vert_rate") * 196.850394)
+    df = df.withColumn("spd", col("velocity") * 1.94384)
+
+    # Apply membership functions to the DataFrame
+    df = df.withColumn("alt_gnd", zmf(col("alt"), 0, 200))
+    df = df.withColumn("alt_lo", gaussmf(col("alt"), 10000, 10000))
+    df = df.withColumn("alt_hi", gaussmf(col("alt"), 35000, 20000))
+    df = df.withColumn("roc_zero", gaussmf(col("roc"), 0, 100))
+    df = df.withColumn("roc_plus", smf(col("roc"), 10, 1000))
+    df = df.withColumn("roc_minus", zmf(col("roc"), -1000, -10))
+    df = df.withColumn("spd_hi", gaussmf(col("spd"), 600, 100))
+    df = df.withColumn("spd_md", gaussmf(col("spd"), 300, 100))
+    df = df.withColumn("spd_lo", gaussmf(col("spd"), 0, 50))
+
+    # Cache the DataFrame after initial transformations
+    df.cache()
+
+    # Define window specification for time windows
+    window_spec = Window.partitionBy("track_id").orderBy("event_time").rangeBetween(Window.unboundedPreceding, 0)
+
+    # Aggregate and apply fuzzy logic within each window
+    df = df.withColumn("alt_mean", F.avg("alt").over(window_spec))
+    df = df.withColumn("spd_mean", F.avg("spd").over(window_spec))
+    df = df.withColumn("roc_mean", F.avg("roc").over(window_spec))
+
+    # Apply fuzzy logic rules
+    df = df.withColumn("rule_ground", F.least(col("alt_gnd"), col("roc_zero"), col("spd_lo")))
+    df = df.withColumn("rule_climb", F.least(col("alt_lo"), col("roc_plus"), col("spd_md")))
+    df = df.withColumn("rule_descent", F.least(col("alt_lo"), col("roc_minus"), col("spd_md")))
+    df = df.withColumn("rule_cruise", F.least(col("alt_hi"), col("roc_zero"), col("spd_hi")))
+    df = df.withColumn("rule_level", F.least(col("alt_lo"), col("roc_zero"), col("spd_md")))
+
+    # Aggregate and determine phase label
+    df = df.withColumn("aggregated", F.greatest(
+        col("rule_ground"), col("rule_climb"), col("rule_descent"),
+        col("rule_cruise"), col("rule_level"))
+    )
+
+    df = df.withColumn(
+        "flight_phase", 
+        F.when(col("aggregated") == col("rule_ground"), "GND")
+         .when(col("aggregated") == col("rule_climb"), "CL")
+         .when(col("aggregated") == col("rule_descent"), "DE")
+         .when(col("aggregated") == col("rule_cruise"), "CR")
+         .when(col("aggregated") == col("rule_level"), "LVL")
+    )
+
+    df = df.withColumnRenamed("alt", "altitude_ft") \
+           .withColumnRenamed("roc", "roc_ft_min") \
+           .withColumnRenamed("spd", "speed_kt")
+
+    df = df.select(
+        "track_id", "lat", "lon", "event_time", "cumulative_distance_nm",
+        "cumulative_time_s", "altitude_ft", "roc_ft_min", "speed_kt", "flight_phase"
+    )
+
+    # Cache the DataFrame before applying window functions for phase detection
+    df.cache()
+
+    # Window specification for detecting phase changes and for TOC/TOD
+    window_spec_phase = Window.partitionBy("track_id").orderBy("event_time")
+    window_spec_cumulative = Window.partitionBy("track_id").orderBy("event_time").rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
+
+    # Detect phase changes
+    df_with_phases = df.withColumn("prev_phase", lag("flight_phase", 1, "None").over(window_spec_phase))
+    df_with_phases = df_with_phases.withColumn("next_phase", lead("flight_phase", 1, "None").over(window_spec_phase))
+
+    # Cache the DataFrame after phase detection
+    df_with_phases.cache()
+
+    # Identify TOC and TOD for 'CR' phases
+    df_with_phases = df_with_phases.withColumn("first_cr_time", min(when(col("flight_phase") == "CR", col("event_time"))).over(window_spec_cumulative))
+    df_with_phases = df_with_phases.withColumn("last_cr_time", max(when(col("flight_phase") == "CR", col("event_time"))).over(window_spec_cumulative))
+
+    # Create event types
+    start_of_segment = (col("flight_phase").isin("CR", "LVL")) & (col("prev_phase") != col("flight_phase"))
+    df_with_phases = df_with_phases.withColumn("start_of_segment", start_of_segment)
+
+    df_with_phases = df_with_phases.withColumn("segment_count", F.sum(when(col("start_of_segment"), 1).otherwise(0)).over(window_spec_cumulative))
+
+    df_with_phases = df_with_phases.withColumn(
+        "milestone_types",
+        F.when(col("event_time") == col("first_cr_time"), F.array(F.lit("level-start"), F.lit("top-of-climb")))
+         .when(col("event_time") == col("last_cr_time"), F.array(F.lit("level-end"), F.lit("top-of-descent")))
+         .when(start_of_segment, F.array(F.lit("level-start")))
+         .when((col("flight_phase").isin("CR", "LVL")) & (col("next_phase") != col("flight_phase")), F.array(F.lit('level-end')))
+         .when((col("prev_phase") == "GND") & (col("next_phase") == "CL"), F.array(F.lit("take-off")))
+         .when((col("prev_phase") == "DE") & (col("flight_phase") == "GND"), F.array(F.lit("landing")))
+         .otherwise(F.array())
+    )
+
+    # Explode the event_types array to create rows for each event
+    df_exploded = df_with_phases.select("*", explode(col("milestone_types")).alias("type"))
+
+    # Filter out rows with no relevant events
+    df_exploded = df_exploded.filter("type IS NOT NULL")
+
+    # Reformat
+    df_openap_events = df_exploded.select(
+        col('track_id'),
+        col('type'),
+        col('event_time'),
+        col('lon'),
+        col('lat'),
+        col('altitude_ft'),
+        col('cumulative_distance_nm'),
+        col('cumulative_time_s')
+    )
+
+    df_openap_events = df_openap_events.dropDuplicates(['track_id', 'type', 'event_time'])
+
+    return df_openap_events
+
+
+
+def calculate_horizontal_segment_events_old(sdf_input):
+    df = sdf_input
+    
     # Extracting OpenAP phases
     ## Defining variables
     df = df.withColumn("altitude_ft", col("baro_altitude") * 3.28084)
     df = df.withColumn("roc_ft_min", col("vert_rate") * 196.850394)
     df = df.withColumn("speed_kt", col("velocity") * 1.94384)
+
+    ## Define schema for UDF
+    df = df.select("track_id", "lat", "lon", "event_time", "altitude_ft", "roc_ft_min", "speed_kt")
 
     ## Define schema for UDF
     schema = StructType([
@@ -117,13 +300,14 @@ def calculate_horizontal_segment_events(sdf_input):
         #StructField("baro_altitude", DoubleType()),
         #StructField("velocity", DoubleType()),
         #StructField("vert_rate", DoubleType()),
-        StructField("cumulative_distance_nm", DoubleType()),
-        StructField("cumulative_time_s", IntegerType()),
+        #StructField("cumulative_distance_nm", DoubleType()),
+        #StructField("cumulative_time_s", IntegerType()),
         StructField("altitude_ft", DoubleType()),
         StructField("roc_ft_min", DoubleType()),
         StructField("speed_kt", DoubleType()),
         StructField("flight_phase", StringType())
     ])
+
 
     @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
     def get_flight_phases(pdf):
@@ -201,79 +385,87 @@ def calculate_horizontal_segment_events(sdf_input):
 # Flight levels crossing extractions
 
 # Your existing DataFrame loading code
+from pyspark.sql import Window, functions as F
+from pyspark.sql.types import DoubleType
+from pyspark.sql.functions import col
+
 def calculate_vertical_crossing_events(sdf_input):
-    df = sdf_input
+    """
+    Calculate vertical crossing events for flight data.
+    
+    Args:
+        sdf_input (DataFrame): Input Spark DataFrame containing flight data.
+        
+    Returns:
+        DataFrame: DataFrame with calculated vertical crossing events.
+    """
+    df = sdf_input.select(
+        "track_id", "lat", "lon", "event_time", "baro_altitude",
+        "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s"
+    )
 
-    ## Convert meters to flight level and create a new column
+    # Convert meters to flight level and create a new column
     df = df.withColumn("altitude_ft", col("baro_altitude") * 3.28084)
-    df = df.withColumn("FL", (F.col("baro_altitude") * 3.28084 / 100).cast(DoubleType())).cache()
+    df = df.withColumn("FL", (col("baro_altitude") * 3.28084 / 100).cast(DoubleType()))
 
-    # Smoothen altitude.. 
-    window_spec_avg = Window.partitionBy("track_id").orderBy("event_time").rowsBetween(-5, 5)
-    #df = df.withColumn("FL", F.avg("FL").over(window_spec_avg))
-
-    ## Window specification to order by event_time for each track_id
+    # Window specification to order by event_time for each track_id
     window_spec = Window.partitionBy("track_id").orderBy("event_time")
 
-    ## Add columns with lead FL values
-    df = df.withColumn("next_FL", F.lead("FL").over(window_spec))
+    # Add columns with lead FL values
+    df = df.withColumn("next_FL", F.lead("FL").over(window_spec)).cache()
 
-    ## Define the conditions for a crossing for each flight level of interest
+    # Define the conditions for a crossing for each flight level of interest
     crossing_conditions = [
-        (F.col("FL") < 50) & (F.col("next_FL") >= 50), # going up
-        (F.col("FL") >= 50) & (F.col("next_FL") < 50), # going down
-        (F.col("FL") < 70) & (F.col("next_FL") >= 70), # going up
-        (F.col("FL") >= 70) & (F.col("next_FL") < 70), # going down
-        (F.col("FL") < 100) & (F.col("next_FL") >= 100), # going up
-        (F.col("FL") >= 100) & (F.col("next_FL") < 100), # going down
-        (F.col("FL") < 245) & (F.col("next_FL") >= 245), # going up
-        (F.col("FL") >= 245) & (F.col("next_FL") < 245), # going down
-
+        (col("FL") < 50) & (col("next_FL") >= 50),  # going up
+        (col("FL") >= 50) & (col("next_FL") < 50),  # going down
+        (col("FL") < 70) & (col("next_FL") >= 70),  # going up
+        (col("FL") >= 70) & (col("next_FL") < 70),  # going down
+        (col("FL") < 100) & (col("next_FL") >= 100),  # going up
+        (col("FL") >= 100) & (col("next_FL") < 100),  # going down
+        (col("FL") < 245) & (col("next_FL") >= 245),  # going up
+        (col("FL") >= 245) & (col("next_FL") < 245),  # going down
     ]
 
-    ## Create a crossing column using multiple when conditions
+    # Create a crossing column using multiple when conditions
     crossing_column = F.when(crossing_conditions[0], 50)
     for condition, flight_level in zip(crossing_conditions[1:], [50, 70, 70, 100, 100, 245, 245]):
         crossing_column = crossing_column.when(condition, flight_level)
 
     df = df.withColumn("crossing", crossing_column)
 
-    ## Filter out only the rows where a crossing was detected
+    # Filter out only the rows where a crossing was detected
     crossing_points = df.filter(col("crossing").isNotNull())
 
-    ## Filter out only the rows where the absolute difference between crossing and FL is less than 10 -> This filters out obvious errors
-    crossing_points = crossing_points.filter(F.abs(F.col("crossing") - F.col("FL")) < 10)
+    # Filter out only the rows where the absolute difference between crossing and FL is less than 10
+    crossing_points = crossing_points.filter(F.abs(col("crossing") - col("FL")) < 10).cache()
 
-    ## Identify first and last crossings by using window functions again
-    ## Note that we need a separate window specification for descending order
-    window_spec_crossing_asc = Window.partitionBy("track_id", "crossing").orderBy("event_time")
-    window_spec_crossing_desc = Window.partitionBy("track_id", "crossing").orderBy(F.col("event_time").desc())
+    # Identify first and last crossings by using window functions again
+    # Note that we need a separate window specification for descending order
+    window_spec_crossing = Window.partitionBy("track_id", "crossing").orderBy("event_time")
+    window_spec_crossing_desc = Window.partitionBy("track_id", "crossing").orderBy(col("event_time").desc())
 
-    crossing_points = crossing_points.withColumn(
-        "row_number_asc",
-        F.row_number().over(window_spec_crossing_asc)
-    )
-    crossing_points = crossing_points.withColumn(
-        "row_number_desc",
-        F.row_number().over(window_spec_crossing_desc)
-    )
+    crossing_points = crossing_points.withColumn("row_number_asc", F.row_number().over(window_spec_crossing))
+    crossing_points = crossing_points.withColumn("row_number_desc", F.row_number().over(window_spec_crossing_desc))
 
-    ## Filter first and last crossings
-    first_crossings = crossing_points.filter(F.col("row_number_asc") == 1)
-    last_crossings = crossing_points.filter(F.col("row_number_desc") ==  1)
+    # Cache the DataFrame after applying window functions for row numbers
+    crossing_points.cache()
 
-    ## Drop the temporary columns used for row numbering
+    # Filter first and last crossings
+    first_crossings = crossing_points.filter(col("row_number_asc") == 1)
+    last_crossings = crossing_points.filter(col("row_number_desc") == 1)
+
+    # Drop the temporary columns used for row numbering
     first_crossings = first_crossings.drop("row_number_asc", "row_number_desc")
     last_crossings = last_crossings.drop("row_number_asc", "row_number_desc")
 
-    ## Add a label to indicate first or last crossing
-    first_crossings = first_crossings.withColumn("type", F.concat(F.lit("first-xing-fl"), F.col('crossing').cast("string")))
-    last_crossings = last_crossings.withColumn("type", F.concat(F.lit("last-xing-fl"), F.col('crossing').cast("string")))
+    # Add a label to indicate first or last crossing
+    first_crossings = first_crossings.withColumn("type", F.concat(F.lit("first-xing-fl"), col('crossing').cast("string")))
+    last_crossings = last_crossings.withColumn("type", F.concat(F.lit("last-xing-fl"), col('crossing').cast("string")))
 
-    ## Combine the first and last crossing data
+    # Combine the first and last crossing data
     all_crossings = first_crossings.union(last_crossings)
 
-    ## Clean up
+    # Clean up
     df_lvl_events = all_crossings.select(
         col('track_id'),
         col('type'),
@@ -285,32 +477,47 @@ def calculate_vertical_crossing_events(sdf_input):
         col('cumulative_time_s')
     )
 
-    df_lvl_events = df_lvl_events.dropDuplicates(['track_id', 'type', 'event_time', 'lon', 'lat', 'altitude_ft', 'cumulative_distance_nm', 'cumulative_time_s'])
-    
+    df_lvl_events = df_lvl_events.dropDuplicates([
+        'track_id', 'type', 'event_time', 'lon', 'lat', 'altitude_ft', 'cumulative_distance_nm', 'cumulative_time_s'
+    ])
+
     return df_lvl_events
+
 
 # Measurement helper functions
 
-def add_time_measure(sdf_input):
-    # Define the window spec partitioned by 'track_id'
-    window_spec = Window.partitionBy('track_id')
+from pyspark.sql import Window, functions as F
 
-    # Add a new column 'cumulative_time_s'
+def add_time_measure(sdf_input):
+    """
+    Add a cumulative time measure to the input Spark DataFrame.
+    
+    Args:
+        sdf_input (DataFrame): Input Spark DataFrame containing flight data.
+        
+    Returns:
+        DataFrame: DataFrame with added cumulative time measure.
+    """
+    # Define the window spec partitioned by 'track_id'
+    window_spec = Window.partitionBy('track_id').orderBy('event_time')
+
+    # Add a new column 'cumulative_time_s' based on the minimum event time per track_id
+    sdf_input = sdf_input.withColumn('min_event_time', F.min('event_time').over(window_spec))
+
+    # Calculate the cumulative time in seconds
     sdf_input = sdf_input.withColumn(
-        'min_event_time',
-        F.min('event_time').over(window_spec)
-    ).withColumn(
         'cumulative_time_s',
-        (F.col('event_time') - F.col('min_event_time'))  # Calculate difference in seconds
+        (F.col('event_time').cast("long") - F.col('min_event_time').cast("long"))
     )
 
-    # Drop the 'first_event_time' as it is no longer needed
+    # Drop the 'min_event_time' as it is no longer needed
     sdf_input = sdf_input.drop('min_event_time')
-    
-    return(sdf_input)
+
+    return sdf_input
+
 
 # Distance helper function
-def add_distance_measure(df: DataFrame) -> DataFrame:
+def add_distance_measure(df):
     """
     Calculate the great circle distance between consecutive points in nautical miles
     and the cumulative distance for each track, using native PySpark functions.
@@ -354,22 +561,56 @@ def add_distance_measure(df: DataFrame) -> DataFrame:
 
     # Drop temporary columns used for calculations
     df = df.drop("lat_rad", "lon_rad", "prev_lat_rad", "prev_lon_rad", "a", "c", "distance_km")
-
+    
     return df
 
 # Final ETL - Combining the datasets and writing away.. 
 
-def etl_flight_events_and_measures(sdf_input, batch_id):
+def etl_flight_events_and_measures(sdf_input, batch_id, calc_vertical = True, calc_horizontal = True):
+    
+    # Smooth baro_alt              
+    sdf_input = smooth_baro_alt(sdf_input)
+    
     # Add measures
     sdf_input = add_distance_measure(sdf_input)
     sdf_input = add_time_measure(sdf_input)
     
-    # Calculate flight events    
-    df_horizontal_events = calculate_horizontal_segment_events(sdf_input)
-    df_vertical_events = calculate_vertical_crossing_events(sdf_input)
+    # Cache
+    sdf_input.cache()
     
-    # Formatting
-    df_events = df_horizontal_events.union(df_vertical_events)
+    # Calculate flight events 
+    if (calc_vertical and calc_horizontal): 
+      print(f"Calculating both vertical and horizontal events for batch_id: {batch_id}")
+      df_horizontal_events = calculate_horizontal_segment_events(sdf_input)
+      df_vertical_events = calculate_vertical_crossing_events(sdf_input)
+    
+      # Cache
+      df_horizontal_events.cache()
+      df_vertical_events.cache()
+    
+      # Formatting
+      df_events = df_horizontal_events.union(df_vertical_events)
+    
+    if (calc_vertical and not calc_horizontal):
+      print(f"Calculating vertical events for batch_id: {batch_id}")
+      df_vertical_events = calculate_vertical_crossing_events(sdf_input)
+    
+      # Cache
+      df_vertical_events.cache()
+    
+      # Formatting
+      df_events = df_vertical_events
+      
+    if (not calc_vertical and calc_horizontal): 
+      print(f"Calculating horizontal events for batch_id: {batch_id}")
+      df_horizontal_events = calculate_horizontal_segment_events(sdf_input)
+      
+      # Cache
+      df_horizontal_events.cache()
+      
+      # Formatting
+      df_events = df_horizontal_events
+    
     df_events = df_events.withColumn('source', F.lit('OSN'))
     df_events = df_events.withColumn('version', F.lit('events_v0.0.2'))
     df_events = df_events.withColumn('info', F.lit(''))
@@ -456,45 +697,210 @@ print('-'*30)
 print(f'Starting milestone extraction process for timeframe {start_date} until {end_date}...')
 
 ## Load logs
-fpath = 'logs/04_osn-flight_events-etl-log.parquet'
-if os.path.isfile(fpath):
-    processed_days = pd.read_parquet(fpath).days.to_list()
-else:
-    processed_days = []
+#fpath = 'logs/04_osn-flight_events-etl-day-by-day-log.parquet'
+#if os.path.isfile(fpath):
+#    processed_days = pd.read_parquet(fpath).days.to_list()
+#else:
+#    processed_days = []
 
 # Loop through time range in daily batches, moving backwards
 current_date = end_date
-while current_date >= start_date:        
-    previous_day_date = get_previous_day(current_date)
-    previous_day_timestamp = int(previous_day_date.timestamp())
+#while current_date >= start_date:        
+#    previous_day_date = get_previous_day(current_date)
+#    previous_day_timestamp = int(previous_day_date.timestamp())
+#    
+#    print(f'Currently processing {previous_day_date} - {current_date}')
+#    if current_date in processed_days:
+#        print('Already processed')
+#        current_date = previous_day_date
+#        continue
+#    
+#    # Perform the ETL operation for the current day
+#    sdf_input = spark.sql(f"""
+#        SELECT track_id, icao24, callsign, lat, lon, event_time, baro_altitude, velocity, vert_rate, cumulative_distance_nm
+#        FROM `{project}`.`osn_tracks_clustered`
+#        WHERE track_id IN (
+#            SELECT track_id
+#            FROM `{project}`.`osn_tracks_clustered`
+#            GROUP BY track_id
+#            HAVING MIN(event_time) BETWEEN {previous_day_timestamp} AND {int(current_date.timestamp())}
+#        )""").cache()
+#
+#    etl_flight_events_and_measures(sdf_input, batch_id=previous_day_date.strftime("%Y%m%d") + '_')
+#    
+#    processed_days.append(current_date)
+#    processed_days_df = pd.DataFrame({'days':processed_days})
+#    processed_days_df.to_parquet(fpath)
+#    
+#    # Move to the previous day
+#    current_date = previous_day_date
+
     
-    print(f'Currently processing {previous_day_date} - {current_date}')
-    if current_date in processed_days:
-        print('Already processed')
-        current_date = previous_day_date
+# Custom functions
+from datetime import datetime, date
+import dateutil.relativedelta
+import calendar
+
+def generate_months(start_date, end_date):
+    """Generate a list of dates corresponding to the first day of each month between two dates.
+
+    Args:
+    start_date (datetime.date): The starting date.
+    end_date (datetime.date): The ending date.
+
+    Returns:
+    list: A list of date objects for the first day of each month within the specified range.
+    """
+    current = start_date
+    months = []
+    while current <= end_date:
+        months.append(current)
+        # Increment month
+        month = current.month
+        year = current.year
+        if month == 12:
+            current = date(year + 1, 1, 1)
+        else:
+            current = date(year, month + 1, 1)
+    return months
+
+def get_start_end_of_month(date):
+    """Return a datetime object for the first and last second  of the given month and year."""
+    year = date.year
+    month = date.month
+    
+    first_second = datetime(year, month, 1, 0, 0, 0)
+    last_day = calendar.monthrange(year, month)[1]
+    last_second = datetime(year, month, last_day, 23, 59, 59)
+    return first_second.timestamp(), last_second.timestamp()
+
+
+## Montly processing test
+# Custom functions
+from datetime import datetime, date
+import dateutil.relativedelta
+import calendar
+
+def generate_months(start_date, end_date):
+    """Generate a list of dates corresponding to the first day of each month between two dates.
+
+    Args:
+    start_date (datetime.date): The starting date.
+    end_date (datetime.date): The ending date.
+
+    Returns:
+    list: A list of date objects for the first day of each month within the specified range.
+    """
+    current = start_date
+    months = []
+    while current <= end_date:
+        months.append(current)
+        # Increment month
+        month = current.month
+        year = current.year
+        if month == 12:
+            current = date(year + 1, 1, 1)
+        else:
+            current = date(year, month + 1, 1)
+    return months
+
+def get_start_end_of_month(date):
+    """Return a datetime object for the first and last second  of the given month and year."""
+    year = date.year
+    month = date.month
+    
+    first_second = datetime(year, month, 1, 0, 0, 0)
+    last_day = calendar.monthrange(year, month)[1]
+    last_second = datetime(year, month, last_day, 23, 59, 59)
+    return first_second.timestamp(), last_second.timestamp()
+
+
+def get_data_within_timeframe(spark, table_name, month, time_col = 'event_time', unix_time = True):
+    """
+    Retrieves records from a specified Spark table within the given timeframe.
+
+    Args:
+    spark (SparkSession): The SparkSession object.
+    table_name (str): The name of the Spark table to query.
+    month (str): The start date of a month in datetime format.
+
+    Returns:
+    pyspark.sql.dataframe.DataFrame: A DataFrame containing the records within the specified timeframe.
+    """
+    # Convert dates to POSIX time (seconds since epoch)
+    start_posix,stop_posix = get_start_end_of_month(month)
+
+    # Load the table
+    df = spark.table(table_name)
+    
+    if unix_time == True:
+        # Filter records based on event_time posix column
+        filtered_df = df.filter((col(time_col) >= start_posix) & (col(time_col) < stop_posix))
+    else: 
+        df = df.withColumn('unix_time', unix_timestamp(time_col))
+        filtered_df = df.filter((col('unix_time') >= start_posix) & ((col('unix_time') < stop_posix)))
+                                
+    return filtered_df
+  
+  
+# Actual processing
+start_month = date(2022, 1, 1)
+end_month = date(2024, 7, 1)
+
+to_process_months = generate_months(start_month, end_month)
+to_process_months.reverse()
+
+## Load logs Horizontal
+fpath_horizontal = 'logs/04_osn-flight_event-horizontal-etl-log.parquet'
+if os.path.isfile(fpath_horizontal):
+    processed_months_horizontal = pd.read_parquet(fpath_horizontal).months.to_list()
+else:
+    processed_months_horizontal = []
+
+## Load logs vertical
+fpath_vertical = 'logs/04_osn-flight_event-vertical-etl-log.parquet'
+if os.path.isfile(fpath_vertical):
+    processed_months_vertical = pd.read_parquet(fpath_vertical).months.to_list()
+else:
+    processed_months_vertical = []
+
+
+# Process loops
+for month in to_process_months:
+    print(f'Processing flight events for month: {month}')
+    calc_horizontal = True
+    calc_vertical = True
+    if month in processed_months_horizontal:
+        print('Month horizontal processed already (fuzzy labelling)')
+        calc_horizontal = False
+    
+    if month in processed_months_vertical:
+        print('Month vertical processed already (FLs)')
+        calc_vertical = False
+        
+    if (not calc_horizontal and not calc_vertical):
+        print('Month vertical and horizontal already processed..')
         continue
     
-    # Perform the ETL operation for the current day
-    sdf_input = spark.sql(f"""
-        SELECT track_id, icao24, callsign, lat, lon, event_time, baro_altitude, velocity, vert_rate, cumulative_distance_nm
-        FROM `{project}`.`osn_tracks_clustered`
-        WHERE track_id IN (
-            SELECT track_id
-            FROM `{project}`.`osn_tracks_clustered`
-            GROUP BY track_id
-            HAVING MIN(event_time) BETWEEN {previous_day_timestamp} AND {int(current_date.timestamp())}
-        )""").persist()
+    else:
+        # Perform the ETL operation for the current day
+        sdf_input = get_data_within_timeframe( # State Vectors sv
+            spark = spark, 
+            table_name = f'{project}.osn_tracks_clustered', 
+            month = month).cache()
 
-    etl_openap_flight_events(sdf_input, batch_id=previous_day_date.strftime("%Y%m%d") + '_')
-    sdf_input.unpersist()
-    
-    processed_days.append(current_date)
-    processed_days_df = pd.DataFrame({'days':processed_days})
-    processed_days_df.to_parquet(fpath)
-    
-    # Move to the previous day
-    current_date = previous_day_date
-
+        etl_flight_events_and_measures(sdf_input, batch_id=month.strftime("%Y%m%d") + '_', 
+                                       calc_vertical = calc_vertical, calc_horizontal = calc_horizontal)
+        
+        ## Logging
+        if calc_horizontal:
+          processed_months_horizontal.append(month)
+          processed_df = pd.DataFrame({'months':processed_months_horizontal})
+          processed_df.to_parquet(fpath_horizontal)
+        if calc_vertical:
+          processed_months_vertical.append(month)
+          processed_df = pd.DataFrame({'months':processed_months_vertical})
+          processed_df.to_parquet(fpath_vertical)
 # Cleanup
 # Uncomment the following line if you want to drop the table
 # spark.sql(f"""DROP TABLE IF EXISTS `{project}`.`osn_tracks`;""")
