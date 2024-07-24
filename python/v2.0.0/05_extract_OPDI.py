@@ -8,75 +8,69 @@ from pyspark.sql import Window
 import os, time
 import subprocess
 import os,shutil
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import pandas as pd
 import numpy as np
+
+# Adding python folder
+import sys
+sys.path.append('/home/cdsw/python/v2.0.0/')
+from helperfunctions import *
 
 # Settings
 
 ## Project settings
-project = "project_aiu"
+project = "project_opdi"
 
 ## Date range
-start_date = datetime.strptime('2023-07-01', '%Y-%m-%d')
-end_date = datetime.strptime('2023-09-30', '%Y-%m-%d')
+start_date = date(2022, 1, 1)
+end_date = date(2024, 7, 1)
 
 ## Versions
-export_version = 'v004'
+export_version = 'v002'
 
-v_long_flist = 'v0.0.1' # Flight list
-v_short_flist = 'v001'
+v_long_flist = 'v0.0.2' # Flight list
+v_short_flist = 'v002'
 
-v_long_events = 'v0.0.1'
-v_short_events = 'v001'
+v_long_events = 'v0.0.2' # Flight events
+v_short_events = 'v002'
 
-v_long_measures = 'v0.0.1'
-v_short_measures = 'v001'
+v_long_measures = 'v0.0.2' # Measurements
+v_short_measures = 'v002'
 
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')
 
 # Makedirs
 
-try: 
-    os.mkdir(f'/home/cdsw/python/data/{export_version}/')
-except OSError as error: 
-    print(error)  
+opath = f"/home/cdsw/data/OPDI/{export_version}"
 
-try: 
-    os.mkdir(f'/home/cdsw/python/data/{export_version}/flight_list/')
+try:
+    os.makedirs(f'{opath}/flight_list/', exist_ok=True)
+    os.makedirs(f'{opath}/flight_events/', exist_ok=True)
+    os.makedirs(f'{opath}/measurements/', exist_ok=True)
 except OSError as error: 
     print(error)  
-    
-try: 
-    os.mkdir(f'/home/cdsw/python/data/{export_version}/flight_events/')
-except OSError as error: 
-    print(error)  
-    
-try: 
-    os.mkdir(f'/home/cdsw/python/data/{export_version}/measurements/')
-except OSError as error: 
-    print(error)  
-
 
 # Spark Session Initialization
-shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
 spark = SparkSession.builder \
-    .appName("Extract OPDI") \
+    .appName("OPDI Extraction") \
     .config("spark.log.level", "ERROR")\
-    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-aiu-dev") \
-    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/aiu.db/unmanaged") \
+    .config("spark.ui.showConsoleProgress", "false")\
+    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
+    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
-    .config("spark.driver.memory", "11G") \
-    .config("spark.executor.memory", "7G") \
+    .config("spark.driver.memory", "10G") \
+    .config("spark.executor.memory", "10G") \
     .config("spark.executor.cores", "1") \
     .config("spark.executor.instances", "2") \
-    .config("spark.dynamicAllocation.maxExecutors", "6") \
-    .config("spark.network.timeout", "800s") \
+    .config("spark.dynamicAllocation.maxExecutors", "10") \
+    .config("spark.network.timeout", "800s")\
     .config("spark.executor.heartbeatInterval", "400s") \
-    .config("spark.driver.maxResultSize", "4g") \
+    .config('spark.ui.showConsoleProgress', False) \
     .enableHiveSupport() \
     .getOrCreate()
+
 # Get environment variables
 engine_id = os.getenv('CDSW_ENGINE_ID')
 domain = os.getenv('CDSW_DOMAIN')
@@ -97,39 +91,36 @@ print("Flight Table time")
 print()
 
 print(f'Extracting flight table from {start_date} until {end_date}...')
+months = generate_months(start_date, end_date)
 
-flight_table_sql = f"""
-SELECT * 
-FROM `project_aiu`.`osn_flight_table` 
-WHERE to_date(from_unixtime(first_seen)) >= '{start_date.strftime('%Y-%m-%d')}' 
-AND to_date(from_unixtime(first_seen)) < '{end_date.strftime('%Y-%m-%d')}'
-"""
-
-try:
-    # Execute the query and convert to pandas DataFrame
-    df = spark.sql(flight_table_sql).toPandas()
-    df_mod = df.loc[:,['TRACK_ID', 'ADEP', 'ADES', 'ICAO24', 'FLT_ID','FIRST_SEEN','LAST_SEEN', 'DOF']].rename({
-    'TRACK_ID':'id', 'ICAO_24':'icao24', 'FIRST_SEEN':'first_seen', 'LAST_SEEN':'last_seen'},axis=1)
-
-    df_mod['first_seen'] = df_mod['first_seen'].apply(lambda l:pd.Timestamp(l, unit='s'))
-    df_mod['last_seen'] = df_mod['last_seen'].apply(lambda l:pd.Timestamp(l, unit='s'))
-    df_mod = df_mod.sort_values('first_seen').reset_index(drop=True)
-    df_mod['version'] = f'flight_list_{v_long_flist}'
-    df_mod.to_csv(f'/home/cdsw/python/data/v002/flight_list/flight_table_{v_short_flist}.csv.gz', compression='gzip',index=False)
-    df_mod.to_parquet(f'/home/cdsw/python/data/v002/flight_list/flight_table_{v_short_flist}.parquet')
+for month in months:
+    start_month_unix, end_month_unix = get_start_end_of_month(month)
+    start_month_str = pd.Timestamp(start_month_unix, unit = 's').strftime('%Y%m%d')
+    end_month_str = pd.Timestamp(end_month_unix, unit = 's').strftime('%Y%m%d')
     
-except Exception as e:
-    print(f"Error executing query: {e}")
+    month_str = pd.Timestamp(start_month_unix, unit = 's').strftime('%Y%m')
+    
+    try:
+        # Execute the query and convert to pandas DataFrame
+        df = get_data_within_timeframe(spark, table_name = 'project_opdi.opdi_flight_list', month = month, time_col = 'first_seen', unix_time = False).toPandas()
+        df_mod = df.loc[:, ['id', 'adep', 'ades', 'icao24', 'flt_id', 'first_seen', 'last_seen', 'dof']].rename({'flt_id':'FLT_ID', 'dof':'DOF'},axis=1)
+        df_mod = df_mod.sort_values('first_seen').reset_index(drop=True)
+        df_mod['version'] = f'flight_list_{v_long_flist}'
+        df_mod.to_csv(f'{opath}/flight_list/flight_list_{v_short_flist}_{month_str}.csv.gz', compression='gzip',index=False)
+        df_mod.to_parquet(f'{opath}/flight_list/flight_list_{v_short_flist}_{month_str}.parquet')
+
+    except Exception as e:
+        print(f"Error executing query: {e}")
     
     
 ################
 # EVENT TABLE  #
 ################
 
-print()
-print()
-print("Event Table time")
-print()
+#print()
+#print()
+#print("Event Table time")
+#print()
 
 # Function to process and save the data for a given date interval
 def process_and_save_data(start_date, end_date):
@@ -166,23 +157,23 @@ def process_and_save_data(start_date, end_date):
     df_mod.to_parquet(file_path, index=False)
 
 # Loop from 2022-05-01 until 2022-07-01 in 10 days intervals
-start_period = start_date
-end_period = end_date
-interval = timedelta(days=10)
+#start_period = start_date
+#end_period = end_date
+#interval = timedelta(days=10)
 
-while start_period < end_period:
-    end_date = start_period + interval
-    process_and_save_data(start_period, end_date)
-    start_period = end_date
+#while start_period < end_period:
+#    end_date = start_period + interval
+#    process_and_save_data(start_period, end_date)
+#    start_period = end_date
 
 ######################
 # MEASUREMENT TABLE  #
 ######################
 
-print()
-print()
-print("Measurement Table time")
-print()
+#print()
+#print()
+#print("Measurement Table time")
+#print()
 
 # Function to process and save the data for a given date interval
 def process_and_save_data(start_date, end_date):
@@ -224,14 +215,14 @@ def process_and_save_data(start_date, end_date):
     df_mod.to_parquet(file_path, index=False)
 
 # Loop from start_period until end_period in 10 days intervals
-start_period = start_date
-end_period = end_date
-interval = timedelta(days=10)
+#start_period = start_date
+#end_period = end_date
+#interval = timedelta(days=10)
 
-while start_period < end_period:
-    end_date = start_period + interval
-    # Adjust end_date to not exceed the end_period
-    if end_date > end_period:
-        end_date = end_period
-    process_and_save_data(start_period, end_date)
-    start_period = end_date
+#while start_period < end_period:
+#    end_date = start_period + interval
+#    # Adjust end_date to not exceed the end_period
+#    if end_date > end_period:
+#        end_date = end_period
+#    process_and_save_data(start_period, end_date)
+#    start_period = end_date

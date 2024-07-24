@@ -14,6 +14,7 @@ from pyspark.sql.functions import avg, udf, abs, col, avg, lag, when,  pandas_ud
 from pyspark.sql.types import DoubleType, StructType, StructField, IntegerType, StringType
 from pyspark.sql.window import Window
 
+
 # Hotfix
 #!cp /runtime-addons/cmladdon-2.0.40-b150/log4j.properties /etc/spark/conf/
 
@@ -383,12 +384,6 @@ def calculate_horizontal_segment_events_old(sdf_input):
     return df_openap_events
 
 # Flight levels crossing extractions
-
-# Your existing DataFrame loading code
-from pyspark.sql import Window, functions as F
-from pyspark.sql.types import DoubleType
-from pyspark.sql.functions import col
-
 def calculate_vertical_crossing_events(sdf_input):
     """
     Calculate vertical crossing events for flight data.
@@ -485,8 +480,6 @@ def calculate_vertical_crossing_events(sdf_input):
 
 
 # Measurement helper functions
-
-from pyspark.sql import Window, functions as F
 
 def add_time_measure(sdf_input):
     """
@@ -735,47 +728,6 @@ current_date = end_date
 #    # Move to the previous day
 #    current_date = previous_day_date
 
-    
-# Custom functions
-from datetime import datetime, date
-import dateutil.relativedelta
-import calendar
-
-def generate_months(start_date, end_date):
-    """Generate a list of dates corresponding to the first day of each month between two dates.
-
-    Args:
-    start_date (datetime.date): The starting date.
-    end_date (datetime.date): The ending date.
-
-    Returns:
-    list: A list of date objects for the first day of each month within the specified range.
-    """
-    current = start_date
-    months = []
-    while current <= end_date:
-        months.append(current)
-        # Increment month
-        month = current.month
-        year = current.year
-        if month == 12:
-            current = date(year + 1, 1, 1)
-        else:
-            current = date(year, month + 1, 1)
-    return months
-
-def get_start_end_of_month(date):
-    """Return a datetime object for the first and last second  of the given month and year."""
-    year = date.year
-    month = date.month
-    
-    first_second = datetime(year, month, 1, 0, 0, 0)
-    last_day = calendar.monthrange(year, month)[1]
-    last_second = datetime(year, month, last_day, 23, 59, 59)
-    return first_second.timestamp(), last_second.timestamp()
-
-
-## Montly processing test
 # Custom functions
 from datetime import datetime, date
 import dateutil.relativedelta
