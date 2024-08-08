@@ -14,6 +14,9 @@ from pyspark.sql.functions import avg, udf, abs, col, avg, lag, when,  pandas_ud
 from pyspark.sql.types import DoubleType, StructType, StructField, IntegerType, StringType
 from pyspark.sql.window import Window
 from pyspark.sql import DataFrame, Window
+from pyspark.sql import Window, functions as F
+from pyspark.sql.functions import col, lag, lead, min, max, when, explode
+
 
 from datetime import datetime, date
 import dateutil.relativedelta
@@ -135,8 +138,7 @@ def smooth_baro_alt(df):
     df = df.drop("smoothed_baro_altitude", "prev_baro_altitude", "prev_event_time", "time_diff", "altitude_diff", "rate_of_climb")
     return df
 
-from pyspark.sql import Window, functions as F
-from pyspark.sql.functions import col, lag, lead, min, max, when, explode
+# Helper function for calculating horizontal segments events
 
 def zmf(col, a, b):
     """Zero-order membership function (ZMF)."""
@@ -278,116 +280,12 @@ def calculate_horizontal_segment_events(sdf_input):
 
     df_openap_events = df_openap_events.dropDuplicates(['track_id', 'type', 'event_time'])
     
-    df.cache()
+    # Add info
+    df_openap_events = df_openap_events.withColumn('info', F.lit(''))
     
     return df_openap_events
 
 
-
-def calculate_horizontal_segment_events_old(sdf_input):
-    df = sdf_input
-    
-    # Extracting OpenAP phases
-    ## Defining variables
-    df = df.withColumn("altitude_ft", col("baro_altitude") * 3.28084)
-    df = df.withColumn("roc_ft_min", col("vert_rate") * 196.850394)
-    df = df.withColumn("speed_kt", col("velocity") * 1.94384)
-
-    ## Define schema for UDF
-    df = df.select("track_id", "lat", "lon", "event_time", "altitude_ft", "roc_ft_min", "speed_kt")
-
-    ## Define schema for UDF
-    schema = StructType([
-        StructField("track_id", StringType()),
-        #StructField("icao24", StringType()),
-        #StructField("callsign", StringType()),
-        StructField("lat", DoubleType()),
-        StructField("lon", DoubleType()),
-        StructField("event_time", IntegerType()),
-        #StructField("baro_altitude", DoubleType()),
-        #StructField("velocity", DoubleType()),
-        #StructField("vert_rate", DoubleType()),
-        #StructField("cumulative_distance_nm", DoubleType()),
-        #StructField("cumulative_time_s", IntegerType()),
-        StructField("altitude_ft", DoubleType()),
-        StructField("roc_ft_min", DoubleType()),
-        StructField("speed_kt", DoubleType()),
-        StructField("flight_phase", StringType())
-    ])
-
-
-    @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
-    def get_flight_phases(pdf):
-        try:
-            fp = FlightPhase()
-            fp.set_trajectory(pdf['event_time'], pdf['altitude_ft'], pdf['speed_kt'], pdf['roc_ft_min'])
-            pdf['flight_phase'] = fp.phaselabel()
-        except: 
-            pdf['flight_phase'] = None
-        
-        return pdf
-
-    ## Apply UDF to get flight phases
-    df_with_phases = df.groupby("track_id").apply(get_flight_phases)
-
-    ## Window specification for detecting phase changes and for TOC/TOD
-    windowSpecPhase = Window.partitionBy("track_id").orderBy("event_time")
-    windowSpecTOC = Window.partitionBy("track_id").orderBy("event_time").rowsBetween(Window.unboundedPreceding, 0)
-    windowSpecTOD = Window.partitionBy("track_id").orderBy("event_time").rowsBetween(0, Window.unboundedFollowing)
-
-    ## Detect phase changes
-    df_with_phases = df_with_phases.withColumn("prev_phase", lag("flight_phase", 1, "None").over(windowSpecPhase))
-    df_with_phases = df_with_phases.withColumn("next_phase", lead("flight_phase", 1, "None").over(windowSpecPhase))
-
-    ## Identify TOC and TOD for 'CR' phases
-    df_with_phases = df_with_phases.withColumn("first_cr_time", min(when(col("flight_phase") == "CR", col("event_time"))).over(windowSpecTOC))
-    df_with_phases = df_with_phases.withColumn("last_cr_time", max(when(col("flight_phase") == "CR", col("event_time"))).over(windowSpecTOD))
-
-    ## Create event types
-
-    ### Define a window spec for a cumulative sum, partitioned by track_id
-    windowSpecCumulative = Window.partitionBy("track_id").orderBy("event_time").rowsBetween(Window.unboundedPreceding, 0)
-
-    ### Column to indicate the start of a level segment
-    start_of_segment = (F.col("flight_phase").isin("CR", "LVL")) & (F.col("prev_phase") != F.col("flight_phase"))
-    df_with_phases = df_with_phases.withColumn("start_of_segment", start_of_segment)
-
-    ### Cumulative count of level segment starts
-    df_with_phases = df_with_phases.withColumn("segment_count", F.sum(F.when(F.col("start_of_segment"), 1).otherwise(0)).over(windowSpecCumulative))
-
-    ### Update milestone_types to include segment number
-    df_with_phases = df_with_phases.withColumn(
-        "milestone_types",
-        F.when(F.col("event_time") == F.col("first_cr_time"), F.array(F.lit("level-start"), F.lit("top-of-climb")))
-         .when(F.col("event_time") == F.col("last_cr_time"), F.array(F.lit('level-end'), F.lit("top-of-descent")))
-         .when(start_of_segment, F.array(F.lit("level-start")))
-         .when((F.col("flight_phase").isin("CR", "LVL")) & (F.col("next_phase") != F.col("flight_phase")), F.array(F.lit('level-end')))
-         .when((F.col("prev_phase") == "GND") & (F.col("next_phase") == "CL"), F.array(F.lit("take-off")))
-         .when((F.col("prev_phase") == "DE") & (F.col("flight_phase") == "GND"), F.array(F.lit("landing")))
-         .otherwise(F.array())
-    )
-
-    ## Explode the event_types array to create rows for each event
-    df_exploded = df_with_phases.select("*", explode(col("milestone_types")).alias("type"))
-
-    ## Filter out rows with no relevant events
-    df_exploded = df_exploded.filter("type IS NOT NULL")
-
-    ## Reformat
-    df_openap_events = df_exploded.select(
-        col('track_id'),
-        col('type'),
-        col('event_time'),
-        col('lon'),
-        col('lat'),
-        col('altitude_ft'),
-        col('cumulative_distance_nm'),
-        col('cumulative_time_s')
-    )
-
-    df_openap_events = df_openap_events.dropDuplicates(['track_id', 'type', 'event_time'])
-    
-    return df_openap_events
 
 # Flight levels crossing extractions
 def calculate_vertical_crossing_events(sdf_input):
@@ -481,7 +379,10 @@ def calculate_vertical_crossing_events(sdf_input):
     df_lvl_events = df_lvl_events.dropDuplicates([
         'track_id', 'type', 'event_time', 'lon', 'lat', 'altitude_ft', 'cumulative_distance_nm', 'cumulative_time_s'
     ])
-
+    
+    # Add info
+    df_lvl_events = df_lvl_events.withColumn('info', F.lit(''))
+    
     return df_lvl_events
 
 def calculate_firstseen_lastseen_events(sdf_input):
@@ -537,8 +438,184 @@ def calculate_firstseen_lastseen_events(sdf_input):
     df_seen_events = df_seen_events.dropDuplicates([
         "track_id", "type", "event_time", "lon", "lat", "altitude_ft", "cumulative_distance_nm", "cumulative_time_s"
     ])
-
+    
+    # Add info
+    df_seen_events = df_seen_events.withColumn('info', F.lit(''))
+    
     return df_seen_events
+
+def calculate_airport_events(sv, month):
+
+    flight_list = get_data_within_timeframe(
+        spark, 
+        'project_opdi.opdi_flight_list', 
+        month, 
+        time_col='dof', 
+        unix_time=False
+    ).select(
+        ['id', 'adep', 'ades', 'adep_p', 'ades_p']
+    )
+
+    # Create the 'apt' column by combining and filtering out null values
+    flight_list = flight_list.withColumn("adep", when(col("adep").isNull(), lit("")).otherwise(col("adep")))
+    flight_list = flight_list.withColumn("ades", when(col("ades").isNull(), lit("")).otherwise(col("ades")))
+    flight_list = flight_list.withColumn("adep_p", when(col("adep_p").isNull(), lit("")).otherwise(col("adep_p")))
+    flight_list = flight_list.withColumn("ades_p", when(col("ades_p").isNull(), lit("")).otherwise(col("ades_p")))
+
+    # Create the 'apt' column by combining and filtering out empty strings
+    flight_list = flight_list.withColumn(
+        'apt', 
+        F.concat(F.array(F.col("adep"), F.col("ades")), F.split(F.col("adep_p"), ', '), F.split(F.col("ades_p"), ', '))
+    ).withColumn(
+        'apt', F.array_remove(col('apt'), "")
+    ).select(['id', 'apt'])
+
+
+    # Filter out rows with missing crucial data
+    sv_f = sv.dropna(subset=['lat', 'lon', 'baro_altitude'])
+
+    # Rename callsign to flight_id (official term)
+    sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
+
+    # Replace missing 'flight_id' with empty string
+    sv_f = sv_f.fillna({'flight_id': ''})
+
+    # Convert event_time from posixtime to datetime 
+    sv_f = sv_f.withColumn('event_time', F.to_timestamp(F.col('event_time')))
+
+    # Add flight level extracted from baro_altitude
+    sv_f = sv_f.withColumn('altitude_ft', col('baro_altitude') * 3.28084)
+    sv_f = sv_f.withColumn('flight_level', col('altitude_ft') / 100)
+
+    # Select columns of interest
+    columns_of_interest = [
+        'track_id', 'icao24', 'flight_id', 'event_time', 'lat', 'lon',  'altitude_ft', 'flight_level',
+        'heading', 'vert_rate', 'h3_res_12', 'cumulative_distance_nm'#, 'cumulative_time_s'
+    ]
+    sv_f = sv_f.select(columns_of_interest)
+
+    # Filter out low altitude statevectors 
+    sv_low_alt = sv_f.filter(col('flight_level') <= 20).cache()
+
+    # Merge with defined airports from flight_list
+    sv_nearby_apt = sv_low_alt.join(flight_list, sv.track_id == flight_list.id, how="inner")
+
+    # Load runway spark dataframe (rwy_sdf) 
+    apt_sdf = spark.table('project_opdi.hexaero_airport_layouts')
+
+    # Using the apt_ident provided by the first 'airport merge' speeds up the merge dramatically
+    df_labelled = sv_nearby_apt.join(
+        apt_sdf, 
+        (sv_nearby_apt.h3_res_12 == apt_sdf.hexaero_h3_id) & 
+        F.array_contains(sv_nearby_apt.apt, apt_sdf.hexaero_apt_icao), 
+        "inner")
+
+    # Define window specification to partition by id and hexaero_id, and order by time
+    window_spec = Window.partitionBy("track_id", "hexaero_osm_id").orderBy("event_time")
+
+    # Calculate time difference between each row and the previous row
+    df_labelled = df_labelled.withColumn("time_diff", (col("event_time").cast("long") - lag(col("event_time").cast("long"), 1).over(window_spec)))
+
+    # Identify rows where a new track starts (assuming a new track if the gap is more than 5 minutes)
+    df_labelled = df_labelled.withColumn("new_trace", when(col("time_diff") > 300, lit(1)).otherwise(lit(0)))
+
+    # Cumulative sum to assign a new ID each time 'new_trace' is True
+    df_labelled = df_labelled.withColumn("trace_id", Fsum(col("new_trace")).over(window_spec))
+    df_labelled = df_labelled.drop("time_diff", "new_trace")
+
+    # Calculate entry and exit times with cumulative distances
+    result = df_labelled.groupBy(
+        "track_id", "icao24", "flight_id", "hexaero_apt_icao", "hexaero_osm_id", "hexaero_aeroway", "hexaero_ref", "hexaero_avg_heading", "trace_id"
+    ).agg(
+        F.min("event_time").alias("entry_time"),
+        F.max("event_time").alias("exit_time"),
+        F.first("lat").alias("entry_lat"), 
+        F.last("lat").alias("exit_lat"),
+        F.first("lon").alias("entry_lon"), 
+        F.last("lon").alias("exit_lon"),
+        F.first("altitude_ft").alias("entry_altitude_ft"),
+        F.last("altitude_ft").alias("exit_altitude_ft"),
+        F.first("cumulative_distance_nm").alias("entry_cumulative_distance_nm"),
+        F.last("cumulative_distance_nm").alias("exit_cumulative_distance_nm")#,
+        F.first("cumulative_time_s").alias("entry_cumulative_time_s"),
+        F.last("cumulative_time_s").alias("exit_cumulative_time_s")
+    )
+
+    # Add time in use for each element
+    result = result.withColumn("time_in_use_seconds", col("exit_time").cast("long") - col("entry_time").cast("long"))
+    result = result.filter(col("time_in_use_seconds") != 0)
+
+    result = result.withColumnRenamed("hexaero_osm_id", "osm_id") \
+                         .withColumnRenamed("hexaero_aeroway", "osm_aeroway") \
+                         .withColumnRenamed("hexaero_ref", "osm_ref") \
+                         .withColumnRenamed("hexaero_apt_icao", "osm_airport") \
+                         .withColumnRenamed("hexaero_avg_heading", "osm_avg_heading")
+
+    # Add 'info' column
+    result = result.withColumn("info", to_json(struct(
+        col("osm_id"),
+        col("osm_aeroway"),
+        col("osm_ref"),
+        col("osm_airport"),
+        col("osm_avg_heading").alias('opdi_avg_heading'),
+        col("time_in_use_seconds").alias("opdi_time_in_use_s"), 
+        col("icao24").alias("osn_icao24"),
+        col("flight_id").alias("osn_flight_id")
+    )))
+
+    # Add 'entry_type' and 'exit_type' columns
+    result = result.withColumn("entry_type", concat_ws('-', lit('entry'), col("osm_aeroway"))) \
+                         .withColumn("exit_type", concat_ws('-', lit('exit'), col("osm_aeroway")))
+
+    result.cache()
+
+    # Select and rename entry events
+    entry_events = result.select(
+        col("track_id"),
+        col("entry_time").alias("event_time"),
+        col("entry_lon").alias("lon"),
+        col("entry_lat").alias("lat"),
+        col("entry_altitude_ft").alias("altitude_ft"),
+        col("entry_cumulative_distance_nm").alias("cumulative_distance_nm"),
+        col("entry_cumulative_time_s").alias("cumulative_time_s"),
+        col("entry_type").alias("type"),
+        col("info")
+    )
+
+    # Select and rename exit events
+    exit_events = result.select(
+        col("track_id"),
+        col("exit_time").alias("event_time"),
+        col("exit_lon").alias("lon"),
+        col("exit_lat").alias("lat"),
+        col("exit_altitude_ft").alias("altitude_ft"),
+        col("exit_cumulative_distance_nm").alias("cumulative_distance_nm"),
+        col("exit_cumulative_time_s").alias("cumulative_time_s"),
+        col("exit_type").alias("type"),
+        col("info")
+    )
+
+    # Concatenate entry and exit events
+    apt_events = entry_events.unionByName(exit_events)
+    
+    # Clean up the DataFrame
+    apt_events = apt_events.select(
+        "track_id",
+        "type",
+        "event_time",
+        "lon",
+        "lat",
+        "altitude_ft",
+        "cumulative_distance_nm",
+        "cumulative_time_s"
+    )
+
+    # Drop duplicates
+    apt_events = apt_events.dropDuplicates([
+        "track_id", "type", "event_time", "lon", "lat", "altitude_ft", "cumulative_distance_nm", "cumulative_time_s"
+    ])
+    
+    return apt_events
 
 # Measurement helper functions
 
@@ -623,6 +700,7 @@ def add_distance_measure(df):
 def etl_flight_events_and_measures(
         sdf_input, 
         batch_id, 
+        month,
         calc_vertical = True, 
         calc_horizontal = True,
         calc_hexaero = True, 
@@ -653,9 +731,9 @@ def etl_flight_events_and_measures(
         else: 
             df_events = df_events.union(df_vertical_events)
     
-    if calc_vertical:
+    if calc_hexaero:
         print(f"Calculating hexaero events (airport events) for batch_id: {batch_id}")
-        df_hexaero_events = calculate_hexaero_events(sdf_input)
+        df_hexaero_events = calculate_airport_events(sdf_input, month)
         
         if pd.isnull(df_events):
             df_events = df_hexaero_events
@@ -671,33 +749,9 @@ def etl_flight_events_and_measures(
         else: 
             df_events = df_events.union(df_seen_events)
     
-#    # Calculate flight events 
-#    if (calc_vertical and calc_horizontal): 
-#      print(f"Calculating both vertical and horizontal events for batch_id: {batch_id}")
-#      df_horizontal_events = calculate_horizontal_segment_events(sdf_input)
-#      df_vertical_events = calculate_vertical_crossing_events(sdf_input)
-#    
-#      # Formatting
-#      df_events = df_horizontal_events.union(df_vertical_events)
-#    
-#    if (calc_vertical and not calc_horizontal):
-#      print(f"Calculating vertical events for batch_id: {batch_id}")
-#      df_vertical_events = calculate_vertical_crossing_events(sdf_input)
-#    
-#      # Formatting
-#      df_events = df_vertical_events
-#      
-#    if (not calc_vertical and calc_horizontal): 
-#      print(f"Calculating horizontal events for batch_id: {batch_id}")
-#      df_horizontal_events = calculate_horizontal_segment_events(sdf_input)
-#      
-#      # Formatting
-#      df_events = df_horizontal_events
-    
     df_events.cache()
     df_events = df_events.withColumn('source', F.lit('OSN'))
     df_events = df_events.withColumn('version', F.lit('events_v0.0.2'))
-    df_events = df_events.withColumn('info', F.lit(''))
 
     df_events = df_events.withColumn("id_tmp", F.concat(F.lit(batch_id),monotonically_increasing_id().cast('string'))).select(
         col('id_tmp'),
@@ -727,14 +781,14 @@ def etl_flight_events_and_measures(
         col('version').alias('version'),
         col('info').alias('info'),
     )
-    #df_milestones.write.mode("append").insertInto(f"`{project}`.`opdi_flight_events`")
-    df_milestones.toPandas().to_parquet('events_test.parquet')
+    df_milestones.write.mode("append").insertInto(f"`{project}`.`opdi_flight_events`")
+    #df_milestones.toPandas().to_parquet('events_test.parquet')
     
     # Measurements table 
     ## Add Distance flown (NM) - df measure
     df_measurements_df = df_events.withColumn('type',F.lit('Distance flown (NM)'))
     df_measurements_df = df_measurements_df.withColumn('version',F.lit('distance_v0.0.2'))
-    df_measurements_df = df_measurements_df.withColumn("id", F.concat(F.lit(batch_id + "_df_"),monotonically_increasing_id().cast('string'))).select(
+    df_measurements_df = df_measurements_df.withColumn("id", F.concat(F.lit(batch_id + "_d_"),monotonically_increasing_id().cast('string'))).select(
         col('id'),
         col('id_tmp').alias('milestone_id'),
         col('type'),
@@ -745,7 +799,7 @@ def etl_flight_events_and_measures(
     ## Add Time Passed - df measure
     df_measurements_tp = df_events.withColumn('type',F.lit('Time Passed (s)'))
     df_measurements_tp = df_measurements_tp.withColumn('version',F.lit('time_v0.0.1'))
-    df_measurements_tp = df_measurements_tp.withColumn("id", F.concat(F.lit(batch_id + "_tp_"),monotonically_increasing_id().cast('string'))).select(
+    df_measurements_tp = df_measurements_tp.withColumn("id", F.concat(F.lit(batch_id + "_t_"),monotonically_increasing_id().cast('string'))).select(
         col('id'),
         col('id_tmp').alias('milestone_id'),
         col('type'),
@@ -755,10 +809,10 @@ def etl_flight_events_and_measures(
     
     # Merge
     df_measurements = df_measurements_df.union(df_measurements_tp)
-    #df_measurements.write.mode("append").insertInto(f"`{project}`.`opdi_measurements`")
-    df_measurements.toPandas().to_parquet('measurements_test.parquet')
+    df_measurements.write.mode("append").insertInto(f"`{project}`.`opdi_measurements`")
+    #df_measurements.toPandas().to_parquet('measurements_test.parquet')
     
-    #df_measurements_tp.write.mode("append").insertInto(f"`{project}`.`opdi_measurements`")
+    df_measurements_tp.write.mode("append").insertInto(f"`{project}`.`opdi_measurements`")
     return None
     
 # Run code.. 
@@ -787,44 +841,6 @@ def get_previous_day(date):
 print('-'*30)
 print(f'Starting milestone extraction process for timeframe {start_date} until {end_date}...')
 
-## Load logs
-#fpath = 'logs/04_osn-flight_events-etl-day-by-day-log.parquet'
-#if os.path.isfile(fpath):
-#    processed_days = pd.read_parquet(fpath).days.to_list()
-#else:
-#    processed_days = []
-
-# Loop through time range in daily batches, moving backwards
-current_date = end_date
-#while current_date >= start_date:        
-#    previous_day_date = get_previous_day(current_date)
-#    previous_day_timestamp = int(previous_day_date.timestamp())
-#    
-#    print(f'Currently processing {previous_day_date} - {current_date}')
-#    if current_date in processed_days:
-#        print('Already processed')
-#        current_date = previous_day_date
-#        continue
-#    
-#    # Perform the ETL operation for the current day
-#    sdf_input = spark.sql(f"""
-#        SELECT track_id, icao24, callsign, lat, lon, event_time, baro_altitude, velocity, vert_rate, cumulative_distance_nm
-#        FROM `{project}`.`osn_tracks_clustered`
-#        WHERE track_id IN (
-#            SELECT track_id
-#            FROM `{project}`.`osn_tracks_clustered`
-#            GROUP BY track_id
-#            HAVING MIN(event_time) BETWEEN {previous_day_timestamp} AND {int(current_date.timestamp())}
-#        )""").cache()
-#
-#    etl_flight_events_and_measures(sdf_input, batch_id=previous_day_date.strftime("%Y%m%d") + '_')
-#    
-#    processed_days.append(current_date)
-#    processed_days_df = pd.DataFrame({'days':processed_days})
-#    processed_days_df.to_parquet(fpath)
-#    
-#    # Move to the previous day
-#    current_date = previous_day_date
 
 def generate_months(start_date, end_date):
     """Generate a list of dates corresponding to the first day of each month between two dates.
@@ -901,7 +917,7 @@ start_month = date(2022, 1, 1)
 end_month = date(2024, 7, 1)
 
 to_process_months = generate_months(start_month, end_month)
-to_process_months.reverse()
+#to_process_months.reverse()
 
 ## Load logs Horizontal
 fpath_horizontal = 'logs/04_osn-flight_event-horizontal-etl-log.parquet'
@@ -936,7 +952,7 @@ for month in to_process_months:
     print(f'Processing flight events for month: {month}')
     calc_horizontal = True
     calc_vertical = True
-    calc_hexaero = False
+    calc_hexaero = True
     calc_seen = True
     
     if month in processed_months_horizontal:
@@ -968,6 +984,7 @@ for month in to_process_months:
 
         etl_flight_events_and_measures(sdf_input, 
                                        batch_id=month.strftime("%Y%m%d") + '_', 
+                                       month = month,
                                        calc_vertical = calc_vertical, 
                                        calc_horizontal = calc_horizontal,
                                        calc_hexaero = calc_hexaero,
@@ -976,21 +993,21 @@ for month in to_process_months:
         
         ## Logging
         if calc_horizontal:
-          processed_months_horizontal.append(month)
-          processed_df = pd.DataFrame({'months':processed_months_horizontal})
-          processed_df.to_parquet(fpath_horizontal)
+            processed_months_horizontal.append(month)
+            processed_df = pd.DataFrame({'months':processed_months_horizontal})
+            processed_df.to_parquet(fpath_horizontal)
         if calc_vertical:
-          processed_months_vertical.append(month)
-          processed_df = pd.DataFrame({'months':processed_months_vertical})
-          processed_df.to_parquet(fpath_vertical)
+            processed_months_vertical.append(month)
+            processed_df = pd.DataFrame({'months':processed_months_vertical})
+            processed_df.to_parquet(fpath_vertical)
         if calc_hexaero:
-          processed_months_hexaero.append(month)
-          processed_df = pd.DataFrame({'months':processed_months_hexaero})
-          processed_df.to_parquet(fpath_hexaero)
+            processed_months_hexaero.append(month)
+            processed_df = pd.DataFrame({'months':processed_months_hexaero})
+            processed_df.to_parquet(fpath_hexaero)
         if calc_vertical:
-          processed_months_seen.append(month)
-          processed_df = pd.DataFrame({'months':processed_months_seen})
-          processed_df.to_parquet(fpath_seen)
+            processed_months_seen.append(month)
+            processed_df = pd.DataFrame({'months':processed_months_seen})
+            processed_df.to_parquet(fpath_seen)
           
     spark.catalog.clearCache()
 # Cleanup
