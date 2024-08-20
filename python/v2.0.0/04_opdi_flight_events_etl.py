@@ -4,23 +4,22 @@ import numpy as np
 import time
 import os
 import shutil
-from datetime import datetime
-from openap.phase import FlightPhase
+from datetime import datetime, date
+from dateutil.relativedelta import relativedelta
+import calendar
 from IPython.display import display, HTML
 
 # Spark imports
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.functions import avg, udf, abs, col, avg, lag, when,  pandas_udf, PandasUDFType, lit, col, when, lag, lead, min, max, sum as Fsum, explode, array, monotonically_increasing_id, round
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, StructType, StructField, IntegerType, StringType
 from pyspark.sql.window import Window
-from pyspark.sql import DataFrame, Window
-from pyspark.sql import Window, functions as F
-from pyspark.sql.functions import col, lag, lead, min, max, when, explode
+from pyspark.sql.functions import (
+    avg, udf, abs, col, split, array, array_remove, lit, lag, when, lead,
+    min, max, sum as Fsum, explode, monotonically_increasing_id, round,
+    to_timestamp, concat, filter, pandas_udf, PandasUDFType, struct, to_json, concat_ws, unix_timestamp
+)
 
-
-from datetime import datetime, date
-import dateutil.relativedelta
-import calendar
 
 # Hotfix
 #!cp /runtime-addons/cmladdon-2.0.40-b150/log4j.properties /etc/spark/conf/
@@ -54,7 +53,7 @@ recreate_measurement_table = False
 
 ## Range for processing
 start_date = datetime.strptime('2022-01-01', '%Y-%m-%d')
-end_date = datetime.strptime('2023-08-31', '%Y-%m-%d')
+end_date = datetime.strptime('2024-07-01', '%Y-%m-%d')
 
 
 # Getting today's date
@@ -490,7 +489,7 @@ def calculate_airport_events(sv, month):
     # Select columns of interest
     columns_of_interest = [
         'track_id', 'icao24', 'flight_id', 'event_time', 'lat', 'lon',  'altitude_ft', 'flight_level',
-        'heading', 'vert_rate', 'h3_res_12', 'cumulative_distance_nm'#, 'cumulative_time_s'
+        'heading', 'vert_rate', 'h3_res_12', 'cumulative_distance_nm', 'cumulative_time_s'
     ]
     sv_f = sv_f.select(columns_of_interest)
 
@@ -536,7 +535,7 @@ def calculate_airport_events(sv, month):
         F.first("altitude_ft").alias("entry_altitude_ft"),
         F.last("altitude_ft").alias("exit_altitude_ft"),
         F.first("cumulative_distance_nm").alias("entry_cumulative_distance_nm"),
-        F.last("cumulative_distance_nm").alias("exit_cumulative_distance_nm")#,
+        F.last("cumulative_distance_nm").alias("exit_cumulative_distance_nm"),
         F.first("cumulative_time_s").alias("entry_cumulative_time_s"),
         F.last("cumulative_time_s").alias("exit_cumulative_time_s")
     )
@@ -598,6 +597,9 @@ def calculate_airport_events(sv, month):
     # Concatenate entry and exit events
     apt_events = entry_events.unionByName(exit_events)
     
+    # Event time back to unix
+    apt_events = apt_events.withColumn('event_time', unix_timestamp(F.col('event_time')))
+    
     # Clean up the DataFrame
     apt_events = apt_events.select(
         "track_id",
@@ -607,7 +609,8 @@ def calculate_airport_events(sv, month):
         "lat",
         "altitude_ft",
         "cumulative_distance_nm",
-        "cumulative_time_s"
+        "cumulative_time_s",
+        "info"
     )
 
     # Drop duplicates
@@ -892,15 +895,7 @@ def get_data_within_timeframe(spark, table_name, month, time_col = 'event_time',
     start_posix,stop_posix = get_start_end_of_month(month)
 
     # Load the table
-    df = spark.read.table(table_name).select(
-        "track_id",
-        "lat",
-        "lon",
-        "event_time",
-        "baro_altitude",
-        "velocity",
-        "vert_rate"
-    )
+    df = spark.read.table(table_name)
     
     if unix_time:
         # Filter records based on event_time posix column
@@ -910,7 +905,6 @@ def get_data_within_timeframe(spark, table_name, month, time_col = 'event_time',
         df = df.filter((col('unix_time') >= start_posix) & ((col('unix_time') < stop_posix)))
                                 
     return df
-  
   
 # Actual processing
 start_month = date(2022, 1, 1)
@@ -980,7 +974,7 @@ for month in to_process_months:
         sdf_input = get_data_within_timeframe( # State Vectors sv
             spark = spark, 
             table_name = f'{project}.osn_tracks_clustered', 
-            month = month).cache()
+            month = month).select("track_id","lat","lon","event_time","baro_altitude","velocity","vert_rate", "callsign", "icao24", "heading", "h3_res_12").cache()
 
         etl_flight_events_and_measures(sdf_input, 
                                        batch_id=month.strftime("%Y%m%d") + '_', 
@@ -1010,9 +1004,6 @@ for month in to_process_months:
             processed_df.to_parquet(fpath_seen)
           
     spark.catalog.clearCache()
-# Cleanup
-# Uncomment the following line if you want to drop the table
-# spark.sql(f"""DROP TABLE IF EXISTS `{project}`.`osn_tracks`;""")
 
 # Stop the SparkSession
 spark.stop()

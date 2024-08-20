@@ -9,8 +9,10 @@ import os, time
 import subprocess
 import os,shutil
 from datetime import datetime, timedelta, date
+from dateutil.relativedelta import relativedelta
 import pandas as pd
 import numpy as np
+import os.path
 
 # Adding python folder
 import sys
@@ -21,6 +23,9 @@ from helperfunctions import *
 
 ## Project settings
 project = "project_opdi"
+extract_flight_list = True
+extract_flight_events = True
+extract_measurements = True
 
 ## Date range
 start_date = date(2022, 1, 1)
@@ -68,6 +73,7 @@ spark = SparkSession.builder \
     .config("spark.network.timeout", "800s")\
     .config("spark.executor.heartbeatInterval", "400s") \
     .config('spark.ui.showConsoleProgress', False) \
+    .config("spark.driver.maxResultSize", "4g") \
     .enableHiveSupport() \
     .getOrCreate()
 
@@ -90,7 +96,7 @@ print()
 print("Flight Table time")
 print()
 
-print(f'Extracting flight table from {start_date} until {end_date}...')
+print(f'[[Extracting FLIGHT table from {start_date} until {end_date}...]]')
 months = generate_months(start_date, end_date)
 
 for month in months:
@@ -100,14 +106,24 @@ for month in months:
     
     month_str = pd.Timestamp(start_month_unix, unit = 's').strftime('%Y%m')
     
+    filename_csv = f'{opath}/flight_list/flight_list_{month_str}.csv.gz'
+    filename_parquet = f'{opath}/flight_list/flight_list_{month_str}.parquet'
+    
+    print(f"Extracting EVENT table {start_month_str} until {end_month_str}...")
+    
+    if os.path.isfile(filename_csv) and os.path.isfile(filename_parquet):
+        print('Files exist already - SKIPPING...')
+        continue
+    
     try:
         # Execute the query and convert to pandas DataFrame
-        df = get_data_within_timeframe(spark, table_name = 'project_opdi.opdi_flight_list', month = month, time_col = 'first_seen', unix_time = False).toPandas()
+        df = get_data_within_timeframe(spark, table_name = f'{project}.opdi_flight_list', month = month, time_col = 'first_seen', unix_time = False).toPandas()
         df_mod = df.loc[:, ['id', 'adep', 'ades', 'icao24', 'flt_id', 'first_seen', 'last_seen', 'dof']].rename({'flt_id':'FLT_ID', 'dof':'DOF'},axis=1)
         df_mod = df_mod.sort_values('first_seen').reset_index(drop=True)
         df_mod['version'] = f'flight_list_{v_long_flist}'
-        df_mod.to_csv(f'{opath}/flight_list/flight_list_{v_short_flist}_{month_str}.csv.gz', compression='gzip',index=False)
-        df_mod.to_parquet(f'{opath}/flight_list/flight_list_{v_short_flist}_{month_str}.parquet')
+        
+        df_mod.to_csv(filename_csv, compression='gzip',index=False)
+        df_mod.to_parquet(filename_parquet)
 
     except Exception as e:
         print(f"Error executing query: {e}")
@@ -117,31 +133,40 @@ for month in months:
 # EVENT TABLE  #
 ################
 
-#print()
-#print()
-#print("Event Table time")
-#print()
+print()
+print()
+print("Event table time")
+print(f'[[Extracting EVENT table from {start_date} until {end_date}...]]')
+print()
 
 # Function to process and save the data for a given date interval
-def process_and_save_data(start_date, end_date):
+def process_and_save_data_events(start_date, end_date):
     # Convert start_date and end_date to strings for SQL query
     start_date_str = start_date.strftime('%Y-%m-%d')
     end_date_str = end_date.strftime('%Y-%m-%d')
     
+    file_date_str = start_date.strftime('%Y%m')
+    file_path_csv = f'{opath}/flight_events/flight_events_{file_date_str}.csv.gz'
+    file_path_parquet = f'{opath}/flight_events/flight_events_{file_date_str}.parquet'
+    
     print(f"Extracting EVENT table {start_date_str} until {end_date_str}...")
+    
+    if os.path.isfile(file_path_csv) and os.path.isfile(file_path_parquet):
+        print('Files exist already - SKIPPING...')
+        return None
     
     # SQL query
     milestone_sql = f"""
-    WITH flight_table AS (
-        SELECT TRACK_ID
-        FROM `project_aiu`.`osn_flight_table` 
-        WHERE to_date(from_unixtime(first_seen)) >= '{start_date_str}' 
-        AND to_date(from_unixtime(first_seen)) < '{end_date_str}' 
+    WITH flight_list AS (
+        SELECT id as track_id
+        FROM `{project}`.`opdi_flight_list` 
+        WHERE first_seen >= TO_DATE('{start_date_str}') 
+        AND first_seen < TO_DATE('{end_date_str}') 
     ) 
 
     SELECT * 
-    FROM `project_aiu`.`osn_milestones`
-    WHERE osn_milestones.flight_id IN (SELECT TRACK_ID FROM flight_table)
+    FROM `{project}`.`opdi_flight_events`
+    WHERE opdi_flight_events.flight_id IN (SELECT track_id FROM flight_list)
     """
 
     # Execute the query and convert to Pandas DataFrame
@@ -153,54 +178,63 @@ def process_and_save_data(start_date, end_date):
     df_mod['version'] = f'flight_events_{v_long_events}'
 
     # Save the DataFrame as a Parquet file
-    file_path = f'/home/cdsw/python/data/v002/flight_events/flight_events_{start_date_str}_{end_date_str}.parquet'
-    df_mod.to_parquet(file_path, index=False)
+    df_mod.to_parquet(file_path_parquet, index=False)
+    df_mod.to_csv(file_path_csv, compression='gzip',index=False)
 
 # Loop from 2022-05-01 until 2022-07-01 in 10 days intervals
-#start_period = start_date
-#end_period = end_date
-#interval = timedelta(days=10)
+start_period = start_date
+end_period = end_date
+interval = relativedelta(months=1)
 
-#while start_period < end_period:
-#    end_date = start_period + interval
-#    process_and_save_data(start_period, end_date)
-#    start_period = end_date
+while start_period < end_period:
+    end_date = start_period + interval
+    process_and_save_data_events(start_period, end_date)
+    start_period = end_date
 
 ######################
 # MEASUREMENT TABLE  #
 ######################
 
-#print()
-#print()
-#print("Measurement Table time")
-#print()
+print()
+print()
+print("Measurement Table time")
+print(f'[[Extracting MEASUREMENT table from {start_date} until {end_date}...]]')
+print()
 
 # Function to process and save the data for a given date interval
-def process_and_save_data(start_date, end_date):
+def process_and_save_data_measurements(start_date, end_date):
     # Convert start_date and end_date to strings for SQL query
     start_date_str = start_date.strftime('%Y-%m-%d')
     end_date_str = end_date.strftime('%Y-%m-%d')
     
-    print(f'Extracting measurement table {start_date_str} until {end_date_str}...')
+    file_date_str = start_date.strftime('%Y%m')
+    file_path_parquet = f'{opath}/measurements/measurements_{file_date_str}.parquet'
+    file_path_csv = f'{opath}/measurements/measurements_{file_date_str}.csv.gz'
+    
+    print(f'Extracting MEASUREMENT table {start_date_str} until {end_date_str}...')
+    
+    if os.path.isfile(file_path_csv) and os.path.isfile(file_path_parquet):
+        print('Files exist already - SKIPPING...')
+        return None
     
     # SQL query
     measurement_sql = f"""
     WITH 
-        flight_table AS (
-            SELECT TRACK_ID
-            FROM `project_aiu`.`osn_flight_table` 
-            WHERE to_date(from_unixtime(first_seen)) >= '{start_date_str}' 
-            AND to_date(from_unixtime(first_seen)) < '{end_date_str}' 
+        flight_list AS (
+            SELECT id as track_id
+            FROM `{project}`.`opdi_flight_list` 
+            WHERE first_seen >= TO_DATE('{start_date_str}') 
+            AND first_seen < TO_DATE('{end_date_str}') 
         ),
         event_table AS (
             SELECT id 
-            FROM `project_aiu`.`osn_milestones`
-            WHERE osn_milestones.flight_id IN (SELECT TRACK_ID FROM flight_table)
+            FROM `{project}`.`opdi_flight_events`
+            WHERE osn_milestones.flight_id IN (SELECT track_id FROM flight_list)
         )
 
     SELECT * 
-    FROM `project_aiu`.`osn_measurements`
-    WHERE osn_measurements.milestone_id in (SELECT id from event_table) 
+    FROM `{project}`.`opdi_measurements`
+    WHERE opdi_measurements.milestone_id in (SELECT id from event_table) 
     """
 
     # Execute the query and convert to Pandas DataFrame
@@ -211,18 +245,18 @@ def process_and_save_data(start_date, end_date):
     df_mod['version'] = f'measurements_{v_long_measures}'
 
     # Save the DataFrame as a Parquet file
-    file_path = f'/home/cdsw/python/data/v002/measurements/measurements_{start_date_str}_{end_date_str}.parquet'
-    df_mod.to_parquet(file_path, index=False)
+    df_mod.to_parquet(file_path_parquet, index=False)
+    df_mod.to_csv(file_path_csv, compression='gzip',index=False)
 
 # Loop from start_period until end_period in 10 days intervals
-#start_period = start_date
-#end_period = end_date
-#interval = timedelta(days=10)
+start_period = start_date
+end_period = end_date
+interval = relativedelta(months=1)
 
-#while start_period < end_period:
-#    end_date = start_period + interval
-#    # Adjust end_date to not exceed the end_period
-#    if end_date > end_period:
-#        end_date = end_period
-#    process_and_save_data(start_period, end_date)
-#    start_period = end_date
+while start_period < end_period:
+    end_date = start_period + interval
+    # Adjust end_date to not exceed the end_period
+    if end_date > end_period:
+        end_date = end_period
+    process_and_save_data_measurements(start_period, end_date)
+    start_period = end_date
