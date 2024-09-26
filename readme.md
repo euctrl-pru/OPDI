@@ -1,3 +1,6 @@
+<img style='border: 1px solid black' align="right" width="250" src="https://github.com/euctrl-pru/OPDI/blob/main/figures/Logo%20Open%20Performance%20Data%20Initiative.png?raw=true" alt="OPDI logo" />
+
+
 # Open Performance Data Initiative (OPDI)
 
 ## Overview
