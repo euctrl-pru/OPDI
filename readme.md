@@ -91,11 +91,11 @@ Ensure the configuration files are set up properly for each step, especially pat
 ## Contributing
 We welcome contributions to the project. Please follow these steps:
 
-### Fork the repository.
-* Create a feature branch (git checkout -b feature/my-new-feature).
-* Commit your changes (git commit -am 'Add some feature').
-* Push to the branch (git push origin feature/my-new-feature).
-* Create a new pull request.
+1. Fork the repository.
+2. Create a feature branch (git checkout -b feature/my-new-feature).
+3. Commit your changes (git commit -am 'Add some feature').
+4. Push to the branch (git push origin feature/my-new-feature).
+5. Create a new pull request.
 
 ## License
 This project is licensed under the MIT License - see the LICENSE file for details.
