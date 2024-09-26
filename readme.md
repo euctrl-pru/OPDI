@@ -5,7 +5,7 @@
 ## Overview
 <img style='border: 1px solid black' align="right" width="200" src="https://github.com/euctrl-pru/OPDI/blob/main/figures/Logo%20Open%20Performance%20Data%20Initiative.png?raw=true" alt="OPDI logo" />
 
-The **Open Performance Data Initiative (OPDI)** is a project launched in 2022 by the **Performance Review Commission (PRC)** to promote transparency, reproducibility, and accessibility of performance data in the **European Air Traffic Management (ATM)** system. The goal is to create a harmonized, open data environment that fosters data-driven decisions and ensures accountability across the aviation industry. 
+The **Open Performance Data Initiative (OPDI)** is a project launched in 2022 by the **Performance Review Commission (PRC)** to promote transparency, reproducibility, and accessibility of performance data in the **European Air Traffic Management (ATM)** system. The goal is to create a harmonized, open data environment that fosters data-driven decisions and ensures accountability across the aviation industry. For more information, see the [OPDI Portal](https://opdi.aero). 
 
 This repository contains the core **ETL pipelines**, **SQL scripts**, and **scratch notebooks** used to extract, transform, and load (ETL) data for the OPDI platform.
 
