@@ -1,6 +1,6 @@
 from IPython.display import display, HTML 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, pandas_udf, col, PandasUDFType, lit, round
+from pyspark.sql.functions import udf, from_unixtime, pandas_udf, col, PandasUDFType, lit, round
 from pyspark.sql.types import DoubleType, StructType, StructField
 from pyspark.sql import functions as F
 from pyspark.sql import Window
@@ -65,11 +65,11 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
     .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
-    .config("spark.driver.memory", "10G") \
-    .config("spark.executor.memory", "10G") \
+    .config("spark.driver.memory", "14G") \
+    .config("spark.executor.memory", "7G") \
     .config("spark.executor.cores", "1") \
     .config("spark.executor.instances", "2") \
-    .config("spark.dynamicAllocation.maxExecutors", "10") \
+    .config("spark.dynamicAllocation.maxExecutors", "15") \
     .config("spark.network.timeout", "800s")\
     .config("spark.executor.heartbeatInterval", "400s") \
     .config('spark.ui.showConsoleProgress', False) \
@@ -117,7 +117,7 @@ for month in months:
     
     try:
         # Execute the query and convert to pandas DataFrame
-        df = get_data_within_timeframe(spark, table_name = f'{project}.opdi_flight_list', month = month, time_col = 'first_seen', unix_time = False).toPandas()
+        df = get_data_within_timeframe(spark, table_name = f'{project}.opdi_flight_list_clustered', month = month, time_col = 'first_seen', unix_time = False).toPandas()
         df_mod = df.loc[:, ['id', 'adep', 'ades', 'icao24', 'flt_id', 'first_seen', 'last_seen', 'dof']].rename({'flt_id':'FLT_ID', 'dof':'DOF'},axis=1)
         df_mod = df_mod.sort_values('first_seen').reset_index(drop=True)
         df_mod['version'] = f'flight_list_{v_long_flist}'
@@ -132,6 +132,7 @@ for month in months:
 ################
 # EVENT TABLE  #
 ################
+# Path for Azure Blob File System (ABFS)
 
 print()
 print()
@@ -145,9 +146,10 @@ def process_and_save_data_events(start_date, end_date):
     start_date_str = start_date.strftime('%Y-%m-%d')
     end_date_str = end_date.strftime('%Y-%m-%d')
     
-    file_date_str = start_date.strftime('%Y%m')
-    file_path_csv = f'{opath}/flight_events/flight_events_{file_date_str}.csv.gz'
-    file_path_parquet = f'{opath}/flight_events/flight_events_{file_date_str}.parquet'
+    file_date_str_start = start_date.strftime('%Y%m%d')
+    file_date_str_end = end_date.strftime('%Y%m%d')
+    file_path_csv = f'{opath}/flight_events/flight_events_{file_date_str_start}_{file_date_str_end}.csv.gz'
+    file_path_parquet = f'{opath}/flight_events/flight_events_{file_date_str_start}_{file_date_str_end}.parquet'
     
     print(f"Extracting EVENT table {start_date_str} until {end_date_str}...")
     
@@ -159,32 +161,32 @@ def process_and_save_data_events(start_date, end_date):
     milestone_sql = f"""
     WITH flight_list AS (
         SELECT id as track_id
-        FROM `{project}`.`opdi_flight_list` 
+        FROM `{project}`.`opdi_flight_list_clustered` 
         WHERE first_seen >= TO_DATE('{start_date_str}') 
         AND first_seen < TO_DATE('{end_date_str}') 
     ) 
 
     SELECT * 
-    FROM `{project}`.`opdi_flight_events`
-    WHERE opdi_flight_events.flight_id IN (SELECT track_id FROM flight_list)
+    FROM `{project}`.`opdi_flight_events_clustered`
+    WHERE opdi_flight_events_clustered.flight_id IN (SELECT track_id FROM flight_list)
     """
 
-    # Execute the query and convert to Pandas DataFrame
-    df = spark.sql(milestone_sql).toPandas()
-
-    # Rename column, convert event_time, and add version
-    df_mod = df.rename({'milestone_type': 'type'}, axis=1)
-    df_mod['event_time'] = df_mod['event_time'].apply(lambda l: pd.Timestamp(l, unit='s'))
-    df_mod['version'] = f'flight_events_{v_long_events}'
-
-    # Save the DataFrame as a Parquet file
-    df_mod.to_parquet(file_path_parquet, index=False)
+     # Execute the query and load data into a PySpark DataFrame
+    df_mod = spark.sql(milestone_sql)
+    df_mod = df_mod.withColumnRenamed("milestone_type", "type")
+    df_mod = df_mod.withColumn("event_time", from_unixtime(col("event_time")))
+    df_mod = df_mod.withColumn("version", lit(f"flight_events_{v_long_events}"))
+    
+    df_mod = df_mod.toPandas()
+    
+    # Save in datalake
     df_mod.to_csv(file_path_csv, compression='gzip',index=False)
+    df_mod.to_parquet(file_path_parquet)
 
 # Loop from 2022-05-01 until 2022-07-01 in 10 days intervals
 start_period = start_date
 end_period = end_date
-interval = relativedelta(months=1)
+interval = relativedelta(days=10)
 
 while start_period < end_period:
     end_date = start_period + interval
@@ -207,9 +209,10 @@ def process_and_save_data_measurements(start_date, end_date):
     start_date_str = start_date.strftime('%Y-%m-%d')
     end_date_str = end_date.strftime('%Y-%m-%d')
     
-    file_date_str = start_date.strftime('%Y%m')
-    file_path_parquet = f'{opath}/measurements/measurements_{file_date_str}.parquet'
-    file_path_csv = f'{opath}/measurements/measurements_{file_date_str}.csv.gz'
+    file_date_str_start = start_date.strftime('%Y%m%d')
+    file_date_str_end = end_date.strftime('%Y%m%d')
+    file_path_parquet = f'{opath}/measurements/measurements_{file_date_str_start}_{file_date_str_end}.parquet'
+    file_path_csv = f'{opath}/measurements/measurements_{file_date_str_start}_{file_date_str_end}.csv.gz'
     
     print(f'Extracting MEASUREMENT table {start_date_str} until {end_date_str}...')
     
@@ -222,36 +225,36 @@ def process_and_save_data_measurements(start_date, end_date):
     WITH 
         flight_list AS (
             SELECT id as track_id
-            FROM `{project}`.`opdi_flight_list` 
+            FROM `{project}`.`opdi_flight_list_clustered` 
             WHERE first_seen >= TO_DATE('{start_date_str}') 
             AND first_seen < TO_DATE('{end_date_str}') 
         ),
         event_table AS (
             SELECT id 
-            FROM `{project}`.`opdi_flight_events`
-            WHERE osn_milestones.flight_id IN (SELECT track_id FROM flight_list)
+            FROM `{project}`.`opdi_flight_events_clustered`
+            WHERE opdi_flight_events_clustered.flight_id IN (SELECT track_id FROM flight_list)
         )
 
     SELECT * 
-    FROM `{project}`.`opdi_measurements`
-    WHERE opdi_measurements.milestone_id in (SELECT id from event_table) 
+    FROM `{project}`.`opdi_measurements_clustered`
+    WHERE opdi_measurements_clustered.milestone_id in (SELECT id from event_table) 
     """
 
     # Execute the query and convert to Pandas DataFrame
-    df = spark.sql(measurement_sql).toPandas()
-
-    # Rename column and add version
-    df_mod = df.rename({'milestone_id': 'event_id'}, axis=1)
-    df_mod['version'] = f'measurements_{v_long_measures}'
-
-    # Save the DataFrame as a Parquet file
-    df_mod.to_parquet(file_path_parquet, index=False)
+    df_mod = spark.sql(measurement_sql)
+    df_mod = df_mod.withColumnRenamed("milestone_id", "event_id")
+    df_mod = df_mod.withColumn("version", lit(f"measurements_{v_long_measures}"))
+    df_mod = df_mod.toPandas()
+    
+    # Save in datalake
     df_mod.to_csv(file_path_csv, compression='gzip',index=False)
+    df_mod.to_parquet(file_path_parquet)
+
 
 # Loop from start_period until end_period in 10 days intervals
 start_period = start_date
 end_period = end_date
-interval = relativedelta(months=1)
+interval = relativedelta(days=10)
 
 while start_period < end_period:
     end_date = start_period + interval
@@ -260,3 +263,6 @@ while start_period < end_period:
         end_date = end_period
     process_and_save_data_measurements(start_period, end_date)
     start_period = end_date
+    
+
+

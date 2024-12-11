@@ -32,7 +32,7 @@ spark = SparkSession.builder \
     .config("spark.executor.memory", "5G") \
     .config("spark.executor.cores", "1") \
     .config("spark.executor.instances", "2") \
-    .config("spark.dynamicAllocation.maxExecutors", "10") \
+    .config("spark.dynamicAllocation.maxExecutors", "20") \
     .config("spark.network.timeout", "800s") \
     .config("spark.executor.heartbeatInterval", "400s") \
     .config("spark.driver.maxResultSize", "4g") \

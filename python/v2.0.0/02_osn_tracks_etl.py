@@ -1,22 +1,62 @@
-!pip install h3
+!pip install h3==3.7.4
 !pip install h3_pyspark
 
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
-from pyspark.sql.functions import lit
-from pyspark.sql.window import Window
+from pyspark.sql.functions import (
+    lit, lag, when, to_date, concat, avg, abs, col, unix_timestamp, to_timestamp
+)
 from pyspark.sql import DataFrame
-import shutil
-from datetime import datetime, date
-import dateutil.relativedelta
-import calendar
-import h3_pyspark
 import os
 import pandas as pd
 from datetime import datetime, date
 import dateutil.relativedelta
 import calendar
+import h3_pyspark
+import gc
 
+# Settings
+## Config
+project = "project_opdi"
+h3_resolutions = [7, 12]
+start_month = date(2022, 1, 1)
+
+## Which months to process
+today = date.today()
+end_month = today - dateutil.relativedelta.relativedelta(months=1) # We work on the d-1 months
+
+# Getting today's date formatted
+today = today.strftime('%d %B %Y')
+#    .config("spark.log.level", "ERROR") \
+#    .config("spark.ui.showConsoleProgress", "false") \
+# Spark Session Initialization
+spark = SparkSession.builder \
+    .appName("OPDI Ingestion") \
+    .config("spark.ui.showConsoleProgress", "false") \
+    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
+    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.executor.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.driver.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.sql.catalog.spark_catalog.type", "hive") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog") \
+    .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
+    .config("spark.sql.catalog.spark_catalog.warehouse", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.driver.cores", "1") \
+    .config("spark.driver.memory", "5G") \
+    .config("spark.executor.memory", "16G") \
+    .config("spark.executor.memoryOverhead", "3G") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.executor.instances", "3") \
+    .config("spark.dynamicAllocation.maxExecutors", "4") \
+    .config("spark.network.timeout", "800s") \
+    .config("spark.executor.heartbeatInterval", "400s") \
+    .config("spark.driver.maxResultSize", "6g") \
+    .config("spark.shuffle.compress", "true") \
+    .config("spark.shuffle.spill.compress", "true") \
+    .enableHiveSupport() \
+    .getOrCreate()
+
+# Helperfunctions
 def generate_months(start_date, end_date):
     """Generate a list of dates corresponding to the first day of each month between two dates.
 
@@ -50,131 +90,16 @@ def get_start_end_of_month(date):
     last_second = datetime(year, month, last_day, 23, 59, 59)
     return first_second.timestamp(), last_second.timestamp()
 
-# Settings
-## Config
-project = "project_opdi"
-max_h3_resolution = 12
-start_month = date(2022, 1, 1)
-
-## Which months to process
-today = date.today()
-end_month = today - dateutil.relativedelta.relativedelta(months=1) # We work on the d-1 months
-
-# Getting today's date formatted
-today = today.strftime('%d %B %Y')
-
-# Spark Session Initialization
-spark = SparkSession.builder \
-    .appName("OSN Tracks Calculation") \
-    .config("spark.log.level", "ERROR") \
-    .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
-    .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
-    .config("spark.sql.shuffle.partitions", "2000") \
-    .config("spark.default.parallelism", "2000") \
-    .config("spark.driver.cores", "1") \
-    .config("spark.driver.memory", "12G") \
-    .config("spark.executor.memory", "10G") \
-    .config("spark.executor.memoryOverhead", "3G") \
-    .config("spark.executor.cores", "1") \
-    .config("spark.executor.instances", "2") \
-    .config("spark.dynamicAllocation.enabled", "true") \
-    .config("spark.ui.showConsoleProgress", "false") \
-    .config("spark.dynamicAllocation.minExecutors", "2") \
-    .config("spark.dynamicAllocation.maxExecutors", "5") \
-    .config("spark.network.timeout", "800s") \
-    .config("spark.executor.heartbeatInterval", "400s") \
-    .enableHiveSupport() \
-    .getOrCreate()
-
-# Helperfunctions
-
-def h3_query_prep(project, max_h3_resolution):
-  # Create OSN tracks db
-  h3_resolution = max_h3_resolution
-  h3_res_sql = ""
+def h3_list_prep(h3_resolutions):
   h3_res = []
-
-  while h3_resolution >= 0:
-      h3_res_sql = h3_res_sql + f"h3_res_{h3_resolution} STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution {h3_resolution}.',\n"
+  for h3_resolution in h3_resolutions:
       h3_res.append(f"h3_res_{h3_resolution}")
-      h3_resolution = h3_resolution - 1
-
-  h3_res_str = ', '.join(h3_res)
-
-  create_osn_tracks_sql = f"""
-    CREATE TABLE IF NOT EXISTS `{project}`.`osn_tracks` (
-        event_time BIGINT COMMENT 'This column contains the unix (aka POSIX or epoch) timestamp for which the state vector was valid.',
-        icao24 STRING COMMENT 'This column contains the 24-bit ICAO transponder ID which can be used to track specific airframes over different flights.',
-        lat DOUBLE COMMENT 'This column contains the last known latitude of the aircraft.',
-        lon DOUBLE COMMENT 'This column contains the last known longitude of the aircraft.',
-        velocity DOUBLE COMMENT 'This column contains the speed over ground of the aircraft in meters per second.',
-        heading DOUBLE COMMENT 'This column represents the direction of movement (track angle in degrees) as the clockwise angle from the geographic north.',
-        vert_rate DOUBLE COMMENT 'This column contains the vertical speed of the aircraft in meters per second.',
-        callsign STRING COMMENT 'This column contains the callsign that was broadcast by the aircraft.',
-        on_ground BOOLEAN COMMENT 'This flag indicates whether the aircraft is broadcasting surface positions (true) or airborne positions (false).',
-        alert BOOLEAN COMMENT 'This flag is a special indicator used in ATC.',
-        spi BOOLEAN COMMENT 'This flag is a special indicator used in ATC.',
-        squawk STRING COMMENT 'This 4-digit octal number is another transponder code which is used by ATC and pilots for identification purposes and indication of emergencies.',
-        baro_altitude DOUBLE COMMENT 'This column indicates the aircrafts altitude. As the names suggest, baroaltitude is the altitude measured by the barometer (in meter).',
-        geo_altitude DOUBLE COMMENT 'This column indicates the aircrafts altitude. As the names suggest, geoaltitude is determined using the GNSS (GPS) sensor (in meter).',
-        last_pos_update DOUBLE COMMENT 'This unix timestamp indicates the age of the position.',
-        last_contact DOUBLE COMMENT 'This unix timestamp indicates the time at which OpenSky received the last signal of the aircraft.',
-        serials ARRAY<INT> COMMENT 'The serials column is a list of serials of the ADS-B receivers which received the message.',
-        track_id STRING COMMENT 'Unique identifier for the associated flight tracks in opdi_flight_table_with_id.',
-        {h3_res_sql}
-        segment_distance_nm DOUBLE COMMENT 'The distance from the previous statevector in nautic miles.',
-        cumulative_distance_nm DOUBLE COMMENT 'The cumulative distance from the start in nautic miles.'
-    )
-    COMMENT '`{project}`.`osn_statevectors` with added track_ids (generated based on callsign, icao24 grouping with 30 min signal gap intolerance) and H3 tags. Last updated: {today}.'
-    STORED AS parquet
-    TBLPROPERTIES ('transactional'='false');
-    """
+  return h3_res
   
-  create_osn_tracks_clustered_sql = f"""
-    CREATE TABLE IF NOT EXISTS `{project}`.`osn_tracks_clustered` (
-        event_time BIGINT COMMENT 'This column contains the unix (aka POSIX or epoch) timestamp for which the state vector was valid.',
-        icao24 STRING COMMENT 'This column contains the 24-bit ICAO transponder ID which can be used to track specific airframes over different flights.',
-        lat DOUBLE COMMENT 'This column contains the last known latitude of the aircraft.',
-        lon DOUBLE COMMENT 'This column contains the last known longitude of the aircraft.',
-        velocity DOUBLE COMMENT 'This column contains the speed over ground of the aircraft in meters per second.',
-        heading DOUBLE COMMENT 'This column represents the direction of movement (track angle in degrees) as the clockwise angle from the geographic north.',
-        vert_rate DOUBLE COMMENT 'This column contains the vertical speed of the aircraft in meters per second.',
-        callsign STRING COMMENT 'This column contains the callsign that was broadcast by the aircraft.',
-        on_ground BOOLEAN COMMENT 'This flag indicates whether the aircraft is broadcasting surface positions (true) or airborne positions (false).',
-        alert BOOLEAN COMMENT 'This flag is a special indicator used in ATC.',
-        spi BOOLEAN COMMENT 'This flag is a special indicator used in ATC.',
-        squawk STRING COMMENT 'This 4-digit octal number is another transponder code which is used by ATC and pilots for identification purposes and indication of emergencies.',
-        baro_altitude DOUBLE COMMENT 'This column indicates the aircrafts altitude. As the names suggest, baroaltitude is the altitude measured by the barometer (in meter).',
-        geo_altitude DOUBLE COMMENT 'This column indicates the aircrafts altitude. As the names suggest, geoaltitude is determined using the GNSS (GPS) sensor (in meter).',
-        last_pos_update DOUBLE COMMENT 'This unix timestamp indicates the age of the position.',
-        last_contact DOUBLE COMMENT 'This unix timestamp indicates the time at which OpenSky received the last signal of the aircraft.',
-        serials ARRAY<INT> COMMENT 'The serials column is a list of serials of the ADS-B receivers which received the message.',
-        track_id STRING COMMENT 'Unique identifier for the associated flight tracks in `{project}`.`opdi_flight_table`.',
-        {h3_res_sql}
-        segment_distance_nm DOUBLE COMMENT 'The distance from the previous statevector in nautic miles.',
-        cumulative_distance_nm DOUBLE COMMENT 'The cumulative distance from the start in nautic miles.'
-    )
-    COMMENT 'Clustered `{project}`.`osn_statevectors` with added track_ids (generated based on callsign, icao24 grouping with 30 min signal gap intolerance) and H3 tags. Last updated: {today}.'
-    CLUSTERED BY (track_id, event_time, icao24, callsign, baro_altitude, {h3_res_str}) INTO 4096 BUCKETS
-    STORED AS parquet
-    TBLPROPERTIES ('transactional'='false');"""
-  
-  # Printing and creating in HUE because spark statements below don't work from CML
-  print(create_osn_tracks_sql)
-  print(create_osn_tracks_clustered_sql)
-  
-  #spark.sql(f"DROP TABLE IF EXISTS `{project}`.`osn_h3_statevectors`;")
-  #spark.sql(create_osn_tracks_sql)
-  
-  return h3_res_sql, h3_res
-
 
 # Distance helper function
-def calculate_cumulative_distance(df: DataFrame) -> DataFrame:
+def add_cumulative_distance(df: DataFrame) -> DataFrame:
     """
-    
-    DEPRECIATED -> This is now done in step 04
-    
     Calculate the great circle distance between consecutive points in nautical miles
     and the cumulative distance for each track, using native PySpark functions.
 
@@ -218,20 +143,75 @@ def calculate_cumulative_distance(df: DataFrame) -> DataFrame:
     df = df.drop("lat_rad", "lon_rad", "prev_lat_rad", "prev_lon_rad", "a", "c", "distance_km")
 
     return df
-  
-def process_tracks(project, max_h3_resolution, month):
+
+def add_clean_altitude(df, col_name):
+    """
+    Cleans altitude data by removing unrealistic climb/descent rates.
+
+    Parameters:
+    df (DataFrame): The input DataFrame containing altitude and event_time columns.
+    col_name (str): The column name for altitude (e.g., "geo_altitude" or "baro_altitude").
+
+    Returns:
+    DataFrame: A DataFrame with cleaned altitude values.
+    """
+    # Define the acceptable rate of climb/descent threshold (25.4 meters per second, i.e. 5000ft/min)
+    rate_threshold = 25.4
+
+    # Calculate the rate of climb/descent in meters per second for each track_id
+    window_spec = Window.partitionBy("track_id").orderBy("event_time")
+    df = df.withColumn(f"prev_{col_name}", lag(col_name).over(window_spec))
+    df = df.withColumn("prev_event_time", lag("event_time").over(window_spec))
+
+    # Calculate time difference as seconds
+    df = df.withColumn("time_diff", (unix_timestamp("event_time") - unix_timestamp("prev_event_time")).cast("double"))
+    df = df.withColumn("altitude_diff", (col(col_name) - col(f"prev_{col_name}")))
+    df = df.withColumn("rate_of_climb", col("altitude_diff") / col("time_diff"))
+
+    # Create a window for calculating the rolling average
+    time_window = 300  # Define a time window for the rolling average (e.g., 300 seconds or 5 min)
+    df = df.withColumn("event_time_epoch", unix_timestamp("event_time").cast("bigint"))
+    window_spec_avg = Window.partitionBy("track_id").orderBy("event_time_epoch").rangeBetween(-time_window, time_window)
+
+    # Calculate the rolling average (smoothing)
+    df = df.withColumn(f"smoothed_{col_name}", avg(col_name).over(window_spec_avg))
+
+    # Replace unrealistic climb/descent points with the smoothed values
+    df = df.withColumn(
+        f"{col_name}_c",
+        when(abs(col("rate_of_climb")) > rate_threshold, col(f"smoothed_{col_name}")).otherwise(col(col_name)),
+    )
+
+    # Drop the temporary columns
+    df = df.drop(
+        f"smoothed_{col_name}",
+        f"prev_{col_name}",
+        "prev_event_time",
+        "time_diff",
+        "altitude_diff",
+        "rate_of_climb",
+        "event_time_epoch",
+    )
+    return df
+
+
+def process_tracks(project, h3_resolutions, month):
   
   print(f"Processing tracks for month {month}.. ({datetime.now()})")
-  h3_res_sql, h3_res = h3_query_prep(project, max_h3_resolution)
+  h3_res = h3_list_prep(h3_resolutions)
   
   start_time, end_time = get_start_end_of_month(month)
   
-  
+  start_time_str = datetime.utcfromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')
+  end_time_str = datetime.utcfromtimestamp(end_time).strftime('%Y-%m-%d %H:%M:%S')
+    
   
   # Read raw data 
   df_month = spark.sql(f"""
-        SELECT * FROM `{project}`.`osn_statevectors_clustered` 
-        WHERE (event_time >= {start_time}) AND (event_time < {end_time});""")
+        SELECT * FROM `{project}`.`osn_statevectors` 
+        WHERE (event_time >= TIMESTAMP('{start_time_str}')) 
+          AND (event_time < TIMESTAMP('{end_time_str}'));
+    """)
 
   # Save the original column names for later and add track_id
   original_columns = df_month.columns + ['track_id'] + h3_res
@@ -272,36 +252,39 @@ def process_tracks(project, max_h3_resolution, month):
   ))
 
   # ADD H3 TAGS
-  
-  h3_resolution = max_h3_resolution
-
-  while h3_resolution >= 0:
-      if h3_resolution == max_h3_resolution:
-          df_month = df_month.withColumn("h3_resolution", lit(h3_resolution))
-          df_month = df_month.withColumn(f"h3_res_{h3_resolution}", h3_pyspark.geo_to_h3('lat', 'lon', 'h3_resolution'))
-      else: 
-          df_month = df_month.withColumn("h3_resolution", lit(h3_resolution))
-          df_month = df_month.withColumn(f"h3_res_{h3_resolution}", h3_pyspark.h3_to_parent(F.col(f"h3_res_{max_h3_resolution}"), F.lit(h3_resolution)))
-
-      h3_resolution = h3_resolution - 1
+  for h3_resolution in h3_resolutions:
+    df_month = df_month.withColumn("h3_resolution", lit(h3_resolution))
+    df_month = df_month.withColumn(f"h3_res_{h3_resolution}", h3_pyspark.geo_to_h3('lat', 'lon', 'h3_resolution'))
 
   # Drop unnecessary and additional columns to retain only the original ones
   df_month = df_month.select(original_columns)
 
   # Add the distance variables
-  df_month = calculate_cumulative_distance(df_month)
+  df_month = add_cumulative_distance(df_month)
 
+  # Add the cleaned geo_altitude and baro_altitude
+  df_month = add_clean_altitude(df_month, col_name = "geo_altitude")
+  df_month = add_clean_altitude(df_month, col_name = "baro_altitude")
+
+  # Prep for insert
+  df_month = df_month.withColumn("event_time_day", to_date(col("event_time")))
+  df_month = df_month.repartition("event_time_day").orderBy("event_time_day")
+
+  # Drop event_time_day before writing
+  df_month = df_month.drop("event_time_day")
+    
   # Write data for the month to the database
-  df_month.write.mode("overwrite").insertInto(f"`{project}`.`osn_tracks`")
+  df_month.writeTo(f"`{project}`.`osn_tracks`").append()
   
-  # Write to clustered DB
-  spark.sql(f"""
-    INSERT INTO TABLE `{project}`.`osn_tracks_clustered`
-    SELECT * FROM `{project}`.`osn_tracks`
-    WHERE event_time >= {start_time}
-    AND event_time < {end_time}
-    """)
+  # Unpersist the DataFrame
+  df_month.unpersist(blocking=True)
 
+  # Clear any additional cached data
+  spark.catalog.clearCache()
+  
+  # Clear garbage
+  gc.collect()
+  
 # Actual processing
 
 to_process_months = generate_months(start_month, end_month)
@@ -321,7 +304,7 @@ for month in to_process_months:
     continue
   else:
     # Process data
-    process_tracks(project, max_h3_resolution, month)
+    process_tracks(project, h3_resolutions, month)
     
     ## Logging
     processed_months.append(month)

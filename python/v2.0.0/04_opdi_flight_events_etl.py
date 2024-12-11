@@ -908,10 +908,9 @@ def get_data_within_timeframe(spark, table_name, month, time_col = 'event_time',
   
 # Actual processing
 start_month = date(2022, 1, 1)
-end_month = date(2024, 7, 1)
+end_month = date(2024, 12, 1)
 
 to_process_months = generate_months(start_month, end_month)
-#to_process_months.reverse()
 
 ## Load logs Horizontal
 fpath_horizontal = 'logs/04_osn-flight_event-horizontal-etl-log.parquet'

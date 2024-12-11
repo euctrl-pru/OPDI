@@ -1,5 +1,5 @@
-CREATE TABLE IF NOT EXISTS `project_opdi`.`osn_tracks_iceberg` (
-        event_time BIGINT COMMENT 'This column contains the unix (aka POSIX or epoch) timestamp for which the state vector was valid.',
+CREATE TABLE IF NOT EXISTS `project_opdi`.`osn_tracks` (
+        event_time TIMESTAMP COMMENT 'This column contains the timestamp for which the state vector was valid.',
         icao24 STRING COMMENT 'This column contains the 24-bit ICAO transponder ID which can be used to track specific airframes over different flights.',
         lat DOUBLE COMMENT 'This column contains the last known latitude of the aircraft.',
         lon DOUBLE COMMENT 'This column contains the last known longitude of the aircraft.',
@@ -20,23 +20,13 @@ CREATE TABLE IF NOT EXISTS `project_opdi`.`osn_tracks_iceberg` (
         serials ARRAY<INT> COMMENT 'The serials column is a list of serials of the ADS-B receivers which received the message.',
         track_id STRING COMMENT 'Unique identifier for the associated flight tracks in `project_opdi`.`opdi_flight_table`.',
         h3_res_12 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 12.',
-        h3_res_11 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 11.',
-        h3_res_10 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 10.',
-        h3_res_9 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 9.',
-        h3_res_8 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 8.',
         h3_res_7 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 7.',
-        h3_res_6 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 6.',
-        h3_res_5 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 5.',
-        h3_res_4 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 4.',
-        h3_res_3 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 3.',
-        h3_res_2 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 2.',
-        h3_res_1 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 1.',
-        h3_res_0 STRING COMMENT 'H3 cell identifier for lat and lon with H3 resolution 0.',
         segment_distance_nm DOUBLE COMMENT 'The distance from the previous state vector in nautical miles.',
         cumulative_distance_nm DOUBLE COMMENT 'The cumulative distance from the start in nautical miles.'
     )
-    COMMENT '`project_opdi`.`osn_statevectors_iceberg` with added track_ids (generated based on callsign, icao24 grouping with 30 min signal gap intolerance) and H3 tags. Last updated: 03 December 2024.'
+    COMMENT '`project_opdi`.`osn_statevectors` with added track_ids (generated based on callsign, icao24 grouping with 30 min signal gap intolerance) and H3 tags. Last updated: 03 December 2024.'
     PARTITIONED BY SPEC(DAY(event_time))
+    STORED BY ICEBERG
     TBLPROPERTIES (
         'write.sort.order' = 'event_time ASC, baro_alt ASC, track_id ASC, h3_res_7 ASC, h3_res_12 ASC',
         'write.distribution-mode' = 'hash',

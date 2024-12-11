@@ -1,19 +1,20 @@
 from pyspark.sql import SparkSession
-import os, time
+from pyspark.sql.functions import col, to_date, from_unixtime
+from datetime import datetime, date, timedelta
 import subprocess
-import os,shutil
-from datetime import datetime, date
+import os, shutil, time
 import os.path
 import dateutil.relativedelta
 import calendar
 import pandas as pd
+
 
 # Settings
 ## Config
 project = "project_opdi"
 start_month = date(2022, 1, 1)
 import_data = True
-cluster_data = True
+cluster_data = False
 
 
 ## Which months to process
@@ -26,18 +27,29 @@ today = today.strftime('%d %B %Y')
 # Spark Session Initialization
 #shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
 spark = SparkSession.builder \
-    .appName("OSN statevectors ETL") \
-    .config("spark.log.level", "ERROR")\
+    .appName("OPDI Ingestion") \
+    .config("spark.log.level", "ERROR") \
+    .config("spark.ui.showConsoleProgress", "false") \
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
     .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.executor.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.driver.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.sql.catalog.spark_catalog.type", "hive") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog") \
+    .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
+    .config("spark.sql.catalog.spark_catalog.warehouse", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "8G") \
-    .config("spark.executor.memory", "5G") \
-    .config("spark.executor.cores", "1") \
-    .config("spark.executor.instances", "2") \
-    .config("spark.dynamicAllocation.maxExecutors", "6") \
+    .config("spark.executor.memory", "12G") \
+    .config("spark.executor.memoryOverhead", "3G") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.executor.instances", "3") \
+    .config("spark.dynamicAllocation.maxExecutors", "4") \
     .config("spark.network.timeout", "800s") \
     .config("spark.executor.heartbeatInterval", "400s") \
+    .config("spark.driver.maxResultSize", "6g") \
+    .config("spark.shuffle.compress", "true") \
+    .config("spark.shuffle.spill.compress", "true") \
     .enableHiveSupport() \
     .getOrCreate()
 
@@ -207,9 +219,25 @@ if import_data:
       # Perform a bulk read using Spark
       if downloaded_files:
           df = spark.read.option("mergeSchema", "true").parquet(local_folder_path)
+          
+          # Renaming stuff
           for camel_case, snake_case in column_name_mapping.items():
               df = df.withColumnRenamed(camel_case, snake_case)
-          df.write.mode("append").insertInto(f"`{project}`.`osn_statevectors`")
+          
+          df = df.withColumnRenamed('time', 'event_time')
+          
+          # Cast 'event_time' from int (Unix timestamp) to timestamp
+          df = df.withColumn("event_time", from_unixtime(col("event_time")).cast("timestamp"))
+          
+          # Add event_time_day column derived from event_time        
+          df_with_partition = df.withColumn("event_time_day", to_date(col("event_time")))
+          df_partitioned = df_with_partition.repartition("event_time_day").orderBy("event_time_day")
+
+          # Drop event_time_day before writing
+          df_cleaned = df_partitioned.drop("event_time_day")
+
+          # Write the data for the month
+          df_cleaned.writeTo(f"`{project}`.`osn_statevectors`").append()
 
           # Delete the local copies to save space
           for file_name in downloaded_files:
