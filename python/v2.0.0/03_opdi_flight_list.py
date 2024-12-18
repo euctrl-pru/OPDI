@@ -1,3 +1,7 @@
+!pip install h3==3.7.4
+!pip install h3_pyspark
+!pip install h3pandas 
+
 # Spark imports
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import udf, pandas_udf, col, PandasUDFType, lit, round, array_contains, from_unixtime
@@ -48,13 +52,23 @@ def generate_months(start_date, end_date):
     return months
 
 def get_start_end_of_month(date):
-    """Return a datetime object for the first and last second  of the given month and year."""
+    """
+    Return the Unix timestamp for the first and last second of the given month and year.
+
+    Args:
+        date (datetime): A datetime object representing any date within the desired month.
+
+    Returns:
+        tuple: A tuple containing the Unix timestamp of the first second and last second of the month.
+    """
     year = date.year
     month = date.month
     
+    # Calculate first and last second of the month
     first_second = datetime(year, month, 1, 0, 0, 0)
     last_day = calendar.monthrange(year, month)[1]
     last_second = datetime(year, month, last_day, 23, 59, 59)
+    
     return first_second.timestamp(), last_second.timestamp()
 
 # Settings
@@ -66,49 +80,61 @@ today = datetime.today().strftime('%d %B %Y')
 
 # Spark Session Initialization
 spark = SparkSession.builder \
-    .appName("OSN Flight Table") \
-    .config("spark.log.level", "ERROR")\
+    .appName("OPDI Flight Table") \
+    .config("spark.ui.showConsoleProgress", "false") \
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
     .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.executor.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.driver.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.sql.catalog.spark_catalog.type", "hive") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog") \
+    .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
+    .config("spark.sql.catalog.spark_catalog.warehouse", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "8G") \
     .config("spark.executor.memory", "8G") \
-    .config("spark.executor.cores", "1") \
-    .config("spark.executor.instances", "2") \
+    .config("spark.executor.memoryOverhead", "3G") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.executor.instances", "3") \
     .config("spark.dynamicAllocation.maxExecutors", "20") \
     .config("spark.network.timeout", "800s") \
     .config("spark.executor.heartbeatInterval", "400s") \
-    .config("spark.driver.maxResultSize", "4g") \
+    .config("spark.driver.maxResultSize", "6g") \
+    .config("spark.shuffle.compress", "true") \
+    .config("spark.shuffle.spill.compress", "true") \
     .enableHiveSupport() \
     .getOrCreate()
 
 ## Query testing sample function
 
-def get_data_within_timeframe(spark, table_name, month, time_col = 'event_time', unix_time = True):
+from pyspark.sql.functions import col, lit, from_unixtime, to_timestamp
+
+def get_data_within_timeframe(spark, table_name, month, time_col='event_time'):
     """
     Retrieves records from a specified Spark table within the given timeframe.
 
     Args:
-    spark (SparkSession): The SparkSession object.
-    table_name (str): The name of the Spark table to query.
-    month (str): The start date of a month in datetime format.
+        spark (SparkSession): The SparkSession object.
+        table_name (str): The name of the Spark table to query.
+        month (str): The start date of a month in the format 'YYYY-MM-DD'.
+        time_col (str): The column name containing timestamp data (default: 'event_time').
 
     Returns:
-    pyspark.sql.dataframe.DataFrame: A DataFrame containing the records within the specified timeframe.
+        pyspark.sql.dataframe.DataFrame: A DataFrame containing the records within the specified timeframe.
     """
-    # Convert dates to POSIX time (seconds since epoch)
-    start_posix,stop_posix = get_start_end_of_month(month)
+    # Convert the start and end of the month to Unix timestamps
+    start_date, end_date = get_start_end_of_month(month)
+
+    # Convert Unix timestamps to Spark timestamp format
+    start_date_ts = to_timestamp(lit(start_date))
+    end_date_ts = to_timestamp(lit(end_date))
 
     # Load the table
     df = spark.table(table_name)
-    
-    if unix_time == True:
-        # Filter records based on event_time posix column
-        filtered_df = df.filter((col(time_col) >= start_posix) & (col(time_col) < stop_posix))
-    else: 
-        df = df.withColumn('unix_time', unix_timestamp(time_col))
-        filtered_df = df.filter((col('unix_time') >= start_posix) & ((col('unix_time') < stop_posix)))
-                                
+
+    # Filter records based on the timestamp column
+    filtered_df = df.filter((col(time_col) >= start_date_ts) & (col(time_col) < end_date_ts))
+
     return filtered_df
 
 
@@ -127,7 +153,7 @@ def load_airports_hex(spark, resolution = 7):
     try:
         # In case I ran the function this dataset should exist.
         df_apt = pd.read_parquet(f'data/airport_hex/airport_concentric_c_hex_res_{resolution}_processed.arrow')
-        sdf_apt = spark.createDataFrame(df_apt)
+        sdf_apt = spark.createDataFrame(df_apt.to_dict(orient='records'))
         return sdf_apt
     
     except Exception as e:
@@ -171,7 +197,7 @@ def load_airports_hex(spark, resolution = 7):
         df_apt.to_parquet(f'data/airport_hex/airport_concentric_c_hex_res_{resolution}_processed.arrow')
 
         # Creating spark df
-        sdf_apt = spark.createDataFrame(df_apt)
+        sdf_apt = spark.createDataFrame(df_apt.to_dict(orient='records'))
         return sdf_apt
 
 def fetch_and_label_sv(spark, project, month, sdf_apt):
@@ -204,7 +230,7 @@ def fetch_and_label_sv(spark, project, month, sdf_apt):
     # Fetch data
     sv = get_data_within_timeframe( # State Vectors sv
         spark = spark, 
-        table_name = f'{project}.osn_tracks_clustered', 
+        table_name = f'{project}.osn_tracks', 
         month = month)
 
     # Filter out rows with missing crucial data
@@ -225,7 +251,7 @@ def fetch_and_label_sv(spark, project, month, sdf_apt):
     # Select columns of interest
     columns_of_interest = [
         'track_id', 'icao24', 'flight_id', 'event_time', 'lat', 'lon',  'flight_level', 'baro_altitude',
-        'heading', 'vert_rate',  'on_ground', 'h3_res_7', 'h3_res_11'
+        'heading', 'vert_rate',  'on_ground', 'h3_res_7'
     ]
     sv_f = sv_f.select(columns_of_interest)
 
@@ -422,6 +448,57 @@ def compute_flight_table(df):
     return(flight_table)
 
 
+def add_osn_aircraft_db_data(spark, flight_table):
+    """
+    Join flight_table with osn_aircraft_db and resolve ambiguous column names.
+
+    Args:
+    spark (SparkSession): The SparkSession object.
+    flight_table (DataFrame): The flight table DataFrame.
+
+    Returns:
+    DataFrame: A merged DataFrame with osn_aircraft_db data and resolved column ambiguity.
+    """
+    # Load the `osn_aircraft_db` table
+    osn_aircraft_db = spark.table("project_opdi.osn_aircraft_db")
+
+    # Perform the join operation with explicit table prefix for ambiguous columns
+    merged_table = flight_table.alias("ft").join(
+        osn_aircraft_db.alias("adb"),
+        col("ft.ICAO24") == col("adb.icao24"),
+        "left"
+    )
+
+    # Convert all column names to uppercase and avoid ambiguity
+    merged_table_uppercase = merged_table.select(
+        *[col(f"ft.{c}").alias(c.upper()) for c in flight_table.columns],
+        *[col(f"adb.{c}").alias(c.upper()) for c in osn_aircraft_db.columns if c != "icao24"]
+    )
+
+    # Select relevant columns for the final table
+    final_table = merged_table_uppercase.select(
+        "ID", 
+        "ICAO24", 
+        "FLT_ID", 
+        "DOF", 
+        "ADEP", 
+        "ADES", 
+        "ADEP_P", 
+        "ADES_P", 
+        "REGISTRATION", 
+        "MODEL", 
+        "TYPECODE", 
+        "ICAO_AIRCRAFT_CLASS", 
+        "ICAO_OPERATOR", 
+        "FIRST_SEEN", 
+        "LAST_SEEN", 
+        "VERSION"
+    )
+
+    return final_table
+
+
+
 def process_flight_table_DAI(spark, project, month):
     
     # Process Departures / Arrivals / Internal flights in the bbox
@@ -433,8 +510,18 @@ def process_flight_table_DAI(spark, project, month):
     sv_nearby_apt = categorize_landing_take_off(sv_nearby_apt)
 
     flight_table = compute_flight_table(sv_nearby_apt)
+
+    flight_table = add_osn_aircraft_db_data(spark, flight_table)
+
+    # Prep for insert
+    flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
+    flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
     
-    flight_table.write.mode("append").insertInto(f"`{project}`.`opdi_flight_list`")
+    # Drop event_time_day before writing
+    flight_table = flight_table.drop("DOF_day")
+    
+    # Write data for the month to the database
+    flight_table.writeTo(f"`{project}`.`opdi_flight_list`").append()
     
     
 # Overfligths
@@ -444,7 +531,7 @@ def fetch_and_aggregate_sv_overflight(spark, project, month):
     # Fetch statevector data
     sv = get_data_within_timeframe(
         spark=spark,
-        table_name=f'{project}.osn_tracks_clustered',
+        table_name=f'{project}.osn_tracks',
         month=month
     )
     
@@ -453,8 +540,7 @@ def fetch_and_aggregate_sv_overflight(spark, project, month):
         spark=spark,
         table_name=f'{project}.opdi_flight_list',
         month=month,
-        time_col='first_seen',
-        unix_time=False
+        time_col='first_seen'
     ).select('id')
 
     # Define a window specification for track_id partitioning
@@ -511,13 +597,23 @@ def fetch_and_aggregate_sv_overflight(spark, project, month):
 def process_flight_table_O(spark, project, month):
     
     # Process overflights
-    flight_table_overflights = fetch_and_aggregate_sv_overflight(spark, project, month)
+    flight_table = fetch_and_aggregate_sv_overflight(spark, project, month)
+
+    # Add osn aircraft db
+    flight_table = add_osn_aircraft_db_data(spark, flight_table)
+
+    # Prep for insert
+    flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
+    flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
     
-    flight_table_overflights.write.mode("append").insertInto(f"`{project}`.`opdi_flight_list`")
+    # Drop event_time_day before writing
+    flight_table = flight_table.drop("DOF_day")
+
+    flight_table.writeTo(f"`{project}`.`opdi_flight_list`").append()
 
 # Actual processing
 start_month = date(2022, 1, 1)
-end_month = date(2024, 7, 1)
+end_month = date(2024, 11, 1)
 
 to_process_months = generate_months(start_month, end_month)
 

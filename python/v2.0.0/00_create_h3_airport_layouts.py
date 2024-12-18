@@ -1,3 +1,4 @@
+!pip install folium geojson h3 scipy shapely
 # Viz
 import traceback
 import folium
@@ -26,22 +27,29 @@ project = "project_opdi"
 # Spark Session Initialization
 spark = SparkSession.builder \
     .appName("HexAero Runway Layout generator") \
-    .config("spark.log.level", "ERROR")\
+    .config("spark.ui.showConsoleProgress", "false") \
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
     .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.executor.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.driver.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.sql.catalog.spark_catalog.type", "hive") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog") \
+    .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
+    .config("spark.sql.catalog.spark_catalog.warehouse", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "8G") \
     .config("spark.executor.memory", "8G") \
-    .config("spark.executor.cores", "1") \
-    .config("spark.executor.instances", "2") \
+    .config("spark.executor.memoryOverhead", "3G") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.executor.instances", "3") \
     .config("spark.dynamicAllocation.maxExecutors", "20") \
     .config("spark.network.timeout", "800s") \
     .config("spark.executor.heartbeatInterval", "400s") \
-    .config("spark.driver.maxResultSize", "4g") \
-    .config("spark.ui.showConsoleProgress", "false") \
+    .config("spark.driver.maxResultSize", "6g") \
+    .config("spark.shuffle.compress", "true") \
+    .config("spark.shuffle.spill.compress", "true") \
     .enableHiveSupport() \
     .getOrCreate()
-
 
 
 def hexagons_dataframe_to_geojson(df_hex, file_output=None):
@@ -300,72 +308,44 @@ def average_heading_linestring(linestring):
 
     average_bearing = np.rad2deg(circmean(np.deg2rad(bearings))) if bearings else None
     return average_bearing
-    
+
+
 def hexagonify_airport(
-    apt_icao, 
+    apt_icao,
     radius,
     airports_df,
-    resolution = 12,
-    standard_width_runways = 50, # In case OSM does not have the width of the object this is the standard value
-    standard_width_taxiways = 20,
-    standard_width_parking = 20,
-    mp_width_runways = 1, # In case you need a buffer around your object, multiply > 1. 
-    mp_width_taxiways = 1,
-    mp_width_parking = 1):
-    
-    latitude = airports_df[airports_df['ident'] == apt_icao].latitude_deg.values[0]
-    longitude = airports_df[airports_df['ident'] == apt_icao].longitude_deg.values[0]
+    resolution=12
+):
+    """
+    Hexagonifies the airport features within a given radius.
 
-    runways_df = query_features(latitude, longitude, 'runway', radius)
-    taxiways_df = query_features(latitude, longitude, 'taxiway', radius)
-    parking_positions_df = query_features(latitude, longitude, 'parking_position', radius)
-    
-    #print(f"runways_df: len = {len(runways_df)}, columns = {list(runways_df.columns)}")
-    #print(f"taxiways_df: len = {len(taxiways_df)}, columns = {list(taxiways_df.columns)}")
-    #print(f"parking_positions_df: len = {len(parking_positions_df)}, columns = {list(parking_positions_df.columns)}")
-    #print()
-    
-    if len(runways_df) == 0:
-        runways_df['geometry'] = None
-    if len(taxiways_df) == 0:
-        taxiways_df['geometry'] = None
-        
-    if len(parking_positions_df) == 0:
-        parking_positions_df['geometry'] = None
-    
-    if 'width' not in runways_df.columns:
-        runways_df['width'] = None
+    Parameters:
+    - apt_icao (str): ICAO identifier of the airport.
+    - radius (float): Radius (in meters) for querying features around the airport.
+    - airports_df (pd.DataFrame): DataFrame containing airport data with latitude and longitude.
+    - resolution (int, optional): H3 resolution for hexagons. Default is 12.
 
-    if 'width' not in taxiways_df.columns:
-        taxiways_df['width'] = None
+    Returns:
+    - df (pd.DataFrame): DataFrame containing hexagonified features.
+    - latitude (float): Latitude of the airport.
+    - longitude (float): Longitude of the airport.
+    """
+    # Validate airport existence
+    airport_row = airports_df[airports_df['ident'] == apt_icao]
+    if airport_row.empty:
+        raise ValueError(f"No airport found with ICAO identifier {apt_icao}")
 
-    if 'width' not in parking_positions_df.columns:
-        parking_positions_df['width'] = None
-    
-    runways_df['width'] = runways_df['width'].apply(safe_convert_to_float)
-    runways_df['width'] = runways_df['width'].apply(lambda l: None if pd.isna(l) else l * mp_width_runways)
-    
-    taxiways_df['width'] = taxiways_df['width'].apply(safe_convert_to_float)
-    taxiways_df['width'] = taxiways_df['width'].apply(lambda l: None if pd.isna(l) else l * mp_width_runways)
-    
-    parking_positions_df['width'] = parking_positions_df['width'].apply(safe_convert_to_float)
-    parking_positions_df['width'] = parking_positions_df['width'].apply(lambda l: None if pd.isna(l) else l * mp_width_runways)
+    latitude = airport_row.latitude_deg.values[0]
+    longitude = airport_row.longitude_deg.values[0]
 
-    runways_df['polygon'] = lines_to_polygons(list(zip(runways_df.geometry.to_list(), runways_df.width.to_list())), standard_width_runways*mp_width_runways)
-    taxiways_df['polygon'] = lines_to_polygons(list(zip(taxiways_df.geometry.to_list(), taxiways_df.width.to_list())), standard_width_taxiways*mp_width_taxiways)
-    parking_positions_df['polygon'] = lines_to_polygons(list(zip(parking_positions_df.geometry.to_list(), parking_positions_df.width.to_list())), standard_width_parking*mp_width_parking)
+    features = ['runway', 'taxiway', 'parking_position', 'hangar','threshold','apron','deicing_pad']
 
-    runways_df['h3_res10'] = runways_df['polygon'].apply(lambda l: polygon_to_h3(l, resolution))
-    taxiways_df['h3_res10'] = taxiways_df['polygon'].apply(lambda l: polygon_to_h3(l, resolution))
-    parking_positions_df['h3_res10'] = parking_positions_df['polygon'].apply(lambda l: polygon_to_h3(l, resolution))
-    
-    runways_df['avg_heading'] = runways_df.geometry.apply(average_heading_linestring)
-    taxiways_df['avg_heading'] = taxiways_df.geometry.apply(average_heading_linestring)
-    parking_positions_df['avg_heading'] = parking_positions_df.geometry.apply(average_heading_linestring)
-    
-    runways_df['color_type'] = 1 
-    taxiways_df['color_type'] = 5000 
-    parking_positions_df['color_type'] = 10000 
+    # Define standard widths and multipliers in an ad-hoc DataFrame
+    feature_widths = pd.DataFrame({
+        'feature': features,
+        'standard_width': [50, 20, 20, 20, 20, 20, 35],
+        'mp_width': [1, 1, 1, 1, 1, 1, 1]
+    })
 
     def filter_empty_na_columns(df):
         """
@@ -377,25 +357,55 @@ def hexagonify_airport(
         Returns:
         - Filtered DataFrame with no completely empty or all-NA columns.
         """
-        # Drop columns where all values are NA
         df_filtered = df.dropna(axis=1, how='all')
-        # Further filter out columns that are entirely empty
         df_filtered = df_filtered.loc[:, (df_filtered != '').any(axis=0)]
         return df_filtered
 
-    # Apply the filtering function to each DataFrame
-    runways_df_filtered = filter_empty_na_columns(runways_df)
-    taxiways_df_filtered = filter_empty_na_columns(taxiways_df)
-    parking_positions_df_filtered = filter_empty_na_columns(parking_positions_df)
+    dfs = []
+    for feature in features:
+        dfs.append(query_features(latitude, longitude, feature, radius))
+
+    dfs_filtered = []
+
+    for idx, (feature, df) in enumerate(zip(features, dfs)):
+        # Extract standard width and multiplier width from the DataFrame
+        standard_width = feature_widths.loc[feature_widths['feature'] == feature, 'standard_width'].values[0]
+        mp_width = feature_widths.loc[feature_widths['feature'] == feature, 'mp_width'].values[0]
+
+        if df.empty:
+            df['geometry'] = pd.Series(dtype='object')
+
+        if 'width' not in df.columns:
+            df['width'] = pd.Series(dtype='float')
+
+        df['width'] = df['width'].apply(safe_convert_to_float)
+        df['width'] = df['width'].apply(lambda l: None if pd.isna(l) else l * mp_width)
+        df['polygon'] = lines_to_polygons(list(zip(df.geometry.to_list(), df.width.to_list())), standard_width * mp_width)
+        df['hex_id'] = df['polygon'].apply(lambda l: polygon_to_h3(l, resolution))
+        df['avg_heading'] = df.geometry.apply(average_heading_linestring)
+        df['color_type'] = idx * idx * 1000
+
+        # Apply the filtering function to each DataFrame
+        df = filter_empty_na_columns(df)
+
+        dfs_filtered.append(df)
 
     # Concatenate the filtered DataFrames
-    df = pd.concat([runways_df_filtered, taxiways_df_filtered, parking_positions_df_filtered])
-    df = df.explode('h3_res10').rename({'h3_res10':'hex_id'},axis=1)
+    df = pd.concat(dfs_filtered, ignore_index=True)
+    
+    # Check if the DataFrame is empty before attempting to explode
+    if df.empty:
+      print(f"No data available for airport {apt_icao}. Skipping...")
+      return None, latitude, longitude  # Or handle appropriately for your use case
+
+    
+    df = df.explode('hex_id')
     df = df[~df.hex_id.isna()]
 
     df['apt_icao'] = apt_icao
-    df['hex_latitude'], df['hex_longitude'] = zip(*df['hex_id'].apply(h3.h3_to_geo)) 
+    df['hex_latitude'], df['hex_longitude'] = zip(*df['hex_id'].apply(h3.h3_to_geo))
     df['hex_res'] = resolution
+
     return df, latitude, longitude
 
 ## Load logs
@@ -425,14 +435,7 @@ for apt_icao in airports_df.ident.to_list():
                 apt_icao, 
                 radius,
                 airports_df,
-                resolution = res,
-                standard_width_runways = 45, # In case OSM does not have the width of the object this is the standard value
-                standard_width_taxiways = 20,
-                standard_width_parking = 20,
-                mp_width_runways = 1, # In case you need a buffer around your object, multiply > 1. 
-                mp_width_taxiways = 1,
-                mp_width_parking = 1)
-            
+                resolution = res)
 
             s = ['apt_icao', 'hex_id', 'hex_latitude', 'hex_longitude', 'hex_res']
             df = df[s + [x for x in df.columns if x not in s + ['geometry', 'polygon']]]
@@ -494,13 +497,16 @@ for apt_icao in airports_df.ident.to_list():
                 StructField("hexaero_avg_heading", DoubleType(), True)
             ])
 
-            sdf = spark.createDataFrame(df, schema)
-            sdf.write.mode("append").insertInto(f"`{project}`.`hexaero_airport_layouts`")
+            sdf = spark.createDataFrame(df.to_dict(orient='records'), schema)
+            sdf = sdf.repartition("hexaero_apt_icao").orderBy("hexaero_apt_icao")
+            sdf.writeTo(f"`{project}`.`hexaero_airport_layouts`").append()
+            
             
             ## Logging
             processed_apt_success.append(apt_icao)
             processed_apt_success_df = pd.DataFrame({'apt':processed_apt_success})
             processed_apt_success_df.to_parquet(fpath_success)
+        
         except Exception as e: 
             print(f"Failed to process {apt_icao}. Error: {e}")
             print(traceback.format_exc())
@@ -512,16 +518,3 @@ for apt_icao in airports_df.ident.to_list():
             continue
 
 
-# Construct the file pattern to match
-#file_pattern = f"data/airport_layout/*"
-
-# Use glob to find all files matching the pattern
-#files = glob.glob(file_pattern)
-
-#df_list = [pd.read_parquet(file) for file in files]
-#concatenated_df = pd.concat(df_list, ignore_index=True)
-
-# Output the concatenated DataFrame to a single Parquet file
-
-#output_file = f"data/airport_layout/h3_res_{res}_apron_all_airports.parquet"
-#concatenated_df.to_parquet(output_file)

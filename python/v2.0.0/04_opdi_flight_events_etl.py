@@ -48,94 +48,15 @@ spark = SparkSession.builder \
 
 # Settings
 project = "project_opdi"
-recreate_flight_event_table = False
-recreate_measurement_table = False
 
 ## Range for processing
 start_date = datetime.strptime('2022-01-01', '%Y-%m-%d')
-end_date = datetime.strptime('2024-07-01', '%Y-%m-%d')
+end_date = datetime.strptime('2024-11-01', '%Y-%m-%d')
 
 
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')
 
-create_flight_events_table_sql = f"""
-    CREATE TABLE IF NOT EXISTS `{project}`.`opdi_flight_events` (
-
-        id STRING COMMENT 'Primary Key: Unique milestone identifier for each record.',
-        flight_id STRING COMMENT 'Foreign Key: Identifier linking the flight event to the flight trajectory table.',
-
-        milestone_type STRING COMMENT 'Type of the flight event (milestone) being recorded.',
-        event_time BIGINT COMMENT 'Timestamp for the flight event.',
-        longitude DOUBLE COMMENT 'Longitude coordinate of the flight event.',
-        latitude DOUBLE COMMENT 'Latitude coordinate of the flight event.',
-        altitude DOUBLE COMMENT 'Altitude at which the flight event occurred.',
-        
-        source STRING COMMENT 'Source of the trajectory data.',
-        version STRING COMMENT 'Version of the flight event (milestone) determination algorithm.',
-        info STRING COMMENT 'Additional information or description of the flight event.'
-    )
-    COMMENT '`{project}`.`opdi_flight_events` table containing various OSN trajectory flight events. Last updated: {today}.'
-    STORED AS parquet
-    TBLPROPERTIES ('transactional'='false');
-"""
-
-print(f' Query to create OPDI Flight Events table:\n {create_flight_events_table_sql}')
-if recreate_flight_event_table:
-    spark.sql(f"DROP TABLE IF EXISTS `{project}`.`opdi_flight_events`;")
-    spark.sql(create_flight_events_table_sql)
-
-create_measurement_table_sql = f"""
-    CREATE TABLE IF NOT EXISTS `{project}`.`opdi_measurements` (
-        
-        id STRING COMMENT 'Primary Key: Unique measurement identifier for each record.',
-        milestone_id STRING COMMENT 'Foreign Key: Identifier linking the measurement to the corresponding event in the flight events table.',
-        
-        type STRING COMMENT 'Type of measurement, e.g. flown distance or fuel consumption.',
-        value DOUBLE COMMENT 'Value of the measurement.',
-        version STRING COMMENT 'The version of the measurement calculation.'
-    )
-    COMMENT '`{project}`.opdi_measurements` table containing various measurements for OPDI flight events. Last updated: {today}.'
-    STORED AS parquet
-    TBLPROPERTIES ('transactional'='false');
-"""
-
-print(f' Query to create OSN Measurements table:\n {create_measurement_table_sql}')
-if recreate_measurement_table: 
-    spark.sql(f"DROP TABLE IF EXISTS `{project}`.`osn_measurements`;")
-    spark.sql(create_measurement_table_sql)
-
-def smooth_baro_alt(df):
-    # Define the acceptable rate of climb/descent threshold (25.4 meters per second, i.e. 5000ft/min)
-    rate_threshold = 25.4
-
-    # Calculate the rate of climb/descent in meters per second for each track_id
-    window_spec = Window.partitionBy("track_id").orderBy("event_time")
-    df = df.withColumn("prev_baro_altitude", lag("baro_altitude").over(window_spec))
-    df = df.withColumn("prev_event_time", lag("event_time").over(window_spec))
-
-    df = df.withColumn("time_diff", (col("event_time") - col("prev_event_time")))
-    df = df.withColumn("altitude_diff", (col("baro_altitude") - col("prev_baro_altitude")))
-    df = df.withColumn("rate_of_climb", col("altitude_diff") / col("time_diff"))
-
-    # Create a window for calculating the rolling average
-    # Define a time window for the rolling average (e.g., 300 seconds or 5 min)
-    time_window = 300
-
-    # Create a window specification for calculating the rolling average based on time
-    window_spec_avg = Window.partitionBy("track_id").orderBy("event_time").rangeBetween(-time_window, time_window)
-
-    # Calculate the rolling average (smoothing)
-    df = df.withColumn("smoothed_baro_altitude", avg("baro_altitude").over(window_spec_avg))
-
-    # Replace unrealistic climb/descent points with the smoothed values
-    df = df.withColumn("baro_altitude",
-                       when((abs(col("rate_of_climb")) > rate_threshold),
-                            col("smoothed_baro_altitude")).otherwise(col("baro_altitude")))
-
-    # Drop the temporary columns
-    df = df.drop("smoothed_baro_altitude", "prev_baro_altitude", "prev_event_time", "time_diff", "altitude_diff", "rate_of_climb")
-    return df
 
 # Helper function for calculating horizontal segments events
 
@@ -162,12 +83,12 @@ def calculate_horizontal_segment_events(sdf_input):
         DataFrame: DataFrame with calculated segment events.
     """
     df = sdf_input.select(
-        "track_id", "lat", "lon", "event_time", "baro_altitude",
+        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
         "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s"
     )
 
     # Extracting OpenAP phases
-    df = df.withColumn("alt", col("baro_altitude") * 3.28084)
+    df = df.withColumn("alt", col("baro_altitude_c") * 3.28084)
     df = df.withColumn("roc", col("vert_rate") * 196.850394)
     df = df.withColumn("spd", col("velocity") * 1.94384)
 
@@ -298,13 +219,13 @@ def calculate_vertical_crossing_events(sdf_input):
         DataFrame: DataFrame with calculated vertical crossing events.
     """
     df = sdf_input.select(
-        "track_id", "lat", "lon", "event_time", "baro_altitude",
+        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
         "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s"
     )
 
     # Convert meters to flight level and create a new column
-    df = df.withColumn("altitude_ft", col("baro_altitude") * 3.28084)
-    df = df.withColumn("FL", (col("baro_altitude") * 3.28084 / 100).cast(DoubleType()))
+    df = df.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
+    df = df.withColumn("FL", (col("baro_altitude_c") * 3.28084 / 100).cast(DoubleType()))
 
     # Window specification to order by event_time for each track_id
     window_spec = Window.partitionBy("track_id").orderBy("event_time")
@@ -396,11 +317,11 @@ def calculate_firstseen_lastseen_events(sdf_input):
     """
     # Select necessary columns
     df = sdf_input.select(
-        "track_id", "lat", "lon", "event_time", "baro_altitude",
+        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
         "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s"
     )
     
-    df = df.withColumn("altitude_ft", col("baro_altitude") * 3.28084)
+    df = df.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
     
     # Window specification to order by event_time for each track_id
     window_spec = Window.partitionBy("track_id").orderBy("event_time")
@@ -471,7 +392,7 @@ def calculate_airport_events(sv, month):
 
 
     # Filter out rows with missing crucial data
-    sv_f = sv.dropna(subset=['lat', 'lon', 'baro_altitude'])
+    sv_f = sv.dropna(subset=['lat', 'lon', 'baro_altitude_c'])
 
     # Rename callsign to flight_id (official term)
     sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
@@ -482,8 +403,8 @@ def calculate_airport_events(sv, month):
     # Convert event_time from posixtime to datetime 
     sv_f = sv_f.withColumn('event_time', F.to_timestamp(F.col('event_time')))
 
-    # Add flight level extracted from baro_altitude
-    sv_f = sv_f.withColumn('altitude_ft', col('baro_altitude') * 3.28084)
+    # Add flight level extracted from baro_altitude_c
+    sv_f = sv_f.withColumn('altitude_ft', col('baro_altitude_c') * 3.28084)
     sv_f = sv_f.withColumn('flight_level', col('altitude_ft') / 100)
 
     # Select columns of interest
