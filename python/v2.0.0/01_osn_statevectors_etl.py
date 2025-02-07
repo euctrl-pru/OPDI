@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, to_date, from_unixtime
+from pyspark.sql.functions import col, lit, to_date, from_unixtime
 from datetime import datetime, date, timedelta
 import subprocess
 import os, shutil, time
@@ -14,7 +14,6 @@ import pandas as pd
 project = "project_opdi"
 start_month = date(2022, 1, 1)
 import_data = True
-cluster_data = False
 
 
 ## Which months to process
@@ -86,7 +85,7 @@ def list_mc_files():
   # Execute mc find command to list files
   stdout, _ = execute_shell_command('./mc find opensky/ec-datadump/ --path "*/states_*.parquet"')
   files_to_download = stdout.split('\n')
-  files_to_download = [file for file in files_to_download if '2022-' in file or '2023-' in file or '2024-' in file]
+  files_to_download = [file for file in files_to_download if '2022-' in file or '2023-' in file or '2024-' in file or '2025-' in file]
   return(files_to_download)
 
 # Create the OSN EC data table to dump in the data
@@ -237,7 +236,7 @@ if import_data:
           df_cleaned = df_partitioned.drop("event_time_day")
 
           # Write the data for the month
-          df_cleaned.writeTo(f"`{project}`.`osn_statevectors`").append()
+          df_cleaned.writeTo(f"`{project}`.`osn_statevectors_v2`").append()
 
           # Delete the local copies to save space
           for file_name in downloaded_files:
@@ -250,106 +249,6 @@ if import_data:
                   f.write(file_name + '\n')
                   processed_files.add(file_name)
 
-# Create clustered version of osn_statevectorsdump.. 
-
-#print("Starting clustering..")
-
-create_clustered_db = f"""
-CREATE TABLE IF NOT EXISTS `{project}`.`osn_statevectors_clustered` (
-  event_time BIGINT COMMENT 'This column contains the unix (aka POSIX or epoch) timestamp for which the state vector was valid.',
-  icao24 STRING COMMENT 'This column contains the 24-bit ICAO transponder ID which can be used to track specific airframes over different flights.',
-  lat DOUBLE COMMENT 'This column contains the last known latitude of the aircraft.',
-  lon DOUBLE COMMENT 'This column contains the last known longitude of the aircraft.',
-  velocity DOUBLE COMMENT 'This column contains the speed over ground of the aircraft in meters per second.',
-  heading DOUBLE COMMENT 'This column represents the direction of movement (track angle in degrees) as the clockwise angle from the geographic north.',
-  vert_rate DOUBLE COMMENT 'This column contains the vertical speed of the aircraft in meters per second.',
-  callsign STRING COMMENT 'This column contains the callsign that was broadcast by the aircraft.',
-  on_ground BOOLEAN COMMENT 'This flag indicates whether the aircraft is broadcasting surface positions (true) or airborne positions (false).',
-  alert BOOLEAN COMMENT 'This flag is a special indicator used in ATC.',
-  spi BOOLEAN COMMENT 'This flag is a special indicator used in ATC.',
-  squawk STRING COMMENT 'This 4-digit octal number is another transponder code which is used by ATC and pilots for identification purposes and indication of emergencies.',
-  baro_altitude DOUBLE COMMENT 'This column indicates the aircrafts altitude. As the names suggest, baroaltitude is the altitude measured by the barometer (in meter).',
-  geo_altitude DOUBLE COMMENT 'This column indicates the aircrafts altitude. As the names suggest, geoaltitude is determined using the GNSS (GPS) sensor (in meter).',
-  last_pos_update DOUBLE COMMENT 'This unix timestamp indicates the age of the position.',
-  last_contact DOUBLE COMMENT 'This unix timestamp indicates the time at which OpenSky received the last signal of the aircraft.',
-  serials ARRAY<INT> COMMENT 'The serials column is a list of serials of the ADS-B receivers which received the message.'
-)
-COMMENT 'OpenSky Network EUROCONTROL datadump (for PRU) clustered. Last updated: {today}.'
-CLUSTERED BY (icao24, callsign, event_time, geo_altitude) INTO 4096 BUCKETS
-STORED AS parquet
-TBLPROPERTIES ('transactional'='false');
-"""
-
-def generate_months(start_date, end_date):
-    """Generate a list of dates corresponding to the first day of each month between two dates.
-
-    Args:
-    start_date (datetime.date): The starting date.
-    end_date (datetime.date): The ending date.
-
-    Returns:
-    list: A list of date objects for the first day of each month within the specified range.
-    """
-    current = start_date
-    months = []
-    while current <= end_date:
-        months.append(current)
-        # Increment month
-        month = current.month
-        year = current.year
-        if month == 12:
-            current = date(year + 1, 1, 1)
-        else:
-            current = date(year, month + 1, 1)
-    return months
-
-def get_start_end_of_month(date):
-    """Return a datetime object for the first and last second  of the given month and year."""
-    year = date.year
-    month = date.month
-    
-    first_second = datetime(year, month, 1, 0, 0, 0)
-    last_day = calendar.monthrange(year, month)[1]
-    last_second = datetime(year, month, last_day, 23, 59, 59)
-    return first_second.timestamp(), last_second.timestamp()
-
-def cluster_data(project, month):
-    print(f"Adding statevectors for {project}.osn_statevectors to clustered table for month {month}")
-
-    start_time, end_time = get_start_end_of_month(month)
-
-    spark.sql(f"""
-      INSERT INTO TABLE `{project}`.`osn_statevectors_clustered` 
-      SELECT * FROM `{project}`.`osn_statevectors`
-      WHERE (event_time >= {start_time}) AND (event_time < {end_time});""");
-
-if cluster_data:
-
-  #spark.sql(create_clustered_db)
-
-  to_process_months = generate_months(start_month, end_month)
-
-  ## Load logs
-  fpath = 'logs/01_osn-statevectors-clustering.parquet'
-  if os.path.isfile(fpath):
-    processed_months = pd.read_parquet(fpath).months.to_list()
-  else:
-    processed_months = []
-
-
-  ## Process loop
-  for month in to_process_months:
-    print(f'Processing month: {month}')
-    if month in processed_months:
-      print(f'Already processed {month}')
-      continue
-    else:
-      cluster_data(project, month)
-      processed_months.append(month)
-
-      ## Logging
-      processed_df = pd.DataFrame({'months':processed_months})
-      processed_df.to_parquet(fpath)
 
 # Stop the SparkSession
 spark.stop()

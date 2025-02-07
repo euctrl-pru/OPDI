@@ -208,7 +208,7 @@ def process_tracks(project, h3_resolutions, month):
   
   # Read raw data 
   df_month = spark.sql(f"""
-        SELECT * FROM `{project}`.`osn_statevectors` 
+        SELECT * FROM `{project}`.`osn_statevectors_v2` 
         WHERE (event_time >= TIMESTAMP('{start_time_str}')) 
           AND (event_time < TIMESTAMP('{end_time_str}'));
     """)

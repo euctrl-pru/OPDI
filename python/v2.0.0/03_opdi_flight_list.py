@@ -75,6 +75,9 @@ def get_start_end_of_month(date):
 project = "project_opdi"
 resolution = 7
 
+start_month = date(2022, 1, 1)
+end_month = date(2024, 12, 1)
+
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')
 
@@ -611,9 +614,6 @@ def process_flight_table_O(spark, project, month):
 
     flight_table.writeTo(f"`{project}`.`opdi_flight_list`").append()
 
-# Actual processing
-start_month = date(2022, 1, 1)
-end_month = date(2024, 11, 1)
 
 to_process_months = generate_months(start_month, end_month)
 

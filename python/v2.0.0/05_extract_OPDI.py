@@ -13,6 +13,7 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 import numpy as np
 import os.path
+from pyspark.sql.types import TimestampType
 
 # Adding python folder
 import sys
@@ -29,7 +30,7 @@ extract_measurements = True
 
 ## Date range
 start_date = date(2022, 1, 1)
-end_date = date(2024, 7, 1)
+end_date = date(2025, 1, 1)
 
 ## Versions
 export_version = 'v002'
@@ -59,21 +60,29 @@ except OSError as error:
 
 # Spark Session Initialization
 spark = SparkSession.builder \
-    .appName("OPDI Extraction") \
-    .config("spark.log.level", "ERROR")\
-    .config("spark.ui.showConsoleProgress", "false")\
+    .appName("OPDI extraction") \
+    .config("spark.ui.showConsoleProgress", "false") \
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
     .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.executor.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.driver.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.sql.catalog.spark_catalog.type", "hive") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog") \
+    .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
+    .config("spark.sql.catalog.spark_catalog.warehouse", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "14G") \
-    .config("spark.executor.memory", "7G") \
-    .config("spark.executor.cores", "1") \
-    .config("spark.executor.instances", "2") \
+    .config("spark.executor.memory", "8G") \
+    .config("spark.executor.memoryOverhead", "3G") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.executor.instances", "3") \
     .config("spark.dynamicAllocation.maxExecutors", "15") \
-    .config("spark.network.timeout", "800s")\
+    .config("spark.network.timeout", "800s") \
     .config("spark.executor.heartbeatInterval", "400s") \
-    .config('spark.ui.showConsoleProgress', False) \
-    .config("spark.driver.maxResultSize", "4g") \
+    .config("spark.driver.maxResultSize", "6g") \
+    .config("spark.shuffle.compress", "true") \
+    .config("spark.shuffle.spill.compress", "true") \
+    .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
     .enableHiveSupport() \
     .getOrCreate()
 
@@ -96,7 +105,7 @@ print()
 print("Flight Table time")
 print()
 
-print(f'[[Extracting FLIGHT table from {start_date} until {end_date}...]]')
+print(f'[[Extracting FLIGHT list from {start_date} until {end_date}...]]')
 months = generate_months(start_date, end_date)
 
 for month in months:
@@ -109,20 +118,21 @@ for month in months:
     filename_csv = f'{opath}/flight_list/flight_list_{month_str}.csv.gz'
     filename_parquet = f'{opath}/flight_list/flight_list_{month_str}.parquet'
     
-    print(f"Extracting EVENT table {start_month_str} until {end_month_str}...")
+    print(f"Extracting flight list {start_month_str} until {end_month_str}...")
     
-    if os.path.isfile(filename_csv) and os.path.isfile(filename_parquet):
+    if os.path.isfile(filename_csv) or os.path.isfile(filename_parquet):
         print('Files exist already - SKIPPING...')
         continue
     
     try:
         # Execute the query and convert to pandas DataFrame
-        df = get_data_within_timeframe(spark, table_name = f'{project}.opdi_flight_list_clustered', month = month, time_col = 'first_seen', unix_time = False).toPandas()
-        df_mod = df.loc[:, ['id', 'adep', 'ades', 'icao24', 'flt_id', 'first_seen', 'last_seen', 'dof']].rename({'flt_id':'FLT_ID', 'dof':'DOF'},axis=1)
-        df_mod = df_mod.sort_values('first_seen').reset_index(drop=True)
-        df_mod['version'] = f'flight_list_{v_long_flist}'
-        
-        df_mod.to_csv(filename_csv, compression='gzip',index=False)
+        df = get_data_within_timeframe(spark, table_name = f'{project}.opdi_flight_list', 
+                                       month = month, time_col = 'first_seen', unix_time = False)
+        df = df.toPandas()
+        df_mod = df.sort_values('first_seen').reset_index(drop=True)
+        df = df.loc[:,['id', 'icao24', 'flt_id', 'dof', 'adep', 'ades', 'adep_p', 'ades_p',
+       'registration', 'model', 'typecode', 'icao_aircraft_class',
+       'icao_operator', 'first_seen', 'last_seen', 'version']]
         df_mod.to_parquet(filename_parquet)
 
     except Exception as e:
@@ -153,7 +163,7 @@ def process_and_save_data_events(start_date, end_date):
     
     print(f"Extracting EVENT table {start_date_str} until {end_date_str}...")
     
-    if os.path.isfile(file_path_csv) and os.path.isfile(file_path_parquet):
+    if os.path.isfile(file_path_csv) or os.path.isfile(file_path_parquet):
         print('Files exist already - SKIPPING...')
         return None
     
@@ -161,26 +171,22 @@ def process_and_save_data_events(start_date, end_date):
     milestone_sql = f"""
     WITH flight_list AS (
         SELECT id as track_id
-        FROM `{project}`.`opdi_flight_list_clustered` 
+        FROM `{project}`.`opdi_flight_list` 
         WHERE first_seen >= TO_DATE('{start_date_str}') 
         AND first_seen < TO_DATE('{end_date_str}') 
     ) 
 
     SELECT * 
-    FROM `{project}`.`opdi_flight_events_clustered`
-    WHERE opdi_flight_events_clustered.flight_id IN (SELECT track_id FROM flight_list)
+    FROM `{project}`.`opdi_flight_events`
+    WHERE opdi_flight_events.flight_id IN (SELECT track_id FROM flight_list)
     """
 
      # Execute the query and load data into a PySpark DataFrame
     df_mod = spark.sql(milestone_sql)
-    df_mod = df_mod.withColumnRenamed("milestone_type", "type")
-    df_mod = df_mod.withColumn("event_time", from_unixtime(col("event_time")))
-    df_mod = df_mod.withColumn("version", lit(f"flight_events_{v_long_events}"))
-    
+    df_mod = df_mod.withColumn("version", lit(f"{v_long_events}"))
     df_mod = df_mod.toPandas()
     
     # Save in datalake
-    df_mod.to_csv(file_path_csv, compression='gzip',index=False)
     df_mod.to_parquet(file_path_parquet)
 
 # Loop from 2022-05-01 until 2022-07-01 in 10 days intervals
@@ -216,7 +222,7 @@ def process_and_save_data_measurements(start_date, end_date):
     
     print(f'Extracting MEASUREMENT table {start_date_str} until {end_date_str}...')
     
-    if os.path.isfile(file_path_csv) and os.path.isfile(file_path_parquet):
+    if os.path.isfile(file_path_csv) or os.path.isfile(file_path_parquet):
         print('Files exist already - SKIPPING...')
         return None
     
@@ -225,29 +231,28 @@ def process_and_save_data_measurements(start_date, end_date):
     WITH 
         flight_list AS (
             SELECT id as track_id
-            FROM `{project}`.`opdi_flight_list_clustered` 
+            FROM `{project}`.`opdi_flight_list` 
             WHERE first_seen >= TO_DATE('{start_date_str}') 
             AND first_seen < TO_DATE('{end_date_str}') 
         ),
         event_table AS (
             SELECT id 
-            FROM `{project}`.`opdi_flight_events_clustered`
-            WHERE opdi_flight_events_clustered.flight_id IN (SELECT track_id FROM flight_list)
+            FROM `{project}`.`opdi_flight_events`
+            WHERE opdi_flight_events.flight_id IN (SELECT track_id FROM flight_list)
         )
 
     SELECT * 
-    FROM `{project}`.`opdi_measurements_clustered`
-    WHERE opdi_measurements_clustered.milestone_id in (SELECT id from event_table) 
+    FROM `{project}`.`opdi_measurements`
+    WHERE opdi_measurements.milestone_id in (SELECT id from event_table) 
     """
 
     # Execute the query and convert to Pandas DataFrame
     df_mod = spark.sql(measurement_sql)
     df_mod = df_mod.withColumnRenamed("milestone_id", "event_id")
-    df_mod = df_mod.withColumn("version", lit(f"measurements_{v_long_measures}"))
+    df_mod = df_mod.withColumn("version", lit(f"{v_long_measures}"))
     df_mod = df_mod.toPandas()
     
     # Save in datalake
-    df_mod.to_csv(file_path_csv, compression='gzip',index=False)
     df_mod.to_parquet(file_path_parquet)
 
 

@@ -28,19 +28,27 @@ from pyspark.sql.functions import (
 #shutil.copy("/runtime-addons/cmladdon-2.0.40-b150/log4j.properties", "/etc/spark/conf/") # Setting logging properties
 spark = SparkSession.builder \
     .appName("OPDI flight events and measurements ETL") \
-    .config("spark.log.level", "ERROR")\
-    .config("spark.ui.showConsoleProgress", "false")\
+    .config("spark.ui.showConsoleProgress", "false") \
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
     .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.executor.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.driver.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
+    .config("spark.sql.catalog.spark_catalog.type", "hive") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog") \
+    .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
+    .config("spark.sql.catalog.spark_catalog.warehouse", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.driver.cores", "1") \
     .config("spark.driver.memory", "5G") \
     .config("spark.executor.memory", "8G") \
-    .config("spark.executor.cores", "1") \
-    .config("spark.executor.instances", "2") \
+    .config("spark.executor.memoryOverhead", "3G") \
+    .config("spark.executor.cores", "2") \
+    .config("spark.executor.instances", "3") \
     .config("spark.dynamicAllocation.maxExecutors", "15") \
-    .config("spark.network.timeout", "800s")\
+    .config("spark.network.timeout", "800s") \
     .config("spark.executor.heartbeatInterval", "400s") \
-    .config('spark.ui.showConsoleProgress', False) \
+    .config("spark.driver.maxResultSize", "6g") \
+    .config("spark.shuffle.compress", "true") \
+    .config("spark.shuffle.spill.compress", "true") \
     .enableHiveSupport() \
     .getOrCreate()
 
@@ -48,11 +56,12 @@ spark = SparkSession.builder \
 
 # Settings
 project = "project_opdi"
+start_month = date(2022, 1, 1)
+end_month = date(2024, 12, 1)
 
 ## Range for processing
 start_date = datetime.strptime('2022-01-01', '%Y-%m-%d')
 end_date = datetime.strptime('2024-11-01', '%Y-%m-%d')
-
 
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')
@@ -370,8 +379,7 @@ def calculate_airport_events(sv, month):
         spark, 
         'project_opdi.opdi_flight_list', 
         month, 
-        time_col='dof', 
-        unix_time=False
+        time_col='dof'
     ).select(
         ['id', 'adep', 'ades', 'adep_p', 'ades_p']
     )
@@ -399,9 +407,6 @@ def calculate_airport_events(sv, month):
 
     # Replace missing 'flight_id' with empty string
     sv_f = sv_f.fillna({'flight_id': ''})
-
-    # Convert event_time from posixtime to datetime 
-    sv_f = sv_f.withColumn('event_time', F.to_timestamp(F.col('event_time')))
 
     # Add flight level extracted from baro_altitude_c
     sv_f = sv_f.withColumn('altitude_ft', col('baro_altitude_c') * 3.28084)
@@ -445,7 +450,7 @@ def calculate_airport_events(sv, month):
 
     # Calculate entry and exit times with cumulative distances
     result = df_labelled.groupBy(
-        "track_id", "icao24", "flight_id", "hexaero_apt_icao", "hexaero_osm_id", "hexaero_aeroway", "hexaero_ref", "hexaero_avg_heading", "trace_id"
+        "track_id", "icao24", "flight_id", "hexaero_apt_icao", "hexaero_osm_id", "hexaero_aeroway", "hexaero_ref", "trace_id"
     ).agg(
         F.min("event_time").alias("entry_time"),
         F.max("event_time").alias("exit_time"),
@@ -468,8 +473,7 @@ def calculate_airport_events(sv, month):
     result = result.withColumnRenamed("hexaero_osm_id", "osm_id") \
                          .withColumnRenamed("hexaero_aeroway", "osm_aeroway") \
                          .withColumnRenamed("hexaero_ref", "osm_ref") \
-                         .withColumnRenamed("hexaero_apt_icao", "osm_airport") \
-                         .withColumnRenamed("hexaero_avg_heading", "osm_avg_heading")
+                         .withColumnRenamed("hexaero_apt_icao", "osm_airport") 
 
     # Add 'info' column
     result = result.withColumn("info", to_json(struct(
@@ -477,7 +481,6 @@ def calculate_airport_events(sv, month):
         col("osm_aeroway"),
         col("osm_ref"),
         col("osm_airport"),
-        col("osm_avg_heading").alias('opdi_avg_heading'),
         col("time_in_use_seconds").alias("opdi_time_in_use_s"), 
         col("icao24").alias("osn_icao24"),
         col("flight_id").alias("osn_flight_id")
@@ -518,8 +521,6 @@ def calculate_airport_events(sv, month):
     # Concatenate entry and exit events
     apt_events = entry_events.unionByName(exit_events)
     
-    # Event time back to unix
-    apt_events = apt_events.withColumn('event_time', unix_timestamp(F.col('event_time')))
     
     # Clean up the DataFrame
     apt_events = apt_events.select(
@@ -630,9 +631,6 @@ def etl_flight_events_and_measures(
         calc_hexaero = True, 
         calc_seen = True):
     
-    # Smooth baro_alt              
-    sdf_input = smooth_baro_alt(sdf_input)
-    
     # Add measures
     sdf_input = add_distance_measure(sdf_input)
     sdf_input = add_time_measure(sdf_input)
@@ -695,7 +693,7 @@ def etl_flight_events_and_measures(
     # Milestones table
     df_milestones = df_events.select(
         col('id_tmp').alias('id'),
-        col('track_id').alias('track_id'),
+        col('track_id').alias('flight_id'),
         col('type').alias('type'),
         col('event_time').alias('event_time'),
         col('lon').alias('longitude'),
@@ -705,8 +703,11 @@ def etl_flight_events_and_measures(
         col('version').alias('version'),
         col('info').alias('info'),
     )
-    df_milestones.write.mode("append").insertInto(f"`{project}`.`opdi_flight_events`")
-    #df_milestones.toPandas().to_parquet('events_test.parquet')
+
+
+    # insert
+    df_milestones = df_milestones.repartition("type", "version").orderBy("type", "version")
+    df_milestones.writeTo(f"`{project}`.`opdi_flight_events`").append()
     
     # Measurements table 
     ## Add Distance flown (NM) - df measure
@@ -733,10 +734,11 @@ def etl_flight_events_and_measures(
     
     # Merge
     df_measurements = df_measurements_df.union(df_measurements_tp)
-    df_measurements.write.mode("append").insertInto(f"`{project}`.`opdi_measurements`")
-    #df_measurements.toPandas().to_parquet('measurements_test.parquet')
+
+    # insert
+    df_measurements = df_measurements.repartition("type", "version").orderBy("type", "version")
+    df_measurements.writeTo(f"`{project}`.`opdi_measurements`").append()
     
-    df_measurements_tp.write.mode("append").insertInto(f"`{project}`.`opdi_measurements`")
     return None
     
 # Run code.. 
@@ -800,36 +802,35 @@ def get_start_end_of_month(date):
     return first_second.timestamp(), last_second.timestamp()
 
 
-def get_data_within_timeframe(spark, table_name, month, time_col = 'event_time', unix_time = True):
+def get_data_within_timeframe(spark, table_name, month, time_col='event_time'):
     """
     Retrieves records from a specified Spark table within the given timeframe.
 
     Args:
-    spark (SparkSession): The SparkSession object.
-    table_name (str): The name of the Spark table to query.
-    month (str): The start date of a month in datetime format.
+        spark (SparkSession): The SparkSession object.
+        table_name (str): The name of the Spark table to query.
+        month (str): The start date of a month in the format 'YYYY-MM-DD'.
+        time_col (str): The column name containing timestamp data (default: 'event_time').
 
     Returns:
-    pyspark.sql.dataframe.DataFrame: A DataFrame containing the records within the specified timeframe.
+        pyspark.sql.dataframe.DataFrame: A DataFrame containing the records within the specified timeframe.
     """
-    # Convert dates to POSIX time (seconds since epoch)
-    start_posix,stop_posix = get_start_end_of_month(month)
+    # Convert the start and end of the month to Unix timestamps
+    start_date, end_date = get_start_end_of_month(month)
+
+    # Convert Unix timestamps to Spark timestamp format
+    start_date_ts = to_timestamp(lit(start_date))
+    end_date_ts = to_timestamp(lit(end_date))
 
     # Load the table
-    df = spark.read.table(table_name)
-    
-    if unix_time:
-        # Filter records based on event_time posix column
-        df = df.filter((col(time_col) >= start_posix) & (col(time_col) < stop_posix))
-    else: 
-        df = df.withColumn('unix_time', unix_timestamp(time_col))
-        df = df.filter((col('unix_time') >= start_posix) & ((col('unix_time') < stop_posix)))
-                                
-    return df
+    df = spark.table(table_name)
+
+    # Filter records based on the timestamp column
+    filtered_df = df.filter((col(time_col) >= start_date_ts) & (col(time_col) < end_date_ts))
+
+    return filtered_df
   
-# Actual processing
-start_month = date(2022, 1, 1)
-end_month = date(2024, 12, 1)
+
 
 to_process_months = generate_months(start_month, end_month)
 
@@ -893,8 +894,8 @@ for month in to_process_months:
         # Perform the ETL operation for the current day
         sdf_input = get_data_within_timeframe( # State Vectors sv
             spark = spark, 
-            table_name = f'{project}.osn_tracks_clustered', 
-            month = month).select("track_id","lat","lon","event_time","baro_altitude","velocity","vert_rate", "callsign", "icao24", "heading", "h3_res_12").cache()
+            table_name = f'{project}.osn_tracks', 
+            month = month).select("track_id","lat","lon","event_time", "baro_altitude_c" ,"baro_altitude_c","velocity","vert_rate", "callsign", "icao24", "heading", "h3_res_12").cache()
 
         etl_flight_events_and_measures(sdf_input, 
                                        batch_id=month.strftime("%Y%m%d") + '_', 
