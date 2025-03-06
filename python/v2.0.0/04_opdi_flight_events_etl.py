@@ -707,7 +707,7 @@ def etl_flight_events_and_measures(
 
     # insert
     df_milestones = df_milestones.repartition("type", "version").orderBy("type", "version")
-    df_milestones.writeTo(f"`{project}`.`opdi_flight_events`").append()
+    df_milestones.writeTo(f"`{project}`.`opdi_flight_events_v2`").append()
     
     # Measurements table 
     ## Add Distance flown (NM) - df measure

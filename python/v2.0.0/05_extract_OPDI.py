@@ -105,7 +105,7 @@ print()
 print("Flight Table time")
 print()
 
-print(f'[[Extracting FLIGHT list from {start_date} until {end_date}...]]')
+print(f'[[Extracting FLIGHT v2 list from {start_date} until {end_date}...]]')
 months = generate_months(start_date, end_date)
 
 for month in months:
@@ -115,8 +115,8 @@ for month in months:
     
     month_str = pd.Timestamp(start_month_unix, unit = 's').strftime('%Y%m')
     
-    filename_csv = f'{opath}/flight_list/flight_list_{month_str}.csv.gz'
-    filename_parquet = f'{opath}/flight_list/flight_list_{month_str}.parquet'
+    filename_csv = f'{opath}/flight_list_v2/flight_list_{month_str}.csv.gz'
+    filename_parquet = f'{opath}/flight_list_v2/flight_list_{month_str}.parquet'
     
     print(f"Extracting flight list {start_month_str} until {end_month_str}...")
     
@@ -126,7 +126,7 @@ for month in months:
     
     try:
         # Execute the query and convert to pandas DataFrame
-        df = get_data_within_timeframe(spark, table_name = f'{project}.opdi_flight_list', 
+        df = get_data_within_timeframe(spark, table_name = f'{project}.opdi_flight_list_v2', 
                                        month = month, time_col = 'first_seen', unix_time = False)
         df = df.toPandas()
         df_mod = df.sort_values('first_seen').reset_index(drop=True)

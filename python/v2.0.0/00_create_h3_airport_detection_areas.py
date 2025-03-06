@@ -14,7 +14,8 @@ import h3_pyspark
 #.config("spark.ui.showConsoleProgress", "false") \
 # Spark Session Initialization
 spark = SparkSession.builder \
-    .appName("OPDI Flight Table") \
+    .appName("OPDI Ingestion") \
+    .config("spark.ui.showConsoleProgress", "false") \
     .config("spark.hadoop.fs.azure.ext.cab.required.group", "eur-app-opdi") \
     .config("spark.kerberos.access.hadoopFileSystems", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
     .config("spark.executor.extraClassPath", "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar") \
@@ -23,13 +24,20 @@ spark = SparkSession.builder \
     .config("spark.sql.catalog.spark_catalog", "org.apache.iceberg.spark.SparkSessionCatalog") \
     .config("spark.sql.iceberg.handle-timestamp-without-timezone", "true") \
     .config("spark.sql.catalog.spark_catalog.warehouse", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged") \
+    .config("spark.driver.cores", "1") \
+    .config("spark.driver.memory", "5G") \
+    .config("spark.executor.memory", "16G") \
+    .config("spark.executor.memoryOverhead", "3G") \
+    .config("spark.executor.cores", "2") \
     .config("spark.executor.instances", "3") \
-    .config("spark.dynamicAllocation.maxExecutors", "20") \
+    .config("spark.dynamicAllocation.maxExecutors", "4") \
     .config("spark.network.timeout", "800s") \
     .config("spark.executor.heartbeatInterval", "400s") \
+    .config("spark.driver.maxResultSize", "6g") \
+    .config("spark.shuffle.compress", "true") \
+    .config("spark.shuffle.spill.compress", "true") \
     .enableHiveSupport() \
     .getOrCreate()
-
 
 def generate_circle_polygon(lon, lat, radius_nautical_miles, num_points=360):
     """
@@ -144,4 +152,4 @@ res = (airports_df_m
     .toPandas()
 )
 
-res.to_parquet('../../data/airport_hex/airport_concentric_c_hex_res_7_new.parquet')
+res.to_parquet('data/airport_hex/airport_concentric_c_hex_res_7_new.parquet')
