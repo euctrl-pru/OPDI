@@ -41,8 +41,8 @@ TBLPROPERTIES ('transactional'='false');
       id STRING COMMENT 'Primary Key: Unique milestone identifier for each record.',
       flight_id STRING COMMENT 'Foreign Key: Identifier linking the flight event to the flight trajectory table.',
 
-      milestone_type STRING COMMENT 'Type of the flight event (milestone) being recorded.',
-      event_time BIGINT COMMENT 'Timestamp for the flight event.',
+      type STRING COMMENT 'Type of the flight event (milestone) being recorded.',
+      event_time TIMESTAMP COMMENT 'Timestamp for the flight event.',
       longitude DOUBLE COMMENT 'Longitude coordinate of the flight event.',
       latitude DOUBLE COMMENT 'Latitude coordinate of the flight event.',
       altitude DOUBLE COMMENT 'Altitude at which the flight event occurred.',
