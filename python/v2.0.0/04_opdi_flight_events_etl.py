@@ -57,14 +57,14 @@ spark = SparkSession.builder \
 # Settings
 project = "project_opdi"
 start_month = date(2022, 1, 1)
-end_month = date(2024, 12, 1)
+end_month = date(2025, 2, 1)
 
 ## Range for processing
 start_date = datetime.strptime('2022-01-01', '%Y-%m-%d')
-end_date = datetime.strptime('2024-11-01', '%Y-%m-%d')
+end_date = datetime.strptime('2025-02-01', '%Y-%m-%d')
 
 # Getting today's date
-today = datetime.today().strftime('%d %B %Y')
+today = datetime.today().strftime('%d %B%Y')
 
 
 # Helper function for calculating horizontal segments events
@@ -707,7 +707,7 @@ def etl_flight_events_and_measures(
 
     # insert
     df_milestones = df_milestones.repartition("type", "version").orderBy("type", "version")
-    df_milestones.writeTo(f"`{project}`.`opdi_flight_events_v2`").append()
+    df_milestones.writeTo(f"`{project}`.`opdi_flight_events`").append()
     
     # Measurements table 
     ## Add Distance flown (NM) - df measure

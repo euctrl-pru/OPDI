@@ -76,7 +76,7 @@ project = "project_opdi"
 resolution = 7
 
 start_month = date(2022, 1, 1)
-end_month = date(2024, 12, 1)
+end_month = date(2025, 3, 1)
 
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')
