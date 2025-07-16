@@ -76,7 +76,8 @@ project = "project_opdi"
 resolution = 7
 
 start_month = date(2022, 1, 1)
-end_month = date(2025, 3, 1)
+today = date.today()
+end_month = today - dateutil.relativedelta.relativedelta(months=1) # We work on the d-1 months
 
 # Getting today's date
 today = datetime.today().strftime('%d %B %Y')

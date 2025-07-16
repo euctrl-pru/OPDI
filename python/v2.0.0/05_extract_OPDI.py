@@ -29,8 +29,8 @@ extract_flight_events = True
 extract_measurements = True
 
 ## Date range
-start_date = date(2022, 1, 1)
-end_date = date(2025, 3, 1)
+start_date = date(2025, 2, 4)
+end_date = date(2025, 5, 1)
 
 ## Versions
 export_version = 'v002'

@@ -57,15 +57,15 @@ spark = SparkSession.builder \
 # Settings
 project = "project_opdi"
 start_month = date(2022, 1, 1)
-end_month = date(2025, 2, 1)
+today = date.today()
+end_month = today - dateutil.relativedelta.relativedelta(months=1) # We work on the d-1 months
 
 ## Range for processing
-start_date = datetime.strptime('2022-01-01', '%Y-%m-%d')
-end_date = datetime.strptime('2025-02-01', '%Y-%m-%d')
+start_date =start_month
+end_date = end_month
 
 # Getting today's date
 today = datetime.today().strftime('%d %B%Y')
-
 
 # Helper function for calculating horizontal segments events
 
