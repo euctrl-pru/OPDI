@@ -282,13 +282,13 @@ airports_df = fetch_airport_data()
 #airports_df = airports_df.loc[airports_df.ident.isin(['EBBR', 'LTFM', 'LFPG', 'EDDM', 'EFHK']), :]
 
 ## Load logs
-fpath_success = 'logs/00_hexaero_layout_progress_success.parquet'
+fpath_success = 'OPDI_live/logs/00_hexaero_layout_progress_success.parquet'
 if os.path.isfile(fpath_success):
     processed_apt_success = pd.read_parquet(fpath_success).apt.to_list()
 else:
     processed_apt_success = []
 
-fpath_failed = 'logs/00_hexaero_layout_progress_failed.parquet'
+fpath_failed = 'OPDI_live/logs/00_hexaero_layout_progress_failed.parquet'
 processed_apt_failed = []
 processed_apt_errpr = []
 

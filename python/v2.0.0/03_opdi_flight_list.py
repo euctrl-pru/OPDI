@@ -156,7 +156,7 @@ def load_airports_hex(spark, resolution = 7):
     """
     try:
         # In case I ran the function this dataset should exist.
-        df_apt = pd.read_parquet(f'data/airport_hex/airport_concentric_c_hex_res_{resolution}_processed.arrow')
+        df_apt = pd.read_parquet(f'OPDI_live/data/airport_hex/airport_concentric_c_hex_res_{resolution}_processed.arrow')
         sdf_apt = spark.createDataFrame(df_apt.to_dict(orient='records'))
         return sdf_apt
     
@@ -164,7 +164,7 @@ def load_airports_hex(spark, resolution = 7):
         print(e)
         
         # Create the dataset if not exists from source
-        df_apt = pd.read_parquet(f'data/airport_hex/airport_concentric_c_hex_res_{resolution}.arrow')
+        df_apt = pd.read_parquet(f'OPDI_live/data/airport_hex/airport_concentric_c_hex_res_{resolution}.arrow')
         
         # Filter out relevant hexagons
         df_apt = df_apt[df_apt.max_c_radius_nm<=30]
@@ -619,13 +619,13 @@ def process_flight_table_O(spark, project, month):
 to_process_months = generate_months(start_month, end_month)
 
 ## Load logs
-fpath_DAI = 'logs/03_osn-flight_table-etl-log.parquet'
+fpath_DAI = 'OPDI_live/logs/03_osn-flight_table-etl-log.parquet'
 if os.path.isfile(fpath_DAI):
     processed_months_DAI = pd.read_parquet(fpath_DAI).months.to_list()
 else:
     processed_months_DAI = []
 
-fpath_O = 'logs/03_osn-flight_table-overflights-etl-log.parquet'
+fpath_O = 'OPDI_live/logs/03_osn-flight_table-overflights-etl-log.parquet'
 if os.path.isfile(fpath_O):
     processed_months_O = pd.read_parquet(fpath_O).months.to_list()
 else:

@@ -17,7 +17,7 @@ from pyspark.sql.types import TimestampType
 
 # Adding python folder
 import sys
-sys.path.append('/home/cdsw/python/v2.0.0/')
+sys.path.append('/home/cdsw/OPDI_live/python/v2.0.0/')
 from helperfunctions import *
 
 # Settings
@@ -29,8 +29,8 @@ extract_flight_events = True
 extract_measurements = True
 
 ## Date range
-start_date = date(2025, 2, 4)
-end_date = date(2025, 5, 1)
+start_date = date(2025, 4, 15)
+end_date = date(2025, 7, 4)
 
 ## Versions
 export_version = 'v002'
@@ -49,7 +49,7 @@ today = datetime.today().strftime('%d %B %Y')
 
 # Makedirs
 
-opath = f"/home/cdsw/data/OPDI/{export_version}"
+opath = f"/home/cdsw/OPDI_live/data/OPDI/{export_version}"
 
 try:
     os.makedirs(f'{opath}/flight_list/', exist_ok=True)

@@ -152,4 +152,4 @@ res = (airports_df_m
     .toPandas()
 )
 
-res.to_parquet('data/airport_hex/airport_concentric_c_hex_res_7_new.parquet')
+res.to_parquet('OPDI_live/data/airport_hex/airport_concentric_c_hex_res_7_new.parquet')

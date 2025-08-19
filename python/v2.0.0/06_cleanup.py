@@ -49,6 +49,6 @@ def clean_and_save_data(input_dir: str, output_dir: str):
         df.to_csv(csv_output_path, index=False, compression='gzip')
 
 if __name__ == "__main__":
-    input_directory = '/home/cdsw/data/OPDI/v002/measurements'
-    output_directory = '/home/cdsw/data/OPDI/v002/measurements_clean/'
+    input_directory = '/home/cdsw/OPDI_live/data/OPDI/v002/measurements'
+    output_directory = '/home/cdsw/OPDI_live/data/OPDI/v002/measurements_clean/'
     clean_and_save_data(input_directory, output_directory)

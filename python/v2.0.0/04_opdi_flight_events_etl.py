@@ -4,6 +4,7 @@ import numpy as np
 import time
 import os
 import shutil
+import dateutil
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import calendar
@@ -835,28 +836,28 @@ def get_data_within_timeframe(spark, table_name, month, time_col='event_time'):
 to_process_months = generate_months(start_month, end_month)
 
 ## Load logs Horizontal
-fpath_horizontal = 'logs/04_osn-flight_event-horizontal-etl-log.parquet'
+fpath_horizontal = 'OPDI_live/logs/04_osn-flight_event-horizontal-etl-log.parquet'
 if os.path.isfile(fpath_horizontal):
     processed_months_horizontal = pd.read_parquet(fpath_horizontal).months.to_list()
 else:
     processed_months_horizontal = []
 
 ## Load logs vertical
-fpath_vertical = 'logs/04_osn-flight_event-vertical-etl-log.parquet'
+fpath_vertical = 'OPDI_live/logs/04_osn-flight_event-vertical-etl-log.parquet'
 if os.path.isfile(fpath_vertical):
     processed_months_vertical = pd.read_parquet(fpath_vertical).months.to_list()
 else:
     processed_months_vertical = []
 
 ## Load hexaero airports
-fpath_hexaero = 'logs/04_osn-flight_event-hexaero_airport-log.parquet'
+fpath_hexaero = 'OPDI_live/logs/04_osn-flight_event-hexaero_airport-log.parquet'
 if os.path.isfile(fpath_hexaero):
     processed_months_hexaero = pd.read_parquet(fpath_hexaero).months.to_list()
 else:
     processed_months_hexaero = []
 
 ## Load first-seen / last-seen logs 
-fpath_seen = 'logs/04_osn-flight_event-first_seen_last_seen-log.parquet'
+fpath_seen = 'OPDI_live/logs/04_osn-flight_event-first_seen_last_seen-log.parquet'
 if os.path.isfile(fpath_seen):
     processed_months_seen = pd.read_parquet(fpath_seen).months.to_list()
 else:

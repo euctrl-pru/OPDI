@@ -291,7 +291,7 @@ urls = {
 }
 
 # Define local path where file will be downloaded
-local_path = "data.csv"
+local_path = "OPDI_live/data.csv"
 
 # Download each dataset, create corresponding Spark DataFrames, and write them into Spark tables
 for name, url in urls.items():

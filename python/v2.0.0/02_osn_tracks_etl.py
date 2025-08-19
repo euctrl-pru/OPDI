@@ -290,7 +290,7 @@ def process_tracks(project, h3_resolutions, month):
 to_process_months = generate_months(start_month, end_month)
 
 ## Load logs
-fpath = 'logs/02_osn-tracks-etl-log.parquet'
+fpath = 'OPDI_live/logs/02_osn-tracks-etl-log.parquet'
 if os.path.isfile(fpath):
   processed_months = pd.read_parquet(fpath).months.to_list()
 else:

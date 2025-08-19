@@ -620,13 +620,13 @@ def process_flight_table_O(spark, project, month):
 to_process_months = generate_months(start_month, end_month)
 
 ## Load logs
-fpath_DAI = 'logs/03_osn-flight_table-etl-log-v2.parquet'
+fpath_DAI = 'OPDI_live/logs/03_osn-flight_table-etl-log-v2.parquet'
 if os.path.isfile(fpath_DAI):
     processed_months_DAI = pd.read_parquet(fpath_DAI).months.to_list()
 else:
     processed_months_DAI = []
 
-fpath_O = 'logs/03_osn-flight_table-overflights-etl-log-v2.parquet'
+fpath_O = 'OPDI_live/logs/03_osn-flight_table-overflights-etl-log-v2.parquet'
 if os.path.isfile(fpath_O):
     processed_months_O = pd.read_parquet(fpath_O).months.to_list()
 else:

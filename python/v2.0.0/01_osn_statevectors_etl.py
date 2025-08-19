@@ -123,8 +123,8 @@ if import_data:
   files_to_download = list_mc_files()
 
   # Initialize path variables
-  local_folder_path = 'data/ec-datadump'
-  processed_files_path = 'logs/01_osn_statevectors_etl.log'
+  local_folder_path = 'OPDI_live/data/ec-datadump'
+  processed_files_path = 'OPDI_live/logs/01_osn_statevectors_etl.log'
 
   # Read the list of processed files if available
   if os.path.exists(processed_files_path):
@@ -188,7 +188,7 @@ if import_data:
               print(f"Removed: {file_path}")
 
   # Directory path
-  directory_path = "data/ec-datadump/"
+  directory_path = "OPDI_live/data/ec-datadump/"
 
   # File extension to look for
   extension_part = ".parquet.part.minio"

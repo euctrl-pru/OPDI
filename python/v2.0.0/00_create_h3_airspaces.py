@@ -42,7 +42,7 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 # Add custom libs
-sys.path.append(os.path.expanduser('~/libs'))
+sys.path.append(os.path.expanduser('~/OPDI_live/libs'))
 from geotools import *
 
 # settings
@@ -350,7 +350,7 @@ for filepath in firs:
 
     if compact_output:
         # Compacted data goes to a file for inspection
-        dest = "~/data/airspace_data/fir/"
+        dest = "~/OPDI_live/data/airspace_data/fir/"
         output_path = f"{dest}/{filepath.split('/')[-1].split('.')[0]}_h3_compact.parquet"
         df = process_fir_airspaces(fir_df, compact =True)
         df.to_parquet(output_path)
