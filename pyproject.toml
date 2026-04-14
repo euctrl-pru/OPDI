@@ -1,0 +1,98 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opdi"
+version = "2.0.0"
+description = "Open Performance Data Initiative - Aviation data processing pipeline"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "EUROCONTROL", email = "pru-support@eurocontrol.int"}
+]
+keywords = [
+    "aviation", "ads-b", "opensky", "data-pipeline", "pyspark",
+    "air-traffic", "h3", "geospatial", "iceberg", "etl",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "pyspark>=3.3.0",
+    "h3>=3.7.0",
+    "h3-pyspark>=1.0.0",
+    "shapely>=2.0.0",
+    "pyproj>=3.4.0",
+    "osmnx>=1.2.0",
+    "pandas>=1.5.0",
+    "numpy>=1.23.0",
+    "plotly>=5.0.0",
+    "python-dateutil>=2.8.0",
+    "requests>=2.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-spark>=0.6.0",
+    "black>=22.0.0",
+    "mypy>=0.990",
+    "ruff>=0.1.0",
+]
+docs = [
+    "sphinx>=7.0.0",
+    "sphinx-autodoc-typehints>=1.23.0",
+    "furo>=2023.9.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/euctrl-pru/opdi"
+Repository = "https://github.com/euctrl-pru/opdi"
+Documentation = "https://github.com/euctrl-pru/opdi/blob/main/README.md"
+Issues = "https://github.com/euctrl-pru/opdi/issues"
+
+[project.scripts]
+opdi = "opdi.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+opdi = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
