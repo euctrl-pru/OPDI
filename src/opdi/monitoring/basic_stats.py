@@ -94,13 +94,10 @@ class BasicStatsCollector:
         Example:
             >>> collector = BasicStatsCollector(spark, config)
             >>> collector.print_summary()
-
             Row counts per table
-            ----------------------------------------
             opdi_flight_list                      1,500,000
             opdi_flight_events                    3,000,000
             opdi_measurements                     5,000,000
-            ----------------------------------------
         """
         if tables is None:
             tables = self.DEFAULT_TABLES

@@ -113,17 +113,17 @@ Environment Configuration
 
 OPDI supports three environments:
 
-+----------+--------------------------------------------------+
-| Name     | Description                                      |
-+==========+==================================================+
-| ``dev``  | Development -- moderate memory, suitable for      |
-|          | prototyping                                      |
-+----------+--------------------------------------------------+
-| ``live`` | Production -- full resource allocation on the     |
-|          | Cloudera cluster                                 |
-+----------+--------------------------------------------------+
-| ``local``| Local testing -- lightweight Spark session         |
-+----------+--------------------------------------------------+
++-----------+--------------------------------------------------+
+| Name      | Description                                      |
++===========+==================================================+
+| ``dev``   | Development -- moderate memory, suitable for      |
+|           | prototyping                                      |
++-----------+--------------------------------------------------+
+| ``live``  | Production -- full resource allocation on the     |
+|           | Cloudera cluster                                 |
++-----------+--------------------------------------------------+
+| ``local`` | Local testing -- lightweight Spark session        |
++-----------+--------------------------------------------------+
 
 Override Spark settings when needed:
 

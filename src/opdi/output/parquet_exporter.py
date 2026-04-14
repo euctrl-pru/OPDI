@@ -380,12 +380,8 @@ class ParquetExporter:
             last_n_months: If set, only export last N months
 
         Returns:
-            Dictionary with statistics:
-            {
-                'flight_list_files': int,
-                'event_files': int,
-                'measurement_files': int
-            }
+            Dictionary with keys ``flight_list_files``, ``event_files``,
+            and ``measurement_files``.
 
         Example:
             >>> from datetime import date

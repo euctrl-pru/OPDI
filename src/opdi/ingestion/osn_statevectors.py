@@ -181,10 +181,10 @@ class StateVectorIngestion:
 
     def remove_partial_files(self) -> None:
         """
-        Remove partially downloaded files (*.parquet.part.minio).
+        Remove partially downloaded files (``*.parquet.part.minio``).
 
-        MinIO creates .part files during download that may remain if download
-        is interrupted. This cleans them up before processing.
+        MinIO creates ``.part`` files during download that may remain if
+        download is interrupted. This cleans them up before processing.
         """
         try:
             files = os.listdir(self.local_download_path)

@@ -7,7 +7,6 @@ parquet files to compressed CSV format.
 
 import os
 import glob
-from typing import Optional
 import pandas as pd
 
 
@@ -118,14 +117,9 @@ class CSVExporter:
         Clean and export all parquet files in input directory.
 
         Returns:
-            Dictionary with statistics:
-            {
-                'files_processed': int,
-                'files_skipped': int,
-                'total_original_rows': int,
-                'total_cleaned_rows': int,
-                'duplicates_removed': int
-            }
+            Dictionary with keys ``files_processed``, ``files_skipped``,
+            ``total_original_rows``, ``total_cleaned_rows``, and
+            ``duplicates_removed``.
 
         Example:
             >>> exporter = CSVExporter(
