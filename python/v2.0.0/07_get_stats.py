@@ -65,8 +65,7 @@ def print_table_counts(spark_session: SparkSession, tables: list[str]) -> None:
         print(f"{table:<45} {count:>12,}")
 
     print("-" * 40)
-
-
+    
 # ---------------------------------------------------------------------
 # Main Execution
 # ---------------------------------------------------------------------

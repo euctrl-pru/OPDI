@@ -221,7 +221,10 @@ def process_tracks(project, h3_resolutions, month):
   df_month = df_month.withColumn("event_time_ts", F.to_timestamp("event_time"))
   
   ## Create a SHA value for each icao24, callsign combination and groupby
-  df_month = df_month.withColumn("group_id", F.sha2(F.concat_ws("", "icao24", "callsign"), 256))
+  #df_month = df_month.withColumn("group_id", F.sha2(F.concat_ws("", "icao24", "callsign"), 256))
+  df_month = df_month.withColumn("group_id", F.substring(F.sha2(F.concat_ws("", "icao24", "callsign"), 256),1,16))
+
+  
   windowSpec = Window.partitionBy("group_id").orderBy("event_time_ts")
 
   ## Calculate the difference between each two timestamps

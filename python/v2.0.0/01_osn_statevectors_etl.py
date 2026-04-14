@@ -12,7 +12,7 @@ import pandas as pd
 # Settings
 ## Config
 project = "project_opdi"
-start_month = date(2022, 1, 1)
+start_month = date(2025, 1, 1)
 import_data = True
 
 
@@ -85,7 +85,7 @@ def list_mc_files():
   # Execute mc find command to list files
   stdout, _ = execute_shell_command('./mc find opensky/ec-datadump/ --path "*/states_*.parquet"')
   files_to_download = stdout.split('\n')
-  files_to_download = [file for file in files_to_download if '2022-' in file or '2023-' in file or '2024-' in file or '2025-' in file]
+  files_to_download = [file for file in files_to_download if '2022-' in file or '2023-' in file or '2024-' in file or '2025-' in file or '2026-' in file]
   return(files_to_download)
 
 # Create the OSN EC data table to dump in the data

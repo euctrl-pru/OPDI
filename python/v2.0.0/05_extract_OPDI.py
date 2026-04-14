@@ -1,6 +1,7 @@
 from IPython.display import display, HTML
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, lit
+import pyspark.sql.functions as sf
 
 import os
 import sys
@@ -232,10 +233,10 @@ print(f"Cutoff date (last {LAST_X_MONTHS} months): {cutoff_date}\n")
 
 print("---- Flight list (MONTH intervals) ----\n")
 for s, e in intervals_months:
-    fs = s.strftime("%Y%m%d")
+    fs = s.strftime("%Y%m")
     fe = e.strftime("%Y%m%d")
-    print(f"{s:%B %d, %Y} - {e:%B %d, %Y}")
-    print(f"  flight_list_{fs}_{fe}.parquet\n")
+    print(f"{s:%, %Y} - {e:%B, %Y}")
+    print(f"  flight_list_{fs}.parquet\n")
 
 print("---- Flight events / measurements (10-DAY intervals) ----\n")
 for s, e in intervals_10d:
@@ -264,9 +265,9 @@ def process_and_save_flight_list(month_start, month_end):
         month_start: Month interval start as datetime.date (1st of month).
         month_end: Month interval end as datetime.date (1st of next month or stop).
     """
-    file_start = month_start.strftime("%Y%m%d")
+    file_start = month_start.strftime("%Y%m")
     file_end = month_end.strftime("%Y%m%d")
-    file_path = f"{opath}/flight_list/flight_list_{file_start}_{file_end}.parquet"
+    file_path = f"{opath}/flight_list/flight_list_{file_start}.parquet"
 
     if os.path.isfile(file_path):
         print(f"Skipping FLIGHT_LIST {file_start} → {file_end}")
@@ -298,6 +299,7 @@ def process_and_save_flight_list(month_start, month_end):
     """
 
     df = spark.sql(sql).withColumn("version", lit(v_long_flist))
+    df = df.withColumn("id", F.xxhash64("id"))
     pdf = safe_to_pandas(df)
 
     if "first_seen" in pdf.columns:
@@ -339,8 +341,9 @@ def process_and_save_events(start_date, end_date):
     FROM `{project}`.`opdi_flight_events`
     WHERE flight_id IN (SELECT track_id FROM flight_list)
     """
-
     df = spark.sql(sql).withColumn("version", lit(v_long_events))
+    df = df.withColumn("id", F.xxhash64("id"))
+    df = df.withColumn("flight_id", F.xxhash64('flight_id'))
     safe_to_pandas(df).to_parquet(file_path)
 
 
@@ -388,7 +391,10 @@ def process_and_save_measurements(start_date, end_date):
         .withColumnRenamed("milestone_id", "event_id")
         .withColumn("version", lit(v_long_measures))
     )
-
+    
+    df = df.withColumn("id", F.xxhash64("id"))
+    df = df.withColumn("event_id", F.xxhash64('event_id'))
+    
     safe_to_pandas(df).to_parquet(file_path)
 
 
