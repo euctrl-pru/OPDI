@@ -32,8 +32,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "pyspark>=3.3.0",
-    "h3>=3.7.0",
+    "pyspark==3.5.1",
+    "h3>=3.7.0,<4.0.0",
     "h3-pyspark>=1.0.0",
     "shapely>=2.0.0",
     "pyproj>=3.4.0",
