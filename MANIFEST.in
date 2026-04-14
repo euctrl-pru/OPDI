@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+include pyproject.toml
+recursive-include src/opdi *.py *.typed
+recursive-include docs *.rst *.py *.bat Makefile
+prune tests

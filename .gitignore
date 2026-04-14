@@ -1,7 +1,46 @@
-R
-node_modules
-*.pyc
-__pycache__
-.*
-!.gitignore
-!.experiments
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Sphinx docs
+docs/_build/
+
+# Data artifacts
+data/
+*.parquet
+*.csv
+*.csv.gz
+!requirements*.txt
+
+# Logs
+logs/
+OPDI_live/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MinIO client
+mc
