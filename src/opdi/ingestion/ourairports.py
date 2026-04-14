@@ -1,20 +1,17 @@
 """
-Ingestion: OurAirports open data.
+OurAirports reference data ingestion.
 
-Downloads CSVs from ourairports.com and writes them into Spark/Hive tables.
-Also provides a helper to fetch airport reference data as a pandas DataFrame
-(used by several downstream transforms).
+Downloads and loads airport reference datasets from OurAirports into
+Spark tables. Covers airports, runways, navaids, frequencies, countries,
+and regions.
+
+Ported from: OPDI-live/python/v2.0.0/00_etl_ourairports.py
 """
 
-from __future__ import annotations
-
-import urllib.request
 import os
+import urllib.request
 from datetime import datetime
-from typing import Optional
-
-import pandas as pd
-import numpy as np
+from typing import Dict, List, Optional
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
@@ -26,11 +23,19 @@ from pyspark.sql.types import (
     StructType,
 )
 
+from opdi.config import OPDIConfig
 
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
+# Dataset URLs
+DEFAULT_URLS: Dict[str, str] = {
+    "airports": "https://ourairports.com/data/airports.csv",
+    "runways": "https://ourairports.com/data/runways.csv",
+    "navaids": "https://ourairports.com/data/navaids.csv",
+    "airport_frequencies": "https://ourairports.com/data/airport-frequencies.csv",
+    "countries": "https://ourairports.com/data/countries.csv",
+    "regions": "https://ourairports.com/data/regions.csv",
+}
 
+# Spark schemas for each dataset
 SCHEMA_AIRPORTS = StructType([
     StructField("id", IntegerType(), True),
     StructField("ident", StringType(), True),
@@ -127,7 +132,7 @@ SCHEMA_REGIONS = StructType([
     StructField("keywords", StringType(), True),
 ])
 
-SCHEMAS = {
+SCHEMAS: Dict[str, StructType] = {
     "airports": SCHEMA_AIRPORTS,
     "runways": SCHEMA_RUNWAYS,
     "navaids": SCHEMA_NAVAIDS,
@@ -136,80 +141,199 @@ SCHEMAS = {
     "regions": SCHEMA_REGIONS,
 }
 
-URLS = {
-    "airports": "https://ourairports.com/data/airports.csv",
-    "runways": "https://ourairports.com/data/runways.csv",
-    "navaids": "https://ourairports.com/data/navaids.csv",
-    "airport_frequencies": "https://ourairports.com/data/airport-frequencies.csv",
-    "countries": "https://ourairports.com/data/countries.csv",
-    "regions": "https://ourairports.com/data/regions.csv",
-}
 
-
-# ---------------------------------------------------------------------------
-# Ingest function
-# ---------------------------------------------------------------------------
-
-def ingest_ourairports(
-    spark: SparkSession,
-    target_project: str = "project_aiu",
-    tmp_csv_path: str = "data.csv",
-) -> None:
+class OurAirportsIngestion:
     """
-    Download all OurAirports CSVs and insert into Hive tables.
+    ETL pipeline for OurAirports reference data.
 
-    Parameters
-    ----------
-    spark : SparkSession
-    target_project : str
-        Database/project that hosts the ``oa_*`` tables.
-    tmp_csv_path : str
-        Temporary file path for CSV download.
+    Downloads CSV datasets from OurAirports, loads them into Spark
+    DataFrames with proper schemas, and writes them to database tables.
+
+    Handles 6 datasets: airports, runways, navaids, airport_frequencies,
+    countries, and regions.
+
+    Args:
+        spark: Active SparkSession.
+        config: OPDI configuration object.
+        target_database: Database to write tables to (default: 'project_aiu').
+        temp_dir: Directory for temporary CSV downloads.
+
+    Example:
+        >>> ingestion = OurAirportsIngestion(spark, config)
+        >>> ingestion.ingest_all()
     """
-    for name, url in URLS.items():
-        urllib.request.urlretrieve(url, tmp_csv_path)
-        df = spark.read.csv(tmp_csv_path, header=True, schema=SCHEMAS[name])
-        df.write.mode("overwrite").insertInto(f"{target_project}.oa_{name}")
 
-    if os.path.exists(tmp_csv_path):
-        os.remove(tmp_csv_path)
+    def __init__(
+        self,
+        spark: SparkSession,
+        config: OPDIConfig,
+        target_database: str = "project_aiu",
+        temp_dir: str = ".",
+    ):
+        self.spark = spark
+        self.config = config
+        self.target_database = target_database
+        self.temp_dir = temp_dir
+        self._temp_file = os.path.join(temp_dir, "ourairports_temp.csv")
 
+    def _get_create_table_sql(self, table_name: str) -> str:
+        """Generate CREATE TABLE SQL for a given OurAirports dataset."""
+        today = datetime.today().strftime("%d %B %Y")
+        db = self.target_database
 
-# ---------------------------------------------------------------------------
-# Helper: fetch airports as pandas DataFrame
-# ---------------------------------------------------------------------------
+        # Map of table names to their CREATE TABLE SQL
+        sqls = {
+            "airports": f"""
+                CREATE TABLE IF NOT EXISTS `{db}`.`oa_airports` (
+                    id INT, ident STRING, type STRING, name STRING,
+                    latitude_deg DOUBLE, longitude_deg DOUBLE, elevation_ft INT,
+                    continent STRING, iso_country STRING, iso_region STRING,
+                    municipality STRING, scheduled_service STRING,
+                    gps_code STRING, iata_code STRING, local_code STRING,
+                    home_link STRING, wikipedia_link STRING, keywords STRING
+                ) COMMENT 'OurAirports airports data. Last updated: {today}.'
+                STORED AS parquet TBLPROPERTIES ('transactional'='false')
+            """,
+            "runways": f"""
+                CREATE TABLE IF NOT EXISTS `{db}`.`oa_runways` (
+                    id INT, airport_ref INT, airport_ident STRING,
+                    length_ft INT, width_ft INT, surface STRING,
+                    lighted BOOLEAN, closed BOOLEAN,
+                    le_ident STRING, le_latitude_deg DOUBLE, le_longitude_deg DOUBLE,
+                    le_elevation_ft INT, le_heading_degT DOUBLE, le_displaced_threshold_ft INT,
+                    he_ident STRING, he_latitude_deg DOUBLE, he_longitude_deg DOUBLE,
+                    he_elevation_ft INT, he_heading_degT DOUBLE, he_displaced_threshold_ft INT
+                ) COMMENT 'OurAirports runways data. Last updated: {today}.'
+                STORED AS parquet TBLPROPERTIES ('transactional'='false')
+            """,
+            "navaids": f"""
+                CREATE TABLE IF NOT EXISTS `{db}`.`oa_navaids` (
+                    id INT, filename STRING, ident STRING, name STRING, type STRING,
+                    frequency_khz INT, latitude_deg DOUBLE, longitude_deg DOUBLE,
+                    elevation_ft INT, iso_country STRING,
+                    dme_frequency_khz INT, dme_channel STRING,
+                    dme_latitude_deg DOUBLE, dme_longitude_deg DOUBLE, dme_elevation_ft INT,
+                    slaved_variation_deg DOUBLE, magnetic_variation_deg DOUBLE,
+                    usageType STRING, power STRING, associated_airport STRING
+                ) COMMENT 'OurAirports navaids data. Last updated: {today}.'
+                STORED AS parquet TBLPROPERTIES ('transactional'='false')
+            """,
+            "airport_frequencies": f"""
+                CREATE TABLE IF NOT EXISTS `{db}`.`oa_airport_frequencies` (
+                    id INT, airport_ref INT, airport_ident STRING,
+                    type STRING, description STRING, frequency_mhz DOUBLE
+                ) COMMENT 'OurAirports airport frequencies. Last updated: {today}.'
+                STORED AS parquet TBLPROPERTIES ('transactional'='false')
+            """,
+            "countries": f"""
+                CREATE TABLE IF NOT EXISTS `{db}`.`oa_countries` (
+                    id INT, code STRING, name STRING, continent STRING,
+                    wikipedia_link STRING, keywords STRING
+                ) COMMENT 'OurAirports countries data. Last updated: {today}.'
+                STORED AS parquet TBLPROPERTIES ('transactional'='false')
+            """,
+            "regions": f"""
+                CREATE TABLE IF NOT EXISTS `{db}`.`oa_regions` (
+                    id INT, code STRING, local_code STRING, name STRING,
+                    continent STRING, iso_country STRING,
+                    wikipedia_link STRING, keywords STRING
+                ) COMMENT 'OurAirports regions data. Last updated: {today}.'
+                STORED AS parquet TBLPROPERTIES ('transactional'='false')
+            """,
+        }
+        return sqls[table_name]
 
-def fetch_airport_data(
-    url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
-    europe_bbox: bool = True,
-    offset: float = 3.0,
-) -> pd.DataFrame:
-    """
-    Download the OurAirports airports CSV and optionally filter to Europe.
+    def create_tables(self, drop_existing: bool = False) -> None:
+        """
+        Create all OurAirports tables.
 
-    Parameters
-    ----------
-    url : str
-        Source URL for airports.csv.
-    europe_bbox : bool
-        If True, filter to a European bounding box (±offset degrees).
-    offset : float
-        Degrees of padding around the Europe bounding box.
+        Args:
+            drop_existing: If True, drop and recreate existing tables.
+        """
+        db = self.target_database
+        table_names = [
+            "oa_airports", "oa_runways", "oa_navaids",
+            "oa_airport_frequencies", "oa_countries", "oa_regions",
+        ]
 
-    Returns
-    -------
-    pd.DataFrame
-    """
-    df = pd.read_csv(url)
+        if drop_existing:
+            for table in table_names:
+                self.spark.sql(f"DROP TABLE IF EXISTS `{db}`.`{table}`")
+                print(f"Dropped {db}.{table}")
 
-    if europe_bbox:
-        f_lat = df.latitude_deg.between(26.74617 - offset, 70.25976 + offset)
-        f_lon = df.longitude_deg.between(-25.86653 - offset, 49.65699 + offset)
-        df = df[f_lat & f_lon]
+        for dataset in SCHEMAS:
+            sql = self._get_create_table_sql(dataset)
+            self.spark.sql(sql)
+            print(f"Created/verified {db}.oa_{dataset}")
 
-    df.columns = df.columns.astype(str)
-    for c in ("latitude_deg", "longitude_deg", "elevation_ft"):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    def ingest_dataset(
+        self,
+        name: str,
+        url: Optional[str] = None,
+    ) -> int:
+        """
+        Download and ingest a single OurAirports dataset.
 
-    return df
+        Args:
+            name: Dataset name (airports, runways, navaids, etc.).
+            url: Override URL for the CSV download.
+
+        Returns:
+            Number of rows ingested.
+        """
+        url = url or DEFAULT_URLS[name]
+        schema = SCHEMAS[name]
+
+        print(f"Downloading {name} from {url}...")
+        urllib.request.urlretrieve(url, self._temp_file)
+
+        df = self.spark.read.csv(self._temp_file, header=True, schema=schema)
+        row_count = df.count()
+
+        table_name = f"{self.target_database}.oa_{name}"
+        df.write.mode("overwrite").insertInto(table_name)
+        print(f"  Ingested {row_count:,} rows into {table_name}")
+
+        return row_count
+
+    def ingest_all(
+        self,
+        urls: Optional[Dict[str, str]] = None,
+        drop_existing: bool = True,
+    ) -> Dict[str, int]:
+        """
+        Download and ingest all OurAirports datasets.
+
+        Args:
+            urls: Override URLs for each dataset.
+            drop_existing: If True, drop and recreate tables first.
+
+        Returns:
+            Dictionary mapping dataset names to row counts.
+
+        Example:
+            >>> ingestion = OurAirportsIngestion(spark, config)
+            >>> stats = ingestion.ingest_all()
+            >>> print(stats)
+            {'airports': 76543, 'runways': 45678, ...}
+        """
+        urls = urls or DEFAULT_URLS
+
+        self.create_tables(drop_existing=drop_existing)
+
+        stats = {}
+        for name in SCHEMAS:
+            url = urls.get(name, DEFAULT_URLS[name])
+            stats[name] = self.ingest_dataset(name, url)
+
+        # Cleanup temp file
+        if os.path.exists(self._temp_file):
+            os.remove(self._temp_file)
+
+        print("\nOurAirports ingestion complete.")
+        print("-" * 40)
+        for name, count in stats.items():
+            print(f"  {name:<25} {count:>10,} rows")
+        print("-" * 40)
+
+        return stats
