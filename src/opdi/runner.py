@@ -57,6 +57,27 @@ from opdi.config import OPDIConfig
 from opdi.utils.spark_helpers import SparkSessionManager
 
 
+def _print_spark_ui_link(spark):
+    """Print a clickable link to the Spark UI.
+
+    On Cloudera (CDSW/CML) the URL is built from environment variables.
+    Elsewhere it falls back to the local Spark UI address.
+    """
+    import os
+
+    engine_id = os.getenv("CDSW_ENGINE_ID")
+    domain = os.getenv("CDSW_DOMAIN")
+
+    if engine_id and domain:
+        url = f"https://spark-{engine_id}.{domain}"
+    else:
+        # Local / non-CDSW environment — use the Spark UI port
+        ui_port = spark.sparkContext.uiWebUrl or "http://localhost:4040"
+        url = str(ui_port)
+
+    print(f"\n  Spark UI: {url}\n")
+
+
 def _step_00_reference_data(spark, config, **kwargs):
     """Step 00: Generate reference data (airports, airspaces)."""
     print("\n" + "=" * 70)
@@ -314,6 +335,9 @@ def run_pipeline(
         app_name=f"OPDI Pipeline - {env}",
         config=config,
     )
+
+    # Print Spark UI link
+    _print_spark_ui_link(spark)
 
     overall_start = time.time()
 
