@@ -5,10 +5,6 @@ The OPDI pipeline transforms raw ADS-B surveillance data into structured
 aviation performance datasets through a sequence of numbered stages. Each stage
 corresponds to one or more modules in the ``opdi`` package.
 
-.. contents:: Stages
-   :local:
-   :depth: 1
-
 Stage 00 -- Reference Data & Ingestion Setup
 ---------------------------------------------
 
