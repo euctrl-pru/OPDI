@@ -215,6 +215,7 @@ class OPDIConfig:
                     executor_memory="12G",
                     executor_instances="2",
                     dynamic_allocation_max_executors="10",
+                    hadoop_group="eur-app-opdi-dev",
                 ),
             )
         elif env == "local":
