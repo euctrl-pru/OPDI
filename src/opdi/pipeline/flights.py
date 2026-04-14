@@ -12,10 +12,8 @@ Ported from: OPDI-live/python/v2.0.0/03_opdi_flight_list_v2.py
 
 import os
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List
 
-import h3
-import numpy as np
 import pandas as pd
 
 from pyspark.sql import SparkSession, DataFrame
@@ -54,11 +52,12 @@ class FlightListProcessor:
     Generates the OPDI flight list from processed track data.
 
     The flight list is produced in two phases:
-    1. **DAI (Departures/Arrivals/Internal)**: Identifies flights with known
-       departure and/or arrival airports by matching track points to H3
-       airport detection zones within 30 NM and below FL40.
-    2. **Overflights**: Captures remaining tracks (no airport match) that
-       have ADS-B signals lasting at least 5 minutes.
+
+    * **DAI (Departures/Arrivals/Internal)** -- Identifies flights with
+      known departure and/or arrival airports by matching track points
+      to H3 airport detection zones within 30 NM and below FL40.
+    * **Overflights** -- Captures remaining tracks (no airport match)
+      that have ADS-B signals lasting at least 5 minutes.
 
     Each flight is enriched with aircraft metadata from the OSN aircraft
     database (registration, model, typecode, operator).

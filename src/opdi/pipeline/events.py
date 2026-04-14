@@ -1,17 +1,20 @@
 """
 Flight events and measurements ETL module.
 
-Detects and records flight events (milestones) from track data:
-- Horizontal segment events: flight phases (GND, CL, DE, CR, LVL),
+Detects and records flight events (milestones) from track data.
+
+Event types:
+
+* Horizontal segment events -- flight phases (GND, CL, DE, CR, LVL),
   top-of-climb, top-of-descent, take-off, landing using fuzzy logic
-- Vertical crossing events: flight level crossings (FL50, FL70, FL100, FL245)
-- Airport events: entry/exit of runway, taxiway, apron via H3 layout matching
-- First/last seen events per track
+* Vertical crossing events -- flight level crossings (FL50, FL70, FL100, FL245)
+* Airport events -- entry/exit of runway, taxiway, apron via H3 layout matching
+* First/last seen events per track
 
 Also produces measurement records (distance flown, time passed) linked
 to each event.
 
-Ported from: OPDI-live/python/v2.0.0/04_opdi_flight_events_etl.py
+Ported from ``OPDI-live/python/v2.0.0/04_opdi_flight_events_etl.py``.
 """
 
 import os
