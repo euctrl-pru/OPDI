@@ -205,7 +205,7 @@ class OPDIConfig:
             # Development environment settings
             return cls(
                 project=ProjectConfig(
-                    project_name="project_opdi_dev",
+                    project_name="project_opdi",
                     warehouse_path="abfs://storage-fs@cdpdldev.dfs.core.windows.net/data/project/opdi.db/unmanaged",
                     hadoop_filesystem="abfs://storage-fs@cdpdldev.dfs.core.windows.net/data/project/opdi.db/unmanaged",
                 ),
