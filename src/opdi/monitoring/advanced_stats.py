@@ -466,10 +466,12 @@ class AdvancedStatsCollector:
         df = self.analyze_missing_data(df, check_minio=check_minio)
 
         # Save CSV
+        os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
         df.to_csv(output_csv, index=False)
         print(f"\nData saved to: {output_csv}")
 
         # Create visualization
+        os.makedirs(os.path.dirname(output_html) or ".", exist_ok=True)
         self.visualize_daily_counts(df, output_html)
 
         return df

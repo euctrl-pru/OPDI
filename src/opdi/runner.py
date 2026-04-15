@@ -49,6 +49,7 @@ Or from the command line::
     opdi run --step 04 --env dev --start 2024-03-01 --end 2024-04-01
 """
 
+import os
 import time
 from datetime import date
 from typing import Optional
@@ -94,12 +95,12 @@ def _step_00_reference_data(spark, config, **kwargs):
         kwargs.get("airports_hex_raw_path", "data/airport_hex/zones_res7.parquet")
     )
     prepared = zone_gen.prepare_for_flight_list(max_radius_nm=30)
-    prepared.to_parquet(
-        kwargs.get(
-            "airports_hex_path",
-            "data/airport_hex/zones_res7_processed.parquet",
-        )
+    prepared_path = kwargs.get(
+        "airports_hex_path",
+        "data/airport_hex/zones_res7_processed.parquet",
     )
+    os.makedirs(os.path.dirname(prepared_path) or ".", exist_ok=True)
+    prepared.to_parquet(prepared_path)
     print(f"  Generated {len(zones)} zone-ring records, {len(prepared)} hex rows.")
 
     # 00b: Airport ground layouts

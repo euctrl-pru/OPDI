@@ -10,6 +10,7 @@ Ported from: OPDI-live/python/v2.0.0/00_create_h3_airport_detection_areas.py
 
 import json
 import math
+import os
 from typing import List, Optional
 
 import numpy as np
@@ -313,6 +314,7 @@ class AirportDetectionZoneGenerator:
         if self._result_df is None:
             raise RuntimeError("Call generate() before saving.")
 
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         self._result_df.to_parquet(output_path)
         print(f"Saved detection zones to {output_path}")
 
