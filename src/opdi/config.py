@@ -56,7 +56,7 @@ class SparkConfig:
     ui_show_console_progress: str = "false"
 
     # Iceberg-specific settings
-    iceberg_jar_path: str = "/opt/spark/optional-lib/iceberg-spark-runtime-3.3_2.12-1.3.1.1.20.7216.0-70.jar"
+    iceberg_jar_path: str = "/opt/spark/optional-lib/iceberg-spark-runtime-3.5_2.12-1.5.2.1.23.17218.0-1.jar"
     """Path to Iceberg Spark runtime JAR."""
 
     handle_timestamp_without_timezone: str = "true"
@@ -80,6 +80,7 @@ class SparkConfig:
             "spark.ui.showConsoleProgress": self.ui_show_console_progress,
             "spark.hadoop.fs.azure.ext.cab.required.group": self.hadoop_group,
             "spark.kerberos.access.hadoopFileSystems": project_config.hadoop_filesystem,
+            "spark.jars": self.iceberg_jar_path,
             "spark.executor.extraClassPath": self.iceberg_jar_path,
             "spark.driver.extraClassPath": self.iceberg_jar_path,
             "spark.sql.catalog.spark_catalog.type": "hive",

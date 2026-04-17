@@ -332,6 +332,13 @@ class AirportLayoutGenerator:
         >>> generator.process_all()
     """
 
+    # OPDI state vector coverage bounding box
+    BBOX_OFFSET = 3  # degrees
+    LAT_MIN = 26.74617
+    LAT_MAX = 70.25976
+    LON_MIN = -25.86653
+    LON_MAX = 49.65699
+
     def __init__(
         self,
         spark: SparkSession,
@@ -391,7 +398,17 @@ class AirportLayoutGenerator:
         airports_df = airports_df[airports_df["type"].isin(airport_types)][
             ["ident", "latitude_deg", "longitude_deg", "elevation_ft", "type"]
         ]
-        print(f"There are {len(airports_df)} airports to process...")
+
+        offset = self.BBOX_OFFSET
+        f_lat = airports_df.latitude_deg.between(
+            self.LAT_MIN - offset, self.LAT_MAX + offset
+        )
+        f_lon = airports_df.longitude_deg.between(
+            self.LON_MIN - offset, self.LON_MAX + offset
+        )
+        airports_df = airports_df[f_lat & f_lon]
+
+        print(f"There are {len(airports_df)} airports to process (within OPDI bbox)...")
         return airports_df
 
     def process_airport(self, apt_icao: str) -> Optional[pd.DataFrame]:
