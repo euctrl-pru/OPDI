@@ -124,12 +124,19 @@ class StateVectorIngestion:
         print("MinIO client configured successfully.")
         return True
 
-    def list_available_files(self, year_filter: Optional[List[int]] = None) -> List[str]:
+    def list_available_files(
+        self,
+        year_filter: Optional[List[int]] = None,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+    ) -> List[str]:
         """
         List available state vector files on OpenSky MinIO server.
 
         Args:
             year_filter: List of years to filter (e.g., [2024, 2025]). If None, uses 2022-2026.
+            start_date: Only include files on or after this date.
+            end_date: Only include files before this date.
 
         Returns:
             List of file paths on MinIO server
@@ -153,7 +160,22 @@ class StateVectorIngestion:
             file for file in files if any(pattern in file for pattern in year_patterns)
         ]
 
-        print(f"Found {len(filtered_files)} files matching year filter.")
+        if start_date or end_date:
+            import re
+            date_filtered = []
+            for f in filtered_files:
+                m = re.search(r"states_(\d{4}-\d{2}-\d{2})-\d{2}\.parquet", f)
+                if not m:
+                    continue
+                file_date = date.fromisoformat(m.group(1))
+                if start_date and file_date < start_date:
+                    continue
+                if end_date and file_date >= end_date:
+                    continue
+                date_filtered.append(f)
+            filtered_files = date_filtered
+
+        print(f"Found {len(filtered_files)} files matching filter.")
         return filtered_files
 
     def load_processed_files(self) -> Set[str]:
@@ -283,6 +305,8 @@ class StateVectorIngestion:
     def ingest(
         self,
         year_filter: Optional[List[int]] = None,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
         dry_run: bool = False,
     ) -> Dict[str, int]:
         """
@@ -292,6 +316,8 @@ class StateVectorIngestion:
 
         Args:
             year_filter: List of years to process (e.g., [2024, 2025])
+            start_date: Only ingest files on or after this date.
+            end_date: Only ingest files before this date.
             dry_run: If True, only list files without downloading/processing
 
         Returns:
@@ -305,14 +331,14 @@ class StateVectorIngestion:
             >>> config = OPDIConfig.for_environment("live")
             >>> spark = get_spark("live", "State Vector Ingestion")
             >>> ingestion = StateVectorIngestion(spark, config)
-            >>> stats = ingestion.ingest(year_filter=[2024])
+            >>> stats = ingestion.ingest(year_filter=[2024], start_date=date(2024, 1, 1), end_date=date(2024, 2, 1))
         """
         # Setup MinIO client
         if not self.setup_minio_client():
             raise RuntimeError("Failed to set up MinIO client")
 
         # List available files
-        files_to_download = self.list_available_files(year_filter)
+        files_to_download = self.list_available_files(year_filter, start_date, end_date)
         processed_files = self.load_processed_files()
 
         # Filter out already processed files
