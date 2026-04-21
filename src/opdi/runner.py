@@ -171,7 +171,8 @@ def _step_01_ingest_statevectors(spark, config, start_date, end_date, **kwargs):
     from opdi.ingestion.osn_statevectors import StateVectorIngestion
 
     sv = StateVectorIngestion(spark, config)
-    sv.ingest(year_filter=start_date.year)
+    years = list(range(start_date.year, end_date.year + 1))
+    sv.ingest(year_filter=years)
 
 
 def _step_02_process_tracks(spark, config, start_date, end_date, **kwargs):
