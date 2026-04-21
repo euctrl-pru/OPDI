@@ -207,8 +207,8 @@ class OPDIConfig:
             return cls(
                 project=ProjectConfig(
                     project_name="project_opdi",
-                    warehouse_path="abfs://storage-fs@cdpdldev.dfs.core.windows.net/data/project/opdi.db/unmanaged",
-                    hadoop_filesystem="abfs://storage-fs@cdpdldev.dfs.core.windows.net/data/project/opdi.db/unmanaged",
+                    warehouse_path="abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/opdi.db/unmanaged",
+                    hadoop_filesystem="abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/opdi.db/unmanaged",
                 ),
                 spark=SparkConfig(
                     app_name="OPDI Pipeline - Dev",

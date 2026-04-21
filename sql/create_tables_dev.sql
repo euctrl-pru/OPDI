@@ -1,7 +1,7 @@
 -- ============================================================================
 -- OPDI Table Creation Script - DEV Environment
 -- Database: project_opdi
--- Warehouse: abfs://storage-fs@cdpdldev.dfs.core.windows.net/data/project/opdi.db/unmanaged
+-- Warehouse: abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/opdi.db/unmanaged
 --
 -- Run this script in Spark SQL / Hive before the first pipeline execution.
 -- All statements use IF NOT EXISTS so they are safe to re-run.
