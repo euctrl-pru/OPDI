@@ -244,28 +244,14 @@ class OurAirportsIngestion:
         }
         return sqls[table_name]
 
-    def create_tables(self, truncate: bool = False) -> None:
-        """
-        Create all OurAirports tables.
-
-        Args:
-            truncate: If True, truncate existing tables before ingestion.
-        """
+    def create_tables(self) -> None:
+        """Create all OurAirports tables if they don't already exist."""
         db = self.target_database
-        table_names = [
-            "oa_airports", "oa_runways", "oa_navaids",
-            "oa_airport_frequencies", "oa_countries", "oa_regions",
-        ]
 
         for dataset in SCHEMAS:
             sql = self._get_create_table_sql(dataset)
             self.spark.sql(sql)
             print(f"Created/verified {db}.oa_{dataset}")
-
-        if truncate:
-            for table in table_names:
-                self.spark.sql(f"TRUNCATE TABLE `{db}`.`{table}`")
-                print(f"Truncated {db}.{table}")
 
     def ingest_dataset(
         self,
@@ -300,14 +286,15 @@ class OurAirportsIngestion:
     def ingest_all(
         self,
         urls: Optional[Dict[str, str]] = None,
-        truncate: bool = True,
     ) -> Dict[str, int]:
         """
         Download and ingest all OurAirports datasets.
 
+        Tables are created if they don't exist, then overwritten with
+        fresh data.
+
         Args:
             urls: Override URLs for each dataset.
-            truncate: If True, truncate tables before ingestion.
 
         Returns:
             Dictionary mapping dataset names to row counts.
@@ -320,7 +307,7 @@ class OurAirportsIngestion:
         """
         urls = urls or DEFAULT_URLS
 
-        self.create_tables(truncate=truncate)
+        self.create_tables()
 
         stats = {}
         for name in SCHEMAS:
