@@ -79,13 +79,8 @@ def _print_spark_ui_link(spark):
     print(f"\n  Spark UI: {url}\n")
 
 
-def _step_00_reference_data(spark, config, **kwargs):
-    """Step 00: Generate reference data (airports, airspaces)."""
-    print("\n" + "=" * 70)
-    print("STEP 00 - Reference data generation")
-    print("=" * 70)
-
-    # 00a: Airport detection zones
+def _step_00a_airport_zones(spark, config, **kwargs):
+    """Step 00a: Airport H3 detection zones."""
     print("\n--- 00a: Airport H3 detection zones ---")
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
 
@@ -103,7 +98,9 @@ def _step_00_reference_data(spark, config, **kwargs):
     prepared.to_parquet(prepared_path)
     print(f"  Generated {len(zones)} zone-ring records, {len(prepared)} hex rows.")
 
-    # 00b: Airport ground layouts
+
+def _step_00b_airport_layouts(spark, config, **kwargs):
+    """Step 00b: Airport ground layouts (OSM -> H3)."""
     print("\n--- 00b: Airport ground layouts (OSM -> H3) ---")
     from opdi.reference.h3_airport_layouts import AirportLayoutGenerator
 
@@ -112,7 +109,9 @@ def _step_00_reference_data(spark, config, **kwargs):
     success, failed = layout_gen.process_all()
     print(f"  Processed {len(success)} airports, {len(failed)} failed.")
 
-    # 00c: Airspace boundaries
+
+def _step_00c_airspaces(spark, config, **kwargs):
+    """Step 00c: Airspace boundaries (ANSP/FIR -> H3)."""
     print("\n--- 00c: Airspace boundaries (ANSP/FIR/country -> H3) ---")
     from opdi.reference.h3_airspaces import AirspaceH3Generator
 
@@ -120,19 +119,47 @@ def _step_00_reference_data(spark, config, **kwargs):
     airspace_gen.create_table_if_not_exists()
     airspace_gen.process_all()
 
-    # 00d: OurAirports reference data
+
+def _step_00d_ourairports(spark, config, **kwargs):
+    """Step 00d: OurAirports reference data."""
     print("\n--- 00d: OurAirports reference data ---")
     from opdi.ingestion.ourairports import OurAirportsIngestion
 
     oa = OurAirportsIngestion(spark, config)
     oa.ingest_all()
 
-    # 00e: OpenSky aircraft database
+
+def _step_00e_aircraft_db(spark, config, **kwargs):
+    """Step 00e: OpenSky aircraft database."""
     print("\n--- 00e: OpenSky aircraft database ---")
     from opdi.ingestion.osn_aircraft_db import AircraftDatabaseIngestion
 
     acdb = AircraftDatabaseIngestion(spark, config)
     acdb.ingest()
+
+
+REFERENCE_SUBSTEPS = {
+    "00a": ("Airport H3 detection zones", _step_00a_airport_zones),
+    "00b": ("Airport ground layouts", _step_00b_airport_layouts),
+    "00c": ("Airspace boundaries", _step_00c_airspaces),
+    "00d": ("OurAirports reference data", _step_00d_ourairports),
+    "00e": ("OpenSky aircraft database", _step_00e_aircraft_db),
+}
+
+
+def _step_00_reference_data(spark, config, **kwargs):
+    """Step 00: Generate reference data (airports, airspaces)."""
+    print("\n" + "=" * 70)
+    print("STEP 00 - Reference data generation")
+    print("=" * 70)
+
+    run_ref = kwargs.get("run_reference", {})
+
+    for substep_id, (label, fn) in REFERENCE_SUBSTEPS.items():
+        if not run_ref.get(substep_id, True):
+            print(f"\n  Skipping {substep_id} ({label})")
+            continue
+        fn(spark, config, **kwargs)
 
 
 def _step_01_ingest_statevectors(spark, config, start_date, end_date, **kwargs):
@@ -283,6 +310,11 @@ def run_pipeline(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     step: Optional[str] = None,
+    run_airport_zones: bool = True,
+    run_airport_layouts: bool = True,
+    run_airspaces: bool = True,
+    run_ourairports: bool = True,
+    run_aircraft_db: bool = True,
     airports_hex_path: str = "data/airport_hex/zones_res7_processed.parquet",
     export_dir: str = "data/OPDI/v002",
     last_n_months: int = 4,
@@ -299,6 +331,11 @@ def run_pipeline(
         end_date: Pipeline end date (first day of last month to process).
         step: Run only this step (``"00"`` through ``"08"``).
             If ``None``, all steps run sequentially.
+        run_airport_zones: Run step 00a — Airport H3 detection zones.
+        run_airport_layouts: Run step 00b — Airport ground layouts (OSM -> H3).
+        run_airspaces: Run step 00c — Airspace boundaries (ANSP/FIR -> H3).
+        run_ourairports: Run step 00d — OurAirports reference data.
+        run_aircraft_db: Run step 00e — OpenSky aircraft database.
         airports_hex_path: Path to pre-generated airport hex zones parquet
             (produced by step 00, consumed by step 03).
         export_dir: Base directory for parquet/CSV exports (steps 05-06).
@@ -314,6 +351,8 @@ def run_pipeline(
         ...     env="live",
         ...     start_date=date(2024, 1, 1),
         ...     end_date=date(2024, 6, 1),
+        ...     run_airport_zones=False,
+        ...     run_airport_layouts=False,
         ... )
     """
     if start_date is None:
@@ -329,7 +368,21 @@ def run_pipeline(
     print(f"  Environment : {env}")
     print(f"  Project     : {config.project.project_name}")
     print(f"  Date range  : {start_date} to {end_date}")
-    print(f"  Step        : {step or 'ALL (00-08)'}")
+    run_reference = {
+        "00a": run_airport_zones,
+        "00b": run_airport_layouts,
+        "00c": run_airspaces,
+        "00d": run_ourairports,
+        "00e": run_aircraft_db,
+    }
+    skip_all_ref = not any(run_reference.values())
+
+    step_label = step or ("ALL (01-08)" if skip_all_ref else "ALL (00-08)")
+    print(f"  Step        : {step_label}")
+    if step is None:
+        skipped = [k for k, v in run_reference.items() if not v]
+        if skipped:
+            print(f"  Reference   : skipping {', '.join(skipped)}")
     print("=" * 70)
 
     spark = SparkSessionManager.create_session(
@@ -347,6 +400,7 @@ def run_pipeline(
         airports_hex_raw_path=airports_hex_path.replace("_processed", ""),
         export_dir=export_dir,
         last_n_months=last_n_months,
+        run_reference=run_reference,
     )
 
     try:

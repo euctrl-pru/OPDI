@@ -52,6 +52,36 @@ def main(argv=None):
         help="Run only this step (00-08). Omit to run all steps.",
     )
     run_parser.add_argument(
+        "--no-airport-zones",
+        action="store_true",
+        default=False,
+        help="Skip 00a: Airport H3 detection zone generation.",
+    )
+    run_parser.add_argument(
+        "--no-airport-layouts",
+        action="store_true",
+        default=False,
+        help="Skip 00b: Airport ground layout generation (OSM -> H3).",
+    )
+    run_parser.add_argument(
+        "--no-airspaces",
+        action="store_true",
+        default=False,
+        help="Skip 00c: Airspace boundary generation (ANSP/FIR -> H3).",
+    )
+    run_parser.add_argument(
+        "--no-ourairports",
+        action="store_true",
+        default=False,
+        help="Skip 00d: OurAirports reference data ingestion.",
+    )
+    run_parser.add_argument(
+        "--no-aircraft-db",
+        action="store_true",
+        default=False,
+        help="Skip 00e: OpenSky aircraft database ingestion.",
+    )
+    run_parser.add_argument(
         "--airports-hex-path",
         default="data/airport_hex/zones_res7_processed.parquet",
         help="Path to pre-generated airport hex zones parquet.",
@@ -76,6 +106,11 @@ def main(argv=None):
             start_date=start,
             end_date=end,
             step=args.step,
+            run_airport_zones=not args.no_airport_zones,
+            run_airport_layouts=not args.no_airport_layouts,
+            run_airspaces=not args.no_airspaces,
+            run_ourairports=not args.no_ourairports,
+            run_aircraft_db=not args.no_aircraft_db,
             airports_hex_path=args.airports_hex_path,
         )
 
