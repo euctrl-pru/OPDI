@@ -60,7 +60,7 @@ def main():
     # 00d: OurAirports reference data (airports, runways, navaids, etc.)
     from opdi.ingestion import OurAirportsIngestion
 
-    oa_ingestion = OurAirportsIngestion(spark, config, target_database="project_aiu")
+    oa_ingestion = OurAirportsIngestion(spark, config)
     # oa_ingestion.ingest_all()
 
     # 00e: OpenSky aircraft database

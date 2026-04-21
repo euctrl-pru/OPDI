@@ -155,7 +155,8 @@ class OurAirportsIngestion:
     Args:
         spark: Active SparkSession.
         config: OPDI configuration object.
-        target_database: Database to write tables to (default: 'project_aiu').
+        target_database: Database to write tables to.  Defaults to the
+            project database from *config* (``config.project.project_name``).
         temp_dir: Directory for temporary CSV downloads.
 
     Example:
@@ -167,12 +168,12 @@ class OurAirportsIngestion:
         self,
         spark: SparkSession,
         config: OPDIConfig,
-        target_database: str = "project_aiu",
+        target_database: Optional[str] = None,
         temp_dir: str = ".",
     ):
         self.spark = spark
         self.config = config
-        self.target_database = target_database
+        self.target_database = target_database or config.project.project_name
         self.temp_dir = temp_dir
         self._temp_file = os.path.join(temp_dir, "ourairports_temp.csv")
 
@@ -243,12 +244,12 @@ class OurAirportsIngestion:
         }
         return sqls[table_name]
 
-    def create_tables(self, drop_existing: bool = False) -> None:
+    def create_tables(self, truncate: bool = False) -> None:
         """
         Create all OurAirports tables.
 
         Args:
-            drop_existing: If True, drop and recreate existing tables.
+            truncate: If True, truncate existing tables before ingestion.
         """
         db = self.target_database
         table_names = [
@@ -256,15 +257,15 @@ class OurAirportsIngestion:
             "oa_airport_frequencies", "oa_countries", "oa_regions",
         ]
 
-        if drop_existing:
-            for table in table_names:
-                self.spark.sql(f"DROP TABLE IF EXISTS `{db}`.`{table}`")
-                print(f"Dropped {db}.{table}")
-
         for dataset in SCHEMAS:
             sql = self._get_create_table_sql(dataset)
             self.spark.sql(sql)
             print(f"Created/verified {db}.oa_{dataset}")
+
+        if truncate:
+            for table in table_names:
+                self.spark.sql(f"TRUNCATE TABLE `{db}`.`{table}`")
+                print(f"Truncated {db}.{table}")
 
     def ingest_dataset(
         self,
@@ -299,14 +300,14 @@ class OurAirportsIngestion:
     def ingest_all(
         self,
         urls: Optional[Dict[str, str]] = None,
-        drop_existing: bool = True,
+        truncate: bool = True,
     ) -> Dict[str, int]:
         """
         Download and ingest all OurAirports datasets.
 
         Args:
             urls: Override URLs for each dataset.
-            drop_existing: If True, drop and recreate tables first.
+            truncate: If True, truncate tables before ingestion.
 
         Returns:
             Dictionary mapping dataset names to row counts.
@@ -319,7 +320,7 @@ class OurAirportsIngestion:
         """
         urls = urls or DEFAULT_URLS
 
-        self.create_tables(drop_existing=drop_existing)
+        self.create_tables(truncate=truncate)
 
         stats = {}
         for name in SCHEMAS:
