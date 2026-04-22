@@ -212,10 +212,10 @@ class OPDIConfig:
                 ),
                 spark=SparkConfig(
                     app_name="OPDI Pipeline - Dev",
-                    driver_memory="8G",
-                    executor_memory="12G",
-                    executor_instances="2",
-                    dynamic_allocation_max_executors="10",
+                    driver_memory="14G",
+                    executor_memory="16G",
+                    executor_instances="3",
+                    dynamic_allocation_max_executors="20",
                     hadoop_group="eur-app-opdi-dev",
                 ),
             )
