@@ -315,8 +315,6 @@ class OPDIConfig:
                     enable_hive=False,
                     enable_iceberg=False,
                     s3_endpoint="https://s3.opensky-network.org",
-                    s3_access_key=os.getenv("AWS_ACCESS_KEY_ID"),
-                    s3_secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
                     spark_packages="org.apache.spark:spark-hadoop-cloud_2.13:4.1.1",
                     k8s_master="k8s://https://192.168.60.102:6443",
                     k8s_namespace="eurocontrol",

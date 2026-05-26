@@ -55,11 +55,6 @@ class SparkSessionManager:
         if container_image:
             config.spark.k8s_container_image = container_image
 
-        # Set S3 credentials as environment variables if configured
-        if config.spark.s3_access_key:
-            os.environ["AWS_ACCESS_KEY_ID"] = config.spark.s3_access_key
-            os.environ["AWS_SECRET_ACCESS_KEY"] = config.spark.s3_secret_key
-
         spark_configs = config.spark.to_spark_config(config.project)
 
         if distributed:
