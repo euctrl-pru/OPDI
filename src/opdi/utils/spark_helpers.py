@@ -5,6 +5,7 @@ Provides centralized Spark session creation with consistent configuration
 across all pipeline components.
 """
 
+import os
 from typing import Dict, Optional
 from pyspark.sql import SparkSession
 from opdi.config import OPDIConfig, SparkConfig, ProjectConfig
@@ -24,6 +25,7 @@ class SparkSessionManager:
         config: Optional[OPDIConfig] = None,
         env: str = "dev",
         extra_configs: Optional[Dict[str, str]] = None,
+        distributed: bool = False,
     ) -> SparkSession:
         """
         Create a new Spark session with OPDI configuration.
@@ -31,59 +33,64 @@ class SparkSessionManager:
         Args:
             app_name: Name for the Spark application
             config: OPDI configuration object. If None, creates config for specified env
-            env: Environment name ("dev", "live", "local") - used if config is None
+            env: Environment name ("dev", "live", "local", "opensky") - used if config is None
             extra_configs: Additional Spark configurations to override defaults
+            distributed: If True, enable Kubernetes distributed mode (opensky env)
 
         Returns:
-            Configured SparkSession with Hive support enabled
+            Configured SparkSession
 
         Example:
             >>> from opdi.utils.spark_helpers import SparkSessionManager
             >>> spark = SparkSessionManager.create_session("Track Processing", env="live")
             >>> df = spark.table("project_opdi.osn_statevectors_v2")
         """
-        # Get configuration
         if config is None:
             config = OPDIConfig.for_environment(env)
 
-        # Override app name in spark config
         config.spark.app_name = app_name
 
-        # Get Spark configuration dictionary
+        # Set S3 credentials as environment variables if configured
+        if config.spark.s3_access_key:
+            os.environ["AWS_ACCESS_KEY_ID"] = config.spark.s3_access_key
+            os.environ["AWS_SECRET_ACCESS_KEY"] = config.spark.s3_secret_key
+
         spark_configs = config.spark.to_spark_config(config.project)
 
-        # Apply extra configs if provided
+        if distributed:
+            spark_configs.update(config.spark.to_distributed_config())
+
         if extra_configs:
             spark_configs.update(extra_configs)
 
-        # Build Spark session
         builder = SparkSession.builder.appName(app_name)
 
-        # Apply all configurations
+        if distributed and config.spark.k8s_master:
+            builder = builder.master(config.spark.k8s_master)
+
         for key, value in spark_configs.items():
             builder = builder.config(key, value)
 
-        # Enable Hive support and create session
-        spark = builder.enableHiveSupport().getOrCreate()
+        if config.spark.enable_hive:
+            builder = builder.enableHiveSupport()
 
-        return spark
+        return builder.getOrCreate()
 
     @staticmethod
     def get_or_create(
         app_name: str = "OPDI Pipeline",
         config: Optional[OPDIConfig] = None,
         env: str = "dev",
+        distributed: bool = False,
     ) -> SparkSession:
         """
         Get existing Spark session or create new one if none exists.
 
-        This method is useful when you want to reuse an existing session
-        within the same application context.
-
         Args:
             app_name: Name for the Spark application
             config: OPDI configuration object. If None, creates config for specified env
-            env: Environment name ("dev", "live", "local")
+            env: Environment name ("dev", "live", "local", "opensky")
+            distributed: If True, enable Kubernetes distributed mode (opensky env)
 
         Returns:
             Active SparkSession (existing or newly created)
@@ -92,15 +99,13 @@ class SparkSessionManager:
             >>> spark = SparkSessionManager.get_or_create("My Analysis")
         """
         try:
-            # Try to get active session
             spark = SparkSession.getActiveSession()
             if spark is not None:
                 return spark
         except Exception:
             pass
 
-        # No active session, create new one
-        return SparkSessionManager.create_session(app_name, config, env)
+        return SparkSessionManager.create_session(app_name, config, env, distributed=distributed)
 
     @staticmethod
     def stop_session(spark: SparkSession) -> None:
@@ -164,21 +169,22 @@ class SparkSessionManager:
         return builder.getOrCreate()
 
 
-def get_spark(env: str = "dev", app_name: str = "OPDI Pipeline") -> SparkSession:
+def get_spark(env: str = "dev", app_name: str = "OPDI Pipeline", distributed: bool = False) -> SparkSession:
     """
     Convenience function to get a Spark session with OPDI configuration.
 
     This is a shorthand for SparkSessionManager.create_session().
 
     Args:
-        env: Environment name ("dev", "live", "local")
+        env: Environment name ("dev", "live", "local", "opensky")
         app_name: Name for the Spark application
+        distributed: If True, enable Kubernetes distributed mode (opensky env)
 
     Returns:
         Configured SparkSession
 
     Example:
         >>> from opdi.utils.spark_helpers import get_spark
-        >>> spark = get_spark("live", "Flight Events Processing")
+        >>> spark = get_spark("opensky", "State Vector Analysis", distributed=True)
     """
-    return SparkSessionManager.create_session(app_name=app_name, env=env)
+    return SparkSessionManager.create_session(app_name=app_name, env=env, distributed=distributed)

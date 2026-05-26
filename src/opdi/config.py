@@ -66,6 +66,27 @@ class SparkConfig:
     hadoop_group: str = "eur-app-opdi"
     """Required group for Azure filesystem access."""
 
+    # S3 settings (for OpenSky environment)
+    s3_endpoint: str = ""
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    spark_packages: str = ""
+
+    # Kubernetes distributed settings
+    k8s_master: str = ""
+    k8s_namespace: str = ""
+    k8s_container_image: str = ""
+    k8s_driver_host: str = "jupyterlab"
+    k8s_driver_bind_address: str = "0.0.0.0"
+    k8s_driver_port: str = "7078"
+    k8s_driver_block_manager_port: str = "7079"
+    k8s_executor_memory_limit: str = ""
+    k8s_executor_cores_limit: str = ""
+
+    # Feature flags
+    enable_hive: bool = True
+    enable_iceberg: bool = True
+
     def to_spark_config(self, project_config: ProjectConfig) -> Dict[str, str]:
         """
         Convert to Spark configuration dictionary.
@@ -76,17 +97,8 @@ class SparkConfig:
         Returns:
             Dictionary of Spark configuration key-value pairs
         """
-        return {
+        configs = {
             "spark.ui.showConsoleProgress": self.ui_show_console_progress,
-            "spark.hadoop.fs.azure.ext.cab.required.group": self.hadoop_group,
-            "spark.kerberos.access.hadoopFileSystems": project_config.hadoop_filesystem,
-            "spark.jars": self.iceberg_jar_path,
-            "spark.executor.extraClassPath": self.iceberg_jar_path,
-            "spark.driver.extraClassPath": self.iceberg_jar_path,
-            "spark.sql.catalog.spark_catalog.type": "hive",
-            "spark.sql.catalog.spark_catalog": "org.apache.iceberg.spark.SparkSessionCatalog",
-            "spark.sql.iceberg.handle-timestamp-without-timezone": self.handle_timestamp_without_timezone,
-            "spark.sql.catalog.spark_catalog.warehouse": project_config.warehouse_path,
             "spark.driver.cores": self.driver_cores,
             "spark.driver.memory": self.driver_memory,
             "spark.executor.memory": self.executor_memory,
@@ -99,6 +111,46 @@ class SparkConfig:
             "spark.driver.maxResultSize": self.driver_max_result_size,
             "spark.shuffle.compress": self.shuffle_compress,
             "spark.shuffle.spill.compress": self.shuffle_spill_compress,
+        }
+
+        if self.enable_iceberg:
+            configs.update({
+                "spark.hadoop.fs.azure.ext.cab.required.group": self.hadoop_group,
+                "spark.kerberos.access.hadoopFileSystems": project_config.hadoop_filesystem,
+                "spark.jars": self.iceberg_jar_path,
+                "spark.executor.extraClassPath": self.iceberg_jar_path,
+                "spark.driver.extraClassPath": self.iceberg_jar_path,
+                "spark.sql.catalog.spark_catalog.type": "hive",
+                "spark.sql.catalog.spark_catalog": "org.apache.iceberg.spark.SparkSessionCatalog",
+                "spark.sql.iceberg.handle-timestamp-without-timezone": self.handle_timestamp_without_timezone,
+                "spark.sql.catalog.spark_catalog.warehouse": project_config.warehouse_path,
+            })
+
+        if self.s3_endpoint:
+            configs.update({
+                "spark.jars.packages": self.spark_packages,
+                "spark.hadoop.fs.s3a.endpoint": self.s3_endpoint,
+                "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+                "spark.hadoop.fs.s3a.path.style.access": "true",
+                "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+            })
+
+        return configs
+
+    def to_distributed_config(self) -> Dict[str, str]:
+        """Return Kubernetes distributed-mode Spark configuration."""
+        if not self.k8s_master:
+            return {}
+        return {
+            "spark.submit.deployMode": "client",
+            "spark.driver.host": self.k8s_driver_host,
+            "spark.driver.bindAddress": self.k8s_driver_bind_address,
+            "spark.driver.port": self.k8s_driver_port,
+            "spark.driver.blockManager.port": self.k8s_driver_block_manager_port,
+            "spark.kubernetes.executor.limit.memory": self.k8s_executor_memory_limit,
+            "spark.kubernetes.executor.limit.cores": self.k8s_executor_cores_limit,
+            "spark.kubernetes.container.image": self.k8s_container_image,
+            "spark.kubernetes.namespace": self.k8s_namespace,
         }
 
 
@@ -237,8 +289,35 @@ class OPDIConfig:
                     iceberg_jar_path="",  # May need to be set manually
                 ),
             )
+        elif env == "opensky":
+            # OpenSky Network S3 environment (read-only access to state vectors)
+            return cls(
+                project=ProjectConfig(
+                    project_name="opensky",
+                    warehouse_path="",
+                    hadoop_filesystem="",
+                ),
+                spark=SparkConfig(
+                    app_name="OPDI - OpenSky",
+                    driver_memory="4G",
+                    executor_memory="4g",
+                    executor_cores="2",
+                    executor_instances="4",
+                    enable_hive=False,
+                    enable_iceberg=False,
+                    s3_endpoint="https://s3.opensky-network.org",
+                    s3_access_key="eurocontrol",
+                    s3_secret_key="xyz",
+                    spark_packages="org.apache.spark:spark-hadoop-cloud_2.13:4.1.1",
+                    k8s_master="k8s://https://192.168.60.102:6443",
+                    k8s_namespace="eurocontrol",
+                    k8s_container_image="docker.io/idlefella/spark:v4.1.1",
+                    k8s_executor_memory_limit="6g",
+                    k8s_executor_cores_limit="4",
+                ),
+            )
         else:
-            raise ValueError(f"Unknown environment: {env}. Use 'dev', 'live', or 'local'.")
+            raise ValueError(f"Unknown environment: {env}. Use 'dev', 'live', 'local', or 'opensky'.")
 
     @classmethod
     def default(cls) -> "OPDIConfig":

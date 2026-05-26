@@ -32,7 +32,7 @@ def main(argv=None):
     run_parser = subparsers.add_parser("run", help="Run pipeline stages.")
     run_parser.add_argument(
         "--env",
-        choices=["dev", "live", "local"],
+        choices=["dev", "live", "local", "opensky"],
         default="dev",
         help="Environment (default: dev).",
     )
