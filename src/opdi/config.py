@@ -317,7 +317,7 @@ class OPDIConfig:
                     s3_endpoint="https://s3.opensky-network.org",
                     s3_access_key="eurocontrol",
                     s3_secret_key="xyz",
-                    spark_packages="org.apache.spark:spark-hadoop-cloud_2.12:3.5.1",
+                    spark_packages="org.apache.spark:spark-hadoop-cloud_2.13:4.1.1",
                     k8s_master="k8s://https://192.168.60.102:6443",
                     k8s_namespace="eurocontrol",
                     k8s_container_image="docker.io/idlefella/spark:v4.1.1",
