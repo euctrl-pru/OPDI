@@ -127,6 +127,8 @@ class SparkConfig:
                 "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "spark.hadoop.fs.s3a.path.style.access": "true",
                 "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+                "spark.driver.memory": self.driver_memory,
+                "spark.driver.maxResultSize": self.driver_max_result_size,
             })
 
         # Iceberg / Azure / Hive configs (dev, live environments)
@@ -328,7 +330,7 @@ class OPDIConfig:
                 ),
                 spark=SparkConfig(
                     app_name="OPDI - OpenSky",
-                    driver_memory="4G",
+                    driver_memory="8G",
                     executor_memory="4g",
                     executor_cores="2",
                     executor_instances="4",
