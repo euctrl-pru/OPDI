@@ -97,24 +97,34 @@ class SparkConfig:
         Returns:
             Dictionary of Spark configuration key-value pairs
         """
-        configs = {
-            "spark.ui.showConsoleProgress": self.ui_show_console_progress,
-            "spark.driver.cores": self.driver_cores,
-            "spark.driver.memory": self.driver_memory,
-            "spark.executor.memory": self.executor_memory,
-            "spark.executor.memoryOverhead": self.executor_memory_overhead,
-            "spark.executor.cores": self.executor_cores,
-            "spark.executor.instances": self.executor_instances,
-            "spark.dynamicAllocation.maxExecutors": self.dynamic_allocation_max_executors,
-            "spark.network.timeout": self.network_timeout,
-            "spark.executor.heartbeatInterval": self.executor_heartbeat_interval,
-            "spark.driver.maxResultSize": self.driver_max_result_size,
-            "spark.shuffle.compress": self.shuffle_compress,
-            "spark.shuffle.spill.compress": self.shuffle_spill_compress,
-        }
+        configs: Dict[str, str] = {}
 
+        # S3 configs (opensky environment)
+        if self.s3_endpoint:
+            configs.update({
+                "spark.jars.packages": self.spark_packages,
+                "spark.hadoop.fs.s3a.endpoint": self.s3_endpoint,
+                "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+                "spark.hadoop.fs.s3a.path.style.access": "true",
+                "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+            })
+
+        # Iceberg / Azure / Hive configs (dev, live environments)
         if self.enable_iceberg:
             configs.update({
+                "spark.ui.showConsoleProgress": self.ui_show_console_progress,
+                "spark.driver.cores": self.driver_cores,
+                "spark.driver.memory": self.driver_memory,
+                "spark.executor.memory": self.executor_memory,
+                "spark.executor.memoryOverhead": self.executor_memory_overhead,
+                "spark.executor.cores": self.executor_cores,
+                "spark.executor.instances": self.executor_instances,
+                "spark.dynamicAllocation.maxExecutors": self.dynamic_allocation_max_executors,
+                "spark.network.timeout": self.network_timeout,
+                "spark.executor.heartbeatInterval": self.executor_heartbeat_interval,
+                "spark.driver.maxResultSize": self.driver_max_result_size,
+                "spark.shuffle.compress": self.shuffle_compress,
+                "spark.shuffle.spill.compress": self.shuffle_spill_compress,
                 "spark.hadoop.fs.azure.ext.cab.required.group": self.hadoop_group,
                 "spark.kerberos.access.hadoopFileSystems": project_config.hadoop_filesystem,
                 "spark.jars": self.iceberg_jar_path,
@@ -126,19 +136,15 @@ class SparkConfig:
                 "spark.sql.catalog.spark_catalog.warehouse": project_config.warehouse_path,
             })
 
-        if self.s3_endpoint:
-            configs.update({
-                "spark.jars.packages": self.spark_packages,
-                "spark.hadoop.fs.s3a.endpoint": self.s3_endpoint,
-                "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
-                "spark.hadoop.fs.s3a.path.style.access": "true",
-                "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
-            })
-
         return configs
 
     def to_distributed_config(self) -> Dict[str, str]:
-        """Return Kubernetes distributed-mode Spark configuration."""
+        """
+        Return Kubernetes distributed-mode Spark configuration.
+
+        Includes executor resource settings that only apply when running
+        with K8s executors.
+        """
         if not self.k8s_master:
             return {}
         return {
@@ -147,6 +153,9 @@ class SparkConfig:
             "spark.driver.bindAddress": self.k8s_driver_bind_address,
             "spark.driver.port": self.k8s_driver_port,
             "spark.driver.blockManager.port": self.k8s_driver_block_manager_port,
+            "spark.executor.instances": self.executor_instances,
+            "spark.executor.memory": self.executor_memory,
+            "spark.executor.cores": self.executor_cores,
             "spark.kubernetes.executor.limit.memory": self.k8s_executor_memory_limit,
             "spark.kubernetes.executor.limit.cores": self.k8s_executor_cores_limit,
             "spark.kubernetes.container.image": self.k8s_container_image,
