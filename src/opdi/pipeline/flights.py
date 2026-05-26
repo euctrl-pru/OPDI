@@ -45,6 +45,7 @@ from opdi.utils.datetime_helpers import (
     generate_months,
     get_start_end_of_month,
 )
+from opdi.utils.storage import StorageManager
 
 
 class FlightListProcessor:
@@ -82,6 +83,7 @@ class FlightListProcessor:
     ):
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.resolution = config.h3.airport_detection_resolution
         self.log_dir = log_dir
@@ -122,7 +124,7 @@ class FlightListProcessor:
         start_lit = to_timestamp(lit(start_ts))
         end_lit = to_timestamp(lit(end_ts))
 
-        df = self.spark.table(table_name)
+        df = self.storage.read_table(table_name)
         return df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
 
     def _load_airports_hex(self, airports_hex_path: str) -> DataFrame:
@@ -166,9 +168,7 @@ class FlightListProcessor:
         Returns:
             DataFrame of state vectors near airports.
         """
-        sv = self._get_data_within_timeframe(
-            f"{self.project}.osn_tracks", month
-        )
+        sv = self._get_data_within_timeframe("osn_tracks", month)
 
         sv_f = sv.dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
         sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
@@ -384,7 +384,7 @@ class FlightListProcessor:
         Returns:
             Enriched DataFrame with registration, model, typecode, etc.
         """
-        osn_aircraft_db = self.spark.table(f"{self.project}.osn_aircraft_db")
+        osn_aircraft_db = self.storage.read_table("osn_aircraft_db")
 
         merged = flight_table.alias("ft").join(
             osn_aircraft_db.alias("adb"),
@@ -426,9 +426,9 @@ class FlightListProcessor:
         Returns:
             DataFrame of overflight records.
         """
-        sv = self._get_data_within_timeframe(f"{self.project}.osn_tracks", month)
+        sv = self._get_data_within_timeframe("osn_tracks", month)
         fl = self._get_data_within_timeframe(
-            f"{self.project}.opdi_flight_list_v2",
+            "opdi_flight_list_v2",
             month,
             time_col="first_seen",
         ).select("id")
@@ -500,7 +500,7 @@ class FlightListProcessor:
         flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
         flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
         flight_table = flight_table.drop("DOF_day")
-        flight_table.writeTo(f"`{self.project}`.`opdi_flight_list_v2`").append()
+        self.storage.write_table(flight_table, "opdi_flight_list_v2")
 
         self._mark_month_processed(month, self._dai_log)
         print(f"DAI processing complete for {month}.")
@@ -528,7 +528,7 @@ class FlightListProcessor:
         flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
         flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
         flight_table = flight_table.drop("DOF_day")
-        flight_table.writeTo(f"`{self.project}`.`opdi_flight_list_v2`").append()
+        self.storage.write_table(flight_table, "opdi_flight_list_v2")
 
         self._mark_month_processed(month, self._overflight_log)
         print(f"Overflight processing complete for {month}.")
@@ -596,5 +596,5 @@ class FlightListProcessor:
         PARTITIONED BY (days(FIRST_SEEN))
         COMMENT 'OPDI flight list v2. Last updated: {today}.'
         """
-        self.spark.sql(create_sql)
+        self.storage.create_table(create_sql)
         print(f"Table {self.project}.opdi_flight_list_v2 created/verified.")

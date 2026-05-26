@@ -26,6 +26,7 @@ class SparkSessionManager:
         env: str = "dev",
         extra_configs: Optional[Dict[str, str]] = None,
         distributed: bool = False,
+        container_image: Optional[str] = None,
     ) -> SparkSession:
         """
         Create a new Spark session with OPDI configuration.
@@ -36,6 +37,7 @@ class SparkSessionManager:
             env: Environment name ("dev", "live", "local", "opensky") - used if config is None
             extra_configs: Additional Spark configurations to override defaults
             distributed: If True, enable Kubernetes distributed mode (opensky env)
+            container_image: Override K8s executor container image (e.g. "my-registry/opdi-spark:v4.1.1")
 
         Returns:
             Configured SparkSession
@@ -49,6 +51,9 @@ class SparkSessionManager:
             config = OPDIConfig.for_environment(env)
 
         config.spark.app_name = app_name
+
+        if container_image:
+            config.spark.k8s_container_image = container_image
 
         # Set S3 credentials as environment variables if configured
         if config.spark.s3_access_key:
@@ -169,7 +174,12 @@ class SparkSessionManager:
         return builder.getOrCreate()
 
 
-def get_spark(env: str = "dev", app_name: str = "OPDI Pipeline", distributed: bool = False) -> SparkSession:
+def get_spark(
+    env: str = "dev",
+    app_name: str = "OPDI Pipeline",
+    distributed: bool = False,
+    container_image: Optional[str] = None,
+) -> SparkSession:
     """
     Convenience function to get a Spark session with OPDI configuration.
 
@@ -179,12 +189,15 @@ def get_spark(env: str = "dev", app_name: str = "OPDI Pipeline", distributed: bo
         env: Environment name ("dev", "live", "local", "opensky")
         app_name: Name for the Spark application
         distributed: If True, enable Kubernetes distributed mode (opensky env)
+        container_image: Override K8s executor container image (e.g. "my-registry/opdi-spark:v4.1.1")
 
     Returns:
         Configured SparkSession
 
     Example:
         >>> from opdi.utils.spark_helpers import get_spark
-        >>> spark = get_spark("opensky", "State Vector Analysis", distributed=True)
+        >>> spark = get_spark("opensky", distributed=True, container_image="my-registry/opdi-spark:v4.1.1")
     """
-    return SparkSessionManager.create_session(app_name=app_name, env=env, distributed=distributed)
+    return SparkSessionManager.create_session(
+        app_name=app_name, env=env, distributed=distributed, container_image=container_image,
+    )

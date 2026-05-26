@@ -24,6 +24,7 @@ from pyspark.sql.types import (
 )
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 # Dataset URLs
 DEFAULT_URLS: Dict[str, str] = {
@@ -173,6 +174,7 @@ class OurAirportsIngestion:
     ):
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.target_database = target_database or config.project.project_name
         self.temp_dir = temp_dir
         self._temp_file = os.path.join(temp_dir, "ourairports_temp.csv")
@@ -250,7 +252,7 @@ class OurAirportsIngestion:
 
         for dataset in SCHEMAS:
             sql = self._get_create_table_sql(dataset)
-            self.spark.sql(sql)
+            self.storage.create_table(sql)
             print(f"Created/verified {db}.oa_{dataset}")
 
     def ingest_dataset(
@@ -277,9 +279,8 @@ class OurAirportsIngestion:
         df = self.spark.read.csv(self._temp_file, header=True, schema=schema)
         row_count = df.count()
 
-        table_name = f"{self.target_database}.oa_{name}"
-        df.write.mode("overwrite").insertInto(table_name)
-        print(f"  Ingested {row_count:,} rows into {table_name}")
+        self.storage.write_table(df, f"oa_{name}", mode="insert_overwrite")
+        print(f"  Ingested {row_count:,} rows into oa_{name}")
 
         return row_count
 

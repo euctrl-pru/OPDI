@@ -19,6 +19,7 @@ import plotly.graph_objects as go
 from pyspark.sql import SparkSession
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 class AdvancedStatsCollector:
@@ -58,6 +59,7 @@ class AdvancedStatsCollector:
         """
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.suspicious_threshold = suspicious_threshold
         self.known_outages = known_outages or self.DEFAULT_KNOWN_OUTAGES
@@ -80,14 +82,14 @@ class AdvancedStatsCollector:
             >>> df = collector.fetch_daily_row_counts("osn_statevectors_v2")
             >>> print(f"Date range: {df['date'].min()} to {df['date'].max()}")
         """
-        full_table_name = f"{self.project}.{table_name}"
-        print(f"\nFetching daily row counts from {full_table_name}...")
+        ref = self.storage.table_ref(table_name)
+        print(f"\nFetching daily row counts from {table_name}...")
 
         query = f"""
         SELECT
             DATE({date_column}) AS date,
             COUNT(*) AS row_count
-        FROM {full_table_name}
+        FROM {ref}
         GROUP BY DATE({date_column})
         ORDER BY date
         """

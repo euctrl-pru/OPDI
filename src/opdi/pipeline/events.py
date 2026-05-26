@@ -52,6 +52,7 @@ from pyspark.sql.window import Window
 
 from opdi.config import OPDIConfig
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
+from opdi.utils.storage import StorageManager
 
 
 # ======================================================================
@@ -362,7 +363,7 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
 
 
 def calculate_airport_events(
-    sv: DataFrame, month: date, spark: SparkSession, project: str
+    sv: DataFrame, month: date, storage: "StorageManager"
 ) -> DataFrame:
     """
     Detect airport infrastructure entry/exit events using H3 layout matching.
@@ -374,8 +375,7 @@ def calculate_airport_events(
     Args:
         sv: Input tracks DataFrame.
         month: Month being processed (for flight list lookup).
-        spark: Active SparkSession.
-        project: Project/database name.
+        storage: StorageManager instance.
 
     Returns:
         DataFrame of airport entry/exit events.
@@ -387,7 +387,7 @@ def calculate_airport_events(
     end_lit = to_timestamp(lit(end_ts))
 
     flight_list = (
-        spark.table(f"{project}.opdi_flight_list")
+        storage.read_table("opdi_flight_list")
         .filter((col("dof") >= start_lit) & (col("dof") < end_lit))
         .select("id", "adep", "ades", "adep_p", "ades_p")
     )
@@ -423,7 +423,7 @@ def calculate_airport_events(
     sv_low_alt = sv_f.filter(col("flight_level") <= 20).cache()
     sv_nearby_apt = sv_low_alt.join(flight_list, sv.track_id == flight_list.id, "inner")
 
-    apt_sdf = spark.table(f"{project}.hexaero_airport_layouts")
+    apt_sdf = storage.read_table("hexaero_airport_layouts")
 
     df_labelled = sv_nearby_apt.join(
         apt_sdf,
@@ -614,6 +614,7 @@ class FlightEventProcessor:
     ):
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.log_dir = log_dir
 
@@ -647,7 +648,7 @@ class FlightEventProcessor:
         start_ts, end_ts = get_start_end_of_month(month)
         start_lit = to_timestamp(lit(start_ts))
         end_lit = to_timestamp(lit(end_ts))
-        df = self.spark.table(table_name)
+        df = self.storage.read_table(table_name)
         return df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
 
     def _etl_flight_events_and_measures(
@@ -690,7 +691,7 @@ class FlightEventProcessor:
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
             df_hexaero = calculate_airport_events(
-                sdf_input, month, self.spark, self.project
+                sdf_input, month, self.storage
             )
             df_events = df_hexaero if df_events is None else df_events.union(df_hexaero)
 
@@ -730,7 +731,7 @@ class FlightEventProcessor:
             col("info"),
         )
         df_milestones = df_milestones.repartition("type", "version").orderBy("type", "version")
-        df_milestones.writeTo(f"`{self.project}`.`opdi_flight_events`").append()
+        self.storage.write_table(df_milestones, "opdi_flight_events")
 
         # Write measurements (distance + time)
         df_dist = (
@@ -767,7 +768,7 @@ class FlightEventProcessor:
 
         df_measurements = df_dist.union(df_time)
         df_measurements = df_measurements.repartition("type", "version").orderBy("type", "version")
-        df_measurements.writeTo(f"`{self.project}`.`opdi_measurements`").append()
+        self.storage.write_table(df_measurements, "opdi_measurements")
 
     def process_month(self, month: date, skip_if_processed: bool = True) -> None:
         """
@@ -790,7 +791,7 @@ class FlightEventProcessor:
                 return
 
         sdf_input = (
-            self._get_data_within_timeframe(f"{self.project}.osn_tracks", month)
+            self._get_data_within_timeframe("osn_tracks", month)
             .select(
                 "track_id", "lat", "lon", "event_time", "baro_altitude_c",
                 "velocity", "vert_rate", "callsign", "icao24", "heading", "h3_res_12",
@@ -883,8 +884,8 @@ class FlightEventProcessor:
         COMMENT 'OPDI measurements linked to flight events. Last updated: {today}.'
         """
 
-        self.spark.sql(events_sql)
+        self.storage.create_table(events_sql)
         print(f"Table {self.project}.opdi_flight_events created/verified.")
 
-        self.spark.sql(measurements_sql)
+        self.storage.create_table(measurements_sql)
         print(f"Table {self.project}.opdi_measurements created/verified.")

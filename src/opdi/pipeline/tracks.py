@@ -26,6 +26,7 @@ import h3_pyspark
 from opdi.config import OPDIConfig
 from opdi.utils.datetime_helpers import get_start_end_of_month
 from opdi.utils.h3_helpers import h3_list_prep
+from opdi.utils.storage import StorageManager
 
 
 class TrackProcessor:
@@ -59,6 +60,7 @@ class TrackProcessor:
         """
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.h3_resolutions = config.h3.track_resolutions
         self.log_file_path = log_file_path
@@ -346,9 +348,10 @@ class TrackProcessor:
         end_time_str = datetime.utcfromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S")
 
         # Read raw state vectors for the month
+        sv_ref = self.storage.table_ref("osn_statevectors_v2")
         df_month = self.spark.sql(
             f"""
-            SELECT * FROM `{self.project}`.`osn_statevectors_v2`
+            SELECT * FROM {sv_ref}
             WHERE (event_time >= TIMESTAMP('{start_time_str}'))
               AND (event_time < TIMESTAMP('{end_time_str}'));
         """
@@ -380,8 +383,7 @@ class TrackProcessor:
         # Drop partition column (Iceberg will handle it)
         df_month = df_month.drop("event_time_day")
 
-        # Write to Iceberg table
-        df_month.writeTo(f"`{self.project}`.`osn_tracks`").append()
+        self.storage.write_table(df_month, "osn_tracks")
 
         # Clean up memory
         df_month.unpersist(blocking=True)
@@ -466,5 +468,5 @@ class TrackProcessor:
         COMMENT 'Flight tracks derived from state vectors. Last updated: {today}.'
         """
 
-        self.spark.sql(create_table_sql)
+        self.storage.create_table(create_table_sql)
         print(f"Table {self.project}.osn_tracks created/verified.")

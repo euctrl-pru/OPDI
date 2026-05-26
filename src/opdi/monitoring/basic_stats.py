@@ -9,6 +9,7 @@ from typing import List, Dict
 from pyspark.sql import SparkSession
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 class BasicStatsCollector:
@@ -35,6 +36,7 @@ class BasicStatsCollector:
         """
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
 
     def get_table_count(self, table_name: str) -> int:
@@ -50,8 +52,8 @@ class BasicStatsCollector:
         Raises:
             Exception: If table doesn't exist
         """
-        full_table_name = f"{self.project}.{table_name}"
-        count = self.spark.sql(f"SELECT COUNT(*) AS cnt FROM {full_table_name}").collect()[0]["cnt"]
+        ref = self.storage.table_ref(table_name)
+        count = self.spark.sql(f"SELECT COUNT(*) AS cnt FROM {ref}").collect()[0]["cnt"]
         return count
 
     def get_all_table_counts(self, tables: List[str] = None) -> Dict[str, int]:
@@ -126,12 +128,7 @@ class BasicStatsCollector:
         Returns:
             True if table exists, False otherwise
         """
-        try:
-            full_table_name = f"{self.project}.{table_name}"
-            self.spark.sql(f"DESCRIBE {full_table_name}")
-            return True
-        except Exception:
-            return False
+        return self.storage.table_exists(table_name)
 
     def get_table_schema(self, table_name: str) -> List[tuple]:
         """
@@ -143,8 +140,8 @@ class BasicStatsCollector:
         Returns:
             List of (column_name, data_type) tuples
         """
-        full_table_name = f"{self.project}.{table_name}"
-        schema_df = self.spark.sql(f"DESCRIBE {full_table_name}")
+        ref = self.storage.table_ref(table_name)
+        schema_df = self.spark.sql(f"DESCRIBE {ref}")
         return [(row.col_name, row.data_type) for row in schema_df.collect()]
 
 

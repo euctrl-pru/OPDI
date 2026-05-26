@@ -42,7 +42,7 @@ from datetime import date
 from opdi.config import OPDIConfig
 from opdi.utils.spark_helpers import get_spark
 
-config = OPDIConfig.for_environment("dev")   # "dev", "live", or "local"
+config = OPDIConfig.for_environment("dev")   # "dev", "live", "local", or "opensky"
 spark  = get_spark(env="dev", app_name="My OPDI Analysis")
 
 # Run one pipeline step
@@ -97,11 +97,63 @@ run_pipeline(env="live", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
 | 07 | `07_get_stats.py` | `monitoring.basic_stats` | Table row counts |
 | 08 | `08_get_advanced_stats.py` | `monitoring.advanced_stats` | Data quality report + Plotly visualization |
 
+## OpenSky Network environment
+
+The `opensky` environment connects directly to the OpenSky Network S3 bucket and stores pipeline output as parquet on S3 (`s3a://eurocontrol/opdi/`). It does not require Hive or Iceberg.
+
+### Non-distributed (local driver only)
+
+```python
+from opdi.utils.spark_helpers import get_spark
+
+spark = get_spark("opensky", app_name="OPDI Analysis")
+```
+
+### Distributed (Kubernetes executors)
+
+```python
+spark = get_spark("opensky", distributed=True)
+
+# With a custom Docker image containing Python dependencies
+spark = get_spark(
+    "opensky",
+    distributed=True,
+    container_image="my-registry/opdi-spark:v4.1.1",
+)
+```
+
+### Running pipeline steps on OpenSky
+
+All pipeline steps use a `StorageManager` abstraction (`opdi.utils.storage`) that transparently switches between Iceberg tables and S3 parquet depending on the environment. No code changes are needed in individual steps.
+
+```python
+from opdi.config import OPDIConfig
+from opdi.utils.spark_helpers import get_spark
+from opdi.ingestion.osn_aircraft_db import AircraftDatabaseIngestion
+
+config = OPDIConfig.for_environment("opensky")
+spark = get_spark("opensky", app_name="Aircraft DB Ingestion")
+
+ingestion = AircraftDatabaseIngestion(spark, config)
+ingestion.create_table_if_not_exists()  # no-op on S3
+ingestion.ingest(mode="overwrite")      # writes to s3a://eurocontrol/opdi/osn_aircraft_db/
+```
+
+### Reading OpenSky state vectors directly
+
+```python
+# State vectors are available as hourly partitions
+df = spark.read.parquet("s3a://opensky-hdfs-backup/tables_v4/state_vectors/hour=1771952400")
+df.show(10)
+```
+
+See `notebooks/opensky_quickstart.ipynb` for a ready-to-run notebook.
+
 ## Package structure
 
 ```
 src/opdi/
-├── config.py               # Centralised configuration (dev/live/local)
+├── config.py               # Centralised configuration (dev/live/local/opensky)
 ├── runner.py               # Full pipeline orchestrator (steps 00-08)
 ├── cli.py                  # CLI entry point (`opdi run ...`)
 ├── ingestion/              # Data source connectors
@@ -123,6 +175,7 @@ src/opdi/
 │   ├── basic_stats.py      # Row counts
 │   └── advanced_stats.py   # Anomaly detection + Plotly
 └── utils/                  # Shared utilities
+    ├── storage.py           # Storage abstraction (Iceberg / S3 parquet)
     ├── datetime_helpers.py  # Date ranges, month boundaries
     ├── spark_helpers.py     # Spark session factory
     ├── geospatial.py        # Haversine, bearing, distance
@@ -134,12 +187,13 @@ src/opdi/
 ```python
 from opdi.config import OPDIConfig
 
-config = OPDIConfig.for_environment("dev")    # Development
-config = OPDIConfig.for_environment("live")   # Production (Cloudera)
-config = OPDIConfig.for_environment("local")  # Local testing
+config = OPDIConfig.for_environment("dev")      # Development (Azure/Iceberg)
+config = OPDIConfig.for_environment("live")     # Production (Azure/Iceberg)
+config = OPDIConfig.for_environment("local")    # Local testing
+config = OPDIConfig.for_environment("opensky")  # OpenSky Network S3
 
 # All settings are accessible as typed dataclass attributes
-config.project.project_name           # "project_opdi_dev"
+config.project.project_name             # "project_opdi"
 config.h3.airport_detection_resolution  # 7
 config.ingestion.batch_size             # 250
 config.spark.executor_memory            # "12G"

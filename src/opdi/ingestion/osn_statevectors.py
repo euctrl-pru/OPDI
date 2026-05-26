@@ -14,6 +14,7 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import col, to_date, from_unixtime
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 class StateVectorIngestion:
@@ -64,6 +65,7 @@ class StateVectorIngestion:
         """
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.local_download_path = local_download_path
         self.log_file_path = log_file_path
         self.project = config.project.project_name
@@ -270,11 +272,9 @@ class StateVectorIngestion:
         # Drop partition column (will be added automatically by Iceberg)
         df_cleaned = df_partitioned.drop("event_time_day")
 
-        # Write to Iceberg table
-        table_name = f"`{self.project}`.`osn_statevectors_v2`"
-        df_cleaned.writeTo(table_name).append()
+        self.storage.write_table(df_cleaned, "osn_statevectors_v2")
 
-        print(f"Written {df_cleaned.count()} records to {table_name}")
+        print(f"Written {df_cleaned.count()} records to osn_statevectors_v2")
 
     def cleanup_local_files(self, file_names: List[str]) -> None:
         """
@@ -421,5 +421,5 @@ class StateVectorIngestion:
         COMMENT 'OpenSky Network state vectors. Last updated: {today}.'
         """
 
-        self.spark.sql(create_table_sql)
+        self.storage.create_table(create_table_sql)
         print(f"Table {self.project}.osn_statevectors_v2 created/verified.")

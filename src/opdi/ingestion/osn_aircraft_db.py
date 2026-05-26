@@ -10,6 +10,7 @@ from pyspark.sql.functions import col, when, trim
 from typing import Optional
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 class AircraftDatabaseIngestion:
@@ -39,6 +40,7 @@ class AircraftDatabaseIngestion:
         """
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.url = url or config.ingestion.osn_aircraft_db_url
 
@@ -104,22 +106,14 @@ class AircraftDatabaseIngestion:
 
     def write_to_table(self, df: DataFrame, mode: str = "append") -> None:
         """
-        Write aircraft database to Iceberg table.
+        Write aircraft database to table.
 
         Args:
             df: DataFrame to write
             mode: Write mode - "append" or "overwrite"
         """
-        table_name = f"`{self.project}`.`osn_aircraft_db`"
-
-        if mode == "append":
-            df.writeTo(table_name).append()
-        elif mode == "overwrite":
-            df.writeTo(table_name).overwrite()
-        else:
-            raise ValueError(f"Invalid mode: {mode}. Use 'append' or 'overwrite'.")
-
-        print(f"Written {df.count()} records to {table_name} (mode: {mode}).")
+        self.storage.write_table(df, "osn_aircraft_db", mode=mode)
+        print(f"Written {df.count()} records to osn_aircraft_db (mode: {mode}).")
 
     def create_table_if_not_exists(self) -> None:
         """
@@ -140,7 +134,7 @@ class AircraftDatabaseIngestion:
         COMMENT 'OpenSky Network aircraft database metadata'
         """
 
-        self.spark.sql(create_table_sql)
+        self.storage.create_table(create_table_sql)
         print(f"Table {self.project}.osn_aircraft_db created/verified.")
 
     def ingest(self, mode: str = "append") -> int:
@@ -193,10 +187,8 @@ class AircraftDatabaseIngestion:
             >>> if info:
             ...     print(f"Registration: {info['registration']}")
         """
-        table_name = f"`{self.project}`.`osn_aircraft_db`"
-
         result = (
-            self.spark.table(table_name)
+            self.storage.read_table("osn_aircraft_db")
             .filter(col("icao24") == icao24.lower())
             .limit(1)
             .collect()

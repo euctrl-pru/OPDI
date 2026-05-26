@@ -25,6 +25,7 @@ from pyspark.sql.types import (
 )
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 # Default data source URLs from PRU Atlas
 DEFAULT_ANSP_URLS = [
@@ -221,6 +222,7 @@ class AirspaceH3Generator:
     ):
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.compact = compact
 
@@ -248,7 +250,7 @@ class AirspaceH3Generator:
         spark_df = spark_df.withColumn(
             "validity_end", col("validity_end").cast(TimestampType())
         )
-        spark_df.writeTo(f"`{self.project}`.`opdi_h3_airspace_ref`").append()
+        self.storage.write_table(spark_df, "opdi_h3_airspace_ref")
 
     def process_ansp(
         self, urls: Optional[List[str]] = None
@@ -347,5 +349,5 @@ class AirspaceH3Generator:
         USING iceberg
         COMMENT 'H3-encoded airspace reference data (ANSP, FIR, country boundaries).'
         """
-        self.spark.sql(create_sql)
+        self.storage.create_table(create_sql)
         print(f"Table {self.project}.opdi_h3_airspace_ref created/verified.")

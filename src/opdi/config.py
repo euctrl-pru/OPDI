@@ -294,7 +294,7 @@ class OPDIConfig:
             return cls(
                 project=ProjectConfig(
                     project_name="opensky",
-                    warehouse_path="",
+                    warehouse_path="s3a://eurocontrol/opdi",
                     hadoop_filesystem="",
                 ),
                 spark=SparkConfig(

@@ -15,6 +15,7 @@ from pyspark.sql.functions import col, lit
 import pyspark.sql.functions as F
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 class ParquetExporter:
@@ -44,6 +45,7 @@ class ParquetExporter:
         """
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.output_dir = output_dir
         self.interval_days = interval_days
@@ -194,6 +196,7 @@ class ParquetExporter:
 
         print(f"Extracting FLIGHT_LIST {file_start}")
 
+        fl_ref = self.storage.table_ref("opdi_flight_list")
         sql = f"""
         SELECT
             id,
@@ -212,7 +215,7 @@ class ParquetExporter:
             first_seen,
             last_seen,
             version
-        FROM `{self.project}`.`opdi_flight_list`
+        FROM {fl_ref}
         WHERE first_seen >= TO_DATE('{month_start}')
           AND first_seen < TO_DATE('{month_end}')
         """
@@ -265,15 +268,17 @@ class ParquetExporter:
 
         print(f"Extracting EVENT {file_start} → {file_end}")
 
+        fl_ref = self.storage.table_ref("opdi_flight_list")
+        ev_ref = self.storage.table_ref("opdi_flight_events")
         sql = f"""
         WITH flight_list AS (
             SELECT id AS track_id
-            FROM `{self.project}`.`opdi_flight_list`
+            FROM {fl_ref}
             WHERE first_seen >= TO_DATE('{start_date}')
               AND first_seen < TO_DATE('{end_date}')
         )
         SELECT *
-        FROM `{self.project}`.`opdi_flight_events`
+        FROM {ev_ref}
         WHERE flight_id IN (SELECT track_id FROM flight_list)
         """
 
@@ -323,20 +328,23 @@ class ParquetExporter:
 
         print(f"Extracting MEASUREMENT {file_start} → {file_end}")
 
+        fl_ref = self.storage.table_ref("opdi_flight_list")
+        ev_ref = self.storage.table_ref("opdi_flight_events")
+        ms_ref = self.storage.table_ref("opdi_measurements")
         sql = f"""
         WITH flight_list AS (
             SELECT id AS track_id
-            FROM `{self.project}`.`opdi_flight_list`
+            FROM {fl_ref}
             WHERE first_seen >= TO_DATE('{start_date}')
               AND first_seen < TO_DATE('{end_date}')
         ),
         event_table AS (
             SELECT id
-            FROM `{self.project}`.`opdi_flight_events`
+            FROM {ev_ref}
             WHERE flight_id IN (SELECT track_id FROM flight_list)
         )
         SELECT *
-        FROM `{self.project}`.`opdi_measurements`
+        FROM {ms_ref}
         WHERE milestone_id IN (SELECT id FROM event_table)
         """
 

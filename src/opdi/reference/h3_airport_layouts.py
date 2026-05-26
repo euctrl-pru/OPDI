@@ -31,6 +31,7 @@ from pyspark.sql.types import (
 )
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 # Default buffer widths (meters) by aeroway type
@@ -348,6 +349,7 @@ class AirportLayoutGenerator:
     ):
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.resolution = resolution or config.h3.airport_layout_resolution
         self.log_dir = log_dir
@@ -425,7 +427,7 @@ class AirportLayoutGenerator:
             df = hexagonify_airport(apt_icao, resolution=self.resolution)
             sdf = self.spark.createDataFrame(df.to_dict(orient="records"), HEXAERO_SCHEMA)
             sdf = sdf.repartition("hexaero_apt_icao").orderBy("hexaero_apt_icao")
-            sdf.writeTo(f"`{self.project}`.`hexaero_airport_layouts`").append()
+            self.storage.write_table(sdf, "hexaero_airport_layouts")
             return df
         except Exception as e:
             print(f"Failed to process {apt_icao}. Error: {e}")
@@ -498,5 +500,5 @@ class AirportLayoutGenerator:
         USING iceberg
         COMMENT 'H3 airport ground layouts from OpenStreetMap data.'
         """
-        self.spark.sql(create_sql)
+        self.storage.create_table(create_sql)
         print(f"Table {self.project}.hexaero_airport_layouts created/verified.")
