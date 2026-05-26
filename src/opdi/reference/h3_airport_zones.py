@@ -29,6 +29,7 @@ import h3
 import h3_pyspark
 
 from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 def generate_circle_polygon(
@@ -143,6 +144,7 @@ class AirportDetectionZoneGenerator:
     ):
         self.spark = spark
         self.config = config
+        self.storage = StorageManager(spark, config)
         self.resolution = resolution or config.h3.airport_detection_resolution
         self.num_points = num_points
         self.radii_nm = radii_nm or [0, 5, 10, 20, 30, 40]
@@ -406,3 +408,22 @@ class AirportDetectionZoneGenerator:
         ]
 
         return df
+
+    def save_prepared_to_table(
+        self,
+        max_radius_nm: float = 30.0,
+        airport_types: Optional[List[str]] = None,
+        table_name: str = "h3_airport_detection_zones",
+    ) -> None:
+        """
+        Run prepare_for_flight_list and write the result to a StorageManager table.
+
+        Args:
+            max_radius_nm: Maximum detection radius in nautical miles.
+            airport_types: Airport types to include.
+            table_name: Target table name.
+        """
+        prepared = self.prepare_for_flight_list(max_radius_nm, airport_types)
+        sdf = self.spark.createDataFrame(prepared)
+        self.storage.write_table(sdf, table_name, mode="overwrite")
+        print(f"Saved {len(prepared)} prepared hex rows to table {table_name}.")

@@ -386,6 +386,66 @@ class StateVectorIngestion:
             "files_skipped": len(files_to_download) - len(pending_files),
         }
 
+    def ingest_from_s3(
+        self,
+        start_date: date,
+        end_date: date,
+        s3_base_path: str = "s3a://opensky-hdfs-backup/tables_v4/state_vectors",
+    ) -> int:
+        """
+        Ingest state vectors by reading directly from the OpenSky S3 bucket.
+
+        This method bypasses the MinIO CLI download and reads parquet
+        partitions directly via Spark's S3A filesystem. Intended for
+        the ``opensky`` environment.
+
+        Args:
+            start_date: First day to ingest (inclusive).
+            end_date: Last day to ingest (exclusive).
+            s3_base_path: S3 prefix for hourly state-vector partitions.
+
+        Returns:
+            Number of rows ingested.
+
+        Example:
+            >>> ingestion = StateVectorIngestion(spark, config)
+            >>> rows = ingestion.ingest_from_s3(date(2025, 8, 1), date(2025, 8, 2))
+        """
+        from datetime import datetime, timedelta
+
+        # Build list of hourly partition paths
+        current = datetime(start_date.year, start_date.month, start_date.day)
+        end_dt = datetime(end_date.year, end_date.month, end_date.day)
+        paths = []
+        while current < end_dt:
+            hour_ts = int(current.timestamp())
+            paths.append(f"{s3_base_path}/hour={hour_ts}")
+            current += timedelta(hours=1)
+
+        print(f"Reading {len(paths)} hourly partitions from S3 ({start_date} to {end_date})...")
+        df = self.spark.read.option("mergeSchema", "true").parquet(*paths)
+
+        # Rename columns from camelCase to snake_case
+        for camel_case, snake_case in self.COLUMN_MAPPING.items():
+            if camel_case in df.columns:
+                df = df.withColumnRenamed(camel_case, snake_case)
+
+        # Handle legacy 'time' column
+        if "time" in df.columns:
+            df = df.withColumnRenamed("time", "event_time")
+
+        # Convert Unix timestamp to Spark timestamp
+        df = df.withColumn("event_time", from_unixtime(col("event_time")).cast("timestamp"))
+
+        row_count = df.count()
+        print(f"Read {row_count:,} state vectors.")
+
+        # Write via StorageManager
+        self.storage.write_table(df, "osn_statevectors_v2", mode="overwrite")
+        print(f"Written to osn_statevectors_v2 ({row_count:,} rows).")
+
+        return row_count
+
     def create_table_if_not_exists(self) -> None:
         """
         Create the osn_statevectors_v2 Iceberg table if it doesn't exist.

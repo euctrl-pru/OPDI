@@ -435,7 +435,7 @@ class AdvancedStatsCollector:
         output_csv: str,
         output_html: str,
         date_column: str = "event_time",
-        check_minio: bool = True,
+        check_minio: Optional[bool] = None,
     ) -> pd.DataFrame:
         """
         Generate complete data quality report.
@@ -445,7 +445,8 @@ class AdvancedStatsCollector:
             output_csv: Path to save CSV report
             output_html: Path to save HTML visualization
             date_column: Column to use for date grouping
-            check_minio: Whether to check MinIO bucket
+            check_minio: Whether to check MinIO bucket.
+                Defaults to True for dev/live, False for opensky.
 
         Returns:
             DataFrame with complete analysis
@@ -458,6 +459,9 @@ class AdvancedStatsCollector:
             ...     "daily_counts.html"
             ... )
         """
+        if check_minio is None:
+            check_minio = self.config.spark.enable_iceberg
+
         # Fetch daily counts
         df = self.fetch_daily_row_counts(table_name, date_column)
 
