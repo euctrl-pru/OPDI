@@ -28,6 +28,46 @@ from pyspark.sql.types import (
 import h3
 import h3_pyspark
 
+
+@udf(returnType=FloatType())
+def _hex_lat_udf(h):
+    if h is None:
+        return None
+    try:
+        return float(h3.h3_to_geo(h)[0])
+    except Exception:
+        return None
+
+
+@udf(returnType=FloatType())
+def _hex_lon_udf(h):
+    if h is None:
+        return None
+    try:
+        return float(h3.h3_to_geo(h)[1])
+    except Exception:
+        return None
+
+
+@udf(returnType=StringType())
+def _geo_to_h3_udf(lat, lon, res):
+    if lat is None or lon is None or res is None:
+        return None
+    try:
+        return h3.geo_to_h3(float(lat), float(lon), int(res))
+    except Exception:
+        return None
+
+
+@udf(returnType=IntegerType())
+def _h3_distance_udf(h1, h2):
+    if h1 is None or h2 is None:
+        return None
+    try:
+        return int(h3.h3_distance(h1, h2))
+    except Exception:
+        return None
+
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
 
@@ -149,6 +189,7 @@ class AirportDetectionZoneGenerator:
         self.num_points = num_points
         self.radii_nm = radii_nm or [0, 5, 10, 20, 30, 40]
         self._result_df: Optional[pd.DataFrame] = None
+        self._result_sdf: Optional[DataFrame] = None
 
         # Register UDF
         self._circle_udf = udf(generate_circle_polygon, StringType())
@@ -253,7 +294,7 @@ class AirportDetectionZoneGenerator:
         )
 
         print(f"Generating H3 zones at resolution {self.resolution}...")
-        result = (
+        sdf = (
             airports_m.withColumn(
                 "inner_circle_polygon",
                 self._circle_udf(
@@ -296,9 +337,11 @@ class AirportDetectionZoneGenerator:
                 "inner_circle_hex_ids",
                 "outer_circle_hex_ids",
             )
-            .toPandas()
         )
+        sdf.cache()
+        self._result_sdf = sdf
 
+        result = sdf.toPandas()
         self._result_df = result
         print(f"Generated {len(result)} airport-ring combinations.")
         return result
@@ -409,6 +452,60 @@ class AirportDetectionZoneGenerator:
 
         return df
 
+    def prepare_for_flight_list_spark(
+        self,
+        max_radius_nm: float = 30.0,
+        airport_types: Optional[List[str]] = None,
+    ) -> DataFrame:
+        """
+        Spark-native version of prepare_for_flight_list.
+
+        Does all heavy work (explode, h3 lookups, bbox filter, distance) on
+        executors and returns a Spark DataFrame. Use this when the result is
+        too large to fit in driver memory.
+        """
+        if self._result_sdf is None:
+            raise RuntimeError("Call generate() before preparing for flight list.")
+
+        if airport_types is None:
+            airport_types = ["large_airport", "medium_airport", "small_airport"]
+
+        sdf = (
+            self._result_sdf
+            .filter(col("type").isin(airport_types))
+            .filter(col("max_c_radius_nm") <= float(max_radius_nm))
+            .select("ident", "hex_id", "latitude_deg", "longitude_deg")
+            .withColumn("hex_id", explode(col("hex_id")))
+            .filter(col("hex_id").isNotNull())
+            .withColumn("lat", _hex_lat_udf(col("hex_id")))
+            .withColumn("lon", _hex_lon_udf(col("hex_id")))
+            .filter(
+                (col("lat") >= float(self.LAT_MIN))
+                & (col("lat") <= float(self.LAT_MAX))
+                & (col("lon") >= float(self.LON_MIN))
+                & (col("lon") <= float(self.LON_MAX))
+            )
+            .withColumn(
+                "center_hex_id",
+                _geo_to_h3_udf(
+                    col("latitude_deg"), col("longitude_deg"), lit(self.resolution)
+                ),
+            )
+            .withColumn(
+                "distance_from_center",
+                _h3_distance_udf(col("hex_id"), col("center_hex_id")),
+            )
+            .filter(col("distance_from_center").isNotNull())
+            .select(
+                col("ident").alias("apt_ident"),
+                col("hex_id").alias("apt_hex_id"),
+                col("distance_from_center"),
+                col("latitude_deg").alias("apt_latitude_deg"),
+                col("longitude_deg").alias("apt_longitude_deg"),
+            )
+        )
+        return sdf
+
     def save_prepared_to_table(
         self,
         max_radius_nm: float = 30.0,
@@ -418,12 +515,14 @@ class AirportDetectionZoneGenerator:
         """
         Run prepare_for_flight_list and write the result to a StorageManager table.
 
+        Uses the Spark-native pipeline so the driver never has to materialize
+        the exploded hex DataFrame.
+
         Args:
             max_radius_nm: Maximum detection radius in nautical miles.
             airport_types: Airport types to include.
             table_name: Target table name.
         """
-        prepared = self.prepare_for_flight_list(max_radius_nm, airport_types)
-        sdf = self.spark.createDataFrame(prepared)
+        sdf = self.prepare_for_flight_list_spark(max_radius_nm, airport_types)
         self.storage.write_table(sdf, table_name, mode="overwrite")
-        print(f"Saved {len(prepared)} prepared hex rows to table {table_name}.")
+        print(f"Saved prepared hex rows to table {table_name}.")
