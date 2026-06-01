@@ -7,6 +7,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     pip install --no-cache-dir \
         "opdi @ git+https://github.com/euctrl-pru/OPDI.git" \
+        "h3<4" \
+        h3-pyspark \
         h3pandas
 
 USER 185
