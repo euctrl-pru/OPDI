@@ -271,7 +271,9 @@ class OurAirportsIngestion:
 
         print(f"Reading {name} from {url}...")
         pdf = pd.read_csv(url)
-        df = self.spark.createDataFrame(pdf, schema)
+        df = self.spark.createDataFrame(pdf)
+        for field in schema:
+            df = df.withColumn(field.name, df[field.name].cast(field.dataType))
         row_count = df.count()
 
         self.storage.write_table(df, f"oa_{name}", mode="insert_overwrite")
