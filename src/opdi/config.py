@@ -331,7 +331,8 @@ class OPDIConfig:
                 spark=SparkConfig(
                     app_name="OPDI - OpenSky",
                     driver_memory="3G",
-                    executor_memory="4g",
+                    executor_memory="16g",
+                    executor_memory_overhead="2g",
                     executor_cores="2",
                     executor_instances="4",
                     enable_hive=False,
@@ -340,8 +341,8 @@ class OPDIConfig:
                     spark_packages="org.apache.spark:spark-hadoop-cloud_2.13:4.1.1",
                     k8s_master="k8s://https://192.168.60.102:6443",
                     k8s_namespace="eurocontrol",
-                    k8s_container_image="docker.io/idlefella/spark:v4.1.1",
-                    k8s_executor_memory_limit="6g",
+                    k8s_container_image="docker.io/quintengs/opdi-spark:v4.1.1-5",
+                    k8s_executor_memory_limit="18g",
                     k8s_executor_cores_limit="4",
                 ),
             )
