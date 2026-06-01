@@ -8,10 +8,10 @@ and regions.
 Ported from: OPDI-live/python/v2.0.0/00_etl_ourairports.py
 """
 
-import os
-import urllib.request
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Optional
+
+import pandas as pd
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
@@ -158,7 +158,6 @@ class OurAirportsIngestion:
         config: OPDI configuration object.
         target_database: Database to write tables to.  Defaults to the
             project database from *config* (``config.project.project_name``).
-        temp_dir: Directory for temporary CSV downloads.
 
     Example:
         >>> ingestion = OurAirportsIngestion(spark, config)
@@ -170,14 +169,11 @@ class OurAirportsIngestion:
         spark: SparkSession,
         config: OPDIConfig,
         target_database: Optional[str] = None,
-        temp_dir: str = ".",
     ):
         self.spark = spark
         self.config = config
         self.storage = StorageManager(spark, config)
         self.target_database = target_database or config.project.project_name
-        self.temp_dir = temp_dir
-        self._temp_file = os.path.join(temp_dir, "ourairports_temp.csv")
 
     def _get_create_table_sql(self, table_name: str) -> str:
         """Generate CREATE TABLE SQL for a given OurAirports dataset."""
@@ -273,10 +269,9 @@ class OurAirportsIngestion:
         url = url or DEFAULT_URLS[name]
         schema = SCHEMAS[name]
 
-        print(f"Downloading {name} from {url}...")
-        urllib.request.urlretrieve(url, self._temp_file)
-
-        df = self.spark.read.csv(self._temp_file, header=True, schema=schema)
+        print(f"Reading {name} from {url}...")
+        pdf = pd.read_csv(url)
+        df = self.spark.createDataFrame(pdf, schema)
         row_count = df.count()
 
         self.storage.write_table(df, f"oa_{name}", mode="insert_overwrite")
@@ -314,10 +309,6 @@ class OurAirportsIngestion:
         for name in SCHEMAS:
             url = urls.get(name, DEFAULT_URLS[name])
             stats[name] = self.ingest_dataset(name, url)
-
-        # Cleanup temp file
-        if os.path.exists(self._temp_file):
-            os.remove(self._temp_file)
 
         print("\nOurAirports ingestion complete.")
         print("-" * 40)
