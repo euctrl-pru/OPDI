@@ -13,7 +13,7 @@ from typing import Dict, Optional
 
 import pandas as pd
 
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import (
     BooleanType,
     DoubleType,
@@ -273,7 +273,8 @@ class OurAirportsIngestion:
         pdf = pd.read_csv(url)
         df = self.spark.createDataFrame(pdf)
         for field in schema:
-            df = df.withColumn(field.name, df[field.name].cast(field.dataType))
+            col = F.when(F.isnan(df[field.name]), None).otherwise(df[field.name])
+            df = df.withColumn(field.name, col.cast(field.dataType))
         row_count = df.count()
 
         self.storage.write_table(df, f"oa_{name}", mode="insert_overwrite")
