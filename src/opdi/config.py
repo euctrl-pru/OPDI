@@ -330,7 +330,7 @@ class OPDIConfig:
                 ),
                 spark=SparkConfig(
                     app_name="OPDI - OpenSky",
-                    driver_memory="3G",
+                    driver_memory="10G",
                     executor_memory="12g",
                     executor_memory_overhead="2g",
                     executor_cores="2",
