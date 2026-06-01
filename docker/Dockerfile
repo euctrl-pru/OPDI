@@ -9,9 +9,4 @@ RUN apt-get update && \
         "opdi @ git+https://github.com/euctrl-pru/OPDI.git" \
         h3pandas
 
-# Workaround for containerd "no users found" error:
-# rewrite /etc/passwd and /etc/group as plain files in the final layer
-RUN cp /etc/passwd /etc/passwd.bak && cp /etc/passwd.bak /etc/passwd && rm /etc/passwd.bak && \
-    cp /etc/group /etc/group.bak && cp /etc/group.bak /etc/group && rm /etc/group.bak
-
-USER spark
+USER 185
