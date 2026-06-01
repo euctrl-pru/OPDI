@@ -273,7 +273,9 @@ class OurAirportsIngestion:
         pdf = pd.read_csv(url)
         df = self.spark.createDataFrame(pdf)
         for field in schema:
-            col = F.when(F.isnan(df[field.name]), None).otherwise(df[field.name])
+            col = df[field.name]
+            if isinstance(df.schema[field.name].dataType, DoubleType):
+                col = F.when(F.isnan(col), None).otherwise(col)
             df = df.withColumn(field.name, col.cast(field.dataType))
         row_count = df.count()
 
