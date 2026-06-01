@@ -331,7 +331,7 @@ class OPDIConfig:
                 spark=SparkConfig(
                     app_name="OPDI - OpenSky",
                     driver_memory="3G",
-                    executor_memory="16g",
+                    executor_memory="12g",
                     executor_memory_overhead="2g",
                     executor_cores="2",
                     executor_instances="4",
@@ -342,7 +342,7 @@ class OPDIConfig:
                     k8s_master="k8s://https://192.168.60.102:6443",
                     k8s_namespace="eurocontrol",
                     k8s_container_image="docker.io/quintengs/opdi-spark:v4.1.1-5",
-                    k8s_executor_memory_limit="18g",
+                    k8s_executor_memory_limit="14g",
                     k8s_executor_cores_limit="4",
                 ),
             )
