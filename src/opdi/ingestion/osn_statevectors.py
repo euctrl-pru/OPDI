@@ -8,7 +8,8 @@ and writes to Iceberg tables with proper partitioning.
 import os
 import subprocess
 import time
-from typing import List, Set, Dict
+from typing import List, Optional, Set, Dict, Tuple
+
 from datetime import date
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import col, to_date, from_unixtime
@@ -47,12 +48,17 @@ class StateVectorIngestion:
         "serials": "serials",
     }
 
+    # Default OPDI bounding box: SW=[lon, lat] NE=[lon, lat]
+    DEFAULT_BBOX: Tuple[float, float, float, float] = (-25.86653, 26.74617, 49.65699, 70.25976)
+
     def __init__(
         self,
         spark: SparkSession,
         config: OPDIConfig,
         local_download_path: str = "OPDI_live/data/ec-datadump",
         log_file_path: str = "OPDI_live/logs/01_osn_statevectors_etl.log",
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+        time_interval: int = 5,
     ):
         """
         Initialize state vector ingestion.
@@ -62,6 +68,11 @@ class StateVectorIngestion:
             config: OPDI configuration object
             local_download_path: Local directory for temporary file downloads
             log_file_path: Path to file tracking processed files
+            bbox: Bounding box as (min_lon, min_lat, max_lon, max_lat).
+                  Defaults to OPDI European coverage area.
+                  Pass None to use the default, or False-y value to disable.
+            time_interval: Keep only rows where event_time % time_interval == 0.
+                  Defaults to 5 (keeps every 5th second). Set to 1 to keep all.
         """
         self.spark = spark
         self.config = config
@@ -70,10 +81,30 @@ class StateVectorIngestion:
         self.log_file_path = log_file_path
         self.project = config.project.project_name
         self.batch_size = config.ingestion.batch_size
+        self.bbox = bbox if bbox is not None else self.DEFAULT_BBOX
+        self.time_interval = time_interval
 
         # Ensure directories exist
         os.makedirs(local_download_path, exist_ok=True)
         os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+
+    def _apply_filters(self, df: DataFrame) -> DataFrame:
+        """Apply bounding box and time interval filters to raw state vectors.
+
+        Must be called before the event_time column is converted from
+        Unix timestamp to Spark timestamp.
+        """
+        if self.bbox:
+            min_lon, min_lat, max_lon, max_lat = self.bbox
+            df = df.filter(
+                (col("lon") >= min_lon) & (col("lon") <= max_lon)
+                & (col("lat") >= min_lat) & (col("lat") <= max_lat)
+            )
+
+        if self.time_interval > 1:
+            df = df.filter((col("event_time") % self.time_interval) == 0)
+
+        return df
 
     def _execute_shell_command(self, command: str) -> tuple[str, str]:
         """
@@ -258,6 +289,9 @@ class StateVectorIngestion:
         if "time" in df.columns:
             df = df.withColumnRenamed("time", "event_time")
 
+        # Apply bounding box and time interval filters (before timestamp conversion)
+        df = self._apply_filters(df)
+
         # Convert Unix timestamp to Spark timestamp
         df = df.withColumn("event_time", from_unixtime(col("event_time")).cast("timestamp"))
 
@@ -433,6 +467,9 @@ class StateVectorIngestion:
         # Handle legacy 'time' column
         if "time" in df.columns:
             df = df.withColumnRenamed("time", "event_time")
+
+        # Apply bounding box and time interval filters (before timestamp conversion)
+        df = self._apply_filters(df)
 
         # Convert Unix timestamp to Spark timestamp
         df = df.withColumn("event_time", from_unixtime(col("event_time")).cast("timestamp"))
