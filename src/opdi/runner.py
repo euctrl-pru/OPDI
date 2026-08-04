@@ -17,6 +17,7 @@ No.  Description                                 Module
 00e  OpenSky aircraft database                   ``ingestion.osn_aircraft_db``
 01   State vector ingestion (OpenSky S3)         ``ingestion.osn_statevectors``
 02   Track processing                            ``pipeline.tracks``
+02a  Trajectory cleaning                         ``cleaning.cleaner``
 03   Flight list generation                      ``pipeline.flights``
 04   Flight events & measurements                ``pipeline.events``
 05   Export to parquet                            ``output.parquet_exporter``
@@ -187,6 +188,19 @@ def _step_02_process_tracks(spark, config, start_date, end_date, **kwargs):
     processor.process_date_range(start_date, end_date)
 
 
+def _step_02a_clean_tracks(spark, config, start_date, end_date, **kwargs):
+    """Step 02a: Native trajectory cleaning over osn_tracks."""
+    print("\n" + "=" * 70)
+    print(f"STEP 02a - Trajectory cleaning ({start_date} to {end_date})")
+    print("=" * 70)
+
+    from opdi.cleaning.cleaner import TrackCleaner
+
+    cleaner = TrackCleaner(spark, config)
+    cleaner.create_table_if_not_exists()
+    cleaner.process_date_range(start_date, end_date)
+
+
 def _step_03_generate_flight_list(spark, config, start_date, end_date, **kwargs):
     """Step 03: Generate the OPDI flight list."""
     print("\n" + "=" * 70)
@@ -296,6 +310,7 @@ STEPS = {
     "00": _step_00_reference_data,
     "01": _step_01_ingest_statevectors,
     "02": _step_02_process_tracks,
+    "02a": _step_02a_clean_tracks,
     "03": _step_03_generate_flight_list,
     "04": _step_04_extract_events,
     "05": _step_05_export_parquet,

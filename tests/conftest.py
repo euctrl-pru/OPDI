@@ -1,0 +1,96 @@
+"""Shared fixtures for the OPDI test suite.
+
+Everything here runs against a local Spark session. No cluster, no Hive, no
+Iceberg, no credentials -- the suite must be runnable on a laptop and in CI.
+"""
+
+import datetime as dt
+from typing import Any, Dict, List, Optional
+
+import pytest
+from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    BooleanType,
+    DoubleType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
+
+#: Minimal ``osn_tracks``-shaped schema: everything the cleaning stages touch.
+TRACK_SCHEMA = StructType(
+    [
+        StructField("event_time", TimestampType(), True),
+        StructField("track_id", StringType(), True),
+        StructField("icao24", StringType(), True),
+        StructField("lat", DoubleType(), True),
+        StructField("lon", DoubleType(), True),
+        StructField("baro_altitude", DoubleType(), True),
+        StructField("geo_altitude", DoubleType(), True),
+        StructField("velocity", DoubleType(), True),
+        StructField("heading", DoubleType(), True),
+        StructField("vert_rate", DoubleType(), True),
+        StructField("on_ground", BooleanType(), True),
+        StructField("last_contact", DoubleType(), True),
+    ]
+)
+
+_EPOCH = dt.datetime(2024, 6, 1, 12, 0, 0)
+
+
+@pytest.fixture(scope="session")
+def spark() -> SparkSession:
+    session = (
+        SparkSession.builder.master("local[1]")
+        .appName("opdi-tests")
+        .config("spark.sql.shuffle.partitions", "1")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.session.timeZone", "UTC")
+        .getOrCreate()
+    )
+    session.sparkContext.setLogLevel("ERROR")
+    yield session
+    session.stop()
+
+
+def make_track(
+    spark: SparkSession,
+    samples: List[Dict[str, Any]],
+    track_id: str = "trk-1",
+):
+    """Build a one-track DataFrame from a list of partial sample dicts.
+
+    Each dict may set ``t`` (seconds after an arbitrary epoch) plus any track
+    column. Anything unset gets a benign default, so a test only has to state
+    the defect it cares about.
+    """
+    rows = []
+    for i, sample in enumerate(samples):
+        offset = sample.get("t", i)
+        rows.append(
+            (
+                _EPOCH + dt.timedelta(seconds=float(offset)),
+                sample.get("track_id", track_id),
+                sample.get("icao24", "abc123"),
+                _as_float(sample.get("lat", 50.0)),
+                _as_float(sample.get("lon", 4.0)),
+                _as_float(sample.get("baro_altitude", 10000.0)),
+                _as_float(sample.get("geo_altitude", 10000.0)),
+                _as_float(sample.get("velocity", 200.0)),
+                _as_float(sample.get("heading", 90.0)),
+                _as_float(sample.get("vert_rate", 0.0)),
+                sample.get("on_ground", False),
+                _as_float(sample.get("last_contact", float(offset))),
+            )
+        )
+    return spark.createDataFrame(rows, schema=TRACK_SCHEMA)
+
+
+def _as_float(value: Any) -> Optional[float]:
+    return None if value is None else float(value)
+
+
+def column_values(df, name: str) -> List[Any]:
+    """Values of *name* ordered by ``event_time`` -- the natural read order."""
+    return [r[name] for r in df.orderBy("event_time").select(name).collect()]

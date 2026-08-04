@@ -117,33 +117,39 @@ the defaults so the population is reproducible, and record any deviation in `MAN
 
 ## Extraction recipe
 
-Run on the work laptop, one month per iteration:
+Run on the work laptop. **One calendar month is the unit of extraction** — see the loop caveat
+above; this is not a convention, it is a correctness requirement.
+
+A single month is enough for the first milestone benchmarks, so start with one:
 
 ```r
 library(eurocontrol)
 library(arrow)
+library(dplyr)
 library(lubridate)
 
-months <- seq(ymd("2024-01-01"), ymd("2024-12-01"), by = "month")
+month <- ymd("2024-06-01")            # <- the only line to change
 
-for (m in months) {
-  m   <- as_date(m)
-  wef <- format(m, "%Y-%m-%d")
-  til <- format(m %m+% months(1), "%Y-%m-%d")
-  tag <- format(m, "%Y%m")
+wef <- format(month, "%Y-%m-%d")
+til <- format(month %m+% months(1), "%Y-%m-%d")
+tag <- format(month, "%Y%m")
 
-  apdf_tidy(wef = wef, til = til) |>
-    dplyr::collect() |>
-    write_parquet(sprintf("reference/apdf_%s.parquet", tag))
+apdf_tidy(wef = wef, til = til) |>
+  collect() |>
+  write_parquet(sprintf("reference/apdf_%s.parquet", tag))
 
-  flights_tidy(wef = wef, til = til) |>
-    dplyr::collect() |>
-    write_parquet(sprintf("reference/flights_%s.parquet", tag))
-}
+flights_tidy(wef = wef, til = til) |>
+  collect() |>
+  write_parquet(sprintf("reference/flights_%s.parquet", tag))
 ```
 
 `collect()` is required — these are lazy Oracle-backed tables, and `write_parquet` needs them
 materialised.
+
+To extend to several months later, wrap the block in
+`for (month in seq(ymd("2024-01-01"), ymd("2024-12-01"), by = "month"))` and re-derive `month <-
+as_date(month)` inside the loop (`seq` over dates yields numerics). Never widen `wef`/`til`
+instead — that is the silent-drop failure described above.
 
 ## Recording an extract
 

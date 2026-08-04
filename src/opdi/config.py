@@ -250,6 +250,129 @@ class IngestionConfig:
 
 
 @dataclass
+class CleaningConfig:
+    """Thresholds for trajectory cleaning (pipeline step 02a).
+
+    Ported from the 2024 PRC Data Challenge winning solution (Alligier &
+    Gianazza, ENAC), whose ``filterclassic.py`` is the best available evidence
+    on ADS-B cleaning. Every threshold is named here rather than inlined so the
+    benchmark can sweep them.
+
+    **Both derivatives carry the same unit,** ``[column] / s``. This is not a
+    typo. Alligier's second derivative is a difference of *raw* differences
+    divided by a mean timestep (``deriv2 = 2 * |d(i+1) - d(i)| / (dt(i+1) +
+    dt(i))``, ``filterclassic.py:181``), not a rate-of-a-rate, so it never
+    acquires an ``s^2``.
+
+    **Units.** The OSN schema is SI: altitudes in metres, ``velocity`` and
+    ``vert_rate`` in m/s. Alligier's thresholds are in aviation units, so they
+    are converted once, here, and never again downstream:
+
+    ====================  ==========  ==============  =========================
+    Column                Alligier    SI              Factor
+    ====================  ==========  ==============  =========================
+    baro_altitude d1      200 ft/s    60.96 m/s       ft -> m: 0.3048
+    baro_altitude d2      50 ft/s     15.24 m/s       ft -> m: 0.3048
+    geo_altitude d1       200 ft/s    60.96 m/s       ft -> m: 0.3048
+    geo_altitude d2       150 ft/s    45.72 m/s       ft -> m: 0.3048
+    vert_rate d1          1500 fpm/s  7.62 m/s^2      ft/min -> m/s: 0.00508
+    vert_rate d2          1000 fpm/s  5.08 m/s^2      ft/min -> m/s: 0.00508
+    velocity d1           12 kt/s     6.17 m/s^2      kt -> m/s: 0.514444
+    velocity d2           10 kt/s     5.14 m/s^2      kt -> m/s: 0.514444
+    ====================  ==========  ==============  =========================
+
+    Getting these wrong is the most likely source of a silent bug in this
+    module: a threshold 3.28x too large simply never fires.
+
+    Note ``geo_altitude`` gets a **looser** second-derivative threshold than
+    ``baro_altitude`` (150 vs 50 ft/s) -- GNSS altitude is noisier. Alligier
+    sets these separately (``filterclassic.py:139-140``); do not collapse them.
+    """
+
+    enabled: bool = True
+    """Master switch for the whole cleaning step."""
+
+    # -- Stage 1: duplicate removal -------------------------------------
+    dedup_enabled: bool = True
+    """Drop duplicate ``(track_id, event_time)`` rows, keeping one."""
+
+    # -- Stage 2: range validity ----------------------------------------
+    lat_min: float = -90.0
+    lat_max: float = 90.0
+    lon_min: float = -180.0
+    lon_max: float = 180.0
+    """Physically possible coordinate ranges. Outside -> NULL."""
+
+    # -- Stage 3: stale-broadcast removal --------------------------------
+    stale_enabled: bool = True
+    """ADS-B transmits position and velocity in separate message types, so
+    identical consecutive values mean *repeated*, not *measured*."""
+
+    # -- Stage 4: derivative spike filter --------------------------------
+    spike_enabled: bool = True
+
+    spike_min_votes: int = 2
+    """A point dies only if it participates in >= this many flagged derivative
+    windows. The middle of a spike takes part in both the rise and the fall and
+    so collects two votes, while a legitimate step change takes part in only
+    one and survives.
+
+    Votes are tallied **separately per derivative order** and the kill is
+    ``votes_d1 >= n OR votes_d2 >= n`` (``filterclassic.py:191``). They are not
+    summed: summing would let one first-derivative vote plus one
+    second-derivative vote kill a legitimate step change, which is exactly the
+    behaviour the rule exists to prevent."""
+
+    baro_altitude_d1_max: float = 60.96
+    """m/s. Alligier altitude first=200 ft/s."""
+    baro_altitude_d2_max: float = 15.24
+    """m/s. Alligier altitude second=50 ft/s."""
+
+    geo_altitude_d1_max: float = 60.96
+    """m/s. Alligier geoaltitude first=200 ft/s."""
+    geo_altitude_d2_max: float = 45.72
+    """m/s. Alligier geoaltitude second=150 ft/s -- deliberately looser than
+    baro, because GNSS altitude is noisier."""
+
+    vert_rate_d1_max: float = 7.62
+    """m/s^2. Alligier vertical_rate first=1500 ft/min/s."""
+    vert_rate_d2_max: float = 5.08
+    """m/s^2. Alligier vertical_rate second=1000 ft/min/s."""
+
+    velocity_d1_max: float = 6.17
+    """m/s^2. Alligier groundspeed first=12 kt/s."""
+    velocity_d2_max: float = 5.14
+    """m/s^2. Alligier groundspeed second=10 kt/s."""
+
+    heading_d1_max: float = 12.0
+    """deg/s. Alligier track first=12. No conversion -- already angular."""
+    heading_d2_max: float = 10.0
+    """deg/s. Alligier track second=10."""
+
+    latlon_d1_max: float = 0.01
+    """deg/s. Alligier latitude/longitude first=0.01. No conversion."""
+    latlon_d2_max: float = 0.06
+    """deg/s. Alligier latitude/longitude second=0.06."""
+
+    # -- Stage 5: isolated-point removal ---------------------------------
+    isolated_enabled: bool = True
+    isolated_max_gap_seconds: float = 20.0
+    """A value further than this from any other valid value of the *same*
+    column, on both sides, is unverifiable and is NULLed."""
+
+    # -- Stage 6: gap segmentation ---------------------------------------
+    segment_gap_seconds: float = 300.0
+    """Coverage holes at or beyond this become a new ``segment_id``, so
+    downstream detectors never interpolate across them. 5 minutes."""
+
+    # -- Optional pandas stage -------------------------------------------
+    enable_pandas_stage: bool = False
+    """Opt-in ``applyInPandas`` escape hatch (csaps smoothing, 1 s resampling,
+    ILS alignment). Off by default: it needs the fat executor image, so the
+    default path stays dependency-free. See ``cleaning/pandas_udf.py``."""
+
+
+@dataclass
 class OPDIConfig:
     """Main OPDI configuration container."""
 
@@ -257,6 +380,7 @@ class OPDIConfig:
     spark: SparkConfig = field(default_factory=SparkConfig)
     h3: H3Config = field(default_factory=H3Config)
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
+    cleaning: CleaningConfig = field(default_factory=CleaningConfig)
 
     @classmethod
     def for_environment(cls, env: str = "dev") -> "OPDIConfig":
