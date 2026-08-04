@@ -52,6 +52,18 @@ git cat-file -p HEAD:reference/<f>.parquet | head -3   # must show an lfs pointe
 An lfs pointer looks like `version https://git-lfs.github.com/spec/v1` + `oid sha256:…` + `size …`.
 If you see raw parquet bytes instead, the file bypassed lfs — undo the commit and redo it.
 
+### The other half of the trap: `.gitignore`
+
+The repo root `.gitignore` blanket-ignores `*.parquet` as a data artifact. `reference/` is
+re-included by an explicit negation (`!reference/**/*.parquet`). If that negation is ever
+removed, `git add reference/foo.parquet` **prints nothing and does nothing** — the extract
+looks committed and simply is not there. If a file you added never shows up in
+`git status`, check this first:
+
+```bash
+git check-ignore -v reference/<f>.parquet   # silent = fine; a match = the negation is gone
+```
+
 ## Naming convention
 
 ```

@@ -34,6 +34,11 @@ data/
 *.csv.gz
 !requirements*.txt
 
+# ...except EUROCONTROL ground truth, which IS committed, via git-lfs.
+# Without this negation the blanket *.parquet above silently swallows every
+# extract and `git add` reports nothing. See reference/README.md.
+!reference/**/*.parquet
+
 # Logs
 logs/
 OPDI_live/
