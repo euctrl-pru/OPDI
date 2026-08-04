@@ -258,31 +258,37 @@ class CleaningConfig:
     on ADS-B cleaning. Every threshold is named here rather than inlined so the
     benchmark can sweep them.
 
+    **Thresholds are in aviation units, matching Alligier verbatim.** OPDI is
+    an ATM dataset and publishes in aviation units (``events.py`` emits
+    ``altitude_ft``, ``roc_ft_min``, ``speed_kt``, ``FL``), so tuning knobs are
+    stated the way the domain -- and the source paper -- states them. Every
+    field below carries its unit in its name.
+
+    The OSN *storage* schema stays SI (metres, m/s), mirroring OpenSky's own
+    schema. It does not need converting, because **masking is unit-agnostic**:
+    :mod:`opdi.cleaning.native` scales each column into its aviation unit only
+    to evaluate the derivative comparison, then applies the resulting NULL mask
+    to the untouched SI column. No converted value is ever stored, so there is
+    no round-trip and no schema change.
+
+    Conversion factors used, identical to those already in ``events.py`` so the
+    two can never drift:
+
+    ==============  ==================  =============
+    Column          Aviation unit       Factor
+    ==============  ==================  =============
+    baro/geo alt    m -> ft             3.28084
+    vert_rate       m/s -> ft/min       196.850394
+    velocity        m/s -> kt           1.94384
+    heading         deg (unchanged)     1.0
+    lat / lon       deg (unchanged)     1.0
+    ==============  ==================  =============
+
     **Both derivatives carry the same unit,** ``[column] / s``. This is not a
     typo. Alligier's second derivative is a difference of *raw* differences
     divided by a mean timestep (``deriv2 = 2 * |d(i+1) - d(i)| / (dt(i+1) +
     dt(i))``, ``filterclassic.py:181``), not a rate-of-a-rate, so it never
     acquires an ``s^2``.
-
-    **Units.** The OSN schema is SI: altitudes in metres, ``velocity`` and
-    ``vert_rate`` in m/s. Alligier's thresholds are in aviation units, so they
-    are converted once, here, and never again downstream:
-
-    ====================  ==========  ==============  =========================
-    Column                Alligier    SI              Factor
-    ====================  ==========  ==============  =========================
-    baro_altitude d1      200 ft/s    60.96 m/s       ft -> m: 0.3048
-    baro_altitude d2      50 ft/s     15.24 m/s       ft -> m: 0.3048
-    geo_altitude d1       200 ft/s    60.96 m/s       ft -> m: 0.3048
-    geo_altitude d2       150 ft/s    45.72 m/s       ft -> m: 0.3048
-    vert_rate d1          1500 fpm/s  7.62 m/s^2      ft/min -> m/s: 0.00508
-    vert_rate d2          1000 fpm/s  5.08 m/s^2      ft/min -> m/s: 0.00508
-    velocity d1           12 kt/s     6.17 m/s^2      kt -> m/s: 0.514444
-    velocity d2           10 kt/s     5.14 m/s^2      kt -> m/s: 0.514444
-    ====================  ==========  ==============  =========================
-
-    Getting these wrong is the most likely source of a silent bug in this
-    module: a threshold 3.28x too large simply never fires.
 
     Note ``geo_altitude`` gets a **looser** second-derivative threshold than
     ``baro_altitude`` (150 vs 50 ft/s) -- GNSS altitude is noisier. Alligier
@@ -323,36 +329,36 @@ class CleaningConfig:
     second-derivative vote kill a legitimate step change, which is exactly the
     behaviour the rule exists to prevent."""
 
-    baro_altitude_d1_max: float = 60.96
-    """m/s. Alligier altitude first=200 ft/s."""
-    baro_altitude_d2_max: float = 15.24
-    """m/s. Alligier altitude second=50 ft/s."""
+    baro_altitude_d1_max_ft_s: float = 200.0
+    """ft/s. Alligier ``altitude`` first."""
+    baro_altitude_d2_max_ft_s: float = 50.0
+    """ft/s. Alligier ``altitude`` second."""
 
-    geo_altitude_d1_max: float = 60.96
-    """m/s. Alligier geoaltitude first=200 ft/s."""
-    geo_altitude_d2_max: float = 45.72
-    """m/s. Alligier geoaltitude second=150 ft/s -- deliberately looser than
-    baro, because GNSS altitude is noisier."""
+    geo_altitude_d1_max_ft_s: float = 200.0
+    """ft/s. Alligier ``geoaltitude`` first."""
+    geo_altitude_d2_max_ft_s: float = 150.0
+    """ft/s. Alligier ``geoaltitude`` second -- deliberately looser than baro,
+    because GNSS altitude is noisier."""
 
-    vert_rate_d1_max: float = 7.62
-    """m/s^2. Alligier vertical_rate first=1500 ft/min/s."""
-    vert_rate_d2_max: float = 5.08
-    """m/s^2. Alligier vertical_rate second=1000 ft/min/s."""
+    vert_rate_d1_max_ftmin_s: float = 1500.0
+    """ft/min per second. Alligier ``vertical_rate`` first."""
+    vert_rate_d2_max_ftmin_s: float = 1000.0
+    """ft/min per second. Alligier ``vertical_rate`` second."""
 
-    velocity_d1_max: float = 6.17
-    """m/s^2. Alligier groundspeed first=12 kt/s."""
-    velocity_d2_max: float = 5.14
-    """m/s^2. Alligier groundspeed second=10 kt/s."""
+    velocity_d1_max_kt_s: float = 12.0
+    """kt/s. Alligier ``groundspeed`` first."""
+    velocity_d2_max_kt_s: float = 10.0
+    """kt/s. Alligier ``groundspeed`` second."""
 
-    heading_d1_max: float = 12.0
-    """deg/s. Alligier track first=12. No conversion -- already angular."""
-    heading_d2_max: float = 10.0
-    """deg/s. Alligier track second=10."""
+    heading_d1_max_deg_s: float = 12.0
+    """deg/s. Alligier ``track`` first."""
+    heading_d2_max_deg_s: float = 10.0
+    """deg/s. Alligier ``track`` second."""
 
-    latlon_d1_max: float = 0.01
-    """deg/s. Alligier latitude/longitude first=0.01. No conversion."""
-    latlon_d2_max: float = 0.06
-    """deg/s. Alligier latitude/longitude second=0.06."""
+    latlon_d1_max_deg_s: float = 0.01
+    """deg/s. Alligier ``latitude``/``longitude`` first."""
+    latlon_d2_max_deg_s: float = 0.06
+    """deg/s. Alligier ``latitude``/``longitude`` second."""
 
     # -- Stage 5: isolated-point removal ---------------------------------
     isolated_enabled: bool = True

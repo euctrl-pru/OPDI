@@ -159,7 +159,7 @@ def test_moderate_step_change_survives(spark, cfg):
     between them *is* the tolerance for real manoeuvres.
     """
     samples = [{"t": i, "lat": 50.0 + i * 0.001} for i in range(5)]
-    step = 0.03  # between latlon_d1_max (0.01) and latlon_d2_max (0.06)
+    step = 0.03  # between latlon_d1_max_deg_s (0.01) and latlon_d2_max_deg_s (0.06)
     samples += [{"t": 5 + i, "lat": 50.004 + step + i * 0.001} for i in range(5)]
 
     cfg.stale_enabled = False
@@ -190,6 +190,53 @@ def test_heading_wraparound_is_not_a_spike(spark, cfg):
     assert all(v is not None for v in column_values(out, "heading")), (
         "the wrap must not be read as a 358 deg/s rate"
     )
+
+
+@pytest.mark.parametrize(
+    "rate_ft_s, expect_masked",
+    [(190.0, False), (210.0, True)],
+    ids=["just-under-200ft/s", "just-over-200ft/s"],
+)
+def test_altitude_threshold_is_read_in_feet_not_metres(
+    spark, cfg, rate_ft_s, expect_masked
+):
+    """Pins the unit contract: metres on disk, ft/s thresholds.
+
+    ``baro_altitude`` is stored in metres but ``baro_altitude_d1_max_ft_s`` is
+    200 ft/s. A steady climb either side of that boundary must be judged in
+    feet. Were the factor dropped, 210 ft/s would read as 64 m/s -- comfortably
+    under 200 -- and the filter would silently never fire. That is the 3.28x
+    silent bug this test exists to catch.
+
+    A steady ramp has a near-zero second derivative, so only the first
+    derivative is in play and the two cases differ by nothing else.
+    """
+    metres_per_second = rate_ft_s / 3.28084
+    samples = [
+        {"t": i, "baro_altitude": 3000.0 + i * metres_per_second} for i in range(8)
+    ]
+    cfg.stale_enabled = False
+    cfg.isolated_enabled = False
+    out = mask_derivative_spikes(make_track(spark, samples), cfg)
+
+    interior = column_values(out, "baro_altitude")[1:-1]
+    if expect_masked:
+        assert all(v is None for v in interior), (
+            f"{rate_ft_s} ft/s exceeds the 200 ft/s threshold and must be "
+            f"masked; got {interior}"
+        )
+    else:
+        assert all(v is not None for v in interior), (
+            f"{rate_ft_s} ft/s is below the 200 ft/s threshold and must "
+            f"survive; got {interior}"
+        )
+
+
+def test_aviation_factors_cover_every_thresholded_column(cfg):
+    """A threshold without its unit factor is a silent 3.28x error."""
+    from opdi.cleaning.native import AVIATION_UNIT_FACTOR, _spike_thresholds
+
+    assert set(_spike_thresholds(cfg)) == set(AVIATION_UNIT_FACTOR)
 
 
 def test_spike_filter_can_be_disabled(spark, cfg):

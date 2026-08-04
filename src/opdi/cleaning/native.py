@@ -21,6 +21,15 @@ behind, including rows this module has already NULLed, and would silently
 produce derivatives of NULL. Every stage below therefore uses
 "previous/next valid value" windows rather than plain ``lag``/``lead``.
 
+**Units: thresholds are aviation, storage stays SI.** OPDI publishes in
+aviation units, and the source thresholds are stated that way, so every tuning
+knob in :class:`~opdi.config.CleaningConfig` is in ft/s, ft/min/s, kt/s or
+deg/s. The OSN storage schema is left in metres and m/s, mirroring OpenSky.
+Nothing has to be converted on disk to reconcile the two, because this module's
+only output is a **NULL mask, and a mask carries no unit**: each column is
+scaled by :data:`AVIATION_UNIT_FACTOR` solely to evaluate the derivative
+comparison, and the resulting mask is applied to the untouched SI column.
+
 Stage order matches ``filter_trajs.py:23``
 (``FilterCstLatLon | FilterCstPosition | FilterCstSpeed | MyFilterDerivative |
 FilterIsolated``), with dedup and range validity prepended and gap
@@ -45,6 +54,7 @@ from pyspark.sql import functions as F
 from opdi.config import CleaningConfig
 
 __all__ = [
+    "AVIATION_UNIT_FACTOR",
     "CLEANED_COLUMNS",
     "clean_tracks",
     "drop_duplicate_statevectors",
@@ -216,21 +226,55 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
 # Stage 4 -- derivative spike filter
 # ---------------------------------------------------------------------------
 
+#: Factor converting each SI storage column into the aviation unit its
+#: threshold is expressed in. Identical to the constants already used in
+#: ``events.py`` so the two cannot drift.
+#:
+#: These scale the derivative *comparison* only. Nothing converted here is ever
+#: written: the filter's output is a NULL mask, and a mask carries no unit, so
+#: it applies unchanged to the untouched SI column.
+AVIATION_UNIT_FACTOR: Dict[str, float] = {
+    "baro_altitude": 3.28084,  # m -> ft
+    "geo_altitude": 3.28084,  # m -> ft
+    "vert_rate": 196.850394,  # m/s -> ft/min
+    "velocity": 1.94384,  # m/s -> kt
+    "heading": 1.0,  # already degrees
+    "lat": 1.0,  # already degrees
+    "lon": 1.0,  # already degrees
+}
+
+
 def _spike_thresholds(cfg: CleaningConfig) -> Dict[str, Tuple[float, float]]:
-    """Per-column ``(first, second)`` derivative thresholds, in SI."""
+    """Per-column ``(first, second)`` derivative thresholds, in aviation units.
+
+    Paired with :data:`AVIATION_UNIT_FACTOR`, which lifts each SI column into
+    the unit its threshold is stated in. Keeping both halves adjacent is
+    deliberate -- a threshold and its unit factor are only correct together.
+    """
     return {
-        "baro_altitude": (cfg.baro_altitude_d1_max, cfg.baro_altitude_d2_max),
-        "geo_altitude": (cfg.geo_altitude_d1_max, cfg.geo_altitude_d2_max),
-        "vert_rate": (cfg.vert_rate_d1_max, cfg.vert_rate_d2_max),
-        "velocity": (cfg.velocity_d1_max, cfg.velocity_d2_max),
-        "heading": (cfg.heading_d1_max, cfg.heading_d2_max),
-        "lat": (cfg.latlon_d1_max, cfg.latlon_d2_max),
-        "lon": (cfg.latlon_d1_max, cfg.latlon_d2_max),
+        "baro_altitude": (
+            cfg.baro_altitude_d1_max_ft_s,
+            cfg.baro_altitude_d2_max_ft_s,
+        ),
+        "geo_altitude": (
+            cfg.geo_altitude_d1_max_ft_s,
+            cfg.geo_altitude_d2_max_ft_s,
+        ),
+        "vert_rate": (cfg.vert_rate_d1_max_ftmin_s, cfg.vert_rate_d2_max_ftmin_s),
+        "velocity": (cfg.velocity_d1_max_kt_s, cfg.velocity_d2_max_kt_s),
+        "heading": (cfg.heading_d1_max_deg_s, cfg.heading_d2_max_deg_s),
+        "lat": (cfg.latlon_d1_max_deg_s, cfg.latlon_d2_max_deg_s),
+        "lon": (cfg.latlon_d1_max_deg_s, cfg.latlon_d2_max_deg_s),
     }
 
 
 def _mask_spikes_one_column(
-    df: DataFrame, name: str, first_max: float, second_max: float, min_votes: int
+    df: DataFrame,
+    name: str,
+    first_max: float,
+    second_max: float,
+    min_votes: int,
+    unit_factor: float = 1.0,
 ) -> DataFrame:
     """Apply the vote-based derivative filter to a single column.
 
@@ -246,17 +290,25 @@ def _mask_spikes_one_column(
     A spike sits in the middle of both a rise and a fall and so collects two
     first-derivative votes; a genuine step change participates in only one and
     survives. That asymmetry is the entire point of the filter.
+
+    ``unit_factor`` scales the column into the aviation unit its thresholds are
+    stated in (see :data:`AVIATION_UNIT_FACTOR`). Because both derivatives are
+    linear in the value, scaling the value is equivalent to scaling both
+    thresholds, and it keeps the stored column untouched: the only thing this
+    function emits is a NULL mask, which has no unit.
     """
     w = _track_window()
     value = F.col(name)
+    # Scaled purely for the comparison below. Never written.
+    scaled = value * F.lit(unit_factor) if unit_factor != 1.0 else value
 
-    prev_value = _prev_valid(value, value, w)
+    prev_value = _prev_valid(value, scaled, w)
     prev_time = _prev_valid(value, F.col(_T), w)
 
     delta = (
-        _angular_delta(value, prev_value)
+        _angular_delta(scaled, prev_value)
         if name == "heading"
-        else value - prev_value
+        else scaled - prev_value
     )
 
     df = df.withColumn("_d_dt", F.col(_T) - prev_time).withColumn("_d_dv", delta)
@@ -323,7 +375,12 @@ def mask_derivative_spikes(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     for name, (first_max, second_max) in _spike_thresholds(cfg).items():
         if name in df.columns:
             df = _mask_spikes_one_column(
-                df, name, first_max, second_max, cfg.spike_min_votes
+                df,
+                name,
+                first_max,
+                second_max,
+                cfg.spike_min_votes,
+                AVIATION_UNIT_FACTOR.get(name, 1.0),
             )
     return df.drop(_T)
 
