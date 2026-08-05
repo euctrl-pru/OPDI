@@ -42,6 +42,10 @@ AIRPORTS = "s3a://eurocontrol/opdi/oa_airports"
 AIRCRAFT_DB = "s3a://eurocontrol/opdi/osn_aircraft_db"
 OUT_BASE = "s3a://eurocontrol/opdi/research/adep_ades"
 TRACKS_BASE = "s3a://eurocontrol/opdi/research/tracks"
+#: Ground truth mirrored to S3. The committed git-lfs copy in reference/ lives
+#: on the driver's local disk, which the remote K8s executor pods cannot see --
+#: reading it by local path works in local[*] mode and fails on the cluster.
+REFERENCE_BASE = "s3a://eurocontrol/opdi/research/reference"
 
 NM_PER_DEG = 60.0
 EARTH_R_NM = 3440.065
@@ -408,7 +412,7 @@ def track_identity(sv: DataFrame) -> DataFrame:
 def load_ground_truth(spark: SparkSession, months: list, days: list = None) -> DataFrame:
     frames = []
     for m in months:
-        p = str(REPO / "reference" / f"flights_{m}.parquet")
+        p = f"{REFERENCE_BASE}/flights_{m}.parquet"
         frames.append(
             spark.read.parquet(p).select(
                 F.lower(F.col("AIRCRAFT_ADDRESS")).alias("icao24"),

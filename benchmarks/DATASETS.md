@@ -75,3 +75,31 @@ resumes rather than restarting.
 (`apdf_202406`, `flights_202406`, `apdf_202506`, `flights_202506`). Two separate months allow
 methodology weights to be fitted on one and validated on the other, which is the only honest
 way to report a tuned combination.
+
+### Driver environment
+
+The driver must match the cluster image on **both** axes, or jobs fail after
+scheduling successfully:
+
+| | Cluster image `quintengs/opdi-spark:v4.1.1-5` | Driver |
+|---|---|---|
+| Spark/pyspark | 4.1.1 | `pyspark==4.1.1` (4.2.0 -> `InvalidClassException`) |
+| Python | 3.10 | `.venv310` (3.13 -> `PYTHON_VERSION_MISMATCH`) |
+
+`.venv310` is built with `uv venv --python 3.10`. Run jobs as:
+
+```bash
+PYSPARK_DRIVER_PYTHON=$PWD/.venv310/bin/python PYSPARK_PYTHON=python3 \
+  .venv310/bin/python benchmarks/adep_ades.py --days 2025-06-05 --months 202506
+```
+
+`PYSPARK_PYTHON=python3` matters: it names the interpreter *on the executors*.
+Pointing it at the driver's venv path makes executors fail with
+`Cannot run program "./.venv310/bin/python"` — that path exists only here.
+
+Python workers are unavoidable even with no UDFs: `spark.createDataFrame` on a
+Python list (the airport cell offsets) is enough to spawn them.
+
+| `opdi/research/reference/` | uploaded from `reference/` | Ground-truth mirror. The git-lfs copy is on the driver's local disk, which remote executors cannot read. | done |
+| `opdi/research/tracks/aircraft=known/day=.../` | `benchmarks/adep_ades.py` | Tracks via the frozen `_add_track_id`, aeroplanes only. | 2025-06-05 |
+| `opdi/research/adep_ades/results/<tag>/` | `benchmarks/adep_ades.py` | Per-method coverage/accuracy. | first run done |
