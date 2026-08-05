@@ -50,6 +50,16 @@ SAMPLES = {
     "2025-06": "3d-2025-06-05_large_medium_r30_fl40",
 }
 
+#: Sample-only tags, for tables that do not vary with detection parameters.
+SAMPLE_TAGS = {"2024-06": "3d-2024-06-05", "2025-06": "3d-2025-06-05"}
+
+#: Extra runs that vary one setting, exported into the method table so the
+#: ablations sit beside the main result instead of in a separate file.
+VARIANTS = {
+    "cleaned": "{sample}_large_medium_r30_fl40_clean",
+    "strict-aircraft": None,     # written under the same tag; see --variant
+}
+
 
 def exports(tag: str) -> dict:
     """S3 prefix (under the bucket) -> CSV filename in the paper's cache."""
@@ -58,7 +68,13 @@ def exports(tag: str) -> dict:
         f"{ROOT}/abstain_sweep/{tag}": "abstention_sweep.csv",
         f"{ROOT}/cascade_diag/{tag}_m0-m3-m2-m1-m5_vs_m1": "cascade_attribution.csv",
         f"{ROOT}/per_airport/{tag}_M7_abstain": "per_airport.csv",
+        f"{ROOT}/error_pairs/{tag}_M7_abstain": "error_pairs.csv",
     }
+
+
+#: Tables tagged by sample alone, without the parameter suffix.
+def sample_exports(sample_tag: str) -> dict:
+    return {f"{ROOT}/track_quality/{sample_tag}": "track_quality.csv"}
 
 
 #: OPDI Europe bounding box, as used at ingestion.
@@ -95,7 +111,8 @@ def annotate_airports(df, s3):
     out["in_scope"] = out.in_bbox & out.in_set
     return out
 
-DEFAULT_OUT = REPO.parent / "opdi-portal" / "papers" / "adep-ades-detection" / "data"
+PAPERS = REPO.parent / "opdi-portal" / "papers"
+DEFAULT_PAPER = "adep-ades-detection-v2"
 
 
 def read_prefix(s3, prefix: str):
@@ -119,7 +136,9 @@ def read_prefix(s3, prefix: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--paper", default=DEFAULT_PAPER,
+                    help="paper folder under opdi-portal/papers to write into")
+    ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--tag", default=DEFAULT_TAG,
                     help=f"run tag to publish (default {DEFAULT_TAG})")
     ap.add_argument("--all-samples", action="store_true", default=True,
@@ -153,6 +172,7 @@ def main() -> None:
 
     import pandas as pd
 
+    args.out = args.out or (PAPERS / args.paper / "data")
     args.out.mkdir(parents=True, exist_ok=True)
     samples = SAMPLES if args.all_samples else {args.tag: args.tag}
 
@@ -167,6 +187,13 @@ def main() -> None:
             frame = tbl.to_pandas()
             if name == "per_airport.csv":
                 frame = annotate_airports(frame, s3)
+            frame.insert(0, "month", month)
+            by_name.setdefault(name, []).append(frame)
+        for prefix, name in sample_exports(SAMPLE_TAGS.get(month, "")).items():
+            tbl = read_prefix(s3, prefix)
+            if tbl is None:
+                continue
+            frame = tbl.to_pandas()
             frame.insert(0, "month", month)
             by_name.setdefault(name, []).append(frame)
 
