@@ -520,8 +520,19 @@ METHODS = {
 
 #: Abstention grid for M7. Distances in NM from the track endpoint to the
 #: nearest aerodrome; heights in ft above that aerodrome's elevation.
+#:
+#: The first version of this grid stepped from 5,000 ft straight to
+#: unrestricted, which turned out to hide the answer for arrivals. At 5,000 ft
+#: M7 beats the production algorithm on ADEP but *loses* 2-3 pp of ADES
+#: coverage; across that one missing interval ADES accuracy falls from 97.97%
+#: to 83.94%, so whether an intermediate cut dominates on arrivals too was
+#: simply not measured. Arrivals plausibly need a higher cut than departures:
+#: the last sample of a track is more often a loss of reception during descent
+#: than a landing, and that happens well above 5,000 ft.
 ABSTAIN_DIST_NM = (1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 40.0, 1e9)
-ABSTAIN_AGL_FT = (0.0, 500.0, 1000.0, 2000.0, 5000.0, 1e9)
+ABSTAIN_AGL_FT = (
+    0.0, 500.0, 1000.0, 2000.0, 5000.0, 8000.0, 10000.0, 15000.0, 20000.0, 1e9
+)
 
 
 # ---------------------------------------------------------------------------
