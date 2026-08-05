@@ -101,5 +101,7 @@ Python workers are unavoidable even with no UDFs: `spark.createDataFrame` on a
 Python list (the airport cell offsets) is enough to spawn them.
 
 | `opdi/research/reference/` | uploaded from `reference/` | Ground-truth mirror. The git-lfs copy is on the driver's local disk, which remote executors cannot read. | done |
-| `opdi/research/tracks/aircraft=known/day=.../` | `benchmarks/adep_ades.py` | Tracks via the frozen `_add_track_id`, aeroplanes only. | 2025-06-05 |
-| `opdi/research/adep_ades/results/<tag>/` | `benchmarks/adep_ades.py` | Per-method coverage/accuracy. | first run done |
+| `opdi/research/tracks/aircraft=known/day=.../` | `benchmarks/adep_ades.py` | Tracks via the frozen `_add_track_id`, aeroplanes only (`icao_aircraft_class` starting L or A). Rebuilt only when the day is absent. | 2025-06-05 |
+| `opdi/research/adep_ades/results/<tag>/` | `benchmarks/adep_ades.py` | Per-method coverage/accuracy, one row per method. `<tag>` is `<airport_set>_r<radius>_fl<max_fl>`. | 2025-06-05, 7 methods |
+| `opdi/research/adep_ades/cascade_diag/<tag>_<ladder>_vs_<control>/` | `--diagnose-cascade` | Per-rung attribution for M6: how many flights each rung answered, its accuracy on them, and the control's accuracy on the same flights. | 2025-06-05 |
+| `opdi/research/adep_ades/abstain_sweep/<airport_set>/` | `--sweep-abstain` | M7 coverage/accuracy over the endpoint distance x height grid (8 x 6 = 48 rows). The figure the paper's operating-point discussion is built on. | 2025-06-05 |
