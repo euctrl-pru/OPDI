@@ -30,13 +30,25 @@ from osn_sample import load_dotenv
 BUCKET = "eurocontrol"
 S3_ENDPOINT = "https://s3.opensky-network.org"
 
-#: S3 prefix (under the bucket) -> CSV filename in the paper's cache.
-EXPORTS = {
-    "opdi/research/adep_ades/results/large_medium_r30_fl40": "method_comparison.csv",
-    "opdi/research/adep_ades/abstain_sweep/large_medium": "abstention_sweep.csv",
-    "opdi/research/adep_ades/cascade_diag/large_medium_r30_fl40_m0-m3-m2-m1-m5_vs_m1":
-        "cascade_attribution.csv",
-}
+ROOT = "opdi/research/adep_ades"
+
+#: Default run tag. `adep_ades.py` encodes the sample in it -- `3d-2025-06-05`
+#: rather than a bare parameter string -- specifically so a longer run cannot
+#: overwrite the shorter one it is meant to be compared against. Which means
+#: the exporter has to be told which run it is publishing.
+#: Run `--list` to see what is actually present. Prefixes without a `<n>d-`
+#: sample component predate that scheme and were written by the first 1-day
+#: run; they are the provenance of the currently committed CSVs.
+DEFAULT_TAG = "3d-2025-06-05_large_medium_r30_fl40"
+
+
+def exports(tag: str) -> dict:
+    """S3 prefix (under the bucket) -> CSV filename in the paper's cache."""
+    return {
+        f"{ROOT}/results/{tag}": "method_comparison.csv",
+        f"{ROOT}/abstain_sweep/{tag}": "abstention_sweep.csv",
+        f"{ROOT}/cascade_diag/{tag}_m0-m3-m2-m1-m5_vs_m1": "cascade_attribution.csv",
+    }
 
 DEFAULT_OUT = REPO.parent / "opdi-portal" / "papers" / "adep-ades-detection" / "data"
 
@@ -63,6 +75,10 @@ def read_prefix(s3, prefix: str):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--tag", default=DEFAULT_TAG,
+                    help=f"run tag to publish (default {DEFAULT_TAG})")
+    ap.add_argument("--list", action="store_true",
+                    help="list the run tags present in S3 and exit")
     args = ap.parse_args()
 
     load_dotenv()
@@ -72,10 +88,23 @@ def main() -> None:
         aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
     )
+    if args.list:
+        for kind in ("results", "abstain_sweep", "cascade_diag", "per_airport"):
+            print(f"\n{kind}:")
+            seen = set()
+            for page in s3.get_paginator("list_objects_v2").paginate(
+                Bucket=BUCKET, Prefix=f"{ROOT}/{kind}/", Delimiter="/"
+            ):
+                for p in page.get("CommonPrefixes", []):
+                    seen.add(p["Prefix"].rstrip("/").rsplit("/", 1)[-1])
+            for t in sorted(seen):
+                print(f"  {t}")
+        return
+
     args.out.mkdir(parents=True, exist_ok=True)
 
     missing = []
-    for prefix, name in EXPORTS.items():
+    for prefix, name in exports(args.tag).items():
         tbl = read_prefix(s3, prefix)
         if tbl is None:
             missing.append(prefix)

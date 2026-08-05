@@ -127,13 +127,28 @@ def filter_to_aeroplanes(
     return out.filter(known | F.col("ac_class").isNull() if include_unknown else known)
 
 
-def build_tracks(spark: SparkSession, sv: DataFrame) -> DataFrame:
-    """Apply the frozen OPDI track-splitting algorithm."""
+def build_tracks(spark: SparkSession, sv: DataFrame, clean: bool = False) -> DataFrame:
+    """Apply the frozen OPDI track-splitting algorithm, optionally then cleaning.
+
+    The cleaning ablation is a real question, not a formality. Stage 3 of
+    ``cleaning/native.py`` masks *stale broadcasts* -- consecutive identical
+    positions, on the reasoning that ADS-B sends position and velocity in
+    separate message types, so a repeated value means repeated rather than
+    measured. An aircraft parked at a gate broadcasts exactly that. If the
+    stage nulls those samples, it removes the evidence the endpoint methods
+    depend on, and cleaning would make ADEP/ADES detection *worse*.
+    """
     from opdi.config import OPDIConfig
     from opdi.pipeline.tracks import TrackProcessor
 
     proc = TrackProcessor(spark, OPDIConfig.for_environment("local"))
-    return proc._add_track_id(sv)
+    tracks = proc._add_track_id(sv)
+    if not clean:
+        return tracks
+
+    from opdi.cleaning.native import clean_tracks
+
+    return clean_tracks(tracks, OPDIConfig.for_environment("local").cleaning)
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +696,48 @@ def sweep_abstention(
     return spark.createDataFrame(rows)
 
 
+def per_airport_counts(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> DataFrame:
+    """Departure and arrival counts per aerodrome, method against ground truth.
+
+    A stricter test than flight-level accuracy, and the one an operational user
+    actually cares about: whether OPDI reports the right *number* of movements
+    at an aerodrome. Flight-level errors can cancel -- a departure misattributed
+    from A to B leaves both counts wrong but the total right -- so the two
+    measures fail in different ways and both are worth reporting.
+
+    Only meaningful where ground truth is complete, i.e. the ~90 aerodromes
+    APDF covers, so aerodromes absent from ground truth are dropped rather than
+    reported as infinite error.
+    """
+    j = align_to_ground_truth(pred, ident, gt)
+    frames = []
+    for side, role in (("adep", "departures"), ("ades", "arrivals")):
+        agg = (
+            j.groupBy(F.col(f"gt_{side}").alias("airport"))
+            .agg(
+                F.count(F.lit(1)).alias("n_truth"),
+                F.sum(F.when(F.col(side).isNotNull(), 1).otherwise(0)).alias("n_predicted_here"),
+                F.sum(F.when(F.col(side) == F.col(f"gt_{side}"), 1).otherwise(0)).alias("n_correct"),
+            )
+            .filter(F.col("airport").isNotNull())
+        )
+        # What the method assigns *to* this aerodrome, including flights that
+        # truly belong elsewhere -- the count an operational user would see.
+        assigned = (
+            j.groupBy(F.col(side).alias("airport"))
+            .agg(F.count(F.lit(1)).alias("n_assigned"))
+            .filter(F.col("airport").isNotNull())
+        )
+        frames.append(
+            agg.join(assigned, "airport", "left")
+            .withColumn("n_assigned", F.coalesce("n_assigned", F.lit(0)))
+            .withColumn("role", F.lit(role))
+            .withColumn("recall", F.col("n_correct") / F.col("n_truth"))
+            .withColumn("count_ratio", F.col("n_assigned") / F.col("n_truth"))
+        )
+    return frames[0].unionByName(frames[1]).orderBy(F.col("n_truth").desc())
+
+
 def _print_diagnosis(rows, fallback: str) -> None:
     print(
         f"\n{'side':5} {'rung':5} {'answered':>9} {'of GT':>7} "
@@ -695,8 +752,14 @@ def _print_diagnosis(rows, fallback: str) -> None:
 
 
 def _materialise_tracks(spark: SparkSession, args) -> DataFrame:
-    """Build tracks once, persist to S3, read back. Idempotent per day."""
+    """Build tracks once, persist to S3, read back. Idempotent per day.
+
+    Cleaned and raw tracks are separate prefixes, so the ablation is a matter
+    of pointing at a different one rather than of rebuilding.
+    """
     keep = "unk" if args.include_unknown_aircraft else "known"
+    if getattr(args, "clean", False):
+        keep += "_clean"
     out = f"{TRACKS_BASE}/aircraft={keep}"
     todo = []
     for d in args.days:
@@ -706,10 +769,12 @@ def _materialise_tracks(spark: SparkSession, args) -> DataFrame:
         else:
             todo.append(d)
     for d in todo:
-        print(f"tracks {d}: building ...")
+        print(f"tracks {d}: building{' + cleaning' if args.clean else ''} ...")
         sv = load_state_vectors(spark, [d])
         sv = filter_to_aeroplanes(spark, sv, args.include_unknown_aircraft)
-        build_tracks(spark, sv).write.mode("overwrite").parquet(f"{out}/day={d}")
+        build_tracks(spark, sv, clean=args.clean).write.mode("overwrite").parquet(
+            f"{out}/day={d}"
+        )
     paths = [f"{out}/day={d}" for d in args.days]
     df = spark.read.parquet(*paths)
     print(f"tracks ready: {df.count():,} state vectors")
@@ -731,12 +796,18 @@ def main() -> None:
     ap.add_argument("--radius-nm", type=float, default=30.0)
     ap.add_argument("--max-fl", type=float, default=40.0)
     ap.add_argument("--include-unknown-aircraft", action="store_true")
+    ap.add_argument("--clean", action="store_true",
+                    help="apply the step-02a cleaning stages to the tracks "
+                         "before detection (ablation; writes a separate prefix)")
     ap.add_argument("--ladder", nargs="+", default=list(DEFAULT_LADDER),
                     choices=list(RUNGS),
                     help="cascade order for M6, most precise first")
     ap.add_argument("--diagnose-cascade", action="store_true",
                     help="attribute the cascade's answers to the rung that "
                          "supplied them and report lift over the control")
+    ap.add_argument("--per-airport", default=None, choices=list(METHODS),
+                    help="write per-aerodrome departure/arrival counts for this "
+                         "method against APDF")
     ap.add_argument("--sweep-abstain", action="store_true",
                     help="sweep M7's endpoint distance x height grid and write "
                          "the coverage/accuracy curve")
@@ -746,8 +817,10 @@ def main() -> None:
                          "it to the strongest single method to test whether a "
                          "rung earns its place at all.")
     ap.add_argument("--ui-port", type=int, default=4041,
-                    help="Spark UI port; proxied at /proxy/<port>/. Defaults to "
-                         "4041 so it does not collide with a concurrent sampler.")
+                    help="Spark UI port; proxied at /proxy/<port>/. Set it if a "
+                         "stale UI still holds 4040/4041, since Spark falls back "
+                         "silently and the proxy path is fixed. It does NOT allow "
+                         "a concurrent job -- see DATASETS.md.")
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="9g")
     ap.add_argument("--executors", type=int, default=osn_sample.RESEARCH_EXECUTORS,
@@ -771,9 +844,26 @@ def main() -> None:
     gt = load_ground_truth(spark, args.months, args.days)
     print(f"ground-truth flights: {gt.count():,}")
 
+    # The sample is part of the tag. A 3-day run must not silently overwrite the
+    # 1-day result it is meant to be compared against, and neither must the
+    # cleaning ablation overwrite the raw run.
+    tag = "_".join(
+        [
+            f"{len(args.days)}d-{min(args.days)}",
+            args.airport_set,
+            f"r{int(args.radius_nm)}",
+            f"fl{int(args.max_fl)}",
+        ]
+        + (["clean"] if args.clean else [])
+    )
+
     if args.sweep_abstain:
-        sw = sweep_abstention(spark, sv, apt, ident, gt)
-        out = f"{OUT_BASE}/abstain_sweep/{args.airport_set}"
+        sw = (
+            sweep_abstention(spark, sv, apt, ident, gt)
+            .withColumn("days", F.lit(",".join(args.days)))
+            .withColumn("cleaned", F.lit(bool(args.clean)))
+        )
+        out = f"{OUT_BASE}/abstain_sweep/{tag}"
         sw.coalesce(1).write.mode("overwrite").parquet(out)
         print(f"\nabstention sweep -> {out}")
 
@@ -791,6 +881,8 @@ def main() -> None:
         m["radius_nm"] = args.radius_nm
         m["max_fl"] = args.max_fl
         m["ladder"] = "-".join(args.ladder) if name == "M6_cascade" else ""
+        m["days"] = ",".join(args.days)
+        m["cleaned"] = bool(args.clean)
         rows.append(m)
         print(
             f"  ADEP cov {m['adep_coverage']:6.2%} acc {m['adep_accuracy']:6.2%} "
@@ -798,8 +890,6 @@ def main() -> None:
             f"ADES cov {m['ades_coverage']:6.2%} acc {m['ades_accuracy']:6.2%} "
             f"overall {m['ades_overall']:6.2%}"
         )
-
-    tag = f"{args.airport_set}_r{int(args.radius_nm)}_fl{int(args.max_fl)}"
 
     if args.diagnose_cascade:
         control = args.control or args.ladder[-1]
@@ -813,6 +903,23 @@ def main() -> None:
         diag.coalesce(1).write.mode("overwrite").parquet(
             f"{OUT_BASE}/cascade_diag/{tag}_{'-'.join(ladder)}_vs_{control}"
         )
+
+    if args.per_airport:
+        kw = {"ladder": args.ladder} if args.per_airport == "M6_cascade" else {}
+        pred = METHODS[args.per_airport](
+            sv, apt, radius_nm=args.radius_nm, max_fl=args.max_fl, **kw
+        )
+        pa = per_airport_counts(pred, ident, gt).cache()
+        print(f"\nper-aerodrome counts, {args.per_airport} (top 15 by movements):")
+        for r in pa.limit(15).collect():
+            print(
+                f"  {r['airport']:6} {r['role']:10} truth {r['n_truth']:6,}  "
+                f"assigned {r['n_assigned']:6,}  ratio {r['count_ratio']:6.2f}  "
+                f"recall {r['recall']:6.2%}"
+            )
+        out = f"{OUT_BASE}/per_airport/{tag}_{args.per_airport}"
+        pa.coalesce(1).write.mode("overwrite").parquet(out)
+        print(f"per-aerodrome counts -> {out}")
 
     if rows:
         res = spark.createDataFrame(rows)
