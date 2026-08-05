@@ -210,6 +210,12 @@ def main() -> None:
                     help="run in local[*] mode instead of on the K8s cluster")
     args = ap.parse_args()
 
+    # Python buffers stdout when it is a file, so a redirected run shows the
+    # JVM's stderr progress bars and none of our own per-day lines until the
+    # very end -- which makes a multi-hour backfill look like it is doing
+    # nothing in particular.
+    sys.stdout.reconfigure(line_buffering=True)
+
     start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end)
     if end <= start:

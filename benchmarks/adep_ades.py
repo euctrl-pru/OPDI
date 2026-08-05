@@ -827,6 +827,10 @@ def main() -> None:
                     help="K8s executors to request (ceiling ~12 for the quota)")
     args = ap.parse_args()
 
+    # Line-buffer stdout: redirected to a log, the per-method result lines
+    # would otherwise not appear until the job ends.
+    sys.stdout.reconfigure(line_buffering=True)
+
     load_dotenv()
     osn_sample.UI_PORT = args.ui_port
     osn_sample.RESEARCH_EXECUTORS = args.executors
