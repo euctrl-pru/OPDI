@@ -64,6 +64,19 @@ Check headroom before scaling up — the quota is shared:
 kubectl get resourcequota -n eurocontrol
 ```
 
+### Running two jobs at once
+
+Give the second job a different `--ui-port`. That is not only about the UI: the
+driver runs in client mode *inside the JupyterLab pod*, so two jobs would
+otherwise both try to bind `spark.driver.port` 7078. The second one fails with
+`Spark context stopped while waiting for backend`, which reads like a cluster
+problem and is not — Spark retries the next port locally while still telling
+executors to connect to the configured one.
+
+`benchmarks/osn_sample.py:driver_ports` derives the pair from `--ui-port`
+(4040 → 7078/7079, 4041 → 7080/7081, …), so a distinct `--ui-port` per job is
+sufficient and nothing else needs setting.
+
 This is not optional. The JupyterLab pod is capped at **16 GB** (`/sys/fs/cgroup/memory.max`)
 while `free(1)` reports the host's 251 GB. In `local[*]` mode every executor task runs inside
 that cap and the JVM is OOM-killed with no crash dump — py4j reports only "Answer from Java

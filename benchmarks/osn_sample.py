@@ -47,6 +47,23 @@ HADOOP_AWS = "org.apache.hadoop:hadoop-aws:3.5.0"
 #: Override with --ui-port when running two jobs at once.
 UI_PORT = 4040
 
+#: Driver ports for the first concurrent job, matching the `opensky` env.
+#: Every job in this pod needs its *own* pair: the driver runs in client mode
+#: inside the JupyterLab pod, so a second job with the same fixed
+#: `spark.driver.port` cannot bind. Spark's own fallback does not save it --
+#: it retries the next port locally while the executors are still told to
+#: connect to the configured one, and the context dies with the misleading
+#: "Spark context stopped while waiting for backend".
+#:
+#: So the pair is derived from --ui-port, which every concurrent job already
+#: has to set: ui 4040 -> 7078/7079, ui 4041 -> 7080/7081, and so on.
+BASE_DRIVER_PORT = 7078
+
+
+def driver_ports(ui_port: int) -> tuple:
+    base = BASE_DRIVER_PORT + 2 * max(0, ui_port - 4040)
+    return str(base), str(base + 1)
+
 
 def load_dotenv() -> None:
     env = REPO / ".env"
@@ -91,6 +108,7 @@ def _build_spark_k8s():
     cfg.spark.s3_access_key = _os.environ["AWS_ACCESS_KEY_ID"]
     cfg.spark.s3_secret_key = _os.environ["AWS_SECRET_ACCESS_KEY"]
     cfg.spark.executor_instances = str(RESEARCH_EXECUTORS)
+    cfg.spark.k8s_driver_port, cfg.spark.k8s_driver_block_manager_port = driver_ports(UI_PORT)
     return SparkSessionManager.create_session(
         app_name="opdi-research", config=cfg, distributed=True,
         extra_configs={
