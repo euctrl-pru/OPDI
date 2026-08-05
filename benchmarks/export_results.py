@@ -38,8 +38,17 @@ ROOT = "opdi/research/adep_ades"
 #: the exporter has to be told which run it is publishing.
 #: Run `--list` to see what is actually present. Prefixes without a `<n>d-`
 #: sample component predate that scheme and were written by the first 1-day
-#: run; they are the provenance of the currently committed CSVs.
+#: run, before the sample was part of the tag.
 DEFAULT_TAG = "3d-2025-06-05_large_medium_r30_fl40"
+
+#: The two samples the study reports, exported into one CSV per table with a
+#: `month` column. Thresholds are fitted on one and validated on the other, so
+#: every table has to be able to show them side by side -- a per-month file
+#: would let a claim be made from whichever month happened to be loaded.
+SAMPLES = {
+    "2024-06": "3d-2024-06-05_large_medium_r30_fl40",
+    "2025-06": "3d-2025-06-05_large_medium_r30_fl40",
+}
 
 
 def exports(tag: str) -> dict:
@@ -113,6 +122,11 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--tag", default=DEFAULT_TAG,
                     help=f"run tag to publish (default {DEFAULT_TAG})")
+    ap.add_argument("--all-samples", action="store_true", default=True,
+                    help="export every sample in SAMPLES into combined CSVs "
+                         "carrying a month column (the default)")
+    ap.add_argument("--single", dest="all_samples", action="store_false",
+                    help="export only --tag")
     ap.add_argument("--list", action="store_true",
                     help="list the run tags present in S3 and exit")
     args = ap.parse_args()
@@ -137,21 +151,31 @@ def main() -> None:
                 print(f"  {t}")
         return
 
-    args.out.mkdir(parents=True, exist_ok=True)
+    import pandas as pd
 
-    missing = []
-    for prefix, name in exports(args.tag).items():
-        tbl = read_prefix(s3, prefix)
-        if tbl is None:
-            missing.append(prefix)
-            print(f"  MISSING  {prefix}")
-            continue
+    args.out.mkdir(parents=True, exist_ok=True)
+    samples = SAMPLES if args.all_samples else {args.tag: args.tag}
+
+    missing, by_name = [], {}
+    for month, tag in samples.items():
+        for prefix, name in exports(tag).items():
+            tbl = read_prefix(s3, prefix)
+            if tbl is None:
+                missing.append(f"{month}: {prefix}")
+                print(f"  MISSING  {prefix}")
+                continue
+            frame = tbl.to_pandas()
+            if name == "per_airport.csv":
+                frame = annotate_airports(frame, s3)
+            frame.insert(0, "month", month)
+            by_name.setdefault(name, []).append(frame)
+
+    for name, frames in by_name.items():
         dest = args.out / name
-        frame = tbl.to_pandas()
-        if name == "per_airport.csv":
-            frame = annotate_airports(frame, s3)
-        frame.to_csv(dest, index=False)
-        print(f"  {tbl.num_rows:4d} rows -> {dest.relative_to(REPO.parent)}")
+        out = pd.concat(frames, ignore_index=True)
+        out.to_csv(dest, index=False)
+        print(f"  {len(out):5d} rows, {out.month.nunique()} month(s) -> "
+              f"{dest.relative_to(REPO.parent)}")
 
     if missing:
         sys.exit(
