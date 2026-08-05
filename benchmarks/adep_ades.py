@@ -31,7 +31,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import DataFrame, SparkSession, Window
+from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 import osn_sample
@@ -66,9 +66,60 @@ AIRPORT_SETS = {
 }
 
 #: ICAO Doc 8643 class first character. L=landplane, A=amphibian are aeroplanes;
-#: H=helicopter, G=gyrocopter, T=tiltrotor are not. Helicopters are 9.8% of
-#: classified airframes in the OSN DB, so this matters.
+#: H=helicopter, G=gyrocopter, T=tiltrotor are not.
 AEROPLANE_CLASSES = ("L", "A")
+
+#: Classes to *exclude*. The filter is a denylist, not an allowlist: only
+#: confirmed non-aeroplanes are dropped, and an airframe with no recorded class
+#: is kept.
+#:
+#: The first version had this backwards, keeping only confirmed L and A.
+#: `icao_aircraft_class` is populated on just 60.9% of the aircraft database, so
+#: that allowlist discarded 47.74% of all airframes to remove rotorcraft, which
+#: are 8.64% -- in a study whose headline problem is under-detection. An
+#: unclassified airframe is overwhelmingly likely to be an aeroplane; excluding
+#: it costs real coverage and buys almost no precision.
+NON_AEROPLANE_CLASSES = ("H", "G", "T")
+
+#: ADS-B emitter categories that are not aircraft at all. Not currently
+#: available: `osn_aircraft_db` carries no category column and neither does the
+#: raw OSN state-vector schema, so surface vehicles cannot be excluded by
+#: declaration at all -- only behaviourally. Kept here so that the filter works
+#: the day step 00e retains the field.
+SURFACE_VEHICLE_PATTERNS = ("Surface Vehicle", "Ground Obstruction", "Point Obstacle")
+
+#: Out-of-area sentinel. A flight whose origin or destination lies outside the
+#: ingestion bounding box cannot have that aerodrome named from this data, and
+#: saying so is a different -- and correct -- answer from staying silent.
+OOA = "OOA"
+
+#: Ingestion bounding box, from ``StateVectorIngestion.DEFAULT_BBOX``.
+BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)  # min_lon, min_lat, max_lon, max_lat
+
+#: How close to the bbox edge an endpoint must be to read as "left the area"
+#: rather than "stopped being seen". One degree of latitude is 60 NM; the
+#: coverage boundary is not sharp, because reception falls off before the
+#: nominal edge, so this is deliberately generous.
+BORDER_MARGIN_NM = 30.0
+
+
+def at_border(lat: Column, lon: Column, margin_nm: float = BORDER_MARGIN_NM) -> Column:
+    """True where a position sits within *margin_nm* of the ingestion bbox edge.
+
+    Longitude degrees shrink with latitude, so the longitude margin is scaled
+    by 1/cos(lat) -- at 60 degrees north a degree of longitude is half a degree
+    of latitude on the ground, and an unscaled margin would be twice as strict
+    in the north as in the south.
+    """
+    min_lon, min_lat, max_lon, max_lat = BBOX
+    dlat = margin_nm / NM_PER_DEG
+    dlon = dlat / F.greatest(F.cos(F.radians(lat)), F.lit(0.1))
+    return (
+        (lat <= F.lit(min_lat) + dlat)
+        | (lat >= F.lit(max_lat) - dlat)
+        | (lon <= F.lit(min_lon) + dlon)
+        | (lon >= F.lit(max_lon) - dlon)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -109,22 +160,48 @@ def load_state_vectors(spark: SparkSession, days: list) -> DataFrame:
 
 
 def filter_to_aeroplanes(
-    spark: SparkSession, sv: DataFrame, include_unknown: bool
+    spark: SparkSession, sv: DataFrame, strict: bool = False
 ) -> DataFrame:
-    """Drop helicopters, gyrocopters, tiltrotors and ground vehicles.
+    """Drop confirmed non-aeroplanes, keeping anything unidentified.
 
-    Helicopters are 9.8% of classified airframes. ``icao_aircraft_class`` is
-    present on ~73% of the aircraft DB, so *unknown* handling is a real
-    trade-off rather than a detail: excluding unknowns protects precision at
-    the cost of coverage, and coverage is the headline number here.
+    Two independent signals, both denylists:
+
+    * ``icao_aircraft_class`` (ICAO Doc 8643) -- drop H, G, T.
+    * ``category_description`` (ADS-B emitter category) -- drop surface
+      vehicles and obstructions. Sparse, but unambiguous where present, and it
+      is the only field that names a ground vehicle at all.
+
+    ``strict=True`` restores the original allowlist behaviour (keep only
+    confirmed L/A) so the two can be compared rather than argued about.
     """
-    db = spark.read.parquet(AIRCRAFT_DB).select(
+    cols = spark.read.parquet(AIRCRAFT_DB).columns
+    sel = [
         F.lower(F.col("icao24")).alias("_ic"),
         F.substring(F.col("icao_aircraft_class"), 1, 1).alias("ac_class"),
-    )
+    ]
+    # The column was added to step 00e after the first study; tolerate its
+    # absence rather than failing on an older reference table.
+    has_cat = "category_description" in cols
+    if has_cat:
+        sel.append(F.col("category_description").alias("ac_category"))
+    db = spark.read.parquet(AIRCRAFT_DB).select(*sel)
+
     out = sv.join(db, F.lower(sv.icao24) == F.col("_ic"), "left").drop("_ic")
-    known = F.col("ac_class").isin(list(AEROPLANE_CLASSES))
-    return out.filter(known | F.col("ac_class").isNull() if include_unknown else known)
+    if not has_cat:
+        out = out.withColumn("ac_category", F.lit(None).cast("string"))
+
+    if strict:
+        return out.filter(F.col("ac_class").isin(list(AEROPLANE_CLASSES)))
+
+    is_rotorcraft = F.col("ac_class").isin(list(NON_AEROPLANE_CLASSES))
+    is_surface = F.lit(False)
+    for pat in SURFACE_VEHICLE_PATTERNS:
+        is_surface = is_surface | F.col("ac_category").contains(pat)
+    # coalesce: a NULL class or category must not make the predicate NULL and
+    # silently drop the row -- unknown means keep.
+    return out.filter(
+        ~F.coalesce(is_rotorcraft, F.lit(False)) & ~F.coalesce(is_surface, F.lit(False))
+    )
 
 
 def build_tracks(spark: SparkSession, sv: DataFrame, clean: bool = False) -> DataFrame:
@@ -198,15 +275,19 @@ def endpoint_candidates(sv: DataFrame, apt: DataFrame) -> DataFrame:
         .withColumn("_rr", F.row_number().over(w.orderBy(F.col("event_time").desc())))
         .filter((F.col("_rn") == 1) | (F.col("_rr") == 1))
         .withColumn("role", F.when(F.col("_rn") == 1, "adep").otherwise("ades"))
-        .select("track_id", "role", "lat", "lon", "baro_altitude", "on_ground")
+        .withColumn("at_border", at_border(F.col("lat"), F.col("lon")))
+        .select("track_id", "role", "lat", "lon", "baro_altitude", "on_ground", "at_border")
     )
     ends = ends.withColumn("cell_lat", F.floor("lat").cast("int")).withColumn(
         "cell_lon", F.floor("lon").cast("int")
     )
-    j = ends.join(F.broadcast(apt), ["cell_lat", "cell_lon"], "inner").withColumn(
+    # LEFT, not inner: an endpoint over open sea has no aerodrome in its cell
+    # neighbourhood, and those are exactly the endpoints that carry the
+    # out-of-area signal. An inner join discards them before they can be read.
+    j = ends.join(F.broadcast(apt), ["cell_lat", "cell_lon"], "left").withColumn(
         "dist_nm", haversine_nm(F.col("lat"), F.col("lon"), F.col("apt_lat"), F.col("apt_lon"))
     )
-    best = Window.partitionBy("track_id", "role").orderBy("dist_nm")
+    best = Window.partitionBy("track_id", "role").orderBy(F.col("dist_nm").asc_nulls_last())
     return j.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1)
 
 
@@ -220,10 +301,17 @@ def pivot_endpoints(cand: DataFrame) -> DataFrame:
             F.first("dist_nm").alias("dist_nm"),
             # Height above the aerodrome, not above the ellipsoid: a 1,000 ft
             # cut-off means nothing at an airport sitting at 5,000 ft.
+            #
+            # elevation_ft is OurAirports, missing on 3.09% of large+medium
+            # aerodromes. `elev_known` carries that so the height test can be
+            # relaxed rather than silently treating a missing elevation as sea
+            # level -- which at a 5,000 ft field is wrong by the whole cut-off.
             F.first(
                 F.col("baro_altitude") * 3.28084 - F.coalesce(F.col("apt_elev_ft"), F.lit(0.0))
             ).alias("agl_ft"),
+            F.first(F.col("apt_elev_ft").isNotNull()).alias("elev_known"),
             F.first("on_ground").alias("on_ground"),
+            F.first("at_border").alias("at_border"),
         )
     )
     for side in ("adep", "ades"):
@@ -245,9 +333,10 @@ def m1_traffic_endpoints(sv: DataFrame, apt: DataFrame, **kw) -> DataFrame:
 def m7_endpoint_abstain(
     sv: DataFrame,
     apt: DataFrame,
-    max_endpoint_dist_nm: float = 10.0,
-    max_endpoint_agl_ft: float = 5000.0,
+    max_endpoint_dist_nm: float = 20.0,
+    max_endpoint_agl_ft: float = 15000.0,
     require_on_ground: bool = False,
+    ooa: bool = True,
     _endpoints: DataFrame = None,
     **kw,
 ) -> DataFrame:
@@ -272,18 +361,154 @@ def m7_endpoint_abstain(
     generous and the height cut is not.
     """
     p = _endpoints if _endpoints is not None else pivot_endpoints(endpoint_candidates(sv, apt))
+    per_side = {
+        "adep": (
+            kw.get("adep_dist_nm", max_endpoint_dist_nm),
+            kw.get("adep_agl_ft", max_endpoint_agl_ft),
+        ),
+        "ades": (
+            kw.get("ades_dist_nm", max_endpoint_dist_nm),
+            kw.get("ades_agl_ft", max_endpoint_agl_ft),
+        ),
+    }
     for side in ("adep", "ades"):
-        ok = F.col(f"{side}_dist_nm") <= max_endpoint_dist_nm
+        d, h = per_side[side]
+        ok = F.col(f"{side}_dist_nm") <= d
         if require_on_ground:
             ok = ok & F.col(f"{side}_on_ground")
         else:
             # A missing barometric altitude on a surface sample is normal, so
-            # on_ground satisfies the height test outright.
+            # on_ground satisfies the height test outright. Where the aerodrome
+            # elevation is unknown, agl_ft is really MSL: fall back to the
+            # ground flag rather than compare a height against the wrong datum.
             ok = ok & (
                 F.col(f"{side}_on_ground")
-                | (F.col(f"{side}_agl_ft") <= max_endpoint_agl_ft)
+                | (F.col(f"{side}_elev_known") & (F.col(f"{side}_agl_ft") <= h))
             )
-        p = p.withColumn(side, F.when(ok, F.col(side)))
+        if ooa:
+            # Order matters: the border test comes first and carries no height
+            # condition. A flight leaving the area is at cruise level by
+            # definition, so any height cut-off would reject exactly the
+            # endpoints this branch exists to catch.
+            p = p.withColumn(
+                side,
+                F.when(F.col(f"{side}_at_border"), F.lit(OOA)).otherwise(
+                    F.when(ok, F.col(side))
+                ),
+            )
+        else:
+            p = p.withColumn(side, F.when(ok, F.col(side)))
+    return p.select("track_id", "adep", "ades")
+
+
+def m8_extrapolated_endpoint(
+    sv: DataFrame,
+    apt: DataFrame,
+    adep_dist_nm: float = 20.0,
+    adep_agl_ft: float = 15000.0,
+    ades_dist_nm: float = 20.0,
+    ades_agl_ft: float = 15000.0,
+    fit_seconds: float = 300.0,
+    max_project_nm: float = 60.0,
+    ooa: bool = True,
+    **kw,
+) -> DataFrame:
+    """M8 -- project the trajectory to the ground before naming an aerodrome.
+
+    M7's weakness on arrivals is that a track's last sample is usually not a
+    landing but a loss of reception, somewhere on the approach. The aircraft's
+    intent at that moment is nevertheless visible: it is descending, on a
+    heading, at a known rate. Continuing that descent to field elevation gives
+    an estimated touchdown point, which is a far better thing to match an
+    aerodrome against than the last place a receiver happened to hear it.
+
+    The projection is deliberately crude -- constant ground speed, constant
+    track, constant vertical rate over the last *fit_seconds* -- because the
+    honest alternative is a full trajectory prediction and the last few minutes
+    of an approach are close to straight anyway. It is capped at
+    *max_project_nm*: beyond that the aircraft may still turn, and a long
+    extrapolation would invent an answer rather than recover one.
+
+    Departures get the mirror treatment, projecting backwards to the ground
+    from the first samples of a climb.
+    """
+    w = Window.partitionBy("track_id").orderBy("event_time")
+    wr = Window.partitionBy("track_id").orderBy(F.col("event_time").desc())
+    marked = (
+        sv.withColumn("_rn", F.row_number().over(w))
+        .withColumn("_rr", F.row_number().over(wr))
+        .withColumn("_t0", F.min("event_time").over(Window.partitionBy("track_id")))
+        .withColumn("_t1", F.max("event_time").over(Window.partitionBy("track_id")))
+    )
+    dep = marked.filter(
+        F.unix_timestamp("event_time") - F.unix_timestamp("_t0") <= fit_seconds
+    ).withColumn("role", F.lit("adep"))
+    arr = marked.filter(
+        F.unix_timestamp("_t1") - F.unix_timestamp("event_time") <= fit_seconds
+    ).withColumn("role", F.lit("ades"))
+
+    seg = dep.unionByName(arr)
+    # Anchor sample per side: the outermost one, which is what gets projected.
+    anchor = (F.col("role") == "adep") & (F.col("_rn") == 1) | (
+        (F.col("role") == "ades") & (F.col("_rr") == 1)
+    )
+    g = seg.groupBy("track_id", "role").agg(
+        F.max(F.when(anchor, F.col("lat"))).alias("lat"),
+        F.max(F.when(anchor, F.col("lon"))).alias("lon"),
+        F.max(F.when(anchor, F.col("baro_altitude"))).alias("alt_m"),
+        F.max(F.when(anchor, F.col("heading"))).alias("heading"),
+        F.max(F.when(anchor, F.col("on_ground"))).alias("on_ground"),
+        F.max(F.when(anchor, F.col("velocity"))).alias("gs_ms"),
+        F.avg("vert_rate").alias("vs_ms"),
+    )
+
+    # Time to reach the ground at the observed vertical rate. Sign convention:
+    # arrivals descend (vs < 0) forwards in time, departures climb (vs > 0)
+    # backwards in time -- both give a positive time-to-ground.
+    signed_vs = F.when(F.col("role") == "ades", -F.col("vs_ms")).otherwise(F.col("vs_ms"))
+    t_ground = F.when(signed_vs > 0.5, F.col("alt_m") / signed_vs)
+    reach_nm = F.least(t_ground * F.col("gs_ms") * 0.000539957, F.lit(max_project_nm))
+
+    # Project along the track. Departures project backwards, hence the reversal.
+    brg = F.radians(
+        F.when(F.col("role") == "adep", F.col("heading") + F.lit(180.0)).otherwise(
+            F.col("heading")
+        )
+    )
+    dlat = reach_nm * F.cos(brg) / NM_PER_DEG
+    dlon = reach_nm * F.sin(brg) / (
+        NM_PER_DEG * F.greatest(F.cos(F.radians(F.col("lat"))), F.lit(0.1))
+    )
+    g = (
+        g.withColumn("proj_nm", F.coalesce(reach_nm, F.lit(0.0)))
+        .withColumn("lat", F.col("lat") + F.coalesce(dlat, F.lit(0.0)))
+        .withColumn("lon", F.col("lon") + F.coalesce(dlon, F.lit(0.0)))
+        .withColumn("at_border", at_border(F.col("lat"), F.col("lon")))
+        .withColumn("cell_lat", F.floor("lat").cast("int"))
+        .withColumn("cell_lon", F.floor("lon").cast("int"))
+    )
+    j = g.join(F.broadcast(apt), ["cell_lat", "cell_lon"], "left").withColumn(
+        "dist_nm", haversine_nm(F.col("lat"), F.col("lon"), F.col("apt_lat"), F.col("apt_lon"))
+    )
+    best = Window.partitionBy("track_id", "role").orderBy(F.col("dist_nm").asc_nulls_last())
+    j = j.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1)
+
+    p = (
+        j.groupBy("track_id")
+        .pivot("role", ["adep", "ades"])
+        .agg(
+            F.first("apt").alias("apt"),
+            F.first("dist_nm").alias("dist_nm"),
+            F.first("at_border").alias("at_border"),
+        )
+    )
+    for side, d in (("adep", adep_dist_nm), ("ades", ades_dist_nm)):
+        p = p.withColumnRenamed(f"{side}_apt", side)
+        ok = F.col(f"{side}_dist_nm") <= d
+        expr = F.when(ok, F.col(side))
+        if ooa:
+            expr = F.when(F.col(f"{side}_at_border"), F.lit(OOA)).otherwise(expr)
+        p = p.withColumn(side, expr)
     return p.select("track_id", "adep", "ades")
 
 
@@ -516,6 +741,7 @@ METHODS = {
     "M5_min_alt": m5_min_alt_closest,
     "M6_cascade": m6_cascade,
     "M7_abstain": m7_endpoint_abstain,
+    "M8_extrapolate": m8_extrapolated_endpoint,
 }
 
 #: Abstention grid for M7. Distances in NM from the track endpoint to the
@@ -553,6 +779,71 @@ def track_identity(sv: DataFrame) -> DataFrame:
             F.col("event_time").alias("t_start"),
         )
     )
+
+
+def airport_locations(spark: SparkSession) -> DataFrame:
+    """Every aerodrome OurAirports knows, for locating ground-truth codes.
+
+    Deliberately unrestricted by type: this is used to decide whether a
+    ground-truth ADEP/ADES lies inside the ingestion area, and a flight to a
+    small field or a heliport is still a flight to somewhere real.
+    """
+    return (
+        spark.read.parquet(AIRPORTS)
+        .select(
+            F.col("ident").alias("_apt"),
+            F.col("latitude_deg").cast("double").alias("_lat"),
+            F.col("longitude_deg").cast("double").alias("_lon"),
+        )
+        .filter(F.col("_apt").isNotNull() & F.col("_lat").isNotNull())
+    )
+
+
+def _in_area(lat: Column, lon: Column) -> Column:
+    min_lon, min_lat, max_lon, max_lat = BBOX
+    return lat.between(min_lat, max_lat) & lon.between(min_lon, max_lon)
+
+
+def label_ground_truth(gt: DataFrame, apt_loc: DataFrame) -> DataFrame:
+    """Rewrite out-of-area ground-truth aerodromes to the OOA sentinel.
+
+    A flight from Dubai to Amsterdam has a real ADEP, but not one any European
+    ADS-B feed can name -- the aircraft entered the area already airborne. The
+    correct answer for such a flight is "out of area", not the ICAO code, and
+    scoring it against the code makes every method look worse than it is while
+    hiding the flights it genuinely missed.
+
+    An ICAO code absent from OurAirports is also treated as out of area. That
+    is the pragmatic reading: the codes that fail to resolve are overwhelmingly
+    non-European, and a code we cannot locate is one we could not have matched
+    a trajectory endpoint to either.
+    """
+    for side in ("adep", "ades"):
+        gt = (
+            gt.join(
+                apt_loc.select(
+                    F.col("_apt").alias(f"_{side}_apt"),
+                    F.col("_lat").alias(f"_{side}_lat"),
+                    F.col("_lon").alias(f"_{side}_lon"),
+                ),
+                gt[f"gt_{side}"] == F.col(f"_{side}_apt"),
+                "left",
+            )
+            .withColumn(
+                f"gt_{side}_in_area",
+                F.coalesce(
+                    _in_area(F.col(f"_{side}_lat"), F.col(f"_{side}_lon")), F.lit(False)
+                ),
+            )
+            .withColumn(
+                f"gt_{side}",
+                F.when(F.col(f"gt_{side}_in_area"), F.col(f"gt_{side}")).otherwise(
+                    F.lit(OOA)
+                ),
+            )
+            .drop(f"_{side}_apt", f"_{side}_lat", f"_{side}_lon")
+        )
+    return gt
 
 
 def load_ground_truth(spark: SparkSession, months: list, days: list = None) -> DataFrame:
@@ -749,6 +1040,67 @@ def per_airport_counts(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> Data
     return frames[0].unionByName(frames[1]).orderBy(F.col("n_truth").desc())
 
 
+def error_pairs(
+    pred: DataFrame, ident: DataFrame, gt: DataFrame, apt: DataFrame, top: int = 40
+) -> DataFrame:
+    """Where a method is wrong, what did it say instead, and how far away is it?
+
+    Accuracy near 100% is only reassuring if the residual is scattered. A
+    concentrated residual -- the same wrong aerodrome, over and over -- is a
+    systematic confusion with a physical cause, usually a second aerodrome
+    close enough to the first that the nearest-endpoint rule cannot separate
+    them. Those are fixable; scattered errors mostly are not.
+
+    Reports each (truth, predicted) pair with the great-circle distance between
+    the two aerodromes, which is the diagnostic: a few miles means a
+    neighbouring-field confusion, hundreds means something else entirely.
+    """
+    j = align_to_ground_truth(pred, ident, gt)
+    loc = (
+        apt.select("apt", "apt_lat", "apt_lon").dropDuplicates(["apt"])
+    )
+    frames = []
+    for side in ("adep", "ades"):
+        e = j.filter(
+            F.col(side).isNotNull()
+            & F.col(f"gt_{side}").isNotNull()
+            & (F.col(side) != F.col(f"gt_{side}"))
+        ).select(
+            F.col(f"gt_{side}").alias("truth"),
+            F.col(side).alias("predicted"),
+        )
+        agg = e.groupBy("truth", "predicted").agg(F.count(F.lit(1)).alias("n"))
+        agg = (
+            agg.join(
+                loc.select(
+                    F.col("apt").alias("truth"),
+                    F.col("apt_lat").alias("t_lat"),
+                    F.col("apt_lon").alias("t_lon"),
+                ),
+                "truth",
+                "left",
+            )
+            .join(
+                loc.select(
+                    F.col("apt").alias("predicted"),
+                    F.col("apt_lat").alias("p_lat"),
+                    F.col("apt_lon").alias("p_lon"),
+                ),
+                "predicted",
+                "left",
+            )
+            .withColumn(
+                "apart_nm",
+                haversine_nm(F.col("t_lat"), F.col("t_lon"), F.col("p_lat"), F.col("p_lon")),
+            )
+            .withColumn("side", F.lit(side))
+            .select("side", "truth", "predicted", "n", "apart_nm")
+        )
+        frames.append(agg)
+    out = frames[0].unionByName(frames[1])
+    return out.orderBy(F.col("n").desc()).limit(top)
+
+
 def _print_diagnosis(rows, fallback: str) -> None:
     print(
         f"\n{'side':5} {'rung':5} {'answered':>9} {'of GT':>7} "
@@ -768,7 +1120,7 @@ def _materialise_tracks(spark: SparkSession, args) -> DataFrame:
     Cleaned and raw tracks are separate prefixes, so the ablation is a matter
     of pointing at a different one rather than of rebuilding.
     """
-    keep = "unk" if args.include_unknown_aircraft else "known"
+    keep = "strict" if getattr(args, "strict_aircraft", False) else "nonrotor"
     if getattr(args, "clean", False):
         keep += "_clean"
     out = f"{TRACKS_BASE}/aircraft={keep}"
@@ -782,7 +1134,7 @@ def _materialise_tracks(spark: SparkSession, args) -> DataFrame:
     for d in todo:
         print(f"tracks {d}: building{' + cleaning' if args.clean else ''} ...")
         sv = load_state_vectors(spark, [d])
-        sv = filter_to_aeroplanes(spark, sv, args.include_unknown_aircraft)
+        sv = filter_to_aeroplanes(spark, sv, strict=getattr(args, "strict_aircraft", False))
         build_tracks(spark, sv, clean=args.clean).write.mode("overwrite").parquet(
             f"{out}/day={d}"
         )
@@ -806,7 +1158,12 @@ def main() -> None:
     ap.add_argument("--airport-set", default="large_medium", choices=list(AIRPORT_SETS))
     ap.add_argument("--radius-nm", type=float, default=30.0)
     ap.add_argument("--max-fl", type=float, default=40.0)
-    ap.add_argument("--include-unknown-aircraft", action="store_true")
+    ap.add_argument("--strict-aircraft", action="store_true",
+                    help="keep only confirmed L/A airframes (the v1 allowlist) "
+                         "instead of dropping only confirmed non-aeroplanes")
+    ap.add_argument("--no-ooa", action="store_true",
+                    help="score out-of-area aerodromes as misses, as v1 did, "
+                         "instead of labelling them OOA on both sides")
     ap.add_argument("--clean", action="store_true",
                     help="apply the step-02a cleaning stages to the tracks "
                          "before detection (ablation; writes a separate prefix)")
@@ -816,6 +1173,9 @@ def main() -> None:
     ap.add_argument("--diagnose-cascade", action="store_true",
                     help="attribute the cascade's answers to the rung that "
                          "supplied them and report lift over the control")
+    ap.add_argument("--error-pairs", default=None, choices=list(METHODS),
+                    help="report the (truth, predicted) confusions this method "
+                         "makes, with the distance between the two aerodromes")
     ap.add_argument("--per-airport", default=None, choices=list(METHODS),
                     help="write per-aerodrome departure/arrival counts for this "
                          "method against APDF")
@@ -857,7 +1217,15 @@ def main() -> None:
     apt = load_airports(spark, args.airport_set)
     ident = track_identity(sv)
     gt = load_ground_truth(spark, args.months, args.days)
-    print(f"ground-truth flights: {gt.count():,}")
+    if not args.no_ooa:
+        gt = label_ground_truth(gt, airport_locations(spark)).cache()
+        n_ooa = gt.filter(
+            (F.col("gt_adep") == OOA) | (F.col("gt_ades") == OOA)
+        ).count()
+        print(f"ground-truth flights: {gt.count():,} "
+              f"({n_ooa:,} with an out-of-area ADEP or ADES)")
+    else:
+        print(f"ground-truth flights: {gt.count():,}")
 
     # The sample is part of the tag. A 3-day run must not silently overwrite the
     # 1-day result it is meant to be compared against, and neither must the
@@ -918,6 +1286,21 @@ def main() -> None:
         diag.coalesce(1).write.mode("overwrite").parquet(
             f"{OUT_BASE}/cascade_diag/{tag}_{'-'.join(ladder)}_vs_{control}"
         )
+
+    if args.error_pairs:
+        kw = {"ladder": args.ladder} if args.error_pairs == "M6_cascade" else {}
+        pred = METHODS[args.error_pairs](
+            sv, apt, radius_nm=args.radius_nm, max_fl=args.max_fl, **kw
+        )
+        ep = error_pairs(pred, ident, gt, apt).cache()
+        print(f"\ntop confusions, {args.error_pairs}:")
+        print(f"  {'side':5} {'truth':6} {'predicted':10} {'n':>6} {'apart':>9}")
+        for r in ep.collect():
+            apart = "—" if r["apart_nm"] is None else f"{r['apart_nm']:8.1f} NM"
+            print(f"  {r['side']:5} {r['truth']:6} {r['predicted']:10} {r['n']:6,} {apart:>9}")
+        out = f"{OUT_BASE}/error_pairs/{tag}_{args.error_pairs}"
+        ep.coalesce(1).write.mode("overwrite").parquet(out)
+        print(f"error pairs -> {out}")
 
     if args.per_airport:
         kw = {"ladder": args.ladder} if args.per_airport == "M6_cascade" else {}
