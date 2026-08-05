@@ -34,6 +34,7 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
+import osn_sample
 from osn_sample import build_spark, load_dotenv
 
 SV_BASE = "s3a://eurocontrol/opdi/research/statevectors"
@@ -500,11 +501,15 @@ def main() -> None:
     ap.add_argument("--radius-nm", type=float, default=30.0)
     ap.add_argument("--max-fl", type=float, default=40.0)
     ap.add_argument("--include-unknown-aircraft", action="store_true")
+    ap.add_argument("--ui-port", type=int, default=4041,
+                    help="Spark UI port; proxied at /proxy/<port>/. Defaults to "
+                         "4041 so it does not collide with a concurrent sampler.")
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="9g")
     args = ap.parse_args()
 
     load_dotenv()
+    osn_sample.UI_PORT = args.ui_port
     spark = build_spark(args.cores, args.driver_memory)
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.shuffle.partitions", "96")

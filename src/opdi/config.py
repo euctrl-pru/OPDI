@@ -473,7 +473,13 @@ class OPDIConfig:
                     k8s_namespace="eurocontrol",
                     k8s_container_image="docker.io/quintengs/opdi-spark:v4.1.1-5",
                     k8s_executor_memory_limit="14g",
-                    k8s_executor_cores_limit="4",
+                    # Match executor_cores. The namespace ResourceQuota counts
+                    # limits.cpu, not requests.cpu, so a limit above the actual
+                    # core count bills the quota for burst headroom the executor
+                    # cannot use: at limit=4 with cores=2, every executor spent
+                    # 4 CPU of a 30 CPU quota to run 2, capping the namespace at
+                    # 6 executors instead of 13.
+                    k8s_executor_cores_limit="2",
                 ),
             )
         else:

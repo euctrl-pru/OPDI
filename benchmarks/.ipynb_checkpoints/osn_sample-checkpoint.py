@@ -43,10 +43,6 @@ TIME_INTERVAL = 5  # seconds; keep rows where event_time % 5 == 0
 
 HADOOP_AWS = "org.apache.hadoop:hadoop-aws:3.5.0"
 
-#: Spark UI port, exposed through the JupyterLab proxy at /proxy/<UI_PORT>/.
-#: Override with --ui-port when running two jobs at once.
-UI_PORT = 4040
-
 
 def load_dotenv() -> None:
     env = REPO / ".env"
@@ -85,17 +81,6 @@ def _build_spark_k8s():
     return SparkSessionManager.create_session(
         app_name="opdi-research", config=cfg, distributed=True,
         extra_configs={
-            # -- Spark UI behind the JupyterLab proxy -----------------------
-            # jupyter-server-proxy serves the UI at <lab-url>/proxy/4040/.
-            # Without proxyBase every link the UI generates is absolute and
-            # escapes the proxy prefix; without proxyRedirectUri its redirects
-            # point back at the pod-internal host.
-            "spark.ui.proxyBase": f"/proxy/{UI_PORT}",
-            "spark.ui.proxyRedirectUri": "/",
-            # Pin the port. Spark silently falls back to 4041, 4042 ... when
-            # 4040 is taken, and the proxy path is hardcoded to one port -- so
-            # a second concurrent job would otherwise serve a UI nothing links to.
-            "spark.ui.port": str(UI_PORT),
             # Same S3 read tuning the local path needs: the hourly objects are
             # ~1 GB and Parquet vectored IO starves under parallelism.
             "spark.hadoop.parquet.hadoop.vectored.io.enabled": "false",
@@ -167,8 +152,6 @@ def main() -> None:
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="9g")
     ap.add_argument("--interval", type=int, default=TIME_INTERVAL)
-    ap.add_argument("--ui-port", type=int, default=UI_PORT,
-                    help="Spark UI port; proxied at /proxy/<port>/")
     ap.add_argument("--local", action="store_true",
                     help="run in local[*] mode instead of on the K8s cluster")
     args = ap.parse_args()
@@ -179,7 +162,6 @@ def main() -> None:
         sys.exit("end must be after start")
 
     load_dotenv()
-    globals()["UI_PORT"] = args.ui_port
     spark = build_spark(args.cores, args.driver_memory, distributed=not args.local)
     spark.sparkContext.setLogLevel("ERROR")
 
