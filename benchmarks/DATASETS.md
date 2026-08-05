@@ -64,18 +64,39 @@ Check headroom before scaling up — the quota is shared:
 kubectl get resourcequota -n eurocontrol
 ```
 
-### Running two jobs at once
+### One job at a time
 
-Give the second job a different `--ui-port`. That is not only about the UI: the
-driver runs in client mode *inside the JupyterLab pod*, so two jobs would
-otherwise both try to bind `spark.driver.port` 7078. The second one fails with
-`Spark context stopped while waiting for backend`, which reads like a cluster
-problem and is not — Spark retries the next port locally while still telling
-executors to connect to the configured one.
+**Two distributed Spark jobs cannot run concurrently from this pod**, however
+much quota is free. The driver runs in client mode inside the JupyterLab pod
+and executors reach it through the `jupyterlab` Service, which routes exactly
+two ports:
 
-`benchmarks/osn_sample.py:driver_ports` derives the pair from `--ui-port`
-(4040 → 7078/7079, 4041 → 7080/7081, …), so a distinct `--ui-port` per job is
-sufficient and nothing else needs setting.
+```console
+$ kubectl get svc jupyterlab -n eurocontrol
+spark              7078 -> 7078
+spark-blockmanager 7079 -> 7079
+```
+
+`spark.driver.port` is therefore fixed by the cluster, not chosen by the job.
+A second job cannot bind 7078; moving it to a free port fails differently,
+because the Service does not route the new port and every executor dies unable
+to reach the driver:
+
+```
+ERROR ExecutorPodsLifecycleManager: Max number of executor failures (8) reached
+java.lang.IllegalStateException: Spark context stopped while waiting for backend
+```
+
+That reads like a quota or cluster fault and is neither. Both failure modes
+cost about the same amount of time to misdiagnose, so: **run jobs
+sequentially**, and give a backfill more `--executors` rather than starting a
+second job. Genuine concurrency would need extra ports added to the Service,
+which is a change to the JupyterLab deployment.
+
+`--ui-port` remains useful for a different reason: Spark silently falls back
+from 4040 to 4041 when the port is taken, and the proxy path is hard-coded to
+one port, so a job started while a stale UI is bound would otherwise serve its
+UI where nothing links to it.
 
 This is not optional. The JupyterLab pod is capped at **16 GB** (`/sys/fs/cgroup/memory.max`)
 while `free(1)` reports the host's 251 GB. In `local[*]` mode every executor task runs inside
