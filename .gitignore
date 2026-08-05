@@ -52,3 +52,7 @@ mc
 
 # Environment variables
 .env
+
+# Jupyter scratch
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
