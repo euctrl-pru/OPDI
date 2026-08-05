@@ -59,6 +59,14 @@ def load_dotenv() -> None:
             os.environ.setdefault(key.strip(), value.strip())
 
 
+#: Executors to request for research jobs. The `opensky` env defaults to 4,
+#: which is right for the production pipeline sharing the namespace; a batch
+#: backfill can take more. The ceiling is ~12: the quota is 30 CPU / 192 GiB,
+#: the JupyterLab driver pod holds 4 CPU / 16 GiB, and each executor costs
+#: 2 CPU / 14 GiB. Going past that makes pods pend forever rather than fail.
+RESEARCH_EXECUTORS = 4
+
+
 def build_spark(cores: int, driver_memory: str, distributed: bool = True):
     """Spark session. Distributed on the OSN K8s cluster by default.
 
@@ -82,9 +90,11 @@ def _build_spark_k8s():
     cfg = OPDIConfig.for_environment("opensky")
     cfg.spark.s3_access_key = _os.environ["AWS_ACCESS_KEY_ID"]
     cfg.spark.s3_secret_key = _os.environ["AWS_SECRET_ACCESS_KEY"]
+    cfg.spark.executor_instances = str(RESEARCH_EXECUTORS)
     return SparkSessionManager.create_session(
         app_name="opdi-research", config=cfg, distributed=True,
         extra_configs={
+            "spark.dynamicAllocation.maxExecutors": str(RESEARCH_EXECUTORS),
             # -- Spark UI behind the JupyterLab proxy -----------------------
             # jupyter-server-proxy serves the UI at <lab-url>/proxy/4040/.
             # Without proxyBase every link the UI generates is absolute and
@@ -169,6 +179,9 @@ def main() -> None:
     ap.add_argument("--interval", type=int, default=TIME_INTERVAL)
     ap.add_argument("--ui-port", type=int, default=UI_PORT,
                     help="Spark UI port; proxied at /proxy/<port>/")
+    ap.add_argument("--executors", type=int, default=RESEARCH_EXECUTORS,
+                    help=f"K8s executors to request (default {RESEARCH_EXECUTORS}, "
+                         "ceiling ~12 for the namespace quota)")
     ap.add_argument("--local", action="store_true",
                     help="run in local[*] mode instead of on the K8s cluster")
     args = ap.parse_args()
@@ -180,6 +193,7 @@ def main() -> None:
 
     load_dotenv()
     globals()["UI_PORT"] = args.ui_port
+    globals()["RESEARCH_EXECUTORS"] = args.executors
     spark = build_spark(args.cores, args.driver_memory, distributed=not args.local)
     spark.sparkContext.setLogLevel("ERROR")
 

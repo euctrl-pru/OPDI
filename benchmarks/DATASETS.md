@@ -43,6 +43,27 @@ Spark runs **distributed on the OSN Kubernetes cluster**, not in the JupyterLab 
 `k8s://https://192.168.60.102:6443`, namespace `eurocontrol`, image
 `docker.io/quintengs/opdi-spark:v4.1.1-5`, client deploy mode with the driver in this pod.
 
+### Sizing a research job
+
+The namespace `ResourceQuota` is **30 CPU / 192 GiB**. The JupyterLab driver pod
+holds 4 CPU / 16 GiB and each executor costs 2 CPU / 14 GiB (12 GiB heap + 2 GiB
+overhead), so the ceiling is about **12 executors**. Request more and the extra
+pods pend indefinitely rather than failing, which looks like a hung job.
+
+The `opensky` environment defaults to 4 executors, which is right for the
+production pipeline sharing the namespace. Batch backfills should ask for more
+explicitly rather than changing that default:
+
+```bash
+python benchmarks/osn_sample.py 2024-06-01 2024-07-01 --executors 10
+```
+
+Check headroom before scaling up — the quota is shared:
+
+```bash
+kubectl get resourcequota -n eurocontrol
+```
+
 This is not optional. The JupyterLab pod is capped at **16 GB** (`/sys/fs/cgroup/memory.max`)
 while `free(1)` reports the host's 251 GB. In `local[*]` mode every executor task runs inside
 that cap and the JVM is OOM-killed with no crash dump — py4j reports only "Answer from Java

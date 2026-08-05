@@ -750,10 +750,13 @@ def main() -> None:
                          "4041 so it does not collide with a concurrent sampler.")
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="9g")
+    ap.add_argument("--executors", type=int, default=osn_sample.RESEARCH_EXECUTORS,
+                    help="K8s executors to request (ceiling ~12 for the quota)")
     args = ap.parse_args()
 
     load_dotenv()
     osn_sample.UI_PORT = args.ui_port
+    osn_sample.RESEARCH_EXECUTORS = args.executors
     spark = build_spark(args.cores, args.driver_memory)
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.shuffle.partitions", "96")
