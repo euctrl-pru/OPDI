@@ -193,22 +193,56 @@ def m1_traffic_endpoints(sv: DataFrame, apt: DataFrame, **kw) -> DataFrame:
 
 
 def m2_on_ground(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.0, **kw):
-    """M2 -- the airport at the last surface sample before flight, and the
-    first after. `on_ground` is the strongest single signal available and the
-    production algorithm selects it into ``columns_of_interest`` then never
-    uses it (``flights.py:190``)."""
-    near = nearby_airports(sv, apt, radius_nm, max_fl).filter(F.col("on_ground"))
-    w = Window.partitionBy("track_id").orderBy("event_time")
-    ranked = near.withColumn("_rn", F.row_number().over(w)).withColumn(
-        "_rr", F.row_number().over(w.orderBy(F.col("event_time").desc()))
+    """M2 -- the airport at the surface samples bracketing the airborne phase.
+
+    `on_ground` is the strongest single signal available, and the production
+    algorithm selects it into ``columns_of_interest`` then never uses it
+    (``flights.py:190``).
+
+    Anchoring matters. Taking simply the first and last surface sample of a
+    track scores ~20% accuracy, because when a track only has surface coverage
+    at the departure end -- common, since OSN ground reception is patchy away
+    from receivers -- the *last* surface sample is still at the departure
+    airport, and gets emitted as the destination. Wrong, and confidently so.
+
+    So the airborne phase is located first, and only surface samples strictly
+    before it can name an ADEP, only those strictly after it an ADES. A side
+    with no qualifying samples yields NULL rather than a guess.
+    """
+    near = nearby_airports(sv, apt, radius_nm, max_fl)
+    # One airport per sample: the nearest. Otherwise a sample within range of
+    # several aerodromes votes several times.
+    per_sample = Window.partitionBy("track_id", "event_time").orderBy("dist_nm")
+    near = near.withColumn("_a", F.row_number().over(per_sample)).filter(F.col("_a") == 1)
+
+    tw = Window.partitionBy("track_id")
+    airborne_t = F.when(~F.col("on_ground"), F.col("event_time"))
+    near = near.withColumn("t_air_first", F.min(airborne_t).over(tw)).withColumn(
+        "t_air_last", F.max(airborne_t).over(tw)
     )
-    ends = ranked.filter((F.col("_rn") == 1) | (F.col("_rr") == 1)).withColumn(
-        "role", F.when(F.col("_rn") == 1, "adep").otherwise("ades")
+
+    ground = near.filter(F.col("on_ground") & F.col("t_air_first").isNotNull())
+    dep = ground.filter(F.col("event_time") < F.col("t_air_first"))
+    arr = ground.filter(F.col("event_time") > F.col("t_air_last"))
+
+    # Nearest airport at the last pre-flight / first post-flight surface sample.
+    wd = Window.partitionBy("track_id").orderBy(
+        F.col("event_time").desc(), F.col("dist_nm").asc()
     )
-    best = Window.partitionBy("track_id", "role").orderBy("dist_nm")
-    return _pivot_roles(
-        ends.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1)
+    wa = Window.partitionBy("track_id").orderBy(
+        F.col("event_time").asc(), F.col("dist_nm").asc()
     )
+    dep = (
+        dep.withColumn("_r", F.row_number().over(wd))
+        .filter(F.col("_r") == 1)
+        .select("track_id", F.col("apt").alias("adep"))
+    )
+    arr = (
+        arr.withColumn("_r", F.row_number().over(wa))
+        .filter(F.col("_r") == 1)
+        .select("track_id", F.col("apt").alias("ades"))
+    )
+    return dep.join(arr, "track_id", "full_outer")
 
 
 def m3_vert_rate(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.0, **kw):
@@ -297,12 +331,56 @@ def _pivot_roles(df: DataFrame) -> DataFrame:
     )
 
 
+def m6_cascade(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.0, **kw):
+    """M6 -- precision-ordered cascade over the single-signal methods.
+
+    Measured on 2025-06-05, the methods form a clean precision/coverage ladder:
+    on_ground 96.6% accurate over 24.8% of flights, vert_rate 97.4% over 57.4%,
+    the production vote 98.3% over 54.8%, min-altitude 82.2% over 69.3%, and
+    traffic's endpoint guess 87.5% over 72.7%.
+
+    So take the most precise answer available for each flight and fall through
+    to the next when it is silent. This keeps the accuracy of the strong
+    signals where they fire and traffic's near-total coverage everywhere else,
+    which is the trade the production algorithm gets backwards by dropping
+    every ambiguous case outright (``flights.py:282``).
+
+    ``ladder_rank`` records which rung answered, so the paper can report where
+    the coverage actually comes from, and it doubles as a confidence proxy.
+    """
+    parts = [
+        ("m2", m2_on_ground(sv, apt, radius_nm=radius_nm, max_fl=max_fl)),
+        ("m3", m3_vert_rate(sv, apt, radius_nm=radius_nm, max_fl=max_fl)),
+        ("m0", m0_current(sv, apt, radius_nm=radius_nm, max_fl=max_fl)),
+        ("m5", m5_min_alt_closest(sv, apt, radius_nm=radius_nm, max_fl=max_fl)),
+        ("m1", m1_traffic_endpoints(sv, apt)),
+    ]
+    out = None
+    for tag, df in parts:
+        df = df.select(
+            "track_id",
+            F.col("adep").alias(f"adep_{tag}"),
+            F.col("ades").alias(f"ades_{tag}"),
+        )
+        out = df if out is None else out.join(df, "track_id", "full_outer")
+    tags = [t for t, _ in parts]
+    return out.select(
+        "track_id",
+        F.coalesce(*[F.col(f"adep_{t}") for t in tags]).alias("adep"),
+        F.coalesce(*[F.col(f"ades_{t}") for t in tags]).alias("ades"),
+        F.coalesce(
+            *[F.when(F.col(f"adep_{t}").isNotNull(), F.lit(t)) for t in tags]
+        ).alias("ladder_rank"),
+    )
+
+
 METHODS = {
     "M0_current": m0_current,
     "M1_traffic": m1_traffic_endpoints,
     "M2_on_ground": m2_on_ground,
     "M3_vert_rate": m3_vert_rate,
     "M5_min_alt": m5_min_alt_closest,
+    "M6_cascade": m6_cascade,
 }
 
 
