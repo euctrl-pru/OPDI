@@ -111,8 +111,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("start", help="first day, YYYY-MM-DD (inclusive)")
     ap.add_argument("end", help="last day, YYYY-MM-DD (exclusive)")
-    ap.add_argument("--cores", type=int, default=12)
-    ap.add_argument("--driver-memory", default="64g")
+    ap.add_argument("--cores", type=int, default=6)
+    ap.add_argument("--driver-memory", default="9g")
     ap.add_argument("--interval", type=int, default=TIME_INTERVAL)
     args = ap.parse_args()
 
