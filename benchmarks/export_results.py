@@ -48,7 +48,43 @@ def exports(tag: str) -> dict:
         f"{ROOT}/results/{tag}": "method_comparison.csv",
         f"{ROOT}/abstain_sweep/{tag}": "abstention_sweep.csv",
         f"{ROOT}/cascade_diag/{tag}_m0-m3-m2-m1-m5_vs_m1": "cascade_attribution.csv",
+        f"{ROOT}/per_airport/{tag}_M7_abstain": "per_airport.csv",
     }
+
+
+#: OPDI Europe bounding box, as used at ingestion.
+BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)
+AIRPORTS_PREFIX = "opdi/oa_airports"
+
+
+def annotate_airports(df, s3):
+    """Mark which aerodromes the method could ever have predicted.
+
+    Ground truth names every destination a flight actually had -- small fields,
+    and airports on other continents. Predictions are restricted to European
+    large and medium airports, so an unrestricted median over all 1,200-odd
+    aerodromes measures the mismatch between those two universes and nothing
+    about the method. `in_scope` is the only population the comparison is
+    meaningful over.
+    """
+    import pandas as pd
+
+    apt = read_prefix(s3, AIRPORTS_PREFIX)
+    if apt is None:
+        return df
+    a = apt.to_pandas()[["ident", "type", "latitude_deg", "longitude_deg"]]
+    a = a.rename(columns={"ident": "airport", "type": "apt_type"})
+    a["latitude_deg"] = pd.to_numeric(a["latitude_deg"], errors="coerce")
+    a["longitude_deg"] = pd.to_numeric(a["longitude_deg"], errors="coerce")
+    out = df.merge(a, on="airport", how="left")
+    min_lon, min_lat, max_lon, max_lat = BBOX
+    out["in_bbox"] = (
+        out.longitude_deg.between(min_lon, max_lon)
+        & out.latitude_deg.between(min_lat, max_lat)
+    )
+    out["in_set"] = out.apt_type.isin(["large_airport", "medium_airport"])
+    out["in_scope"] = out.in_bbox & out.in_set
+    return out
 
 DEFAULT_OUT = REPO.parent / "opdi-portal" / "papers" / "adep-ades-detection" / "data"
 
@@ -111,7 +147,10 @@ def main() -> None:
             print(f"  MISSING  {prefix}")
             continue
         dest = args.out / name
-        tbl.to_pandas().to_csv(dest, index=False)
+        frame = tbl.to_pandas()
+        if name == "per_airport.csv":
+            frame = annotate_airports(frame, s3)
+        frame.to_csv(dest, index=False)
         print(f"  {tbl.num_rows:4d} rows -> {dest.relative_to(REPO.parent)}")
 
     if missing:
