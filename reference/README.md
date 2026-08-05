@@ -120,6 +120,20 @@ the defaults so the population is reproducible, and record any deviation in `MAN
 Run on the work laptop. **One calendar month is the unit of extraction** — see the loop caveat
 above; this is not a convention, it is a correctness requirement.
 
+The whole thing is scripted. From the repo root:
+
+```bash
+Rscript reference/extract.R 2024-06
+```
+
+It opens one DB connection and closes it on any exit, writes both parquet files, prints the
+`SRC_PHASE` split and the `AIRCRAFT_ADDRESS` fill rate as sanity checks, and prints the
+`MANIFEST.md` rows for you to paste. Omit the argument to use the default month at the top of
+the script.
+
+<details>
+<summary>Equivalent by hand, if you prefer the console</summary>
+
 A single month is enough for the first milestone benchmarks, so start with one:
 
 ```r
@@ -146,10 +160,11 @@ flights_tidy(wef = wef, til = til) |>
 `collect()` is required — these are lazy Oracle-backed tables, and `write_parquet` needs them
 materialised.
 
-To extend to several months later, wrap the block in
-`for (month in seq(ymd("2024-01-01"), ymd("2024-12-01"), by = "month"))` and re-derive `month <-
-as_date(month)` inside the loop (`seq` over dates yields numerics). Never widen `wef`/`til`
-instead — that is the silent-drop failure described above.
+</details>
+
+To extend to several months later, call the script once per month —
+`for m in 2024-01 2024-02 2024-03; do Rscript reference/extract.R $m; done`. Never widen
+`wef`/`til` instead: that is the silent-drop failure described above.
 
 ## Recording an extract
 
