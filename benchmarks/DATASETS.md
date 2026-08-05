@@ -37,6 +37,21 @@ Written 2026-06-02, ~48 GB total across 15,010 objects.
 
 ---
 
+## Compute
+
+Spark runs **distributed on the OSN Kubernetes cluster**, not in the JupyterLab pod:
+`k8s://https://192.168.60.102:6443`, namespace `eurocontrol`, image
+`docker.io/quintengs/opdi-spark:v4.1.1-5`, client deploy mode with the driver in this pod.
+
+This is not optional. The JupyterLab pod is capped at **16 GB** (`/sys/fs/cgroup/memory.max`)
+while `free(1)` reports the host's 251 GB. In `local[*]` mode every executor task runs inside
+that cap and the JVM is OOM-killed with no crash dump — py4j reports only "Answer from Java
+side is empty", which looks like a network fault.
+
+**The driver's pyspark must match the cluster image exactly.** pyspark 4.2.0 against the 4.1.1
+image fails with `InvalidClassException: local class incompatible` once executors start doing
+real work. Pinned to `pyspark==4.1.1`.
+
 ## Research (written by this work)
 
 All under `opdi/research/`, deliberately separate from the production prefixes above.

@@ -55,7 +55,45 @@ def load_dotenv() -> None:
             os.environ.setdefault(key.strip(), value.strip())
 
 
-def build_spark(cores: int, driver_memory: str):
+def build_spark(cores: int, driver_memory: str, distributed: bool = True):
+    """Spark session. Distributed on the OSN K8s cluster by default.
+
+    The JupyterLab pod is capped at 16 GB (cgroup memory.max), so local[*] mode
+    puts every executor task inside that cap and OOM-kills the JVM with no
+    crash dump. In distributed mode this pod only hosts the driver and the
+    executors run as separate K8s pods with their own memory -- which is what
+    the `opensky` environment is configured for (k8s_driver_host="jupyterlab",
+    deployMode=client).
+    """
+    if distributed:
+        return _build_spark_k8s()
+    return _build_spark_local(cores, driver_memory)
+
+
+def _build_spark_k8s():
+    import os as _os
+    from opdi.config import OPDIConfig
+    from opdi.utils.spark_helpers import SparkSessionManager
+
+    cfg = OPDIConfig.for_environment("opensky")
+    cfg.spark.s3_access_key = _os.environ["AWS_ACCESS_KEY_ID"]
+    cfg.spark.s3_secret_key = _os.environ["AWS_SECRET_ACCESS_KEY"]
+    return SparkSessionManager.create_session(
+        app_name="opdi-research", config=cfg, distributed=True,
+        extra_configs={
+            # Same S3 read tuning the local path needs: the hourly objects are
+            # ~1 GB and Parquet vectored IO starves under parallelism.
+            "spark.hadoop.parquet.hadoop.vectored.io.enabled": "false",
+            "spark.hadoop.fs.s3a.experimental.input.fadvise": "sequential",
+            "spark.hadoop.fs.s3a.connection.timeout": "600000",
+            "spark.hadoop.fs.s3a.connection.maximum": "256",
+            "spark.hadoop.fs.s3a.attempts.maximum": "10",
+            "spark.hadoop.fs.s3a.retry.limit": "10",
+        },
+    )
+
+
+def _build_spark_local(cores: int, driver_memory: str):
     from pyspark.sql import SparkSession
 
     key = os.environ.get("AWS_ACCESS_KEY_ID", "")
@@ -114,6 +152,8 @@ def main() -> None:
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="9g")
     ap.add_argument("--interval", type=int, default=TIME_INTERVAL)
+    ap.add_argument("--local", action="store_true",
+                    help="run in local[*] mode instead of on the K8s cluster")
     args = ap.parse_args()
 
     start = dt.date.fromisoformat(args.start)
@@ -122,7 +162,7 @@ def main() -> None:
         sys.exit("end must be after start")
 
     load_dotenv()
-    spark = build_spark(args.cores, args.driver_memory)
+    spark = build_spark(args.cores, args.driver_memory, distributed=not args.local)
     spark.sparkContext.setLogLevel("ERROR")
 
     from pyspark.sql import functions as F
