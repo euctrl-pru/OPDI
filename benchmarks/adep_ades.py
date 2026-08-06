@@ -1238,6 +1238,12 @@ def main() -> None:
             f"fl{int(args.max_fl)}",
         ]
         + (["clean"] if args.clean else [])
+        # The aircraft filter and the OOA mode both change the population, so
+        # they have to be part of the tag. They were not, and the strict-filter
+        # ablation silently overwrote the main result for its sample -- same
+        # tag, eight methods replaced by one.
+        + (["strict"] if getattr(args, "strict_aircraft", False) else [])
+        + (["noooa"] if getattr(args, "no_ooa", False) else [])
     )
 
     if args.sweep_abstain:
