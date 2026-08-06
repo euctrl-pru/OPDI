@@ -102,6 +102,31 @@ BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)  # min_lon, min_lat, max_lon, m
 #: nominal edge, so this is deliberately generous.
 BORDER_MARGIN_NM = 30.0
 
+#: Distance penalty, in NM, applied to aerodromes without scheduled service
+#: when ranking candidates for a track endpoint.
+#:
+#: Six of the seven most frequent ADEP confusions were a scheduled civil
+#: airport losing to an adjacent military airfield: Izmir to Cigli Airbase
+#: (361 flights across both samples), Naples to Grazzanise, Cagliari to
+#: Decimomannu, Catania to Sigonella, Gdansk to Cewice. In every case the truth
+#: was `scheduled_service=yes, large_airport` and the prediction a
+#: `scheduled_service=no` air base 7 to 25 NM away.
+#:
+#: A commercial flight is far more likely to have used the aerodrome with
+#: scheduled service, so non-scheduled candidates are pushed back by a fixed
+#: distance rather than excluded -- military and GA movements stay detectable,
+#: they just have to be clearly nearest. 0 reproduces the unbiased behaviour
+#: exactly, which is why this is swept rather than assumed.
+SCHED_PENALTY_NM = 15.0
+
+
+def effective_distance(sched_penalty_nm: float) -> Column:
+    """Great-circle distance, penalised for aerodromes without scheduled service."""
+    penalty = F.when(F.col("apt_scheduled") == "yes", F.lit(0.0)).otherwise(
+        F.lit(float(sched_penalty_nm))
+    )
+    return F.col("dist_nm") + penalty
+
 
 def at_border(lat: Column, lon: Column, margin_nm: float = BORDER_MARGIN_NM) -> Column:
     """True where a position sits within *margin_nm* of the ingestion bbox edge.
@@ -138,6 +163,9 @@ def load_airports(spark: SparkSession, airport_set: str) -> DataFrame:
             F.col("latitude_deg").cast("double").alias("apt_lat"),
             F.col("longitude_deg").cast("double").alias("apt_lon"),
             F.col("elevation_ft").cast("double").alias("apt_elev_ft"),
+            # Used to break ties between co-located aerodromes; see
+            # SCHED_PENALTY_NM.
+            F.col("scheduled_service").alias("apt_scheduled"),
         )
         .filter(F.col("apt_lat").isNotNull() & F.col("apt_lon").isNotNull())
     )
@@ -262,7 +290,9 @@ def nearby_airports(
 # Methodologies -- each returns (track_id, adep, ades)
 # ---------------------------------------------------------------------------
 
-def endpoint_candidates(sv: DataFrame, apt: DataFrame) -> DataFrame:
+def endpoint_candidates(
+    sv: DataFrame, apt: DataFrame, sched_penalty_nm: float = SCHED_PENALTY_NM
+) -> DataFrame:
     """Nearest airport to the track's first and last sample, with the evidence.
 
     The evidence columns -- how far the endpoint is from that airport, how high
@@ -287,7 +317,8 @@ def endpoint_candidates(sv: DataFrame, apt: DataFrame) -> DataFrame:
     j = ends.join(F.broadcast(apt), ["cell_lat", "cell_lon"], "left").withColumn(
         "dist_nm", haversine_nm(F.col("lat"), F.col("lon"), F.col("apt_lat"), F.col("apt_lon"))
     )
-    best = Window.partitionBy("track_id", "role").orderBy(F.col("dist_nm").asc_nulls_last())
+    j = j.withColumn("eff_nm", effective_distance(sched_penalty_nm))
+    best = Window.partitionBy("track_id", "role").orderBy(F.col("eff_nm").asc_nulls_last())
     return j.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1)
 
 
@@ -327,7 +358,11 @@ def m1_traffic_endpoints(sv: DataFrame, apt: DataFrame, **kw) -> DataFrame:
     call ``guess_airport`` on ``iloc[0]`` and ``iloc[-1]``. No altitude, no
     on_ground, no vertical trend -- purely the closest airport to one point.
     """
-    return pivot_endpoints(endpoint_candidates(sv, apt)).select("track_id", "adep", "ades")
+    # sched_penalty_nm=0: M1 must stay a faithful recreation of traffic's
+    # nearest-aerodrome rule, which knows nothing about scheduled service.
+    return pivot_endpoints(
+        endpoint_candidates(sv, apt, sched_penalty_nm=0.0)
+    ).select("track_id", "adep", "ades")
 
 
 def m7_endpoint_abstain(
@@ -360,7 +395,13 @@ def m7_endpoint_abstain(
     10 NM to 40 NM moves ADEP coverage by 0.2 pp -- which is why the radius is
     generous and the height cut is not.
     """
-    p = _endpoints if _endpoints is not None else pivot_endpoints(endpoint_candidates(sv, apt))
+    p = (
+        _endpoints
+        if _endpoints is not None
+        else pivot_endpoints(
+            endpoint_candidates(sv, apt, kw.get("sched_penalty_nm", SCHED_PENALTY_NM))
+        )
+    )
     per_side = {
         "adep": (
             kw.get("adep_dist_nm", max_endpoint_dist_nm),
@@ -386,14 +427,22 @@ def m7_endpoint_abstain(
                 | (F.col(f"{side}_elev_known") & (F.col(f"{side}_agl_ft") <= h))
             )
         if ooa:
-            # Order matters: the border test comes first and carries no height
-            # condition. A flight leaving the area is at cruise level by
-            # definition, so any height cut-off would reject exactly the
-            # endpoints this branch exists to catch.
+            # A qualifying aerodrome wins; the border label is the fallback.
+            #
+            # The first version had these the other way round, and the border
+            # test won unconditionally. Ponta Delgada sits about 8 NM inside the
+            # western bbox edge, so ~164 flights departing it were labelled
+            # out-of-area with the aircraft still on the runway; Tromso the
+            # same. Being near the boundary only means "out of area" when there
+            # is nothing better to say.
+            #
+            # The border branch still carries no height condition -- a flight
+            # leaving the area is at cruise level by definition -- it simply no
+            # longer pre-empts an aerodrome match.
             p = p.withColumn(
                 side,
-                F.when(F.col(f"{side}_at_border"), F.lit(OOA)).otherwise(
-                    F.when(ok, F.col(side))
+                F.when(ok, F.col(side)).otherwise(
+                    F.when(F.col(f"{side}_at_border"), F.lit(OOA))
                 ),
             )
         else:
@@ -490,7 +539,8 @@ def m8_extrapolated_endpoint(
     j = g.join(F.broadcast(apt), ["cell_lat", "cell_lon"], "left").withColumn(
         "dist_nm", haversine_nm(F.col("lat"), F.col("lon"), F.col("apt_lat"), F.col("apt_lon"))
     )
-    best = Window.partitionBy("track_id", "role").orderBy(F.col("dist_nm").asc_nulls_last())
+    j = j.withColumn("eff_nm", effective_distance(kw.get("sched_penalty_nm", SCHED_PENALTY_NM)))
+    best = Window.partitionBy("track_id", "role").orderBy(F.col("eff_nm").asc_nulls_last())
     j = j.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1)
 
     p = (
@@ -507,7 +557,10 @@ def m8_extrapolated_endpoint(
         ok = F.col(f"{side}_dist_nm") <= d
         expr = F.when(ok, F.col(side))
         if ooa:
-            expr = F.when(F.col(f"{side}_at_border"), F.lit(OOA)).otherwise(expr)
+            # Same precedence as m7: aerodrome first, border as fallback.
+            expr = expr.otherwise(
+                F.when(F.col(f"{side}_at_border"), F.lit(OOA))
+            )
         p = p.withColumn(side, expr)
     return p.select("track_id", "adep", "ades")
 
@@ -888,7 +941,27 @@ def align_to_ground_truth(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> D
 
 
 def score(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> dict:
-    """Coverage and accuracy against ground truth."""
+    """Coverage and accuracy against ground truth, decomposed by out-of-area.
+
+    Headline coverage and accuracy mix two different abilities: naming the
+    right aerodrome, and recognising that a flight's origin or destination lies
+    outside the observed area. With roughly one flight in six genuinely
+    out-of-area, a method can buy accuracy cheaply by labelling OOA liberally,
+    and an undecomposed table cannot show it.
+
+    So each side is reported three ways:
+
+    * headline ``coverage``/``accuracy`` -- every flight, OOA counted as an
+      answer like any other. Comparable with earlier versions of this study.
+    * ``ooa_recall``/``ooa_precision`` -- how well the method identifies flights
+      it cannot name. Precision is the one that catches over-labelling.
+    * ``inarea_coverage``/``inarea_accuracy`` -- restricted to flights whose
+      truth is a real aerodrome. This is detection skill with the free wins
+      removed, and it is the number to read when comparing naming rules.
+
+    ``gt_ooa_share`` is a property of the sample, so it must come out identical
+    for every method scored against the same ground truth.
+    """
     j = align_to_ground_truth(pred, ident, gt)
 
     agg = j.agg(
@@ -897,6 +970,38 @@ def score(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> dict:
         F.sum(F.when(F.col("ades").isNotNull(), 1).otherwise(0)).alias("ades_any"),
         F.sum(F.when(F.col("adep") == F.col("gt_adep"), 1).otherwise(0)).alias("adep_ok"),
         F.sum(F.when(F.col("ades") == F.col("gt_ades"), 1).otherwise(0)).alias("ades_ok"),
+        *[
+            expr
+            for side in ("adep", "ades")
+            for expr in (
+                F.sum(F.when(F.col(f"gt_{side}") == OOA, 1).otherwise(0)).alias(
+                    f"{side}_gt_ooa"
+                ),
+                F.sum(F.when(F.col(side) == OOA, 1).otherwise(0)).alias(
+                    f"{side}_pred_ooa"
+                ),
+                F.sum(
+                    F.when(
+                        (F.col(side) == OOA) & (F.col(f"gt_{side}") == OOA), 1
+                    ).otherwise(0)
+                ).alias(f"{side}_ooa_hit"),
+                # In-area: ground truth names a real aerodrome.
+                F.sum(F.when(F.col(f"gt_{side}") != OOA, 1).otherwise(0)).alias(
+                    f"{side}_gt_inarea"
+                ),
+                F.sum(
+                    F.when(
+                        (F.col(f"gt_{side}") != OOA) & F.col(side).isNotNull(), 1
+                    ).otherwise(0)
+                ).alias(f"{side}_inarea_any"),
+                F.sum(
+                    F.when(
+                        (F.col(f"gt_{side}") != OOA) & (F.col(side) == F.col(f"gt_{side}")),
+                        1,
+                    ).otherwise(0)
+                ).alias(f"{side}_inarea_ok"),
+            )
+        ],
     ).first()
     n = agg["n_gt"] or 1
     return {
@@ -907,6 +1012,30 @@ def score(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> dict:
         "ades_accuracy": (agg["ades_ok"] / agg["ades_any"]) if agg["ades_any"] else 0.0,
         "adep_overall": agg["adep_ok"] / n,
         "ades_overall": agg["ades_ok"] / n,
+        **{
+            k: v
+            for side in ("adep", "ades")
+            for k, v in {
+                f"{side}_gt_ooa_share": agg[f"{side}_gt_ooa"] / n,
+                f"{side}_pred_ooa_share": agg[f"{side}_pred_ooa"] / n,
+                f"{side}_ooa_recall": (
+                    agg[f"{side}_ooa_hit"] / agg[f"{side}_gt_ooa"]
+                    if agg[f"{side}_gt_ooa"] else 0.0
+                ),
+                f"{side}_ooa_precision": (
+                    agg[f"{side}_ooa_hit"] / agg[f"{side}_pred_ooa"]
+                    if agg[f"{side}_pred_ooa"] else 0.0
+                ),
+                f"{side}_inarea_coverage": (
+                    agg[f"{side}_inarea_any"] / agg[f"{side}_gt_inarea"]
+                    if agg[f"{side}_gt_inarea"] else 0.0
+                ),
+                f"{side}_inarea_accuracy": (
+                    agg[f"{side}_inarea_ok"] / agg[f"{side}_inarea_any"]
+                    if agg[f"{side}_inarea_any"] else 0.0
+                ),
+            }.items()
+        },
     }
 
 
@@ -1056,9 +1185,13 @@ def error_pairs(
     neighbouring-field confusion, hundreds means something else entirely.
     """
     j = align_to_ground_truth(pred, ident, gt)
-    loc = (
-        apt.select("apt", "apt_lat", "apt_lon").dropDuplicates(["apt"])
-    )
+    # Carry scheduled service, type and name so the confusion table shows the
+    # *kind* of aerodrome involved, not just its code. Six of the seven most
+    # frequent confusions turned out to be a scheduled civil airport losing to
+    # an adjacent air base, which is invisible if only ICAO codes are reported.
+    loc = apt.select(
+        "apt", "apt_lat", "apt_lon", "apt_scheduled", "apt_type"
+    ).dropDuplicates(["apt"])
     frames = []
     for side in ("adep", "ades"):
         e = j.filter(
@@ -1076,6 +1209,8 @@ def error_pairs(
                     F.col("apt").alias("truth"),
                     F.col("apt_lat").alias("t_lat"),
                     F.col("apt_lon").alias("t_lon"),
+                    F.col("apt_scheduled").alias("t_scheduled"),
+                    F.col("apt_type").alias("t_type"),
                 ),
                 "truth",
                 "left",
@@ -1085,6 +1220,8 @@ def error_pairs(
                     F.col("apt").alias("predicted"),
                     F.col("apt_lat").alias("p_lat"),
                     F.col("apt_lon").alias("p_lon"),
+                    F.col("apt_scheduled").alias("p_scheduled"),
+                    F.col("apt_type").alias("p_type"),
                 ),
                 "predicted",
                 "left",
@@ -1094,7 +1231,17 @@ def error_pairs(
                 haversine_nm(F.col("t_lat"), F.col("t_lon"), F.col("p_lat"), F.col("p_lon")),
             )
             .withColumn("side", F.lit(side))
-            .select("side", "truth", "predicted", "n", "apart_nm")
+            # The signature of the military-airfield confusion: truth has
+            # scheduled service, the prediction does not.
+            .withColumn(
+                "sched_to_unsched",
+                (F.col("t_scheduled") == "yes") & (F.col("p_scheduled") != "yes"),
+            )
+            .select(
+                "side", "truth", "predicted", "n", "apart_nm",
+                "t_scheduled", "p_scheduled", "t_type", "p_type",
+                "sched_to_unsched",
+            )
         )
         frames.append(agg)
     out = frames[0].unionByName(frames[1])
@@ -1112,6 +1259,21 @@ def _print_diagnosis(rows, fallback: str) -> None:
             f"{r['share_of_gt']:7.2%} {r['accuracy']:7.2%} "
             f"{r['fallback_accuracy']:8.2%} {r['lift']:+7.2%}"
         )
+
+
+def method_kwargs(args) -> dict:
+    """Optional per-side and tie-break settings, omitted when unset.
+
+    Left out rather than passed as None so each method keeps its own default,
+    and so a run that sets nothing is byte-identical to one from before these
+    options existed.
+    """
+    kw = {"sched_penalty_nm": args.sched_penalty_nm}
+    for name in ("adep_dist_nm", "adep_agl_ft", "ades_dist_nm", "ades_agl_ft"):
+        value = getattr(args, name, None)
+        if value is not None:
+            kw[name] = value
+    return kw
 
 
 def _materialise_tracks(spark: SparkSession, args) -> DataFrame:
@@ -1161,6 +1323,15 @@ def main() -> None:
     ap.add_argument("--strict-aircraft", action="store_true",
                     help="keep only confirmed L/A airframes (the v1 allowlist) "
                          "instead of dropping only confirmed non-aeroplanes")
+    ap.add_argument("--adep-dist-nm", type=float, default=None)
+    ap.add_argument("--adep-agl-ft", type=float, default=None)
+    ap.add_argument("--ades-dist-nm", type=float, default=None)
+    ap.add_argument("--ades-agl-ft", type=float, default=None,
+                    help="per-side abstention thresholds; each falls back to "
+                         "--radius-nm/--max-fl style defaults when unset")
+    ap.add_argument("--sched-penalty-nm", type=float, default=SCHED_PENALTY_NM,
+                    help="distance penalty for aerodromes without scheduled "
+                         "service (0 disables the tie-break)")
     ap.add_argument("--no-ooa", action="store_true",
                     help="score out-of-area aerodromes as misses, as v1 did, "
                          "instead of labelling them OOA on both sides")
@@ -1244,6 +1415,11 @@ def main() -> None:
         # tag, eight methods replaced by one.
         + (["strict"] if getattr(args, "strict_aircraft", False) else [])
         + (["noooa"] if getattr(args, "no_ooa", False) else [])
+        + ([f"sp{int(args.sched_penalty_nm)}"] if args.sched_penalty_nm else [])
+        + (["perside"] if any(
+            getattr(args, n, None) is not None
+            for n in ("adep_dist_nm", "adep_agl_ft", "ades_dist_nm", "ades_agl_ft")
+        ) else [])
     )
 
     if args.sweep_abstain:
@@ -1263,6 +1439,7 @@ def main() -> None:
     for name in names:
         print(f"\n--- {name} ---")
         kw = {"ladder": args.ladder} if name == "M6_cascade" else {}
+        kw.update(method_kwargs(args))
         pred = METHODS[name](sv, apt, radius_nm=args.radius_nm, max_fl=args.max_fl, **kw)
         m = score(pred, ident, gt)
         m["method"] = name
@@ -1295,6 +1472,7 @@ def main() -> None:
 
     if args.error_pairs:
         kw = {"ladder": args.ladder} if args.error_pairs == "M6_cascade" else {}
+        kw.update(method_kwargs(args))
         pred = METHODS[args.error_pairs](
             sv, apt, radius_nm=args.radius_nm, max_fl=args.max_fl, **kw
         )
@@ -1310,6 +1488,7 @@ def main() -> None:
 
     if args.per_airport:
         kw = {"ladder": args.ladder} if args.per_airport == "M6_cascade" else {}
+        kw.update(method_kwargs(args))
         pred = METHODS[args.per_airport](
             sv, apt, radius_nm=args.radius_nm, max_fl=args.max_fl, **kw
         )
