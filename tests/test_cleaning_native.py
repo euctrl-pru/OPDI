@@ -112,12 +112,19 @@ def test_repeated_speed_fields_are_nulled(spark, cfg):
     assert column_values(out, "heading")[2] == pytest.approx(90.0)
 
 
-def test_first_sample_has_no_predecessor_and_is_masked(spark, cfg):
-    """Mirrors ``isvar``: a comparison against a missing neighbour is not
-    evidence of an update, so the opening sample cannot be confirmed fresh."""
+def test_first_sample_has_no_predecessor_and_is_kept(spark, cfg):
+    """The opening sample cannot be a repeat, because there is nothing before it.
+
+    This test previously asserted the opposite, on the reasoning that a
+    comparison against a missing neighbour is not evidence of an update. That
+    confuses absence of evidence for a repeat with evidence of one, and it made
+    cleaning NULL the position of 100% of track first samples on real data --
+    which took ADEP detection on cleaned tracks to zero. The test was locking
+    in the defect, so it is inverted here rather than adjusted.
+    """
     df = make_track(spark, [{"t": 0, "lat": 50.0}, {"t": 1, "lat": 50.5}])
     out = mask_stale_broadcasts(df, cfg)
-    assert column_values(out, "lat")[0] is None
+    assert column_values(out, "lat")[0] == pytest.approx(50.0)
 
 
 # ---------------------------------------------------------------------------
@@ -323,13 +330,11 @@ def test_clean_tracks_respects_master_switch(spark, cfg):
 
 
 def test_clean_tracks_is_stable_on_a_pristine_track(spark, cfg):
-    """No defects in, no positions masked out -- beyond the documented
-    first-sample rule from the stale-broadcast stage."""
+    """No defects in, nothing masked out. Not one sample, including the first."""
     df = make_track(spark, _ramp(30))
     lat = column_values(clean_tracks(df, cfg), "lat")
 
-    assert lat[0] is None  # opening sample, see test_first_sample_...
-    assert all(v is not None for v in lat[1:]), f"clean data was damaged: {lat}"
+    assert all(v is not None for v in lat), f"clean data was damaged: {lat}"
 
 
 def test_null_rate_report_counts_masked_values(spark, cfg):
@@ -346,3 +351,41 @@ def test_null_rate_report_counts_masked_values(spark, cfg):
 
     assert report["lat"] == pytest.approx(0.5)
     assert report["lon"] == pytest.approx(0.0)
+
+
+def test_first_sample_of_a_track_is_never_stale(spark):
+    """A sample with no predecessor cannot be a repeat of anything.
+
+    Regression: `changed()` required a non-NULL predecessor, so every column
+    of a track's first row read as "unchanged" and was NULLed as stale. On real
+    data that removed the position of 100% of track first samples, which took
+    ADEP detection on cleaned tracks from ~75% coverage to zero.
+    """
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "lat": 50.00, "lon": 4.00},
+            {"t": 5, "lat": 50.01, "lon": 4.01},
+            {"t": 10, "lat": 50.02, "lon": 4.02},
+        ],
+    )
+    out = mask_stale_broadcasts(df, CleaningConfig())
+    assert column_values(out, "lat")[0] == pytest.approx(50.00)
+    assert column_values(out, "lon")[0] == pytest.approx(4.00)
+
+
+def test_genuinely_repeated_position_is_still_masked(spark):
+    """The fix must not disarm the filter it is fixing."""
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "lat": 50.00, "lon": 4.00},
+            {"t": 5, "lat": 50.00, "lon": 4.00},
+            {"t": 10, "lat": 50.01, "lon": 4.01},
+        ],
+    )
+    out = mask_stale_broadcasts(df, CleaningConfig())
+    lat = column_values(out, "lat")
+    assert lat[0] == pytest.approx(50.00)   # first: kept, no predecessor
+    assert lat[1] is None                   # second: identical repeat, masked
+    assert lat[2] == pytest.approx(50.01)   # third: moved again, kept

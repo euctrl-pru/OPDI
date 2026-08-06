@@ -190,13 +190,23 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     w = _track_window()
 
     def changed(name: str) -> Column:
-        """True only if both this and the previous value exist and differ.
+        """True where this value is a fresh measurement rather than a repeat.
 
-        Mirrors ``isvar`` (``filterclassic.py:27-32``): a comparison against a
-        missing neighbour is not evidence of an update.
+        Mirrors ``isvar`` (``filterclassic.py:27-32``), with one boundary case
+        that ``isvar`` gets for free from NumPy's NaN convention and a Spark
+        port does not: **the first sample of a track has no predecessor, so it
+        cannot be a repeat of anything.**
+
+        Requiring ``prev.isNotNull()`` here -- as this did originally -- makes
+        every column of the first row "unchanged", which the caller then reads
+        as "stale" and NULLs. The result was that cleaning destroyed the
+        position of the first sample of every single track: measured at 100%
+        on 2025-06-05, which took ADEP detection on cleaned tracks to zero.
+        Absence of a predecessor is absence of evidence for a repeat, not
+        evidence of one.
         """
         prev = F.lag(F.col(name)).over(w)
-        return F.col(name).isNotNull() & prev.isNotNull() & (F.col(name) != prev)
+        return F.col(name).isNotNull() & (prev.isNull() | (F.col(name) != prev))
 
     lat_or_lon = changed("lat") | changed("lon")
     position = lat_or_lon | changed("baro_altitude")
