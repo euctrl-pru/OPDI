@@ -64,6 +64,25 @@ Check headroom before scaling up — the quota is shared:
 kubectl get resourcequota -n eurocontrol
 ```
 
+### The bucket has a quota
+
+Writes fail with `AWSBadRequestException: ... Bucket quota exceeded` once the
+bucket is full, and they fail **at the end of a job**, after the work is done
+and the results have been printed to stdout but before they are persisted. A
+whole chain can therefore appear to run and leave nothing behind.
+
+Production is ~48 GB and the quota is around 100 GB, so research output has to
+be pruned rather than accumulated. Track builds are the expensive artefact
+(~4 GB per 3-day sample per filter variant) and are all rebuildable from the
+state vectors, which are the thing worth keeping.
+
+Check before a long run:
+
+```python
+tot = sum(o["Size"] for p in s3.get_paginator("list_objects_v2")
+          .paginate(Bucket="eurocontrol") for o in p.get("Contents", []))
+```
+
 ### Deleting objects
 
 The OpenSky endpoint rejects S3 batch `DeleteObjects` with
