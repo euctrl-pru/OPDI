@@ -64,6 +64,24 @@ Check headroom before scaling up — the quota is shared:
 kubectl get resourcequota -n eurocontrol
 ```
 
+### Deleting objects
+
+The OpenSky endpoint rejects S3 batch `DeleteObjects` with
+`MissingContentMD5` — it requires a `Content-Md5` header that botocore does not
+send. Single-object `delete_object` calls are unaffected:
+
+```python
+for k in keys:
+    s3.delete_object(Bucket="eurocontrol", Key=k)
+```
+
+This matters because the benchmark harness is idempotent: `_materialise_tracks`
+skips any day whose `_SUCCESS` marker exists. A failed delete therefore does not
+look like a failure — the next run quietly reuses the old data and produces
+results identical to the ones you were trying to replace. If a re-run returns
+byte-identical numbers after a code change, check the object timestamps before
+believing them.
+
 ### One job at a time
 
 **Two distributed Spark jobs cannot run concurrently from this pod**, however
