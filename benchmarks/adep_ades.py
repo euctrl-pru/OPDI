@@ -1306,6 +1306,28 @@ def _materialise_tracks(spark: SparkSession, args) -> DataFrame:
     return df
 
 
+def emit(df: DataFrame, s3_path: str, args, name: str) -> None:
+    """Persist a small result table, to local CSV or to S3.
+
+    These tables are tens to a few thousand rows -- metadata about a run, not a
+    dataset -- and they end up committed to the repository as CSV regardless.
+    When the bucket is at its quota, writing them to S3 fails at the very end of
+    a job and discards everything the job computed, so `--results-dir` writes
+    them straight to disk instead and the run survives.
+
+    The large artefacts (tracks) still go to S3; only results come here.
+    """
+    if getattr(args, "results_dir", None):
+        out = Path(args.results_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        dest = out / f"{name}.csv"
+        df.toPandas().to_csv(dest, index=False)
+        print(f"{name} -> {dest}")
+    else:
+        df.coalesce(1).write.mode("overwrite").parquet(s3_path)
+        print(f"{name} -> {s3_path}")
+
+
 def _s3_exists(spark: SparkSession, path: str) -> bool:
     jvm = spark._jvm
     p = jvm.org.apache.hadoop.fs.Path(path)
@@ -1329,6 +1351,9 @@ def main() -> None:
     ap.add_argument("--ades-agl-ft", type=float, default=None,
                     help="per-side abstention thresholds; each falls back to "
                          "--radius-nm/--max-fl style defaults when unset")
+    ap.add_argument("--results-dir", default=None,
+                    help="write result tables to this local directory as CSV "
+                         "instead of S3 parquet; use when the bucket is at quota")
     ap.add_argument("--sched-penalty-nm", type=float, default=SCHED_PENALTY_NM,
                     help="distance penalty for aerodromes without scheduled "
                          "service (0 disables the tie-break)")
@@ -1429,8 +1454,7 @@ def main() -> None:
             .withColumn("cleaned", F.lit(bool(args.clean)))
         )
         out = f"{OUT_BASE}/abstain_sweep/{tag}"
-        sw.coalesce(1).write.mode("overwrite").parquet(out)
-        print(f"\nabstention sweep -> {out}")
+        emit(sw, out, args, f"abstain_sweep__{tag}")
 
     names = {"all": list(METHODS), "none": []}.get(
         args.methods[0] if len(args.methods) == 1 else "", args.methods
@@ -1466,9 +1490,8 @@ def main() -> None:
             sv, apt, ident, gt, ladder, args.radius_nm, args.max_fl, control
         ).cache()
         _print_diagnosis(diag.collect(), control)
-        diag.coalesce(1).write.mode("overwrite").parquet(
-            f"{OUT_BASE}/cascade_diag/{tag}_{'-'.join(ladder)}_vs_{control}"
-        )
+        emit(diag, f"{OUT_BASE}/cascade_diag/{tag}_{'-'.join(ladder)}_vs_{control}",
+             args, f"cascade_diag__{tag}")
 
     if args.error_pairs:
         kw = {"ladder": args.ladder} if args.error_pairs == "M6_cascade" else {}
@@ -1483,8 +1506,7 @@ def main() -> None:
             apart = "—" if r["apart_nm"] is None else f"{r['apart_nm']:8.1f} NM"
             print(f"  {r['side']:5} {r['truth']:6} {r['predicted']:10} {r['n']:6,} {apart:>9}")
         out = f"{OUT_BASE}/error_pairs/{tag}_{args.error_pairs}"
-        ep.coalesce(1).write.mode("overwrite").parquet(out)
-        print(f"error pairs -> {out}")
+        emit(ep, out, args, f"error_pairs__{tag}_{args.error_pairs}")
 
     if args.per_airport:
         kw = {"ladder": args.ladder} if args.per_airport == "M6_cascade" else {}
@@ -1501,13 +1523,11 @@ def main() -> None:
                 f"recall {r['recall']:6.2%}"
             )
         out = f"{OUT_BASE}/per_airport/{tag}_{args.per_airport}"
-        pa.coalesce(1).write.mode("overwrite").parquet(out)
-        print(f"per-aerodrome counts -> {out}")
+        emit(pa, out, args, f"per_airport__{tag}_{args.per_airport}")
 
     if rows:
         res = spark.createDataFrame(rows)
-        res.coalesce(1).write.mode("overwrite").parquet(f"{OUT_BASE}/results/{tag}")
-        print(f"\nresults -> {OUT_BASE}/results/{tag}")
+        emit(res, f"{OUT_BASE}/results/{tag}", args, f"results__{tag}")
     spark.stop()
 
 
