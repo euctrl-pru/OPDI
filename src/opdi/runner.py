@@ -208,7 +208,14 @@ def _step_01_ingest_statevectors(spark, config, start_date, end_date, **kwargs):
     from opdi.ingestion.osn_statevectors import StateVectorIngestion
 
     sv = StateVectorIngestion(spark, config)
-    sv.ingest(start_date=start_date, end_date=end_date)
+    # The default ingest() shells out to the MinIO client and stages files on
+    # local disk, which suits a host with the archive mounted. In the opensky
+    # environment the archive is another bucket on the same endpoint, so
+    # reading it directly through S3A avoids the download entirely.
+    if config.project.project_name == "opensky":
+        sv.ingest_from_s3(start_date=start_date, end_date=end_date)
+    else:
+        sv.ingest(start_date=start_date, end_date=end_date)
 
 
 def _step_02_process_tracks(spark, config, start_date, end_date, **kwargs):
