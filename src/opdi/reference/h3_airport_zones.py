@@ -571,8 +571,12 @@ class AirportDetectionZoneGenerator:
                 col("distance_from_center"),
                 col("latitude_deg").alias("apt_latitude_deg"),
                 col("longitude_deg").alias("apt_longitude_deg"),
-                col("min_c_radius_nm"),
-                col("max_c_radius_nm"),
+                # apt_ prefix to match the pandas variant. Without it the two
+                # paths emit different names, and the consumer's radius filter
+                # -- which is keyed on apt_max_c_radius_nm -- silently does not
+                # apply, widening detection to the full ring reach.
+                col("min_c_radius_nm").alias("apt_min_c_radius_nm"),
+                col("max_c_radius_nm").alias("apt_max_c_radius_nm"),
                 col("type").alias("apt_type"),
                 col("scheduled_service").alias("apt_scheduled"),
             )

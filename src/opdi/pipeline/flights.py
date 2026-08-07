@@ -208,8 +208,21 @@ class FlightListProcessor:
         # detection radius has to be applied here. Without this filter the join
         # would match aerodromes as far out as the rings go -- a large, silent
         # change in behaviour disguised as a reference-data update.
-        if "apt_max_c_radius_nm" in sdf_apt.columns:
-            sdf_apt = sdf_apt.filter(col("apt_max_c_radius_nm") <= self.DETECTION_RADIUS_NM)
+        radius_col = next(
+            (c for c in ("apt_max_c_radius_nm", "max_c_radius_nm") if c in sdf_apt.columns),
+            None,
+        )
+        if radius_col:
+            sdf_apt = sdf_apt.filter(col(radius_col) <= self.DETECTION_RADIUS_NM)
+        else:
+            # Pre-dates the banded reference, which was clipped at generation
+            # time -- so no filter is the correct behaviour. Said out loud
+            # because the alternative reading (a banded table whose column was
+            # renamed) would silently widen detection to the full ring reach.
+            print(
+                "  NOTE: airport zones carry no radius band; using the table as "
+                "generated. Regenerate step 00a to filter by radius at read time."
+            )
 
         sv_nearby_apt = sv_low_alt.join(
             sdf_apt, sv_low_alt.h3_res_7 == sdf_apt.apt_hex_id, "left"
