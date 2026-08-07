@@ -187,7 +187,27 @@ class AirportDetectionZoneGenerator:
         self.storage = StorageManager(spark, config)
         self.resolution = resolution or config.h3.airport_detection_resolution
         self.num_points = num_points
-        self.radii_nm = radii_nm or [0, 5, 10, 20, 30, 40]
+        # Graduated rings out to 110 NM: 5 NM steps where the detection
+        # thresholds sit, 10 NM beyond, because a ring's hex count grows with
+        # the square of its radius.
+        #
+        # 110 NM is chosen to cover the ASMA C40 and C100 rings with margin.
+        # At that reach the whole table is ~32 M cells (under 1 GB) at
+        # resolution 7, so it needs no mixed-resolution scheme: state vectors
+        # already carry h3_res_7, so there is one join key and no parent
+        # lookup. Going to 200 NM would have tripled it and forced coarser
+        # cells further out.
+        #
+        # The rings are only labels on H3 cells, so this costs generation time
+        # and storage but nothing at query time, and it lets the detection
+        # radius be swept in the pipeline's own terms rather than through a
+        # parallel distance calculation. Reaching 200 NM also lets a track
+        # endpoint be described as "150 NM from any aerodrome", which is the
+        # evidence an out-of-area test needs.
+        self.radii_nm = radii_nm or (
+            list(range(0, 45, 5))          # 0-40 NM, 5 NM steps
+            + list(range(50, 120, 10))     # 50-110 NM, 10 NM steps
+        )
         self._result_df: Optional[pd.DataFrame] = None
         self._result_sdf: Optional[DataFrame] = None
 
@@ -197,6 +217,7 @@ class AirportDetectionZoneGenerator:
     def _load_airports(
         self,
         airports_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
+        airports_df: Optional[DataFrame] = None,
     ) -> DataFrame:
         """
         Load airport data from OurAirports and filter to European bounding box.
@@ -207,6 +228,13 @@ class AirportDetectionZoneGenerator:
         Returns:
             Spark DataFrame with airport data filtered to Europe.
         """
+        if airports_df is not None:
+            # Already-ingested OurAirports table (step 00d). Preferred on the
+            # OSN cluster, where the public URL is not reachable and where
+            # generating zones from a different snapshot than the pipeline uses
+            # would silently decouple the two.
+            return self._filter_airports_spark(airports_df)
+
         df_apt = pd.read_csv(airports_url)
 
         # European bounding box filter
@@ -474,7 +502,13 @@ class AirportDetectionZoneGenerator:
             self._result_sdf
             .filter(col("type").isin(airport_types))
             .filter(col("max_c_radius_nm") <= float(max_radius_nm))
-            .select("ident", "hex_id", "latitude_deg", "longitude_deg")
+            .select(
+                "ident", "hex_id", "latitude_deg", "longitude_deg",
+                # Carried through so consumers can narrow the radius at query
+                # time. Dropping these baked the detection radius into the
+                # table and made it un-sweepable without regenerating.
+                "min_c_radius_nm", "max_c_radius_nm", "type", "scheduled_service",
+            )
             .withColumn("hex_id", explode(col("hex_id")))
             .filter(col("hex_id").isNotNull())
             .withColumn("lat", _hex_lat_udf(col("hex_id")))
@@ -502,6 +536,10 @@ class AirportDetectionZoneGenerator:
                 col("distance_from_center"),
                 col("latitude_deg").alias("apt_latitude_deg"),
                 col("longitude_deg").alias("apt_longitude_deg"),
+                col("min_c_radius_nm"),
+                col("max_c_radius_nm"),
+                col("type").alias("apt_type"),
+                col("scheduled_service").alias("apt_scheduled"),
             )
         )
         return sdf
