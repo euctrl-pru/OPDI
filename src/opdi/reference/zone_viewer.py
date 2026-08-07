@@ -23,6 +23,11 @@ from typing import List, Optional, Sequence
 
 import pandas as pd
 
+#: Carto's Dark Matter vector style. Free and token-free, unlike the Mapbox
+#: styles kepler.gl defaults to -- a page built without a token shows the data
+#: floating over nothing at all.
+CARTO_DARK_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+
 #: Default detection radius shown when the page opens, matching the flight list.
 DEFAULT_MAX_RADIUS_NM = 30.0
 
@@ -152,7 +157,29 @@ def _config(default_max_nm: float, radius_bounds: tuple) -> dict:
                 "bearing": 0,
                 "pitch": 0,
             },
-            "mapStyle": {"styleType": "dark"},
+            # Carto Dark Matter, served as a free vector style. kepler.gl
+            # otherwise defaults to Mapbox styles, and the generated page has
+            # no access token -- which renders the data over a blank void
+            # rather than a map.
+            "mapStyle": {
+                "styleType": "carto_dark",
+                "topLayerGroups": {},
+                "visibleLayerGroups": {
+                    "label": True, "road": True, "border": False,
+                    "building": True, "water": True, "land": True,
+                },
+                "threeDBuildingColor": [15.0, 15.0, 15.0],
+                "mapStyles": {
+                    "carto_dark": {
+                        "id": "carto_dark",
+                        "label": "Carto Dark Matter",
+                        "url": CARTO_DARK_STYLE,
+                        "icon": "",
+                        "custom": True,
+                        "accessToken": "",
+                    }
+                },
+            },
         },
     }
 
@@ -180,7 +207,38 @@ def render(
     out_html = Path(out_html)
     out_html.parent.mkdir(parents=True, exist_ok=True)
     m.save_to_html(file_name=str(out_html))
+    _finish_html(out_html)
     return out_html
+
+
+#: kepler.gl's template renders into an unsized div, so the map occupies a
+#: corner of the window instead of the window.
+_FULLSCREEN_CSS = """
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+  #app-content { position: absolute; inset: 0; width: 100vw; height: 100vh; }
+</style>
+"""
+
+
+def _finish_html(path: Path) -> None:
+    """Size the map to the viewport and strip the bundled analytics beacon."""
+    import re
+
+    html = path.read_text()
+    if "#app-content" not in html.split("<body")[0]:
+        html = html.replace("</head>", _FULLSCREEN_CSS + "</head>", 1)
+
+    # The template ships a Google Analytics tag. This is an internal artefact
+    # about aerodrome geometry; it should not call home when opened. The
+    # loader appears both as a script tag and again inside a bundled JS
+    # string, so the endpoint is neutralised rather than the code excised --
+    # excising only the tag leaves the second copy live.
+    html = re.sub(
+        r"<script>\(function\(i,s,o,g,r,a,m\).*?</script>", "", html, flags=re.S
+    )
+    html = html.replace("https://www.google-analytics.com/analytics.js", "about:blank")
+    path.write_text(html)
 
 
 def build(
