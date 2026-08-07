@@ -8,14 +8,17 @@ where the result lands.
 
 Two modes:
 
-``--out s3a://...``
-    One Spark write, exactly what pipeline step 00a does. Preferred.
+``--out`` takes any number of destinations and infers how to write each from
+its scheme. ``s3a://`` and ``hdfs://`` paths are written from the executors;
+anything else is a local directory, collected to the driver. Giving both writes
+the same batches to both, rather than generating twice:
 
-``--out <local dir> --local``
-    Generates in aerodrome batches and collects each to the driver. Needed
-    because a cluster job cannot write to the driver's local disk -- executors
-    would each write to their own filesystem -- and because the whole table at
-    full reach is tens of millions of rows, too large to collect in one piece.
+    --out s3a://eurocontrol/opdi/h3_airport_detection_zones /data/zones_local
+
+A local destination forces aerodrome-batched generation, because a cluster job
+cannot write to the driver's disk -- executors would each write to their own
+filesystem -- and the whole table at full reach is tens of millions of rows,
+too large to collect in one piece.
 
 Once the bucket has room, the S3 copy is produced by the pipeline itself:
 
@@ -57,11 +60,13 @@ def _generator(spark, args):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out", required=True, help="s3a:// path, or a local directory with --local")
-    ap.add_argument("--local", action="store_true",
-                    help="collect in batches to the driver instead of writing from executors")
+    ap.add_argument("--out", nargs="+", required=True,
+                    help="one or more destinations. A path starting with s3a:// "
+                         "or s3:// is written from the executors; anything else "
+                         "is treated as a local directory and collected to the "
+                         "driver. Both kinds can be given together.")
     ap.add_argument("--batch", type=int, default=150,
-                    help="aerodromes per batch in --local mode")
+                    help="aerodromes per batch when a local destination is given")
     ap.add_argument("--max-radius-nm", type=float, default=None,
                     help="ring reach; defaults to the generator's outermost ring")
     ap.add_argument("--types", nargs="+", default=AIRPORT_TYPES)
@@ -87,31 +92,48 @@ def main() -> None:
     idents = [r[0] for r in airports.select("ident").distinct().collect()]
     print(f"aerodromes: {len(idents):,} ({', '.join(args.types)})")
 
-    if not args.local:
-        gen.generate(airports_df=airports)
-        sdf = gen.prepare_for_flight_list_spark(max_radius_nm=reach, airport_types=args.types)
-        sdf.write.mode("overwrite").parquet(args.out)
-        print(f"\n{spark.read.parquet(args.out).count():,} rows -> {args.out}")
-        spark.stop()
-        return
+    remote = [d for d in args.out if d.startswith(("s3a://", "s3://", "hdfs://"))]
+    local = [Path(d) for d in args.out if d not in remote]
+    for d in local:
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
 
-    out = Path(args.out)
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    def prepared(subset=None):
+        gen.generate(airports_df=subset if subset is not None else airports)
+        return gen.prepare_for_flight_list_spark(
+            max_radius_nm=reach, airport_types=args.types
+        )
+
     total = 0
-    for i in range(0, len(idents), args.batch):
-        chunk = idents[i:i + args.batch]
-        gen.generate(airports_df=airports.filter(F.col("ident").isin(chunk)))
-        sdf = gen.prepare_for_flight_list_spark(max_radius_nm=reach, airport_types=args.types)
-        pdf = sdf.toPandas()
-        part = out / f"part-{i // args.batch:04d}.parquet"
-        pdf.to_parquet(part, index=False)
-        total += len(pdf)
-        print(f"  batch {i // args.batch + 1:>3}: {len(chunk):>4} aerodromes, "
-              f"{len(pdf):>9,} rows  (total {total:,})")
+    if not local:
+        # No driver collection needed: generate once, write from the executors.
+        sdf = prepared().cache()
+        total = sdf.count()
+        for d in remote:
+            sdf.write.mode("overwrite").parquet(d)
+            print(f"  {total:,} rows -> {d}")
+    else:
+        # A local destination forces batching, because a cluster job cannot
+        # write to the driver's disk and the whole table is too large to
+        # collect in one piece. Remote destinations are filled from the same
+        # batches rather than by regenerating.
+        for i in range(0, len(idents), args.batch):
+            chunk = idents[i:i + args.batch]
+            sdf = prepared(airports.filter(F.col("ident").isin(chunk))).cache()
+            for d in remote:
+                sdf.write.mode("overwrite" if i == 0 else "append").parquet(d)
+            pdf = sdf.toPandas()
+            for d in local:
+                pdf.to_parquet(d / f"part-{i // args.batch:04d}.parquet", index=False)
+            sdf.unpersist()
+            total += len(pdf)
+            print(f"  batch {i // args.batch + 1:>3}: {len(chunk):>4} aerodromes, "
+                  f"{len(pdf):>9,} rows  (total {total:,})")
+        for d in local + [Path(x) for x in remote]:
+            print(f"  {total:,} rows -> {d}")
 
-    print(f"\n{total:,} rows -> {out}")
+    print(f"\n{total:,} rows written to {len(args.out)} destination(s)")
     spark.stop()
 
 
