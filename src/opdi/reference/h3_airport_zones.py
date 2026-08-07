@@ -653,6 +653,8 @@ class AirportDetectionZoneGenerator:
         # Europe -- and three quarters of them produce no rows at all.
         airports_df = self._filter_airports_spark(airports_df)
         idents = [r[0] for r in airports_df.select("ident").distinct().collect()]
+        n_batches = (len(idents) + batch - 1) // batch
+        print(f"  {len(idents):,} aerodromes in scope -> {n_batches} batches of {batch}")
 
         total = 0
         for i in range(0, len(idents), batch):
