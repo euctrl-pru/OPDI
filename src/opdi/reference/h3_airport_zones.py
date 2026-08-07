@@ -639,14 +639,11 @@ class AirportDetectionZoneGenerator:
                 max_radius_nm=reach, airport_types=airport_types
             )
 
-        if not local:
-            sdf = _prepared(airports_df).cache()
-            total = sdf.count()
-            for d in remote:
-                sdf.write.mode("overwrite").parquet(d)
-            sdf.unpersist()
-            return total
-
+        # Always batch, even for remote-only destinations. generate() returns a
+        # pandas DataFrame, so it collects every (aerodrome, ring) row -- each
+        # holding an array of up to ~27,000 hex ids -- onto the driver. Doing
+        # that for all 1,353 aerodromes at once loses executors; at 150 per
+        # batch it is comfortable.
         if airports_df is None:
             airports_df = self._load_airports()
         if airport_types:
