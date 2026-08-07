@@ -122,6 +122,16 @@ def _step_00a_airport_zones(spark, config, **kwargs):
         airport_types=airport_types,
         table_name=table_name,
     )
+    # Optional extra destinations (a local copy, a second bucket). Same batches,
+    # no second generation -- see AirportDetectionZoneGenerator.save_prepared.
+    extra = kwargs.get("airport_zone_extra_destinations")
+    if extra:
+        zone_gen.save_prepared(
+            destinations=list(extra),
+            max_radius_nm=max_radius,
+            airport_types=airport_types,
+            airports_df=airports_df,
+        )
     print(f"  Generated {len(zones)} zone-ring records -> table {table_name} "
           f"(rings to {max_radius:g} NM).")
 

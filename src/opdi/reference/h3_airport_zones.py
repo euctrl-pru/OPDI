@@ -579,6 +579,91 @@ class AirportDetectionZoneGenerator:
         )
         return sdf
 
+    def save_prepared(
+        self,
+        destinations: List[str],
+        max_radius_nm: Optional[float] = None,
+        airport_types: Optional[List[str]] = None,
+        airports_df: Optional[DataFrame] = None,
+        batch: int = 150,
+    ) -> int:
+        """Generate zones and write them to one or more destinations.
+
+        Each destination is written according to its scheme: ``s3a://``,
+        ``s3://`` and ``hdfs://`` paths are written from the executors, and
+        anything else is treated as a local directory and collected to the
+        driver.
+
+        A local destination forces aerodrome-batched generation. A cluster job
+        cannot write to the driver's disk -- executors would each write to
+        their own filesystem -- and the whole table at full ring reach is tens
+        of millions of rows, too large to collect in one piece. When both kinds
+        of destination are given, the remote ones are filled from the same
+        batches rather than by generating twice, since generation is the
+        expensive half.
+
+        Args:
+            destinations: Output paths. At least one.
+            max_radius_nm: Ring reach. Defaults to the outermost configured ring,
+                so the table is generated wide and each consumer narrows it at
+                read time via ``max_c_radius_nm``.
+            airport_types: OurAirports ``type`` values to include.
+            airports_df: Pre-loaded airports, e.g. the ingested ``oa_airports``
+                table. Falls back to the public CSV when omitted.
+            batch: Aerodromes per batch, when a local destination is present.
+
+        Returns:
+            Number of (aerodrome, hex) rows written to each destination.
+        """
+        import shutil
+        from pathlib import Path as _Path
+
+        if not destinations:
+            raise ValueError("save_prepared needs at least one destination")
+
+        reach = max_radius_nm if max_radius_nm is not None else max(self.radii_nm)
+        remote = [d for d in destinations if str(d).startswith(("s3a://", "s3://", "hdfs://"))]
+        local = [_Path(d) for d in destinations if d not in remote]
+        for d in local:
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True)
+
+        def _prepared(subset):
+            self.generate(airports_df=subset)
+            return self.prepare_for_flight_list_spark(
+                max_radius_nm=reach, airport_types=airport_types
+            )
+
+        if not local:
+            sdf = _prepared(airports_df).cache()
+            total = sdf.count()
+            for d in remote:
+                sdf.write.mode("overwrite").parquet(d)
+            sdf.unpersist()
+            return total
+
+        if airports_df is None:
+            airports_df = self._load_airports()
+        if airport_types:
+            airports_df = airports_df.filter(col("type").isin(airport_types))
+        idents = [r[0] for r in airports_df.select("ident").distinct().collect()]
+
+        total = 0
+        for i in range(0, len(idents), batch):
+            chunk = idents[i:i + batch]
+            sdf = _prepared(airports_df.filter(col("ident").isin(chunk))).cache()
+            for d in remote:
+                sdf.write.mode("overwrite" if i == 0 else "append").parquet(d)
+            pdf = sdf.toPandas()
+            for d in local:
+                pdf.to_parquet(d / f"part-{i // batch:04d}.parquet", index=False)
+            sdf.unpersist()
+            total += len(pdf)
+            print(f"  batch {i // batch + 1:>3}: {len(chunk):>4} aerodromes, "
+                  f"{len(pdf):>9,} rows (total {total:,})")
+        return total
+
     def save_prepared_to_table(
         self,
         max_radius_nm: float = 30.0,
