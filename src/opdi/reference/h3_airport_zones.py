@@ -257,6 +257,32 @@ class AirportDetectionZoneGenerator:
 
         return self.spark.createDataFrame(df_apt, schema=self.AIRPORT_SCHEMA)
 
+    def _filter_airports_spark(self, airports_df: DataFrame) -> DataFrame:
+        """Apply the European bounding-box filter to an already-loaded table.
+
+        The Spark-side twin of the pandas path in :meth:`_load_airports`, for
+        when airports come from the ingested OurAirports table (step 00d)
+        rather than the public CSV. Same bounding box, same offset, and the
+        result is cast to ``AIRPORT_SCHEMA`` so everything downstream sees
+        identical types whichever source was used.
+        """
+        offset = self.BBOX_OFFSET
+        df = airports_df.filter(
+            (col("latitude_deg").cast("double") >= self.LAT_MIN - offset)
+            & (col("latitude_deg").cast("double") <= self.LAT_MAX + offset)
+            & (col("longitude_deg").cast("double") >= self.LON_MIN - offset)
+            & (col("longitude_deg").cast("double") <= self.LON_MAX + offset)
+        )
+        # Project onto AIRPORT_SCHEMA, tolerating columns the ingested table
+        # does not carry -- OurAirports adds and drops fields over time and a
+        # missing optional column should not fail zone generation.
+        present = set(df.columns)
+        return df.select(*[
+            col(f.name).cast(f.dataType).alias(f.name) if f.name in present
+            else lit(None).cast(f.dataType).alias(f.name)
+            for f in self.AIRPORT_SCHEMA.fields
+        ])
+
     def _build_ring_config(self) -> DataFrame:
         """
         Build Spark DataFrame defining concentric ring boundaries.
@@ -295,6 +321,7 @@ class AirportDetectionZoneGenerator:
     def generate(
         self,
         airports_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
+        airports_df: Optional[DataFrame] = None,
     ) -> pd.DataFrame:
         """
         Generate H3 detection zones for all airports in the European bounding box.
@@ -311,7 +338,7 @@ class AirportDetectionZoneGenerator:
             Columns include all airport metadata plus area_type and hex_id.
         """
         print("Loading airports...")
-        airports_df = self._load_airports(airports_url)
+        airports_df = self._load_airports(airports_url, airports_df=airports_df)
 
         print("Building ring configuration...")
         ring_config = self._build_ring_config()
