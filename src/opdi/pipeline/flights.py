@@ -48,6 +48,53 @@ from opdi.utils.datetime_helpers import (
 from opdi.utils.storage import StorageManager
 
 
+#: Ingestion bounding box, from ``StateVectorIngestion.DEFAULT_BBOX``. Used to
+#: decide whether a track endpoint has left the observed area.
+BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)  # min_lon, min_lat, max_lon, max_lat
+
+#: How close to the bbox edge an endpoint must be to read as "left the area"
+#: rather than "stopped being seen". Reception falls off before the nominal
+#: edge, so this is deliberately generous.
+BORDER_MARGIN_NM = 30.0
+
+#: Marker for an aerodrome outside the observed area. A flight that entered
+#: European airspace already airborne has an origin no ADS-B feed here can
+#: name, and saying so is a different -- and correct -- answer from silence.
+OOA = "OOA"
+
+NM_PER_DEG = 60.0
+EARTH_R_NM = 3440.065
+
+
+def haversine_nm(lat1, lon1, lat2, lon2):
+    """Great-circle distance in nautical miles between two column pairs."""
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = (
+        sin(dlat / 2) ** 2
+        + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    )
+    return lit(2 * EARTH_R_NM) * F.asin(F.sqrt(F.least(a, lit(1.0))))
+
+
+def at_border(lat, lon, margin_nm: float = BORDER_MARGIN_NM):
+    """True where a position sits within *margin_nm* of the ingestion bbox edge.
+
+    The longitude margin is scaled by 1/cos(latitude): a degree of longitude
+    shrinks toward the pole, so an unscaled margin would be twice as strict in
+    northern Norway as in the Canaries.
+    """
+    min_lon, min_lat, max_lon, max_lat = BBOX
+    dlat = margin_nm / NM_PER_DEG
+    dlon = dlat / F.greatest(cos(radians(lat)), lit(0.1))
+    return (
+        (lat <= lit(min_lat) + dlat)
+        | (lat >= lit(max_lat) - dlat)
+        | (lon <= lit(min_lon) + dlon)
+        | (lon >= lit(max_lon) - dlon)
+    )
+
+
 class FlightListProcessor:
     """
     Generates the OPDI flight list from processed track data.
@@ -94,6 +141,11 @@ class FlightListProcessor:
         self.log_dir = log_dir
 
         self._dai_log = os.path.join(log_dir, "03_osn-flight_table-etl-log-v2.parquet")
+        # Same processed-month convention as the flight list and overflights,
+        # so the candidate cache is invalidated and resumed the same way.
+        self._endpoint_log = os.path.join(
+            log_dir, "03_osn-endpoint_candidates-etl-log.parquet"
+        )
         self._overflight_log = os.path.join(
             log_dir, "03_osn-flight_table-overflights-etl-log-v2.parquet"
         )
@@ -158,6 +210,122 @@ class FlightListProcessor:
     # ------------------------------------------------------------------
     # DAI processing (Departures / Arrivals / Internal)
     # ------------------------------------------------------------------
+
+    def _candidates(
+        self,
+        sv: DataFrame,
+        sdf_apt: DataFrame,
+        max_radius_nm: float,
+        sched_penalty_nm: float = 0.0,
+    ) -> DataFrame:
+        """Candidate (sample, aerodrome) pairs, with exact distance.
+
+        H3 is the index and haversine is the comparison. The zone table is
+        generated wide and carries ``apt_max_c_radius_nm``, so the reach is
+        chosen here rather than baked into the reference -- which is what makes
+        a radius sweep possible without regenerating anything.
+
+        ``sched_penalty_nm`` pushes back aerodromes without scheduled service.
+        A departing aircraft's first recorded fix is often already a few miles
+        into the climb, and where a military field sits between the airport and
+        the departure track it wins on raw distance. A penalty of 0 reproduces
+        the unbiased ranking exactly.
+        """
+        radius_col = next(
+            (c for c in ("apt_max_c_radius_nm", "max_c_radius_nm") if c in sdf_apt.columns),
+            None,
+        )
+        if radius_col:
+            sdf_apt = sdf_apt.filter(col(radius_col) <= float(max_radius_nm))
+
+        j = sv.join(sdf_apt, sv.h3_res_7 == sdf_apt.apt_hex_id, "inner")
+        j = j.withColumn(
+            "dist_nm",
+            haversine_nm(col("lat"), col("lon"),
+                         col("apt_latitude_deg"), col("apt_longitude_deg")),
+        )
+        # Beyond the ring reach the H3 cell can still match while the exact
+        # distance does not; the band is a coarse index, not the answer.
+        j = j.filter(col("dist_nm") <= float(max_radius_nm))
+
+        scheduled = next(
+            (c for c in ("apt_scheduled", "scheduled_service") if c in j.columns), None
+        )
+        penalty = (
+            when(col(scheduled) == "yes", lit(0.0)).otherwise(lit(float(sched_penalty_nm)))
+            if scheduled and sched_penalty_nm
+            else lit(0.0)
+        )
+        return j.withColumn("eff_nm", col("dist_nm") + penalty)
+
+    def build_endpoint_candidates(
+        self,
+        month: date,
+        max_radius_nm: float = 110.0,
+        skip_if_processed: bool = True,
+    ) -> None:
+        """Materialise candidate aerodromes for each track's first/last sample.
+
+        This is the cache the threshold sweeps run over. Deriving candidates
+        from state vectors is the expensive part; once materialised, any
+        (radius, height, penalty) combination is a filter and a re-rank over a
+        few million rows rather than a pass over hundreds of millions.
+
+        Only the two endpoint samples per track are kept, which is what makes
+        the full 110 NM reach affordable -- roughly a million rows to join
+        instead of the whole month of state vectors.
+        """
+        if skip_if_processed and month in self._load_processed_months(self._endpoint_log):
+            print(f"  endpoint candidates for {month:%Y-%m} already built, skipping")
+            return
+
+        sv = self._get_data_within_timeframe("osn_tracks", month)
+        sv = sv.dropna(subset=["lat", "lon", "track_id"])
+        sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
+
+        w = Window.partitionBy("track_id").orderBy("event_time")
+        ends = (
+            sv.withColumn("_rn", row_number().over(w))
+            .withColumn("_rr", row_number().over(w.orderBy(col("event_time").desc())))
+            .filter((col("_rn") == 1) | (col("_rr") == 1))
+            .withColumn("role", when(col("_rn") == 1, lit("adep")).otherwise(lit("ades")))
+            .withColumn("at_border", at_border(col("lat"), col("lon")))
+            .select(
+                "track_id", "icao24", "flight_id", "role", "event_time",
+                "lat", "lon", "baro_altitude", "on_ground", "at_border", "h3_res_7",
+            )
+        )
+
+        sdf_apt = self._load_airports_hex()
+        cand = self._candidates(ends, sdf_apt, max_radius_nm=max_radius_nm)
+
+        elev = next(
+            (c for c in ("apt_elevation_ft", "elevation_ft") if c in cand.columns), None
+        )
+        if elev:
+            # Height above the aerodrome, not above the ellipsoid: a fixed
+            # cut-off means nothing at a field sitting at 5,000 ft.
+            cand = cand.withColumn(
+                "agl_ft", col("baro_altitude") * 3.28084 - col(elev)
+            ).withColumn("elev_known", col(elev).isNotNull())
+        else:
+            cand = cand.withColumn("agl_ft", lit(None).cast("double")).withColumn(
+                "elev_known", lit(False)
+            )
+
+        keep = [
+            "track_id", "icao24", "flight_id", "role", "event_time",
+            "apt_ident", "dist_nm", "eff_nm", "agl_ft", "elev_known",
+            "on_ground", "at_border", "lat", "lon",
+        ]
+        for extra in ("apt_min_c_radius_nm", "apt_max_c_radius_nm",
+                      "apt_scheduled", "apt_type"):
+            if extra in cand.columns:
+                keep.append(extra)
+
+        self.storage.write_table(cand.select(*keep), "opdi_endpoint_candidates")
+        self._mark_month_processed(month, self._endpoint_log)
+        print(f"  endpoint candidates for {month:%Y-%m} written")
 
     def _fetch_and_label_sv(
         self, month: date, sdf_apt: DataFrame
@@ -228,6 +396,85 @@ class FlightListProcessor:
             sdf_apt, sv_low_alt.h3_res_7 == sdf_apt.apt_hex_id, "left"
         )
         return sv_nearby_apt
+
+    @staticmethod
+    def classify_endpoints(
+        cand: DataFrame,
+        mode: str = "nearest",
+        abstention_radius_nm: float = 40.0,
+        abstention_height_ft: float = 15000.0,
+        sched_penalty_nm: float = 10.0,
+        ooa: bool = True,
+    ) -> DataFrame:
+        """Pick one aerodrome per (track, role) from cached endpoint candidates.
+
+        Two of the three modes live here, because both read the same evidence --
+        the track's first and last sample -- and differ only in whether they are
+        willing to stay silent.
+
+        ``nearest`` (M1)
+            Faithful to ``traffic``'s rule: the closest aerodrome wins, with no
+            altitude, ground-state or trend condition. It never abstains, so its
+            only silence comes from having no candidate at all.
+
+        ``endpoint`` (M7)
+            The same naming rule plus an explicit test: emit only when the
+            endpoint is within *abstention_radius_nm* and no more than
+            *abstention_height_ft* above field elevation, or is flagged
+            ``on_ground``. Otherwise fall back to the out-of-area marker when
+            the endpoint sits at the ingestion boundary, and to null when it
+            does not.
+
+        Precedence in ``endpoint`` is aerodrome first, border second. The other
+        order looks equivalent and is not: Ponta Delgada sits about 8 NM inside
+        the western edge, and letting the border test win labelled its
+        departures out-of-area with the aircraft still on the runway.
+        """
+        if mode not in ("nearest", "endpoint"):
+            raise ValueError(f"classify_endpoints: unsupported mode {mode!r}")
+
+        # Re-rank here rather than trusting a cached eff_nm, so the penalty can
+        # be swept without rebuilding the cache.
+        scheduled = "apt_scheduled" if "apt_scheduled" in cand.columns else None
+        penalty = (
+            when(col(scheduled) == "yes", lit(0.0)).otherwise(lit(float(sched_penalty_nm)))
+            if scheduled and sched_penalty_nm
+            else lit(0.0)
+        )
+        cand = cand.withColumn("_eff", col("dist_nm") + penalty)
+
+        w = Window.partitionBy("track_id", "role").orderBy(col("_eff").asc_nulls_last())
+        best = cand.withColumn("_r", row_number().over(w)).filter(col("_r") == 1)
+
+        if mode == "nearest":
+            return best.withColumn("apt", col("apt_ident")).withColumn(
+                "source",
+                when(col("apt_ident").isNotNull(), lit("aerodrome")).otherwise(
+                    lit("undetermined")
+                ),
+            )
+
+        ok = col("dist_nm") <= float(abstention_radius_nm)
+        # on_ground satisfies the height test on its own: a missing barometric
+        # altitude on the surface is normal. Where the aerodrome elevation is
+        # unknown, agl_ft is really MSL, so fall back to the ground flag rather
+        # than compare against the wrong datum.
+        ok = ok & (
+            col("on_ground")
+            | (col("elev_known") & (col("agl_ft") <= float(abstention_height_ft)))
+        )
+
+        apt = when(ok, col("apt_ident"))
+        source = when(ok, lit("aerodrome"))
+        if ooa:
+            apt = apt.otherwise(when(col("at_border"), lit(OOA)))
+            source = source.otherwise(
+                when(col("at_border"), lit("out_of_area")).otherwise(lit("undetermined"))
+            )
+        else:
+            source = source.otherwise(lit("undetermined"))
+
+        return best.withColumn("apt", apt).withColumn("source", source)
 
     @staticmethod
     def _categorize_landing_take_off(df: DataFrame) -> DataFrame:
