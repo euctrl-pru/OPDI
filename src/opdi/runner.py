@@ -107,16 +107,23 @@ def _step_00a_airport_zones(spark, config, **kwargs):
     # consumer narrows it at read time: the flight list keeps its 30 NM, and
     # ASMA ring crossings can use the same table out to 110 NM. Clipping here
     # would mean regenerating the whole reference for every new radius.
-    prepared = zone_gen.prepare_for_flight_list(
-        max_radius_nm=kwargs.get("airport_zone_max_radius_nm", max(zone_gen.radii_nm))
+    max_radius = kwargs.get("airport_zone_max_radius_nm", max(zone_gen.radii_nm))
+    airport_types = kwargs.get("airport_zone_types", None)
+    table_name = kwargs.get("airport_zone_table", "h3_airport_detection_zones")
+
+    # Spark path, and written to the StorageManager table -- which is S3 in the
+    # `opensky` environment. The previous version called the pandas
+    # prepare_for_flight_list and wrote a local file, so the reference the
+    # pipeline actually reads was never produced by the pipeline. At the full
+    # ring reach that path also collects tens of millions of exploded hex rows
+    # into driver memory, which the Spark variant avoids entirely.
+    zone_gen.save_prepared_to_table(
+        max_radius_nm=max_radius,
+        airport_types=airport_types,
+        table_name=table_name,
     )
-    prepared_path = kwargs.get(
-        "airports_hex_path",
-        "data/airport_hex/zones_res7_processed.parquet",
-    )
-    os.makedirs(os.path.dirname(prepared_path) or ".", exist_ok=True)
-    prepared.to_parquet(prepared_path)
-    print(f"  Generated {len(zones)} zone-ring records, {len(prepared)} hex rows.")
+    print(f"  Generated {len(zones)} zone-ring records -> table {table_name} "
+          f"(rings to {max_radius:g} NM).")
 
 
 def _step_00b_airport_layouts(spark, config, **kwargs):
