@@ -652,6 +652,64 @@ class FlightListProcessor:
             "ICAO24", "FLT_ID", "first_seen", "last_seen", "DOF", "version",
         )
 
+    @staticmethod
+    def _flight_table_from_endpoints(classified: DataFrame, cand: DataFrame) -> DataFrame:
+        """Assemble the flight table from classified endpoints.
+
+        Produces the same schema as :meth:`_compute_flight_table` so the two
+        paths are interchangeable downstream, plus ``adep_source``/
+        ``ades_source``. Those three states -- named an aerodrome, out of area,
+        could not tell -- currently collapse into a single null in the published
+        flight list, and they mean entirely different things to a consumer.
+        """
+        chosen = classified.select(
+            "track_id", "icao24", "flight_id", "role", "apt", "source", "event_time"
+        )
+
+        # Runner-up aerodromes, kept for the ADEP_P/ADES_P semantics the portal
+        # methodology already documents. Ranked by true distance.
+        others = (
+            cand.join(
+                chosen.select("track_id", "role", col("apt").alias("_chosen")),
+                ["track_id", "role"], "left",
+            )
+            .filter(col("apt_ident") != col("_chosen"))
+            .groupBy("track_id", "role")
+            .agg(collect_list("apt_ident").alias("potential"))
+        )
+
+        j = chosen.join(others, ["track_id", "role"], "left")
+
+        def side(role: str, prefix: str) -> DataFrame:
+            d = j.filter(col("role") == role)
+            return d.select(
+                col("track_id"),
+                col("icao24"),
+                col("flight_id"),
+                col("apt").alias(prefix),
+                col("source").alias(f"{prefix.lower()}_source"),
+                col("potential").alias(f"{prefix}_P"),
+                col("event_time").alias("first_seen" if role == "adep" else "last_seen"),
+            )
+
+        dep = side("adep", "ADEP")
+        arr = side("ades", "ADES").drop("icao24", "flight_id")
+
+        ft = dep.join(arr, "track_id", "outer")
+        ft = ft.withColumn("DOF", to_date(col("first_seen")))
+        ft = ft.withColumn("version", lit("v3.0.0"))
+        ft = ft.withColumnRenamed("track_id", "id").withColumnRenamed(
+            "icao24", "ICAO24"
+        ).withColumnRenamed("flight_id", "FLT_ID")
+        ft = ft.withColumn("ADEP_P", concat_ws(", ", col("ADEP_P")))
+        ft = ft.withColumn("ADES_P", concat_ws(", ", col("ADES_P")))
+
+        return ft.select(
+            "id", "ADEP", "ADES", "ADEP_P", "ADES_P",
+            "adep_source", "ades_source",
+            "ICAO24", "FLT_ID", "first_seen", "last_seen", "DOF", "version",
+        )
+
     def _add_osn_aircraft_db_data(self, flight_table: DataFrame) -> DataFrame:
         """
         Enrich the flight table with aircraft metadata from the OSN database.
@@ -754,6 +812,10 @@ class FlightListProcessor:
         month: date,
         airports_hex_path: Optional[str] = None,
         skip_if_processed: bool = True,
+        mode: str = "trend",
+        abstention_radius_nm: float = 40.0,
+        abstention_height_ft: float = 15000.0,
+        sched_penalty_nm: float = 10.0,
     ) -> None:
         """
         Process Departures/Arrivals/Internal flights for a month.
@@ -768,11 +830,33 @@ class FlightListProcessor:
             print(f"Month DAI {month} already processed. Skipping.")
             return
 
-        print(f"Processing DAI for {month}...")
-        sdf_apt = self._load_airports_hex(airports_hex_path)
-        sv_nearby = self._fetch_and_label_sv(month, sdf_apt)
-        sv_classified = self._categorize_landing_take_off(sv_nearby)
-        flight_table = self._compute_flight_table(sv_classified)
+        print(f"Processing DAI for {month} (mode={mode})...")
+        if mode == "trend":
+            sdf_apt = self._load_airports_hex(airports_hex_path)
+            sv_nearby = self._fetch_and_label_sv(month, sdf_apt)
+            sv_classified = self._categorize_landing_take_off(sv_nearby)
+            flight_table = self._compute_flight_table(sv_classified)
+            # The trend path names an aerodrome or drops the flight; it has no
+            # out-of-area concept, so every answer it gives is an aerodrome.
+            flight_table = flight_table.withColumn(
+                "adep_source",
+                when(col("ADEP").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
+            ).withColumn(
+                "ades_source",
+                when(col("ADES").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
+            )
+        else:
+            self.build_endpoint_candidates(month, skip_if_processed=skip_if_processed)
+            cand = self._get_data_within_timeframe("opdi_endpoint_candidates", month)
+            classified = self.classify_endpoints(
+                cand,
+                mode=mode,
+                abstention_radius_nm=abstention_radius_nm,
+                abstention_height_ft=abstention_height_ft,
+                sched_penalty_nm=sched_penalty_nm,
+            )
+            flight_table = self._flight_table_from_endpoints(classified, cand)
+
         flight_table = self._add_osn_aircraft_db_data(flight_table)
 
         # Prepare and write
