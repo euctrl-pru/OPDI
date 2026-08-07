@@ -262,7 +262,7 @@ class FlightListProcessor:
         self,
         month: date,
         max_radius_nm: float = 110.0,
-        skip_if_processed: bool = True,
+        rebuild: bool = False,
     ) -> None:
         """Materialise candidate aerodromes for each track's first/last sample.
 
@@ -275,7 +275,7 @@ class FlightListProcessor:
         the full 110 NM reach affordable -- roughly a million rows to join
         instead of the whole month of state vectors.
         """
-        if skip_if_processed and month in self._load_processed_months(self._endpoint_log):
+        if not rebuild and month in self._load_processed_months(self._endpoint_log):
             print(f"  endpoint candidates for {month:%Y-%m} already built, skipping")
             return
 
@@ -298,6 +298,19 @@ class FlightListProcessor:
 
         sdf_apt = self._load_airports_hex()
         cand = self._candidates(ends, sdf_apt, max_radius_nm=max_radius_nm)
+
+        # The detection zones carry geometry, not aerodrome metadata, so
+        # elevation comes from OurAirports. Without it the height test can only
+        # be satisfied by on_ground and the endpoint mode collapses into a
+        # surface-samples-only rule.
+        if self.storage.table_exists("oa_airports"):
+            elev_ref = self.storage.read_table("oa_airports").select(
+                col("ident").alias("_elev_ident"),
+                col("elevation_ft").cast("double").alias("apt_elevation_ft"),
+            )
+            cand = cand.join(
+                broadcast(elev_ref), cand.apt_ident == col("_elev_ident"), "left"
+            ).drop("_elev_ident")
 
         elev = next(
             (c for c in ("apt_elevation_ft", "elevation_ft") if c in cand.columns), None
@@ -323,7 +336,12 @@ class FlightListProcessor:
             if extra in cand.columns:
                 keep.append(extra)
 
-        self.storage.write_table(cand.select(*keep), "opdi_endpoint_candidates")
+        # overwrite, not append: a rebuild of the same month must replace it.
+        # Appending silently doubled the cache when the month was rebuilt, and
+        # a doubled cache does not fail -- it just weights every aggregate.
+        self.storage.write_table(
+            cand.select(*keep), "opdi_endpoint_candidates", mode="overwrite"
+        )
         self._mark_month_processed(month, self._endpoint_log)
         print(f"  endpoint candidates for {month:%Y-%m} written")
 
@@ -854,7 +872,10 @@ class FlightListProcessor:
                 when(col("ADES").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
             )
         else:
-            self.build_endpoint_candidates(month, skip_if_processed=skip_if_processed)
+            # Deliberately not keyed to skip_if_processed: rebuilding the
+            # flight list with different thresholds does not invalidate the
+            # candidates, which is the entire point of caching them.
+            self.build_endpoint_candidates(month)
             cand = self._get_data_within_timeframe("opdi_endpoint_candidates", month)
             classified = self.classify_endpoints(
                 cand,
