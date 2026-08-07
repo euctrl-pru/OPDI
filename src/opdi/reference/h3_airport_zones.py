@@ -647,6 +647,11 @@ class AirportDetectionZoneGenerator:
             airports_df = self._load_airports()
         if airport_types:
             airports_df = airports_df.filter(col("type").isin(airport_types))
+        # Apply the bounding box before batching, not just inside generate().
+        # Otherwise the batches iterate every aerodrome of the given types
+        # worldwide -- about 5,300 for large+medium against roughly 1,300 in
+        # Europe -- and three quarters of them produce no rows at all.
+        airports_df = self._filter_airports_spark(airports_df)
         idents = [r[0] for r in airports_df.select("ident").distinct().collect()]
 
         total = 0
