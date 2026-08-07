@@ -737,13 +737,19 @@ class FlightListProcessor:
             ],
         )
 
-        return merged_upper.select(
+        columns = [
             "ID", "ICAO24", "FLT_ID", "DOF",
             "ADEP", "ADES", "ADEP_P", "ADES_P",
             "REGISTRATION", "MODEL", "TYPECODE",
             "ICAO_AIRCRAFT_CLASS", "ICAO_OPERATOR",
             "FIRST_SEEN", "LAST_SEEN", "VERSION",
-        )
+        ]
+        # Carry the provenance columns when the caller produced them. A fixed
+        # list here silently dropped them, so the flight list came out without
+        # the one field that distinguishes "outside the observed area" from
+        # "could not determine".
+        columns += [c for c in ("ADEP_SOURCE", "ADES_SOURCE") if c in merged_upper.columns]
+        return merged_upper.select(*columns)
 
     # ------------------------------------------------------------------
     # Overflight processing
