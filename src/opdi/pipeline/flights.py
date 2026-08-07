@@ -74,6 +74,11 @@ class FlightListProcessor:
     """
 
     MAX_FL = 40  # Maximum flight level for airport zone matching
+    # Detection radius applied to the airport zone table. The table is
+    # generated wider than this so one reference can serve both the flight list
+    # and the ASMA ring crossings; this is what keeps flight-list behaviour
+    # unchanged when the reference is regenerated with a longer reach.
+    DETECTION_RADIUS_NM = 30
 
     def __init__(
         self,
@@ -199,6 +204,13 @@ class FlightListProcessor:
 
         # Filter to low altitude (below FL40) and join with airport zones
         sv_low_alt = sv_f.filter(col("flight_level") <= self.MAX_FL)
+        # The zone table is generated out to its full ring reach, so the
+        # detection radius has to be applied here. Without this filter the join
+        # would match aerodromes as far out as the rings go -- a large, silent
+        # change in behaviour disguised as a reference-data update.
+        if "apt_max_c_radius_nm" in sdf_apt.columns:
+            sdf_apt = sdf_apt.filter(col("apt_max_c_radius_nm") <= self.DETECTION_RADIUS_NM)
+
         sv_nearby_apt = sv_low_alt.join(
             sdf_apt, sv_low_alt.h3_res_7 == sdf_apt.apt_hex_id, "left"
         )

@@ -86,11 +86,30 @@ def _step_00a_airport_zones(spark, config, **kwargs):
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
 
     zone_gen = AirportDetectionZoneGenerator(spark, config)
-    zones = zone_gen.generate()
+
+    # Build zones from the ingested OurAirports table when it exists. The
+    # public CSV is not reachable from the OSN cluster, and using a different
+    # snapshot than the pipeline reads would silently decouple the two.
+    from opdi.utils.storage import StorageManager
+
+    storage = StorageManager(spark, config)
+    airports_df = (
+        storage.read_table("oa_airports")
+        if storage.table_exists("oa_airports")
+        else None
+    )
+    zones = zone_gen.generate(airports_df=airports_df)
     zone_gen.save_to_parquet(
         kwargs.get("airports_hex_raw_path", "data/airport_hex/zones_res7.parquet")
     )
-    prepared = zone_gen.prepare_for_flight_list(max_radius_nm=30)
+    # Generated out to the full ring reach, not clipped to the detection
+    # radius. The table carries min_c_radius_nm/max_c_radius_nm, so each
+    # consumer narrows it at read time: the flight list keeps its 30 NM, and
+    # ASMA ring crossings can use the same table out to 110 NM. Clipping here
+    # would mean regenerating the whole reference for every new radius.
+    prepared = zone_gen.prepare_for_flight_list(
+        max_radius_nm=kwargs.get("airport_zone_max_radius_nm", max(zone_gen.radii_nm))
+    )
     prepared_path = kwargs.get(
         "airports_hex_path",
         "data/airport_hex/zones_res7_processed.parquet",

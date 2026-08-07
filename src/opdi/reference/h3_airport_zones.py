@@ -454,9 +454,15 @@ class AirportDetectionZoneGenerator:
         # Filter by airport type and radius
         df = df[df["type"].isin(airport_types)]
         df = df[df["max_c_radius_nm"] <= max_radius_nm]
+        # The band columns stay in the output, as in prepare_for_flight_list_spark.
+        # Dropping them baked the detection radius into the table; consumers now
+        # narrow it themselves at read time.
 
         # Explode hex arrays and remove nulls
-        df = df[["ident", "hex_id", "latitude_deg", "longitude_deg"]].explode("hex_id")
+        df = df[[
+            "ident", "hex_id", "latitude_deg", "longitude_deg",
+            "min_c_radius_nm", "max_c_radius_nm", "type", "scheduled_service",
+        ]].explode("hex_id")
         df = df[~df.hex_id.isna()]
 
         # Get H3 coordinates for each hex
@@ -499,6 +505,8 @@ class AirportDetectionZoneGenerator:
             [
                 "apt_ident",
                 "apt_hex_id",
+                "apt_min_c_radius_nm",
+                "apt_max_c_radius_nm",
                 "distance_from_center",
                 "apt_latitude_deg",
                 "apt_longitude_deg",
