@@ -822,6 +822,8 @@ class FlightListProcessor:
         abstention_radius_nm: float = 40.0,
         abstention_height_ft: float = 15000.0,
         sched_penalty_nm: float = 10.0,
+        table_name: str = "opdi_flight_list",
+        write_mode: str = "append",
     ) -> None:
         """
         Process Departures/Arrivals/Internal flights for a month.
@@ -869,7 +871,9 @@ class FlightListProcessor:
         flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
         flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
         flight_table = flight_table.drop("DOF_day")
-        self.storage.write_table(flight_table, "opdi_flight_list")
+        # append by default, because the production run accumulates month by
+        # month; a comparison run wants one table per variant and overwrite.
+        self.storage.write_table(flight_table, table_name, mode=write_mode)
 
         self._mark_month_processed(month, self._dai_log)
         print(f"DAI processing complete for {month}.")
