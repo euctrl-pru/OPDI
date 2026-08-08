@@ -150,6 +150,14 @@ def _build_spark_local(cores: int, driver_memory: str):
     if not key or not secret:
         sys.exit("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set.")
 
+    # PYSPARK_PYTHON names the interpreter for the *workers*. On the cluster
+    # that must be `python3` -- the image's interpreter, not this venv, whose
+    # path does not exist there. In local mode the workers are on this machine,
+    # so the same setting picks up the system 3.13 against a 3.10 driver and
+    # every task dies with PYTHON_VERSION_MISMATCH. Local mode has to point at
+    # the driver's own interpreter.
+    os.environ["PYSPARK_PYTHON"] = sys.executable
+
     return (
         SparkSession.builder.master(f"local[{cores}]")
         .appName("opdi-osn-sample")

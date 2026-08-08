@@ -1169,6 +1169,77 @@ def per_airport_counts(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> Data
     return frames[0].unionByName(frames[1]).orderBy(F.col("n_truth").desc())
 
 
+def airport_types(spark: SparkSession) -> DataFrame:
+    """ident -> OurAirports type, for grouping ground truth by aerodrome class.
+
+    Unrestricted by type for the same reason ``airport_locations`` is: the
+    point of the grouping is to show what happens to flights whose truth is a
+    class the detection reference does not contain.
+    """
+    return (
+        spark.read.parquet(AIRPORTS)
+        .select(F.col("ident").alias("_apt"), F.col("type").alias("_type"))
+        .filter(F.col("_apt").isNotNull())
+        .dropDuplicates(["_apt"])
+    )
+
+
+def per_type_counts(
+    pred: DataFrame, ident: DataFrame, gt: DataFrame, apt_type: DataFrame
+) -> DataFrame:
+    """Coverage and accuracy grouped by the class of the ground-truth aerodrome.
+
+    The detection reference holds large and medium aerodromes only. Every
+    headline figure therefore averages over two populations that behave
+    completely differently: flights to aerodromes the reference contains, and
+    flights to aerodromes it cannot name at any radius or height. Splitting on
+    OurAirports ``type`` separates them and puts a number on what the
+    restriction costs.
+
+    Coverage and accuracy are computed within each class, so they answer "of
+    the flights whose true aerodrome is of this class, how many did the method
+    answer, and how many of those were right". A class the reference omits
+    should show near-zero coverage and is not evidence about the naming rule.
+    """
+    j = align_to_ground_truth(pred, ident, gt)
+    frames = []
+    for side, role in (("adep", "departures"), ("ades", "arrivals")):
+        t = (
+            j.join(apt_type, j[f"gt_{side}"] == apt_type["_apt"], "left")
+            .withColumn(
+                "apt_class",
+                F.when(F.col(f"gt_{side}") == OOA, F.lit("out of area")).otherwise(
+                    F.coalesce(F.col("_type"), F.lit("unknown"))
+                ),
+            )
+            .drop("_apt", "_type")
+        )
+        frames.append(
+            t.filter(F.col(f"gt_{side}").isNotNull())
+            .groupBy(F.col("apt_class").alias("apt_type"))
+            .agg(
+                F.count(F.lit(1)).alias("n_truth"),
+                F.sum(F.when(F.col(side).isNotNull(), 1).otherwise(0)).alias("n_answered"),
+                F.sum(F.when(F.col(side) == F.col(f"gt_{side}"), 1).otherwise(0)).alias("n_correct"),
+                F.countDistinct(F.col(f"gt_{side}")).alias("n_aerodromes"),
+            )
+            .withColumn("role", F.lit(role))
+            .withColumn("coverage", F.col("n_answered") / F.col("n_truth"))
+            # Undefined rather than zero when nothing was answered: a class the
+            # method never speaks about has no accuracy to report.
+            .withColumn(
+                "accuracy",
+                F.when(F.col("n_answered") > 0, F.col("n_correct") / F.col("n_answered")),
+            )
+            .withColumn("overall", F.col("n_correct") / F.col("n_truth"))
+        )
+    return (
+        frames[0]
+        .unionByName(frames[1])
+        .orderBy(F.col("role"), F.col("n_truth").desc())
+    )
+
+
 def error_pairs(
     pred: DataFrame, ident: DataFrame, gt: DataFrame, apt: DataFrame, top: int = 40
 ) -> DataFrame:

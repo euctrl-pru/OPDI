@@ -207,7 +207,16 @@ python benchmarks/benchmark_modes.py --months 202506 \
 
 The benchmark takes `--local` because its inputs are small — 7.5M cached
 candidates, 233k flight records, 95k ground-truth flights. Running it on the
-cluster costs a slot the namespace does not have to spare.
+cluster costs a slot the namespace does not have to spare. Add `--skip-sweeps`
+to get the headline table and both cross-checks without the 90-cell grid; that
+is a couple of minutes rather than a quarter of an hour.
+
+⚠️ **`PYSPARK_PYTHON` is per-mode, not per-repo.** On the cluster it must be
+`python3` — the image's interpreter, since this venv's path does not exist
+there. In local mode the workers run on this machine, so the same value picks
+up the system 3.13 against a 3.10 driver and every task dies with
+`PYTHON_VERSION_MISMATCH`. `_build_spark_local` now overrides it to
+`sys.executable`, so only the distributed path needs the env var set.
 
 ### Why these months
 

@@ -24,8 +24,8 @@ from pyspark.sql import functions as F
 import osn_sample
 from osn_sample import build_spark, load_dotenv
 from adep_ades import (
-    airport_locations, label_ground_truth, load_ground_truth, score,
-    per_airport_counts, error_pairs,
+    airport_locations, airport_types, label_ground_truth, load_ground_truth,
+    score, per_airport_counts, per_type_counts, error_pairs,
 )
 
 FL_BASE = "s3a://eurocontrol/opdi/research/flight_list_{mode}"
@@ -157,7 +157,22 @@ def main() -> None:
               f"   in-area acc {m['adep_inarea_accuracy']:6.2%}")
     spark.createDataFrame(rows).toPandas().to_csv(out / "mode_comparison.csv", index=False)
 
+    # -- cross-checks against the reference ---------------------------------
+    # Ahead of the sweeps: these read the flight lists, which are already open,
+    # and --skip-sweeps is normally used when only the cross-checks changed.
+    pred, ident = from_flight_list(spark, "endpoint")
+    per_airport_counts(pred, ident, gt).toPandas().to_csv(
+        out / "per_airport.csv", index=False
+    )
+    pt = per_type_counts(pred, ident, gt, airport_types(spark)).toPandas()
+    pt.to_csv(out / "per_type.csv", index=False)
+    for r in pt.itertuples():
+        acc = f"{r.accuracy:6.2%}" if r.n_answered else "     -"
+        print(f"  {r.role:10} {r.apt_type:18} n {r.n_truth:>6,}"
+              f"  cov {r.coverage:6.2%}  acc {acc}")
+
     if args.skip_sweeps:
+        print(f"\nwritten to {out}")
         spark.stop()
         return
 
@@ -189,12 +204,6 @@ def main() -> None:
               f"   ADES {m['ades_coverage']:6.2%}/{m['ades_accuracy']:6.2%}")
     spark.createDataFrame(pen).toPandas().to_csv(out / "sweep_penalty.csv", index=False)
 
-    # -- cross-checks against the reference ---------------------------------
-    pred, ident = from_flight_list(spark, "endpoint")
-    apt = airport_locations(spark)
-    per_airport_counts(pred, ident, gt).toPandas().to_csv(
-        out / "per_airport.csv", index=False
-    )
     print(f"\nwritten to {out}")
     spark.stop()
 
