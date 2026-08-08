@@ -121,13 +121,20 @@ def main() -> None:
     ap.add_argument("--executors", type=int, default=4)
     ap.add_argument("--ui-port", type=int, default=4041)
     ap.add_argument("--skip-sweeps", action="store_true")
+    ap.add_argument("--local", action="store_true",
+                    help="run in local mode. The benchmark inputs are small -- "
+                         "7.5M cached candidates, 233k flight records, 95k "
+                         "ground-truth flights -- so it does not need the "
+                         "cluster, and the namespace is shared.")
+    ap.add_argument("--cores", type=int, default=6)
+    ap.add_argument("--driver-memory", default="8g")
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
     load_dotenv()
     osn_sample.UI_PORT = args.ui_port
     osn_sample.RESEARCH_EXECUTORS = args.executors
-    spark = build_spark(6, "9g")
+    spark = build_spark(args.cores, args.driver_memory, distributed=not args.local)
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.shuffle.partitions", "96")
 

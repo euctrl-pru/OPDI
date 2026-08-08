@@ -13,27 +13,41 @@ git-lfs, because OSN pulls them with a shallow clone of this repo.
 
 ---
 
-## Production (pre-existing — **do not overwrite**)
+## Pipeline prefixes
 
-Written 2026-06-02, ~48 GB total across 15,010 objects.
+Measured 2026-08-08: **42.69 GB** across the whole bucket.
 
-| Prefix | Size | Contents |
-|---|---|---|
-| `opdi/osn_tracks/` | 40.04 GB | **838,853,387 rows, a single day: 2025-08-01.** Full track schema incl. `track_id`, `h3_res_7`, `h3_res_12`, `*_altitude_c`. One unpartitioned parquet file, 287 row groups. |
-| `opdi/osn_statevectors_v2/` | 2.17 GB | Raw state vectors, 167 objects. |
-| `opdi/opdi_flight_list/` | 0.01 GB | Flight list output. |
-| `opdi/opdi_flight_events/` | — | Published flight events. |
-| `opdi/opdi_measurements/` | — | Published measurements. |
-| `opdi/h3_airport_detection_zones/` | 0.09 GB | Airport H3 res-7 detection zones (step 00a output). |
-| `opdi/hexaero_airport_layouts/` | — | HexAero airport ground layouts (step 00b). |
-| `opdi/opdi_h3_airspace_ref/` | — | Airspace H3 reference (step 00c). Generated, read by nothing. |
-| `opdi/osn_aircraft_db/` | 0.01 GB | OpenSky aircraft database incl. `icao_aircraft_class`. |
-| `opdi/oa_airports/`, `oa_runways/`, `oa_navaids/`, `oa_regions/`, `oa_countries/`, `oa_airport_frequencies/` | 0.01 GB | OurAirports reference (step 00d). |
-| `opdi/example_output/` | — | Example output. |
+The ADEP/ADES version 4 study ran the pipeline itself rather than a private
+harness, so several of these were rewritten by that run and no longer hold what
+earlier notes here described. The column says which.
 
-> `osn_tracks` covering only **2025-08-01** is the operative constraint on reuse: it does not
-> overlap the 2024-06 / 2025-06 ground-truth extracts, so ADEP/ADES research cannot be run
-> against it directly. It is still useful as a smoke-test dataset with real `track_id`s.
+| Prefix | Size | Objects | Contents |
+|---|---|---|---|
+| `opdi/osn_statevectors_v2/` | 6.13 GB | 469 | **Rewritten 2026-08.** 142,630,930 rows for 2025-06-05/06/07, already reduced to the Europe bbox and 5 s at ingest — step 01 applies both filters before anything is written, so the raw global 1 s feed is never persisted. |
+| `opdi/osn_tracks/` | 10.16 GB | 5 | **Rewritten 2026-08**, same three days. Full track schema incl. `track_id`, `h3_res_7`, `h3_res_12`, `*_altitude_c`. This is *not* the 2025-08-01 snapshot earlier revisions of this file described; that one was deleted. |
+| `opdi/h3_airport_detection_zones/` | 0.22 GB | 152 | **Regenerated 2026-08.** 33,751,619 (aerodrome, cell) rows for the 1,353 large and medium aerodromes in the bbox. H3 res-7 cells in concentric bands — 5 NM steps to 40 NM, then 10 NM steps to 110 NM — with `min_c_radius_nm` / `max_c_radius_nm` on every row, so a consumer picks its own radius at read time. Reaches 110 NM so the same table can serve ASMA 40/100 NM ring crossings. |
+| `opdi/opdi_endpoint_candidates/` | 0.16 GB | 20 | **New 2026-08.** 7,491,655 rows. For each track's first and last sample, every aerodrome whose zone contains it, with the exact great-circle distance, field elevation and height above it. Written by `pipeline/flights.py:build_endpoint_candidates` with `mode="overwrite"` — it appended in an early revision and silently doubled itself. This cache is what makes a threshold sweep a filter rather than a pipeline run. |
+| `opdi/opdi_flight_list/` | 0.02 GB | 7 | Flight list output. |
+| `opdi/opdi_flight_events/` | 0.30 GB | 7 | Published flight events. |
+| `opdi/opdi_measurements/` | 0.34 GB | 4 | Published measurements. |
+| `opdi/hexaero_airport_layouts/` | 0.01 GB | 22 | HexAero airport ground layouts (step 00b). |
+| `opdi/osn_aircraft_db/` | 0.01 GB | 6 | OpenSky aircraft database incl. `icao_aircraft_class`. |
+| `opdi/oa_airports/`, `oa_runways/`, `oa_navaids/`, `oa_regions/`, `oa_countries/`, `oa_airport_frequencies/` | 0.01 GB | 60 | OurAirports reference (step 00d). `oa_airports` carries the elevation the endpoint rule needs; the zone table does not. |
+| `opdi/example_output/` | — | 3 | Example output. |
+
+Gone, deliberately:
+
+* `opdi/opdi_h3_airspace_ref/` — step 00c output, read by nothing in the
+  codebase. Deleted; step 00c regenerates it if an airspace event ever needs it.
+* `opdi/research/statevectors/` — superseded. Step 01 has an `ingest_from_s3`
+  path for the `opensky` environment that does what `osn_sample.py` was written
+  to do, so research reads the pipeline's own state vectors.
+
+Not this work:
+
+* `opdi/osn_symposium_paper_2026/` — 13.09 GB, 86 objects, written by a
+  concurrent job. Recorded here so it is not mistaken for an unidentified
+  prefix. Do not build on it or delete it.
 
 ---
 
@@ -146,20 +160,54 @@ real work. Pinned to `pyspark==4.1.1`.
 
 ## Research (written by this work)
 
-All under `opdi/research/`, deliberately separate from the production prefixes above.
+All under `opdi/research/`, deliberately separate from the pipeline prefixes above.
 
-| Prefix | Produced by | Contents | Status |
-|---|---|---|---|
-| `opdi/research/statevectors/day=YYYY-MM-DD/` | `benchmarks/osn_sample.py` | OSN state vectors from `s3a://opensky-hdfs-backup/tables_v4/state_vectors`, filtered to the OPDI Europe bbox `(-25.86653, 26.74617, 49.65699, 70.25976)` and decimated to 5 s — identical to `ingestion/osn_statevectors.py:_apply_filters`. ~1.5 GB/day. Schema renamed to OPDI snake_case. | in progress |
+| Prefix | Size | Produced by | Contents | From |
+|---|---|---|---|---|
+| `opdi/research/flight_list_trend/` | 0.01 GB | `flights.py:process_dai(mode="trend")` | 113,999 rows. The production altitude-trend algorithm, now reading H3 candidates with exact distances. | v4, 2025-06-05/07 |
+| `opdi/research/flight_list_nearest/` | 0.02 GB | `process_dai(mode="nearest")` | 233,144 rows. Nearest aerodrome by effective distance, never abstains. | v4, 2025-06-05/07 |
+| `opdi/research/flight_list_endpoint/` | 0.01 GB | `process_dai(mode="endpoint")` | 233,144 rows. Nearest, but only within `radius_nm` and below `height_ft` above field elevation; otherwise out-of-area or nothing. | v4, 2025-06-05/07 |
+| `opdi/research/reference/` | 0.28 GB | uploaded from `reference/` | Ground-truth mirror. The git-lfs copy is on the driver's local disk, which remote executors cannot read. | done |
+| `opdi/research/tracks/aircraft=known/day=.../` | 11.93 GB | `benchmarks/adep_ades.py` | Tracks via the frozen `_add_track_id`, aeroplanes only (`icao_aircraft_class` starting L or A). Rebuilt only when the day is absent. | v1–v3 |
+| `opdi/research/adep_ades/results/<tag>/` | 0.00 GB | `benchmarks/adep_ades.py` | Per-method coverage/accuracy, one row per method. `<tag>` is `<airport_set>_r<radius>_fl<max_fl>`. | v1–v3, 7 methods |
+| `opdi/research/adep_ades/cascade_diag/<tag>_<ladder>_vs_<control>/` | 0.00 GB | `--diagnose-cascade` | Per-rung attribution for M6: how many flights each rung answered, its accuracy on them, and the control's accuracy on the same flights. | v1–v3 |
+| `opdi/research/adep_ades/abstain_sweep/<airport_set>/` | 0.00 GB | `--sweep-abstain` | M7 coverage/accuracy over the endpoint distance x height grid (8 x 6 = 48 rows). | v1–v3 |
 
-### Reproducing
+**Prune `research/tracks/` first.** At 11.93 GB it is by far the largest research
+artefact, it belongs to versions 1–3, and it is fully rebuildable from the state
+vectors. Version 4 does not read it — the pipeline builds its own tracks.
+
+### Reproducing version 4
 
 ```bash
-python benchmarks/osn_sample.py 2025-06-05 2025-06-08     # [start, end)
+RANGE="--env opensky --start 2025-06-05 --end 2025-06-08"
+opdi run $RANGE --step 00a   # zones: 5 NM bands to 110 NM
+opdi run $RANGE --step 01    # state vectors, bbox and 5 s applied at ingest
+opdi run $RANGE --step 02    # tracks, with H3 res 7 and 12
 ```
 
-Idempotent: a day whose `_SUCCESS` marker already exists is skipped, so an interrupted run
-resumes rather than restarting.
+```python
+from datetime import date
+from opdi.pipeline.flights import FlightListProcessor
+
+fp = FlightListProcessor(spark, config)
+fp.build_endpoint_candidates(date(2025, 6, 1))    # the cache; write it once
+for mode in ("trend", "nearest", "endpoint"):
+    fp.process_dai(date(2025, 6, 1), mode=mode, skip_if_processed=False,
+                   abstention_radius_nm=40, abstention_height_ft=15000,
+                   sched_penalty_nm=10,
+                   table_name=f"research/flight_list_{mode}",
+                   write_mode="overwrite")
+```
+
+```bash
+python benchmarks/benchmark_modes.py --months 202506 \
+    --days 2025-06-05 2025-06-06 2025-06-07 --local --results-dir <dir>
+```
+
+The benchmark takes `--local` because its inputs are small — 7.5M cached
+candidates, 233k flight records, 95k ground-truth flights. Running it on the
+cluster costs a slot the namespace does not have to spare.
 
 ### Why these months
 
@@ -191,9 +239,3 @@ Pointing it at the driver's venv path makes executors fail with
 
 Python workers are unavoidable even with no UDFs: `spark.createDataFrame` on a
 Python list (the airport cell offsets) is enough to spawn them.
-
-| `opdi/research/reference/` | uploaded from `reference/` | Ground-truth mirror. The git-lfs copy is on the driver's local disk, which remote executors cannot read. | done |
-| `opdi/research/tracks/aircraft=known/day=.../` | `benchmarks/adep_ades.py` | Tracks via the frozen `_add_track_id`, aeroplanes only (`icao_aircraft_class` starting L or A). Rebuilt only when the day is absent. | 2025-06-05 |
-| `opdi/research/adep_ades/results/<tag>/` | `benchmarks/adep_ades.py` | Per-method coverage/accuracy, one row per method. `<tag>` is `<airport_set>_r<radius>_fl<max_fl>`. | 2025-06-05, 7 methods |
-| `opdi/research/adep_ades/cascade_diag/<tag>_<ladder>_vs_<control>/` | `--diagnose-cascade` | Per-rung attribution for M6: how many flights each rung answered, its accuracy on them, and the control's accuracy on the same flights. | 2025-06-05 |
-| `opdi/research/adep_ades/abstain_sweep/<airport_set>/` | `--sweep-abstain` | M7 coverage/accuracy over the endpoint distance x height grid (8 x 6 = 48 rows). The figure the paper's operating-point discussion is built on. | 2025-06-05 |
