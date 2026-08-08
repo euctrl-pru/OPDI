@@ -37,7 +37,11 @@ RADII_NM = (5, 10, 20, 30, 40, 60, 80, 100, 110)
 
 #: Height above field elevation. 0 means on-ground only; the sentinel admits
 #: any height, which is what makes the endpoint rule collapse into `nearest`.
-HEIGHTS_FT = (0, 500, 1000, 2000, 5000, 8000, 10000, 15000, 20000, 1e9)
+#: The grid runs to 40,000 ft -- above typical cruise, so the curve is followed
+#: all the way to where it flattens rather than being cut off mid-rise at
+#: 20,000 ft, where 6 points of coverage still separated it from unrestricted.
+HEIGHTS_FT = (0, 500, 1000, 2000, 5000, 8000, 10000, 15000, 20000,
+              25000, 30000, 35000, 40000, 1e9)
 
 #: Scheduled-service penalties. 0 reproduces the unbiased ranking exactly and
 #: is the control for the tie-break.
