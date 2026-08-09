@@ -47,6 +47,18 @@ HEIGHTS_FT = (0, 500, 1000, 2000, 5000, 8000, 10000, 15000, 20000,
 #: is the control for the tie-break.
 PENALTIES_NM = (0, 5, 10, 15, 20, 30)
 
+#: Approach-cone slopes, ft of height allowed per NM of distance. The physical
+#: anchors are the 3-degree glideslope at 318 ft/NM and the "three times the
+#: flight level" descent rule of thumb at about 333 ft/NM; the sweep brackets
+#: both by an order of magnitude in each direction so the optimum is not
+#: assumed.
+CONE_SLOPES_FT_NM = (150, 200, 250, 300, 333, 400, 500, 650, 800, 1000, 1500)
+
+#: Outer caps for the cone. At 333 ft/NM a 110 NM cap is already a 36,600 ft
+#: ceiling, so the cone is the binding constraint and the cap only bounds the
+#: join.
+CONE_RADII_NM = (40, 60, 110)
+
 
 def from_flight_list(spark: SparkSession, mode: str):
     """(predictions, identities) from a per-mode flight list."""
@@ -95,6 +107,55 @@ def predictions_from_candidates(
 
     return (
         best.groupBy("track_id")
+        .pivot("role", ["adep", "ades"])
+        .agg(F.first("apt"))
+    )
+
+
+def predictions_cone(
+    cand: DataFrame, radius_nm: float, slope_ft_nm: float, penalty_nm: float,
+    floor_ft: float = 1000.0,
+) -> DataFrame:
+    """The endpoint rule with an approach cone instead of a rectangle.
+
+    The box rule accepts an endpoint when it is inside `radius_nm` *and* below
+    `height_ft`, treating the two as independent. They are not. An aircraft
+    descending toward an aerodrome trades height for distance at roughly a
+    constant rate -- the 3-degree glideslope is 318 ft/NM, and the "three times
+    the flight level" rule of thumb is about 333 ft/NM -- so the endpoints that
+    genuinely belong to an aerodrome lie in a cone, not a box.
+
+    The two shapes disagree in both corners, and both disagreements matter:
+
+    * **close and high** is inside the box and outside the cone. An aircraft at
+      15,000 ft overhead an aerodrome is overflying it, not using it. The box
+      accepts this and it is a pure source of wrong labels.
+    * **far and low** is outside the box and inside the cone. An arrival whose
+      reception dies at 8,000 ft and 30 NM is on profile and is a good
+      candidate. The box rejects it once the radius is tight.
+
+    ``floor_ft`` keeps the cone from collapsing to nothing at the threshold, so
+    an endpoint on or beside the runway is always admitted.
+    """
+    penalty = F.when(F.col("apt_scheduled") == "yes", F.lit(0.0)).otherwise(
+        F.lit(float(penalty_nm))
+    )
+    c = cand.withColumn("_eff", F.col("dist_nm") + penalty)
+    w = Window.partitionBy("track_id", "role").orderBy(F.col("_eff").asc_nulls_last())
+    best = c.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1)
+
+    ceiling = F.greatest(
+        F.lit(float(floor_ft)), F.col("dist_nm") * F.lit(float(slope_ft_nm))
+    )
+    ok = (F.col("dist_nm") <= float(radius_nm)) & (
+        F.col("on_ground") | (F.col("elev_known") & (F.col("agl_ft") <= ceiling))
+    )
+    apt = F.when(ok, F.col("apt_ident")).otherwise(
+        F.when(F.col("at_border"), F.lit("OOA"))
+    )
+    return (
+        best.withColumn("apt", apt)
+        .groupBy("track_id")
         .pivot("role", ["adep", "ades"])
         .agg(F.first("apt"))
     )
@@ -183,6 +244,20 @@ def main() -> None:
     cand = spark.read.parquet(CANDIDATES).cache()
     ident_c = identities_from_candidates(cand)
     print(f"cached candidates: {cand.count():,}")
+
+    # -- approach cone, as an alternative to the rectangle -------------------
+    # Cheap enough to always run: a handful of cells over the same cache.
+    cone = []
+    for r in CONE_RADII_NM:
+        for k in CONE_SLOPES_FT_NM:
+            p = predictions_cone(cand, r, k, penalty_nm=10.0)
+            m = score(p, ident_c, gt)
+            m.update(radius_nm=float(r), slope_ft_nm=float(k), penalty_nm=10.0)
+            cone.append(m)
+            print(f"  cone r<={r:>3} k={k:>5.0f} ft/NM  ADEP {m['adep_coverage']:6.2%}/"
+                  f"{m['adep_accuracy']:6.2%}   ADES {m['ades_coverage']:6.2%}/"
+                  f"{m['ades_accuracy']:6.2%}")
+    spark.createDataFrame(cone).toPandas().to_csv(out / "sweep_cone.csv", index=False)
 
     # -- radius x height ----------------------------------------------------
     grid = []
