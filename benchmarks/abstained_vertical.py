@@ -239,6 +239,18 @@ def main() -> None:
             # of the window, compare the direction the aircraft actually
             # travelled with the direction of the candidate. Zero means the
             # track runs straight at it.
+            #
+            # No sgn here, unlike slope and closing rate above, and that is not
+            # an oversight. Those are signed rates along the time axis, so the
+            # role genuinely flips them. This is an angle between two bearings
+            # from a common origin -- and the origin already flips with the
+            # role, because _off is measured from the arrival's *last* fix and
+            # the departure's *first*. So "far" is earlier in time for an
+            # arrival and later for a departure, which makes bearing(far->near)
+            # the course for one and the reverse course for the other. Both
+            # read 0 degrees for a correct match; a 180 degree correction would
+            # break departures rather than fix them. Confirmed empirically:
+            # correctly identified departures sit at 2-9 degrees, not 171-178.
             agg = agg.withColumn(
                 "align_deg",
                 angle_between(
