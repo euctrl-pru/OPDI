@@ -55,21 +55,54 @@ def redirect_storage():
     Wrapping StorageManager rather than editing the pipeline keeps the
     experiment out of the production code path entirely: nothing in
     ``src/opdi`` knows this ran.
+
+    ``write_table`` takes the DataFrame first and the table name second, so it
+    needs its own wrapper -- a generic one that assumes the name is the first
+    argument silently fails to redirect *writes only*, which is the one case
+    where failing silently destroys data. Hence the guard: any write whose
+    target is not under ``research/`` raises rather than proceeding.
     """
     from opdi.utils.storage import StorageManager
 
-    for name in ("read_table", "write_table", "table_ref", "table_exists"):
-        original = getattr(StorageManager, name)
-        if getattr(original, "_redirected", False):
-            continue
+    if getattr(StorageManager, "_redirected", False):
+        return
+    orig_read, orig_write = StorageManager.read_table, StorageManager.write_table
+    orig_ref, orig_exists = StorageManager.table_ref, StorageManager.table_exists
 
-        def make(orig):
-            def wrapper(self, table_name, *a, **kw):
-                return orig(self, REDIRECT.get(table_name, table_name), *a, **kw)
-            wrapper._redirected = True
-            return wrapper
+    def read_table(self, table_name, *a, **kw):
+        return orig_read(self, REDIRECT.get(table_name, table_name), *a, **kw)
 
-        setattr(StorageManager, name, make(original))
+    def table_ref(self, table_name, *a, **kw):
+        # table_ref registers a temp view *named after the table*, and a
+        # research path contains a slash, which is not a legal view name. So
+        # read from the redirected path but register under a sanitised name.
+        target = REDIRECT.get(table_name, table_name)
+        if target == table_name or not self.use_s3:
+            return orig_ref(self, target, *a, **kw)
+        view = target.replace("/", "__").replace("-", "_")
+        if view not in self._registered_views:
+            self.spark.read.parquet(self._s3_path(target)).createOrReplaceTempView(view)
+            self._registered_views.add(view)
+        return view
+
+    def table_exists(self, table_name, *a, **kw):
+        return orig_exists(self, REDIRECT.get(table_name, table_name), *a, **kw)
+
+    def write_table(self, df, table_name, *a, **kw):
+        target = REDIRECT.get(table_name, table_name)
+        if not target.startswith("research/"):
+            raise RuntimeError(
+                f"refusing to write to {target!r}. This experiment writes only "
+                f"under research/; add {table_name!r} to REDIRECT."
+            )
+        print(f"  -> writing {target}")
+        return orig_write(self, df, target, *a, **kw)
+
+    StorageManager.read_table = read_table
+    StorageManager.table_ref = table_ref
+    StorageManager.table_exists = table_exists
+    StorageManager.write_table = write_table
+    StorageManager._redirected = True
 
 
 def main() -> None:
@@ -81,6 +114,8 @@ def main() -> None:
     ap.add_argument("--ui-port", type=int, default=4041)
     ap.add_argument("--skip-build", action="store_true",
                     help="score only; assumes the bucket tables already exist")
+    ap.add_argument("--skip-ingest", action="store_true",
+                    help="reuse an existing research/sv_bucket from a previous run")
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -103,18 +138,32 @@ def main() -> None:
         from opdi.pipeline.flights import FlightListProcessor
 
         cfg = OPDIConfig.for_environment("opensky")
+        # Separate processed-month logs. Sharing production's would let this
+        # experiment mark 2025-06 as done and make a later production run skip
+        # a month it never actually built.
+        logs = Path("OPDI_live/logs/decimation_bucket")
+        logs.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n=== 01 ingest, decimation=bucket, {days[0]} .. {days[-1]} ===")
-        ing = StateVectorIngestion(spark, cfg, decimation=DECIMATION_BUCKET)
-        n = ing.ingest_from_s3(days[0], date.fromordinal(days[-1].toordinal() + 1))
-        print(f"  rows ingested: {n:,}")
+        if args.skip_ingest:
+            print("\n=== 01 ingest skipped, reusing research/sv_bucket ===")
+        else:
+            print(f"\n=== 01 ingest, decimation=bucket, {days[0]} .. {days[-1]} ===")
+            ing = StateVectorIngestion(
+                spark, cfg, decimation=DECIMATION_BUCKET,
+                log_file_path=str(logs / "01_statevectors.log"))
+            n = ing.ingest_from_s3(
+                days[0], date.fromordinal(days[-1].toordinal() + 1))
+            print(f"  rows ingested: {n:,}")
 
         print("\n=== 02 tracks ===")
-        TrackProcessor(spark, cfg).process_month(month, skip_if_processed=False)
+        TrackProcessor(
+            spark, cfg, log_file_path=str(logs / "02_tracks.parquet")
+        ).process_month(month, skip_if_processed=False)
 
         print("\n=== 03 endpoint candidates ===")
-        FlightListProcessor(spark, cfg).build_endpoint_candidates(
-            month, max_radius_nm=110.0, rebuild=True)
+        FlightListProcessor(
+            spark, cfg, log_dir=str(logs)
+        ).build_endpoint_candidates(month, max_radius_nm=110.0, rebuild=True)
 
     # -- score both arms on identical ground truth --------------------------
     gt = load_ground_truth(spark, [args.month], args.days)
