@@ -43,7 +43,17 @@ from abstained_vertical import (
 )
 
 #: (label, window minutes, angle gate degrees)
-BEARING_VARIANTS = [("7 min / 3 deg", 7, 3.0), ("30 min / 1 deg", 30, 1.0)]
+BEARING_VARIANTS = [
+    ("7 min / 0.10 deg", 7, 0.10),
+    ("7 min / 0.25 deg", 7, 0.25),
+    ("7 min / 0.50 deg", 7, 0.50),
+    ("7 min / 0.75 deg", 7, 0.75),
+    ("7 min / 1 deg", 7, 1.0),
+    ("7 min / 2 deg", 7, 2.0),
+    ("7 min / 3 deg", 7, 3.0),
+    ("20 min / 1 deg", 20, 1.0),
+    ("30 min / 1 deg", 30, 1.0),
+]
 
 #: Window for the vertical test, and the sense required per role.
 RATE_WINDOW_MIN = 20
@@ -168,7 +178,7 @@ def main() -> None:
     # The rate arm: same bearing gate, plus a demand that the aircraft was
     # going the right way vertically -- down toward an arrival, up away from a
     # departure.
-    for lab, mins, deg in BEARING_VARIANTS[:1]:
+    for lab, mins, deg in [BEARING_VARIANTS[4], BEARING_VARIANTS[6]]:
         def rescue(role, mins=mins, deg=deg):
             vert = (F.col("slope_ols") < 0) if role == "ades" else (F.col("slope_ols") > 0)
             return (mins, (F.col("align_deg") <= deg) & vert)

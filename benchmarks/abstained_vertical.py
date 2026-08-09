@@ -63,7 +63,12 @@ WINDOWS_MIN = (2, 3, 5, 7, 10, 15, 20, 30)
 
 #: Bearing-alignment gates, degrees. The angle between the direction travelled
 #: and the direction of the candidate aerodrome.
-ANGLES_DEG = (1, 2, 3, 4, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 90)
+#: Sub-degree gates are included to find where the measure stops being
+#: physical. An aerodrome is not a point: a runway complex spans 2-4 km, which
+#: from 40 NM subtends roughly 2-3 degrees. Below that the gate is tighter than
+#: the target, so it selects for pointing at the exact reference coordinate
+#: OurAirports happens to publish rather than at the airport.
+ANGLES_DEG = (0.1, 0.25, 0.5, 0.75, 1, 2, 3, 4, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 90)
 
 M_S_TO_FT_MIN = 196.850394
 M_TO_FT = 3.28084
@@ -292,7 +297,7 @@ def main() -> None:
             base_ok = agg.filter("guess_right").count()
             print(f"     baseline on this block: {base_ok:,}/{base_n:,} "
                   f"= {base_ok/max(base_n,1):.1%}  ({base_ok/max(base_n-base_ok,1):.2f}:1)")
-            print(f"     {'angle':>6} {'answered':>9} {'correct':>8} {'wrong':>8} "
+            print(f"     {'angle':>7} {'answered':>9} {'correct':>8} {'wrong':>8} "
                   f"{'accuracy':>9} {'ratio':>7} {'recall':>7}")
             for deg in ANGLES_DEG:
                 t = agg.filter(F.col("align_deg") <= deg).agg(
@@ -306,7 +311,7 @@ def main() -> None:
                               "recall_of_recoverable": ok / base_ok if base_ok else None,
                               "block_flights": base_n, "block_correct": base_ok})
                 if nn:
-                    print(f"     {deg:>5}d {nn:>9,} {ok:>8,} {nn-ok:>8,} "
+                    print(f"     {deg:>6}d {nn:>9,} {ok:>8,} {nn-ok:>8,} "
                           f"{ok/nn:>9.1%} {ok/max(nn-ok,1):>6.2f}:1 {ok/max(base_ok,1):>6.1%}")
             all_sweeps.extend(sweep)
             agg.unpersist()
