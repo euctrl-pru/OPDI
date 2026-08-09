@@ -12,10 +12,16 @@ from typing import List, Optional, Set, Dict, Tuple
 
 from datetime import date
 from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import functions as F
 from pyspark.sql.functions import col, to_date, from_unixtime
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
+
+#: Thinning rules for :meth:`StateVectorIngestion._apply_filters`.
+#: ``modulo`` is what every published OPDI dataset was built with.
+DECIMATION_MODULO = "modulo"
+DECIMATION_BUCKET = "bucket"
 
 
 class StateVectorIngestion:
@@ -59,6 +65,7 @@ class StateVectorIngestion:
         log_file_path: str = "OPDI_live/logs/01_osn_statevectors_etl.log",
         bbox: Optional[Tuple[float, float, float, float]] = None,
         time_interval: int = 5,
+        decimation: str = DECIMATION_MODULO,
     ):
         """
         Initialize state vector ingestion.
@@ -71,8 +78,12 @@ class StateVectorIngestion:
             bbox: Bounding box as (min_lon, min_lat, max_lon, max_lat).
                   Defaults to OPDI European coverage area.
                   Pass None to use the default, or False-y value to disable.
-            time_interval: Keep only rows where event_time % time_interval == 0.
-                  Defaults to 5 (keeps every 5th second). Set to 1 to keep all.
+            time_interval: Thinning interval in seconds. Defaults to 5. Set to 1
+                  to keep every row.
+            decimation: Which thinning rule to apply. ``"modulo"`` (default)
+                  keeps rows where ``event_time % time_interval == 0``;
+                  ``"bucket"`` keeps one row per (aircraft, interval bin). See
+                  :meth:`_apply_filters` for why the default is what it is.
         """
         self.spark = spark
         self.config = config
@@ -83,16 +94,44 @@ class StateVectorIngestion:
         self.batch_size = config.ingestion.batch_size
         self.bbox = bbox if bbox is not None else self.DEFAULT_BBOX
         self.time_interval = time_interval
+        if decimation not in (DECIMATION_MODULO, DECIMATION_BUCKET):
+            raise ValueError(
+                f"decimation must be {DECIMATION_MODULO!r} or {DECIMATION_BUCKET!r}, "
+                f"got {decimation!r}"
+            )
+        self.decimation = decimation
 
         # Ensure directories exist
         os.makedirs(local_download_path, exist_ok=True)
         os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
 
     def _apply_filters(self, df: DataFrame) -> DataFrame:
-        """Apply bounding box and time interval filters to raw state vectors.
+        """Apply bounding box and thinning filters to raw state vectors.
 
         Must be called before the event_time column is converted from
         Unix timestamp to Spark timestamp.
+
+        Two thinning rules are available.
+
+        ``modulo`` keeps the row at the one second per interval that is
+        congruent to zero. It is a *fixed-phase* sampler, so on a feed whose
+        rows arrive at arbitrary seconds it would delete far more than one row
+        in ``time_interval``. **This is the default because it is what every
+        published OPDI dataset was built with**, and because on the OSN archive
+        it costs nothing: that table is a complete 1 Hz grid, so the phase
+        always lands on a row.
+
+        ``bucket`` bins time into ``floor(t / time_interval)`` and keeps one row
+        per (aircraft, bin) -- the last, so a track's final observation is
+        preserved exactly. This is the rule the modulo filter is an
+        approximation of, and it is correct on a sparse feed.
+
+        Measured on three hours of the OSN archive, bucket keeps 1.002x the rows
+        of modulo and costs ~13% more wall clock, so it is offered rather than
+        adopted. See ``benchmarks/decimation_experiment.py`` and the
+        state-vector decimation study for the measurement. Switching rules
+        changes ``track_id`` for every downstream row, so it is not a drop-in
+        change to a published pipeline.
         """
         if self.bbox:
             min_lon, min_lat, max_lon, max_lat = self.bbox
@@ -102,9 +141,30 @@ class StateVectorIngestion:
             )
 
         if self.time_interval > 1:
-            df = df.filter((col("event_time") % self.time_interval) == 0)
+            if self.decimation == DECIMATION_MODULO:
+                df = df.filter((col("event_time") % self.time_interval) == 0)
+            else:
+                df = self._bucket_decimate(df)
 
         return df
+
+    def _bucket_decimate(self, df: DataFrame) -> DataFrame:
+        """Keep the last row of each (aircraft, interval bin).
+
+        ``max`` over a struct compares field by field, so putting event_time
+        first selects the latest row in the bin. That makes this a hash
+        aggregate with map-side partial aggregation rather than a sort-based
+        window -- one shuffle, and native Spark throughout.
+        """
+        rest = [c for c in df.columns if c != "event_time"]
+        binned = df.withColumn(
+            "_bin", col("event_time") - (col("event_time") % self.time_interval)
+        )
+        return (
+            binned.groupBy("icao24", "_bin")
+            .agg(F.max(F.struct("event_time", *rest)).alias("_s"))
+            .select("_s.*")
+        )
 
     def _execute_shell_command(self, command: str) -> tuple[str, str]:
         """
