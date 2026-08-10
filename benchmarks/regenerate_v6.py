@@ -294,6 +294,20 @@ def jobs() -> list:
             "harness -- this is where production's own optimum is found",
             inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
 
+        Job("pipeline_path_ring", "benchmarks/flight_list_v6.py",
+            ["--months", "202506", "--days", *DAYS_2025,
+             "--trend-sweep", str(DATA / "trend_sweep_2025.csv"),
+             "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
+             "--runs", "path0_legacy", "path1_penalty", "path2_flcap",
+             "path3_margin", "path4_radius",
+             "--trend-rank-by", "ring", "--executors", "10"],
+            {"mode_comparison_v6.csv": "pipeline_path_ring_v6.csv"}, PIPE,
+            "the same path under the OLD ring-count selection. Kept as a job "
+            "rather than an archived file because the ring-vs-exact comparison "
+            "is the report's central result, and half of it must not be a "
+            "number nobody can regenerate",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
+
         Job("pipeline_path", "benchmarks/flight_list_v6.py",
             ["--months", "202506", "--days", *DAYS_2025,
              "--trend-sweep", str(DATA / "trend_sweep_2025.csv"),
