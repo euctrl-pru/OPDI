@@ -29,6 +29,8 @@ from adep_ades import (
 )
 
 FL_BASE = "s3a://eurocontrol/opdi/research/flight_list_{mode}"
+#: Default candidate cache. Overridable with --candidates so the same sweeps
+#: can be run against a second period, whose cache lives elsewhere.
 CANDIDATES = "s3a://eurocontrol/opdi/opdi_endpoint_candidates"
 MODES = ("trend", "nearest", "endpoint")
 
@@ -198,6 +200,8 @@ def main() -> None:
     ap.add_argument("--executors", type=int, default=4)
     ap.add_argument("--ui-port", type=int, default=4041)
     ap.add_argument("--skip-sweeps", action="store_true")
+    ap.add_argument("--candidates", default=CANDIDATES,
+                    help="candidate cache to sweep (default: the 2025 table)")
     ap.add_argument("--sweeps-only", action="store_true",
                     help="skip the mode comparison and cross-checks, "
                          "which read flight lists another run wrote")
@@ -271,7 +275,7 @@ def main() -> None:
         spark.stop()
         return
 
-    cand = spark.read.parquet(CANDIDATES).cache()
+    cand = spark.read.parquet(args.candidates).cache()
     ident_c = identities_from_candidates(cand)
     print(f"cached candidates: {cand.count():,}")
 

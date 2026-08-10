@@ -172,6 +172,7 @@ T_VOTES    = "s3a://eurocontrol/opdi/research/trend_votes"
 T_VOTES24  = "s3a://eurocontrol/opdi/research/trend_votes_2024"
 T_SV       = "s3a://eurocontrol/opdi/osn_statevectors_v2"
 T_REF      = "s3a://eurocontrol/opdi/research/reference"
+T_CAND24   = "s3a://eurocontrol/opdi/research/cand_2024"
 
 OPDI = [sys.executable, "-m", "opdi.cli", "run", "--env", "opensky"]
 PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config.py"]
@@ -231,6 +232,15 @@ def stages() -> list:
                "--results-dir", "/tmp/v6_votecache_2024"],
               T_VOTES24, ["benchmarks/trend_sweep.py"],
               "second period; its tracks pre-date H3 so the index is computed"),
+
+        Stage("03_endpoint_candidates_2024",
+              [sys.executable, "-u", "benchmarks/build_candidates_2024.py",
+               "--days", *DAYS_2024, "--executors", "10"],
+              T_CAND24,
+              ["benchmarks/build_candidates_2024.py",
+               "src/opdi/pipeline/flights.py"],
+              "endpoint candidates for the second period, built by the "
+              "pipeline's own builder over a pre-reduced endpoint table"),
     ]
 
 
@@ -293,6 +303,38 @@ def jobs() -> list:
             "trend FL cap x radius swept through process_dai itself, not the "
             "harness -- this is where production's own optimum is found",
             inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
+
+        Job("endpoint_sweeps_2024", "benchmarks/benchmark_modes.py",
+            ["--months", "202406", "--days", *DAYS_2024, "--sweeps-only",
+             "--candidates", T_CAND24],
+            {"sweep_radius_height.csv": "sweep_radius_height_2024.csv"}, CORE,
+            "the endpoint grid on the second period -- the check the report "
+            "previously listed as outstanding",
+            inputs=[T_CAND24, T_REF]),
+
+        Job("trend_bearing", "benchmarks/trend_bearing.py",
+            ["--months", "202506", "--days", *DAYS_2025, "--executors", "10"],
+            {"trend_bearing.csv": "trend_bearing_v6.csv"},
+            CORE + ["benchmarks/abstained_vertical.py", "benchmarks/trend_sweep.py"],
+            "bearing applied to trend rather than to the endpoint family: "
+            "rerank, tie-break and veto against the shipped configuration",
+            inputs=[T_VOTES, T_TRACKS, T_REF]),
+
+        Job("vertical_measure", "benchmarks/vertical_measure.py",
+            ["--executors", "10"],
+            {"vertical_measure.csv": "vertical_measure_v6.csv"},
+            CORE + ["benchmarks/abstained_vertical.py"],
+            "which vertical measure can be trusted: broadcast rate, two-point "
+            "slope, or OLS over the window",
+            inputs=[T_CAND, T_TRACKS, T_REF]),
+
+        Job("decimation", "benchmarks/decimation_end_to_end.py",
+            ["--days", *DAYS_2025, "--month", "202506", "--skip-ingest",
+             "--skip-build", "--executors", "10"],
+            {"arm_comparison.csv": "decimation_v6.csv"},
+            CORE + ["src/opdi/ingestion/osn_statevectors.py"],
+            "bucket decimation against the modulo rule, end to end",
+            inputs=[T_CAND, T_REF]),
 
         Job("pipeline_path_ring", "benchmarks/flight_list_v6.py",
             ["--months", "202506", "--days", *DAYS_2025,
