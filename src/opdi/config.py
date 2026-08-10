@@ -451,6 +451,22 @@ class DetectionConfig:
     a raised flight-level cap that is not being adopted, so it recovers ground
     that is never given away here."""
 
+    trend_rank_by: str = "haversine"
+    """How ``trend`` chooses among candidate aerodromes: ``"haversine"`` or
+    ``"ring"``.
+
+    **Changed from "ring".** The original rule kept only candidates at the
+    minimum H3 *ring count* -- an integer stepping about 5.2 km at resolution 7
+    -- and computed exact distance only among those. An aerodrome one ring
+    further out was eliminated before distance was ever measured, so the
+    tie-break could not see it.
+
+    That coarseness is what made every tuned trend parameter fail to transfer:
+    raising the flight-level cap admits samples from higher up, where more
+    aerodromes fall in the same ring, and a ring-count filter cannot separate
+    them. Ranking on exact distance removes the constraint rather than tuning
+    around it."""
+
     trend_sched_penalty_nm: float = 10.0
     """Scheduled-service penalty applied to trend's aerodrome choice.
 
@@ -492,6 +508,7 @@ class DetectionConfig:
             trend_smooth_half_window=2,
             trend_vote_margin=4,
             trend_sched_penalty_nm=0.0,
+            trend_rank_by="ring",
             endpoint_radius_nm=40.0,
             endpoint_height_ft=15000.0,
             endpoint_sched_penalty_nm=10.0,

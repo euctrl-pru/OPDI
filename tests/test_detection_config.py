@@ -92,7 +92,10 @@ def test_unknown_mode_is_rejected():
 def test_every_field_carries_its_unit_or_is_unitless(field_name):
     """The package convention: units live in field names so a threshold cannot
     be read in the wrong one. Counts and levels are the exceptions."""
-    unitless = {"trend_max_fl", "trend_smooth_half_window", "trend_vote_margin"}
+    # Counts, levels and one categorical. `trend_rank_by` names a rule rather
+    # than measuring anything, so a unit suffix would be a lie.
+    unitless = {"trend_max_fl", "trend_smooth_half_window", "trend_vote_margin",
+                "trend_rank_by"}
     assert field_name in unitless or field_name.endswith(("_nm", "_ft"))
 
 
@@ -116,6 +119,18 @@ def test_shipped_defaults_are_the_values_the_study_supports():
     assert d.endpoint_radius_nm == 30.0
     assert d.endpoint_height_ft == 15000.0
     assert d.endpoint_sched_penalty_nm == 10.0
+
+
+def test_ranking_rule_is_exact_distance_by_default_and_rings_under_legacy():
+    """The candidate ranking rule, which matters more than any threshold here.
+
+    `ring` keeps only candidates at the minimum H3 ring count before measuring
+    distance, so an aerodrome one ring further out is discarded unmeasured.
+    That coarseness is why every tuned trend parameter failed to transfer from
+    the sweep harness, which always ranked on exact distance.
+    """
+    assert DetectionConfig().trend_rank_by == "haversine"
+    assert DetectionConfig.legacy().trend_rank_by == "ring"
 
 
 def test_defaults_differ_from_legacy_so_the_preset_is_load_bearing():

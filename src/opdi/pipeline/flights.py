@@ -581,7 +581,9 @@ class FlightListProcessor:
 
     @staticmethod
     def _compute_flight_table(
-        df: DataFrame, sched_penalty_nm: float = 0.0
+        df: DataFrame,
+        sched_penalty_nm: float = 0.0,
+        rank_by: str = "ring",
     ) -> DataFrame:
         """
         Create the flight table from classified tracks.
@@ -611,10 +613,62 @@ class FlightListProcessor:
         """
         df = df.filter(df.status != "ambiguous")
 
-        # Find the point closest to airport center for each track-status pair
-        window_spec = Window.partitionBy(["icao24", "flight_id", "track_id", "status"])
-        df = df.withColumn("min_distance", f_min("distance_from_center").over(window_spec))
-        df_min = df.filter(df.distance_from_center == df.min_distance)
+        # Candidate selection. Two rules, and the difference between them is
+        # larger than any threshold in this class.
+        #
+        # `ring` is the original: keep only the samples at the minimum H3 ring
+        # count for the whole track-status pair, then break ties on exact
+        # distance among the survivors. The window below is partitioned by
+        # track and status but *not* by aerodrome, so the minimum is taken
+        # across every candidate at once -- and an aerodrome one ring further
+        # out is gone before its distance is ever computed. At resolution 7 a
+        # ring is about 5.2 km, so "one ring further out" routinely means "a
+        # kilometre further away".
+        #
+        # `haversine` measures first and chooses afterwards, which is what the
+        # sweep harness always did and what every tuned parameter was scored
+        # against.
+        if rank_by == "ring":
+            window_spec = Window.partitionBy(
+                ["icao24", "flight_id", "track_id", "status"]
+            )
+            df = df.withColumn(
+                "min_distance", f_min("distance_from_center").over(window_spec)
+            )
+            df_min = df.filter(df.distance_from_center == df.min_distance)
+        elif rank_by == "haversine":
+            # Distance from every sample to every candidate aerodrome, then the
+            # closest approach per aerodrome. Ranking happens further down, on
+            # `distance_km`, which this makes exact rather than ring-limited.
+            df = df.withColumn(
+                "_closest_nm",
+                haversine_nm(
+                    col("lat"), col("lon"),
+                    col("apt_latitude_deg"), col("apt_longitude_deg"),
+                ),
+            )
+            # Partitioned by aerodrome as well, so this is each candidate's own
+            # closest approach rather than a cut across all of them. Nothing is
+            # eliminated here -- every candidate survives to be ranked.
+            per_apt = Window.partitionBy(
+                ["icao24", "flight_id", "track_id", "status", "apt_ident"]
+            )
+            df = df.withColumn(
+                "_min_nm", f_min("_closest_nm").over(per_apt)
+            )
+            # `min_distance` keeps its original meaning -- an H3 ring count --
+            # because it is carried into the output projection and downstream
+            # readers expect that. Selection is on exact distance; only the
+            # ranking rule changes, not the column's units.
+            df_min = (
+                df.filter(col("_closest_nm") == col("_min_nm"))
+                .drop("_closest_nm", "_min_nm")
+                .withColumn("min_distance", col("distance_from_center"))
+            )
+        else:
+            raise ValueError(
+                f"unknown trend_rank_by: {rank_by!r}; expected 'haversine' or 'ring'"
+            )
 
         # The scheduled-service flag is carried through only when it is going
         # to be used. It is not part of the original projection, and dropping
@@ -1024,7 +1078,9 @@ class FlightListProcessor:
                 vote_margin=d.trend_vote_margin,
             )
             t = self._compute_flight_table(
-                sv_classified, sched_penalty_nm=d.trend_sched_penalty_nm
+                sv_classified,
+                sched_penalty_nm=d.trend_sched_penalty_nm,
+                rank_by=getattr(d, "trend_rank_by", "ring"),
             )
             # The trend path names an aerodrome or drops the flight; it has no
             # out-of-area concept, so every answer it gives is an aerodrome.
