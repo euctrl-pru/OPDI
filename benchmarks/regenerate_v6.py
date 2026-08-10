@@ -99,15 +99,36 @@ class Stage:
         return {}
 
     def run(self, extra=()):
-        cmd = [str(x) for x in self.cmd]
-        print(f"\n=== {self.name} ===\n  {' '.join(cmd)}", flush=True)
-        r = subprocess.run(cmd, cwd=REPO)
-        if r.returncode != 0:
-            raise SystemExit(f"{self.name} failed with exit {r.returncode}")
+        """Build the table if it is missing; otherwise just record what it is.
+
+        Deliberately *not* rebuilt on --force. These stages produce the inputs
+        every published figure was computed from -- regenerating the airport
+        zone table would change the candidate set under the whole study, and
+        rebuilding tracks would cost hours to arrive at the same rows. When the
+        table is already there, the honest action is to record its identity and
+        say that it was not rebuilt, rather than to churn the study's inputs
+        for the sake of a green tick.
+        """
+        print(f"\n=== {self.name} ===", flush=True)
+        ident = provenance.s3_identity(self.produces)
+        present = bool(ident.get("objects"))
+        note = self.notes
+        if present:
+            print(f"  {self.produces}\n  present: {ident['objects']:,} objects, "
+                  f"{ident['bytes'] / 1e9:.2f} GB -- recording, not rebuilding")
+            note = (note + " | PRE-EXISTING: identity recorded without a "
+                    "rebuild, so the command below is how it is built, not "
+                    "necessarily how this copy was built.").strip(" |")
+        else:
+            cmd = [str(x) for x in self.cmd]
+            print(f"  absent -- building\n  {' '.join(cmd)}", flush=True)
+            r = subprocess.run(cmd, cwd=REPO)
+            if r.returncode != 0:
+                raise SystemExit(f"{self.name} failed with exit {r.returncode}")
         DATA.mkdir(parents=True, exist_ok=True)
         provenance.record(
             DATA, self.key, self.script, self.args, self.code_paths,
-            notes=self.notes, input_tables=[self.produces],
+            notes=note, input_tables=[self.produces],
         )
         print(f"  recorded {self.key}")
 
@@ -174,7 +195,10 @@ T_SV       = "s3a://eurocontrol/opdi/osn_statevectors_v2"
 T_REF      = "s3a://eurocontrol/opdi/research/reference"
 T_CAND24   = "s3a://eurocontrol/opdi/research/cand_2024"
 
-OPDI = [sys.executable, "-m", "opdi.cli", "run", "--env", "opensky"]
+#: The installed console script, not ``python -m opdi.cli``: a module
+#: invocation resolves `opdi` to ``opdi.py`` at the repo root, which shadows the
+#: package in ``src/`` and fails with a bare ModuleNotFoundError.
+OPDI = [str(REPO / ".venv310" / "bin" / "opdi"), "run", "--env", "opensky"]
 PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config.py"]
 
 
@@ -188,10 +212,12 @@ def stages() -> list:
     committed parquet would be worse than saying so.
     """
     return [
-        Stage("00a_airport_zones",
-              OPDI + ["--step", "00a", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
+        Stage("00_reference_data",
+              OPDI + ["--step", "00", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
               T_ZONES, PIPELINE_SRC + ["src/opdi/reference/h3_airport_zones.py"],
-              "H3 detection zones; the candidate set every method chooses from"),
+              "H3 detection zones and the OurAirports reference the candidate "
+              "builder reads field elevations from. Step ids are 00/01/02/... "
+              "-- there is no 00a at this level, the substeps live inside 00"),
 
         Stage("01_ingest_statevectors",
               OPDI + ["--step", "01", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
