@@ -43,19 +43,20 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 import osn_sample
+from tables import table, fixed
 from osn_sample import build_spark, load_dotenv
 from adep_ades import (
     airport_locations, label_ground_truth, load_ground_truth, score,
 )
 
-TRACKS = "s3a://eurocontrol/opdi/osn_tracks"
-ZONES = "s3a://eurocontrol/opdi/h3_airport_detection_zones"
-CACHE = "s3a://eurocontrol/opdi/research/trend_votes"
+TRACKS = table("osn_tracks")
+ZONES = table("h3_airport_detection_zones")
+CACHE = table("research/trend_votes")
 
 #: The second period's tracks. Built by earlier versions of this study and
 #: still present, so 2024 needs neither an ingest nor a track rebuild -- but
 #: they pre-date H3 indexing, so `h3_res_7` has to be computed at read time.
-TRACKS_2024 = "s3a://eurocontrol/opdi/research/tracks"
+TRACKS_2024 = fixed("research/tracks")
 
 #: Caps to cache votes at. 40 is production.
 FL_CAPS = (20, 30, 40, 60, 80, 100, 120, 150, 200)

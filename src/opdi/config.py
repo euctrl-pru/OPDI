@@ -213,6 +213,31 @@ class IngestionConfig:
     osn_aircraft_db_url: str = "https://s3.opensky-network.org/data-samples/metadata/aircraft-database-complete-2024-10.csv"
     """URL for OpenSky Network aircraft database."""
 
+    decimation: str = "bucket"
+    """Which 5 s thinning rule the ingest applies: ``"bucket"`` or ``"modulo"``.
+
+    **Changed from "modulo".** The modulo rule keeps a row only if one exists
+    at the single second per window congruent to zero -- a fixed-phase sampler,
+    which is arbitrary with respect to the data. The bucket rule keeps the
+    newest row in each 5 s window, which is the sampler the thinning was always
+    meant to be.
+
+    The measured gain is small, because the OpenSky archive is a complete 1 Hz
+    grid with carried-forward positions, so the modulo rule rarely misses:
+    1.002x the rows, and +0.26 pp of arrival coverage end to end. The reason to
+    prefer it is that it does not depend on that property. If OpenSky ever
+    stops carrying positions forward, the modulo rule degrades badly and this
+    one degrades gracefully.
+
+    .. warning::
+
+       Changing this changes which samples reach ``_add_track_id``, and the
+       rescued rows sit at track boundaries -- so ``track_id`` values differ
+       from those published under the modulo rule. That is a deliberate,
+       accepted discontinuity, and it needs a new algorithm ``version``, not a
+       mutation of an existing one.
+    """
+
     # OurAirports
     ourairports_base_url: str = "https://ourairports.com/data/"
     """Base URL for OurAirports CSV datasets."""
@@ -599,7 +624,14 @@ class OPDIConfig:
             return cls(
                 project=ProjectConfig(
                     project_name="opensky",
-                    warehouse_path="s3a://eurocontrol/opdi",
+                    # One knob isolates every table this environment reads or
+                    # writes: StorageManager resolves each name against
+                    # `warehouse_path`. Setting OPDI_WAREHOUSE therefore runs
+                    # the whole pipeline into a parallel prefix without
+                    # touching a production table, which is what makes a
+                    # from-scratch rebuild safe to attempt.
+                    warehouse_path=os.environ.get(
+                        "OPDI_WAREHOUSE", "s3a://eurocontrol/opdi"),
                     hadoop_filesystem="",
                 ),
                 spark=SparkConfig(

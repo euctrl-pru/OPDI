@@ -46,6 +46,7 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 import osn_sample
+from tables import table, fixed
 from osn_sample import build_spark, load_dotenv
 from adep_ades import (
     airport_locations, label_ground_truth, load_ground_truth, align_to_ground_truth,
@@ -53,8 +54,8 @@ from adep_ades import (
 )
 from benchmark_modes import identities_from_candidates
 
-CANDIDATES = "s3a://eurocontrol/opdi/opdi_endpoint_candidates"
-TRACKS = "s3a://eurocontrol/opdi/osn_tracks"
+CANDIDATES = table("opdi_endpoint_candidates")
+TRACKS = table("osn_tracks")
 
 #: The version 4.5 operating point, which defines what "abstained" means.
 OP_RADIUS_NM, OP_HEIGHT_FT, OP_PENALTY_NM = 30.0, 15000.0, 10.0

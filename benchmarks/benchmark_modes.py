@@ -22,16 +22,17 @@ from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 import osn_sample
+from tables import table, fixed
 from osn_sample import build_spark, load_dotenv
 from adep_ades import (
     airport_locations, airport_types, label_ground_truth, load_ground_truth,
     score, per_airport_counts, per_type_counts, error_pairs,
 )
 
-FL_BASE = "s3a://eurocontrol/opdi/research/flight_list_{mode}"
+FL_BASE = table("research/flight_list_{mode}")
 #: Default candidate cache. Overridable with --candidates so the same sweeps
 #: can be run against a second period, whose cache lives elsewhere.
-CANDIDATES = "s3a://eurocontrol/opdi/opdi_endpoint_candidates"
+CANDIDATES = table("opdi_endpoint_candidates")
 MODES = ("trend", "nearest", "endpoint")
 
 #: Radius grid, on the zone table's own band boundaries.

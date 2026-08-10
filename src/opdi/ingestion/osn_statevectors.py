@@ -65,7 +65,7 @@ class StateVectorIngestion:
         log_file_path: str = "OPDI_live/logs/01_osn_statevectors_etl.log",
         bbox: Optional[Tuple[float, float, float, float]] = None,
         time_interval: int = 5,
-        decimation: str = DECIMATION_MODULO,
+        decimation: Optional[str] = None,
     ):
         """
         Initialize state vector ingestion.
@@ -94,6 +94,11 @@ class StateVectorIngestion:
         self.batch_size = config.ingestion.batch_size
         self.bbox = bbox if bbox is not None else self.DEFAULT_BBOX
         self.time_interval = time_interval
+        # None means "whatever the configuration says", so the rule is set in
+        # one place rather than at every call site. An explicit argument still
+        # wins, which is what lets the decimation benchmark run both arms.
+        if decimation is None:
+            decimation = getattr(config.ingestion, "decimation", DECIMATION_MODULO)
         if decimation not in (DECIMATION_MODULO, DECIMATION_BUCKET):
             raise ValueError(
                 f"decimation must be {DECIMATION_MODULO!r} or {DECIMATION_BUCKET!r}, "
