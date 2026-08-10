@@ -95,6 +95,8 @@ Kept as the run proceeds, so every choice made without review is visible.
 | 4 | Did **not** rebuild the 2024 endpoint candidate cache | Its input (`research/tracks`, the 2024 period) did not change, so it is still valid. Confirmed by the chain skipping it as current. |
 | 5 | Corrected the sampler claim rather than leaving it | The +0.26 pp figure was from the earlier one-day study, taken before the ranking change and at an operating point that is not the shipped configuration. Quoting it as the sampler's benefit broke this study's own rule against carried-over numbers. |
 
+| 6 | `trend_bearing` scored 0.00% on every variant — fixed and re-run | ADS-B callsigns are space-padded to eight characters and the ground-truth callsign is not, so the identity join matched nothing. The job wrote a CSV of zeros and exited successfully. Now trims, and treats zero coverage on both roles as an error rather than a result. |
+
 ## Observations worth checking
 
 * **State vectors grew 58% on disk** (6.13 -> 9.68 GB) while row count should be
