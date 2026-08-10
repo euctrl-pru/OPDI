@@ -52,6 +52,11 @@ TRACKS = "s3a://eurocontrol/opdi/osn_tracks"
 ZONES = "s3a://eurocontrol/opdi/h3_airport_detection_zones"
 CACHE = "s3a://eurocontrol/opdi/research/trend_votes"
 
+#: The second period's tracks. Built by earlier versions of this study and
+#: still present, so 2024 needs neither an ingest nor a track rebuild -- but
+#: they pre-date H3 indexing, so `h3_res_7` has to be computed at read time.
+TRACKS_2024 = "s3a://eurocontrol/opdi/research/tracks"
+
 #: Caps to cache votes at. 40 is production.
 FL_CAPS = (20, 30, 40, 60, 80, 100, 120, 150, 200)
 #: Zone bands to cache out to. 30 NM is production. Wider than any radius
@@ -83,18 +88,33 @@ def haversine_nm(lat1, lon1, lat2, lon2):
     return F.lit(2 * EARTH_R_NM) * F.asin(F.sqrt(F.least(a, F.lit(1.0))))
 
 
-def build_cache(spark, days) -> DataFrame:
-    """One expensive pass: vote counts per (track, aerodrome) at every cap."""
-    sv = (spark.read.parquet(TRACKS)
+def build_cache(spark, days, tracks: str = TRACKS, add_h3: bool = False) -> DataFrame:
+    """One expensive pass: vote counts per (track, aerodrome) at every cap.
+
+    ``add_h3`` computes the resolution-7 index rather than reading it. The
+    second period's tracks pre-date H3 indexing, and ``geo_to_h3`` is a
+    row-at-a-time Python UDF, so it is applied *after* the flight-level filter
+    -- indexing points the sweep will never look at is the expensive half of
+    the job.
+    """
+    sv = (spark.read.parquet(tracks)
           .filter(F.to_date("event_time").isin(days))
           .dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
           .withColumnRenamed("callsign", "flight_id")
           .fillna({"flight_id": ""})
           .withColumn("flight_level",
                       (F.col("baro_altitude") * 3.28084 / 100).cast("int"))
-          .filter(F.col("flight_level") <= max(FL_CAPS))
-          .select("track_id", "icao24", "flight_id", "event_time", "lat", "lon",
-                  "flight_level", "baro_altitude", "h3_res_7"))
+          .filter(F.col("flight_level") <= max(FL_CAPS)))
+
+    if add_h3:
+        import h3_pyspark
+
+        sv = (sv.withColumn("_res", F.lit(7))
+                .withColumn("h3_res_7", h3_pyspark.geo_to_h3("lat", "lon", "_res"))
+                .drop("_res"))
+
+    sv = sv.select("track_id", "icao24", "flight_id", "event_time", "lat", "lon",
+                   "flight_level", "baro_altitude", "h3_res_7")
 
     z = spark.read.parquet(ZONES)
     rc = next((c for c in ("apt_max_c_radius_nm", "max_c_radius_nm") if c in z.columns))
@@ -167,6 +187,14 @@ def main() -> None:
                     default=["2025-06-05", "2025-06-06", "2025-06-07"])
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--build", action="store_true", help="rebuild the vote cache")
+    ap.add_argument("--tracks", default=TRACKS,
+                    help=f"track table to build the cache from (default {TRACKS}; "
+                         f"use {TRACKS_2024} for the 2024 period)")
+    ap.add_argument("--add-h3", action="store_true",
+                    help="compute h3_res_7 rather than read it, for tracks that "
+                         "pre-date H3 indexing")
+    ap.add_argument("--cache", default=CACHE, help="where the vote cache lives")
+    ap.add_argument("--out-name", default="trend_sweep.csv")
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4041)
     args = ap.parse_args()
@@ -183,8 +211,9 @@ def main() -> None:
 
     if args.build:
         print("building the vote cache (one pass over the tracks)...")
-        build_cache(spark, args.days).write.mode("overwrite").parquet(CACHE)
-    votes = spark.read.parquet(CACHE).cache()
+        (build_cache(spark, args.days, tracks=args.tracks, add_h3=args.add_h3)
+         .write.mode("overwrite").parquet(args.cache))
+    votes = spark.read.parquet(args.cache).cache()
     print(f"vote cache: {votes.count():,} (track, aerodrome) pairs")
 
     ident = identities(votes)
@@ -255,7 +284,7 @@ def main() -> None:
             rows.append(m)
             show(m)
 
-    spark.createDataFrame(rows).toPandas().to_csv(out / "trend_sweep.csv", index=False)
+    spark.createDataFrame(rows).toPandas().to_csv(out / args.out_name, index=False)
     print(f"\nwritten to {out}")
     spark.stop()
 
