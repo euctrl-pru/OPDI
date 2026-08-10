@@ -61,8 +61,20 @@ CONE_RADII_NM = (40, 60, 110)
 
 
 def from_flight_list(spark: SparkSession, mode: str):
-    """(predictions, identities) from a per-mode flight list."""
-    fl = spark.read.parquet(FL_BASE.format(mode=mode))
+    """(predictions, identities) from a per-mode flight list.
+
+    .. warning::
+
+       This reads a table the *pipeline* wrote, not the candidate cache. If
+       that table predates the parameters under test, every metric derived from
+       it -- the mode comparison and both cross-checks -- silently describes an
+       older run while looking freshly computed. The sweeps in this module read
+       the candidate cache instead and do not have that failure mode.
+
+       Rebuild the flight lists with ``process_dai`` before trusting these.
+    """
+    path = FL_BASE.format(mode=mode)
+    fl = spark.read.parquet(path)
     pred = fl.select(
         F.col("ID").alias("track_id"),
         F.col("ADEP").alias("adep"),
@@ -211,6 +223,9 @@ def main() -> None:
     print(f"ground-truth flights: {gt.count():,}")
 
     # -- headline: the three modes, as the pipeline actually produced them ---
+    print("\n  NOTE: the mode comparison and cross-checks below read the flight\n"
+          "  lists under research/, not the candidate cache. Confirm they were\n"
+          "  written with the parameters under test.")
     rows = []
     for mode in MODES:
         pred, ident = from_flight_list(spark, mode)
