@@ -303,11 +303,13 @@ def main() -> None:
     # decomposition shows the penalty is the only tuned step that survives
     # contact with the ring-count ranking, and the flight-level cap that the
     # harness liked most actively loses ground here.
-    recommended = DetectionConfig.legacy()
-    recommended.trend_sched_penalty_nm = t_pn
-    recommended.endpoint_radius_nm = float(e_adep["radius_nm"])
-    recommended.endpoint_height_ft = float(e_adep["height_ft"])
-    recommended.endpoint_sched_penalty_nm = float(e_adep["penalty_nm"])
+    # Literally the shipped defaults. Built from DetectionConfig() rather than
+    # assembled field by field, because the previous version started from
+    # legacy() and overrode the values it remembered to override -- and forgot
+    # trend_rank_by, so the row labelled "recommended" silently kept the old
+    # ring-count selection and scored worse than production. A config assembled
+    # by hand can disagree with the one that ships; this one cannot.
+    recommended = DetectionConfig()
 
     # A grid of trend settings, run through the pipeline rather than the sweep
     # harness. This exists because the harness's optimum was found against a

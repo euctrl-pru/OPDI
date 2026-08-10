@@ -100,19 +100,19 @@ def test_every_field_carries_its_unit_or_is_unitless(field_name):
 
 
 def test_shipped_defaults_are_the_values_the_study_supports():
-    """The defaults must match what V6 concluded, not what its sweeps preferred.
+    """The defaults must match what V6 measured through the pipeline.
 
-    Two of the sweep's favourite values are deliberately *not* here. The
-    flight-level cap stays at production's FL40 because raising it lost ground
-    when run through the pipeline, and the trend radius stays at 30 NM because
-    the argmax was worth fifteen flights on one sample. Encoding that here
-    means a future edit that "restores the optimum" has to argue with a test
-    rather than with a comment.
+    Every value here was confirmed by running `process_dai` itself, not by a
+    sweep harness -- with one exception, the vote margin, which the pipeline
+    grid held fixed. The flight-level cap and radius were each rejected once on
+    ring-ranked evidence and reinstated once ranking became exact; pinning them
+    here means a future edit that "restores the production constant" has to
+    argue with a test rather than with a comment.
     """
     d = DetectionConfig()
-    assert d.trend_max_fl == 40
-    assert d.trend_radius_nm == 30.0
-    assert d.trend_vote_margin == 4
+    assert d.trend_max_fl == 60
+    assert d.trend_radius_nm == 20.0
+    assert d.trend_vote_margin == 2
     # The one tuned trend value the pipeline confirmed.
     assert d.trend_sched_penalty_nm == 10.0
     # Endpoint: radius revised, height confirmed where it already was.

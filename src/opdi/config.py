@@ -416,40 +416,45 @@ class DetectionConfig:
     """
 
     # -- trend -----------------------------------------------------------
-    trend_max_fl: int = 40
+    trend_max_fl: int = 60
     """Only samples below this flight level are considered. This is the
     binding constraint on trend's coverage: an aircraft never seen below it
     near an aerodrome has no candidate at all, whatever the radius.
 
-    **Deliberately left at the production value.** The sweep harness preferred
-    FL120 by a wide margin, and running that through the pipeline lost 1,741
-    points of score where the harness predicted a gain. The harness ranks
-    candidate aerodromes by exact haversine distance; the pipeline keeps only
-    those at the minimum H3 ring count and tie-breaks within that set. Raising
-    the cap admits samples from higher up, where more aerodromes share a ring
-    and the coarser tie-break has to separate them -- so it answers more often
-    and is right less often. Do not raise this without re-measuring through
-    :meth:`FlightListProcessor.process_dai`, not through a sweep."""
+    **Changed from 40**, which was never swept. Measured through
+    ``process_dai`` itself over FL 40/60/80/100/120, arrivals peak at FL60 and
+    fall away on both sides -- a genuine interior optimum, worth +1,408 against
+    the production constants.
 
-    trend_radius_nm: float = 30.0
+    This value was rejected once, on evidence that turned out to be measuring
+    the wrong thing: under the old H3 ring-count selection, raising the cap
+    lost ground, because it admits samples from higher up where more aerodromes
+    share a ring and a ring-count filter cannot separate them. With
+    ``trend_rank_by="haversine"`` the constraint is gone and the gain appears.
+    The two settings must move together."""
+
+    trend_radius_nm: float = 20.0
     """Zone radius for the sample-to-aerodrome join.
 
-    Left at the production value. The harness's argmax was 20 NM, worth 15
-    flights out of 61,038 on a single three-day sample -- inside the noise, and
-    not enough to move a published constant for."""
+    **Changed from 30.** Both roles prefer 20 NM at every flight level in the
+    pipeline grid. The margin is small -- a few hundred flights -- but it is
+    consistent across all ten cells rather than a single argmax, which is the
+    kind of evidence a published constant should move on."""
 
     trend_smooth_half_window: int = 2
     """Half-width of the centred rolling mean over ``baro_altitude``, in
     samples: 2 gives the five-sample window ``rowsBetween(-2, 2)``. **Never
     swept** -- inherited, not chosen."""
 
-    trend_vote_margin: int = 4
+    trend_vote_margin: int = 2
     """One direction must beat the other by this many samples or the pair is
-    ``ambiguous`` and dropped. At 5 s sampling, 4 is about 20 s.
+    ``ambiguous`` and dropped. At 5 s sampling, 2 is about 10 s.
 
-    Left at the production value: its gain in the sweep was measured on top of
-    a raised flight-level cap that is not being adopted, so it recovers ground
-    that is never given away here."""
+    **Changed from 4**, on sweep evidence rather than pipeline evidence: the
+    pipeline grid held the margin fixed at 2 while varying the cap and radius,
+    so this is the one adopted value not confirmed by a pipeline sweep of its
+    own. Worth about 150 flights in the harness. Flagged in the report as the
+    weakest link in the recommendation."""
 
     trend_rank_by: str = "haversine"
     """How ``trend`` chooses among candidate aerodromes: ``"haversine"`` or
