@@ -60,7 +60,7 @@ OUT_TMPL = "research/flight_list_v6_{run}"
 #: Modes to build. `legacy` is the control: the pre-V6 constants, which is what
 #: every published OPDI flight list was built with. Without it the report would
 #: have no measured baseline of its own to compare the tuned settings against.
-RUNS = ("legacy", "trend", "endpoint", "nearest", "combined")
+RUNS = ("legacy", "trend", "endpoint", "nearest", "combined", "recommended")
 
 
 def counts(row: dict, side: str) -> tuple:
@@ -171,6 +171,8 @@ def main() -> None:
                          "endpoint candidate log is read from here so the "
                          "existing cache is reused rather than rebuilt")
     ap.add_argument("--executors", type=int, default=10)
+    ap.add_argument("--cores", type=int, default=6)
+    ap.add_argument("--driver-memory", default="8g")
     ap.add_argument("--ui-port", type=int, default=4044)
     args = ap.parse_args()
 
@@ -248,7 +250,54 @@ def main() -> None:
             d.trend_sched_penalty_nm = float(t_adep["penalty_nm"])
         return d
 
+    # The harness path decomposition, re-walked through the pipeline itself.
+    #
+    # This exists because the two do not agree. `endpoint` reproduces exactly --
+    # the sweep filters the same candidate cache the pipeline reads, so it is
+    # the same computation -- but `trend` does not. The pipeline picks the
+    # aerodrome at the minimum H3 *ring count* across all candidates before the
+    # haversine tie-break runs, so a scheduled aerodrome one ring further out is
+    # eliminated before the scheduled-service penalty can rescue it. A penalty
+    # tuned against exact haversine therefore does something weaker, and
+    # possibly something different, in production.
+    #
+    # So each step of the path is run through process_dai and scored, which
+    # answers directly which tuned values survive contact with the pipeline.
+    def path_cfg(**kw):
+        d = DetectionConfig.legacy()
+        for k_, v_ in kw.items():
+            setattr(d, k_, v_)
+        return d
+
+    t_fl, t_mg = int(t_ades["fl_cap"]), int(t_ades["margin"])
+    t_rd, t_pn = float(t_ades["radius_nm"]), float(t_ades["penalty_nm"])
+    path = {
+        "path0_legacy":  path_cfg(),
+        "path1_penalty": path_cfg(trend_sched_penalty_nm=t_pn),
+        "path2_flcap":   path_cfg(trend_sched_penalty_nm=t_pn, trend_max_fl=t_fl),
+        "path3_margin":  path_cfg(trend_sched_penalty_nm=t_pn, trend_max_fl=t_fl,
+                                  trend_vote_margin=t_mg),
+        "path4_radius":  path_cfg(trend_sched_penalty_nm=t_pn, trend_max_fl=t_fl,
+                                  trend_vote_margin=t_mg, trend_radius_nm=t_rd),
+    }
+
+    # What the study actually recommends, as one flight list.
+    #
+    # Departures take `endpoint` at the swept optimum, which the pipeline
+    # reproduces exactly. Arrivals take `trend` at the *production* geometry
+    # plus the scheduled-service penalty -- because the pipeline path
+    # decomposition shows the penalty is the only tuned step that survives
+    # contact with the ring-count ranking, and the flight-level cap that the
+    # harness liked most actively loses ground here.
+    recommended = DetectionConfig.legacy()
+    recommended.trend_sched_penalty_nm = t_pn
+    recommended.endpoint_radius_nm = float(e_adep["radius_nm"])
+    recommended.endpoint_height_ft = float(e_adep["height_ft"])
+    recommended.endpoint_sched_penalty_nm = float(e_adep["penalty_nm"])
+
     plan = {
+        **{k_: (v_, "trend", "trend") for k_, v_ in path.items()},
+        "recommended": (recommended, "endpoint", "trend"),
         "legacy": (DetectionConfig.legacy(), "trend", "trend"),
         "trend": (single("trend"), "trend", "trend"),
         "endpoint": (tuned(), "endpoint", "endpoint"),
@@ -258,17 +307,24 @@ def main() -> None:
 
     load_dotenv()
     osn_sample.RESEARCH_EXECUTORS = args.executors
-    spark = build_spark(args.ui_port)
+    osn_sample.UI_PORT = args.ui_port
+    spark = build_spark(args.cores, args.driver_memory, distributed=True)
     guard_writes()
 
     from opdi.config import OPDIConfig
 
-    cfg = OPDIConfig()
-    cfg.project.environment = "opensky"
+    # The factory, not OPDIConfig() plus an attribute: the environment decides
+    # the storage backend (plain parquet over S3A, no Hive, no Iceberg), and
+    # setting the field afterwards leaves the StorageManager unwired, so every
+    # table looks absent.
+    cfg = OPDIConfig.for_environment("opensky")
     month = datetime.strptime(args.months[0], "%Y%m").date().replace(day=1)
 
-    days = [datetime.strptime(d, "%Y-%m-%d").date() for d in args.days]
-    gt = load_ground_truth(spark, args.months)
+    # Restricted to the days actually ingested. Without this the ground truth
+    # spans the whole month while the flight lists cover three days, so every
+    # flight on the other twenty-seven counts as an abstention and coverage
+    # comes out roughly ten times too low.
+    gt = load_ground_truth(spark, args.months, args.days)
     apt = airport_locations(spark)
     gt = label_ground_truth(gt, apt)
     types = airport_types(spark)
