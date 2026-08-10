@@ -25,7 +25,7 @@ being processed twice.
 import argparse
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -85,8 +85,16 @@ def main() -> None:
 
     import provenance as pv
 
+    # --start/--end are INCLUSIVE here, matching how every other job in this
+    # study names its days. `ingest_from_s3` takes an *exclusive* end, so the
+    # extra day is added at the call site rather than left to the caller to
+    # remember. Passing the last day straight through ingests one day fewer,
+    # which does not fail -- it just makes the sample smaller than every figure
+    # it will be compared against.
     start = datetime.strptime(args.start, "%Y-%m-%d").date()
-    end = datetime.strptime(args.end, "%Y-%m-%d").date()
+    end_inclusive = datetime.strptime(args.end, "%Y-%m-%d").date()
+    ingest_end = end_inclusive + timedelta(days=1)
+    n_days = (ingest_end - start).days
 
     print("=== targets, before ===")
     for t in ("osn_statevectors_v2", "osn_tracks"):
@@ -117,14 +125,19 @@ def main() -> None:
     force_first_write_overwrite({"osn_statevectors_v2", "osn_tracks"})
 
     if not args.skip_ingest:
-        print("\n=== 01 ingest ===")
+        print(f"\n=== 01 ingest === {n_days} day(s): {start} .. "
+              f"{end_inclusive} (exclusive end {ingest_end})")
         StateVectorIngestion(spark, cfg).ingest_from_s3(
-            start_date=start, end_date=end)
+            start_date=start, end_date=ingest_end)
 
     print("\n=== 02 tracks ===")
+    # process_date_range iterates *months*, not days. Passing day-level dates
+    # happens to work because both fall in one month, but naming the month is
+    # what the function actually means.
+    month = start.replace(day=1)
     tp = TrackProcessor(spark, cfg)
     tp.create_table_if_not_exists()
-    tp.process_date_range(start, end)
+    tp.process_date_range(month, month)
 
     print("\n=== targets, after ===")
     for t in ("osn_statevectors_v2", "osn_tracks"):
