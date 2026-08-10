@@ -616,12 +616,24 @@ class FlightListProcessor:
         df = df.withColumn("min_distance", f_min("distance_from_center").over(window_spec))
         df_min = df.filter(df.distance_from_center == df.min_distance)
 
-        df_min = df_min.select(
+        # The scheduled-service flag is carried through only when it is going
+        # to be used. It is not part of the original projection, and dropping
+        # it here is what silently disabled the penalty: the ranking further
+        # down looks the column up on this frame, does not find it, and falls
+        # back to raw distance -- which is indistinguishable from a penalty of
+        # zero unless something says so.
+        keep = [
             "icao24", "flight_id", "track_id", "apt_ident",
             "apt_longitude_deg", "apt_latitude_deg", "DOF",
             "first_seen", "last_seen", "status", "event_time",
             "lat", "lon", "min_distance", "take_off_count", "landing_count",
-        )
+        ]
+        if sched_penalty_nm:
+            keep += [
+                c for c in ("apt_scheduled", "scheduled_service")
+                if c in df_min.columns
+            ]
+        df_min = df_min.select(*keep)
 
         # Get time range per track-airport-status
         window_spec2 = Window.partitionBy(
