@@ -64,7 +64,7 @@ class Stage:
     them in the chain rather than in a README.
     """
 
-    def __init__(self, name, cmd, produces, code_paths, notes=""):
+    def __init__(self, name, cmd, produces, code_paths, notes="", inputs=()):
         self.name = name
         self.cmd = cmd            # argv, run from the repo root
         self.produces = produces  # S3 prefix this stage fills
@@ -72,7 +72,11 @@ class Stage:
         self.notes = notes
         self.script = cmd[0] if cmd else ""
         self.args = cmd[1:]
-        self.inputs = []
+        # S3 prefixes this stage derives from. Without these a stage whose
+        # input has been rebuilt looks current, and the pipeline quietly keeps
+        # serving a cache derived from data that no longer exists -- which is
+        # exactly what happens when the sampler changes.
+        self.inputs = list(inputs)
         self.outputs = {}
 
     @property
@@ -96,10 +100,19 @@ class Stage:
         entry = provenance.load_manifest(DATA).get(self.key)
         if entry is None:
             return {self.produces: "present, but no provenance recorded"}
+        why = provenance.inputs_changed(entry, self.inputs)
+        if why:
+            return {self.produces: f"must rebuild: {why}"}
         return {}
 
-    def run(self, extra=()):
+    def run(self, extra=(), rebuild=False):
         """Build the table if it is missing; otherwise just record what it is.
+
+        ``rebuild`` forces the build. Stages deliberately do *not* rebuild on a
+        code change -- editing ``flights.py`` would otherwise cost hours of
+        track rebuilding for a table it does not affect -- so when a change
+        genuinely does invalidate a table, as switching the sampler does, it
+        has to be named.
 
         Deliberately *not* rebuilt on --force. These stages produce the inputs
         every published figure was computed from -- regenerating the airport
@@ -111,8 +124,12 @@ class Stage:
         """
         print(f"\n=== {self.name} ===", flush=True)
         ident = provenance.s3_identity(self.produces)
-        present = bool(ident.get("objects"))
+        entry = provenance.load_manifest(DATA).get(self.key)
+        stale_input = provenance.inputs_changed(entry, self.inputs) if entry else ""
+        present = bool(ident.get("objects")) and not stale_input and not rebuild
         note = self.notes
+        if stale_input:
+            print(f"  {stale_input} -- rebuilding rather than recording")
         if present:
             print(f"  {self.produces}\n  present: {ident['objects']:,} objects, "
                   f"{ident['bytes'] / 1e9:.2f} GB -- recording, not rebuilding")
@@ -128,7 +145,7 @@ class Stage:
         DATA.mkdir(parents=True, exist_ok=True)
         provenance.record(
             DATA, self.key, self.script, self.args, self.code_paths,
-            notes=note, input_tables=[self.produces],
+            notes=note, input_tables=[self.produces] + self.inputs,
         )
         print(f"  recorded {self.key}")
 
@@ -212,6 +229,18 @@ def stages() -> list:
     committed parquet would be worse than saying so.
     """
     return [
+        Stage("01_02_rebuild_sample",
+              [sys.executable, "-u", "benchmarks/rebuild_sample.py",
+               "--start", DAYS_2025[0], "--end", DAYS_2025[-1],
+               "--executors", "10"],
+              T_TRACKS,
+              ["benchmarks/rebuild_sample.py",
+               "src/opdi/ingestion/osn_statevectors.py",
+               "src/opdi/pipeline/tracks.py", "src/opdi/config.py"],
+              "ingest and track building with the configured sampler. Replaces "
+              "rather than appends, because the rows being replaced were made "
+              "by a different rule"),
+
         Stage("00_reference_data",
               OPDI + ["--step", "00", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
               T_ZONES, PIPELINE_SRC + ["src/opdi/reference/h3_airport_zones.py"],
@@ -241,7 +270,8 @@ def stages() -> list:
                "FlightListProcessor(s,cfg).build_endpoint_candidates(date(2025,6,1))"],
               T_CAND, PIPELINE_SRC + ["src/opdi/pipeline/flights.py"],
               "first/last fix per track against every aerodrome within 110 NM; "
-              "the cache the endpoint sweeps filter"),
+              "the cache the endpoint sweeps filter",
+              inputs=[T_TRACKS, T_ZONES]),
 
         Stage("03_trend_votes_2025",
               [sys.executable, "-u", "benchmarks/trend_sweep.py",
@@ -249,7 +279,8 @@ def stages() -> list:
                "--build-only", "--executors", "10",
                "--results-dir", "/tmp/v6_votecache_2025"],
               T_VOTES, ["benchmarks/trend_sweep.py"],
-              "vote counts per (track, aerodrome) at every FL cap, in one pass"),
+              "vote counts per (track, aerodrome) at every FL cap, in one pass",
+              inputs=[T_TRACKS, T_ZONES]),
 
         Stage("03_trend_votes_2024",
               [sys.executable, "-u", "benchmarks/trend_sweep.py",
@@ -405,6 +436,10 @@ def main() -> None:
                          "rather than from whatever is in the bucket.")
     ap.add_argument("--stages-only", action="store_true",
                     help="run the upstream steps and stop")
+    ap.add_argument("--rebuild-stage", nargs="+", default=[],
+                    help="force these stages to rebuild their table rather "
+                         "than record it. Downstream stages then follow "
+                         "automatically, because their inputs will have moved.")
     ap.add_argument("--allow-stale", action="store_true",
                     help="report staleness but exit 0 -- for rendering a draft "
                          "without a cluster")
@@ -441,9 +476,11 @@ def main() -> None:
               "\nrendering with stale outputs (--allow-stale)")
         return
 
+    rebuild = set(args.rebuild_stage)
     for j in todo:
-        if args.force or stale[j.name]:
-            j.run()
+        forced = j.name in rebuild
+        if args.force or stale[j.name] or forced:
+            j.run(rebuild=forced) if isinstance(j, Stage) else j.run()
         else:
             print(f"  skipping {j.name} (current)")
     print("\ndone")
