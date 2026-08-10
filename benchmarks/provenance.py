@@ -81,6 +81,61 @@ def file_hash(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
+def s3_identity(prefix: str) -> dict:
+    """A cheap identity for an S3 prefix: object count, bytes, newest mtime.
+
+    This is what lets a *data* dependency participate in staleness. A
+    fingerprint over source files answers "was this produced by the current
+    code"; it cannot answer "was this produced from the current data", and the
+    two failures look identical in the output. A job whose input table has
+    grown, shrunk or been rewritten since its result was recorded is stale in
+    exactly the way that matters.
+
+    Deliberately not a checksum of the contents: these prefixes hold tens of
+    gigabytes, and reading them to decide whether to read them defeats the
+    purpose.
+    """
+    import os
+
+    try:
+        import boto3
+    except ImportError:
+        return {"error": "boto3 unavailable"}
+
+    env = REPO / ".env"
+    if env.is_file():
+        for line in env.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+    if "AWS_ACCESS_KEY_ID" not in os.environ:
+        return {"error": "no credentials"}
+
+    path = prefix.replace("s3a://", "").replace("s3://", "")
+    bucket, _, key = path.partition("/")
+    try:
+        s3 = boto3.client(
+            "s3", endpoint_url=os.environ.get(
+                "OPDI_S3_ENDPOINT", "https://s3.opensky-network.org"),
+            aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+            aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        )
+        n = total = 0
+        newest = ""
+        for page in s3.get_paginator("list_objects_v2").paginate(
+                Bucket=bucket, Prefix=key.rstrip("/") + "/"):
+            for o in page.get("Contents", []):
+                n += 1
+                total += o["Size"]
+                ts = o["LastModified"].isoformat()
+                if ts > newest:
+                    newest = ts
+        return {"objects": n, "bytes": total, "newest": newest}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def load_manifest(data_dir: Path) -> dict:
     p = Path(data_dir) / MANIFEST_NAME
     if not p.is_file():
@@ -104,6 +159,7 @@ def record(
     code_paths: list,
     inputs: dict = None,
     notes: str = "",
+    input_tables: list = None,
 ) -> dict:
     """Add or replace one output's entry in the manifest.
 
@@ -123,6 +179,7 @@ def record(
         "code_fingerprint": fingerprint(code_paths),
         "code_paths": sorted(str(p) for p in code_paths),
         "inputs": inputs or {},
+        "input_tables": {p: s3_identity(p) for p in (input_tables or [])},
         "notes": notes,
     }
     if out_path.is_file():
@@ -133,7 +190,26 @@ def record(
     return entry
 
 
-def is_stale(data_dir: Path, output: str, code_paths: list) -> tuple:
+def inputs_changed(entry: dict, inputs: list) -> str:
+    """Reason string if a declared input table differs from when recorded."""
+    if not inputs:
+        return ""
+    recorded = (entry or {}).get("input_tables") or {}
+    for prefix in inputs:
+        was = recorded.get(prefix)
+        if was is None:
+            return f"input {prefix} was not recorded"
+        if was.get("error") or "error" in (now := s3_identity(prefix)):
+            # Cannot tell without credentials. Silence here would be a lie in
+            # the safe-looking direction, so it is reported rather than passed.
+            return ""
+        if now.get("objects") != was.get("objects") or now.get("bytes") != was.get("bytes"):
+            return (f"input {prefix} changed "
+                    f"({was.get('objects')} objects -> {now.get('objects')})")
+    return ""
+
+
+def is_stale(data_dir: Path, output: str, code_paths: list, inputs: list = None) -> tuple:
     """(stale, reason) for one output.
 
     Stale means "not produced by the code currently checked out", not "old".
@@ -151,4 +227,7 @@ def is_stale(data_dir: Path, output: str, code_paths: list) -> tuple:
         return True, "code changed since this was produced"
     if entry.get("sha256_16") and entry["sha256_16"] != file_hash(out_path):
         return True, "file modified after it was recorded"
+    why = inputs_changed(entry, inputs or [])
+    if why:
+        return True, why
     return False, "current"

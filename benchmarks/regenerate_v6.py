@@ -49,21 +49,87 @@ PIPE = CORE + ["src/opdi/pipeline/flights.py", "src/opdi/config.py",
                "benchmarks/flight_list_v6.py"]
 
 
+class Stage:
+    """An upstream pipeline step, whose product is an S3 table, not a CSV.
+
+    These are the steps the analysis used to assume had already been run:
+    reference zones, state-vector ingestion, track building, and the two caches
+    the sweeps read. Without them the chain is reproducible only from whatever
+    happened to be in the bucket, which is not reproducibility -- delete
+    ``research/trend_votes`` and every sweep fails while the manifest still
+    reports it current.
+
+    Each step is idempotent by its own progress log, so a stage whose data is
+    already present is a fast no-op. That is what makes it affordable to put
+    them in the chain rather than in a README.
+    """
+
+    def __init__(self, name, cmd, produces, code_paths, notes=""):
+        self.name = name
+        self.cmd = cmd            # argv, run from the repo root
+        self.produces = produces  # S3 prefix this stage fills
+        self.code_paths = list(code_paths)
+        self.notes = notes
+        self.script = cmd[0] if cmd else ""
+        self.args = cmd[1:]
+        self.inputs = []
+        self.outputs = {}
+
+    @property
+    def key(self):
+        return f"table:{self.produces}"
+
+    def stale(self):
+        """Stale when the table is absent or empty, or the code moved.
+
+        A populated table is *not* re-derived just because the pipeline code
+        changed -- rebuilding tracks for every edit to `flights.py` would cost
+        hours and change nothing. The recorded fingerprint still says which
+        code filled it, so a mismatch is visible in the provenance table even
+        when it does not force a re-run.
+        """
+        ident = provenance.s3_identity(self.produces)
+        if ident.get("error"):
+            return {self.produces: f"cannot check ({ident['error']})"}
+        if not ident.get("objects"):
+            return {self.produces: "table absent or empty"}
+        entry = provenance.load_manifest(DATA).get(self.key)
+        if entry is None:
+            return {self.produces: "present, but no provenance recorded"}
+        return {}
+
+    def run(self, extra=()):
+        cmd = [str(x) for x in self.cmd]
+        print(f"\n=== {self.name} ===\n  {' '.join(cmd)}", flush=True)
+        r = subprocess.run(cmd, cwd=REPO)
+        if r.returncode != 0:
+            raise SystemExit(f"{self.name} failed with exit {r.returncode}")
+        DATA.mkdir(parents=True, exist_ok=True)
+        provenance.record(
+            DATA, self.key, self.script, self.args, self.code_paths,
+            notes=self.notes, input_tables=[self.produces],
+        )
+        print(f"  recorded {self.key}")
+
+
 class Job:
     """One analysis step: a command, its outputs, and what it depends on."""
 
-    def __init__(self, name, script, args, outputs, code_paths, notes=""):
+    def __init__(self, name, script, args, outputs, code_paths, notes="",
+                 inputs=()):
         self.name = name
         self.script = script
         self.args = args
         self.outputs = outputs      # {produced filename: staged filename}
         self.code_paths = [script] + list(code_paths)
         self.notes = notes
+        self.inputs = list(inputs)  # S3 prefixes this job reads
 
     def stale(self):
         reasons = {}
         for staged in self.outputs.values():
-            bad, why = provenance.is_stale(DATA, staged, self.code_paths)
+            bad, why = provenance.is_stale(
+                DATA, staged, self.code_paths, self.inputs)
             if bad:
                 reasons[staged] = why
         return reasons
@@ -92,8 +158,80 @@ class Job:
                 provenance.record(
                     DATA, staged, self.script, self.args,
                     self.code_paths, notes=self.notes,
+                    input_tables=self.inputs,
                 )
                 print(f"  staged {staged}")
+
+
+#: S3 prefixes the analysis reads.
+T_TRACKS   = "s3a://eurocontrol/opdi/osn_tracks"
+T_TRACKS24 = "s3a://eurocontrol/opdi/research/tracks"
+T_ZONES    = "s3a://eurocontrol/opdi/h3_airport_detection_zones"
+T_CAND     = "s3a://eurocontrol/opdi/opdi_endpoint_candidates"
+T_VOTES    = "s3a://eurocontrol/opdi/research/trend_votes"
+T_VOTES24  = "s3a://eurocontrol/opdi/research/trend_votes_2024"
+T_SV       = "s3a://eurocontrol/opdi/osn_statevectors_v2"
+T_REF      = "s3a://eurocontrol/opdi/research/reference"
+
+OPDI = [sys.executable, "-m", "opdi.cli", "run", "--env", "opensky"]
+PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config.py"]
+
+
+def stages() -> list:
+    """The upstream steps the analysis depends on.
+
+    Ground truth is deliberately absent. ``research/reference`` is extracted by
+    the ``eurocontrol`` R package against the PRISME Oracle warehouse, which
+    runs only on a machine with that access -- so no render on this cluster can
+    rebuild it, and claiming otherwise in a chain that silently reads a
+    committed parquet would be worse than saying so.
+    """
+    return [
+        Stage("00a_airport_zones",
+              OPDI + ["--step", "00a", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
+              T_ZONES, PIPELINE_SRC + ["src/opdi/reference/h3_airport_zones.py"],
+              "H3 detection zones; the candidate set every method chooses from"),
+
+        Stage("01_ingest_statevectors",
+              OPDI + ["--step", "01", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
+              T_SV, PIPELINE_SRC + ["src/opdi/ingestion/osn_statevectors.py"],
+              "bbox-filtered, 5 s decimated; never the raw global 1 s feed"),
+
+        Stage("02_tracks",
+              OPDI + ["--step", "02", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
+              T_TRACKS, PIPELINE_SRC + ["src/opdi/pipeline/tracks.py"],
+              "track splitting is frozen: _add_track_id must not change"),
+
+        Stage("03_endpoint_candidates",
+              [sys.executable, "-c",
+               "import sys; sys.path.insert(0,'src');"
+               "from opdi.config import OPDIConfig;"
+               "from opdi.utils.spark import get_spark_session;"
+               "from opdi.pipeline.flights import FlightListProcessor;"
+               "from datetime import date;"
+               "cfg=OPDIConfig.for_environment('opensky');"
+               "s=get_spark_session(app_name='opdi-candidates', config=cfg, distributed=True);"
+               "FlightListProcessor(s,cfg).build_endpoint_candidates(date(2025,6,1))"],
+              T_CAND, PIPELINE_SRC + ["src/opdi/pipeline/flights.py"],
+              "first/last fix per track against every aerodrome within 110 NM; "
+              "the cache the endpoint sweeps filter"),
+
+        Stage("03_trend_votes_2025",
+              [sys.executable, "-u", "benchmarks/trend_sweep.py",
+               "--months", "202506", "--days", *DAYS_2025, "--build",
+               "--executors", "10", "--results-dir", "/tmp/v6_votecache_2025"],
+              T_VOTES, ["benchmarks/trend_sweep.py"],
+              "vote counts per (track, aerodrome) at every FL cap, in one pass"),
+
+        Stage("03_trend_votes_2024",
+              [sys.executable, "-u", "benchmarks/trend_sweep.py",
+               "--months", "202406", "--days", *DAYS_2024, "--build",
+               "--tracks", T_TRACKS24, "--add-h3", "--cache", T_VOTES24,
+               "--out-name", "trend_sweep_2024.csv", "--executors", "10",
+               "--results-dir", "/tmp/v6_votecache_2024"],
+              T_VOTES24, ["benchmarks/trend_sweep.py"],
+              "second period; its tracks pre-date H3 so the index is computed"),
+    ]
 
 
 def jobs() -> list:
@@ -102,7 +240,8 @@ def jobs() -> list:
         Job("trend_sweep_2025", "benchmarks/trend_sweep.py",
             ["--months", "202506", "--days", *DAYS_2025, "--executors", "10"],
             {"trend_sweep.csv": "trend_sweep_2025.csv"}, CORE,
-            "371 cells over the cached vote table; --build rebuilds that cache"),
+            "371 cells over the cached vote table",
+            inputs=[T_VOTES, T_ZONES, T_REF]),
 
         Job("trend_sweep_2024", "benchmarks/trend_sweep.py",
             ["--months", "202406", "--days", *DAYS_2024,
@@ -110,7 +249,8 @@ def jobs() -> list:
              "--cache", "s3a://eurocontrol/opdi/research/trend_votes_2024",
              "--out-name", "trend_sweep_2024.csv", "--executors", "10"],
             {"trend_sweep_2024.csv": "trend_sweep_2024.csv"}, CORE,
-            "second period; tracks pre-date H3 indexing so the index is computed"),
+            "second period",
+            inputs=[T_VOTES24, T_ZONES, T_REF]),
 
         Job("endpoint_sweeps", "benchmarks/benchmark_modes.py",
             ["--months", "202506", "--days", *DAYS_2025, "--sweeps-only"],
@@ -118,13 +258,15 @@ def jobs() -> list:
              "sweep_penalty.csv": "sweep_penalty_2025.csv",
              "sweep_cone.csv": "sweep_cone_2025.csv"}, CORE,
             "--sweeps-only: this script can also score pipeline output written "
-            "by another run, which the report does not use"),
+            "by another run, which the report does not use",
+            inputs=[T_CAND, T_REF]),
 
         Job("bearing", "benchmarks/bearing_whole_sample.py",
             ["--months", "202506", "--days", *DAYS_2025, "--executors", "10"],
             {"whole_sample.csv": "bearing_whole_sample_v6.csv"},
             CORE + ["benchmarks/abstained_vertical.py"],
-            "rescue / veto / replace / rerank against the endpoint baseline"),
+            "rescue / veto / replace / rerank against the endpoint baseline",
+            inputs=[T_CAND, T_TRACKS, T_REF]),
 
         Job("modes", "benchmarks/flight_list_v6.py",
             ["--months", "202506", "--days", *DAYS_2025,
@@ -135,7 +277,8 @@ def jobs() -> list:
             {"mode_comparison_v6.csv": "mode_comparison_v6.csv",
              "per_airport_v6.csv": "per_airport_v6.csv",
              "per_type_v6.csv": "per_type_v6.csv"}, PIPE,
-            "real process_dai runs; this is what the verdict is scored on"),
+            "real process_dai runs; this is what the verdict is scored on",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
 
         Job("trend_grid", "benchmarks/flight_list_v6.py",
             ["--months", "202506", "--days", *DAYS_2025,
@@ -148,7 +291,8 @@ def jobs() -> list:
              "--trend-rank-by", "haversine", "--executors", "10"],
             {"mode_comparison_v6.csv": "trend_grid_v6.csv"}, PIPE,
             "trend FL cap x radius swept through process_dai itself, not the "
-            "harness -- this is where production's own optimum is found"),
+            "harness -- this is where production's own optimum is found",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
 
         Job("pipeline_path", "benchmarks/flight_list_v6.py",
             ["--months", "202506", "--days", *DAYS_2025,
@@ -159,7 +303,8 @@ def jobs() -> list:
              "--trend-rank-by", "haversine", "--executors", "10"],
             {"mode_comparison_v6.csv": "pipeline_path_v6.csv",
              "per_airport_v6.csv": "per_airport_path_v6.csv"}, PIPE,
-            "the arrival tuning walked one parameter at a time"),
+            "the arrival tuning walked one parameter at a time",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
     ]
 
 
@@ -169,12 +314,24 @@ def main() -> None:
                     help="report staleness and exit; no cluster needed")
     ap.add_argument("--force", action="store_true", help="re-run every job")
     ap.add_argument("--only", nargs="+", help="run only these jobs, by name")
+    ap.add_argument("--with-stages", action="store_true",
+                    help="include the upstream pipeline steps -- reference "
+                         "zones, ingestion, tracks and the two caches. Off by "
+                         "default because they are idempotent and slow; on, "
+                         "the chain rebuilds the analysis from the archive "
+                         "rather than from whatever is in the bucket.")
+    ap.add_argument("--stages-only", action="store_true",
+                    help="run the upstream steps and stop")
     ap.add_argument("--allow-stale", action="store_true",
                     help="report staleness but exit 0 -- for rendering a draft "
                          "without a cluster")
     args = ap.parse_args()
 
-    todo = jobs()
+    todo = []
+    if args.with_stages or args.stages_only:
+        todo += stages()
+    if not args.stages_only:
+        todo += jobs()
     if args.only:
         todo = [j for j in todo if j.name in set(args.only)]
 
