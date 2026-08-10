@@ -82,6 +82,20 @@ def main(argv=None):
         help="Skip 00e: OpenSky aircraft database ingestion.",
     )
     run_parser.add_argument(
+        "--adep-mode",
+        choices=["trend", "endpoint", "nearest"],
+        default=None,
+        help="Detection algorithm for departures (step 03). Defaults to the "
+             "value in DetectionConfig.",
+    )
+    run_parser.add_argument(
+        "--ades-mode",
+        choices=["trend", "endpoint", "nearest"],
+        default=None,
+        help="Detection algorithm for arrivals (step 03). The two roles take "
+             "different rules because they are not equally hard.",
+    )
+    run_parser.add_argument(
         "--airports-hex-path",
         default="data/airport_hex/zones_res7_processed.parquet",
         help="Path to pre-generated airport hex zones parquet.",
@@ -112,6 +126,8 @@ def main(argv=None):
             run_ourairports=not args.no_ourairports,
             run_aircraft_db=not args.no_aircraft_db,
             airports_hex_path=args.airports_hex_path,
+            adep_mode=args.adep_mode,
+            ades_mode=args.ades_mode,
         )
 
     parser.print_help()

@@ -5,9 +5,20 @@ Iceberg, no credentials -- the suite must be runnable on a laptop and in CI.
 """
 
 import datetime as dt
+import os
+import sys
 from typing import Any, Dict, List, Optional
 
 import pytest
+
+# PYSPARK_PYTHON names the interpreter for the *workers*. On the cluster that
+# must be `python3` -- the image's interpreter, whose path this venv does not
+# share. Under pytest the workers are local, so the same value picks up the
+# system 3.13 against a 3.10 driver and every Spark test dies with
+# PYTHON_VERSION_MISMATCH. Pin it to the interpreter actually running the
+# suite, before any SparkSession is built.
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     BooleanType,

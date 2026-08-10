@@ -120,6 +120,9 @@ class FlightListProcessor:
         >>> processor.process_date_range(date(2024, 1, 1), date(2024, 3, 1))
     """
 
+    # Kept so anything importing them still resolves, but the pipeline reads
+    # ``config.detection``. These are the pre-V6 values, identical to
+    # :meth:`DetectionConfig.legacy`.
     MAX_FL = 40  # Maximum flight level for airport zone matching
     # Detection radius applied to the airport zone table. The table is
     # generated wider than this so one reference can serve both the flight list
@@ -138,6 +141,14 @@ class FlightListProcessor:
         self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.resolution = config.h3.airport_detection_resolution
+        # A config built before DetectionConfig existed still works, and gets
+        # the pre-V6 constants rather than the tuned ones -- silently upgrading
+        # an old caller's behaviour is exactly what must not happen here.
+        self.detection = getattr(config, "detection", None)
+        if self.detection is None:
+            from opdi.config import DetectionConfig
+
+            self.detection = DetectionConfig.legacy()
         self.log_dir = log_dir
 
         self._dai_log = os.path.join(log_dir, "03_osn-flight_table-etl-log-v2.parquet")
@@ -389,7 +400,7 @@ class FlightListProcessor:
         sv_f = sv_f.withColumn("DOF", to_date("first_seen"))
 
         # Filter to low altitude (below FL40) and join with airport zones
-        sv_low_alt = sv_f.filter(col("flight_level") <= self.MAX_FL)
+        sv_low_alt = sv_f.filter(col("flight_level") <= self.detection.trend_max_fl)
         # The zone table is generated out to its full ring reach, so the
         # detection radius has to be applied here. Without this filter the join
         # would match aerodromes as far out as the rings go -- a large, silent
@@ -399,7 +410,9 @@ class FlightListProcessor:
             None,
         )
         if radius_col:
-            sdf_apt = sdf_apt.filter(col(radius_col) <= self.DETECTION_RADIUS_NM)
+            sdf_apt = sdf_apt.filter(
+                col(radius_col) <= self.detection.trend_radius_nm
+            )
         else:
             # Pre-dates the banded reference, which was clipped at generation
             # time -- so no filter is the correct behaviour. Said out loud
@@ -495,17 +508,30 @@ class FlightListProcessor:
         return best.withColumn("apt", apt).withColumn("source", source)
 
     @staticmethod
-    def _categorize_landing_take_off(df: DataFrame) -> DataFrame:
+    def _categorize_landing_take_off(
+        df: DataFrame,
+        smooth_half_window: int = 2,
+        vote_margin: int = 4,
+    ) -> DataFrame:
         """
         Classify each track-airport pair as take-off, landing, or ambiguous.
 
         Uses a smoothed altitude change analysis: if the altitude is mostly
         increasing near the airport, it's a take-off; if decreasing, it's a
-        landing. A margin of +4 state vectors prevents noise from flipping
-        the classification.
+        landing. The margin prevents noise from flipping the classification.
+
+        Both knobs were literals until they were measured. Kept as keyword
+        arguments rather than read from ``self`` so this stays a static method,
+        matching :meth:`classify_endpoints`, and so a sweep can call it
+        directly without constructing a processor.
 
         Args:
             df: DataFrame from _fetch_and_label_sv.
+            smooth_half_window: half-width of the centred rolling mean over
+                ``baro_altitude``, in samples. 2 gives the original 5-sample
+                window.
+            vote_margin: one direction must beat the other by this many samples
+                or the pair is ``ambiguous``. At 5 s sampling, 4 is about 20 s.
 
         Returns:
             DataFrame with 'status' column (take-off / landing / ambiguous).
@@ -517,7 +543,7 @@ class FlightListProcessor:
         # Smoothed altitude
         window_avg = Window.partitionBy(
             ["icao24", "flight_id", "track_id", "apt_ident"]
-        ).orderBy("event_time").rowsBetween(-2, 2)
+        ).orderBy("event_time").rowsBetween(-smooth_half_window, smooth_half_window)
 
         df_m = df.withColumn("smoothed_altitude", F.avg("baro_altitude").over(window_avg))
         df_m = df_m.withColumn(
@@ -539,11 +565,11 @@ class FlightListProcessor:
             F.sum(when(col("trajectory_type") == "landing", 1).otherwise(0)).alias("landing_count"),
         )
 
-        # Classify with +4 margin (at least 20s in one state)
+        # A margin of N samples is about 5N seconds in one state.
         flight_type_df = flight_type_df.withColumn(
             "status",
-            when(col("take_off_count") > (col("landing_count") + 4), "take-off")
-            .when(col("landing_count") > (col("take_off_count") + 4), "landing")
+            when(col("take_off_count") > (col("landing_count") + vote_margin), "take-off")
+            .when(col("landing_count") > (col("take_off_count") + vote_margin), "landing")
             .otherwise("ambiguous"),
         )
 
@@ -554,7 +580,9 @@ class FlightListProcessor:
         )
 
     @staticmethod
-    def _compute_flight_table(df: DataFrame) -> DataFrame:
+    def _compute_flight_table(
+        df: DataFrame, sched_penalty_nm: float = 0.0
+    ) -> DataFrame:
         """
         Create the flight table from classified tracks.
 
@@ -563,8 +591,20 @@ class FlightListProcessor:
         2. Use Haversine distance to resolve multi-airport ambiguity
         3. Merge departures and arrivals into a single flight record
 
+        ``sched_penalty_nm`` biases step 2 toward aerodromes with scheduled
+        service, so a military field must be *clearly* nearest rather than
+        merely nearest. It is applied to the **haversine distance**, not to
+        ``distance_from_center`` -- that column is an H3 ring count at the
+        zone resolution, an integer step of several kilometres, and cannot
+        carry nautical miles.
+
+        Zero, the default, reproduces the original behaviour exactly: the
+        penalty column is never added and the ordering key is untouched.
+
         Args:
             df: DataFrame from _categorize_landing_take_off.
+            sched_penalty_nm: nautical miles added to the effective distance of
+                an aerodrome without scheduled service.
 
         Returns:
             DataFrame with ADEP, ADES, and flight metadata.
@@ -620,7 +660,32 @@ class FlightListProcessor:
 
         # Select closest airport per flight
         key_columns = ["icao24", "flight_id", "track_id", "status", "first_seen", "last_seen"]
-        window_closest = Window.partitionBy(key_columns).orderBy(col("distance_km"))
+
+        order_col = col("distance_km")
+        if sched_penalty_nm:
+            sched_col = next(
+                (c for c in ("apt_scheduled", "scheduled_service")
+                 if c in flight_table.columns),
+                None,
+            )
+            if sched_col is None:
+                # Said out loud rather than silently ranking on raw distance:
+                # a missing column would look exactly like a penalty of zero.
+                print(
+                    "  NOTE: airport zones carry no scheduled-service column; "
+                    "trend_sched_penalty_nm has no effect. Regenerate step 00a."
+                )
+            else:
+                flight_table = flight_table.withColumn(
+                    "_eff_km",
+                    col("distance_km")
+                    + when(col(sched_col) == "yes", lit(0.0)).otherwise(
+                        lit(float(sched_penalty_nm) * 1.852)
+                    ),
+                )
+                order_col = col("_eff_km")
+
+        window_closest = Window.partitionBy(key_columns).orderBy(order_col)
 
         df_numbered = flight_table.withColumn("row_number", row_number().over(window_closest))
         df_numbered = df_numbered.withColumn("is_most_likely", col("row_number") == 1)
@@ -831,15 +896,72 @@ class FlightListProcessor:
     # Main processing entry points
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _merge_roles(
+        adep_table: DataFrame,
+        ades_table: DataFrame,
+        adep_mode: str,
+        ades_mode: str,
+    ) -> DataFrame:
+        """Take the departure half from one flight table and the arrival half
+        from another.
+
+        Both producers -- :meth:`_compute_flight_table` and
+        :meth:`_flight_table_from_endpoints` -- emit the same schema keyed on
+        ``id``, which is what makes this a join rather than a rewrite.
+
+        When both roles use the same algorithm the two arguments are the *same
+        DataFrame*, and this returns it untouched. That identity matters: it is
+        what lets the per-role split be added without altering a single
+        existing run, and it is the regression gate in the tests.
+        """
+        if adep_mode == ades_mode:
+            return adep_table
+
+        dep = adep_table.select(
+            "id", "ADEP", "ADEP_P", "adep_source",
+            "ICAO24", "FLT_ID", "first_seen", "last_seen", "DOF", "version",
+        )
+        arr = ades_table.select(
+            col("id").alias("_id"), "ADES", "ADES_P", "ades_source",
+            col("ICAO24").alias("_ICAO24"), col("FLT_ID").alias("_FLT_ID"),
+            col("first_seen").alias("_first_seen"),
+            col("last_seen").alias("_last_seen"),
+            col("DOF").alias("_DOF"), col("version").alias("_version"),
+        )
+
+        # Outer, not inner: a track one algorithm can place and the other
+        # cannot must survive with the half that worked. An inner join would
+        # silently make the combination *less* covered than either input.
+        j = dep.join(arr, dep.id == arr._id, "outer")
+
+        # The identity columns are properties of the track, so either side will
+        # do -- but only one side is populated for a track that just one
+        # algorithm saw, hence the coalesce.
+        return j.select(
+            F.coalesce(col("id"), col("_id")).alias("id"),
+            "ADEP", "ADES", "ADEP_P", "ADES_P",
+            F.coalesce(col("ICAO24"), col("_ICAO24")).alias("ICAO24"),
+            F.coalesce(col("FLT_ID"), col("_FLT_ID")).alias("FLT_ID"),
+            F.coalesce(col("first_seen"), col("_first_seen")).alias("first_seen"),
+            F.coalesce(col("last_seen"), col("_last_seen")).alias("last_seen"),
+            F.coalesce(col("DOF"), col("_DOF")).alias("DOF"),
+            F.coalesce(col("version"), col("_version")).alias("version"),
+            F.coalesce(col("adep_source"), lit("undetermined")).alias("adep_source"),
+            F.coalesce(col("ades_source"), lit("undetermined")).alias("ades_source"),
+        )
+
     def process_dai(
         self,
         month: date,
         airports_hex_path: Optional[str] = None,
         skip_if_processed: bool = True,
-        mode: str = "trend",
-        abstention_radius_nm: float = 40.0,
-        abstention_height_ft: float = 15000.0,
-        sched_penalty_nm: float = 10.0,
+        mode: Optional[str] = None,
+        adep_mode: Optional[str] = None,
+        ades_mode: Optional[str] = None,
+        abstention_radius_nm: Optional[float] = None,
+        abstention_height_ft: Optional[float] = None,
+        sched_penalty_nm: Optional[float] = None,
         table_name: str = "opdi_flight_list",
         write_mode: str = "append",
     ) -> None:
@@ -856,35 +978,72 @@ class FlightListProcessor:
             print(f"Month DAI {month} already processed. Skipping.")
             return
 
-        print(f"Processing DAI for {month} (mode={mode})...")
-        if mode == "trend":
+        # Departures and arrivals are not equally hard, and the rules that suit
+        # them differ, so each role gets its own. `mode` remains as an alias
+        # that sets both, so every existing caller is unaffected.
+        if adep_mode is None:
+            adep_mode = mode if mode is not None else "trend"
+        if ades_mode is None:
+            ades_mode = mode if mode is not None else "trend"
+
+        d = self.detection
+        if abstention_radius_nm is None:
+            abstention_radius_nm = d.endpoint_radius_nm
+        if abstention_height_ft is None:
+            abstention_height_ft = d.endpoint_height_ft
+        if sched_penalty_nm is None:
+            sched_penalty_nm = d.endpoint_sched_penalty_nm
+
+        needed = {adep_mode, ades_mode}
+        unknown = needed - {"trend", "endpoint", "nearest"}
+        if unknown:
+            raise ValueError(f"unknown detection mode(s): {sorted(unknown)}")
+
+        print(f"Processing DAI for {month} (ADEP={adep_mode}, ADES={ades_mode})...")
+
+        tables: dict = {}
+
+        if "trend" in needed:
             sdf_apt = self._load_airports_hex(airports_hex_path)
             sv_nearby = self._fetch_and_label_sv(month, sdf_apt)
-            sv_classified = self._categorize_landing_take_off(sv_nearby)
-            flight_table = self._compute_flight_table(sv_classified)
+            sv_classified = self._categorize_landing_take_off(
+                sv_nearby,
+                smooth_half_window=d.trend_smooth_half_window,
+                vote_margin=d.trend_vote_margin,
+            )
+            t = self._compute_flight_table(
+                sv_classified, sched_penalty_nm=d.trend_sched_penalty_nm
+            )
             # The trend path names an aerodrome or drops the flight; it has no
             # out-of-area concept, so every answer it gives is an aerodrome.
-            flight_table = flight_table.withColumn(
+            tables["trend"] = t.withColumn(
                 "adep_source",
                 when(col("ADEP").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
             ).withColumn(
                 "ades_source",
                 when(col("ADES").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
             )
-        else:
+
+        for m in needed & {"endpoint", "nearest"}:
             # Deliberately not keyed to skip_if_processed: rebuilding the
             # flight list with different thresholds does not invalidate the
             # candidates, which is the entire point of caching them.
-            self.build_endpoint_candidates(month)
+            self.build_endpoint_candidates(
+                month, max_radius_nm=d.endpoint_candidate_radius_nm
+            )
             cand = self._get_data_within_timeframe("opdi_endpoint_candidates", month)
             classified = self.classify_endpoints(
                 cand,
-                mode=mode,
+                mode=m,
                 abstention_radius_nm=abstention_radius_nm,
                 abstention_height_ft=abstention_height_ft,
                 sched_penalty_nm=sched_penalty_nm,
             )
-            flight_table = self._flight_table_from_endpoints(classified, cand)
+            tables[m] = self._flight_table_from_endpoints(classified, cand)
+
+        flight_table = self._merge_roles(
+            tables[adep_mode], tables[ades_mode], adep_mode, ades_mode
+        )
 
         flight_table = self._add_osn_aircraft_db_data(flight_table)
 
@@ -933,6 +1092,8 @@ class FlightListProcessor:
         end_month: date,
         airports_hex_path: Optional[str] = None,
         skip_if_processed: bool = True,
+        adep_mode: Optional[str] = None,
+        ades_mode: Optional[str] = None,
     ) -> None:
         """
         Process the complete flight list for a range of months.
@@ -957,7 +1118,16 @@ class FlightListProcessor:
         print(f"Processing flight list for {len(months)} months...")
 
         for month in months:
-            self.process_dai(month, airports_hex_path, skip_if_processed)
+            # Keyword, not positional: called positionally this silently
+            # dropped every threshold and ran the defaults, which is how the
+            # tuning surface came to stop at process_dai.
+            self.process_dai(
+                month,
+                airports_hex_path=airports_hex_path,
+                skip_if_processed=skip_if_processed,
+                adep_mode=adep_mode,
+                ades_mode=ades_mode,
+            )
 
         for month in months:
             self.process_overflights(month, skip_if_processed)

@@ -258,7 +258,13 @@ def _step_03_generate_flight_list(spark, config, start_date, end_date, **kwargs)
 
     processor = FlightListProcessor(spark, config)
     processor.create_table_if_not_exists()
-    processor.process_date_range(start_date, end_date, airports_hex_path)
+    processor.process_date_range(
+        start_date,
+        end_date,
+        airports_hex_path,
+        adep_mode=kwargs.get("adep_mode"),
+        ades_mode=kwargs.get("ades_mode"),
+    )
 
 
 def _step_04_extract_events(spark, config, start_date, end_date, **kwargs):
@@ -376,6 +382,8 @@ def run_pipeline(
     airports_hex_path: str = "data/airport_hex/zones_res7_processed.parquet",
     export_dir: str = "data/OPDI/v002",
     last_n_months: int = 4,
+    adep_mode: Optional[str] = None,
+    ades_mode: Optional[str] = None,
 ) -> int:
     """
     Run the OPDI pipeline end-to-end or a single step.
@@ -394,6 +402,12 @@ def run_pipeline(
         run_airspaces: Run step 00c — Airspace boundaries (ANSP/FIR -> H3).
         run_ourairports: Run step 00d — OurAirports reference data.
         run_aircraft_db: Run step 00e — OpenSky aircraft database.
+        adep_mode: Detection algorithm for departures in step 03
+            (``"trend"``, ``"endpoint"`` or ``"nearest"``). ``None`` uses the
+            configured default.
+        ades_mode: Detection algorithm for arrivals in step 03. The two roles
+            are separate because they are not equally hard and the rules that
+            suit them differ.
         airports_hex_path: Path to pre-generated airport hex zones parquet
             (produced by step 00, consumed by step 03).
         export_dir: Base directory for parquet/CSV exports (steps 05-06).
@@ -459,6 +473,10 @@ def run_pipeline(
         export_dir=export_dir,
         last_n_months=last_n_months,
         run_reference=run_reference,
+        # None means "whatever DetectionConfig says", so a plain run is
+        # unaffected by the existence of these.
+        adep_mode=adep_mode,
+        ades_mode=ades_mode,
     )
 
     try:

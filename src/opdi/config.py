@@ -379,6 +379,97 @@ class CleaningConfig:
 
 
 @dataclass
+class DetectionConfig:
+    """Thresholds for ADEP/ADES detection (pipeline step 03).
+
+    Named here rather than inlined in ``pipeline/flights.py`` for the same
+    reason as :class:`CleaningConfig`: so the benchmark can sweep them. Until
+    this existed, ``MAX_FL`` and ``DETECTION_RADIUS_NM`` were class constants
+    and the vote margin and smoothing window were literals inside a static
+    method, so tuning them meant editing the pipeline.
+
+    **Units are aviation and carried in the field names**, matching the
+    convention the rest of the package follows.
+
+    Two detection algorithms share this config, and they take *different*
+    thresholds because they read different evidence:
+
+    ``trend``
+        Votes on the sign of a smoothed altitude change across every sample
+        below ``trend_max_fl`` inside ``trend_radius_nm``. Its abstention is
+        evidence-based -- "the altitude trace does not clearly rise or fall".
+
+    ``endpoint``
+        Looks at one fix, the track's first or last, and accepts it if it is
+        within ``endpoint_radius_nm`` and below ``endpoint_height_ft`` above
+        field elevation. Its abstention is geometric.
+
+    Both rank candidate aerodromes on distance plus a penalty for aerodromes
+    without scheduled service, so a military field must be *clearly* nearest
+    rather than merely nearest.
+
+    .. warning::
+
+       The defaults are the **tuned** values, not the ones every dataset
+       published before 2026-08 was built with. Re-running an old month with
+       these will not reproduce what was released. Use :meth:`legacy` for that.
+    """
+
+    # -- trend -----------------------------------------------------------
+    trend_max_fl: int = 40
+    """Only samples below this flight level are considered. This is the
+    binding constraint on trend's coverage: an aircraft never seen below it
+    near an aerodrome has no candidate at all, whatever the radius."""
+
+    trend_radius_nm: float = 30.0
+    """Zone radius for the sample-to-aerodrome join."""
+
+    trend_smooth_half_window: int = 2
+    """Half-width of the centred rolling mean over ``baro_altitude``, in
+    samples: 2 gives the five-sample window ``rowsBetween(-2, 2)``. **Never
+    swept** -- inherited, not chosen."""
+
+    trend_vote_margin: int = 4
+    """One direction must beat the other by this many samples or the pair is
+    ``ambiguous`` and dropped. At 5 s sampling, 4 is about 20 s."""
+
+    trend_sched_penalty_nm: float = 0.0
+    """Scheduled-service penalty applied to trend's aerodrome choice. Zero
+    reproduces the original behaviour, which applied none."""
+
+    # -- endpoint --------------------------------------------------------
+    endpoint_radius_nm: float = 40.0
+    endpoint_height_ft: float = 15000.0
+    """Height above *field elevation*, not above sea level -- a fixed altitude
+    cut-off means nothing at an aerodrome sitting at 5,000 ft."""
+
+    endpoint_sched_penalty_nm: float = 10.0
+    endpoint_candidate_radius_nm: float = 110.0
+    """How far the cached candidate table reaches. Wider than any detection
+    radius on purpose, so the radius stays sweepable without a rebuild."""
+
+    @classmethod
+    def legacy(cls) -> "DetectionConfig":
+        """The constants in force before the V6 tuning.
+
+        Every OPDI flight list published up to 2026-08 was built with these.
+        They are kept reachable so released data stays reproducible -- the same
+        principle as the frozen ``version`` strings on published events.
+        """
+        return cls(
+            trend_max_fl=40,
+            trend_radius_nm=30.0,
+            trend_smooth_half_window=2,
+            trend_vote_margin=4,
+            trend_sched_penalty_nm=0.0,
+            endpoint_radius_nm=40.0,
+            endpoint_height_ft=15000.0,
+            endpoint_sched_penalty_nm=10.0,
+            endpoint_candidate_radius_nm=110.0,
+        )
+
+
+@dataclass
 class OPDIConfig:
     """Main OPDI configuration container."""
 
@@ -387,6 +478,7 @@ class OPDIConfig:
     h3: H3Config = field(default_factory=H3Config)
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     cleaning: CleaningConfig = field(default_factory=CleaningConfig)
+    detection: DetectionConfig = field(default_factory=DetectionConfig)
 
     @classmethod
     def for_environment(cls, env: str = "dev") -> "OPDIConfig":
