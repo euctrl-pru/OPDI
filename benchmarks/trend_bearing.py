@@ -159,10 +159,16 @@ def main() -> None:
                             airport_locations(spark)).cache()
     print(f"ground-truth flights: {gt.count():,}")
 
-    ident = (c.filter(F.col("status") == "adep")
-             .groupBy("track_id").agg(
-                 F.first("icao24").alias("icao24"),
-                 F.first("flight_id").alias("callsign"),
+    # Every track that survived the vote rule, not only the ones with a
+    # departure. `trend` classifies each (track, aerodrome) pair independently,
+    # so a track can carry an arrival and no departure at all -- filtering to
+    # `status == "adep"` would drop those tracks from the identity table, and a
+    # track absent from it never matches ground truth, so its arrival would be
+    # scored as a silence. That would understate exactly the coverage this
+    # benchmark exists to measure.
+    ident = (c.groupBy("track_id").agg(
+                 F.min("icao24").alias("icao24"),
+                 F.min("flight_id").alias("callsign"),
                  F.min("t_first").alias("t_start"))
              .withColumn("icao24", F.lower("icao24"))
              .withColumn("day", F.to_date("t_start")))
