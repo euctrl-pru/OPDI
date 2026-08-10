@@ -207,16 +207,28 @@ def main() -> None:
               f"{m['ades_coverage']:>10.2%}{m['ades_accuracy']:>10.2%}"
               f"{m['ades_correct'] - 2 * m['ades_wrong']:>11,}")
 
-    hdr = (f"{'FL cap':>7}{'margin':>8}{'radius':>8}{'penalty':>9}"
+    HDR = (f"{'FL cap':>7}{'margin':>8}{'radius':>8}{'penalty':>9}"
            f"{'ADEP cov':>10}{'ADEP acc':>10}{'ADEP s@2':>11}"
            f"{'ADES cov':>10}{'ADES acc':>10}{'ADES s@2':>11}")
+
+    # Stage 0: the legacy setting exactly as production ran it -- FL40,
+    # margin 4, 30 NM and *no* penalty. Stage 1 sweeps at a fixed penalty of
+    # 10, so without this the baseline every result is compared against would
+    # not appear anywhere in the output.
+    rows = []
+    print(f"stage 0: the legacy setting\n{HDR}")
+    m = cell(40, 4, 30.0, 0.0)
+    m["stage"] = 0
+    m["legacy"] = True
+    rows.append(m)
+    show(m)
+    print()
 
     # Stage 1: the geometry, at a fixed penalty. Sweeping the penalty inside
     # this grid would be 1,350 cells for a parameter that the endpoint study
     # found to be near-independent of the others -- so it gets its own pass at
     # the winning cell instead, which is how the endpoint sweeps did it.
-    rows = []
-    print(f"stage 1: FL x radius x margin at penalty {PENALTY_STAGE1:g} NM\n{hdr}")
+    print(f"stage 1: FL x radius x margin at penalty {PENALTY_STAGE1:g} NM\n{HDR}")
     for cap in FL_CAPS:
         for margin in MARGINS:
             for radius in RADII_NM:
@@ -226,9 +238,10 @@ def main() -> None:
                 show(m)
 
     # Stage 2: the penalty, at whichever cell won for each role.
-    print(f"\nstage 2: penalty sweep at each role's best cell\n{hdr}")
+    print(f"\nstage 2: penalty sweep at each role's best cell\n{HDR}")
     for role in ("adep", "ades"):
-        best = max(rows, key=lambda m: m[f"{role}_correct"] - 2 * m[f"{role}_wrong"])
+        best = max((m for m in rows if m["stage"] == 1),
+                   key=lambda m: m[f"{role}_correct"] - 2 * m[f"{role}_wrong"])
         for pen in PENALTIES_NM:
             if pen == PENALTY_STAGE1:
                 continue
