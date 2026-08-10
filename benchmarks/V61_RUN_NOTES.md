@@ -104,3 +104,32 @@ Kept as the run proceeds, so every choice made without review is visible.
 * **Bucket usage** reached ~84 GB mid-run against a ~100 GB quota. The tracks
   overwrite frees its old copy before writing, so the peak stayed inside the
   quota, but there is not much room.
+
+## Interim result: what the sampler is actually worth
+
+First current measurement, three days, 371 trend sweep cells, bucket against
+modulo with everything else identical (the previous CSV is in git history and
+was produced by the same harness on the modulo sample).
+
+| | median dscore | cells improved | cells worsened | median dcoverage |
+|---|---|---|---|---|
+| ADEP | +6 | 231 | 134 | +0.002 pp |
+| ADES | +17 | 310 | 57 | +0.004 pp |
+
+**Consistent in direction, negligible in magnitude.** 310 of 371 arrival cells
+improving is not noise -- the bin-based rule really does help -- but the size is
+about +0.004 pp of coverage, two orders of magnitude below the 0.5 pp bar and
+far below the +0.26 pp the earlier one-day study suggested.
+
+At the legacy cell specifically the effect is nil: ADEP -23 score, ADES -1.
+
+This is the trend harness. The endpoint sweeps and the `decimation` job give the
+endpoint-side view, which is where the earlier study measured its +0.26 pp, and
+those are still to come.
+
+**What this does not change:** the argument for adopting the bin-based sampler
+was never the size of the gain. It is that the rule is correct and does not
+depend on the OpenSky archive carrying positions forward. The measurement says
+the cost of that correctness is nil and the benefit is small and real, which is
+a perfectly good reason to keep it -- it just should not be sold as a coverage
+improvement.
