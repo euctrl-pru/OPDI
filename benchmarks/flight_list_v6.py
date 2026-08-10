@@ -117,7 +117,9 @@ def build(spark, cfg, month, run, detection, adep_mode, ades_mode, log_dir):
     from opdi.pipeline.flights import FlightListProcessor
 
     cfg.detection = detection
-    table = OUT_TMPL.format(run=run)
+    # Grid cells are scored and discarded, so they share one table rather than
+    # leaving a prefix behind for every combination tried.
+    table = OUT_TMPL.format(run="grid" if run.startswith("grid_") else run)
     print(f"\n=== {run}: ADEP={adep_mode} ADES={ades_mode} ===")
     print(f"    {detection}")
 
@@ -171,6 +173,13 @@ def main() -> None:
                          "endpoint candidate log is read from here so the "
                          "existing cache is reused rather than rebuilt")
     ap.add_argument("--executors", type=int, default=10)
+    ap.add_argument("--grid-fl", nargs="+", type=int, default=[40, 60, 80, 100, 120])
+    ap.add_argument("--grid-radius", nargs="+", type=float, default=[20.0, 30.0])
+    ap.add_argument("--grid-margin", nargs="+", type=int, default=[2])
+    ap.add_argument("--grid-penalty", type=float, default=10.0)
+    ap.add_argument("--trend-rank-by", default="haversine",
+                    choices=["haversine", "ring"],
+                    help="how trend chooses among candidate aerodromes")
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="8g")
     ap.add_argument("--ui-port", type=int, default=4044)
@@ -265,6 +274,11 @@ def main() -> None:
     # answers directly which tuned values survive contact with the pipeline.
     def path_cfg(**kw):
         d = DetectionConfig.legacy()
+        # The ranking rule is the base the path is walked on, not a step in it.
+        # Walking the thresholds on `ring` measures how far a tuned value can
+        # get while the selection rule throws candidates away unmeasured; on
+        # `haversine` it measures what the value is actually worth.
+        d.trend_rank_by = args.trend_rank_by
         for k_, v_ in kw.items():
             setattr(d, k_, v_)
         return d
@@ -295,7 +309,22 @@ def main() -> None:
     recommended.endpoint_height_ft = float(e_adep["height_ft"])
     recommended.endpoint_sched_penalty_nm = float(e_adep["penalty_nm"])
 
+    # A grid of trend settings, run through the pipeline rather than the sweep
+    # harness. This exists because the harness's optimum was found against a
+    # ranking rule the pipeline did not have; now that it does, the harness is
+    # a credible model again -- but "credible" is not "verified", and the
+    # cheapest way to verify is to run the thing itself.
+    grid = {}
+    for fl in args.grid_fl:
+        for rd in args.grid_radius:
+            for mg in args.grid_margin:
+                grid[f"grid_fl{fl}_r{rd:g}_m{mg}"] = path_cfg(
+                    trend_max_fl=fl, trend_radius_nm=float(rd),
+                    trend_vote_margin=mg, trend_sched_penalty_nm=args.grid_penalty,
+                )
+
     plan = {
+        **{k_: (v_, "trend", "trend") for k_, v_ in grid.items()},
         **{k_: (v_, "trend", "trend") for k_, v_ in path.items()},
         "recommended": (recommended, "endpoint", "trend"),
         "legacy": (DetectionConfig.legacy(), "trend", "trend"),
@@ -341,6 +370,8 @@ def main() -> None:
                  trend_radius_nm=detection.trend_radius_nm,
                  trend_vote_margin=detection.trend_vote_margin,
                  trend_sched_penalty_nm=detection.trend_sched_penalty_nm,
+                 trend_rank_by=getattr(detection, "trend_rank_by", "ring"),
+                 trend_max_fl_v=detection.trend_max_fl,
                  endpoint_radius_nm=detection.endpoint_radius_nm,
                  endpoint_height_ft=detection.endpoint_height_ft,
                  endpoint_sched_penalty_nm=detection.endpoint_sched_penalty_nm)
