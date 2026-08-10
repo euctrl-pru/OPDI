@@ -133,3 +133,39 @@ depend on the OpenSky archive carrying positions forward. The measurement says
 the cost of that correctness is nil and the benefit is small and real, which is
 a perfectly good reason to keep it -- it just should not be sold as a coverage
 improvement.
+
+## The sampler, settled
+
+Both sides now measured on three days, same code, full grids, bucket against
+modulo.
+
+| | median dscore | improved | worsened | median dcoverage |
+|---|---|---|---|---|
+| trend sweep, ADEP (371 cells) | +6 | 231 | 134 | +0.002 pp |
+| trend sweep, ADES (371 cells) | +17 | 310 | 57 | +0.004 pp |
+| endpoint grid, ADEP (126 cells) | -6 | 41 | 84 | +0.001 pp |
+| endpoint grid, ADES (126 cells) | -12 | 28 | 92 | -0.014 pp |
+
+At the shipped operating point: `endpoint` 30 NM / 15,000 ft gives ADEP -18 and
+ADES -4; the trend side gives ADES +17. The shipped configuration takes
+departures from `endpoint` and arrivals from `trend`, so the net is **about
+zero**.
+
+**The earlier +0.26 pp does not reproduce.** Measured on three days on the same
+rule it was measured on, the endpoint arrival coverage change is -0.014 pp. The
+one-day figure was noise, and it was the number used to characterise the
+sampler as beneficial-but-below-bar. Neither half of that was right: it is not
+below bar, it is *not measurably different from zero*.
+
+**Caveat.** Rebuilding the sample changed `track_id` values, because the
+rescued rows sit at track boundaries. So the benchmark's track-to-flight
+alignment differs slightly between the two arms, and some of these small deltas
+are that rather than the sampler. That cuts both ways and is another reason not
+to read anything into a +-0.02 pp difference.
+
+**What this means for the decision.** The case for the bin-based sampler was
+never a coverage gain -- it is that the rule is correct and does not depend on
+the OpenSky archive carrying positions forward. The measurement now says the
+correctness costs nothing, which is the useful thing to know. It should be
+documented as neutral on accuracy and adopted on principle, not sold as an
+improvement.
