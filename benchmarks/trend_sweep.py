@@ -190,12 +190,10 @@ def main() -> None:
     N = gt.count()
 
     def cell(cap, margin, radius, pen):
+        # `score` returns the counts exactly; they used to be reconstructed
+        # here as round(ratio * n), which is off by up to a flight either way
+        # and made two settings a few flights apart impossible to rank.
         m = score(predictions(votes, cap, margin, radius, pen), ident, gt)
-        n = m["n_ground_truth"]
-        for role in ("adep", "ades"):
-            cor = round(m[f"{role}_overall"] * n)
-            m[f"{role}_correct"] = cor
-            m[f"{role}_wrong"] = round(m[f"{role}_coverage"] * n) - cor
         m.update(fl_cap=cap, margin=margin, radius_nm=radius, penalty_nm=pen)
         return m
 
@@ -203,9 +201,9 @@ def main() -> None:
         print(f"{m['fl_cap']:>7}{m['margin']:>8}{m['radius_nm']:>8.0f}"
               f"{m['penalty_nm']:>9.0f}"
               f"{m['adep_coverage']:>10.2%}{m['adep_accuracy']:>10.2%}"
-              f"{m['adep_correct'] - 2 * m['adep_wrong']:>11,}"
+              f"{m['adep_score']:>11,}"
               f"{m['ades_coverage']:>10.2%}{m['ades_accuracy']:>10.2%}"
-              f"{m['ades_correct'] - 2 * m['ades_wrong']:>11,}")
+              f"{m['ades_score']:>11,}")
 
     HDR = (f"{'FL cap':>7}{'margin':>8}{'radius':>8}{'penalty':>9}"
            f"{'ADEP cov':>10}{'ADEP acc':>10}{'ADEP s@2':>11}"
@@ -241,7 +239,7 @@ def main() -> None:
     print(f"\nstage 2: penalty sweep at each role's best cell\n{HDR}")
     for role in ("adep", "ades"):
         best = max((m for m in rows if m["stage"] == 1),
-                   key=lambda m: m[f"{role}_correct"] - 2 * m[f"{role}_wrong"])
+                   key=lambda m: m[f"{role}_score"])
         for pen in PENALTIES_NM:
             if pen == PENALTY_STAGE1:
                 continue

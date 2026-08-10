@@ -940,7 +940,7 @@ def align_to_ground_truth(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> D
     return j.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1)
 
 
-def score(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> dict:
+def score(pred: DataFrame, ident: DataFrame, gt: DataFrame, k: float = 2.0) -> dict:
     """Coverage and accuracy against ground truth, decomposed by out-of-area.
 
     Headline coverage and accuracy mix two different abilities: naming the
@@ -961,6 +961,21 @@ def score(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> dict:
 
     ``gt_ooa_share`` is a property of the sample, so it must come out identical
     for every method scored against the same ground truth.
+
+    Alongside the ratios, each side reports the raw ``correct`` and ``wrong``
+    counts and a ``score`` of ``correct - k * wrong``. The ratios alone cannot
+    settle a comparison between two settings that trade coverage against
+    accuracy: raising coverage necessarily lowers accuracy, and neither ratio
+    says whether the exchange was worth taking. The counts do, because they are
+    the quantity the exchange is denominated in -- a change is worth taking iff
+    it wins more than ``k`` correct labels per wrong one it introduces.
+
+    ``k`` is 2 by default, on the argument that a wrong aerodrome is worse than
+    a silence: it corrupts *two* movement counts, the one it invents and the
+    one it omits, and it is invisible downstream, where a silence corrupts one
+    and is an explicit null anyone can filter on. That is a judgement, not a
+    measurement, so the report scores every headline choice at k = 1, 2 and 3
+    and says where the ranking moves.
     """
     j = align_to_ground_truth(pred, ident, gt)
 
@@ -1012,6 +1027,20 @@ def score(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> dict:
         "ades_accuracy": (agg["ades_ok"] / agg["ades_any"]) if agg["ades_any"] else 0.0,
         "adep_overall": agg["adep_ok"] / n,
         "ades_overall": agg["ades_ok"] / n,
+        # Raw counts, so a sweep row can be read as an exchange rate rather
+        # than as two ratios moving in opposite directions.
+        "k": k,
+        **{
+            key: val
+            for side in ("adep", "ades")
+            for key, val in {
+                f"{side}_correct": agg[f"{side}_ok"],
+                f"{side}_wrong": agg[f"{side}_any"] - agg[f"{side}_ok"],
+                f"{side}_score": agg[f"{side}_ok"] - k * (
+                    agg[f"{side}_any"] - agg[f"{side}_ok"]
+                ),
+            }.items()
+        },
         **{
             k: v
             for side in ("adep", "ades")
