@@ -82,3 +82,25 @@ failure mode this study keeps producing.
 * Whether the 2024 endpoint grid agrees with 2025 on 30 NM / 15,000 ft.
 * The report sections that read the new CSVs state their own conclusions from
   the data, including sign, so they do not presume the answer.
+
+## Decision log — autonomous run
+
+Kept as the run proceeds, so every choice made without review is visible.
+
+| # | Decision / fix | Why |
+|---|---|---|
+| 1 | Stage commands must be scripts, not `python -c` one-liners | The candidate builder was inline and imported `opdi.utils.spark`, which does not exist. It died an hour into a run on a typo nothing could check. Now `benchmarks/build_candidates.py`, and every stage script is verified to import before launching. |
+| 2 | Dropped stages `01_ingest_statevectors` and `02_tracks` | Both claimed tables `01_02_rebuild_sample` already produces, and `02_tracks` claimed the *same* manifest key, so their provenance entries silently overwrote each other. |
+| 3 | Resumed without `--force` after the failure | The sample rebuild and reference data were already complete and correct. Re-running them would have cost another hour and risked the same fragile overwrite window for no gain; staleness detection was left to decide the rest, and it correctly rebuilt candidates and the 2025 vote cache while skipping the 2024 one. |
+| 4 | Did **not** rebuild the 2024 endpoint candidate cache | Its input (`research/tracks`, the 2024 period) did not change, so it is still valid. Confirmed by the chain skipping it as current. |
+| 5 | Corrected the sampler claim rather than leaving it | The +0.26 pp figure was from the earlier one-day study, taken before the ranking change and at an operating point that is not the shipped configuration. Quoting it as the sampler's benefit broke this study's own rule against carried-over numbers. |
+
+## Observations worth checking
+
+* **State vectors grew 58% on disk** (6.13 -> 9.68 GB) while row count should be
+  within 0.2%. Tracks came out the same size as before (10.16 GB), which points
+  at file layout and compression rather than rows. Worth confirming against the
+  row count if it matters, but nothing depends on it.
+* **Bucket usage** reached ~84 GB mid-run against a ~100 GB quota. The tracks
+  overwrite frees its old copy before writing, so the peak stayed inside the
+  quota, but there is not much room.
