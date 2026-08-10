@@ -198,6 +198,9 @@ def main() -> None:
     ap.add_argument("--executors", type=int, default=4)
     ap.add_argument("--ui-port", type=int, default=4041)
     ap.add_argument("--skip-sweeps", action="store_true")
+    ap.add_argument("--sweeps-only", action="store_true",
+                    help="skip the mode comparison and cross-checks, "
+                         "which read flight lists another run wrote")
     ap.add_argument("--local", action="store_true",
                     help="run in local mode. The benchmark inputs are small -- "
                          "7.5M cached candidates, 233k flight records, 95k "
@@ -223,33 +226,45 @@ def main() -> None:
     print(f"ground-truth flights: {gt.count():,}")
 
     # -- headline: the three modes, as the pipeline actually produced them ---
-    print("\n  NOTE: the mode comparison and cross-checks below read the flight\n"
-          "  lists under research/, not the candidate cache. Confirm they were\n"
-          "  written with the parameters under test.")
-    rows = []
-    for mode in MODES:
-        pred, ident = from_flight_list(spark, mode)
-        m = score(pred, ident, gt)
-        m["mode"] = mode
-        rows.append(m)
-        print(f"  {mode:9} ADEP cov {m['adep_coverage']:6.2%} acc {m['adep_accuracy']:6.2%}"
-              f"   ADES cov {m['ades_coverage']:6.2%} acc {m['ades_accuracy']:6.2%}"
-              f"   in-area acc {m['adep_inarea_accuracy']:6.2%}")
-    spark.createDataFrame(rows).toPandas().to_csv(out / "mode_comparison.csv", index=False)
+    #
+    # Skippable, and skipped by the V6 regeneration chain. This block reads the
+    # flight lists under research/, which some *other* run wrote at whatever
+    # parameters were current then; the V6 report gets its mode comparison from
+    # flight_list_v6.py, which builds the tables it scores. Leaving this on
+    # would spend cluster time producing numbers nothing reads, and leave a
+    # second mode_comparison.csv lying around for someone to pick up by
+    # mistake.
+    # Skipped by the V6 regeneration chain. This block reads the flight lists
+    # under research/, which some *other* run wrote at whatever parameters were
+    # current then; the V6 report takes its mode comparison from
+    # flight_list_v6.py, which builds the tables it scores. Leaving it on spends
+    # cluster time producing numbers nothing reads, and leaves a second
+    # mode_comparison.csv for someone to pick up by mistake.
+    if args.sweeps_only:
+        print("\n  skipping the mode comparison and cross-checks (--sweeps-only):\n"
+              "  they read pipeline output written by another run.")
+    else:
+        print("\n  NOTE: the mode comparison and cross-checks below read the\n"
+              "  flight lists under research/, not the candidate cache. Confirm\n"
+              "  they were written with the parameters under test.")
+        rows = []
+        for mode in MODES:
+            pred, ident = from_flight_list(spark, mode)
+            m = score(pred, ident, gt)
+            m["mode"] = mode
+            rows.append(m)
+            print(f"  {mode:9} ADEP cov {m['adep_coverage']:6.2%} "
+                  f"acc {m['adep_accuracy']:6.2%}"
+                  f"   ADES cov {m['ades_coverage']:6.2%} "
+                  f"acc {m['ades_accuracy']:6.2%}")
+        spark.createDataFrame(rows).toPandas().to_csv(
+            out / "mode_comparison.csv", index=False)
 
-    # -- cross-checks against the reference ---------------------------------
-    # Ahead of the sweeps: these read the flight lists, which are already open,
-    # and --skip-sweeps is normally used when only the cross-checks changed.
-    pred, ident = from_flight_list(spark, "endpoint")
-    per_airport_counts(pred, ident, gt).toPandas().to_csv(
-        out / "per_airport.csv", index=False
-    )
-    pt = per_type_counts(pred, ident, gt, airport_types(spark)).toPandas()
-    pt.to_csv(out / "per_type.csv", index=False)
-    for r in pt.itertuples():
-        acc = f"{r.accuracy:6.2%}" if r.n_answered else "     -"
-        print(f"  {r.role:10} {r.apt_type:18} n {r.n_truth:>6,}"
-              f"  cov {r.coverage:6.2%}  acc {acc}")
+        pred, ident = from_flight_list(spark, "endpoint")
+        per_airport_counts(pred, ident, gt).toPandas().to_csv(
+            out / "per_airport.csv", index=False)
+        pt = per_type_counts(pred, ident, gt, airport_types(spark)).toPandas()
+        pt.to_csv(out / "per_type.csv", index=False)
 
     if args.skip_sweeps:
         print(f"\nwritten to {out}")

@@ -113,12 +113,12 @@ def jobs() -> list:
             "second period; tracks pre-date H3 indexing so the index is computed"),
 
         Job("endpoint_sweeps", "benchmarks/benchmark_modes.py",
-            ["--months", "202506", "--days", *DAYS_2025],
+            ["--months", "202506", "--days", *DAYS_2025, "--sweeps-only"],
             {"sweep_radius_height.csv": "sweep_radius_height_2025.csv",
              "sweep_penalty.csv": "sweep_penalty_2025.csv",
              "sweep_cone.csv": "sweep_cone_2025.csv"}, CORE,
-            "sweeps read the candidate cache; the mode comparison in this "
-            "script reads pipeline output and is NOT used by the report"),
+            "--sweeps-only: this script can also score pipeline output written "
+            "by another run, which the report does not use"),
 
         Job("bearing", "benchmarks/bearing_whole_sample.py",
             ["--months", "202506", "--days", *DAYS_2025, "--executors", "10"],
@@ -136,6 +136,19 @@ def jobs() -> list:
              "per_airport_v6.csv": "per_airport_v6.csv",
              "per_type_v6.csv": "per_type_v6.csv"}, PIPE,
             "real process_dai runs; this is what the verdict is scored on"),
+
+        Job("trend_grid", "benchmarks/flight_list_v6.py",
+            ["--months", "202506", "--days", *DAYS_2025,
+             "--trend-sweep", str(DATA / "trend_sweep_2025.csv"),
+             "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
+             "--runs", *[f"grid_fl{fl}_r{r:g}_m2"
+                         for fl in (40, 60, 80, 100, 120) for r in (20, 30)],
+             "--grid-fl", "40", "60", "80", "100", "120",
+             "--grid-radius", "20", "30", "--grid-margin", "2",
+             "--trend-rank-by", "haversine", "--executors", "10"],
+            {"mode_comparison_v6.csv": "trend_grid_v6.csv"}, PIPE,
+            "trend FL cap x radius swept through process_dai itself, not the "
+            "harness -- this is where production's own optimum is found"),
 
         Job("pipeline_path", "benchmarks/flight_list_v6.py",
             ["--months", "202506", "--days", *DAYS_2025,
