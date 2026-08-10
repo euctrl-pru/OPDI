@@ -60,7 +60,13 @@ CACHE_RADIUS_NM = 80.0
 
 #: Swept in stage 1, at a fixed penalty.
 MARGINS = (0, 2, 4, 8, 16)
-RADII_NM = (20.0, 30.0, 40.0, 60.0, 80.0)
+#: Extended below 20 NM after the first pass put *both* roles' optimum on the
+#: grid floor. The reason is visible in the counts: over 20-80 NM `correct`
+#: moves by ~160 flights while `wrong` doubles, so under any k the score falls
+#: monotonically outward and the argmax was the smallest radius offered rather
+#: than a real peak. Going lower is free -- `predictions` filters the cached
+#: `dist_{cap}`, so a tighter radius is a query-time filter, not a rebuild.
+RADII_NM = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 60.0, 80.0)
 
 #: Stage 2 sweeps the penalty at each role's winning cell, matching the range
 #: the endpoint study used so the two are comparable.
