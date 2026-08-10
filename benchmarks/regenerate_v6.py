@@ -248,27 +248,12 @@ def stages() -> list:
               "builder reads field elevations from. Step ids are 00/01/02/... "
               "-- there is no 00a at this level, the substeps live inside 00"),
 
-        Stage("01_ingest_statevectors",
-              OPDI + ["--step", "01", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
-              T_SV, PIPELINE_SRC + ["src/opdi/ingestion/osn_statevectors.py"],
-              "bbox-filtered, 5 s decimated; never the raw global 1 s feed"),
-
-        Stage("02_tracks",
-              OPDI + ["--step", "02", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
-              T_TRACKS, PIPELINE_SRC + ["src/opdi/pipeline/tracks.py"],
-              "track splitting is frozen: _add_track_id must not change"),
-
         Stage("03_endpoint_candidates",
-              [sys.executable, "-c",
-               "import sys; sys.path.insert(0,'src');"
-               "from opdi.config import OPDIConfig;"
-               "from opdi.utils.spark import get_spark_session;"
-               "from opdi.pipeline.flights import FlightListProcessor;"
-               "from datetime import date;"
-               "cfg=OPDIConfig.for_environment('opensky');"
-               "s=get_spark_session(app_name='opdi-candidates', config=cfg, distributed=True);"
-               "FlightListProcessor(s,cfg).build_endpoint_candidates(date(2025,6,1))"],
-              T_CAND, PIPELINE_SRC + ["src/opdi/pipeline/flights.py"],
+              [sys.executable, "-u", "benchmarks/build_candidates.py",
+               "--month", "202506", "--executors", "10"],
+              T_CAND,
+              ["benchmarks/build_candidates.py", "src/opdi/pipeline/flights.py",
+               "src/opdi/config.py"],
               "first/last fix per track against every aerodrome within 110 NM; "
               "the cache the endpoint sweeps filter",
               inputs=[T_TRACKS, T_ZONES]),
