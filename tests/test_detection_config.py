@@ -94,3 +94,34 @@ def test_every_field_carries_its_unit_or_is_unitless(field_name):
     be read in the wrong one. Counts and levels are the exceptions."""
     unitless = {"trend_max_fl", "trend_smooth_half_window", "trend_vote_margin"}
     assert field_name in unitless or field_name.endswith(("_nm", "_ft"))
+
+
+def test_shipped_defaults_are_the_values_the_study_supports():
+    """The defaults must match what V6 concluded, not what its sweeps preferred.
+
+    Two of the sweep's favourite values are deliberately *not* here. The
+    flight-level cap stays at production's FL40 because raising it lost ground
+    when run through the pipeline, and the trend radius stays at 30 NM because
+    the argmax was worth fifteen flights on one sample. Encoding that here
+    means a future edit that "restores the optimum" has to argue with a test
+    rather than with a comment.
+    """
+    d = DetectionConfig()
+    assert d.trend_max_fl == 40
+    assert d.trend_radius_nm == 30.0
+    assert d.trend_vote_margin == 4
+    # The one tuned trend value the pipeline confirmed.
+    assert d.trend_sched_penalty_nm == 10.0
+    # Endpoint: radius revised, height confirmed where it already was.
+    assert d.endpoint_radius_nm == 30.0
+    assert d.endpoint_height_ft == 15000.0
+    assert d.endpoint_sched_penalty_nm == 10.0
+
+
+def test_defaults_differ_from_legacy_so_the_preset_is_load_bearing():
+    """If these ever coincide, `legacy()` has stopped protecting anything and
+    the published-data guarantee is silently vacuous."""
+    assert DetectionConfig() != DetectionConfig.legacy()
+    # Precisely: the scheduled-service penalty and the endpoint radius moved.
+    assert DetectionConfig.legacy().trend_sched_penalty_nm == 0.0
+    assert DetectionConfig.legacy().endpoint_radius_nm == 40.0

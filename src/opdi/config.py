@@ -419,10 +419,24 @@ class DetectionConfig:
     trend_max_fl: int = 40
     """Only samples below this flight level are considered. This is the
     binding constraint on trend's coverage: an aircraft never seen below it
-    near an aerodrome has no candidate at all, whatever the radius."""
+    near an aerodrome has no candidate at all, whatever the radius.
+
+    **Deliberately left at the production value.** The sweep harness preferred
+    FL120 by a wide margin, and running that through the pipeline lost 1,741
+    points of score where the harness predicted a gain. The harness ranks
+    candidate aerodromes by exact haversine distance; the pipeline keeps only
+    those at the minimum H3 ring count and tie-breaks within that set. Raising
+    the cap admits samples from higher up, where more aerodromes share a ring
+    and the coarser tie-break has to separate them -- so it answers more often
+    and is right less often. Do not raise this without re-measuring through
+    :meth:`FlightListProcessor.process_dai`, not through a sweep."""
 
     trend_radius_nm: float = 30.0
-    """Zone radius for the sample-to-aerodrome join."""
+    """Zone radius for the sample-to-aerodrome join.
+
+    Left at the production value. The harness's argmax was 20 NM, worth 15
+    flights out of 61,038 on a single three-day sample -- inside the noise, and
+    not enough to move a published constant for."""
 
     trend_smooth_half_window: int = 2
     """Half-width of the centred rolling mean over ``baro_altitude``, in
@@ -431,17 +445,33 @@ class DetectionConfig:
 
     trend_vote_margin: int = 4
     """One direction must beat the other by this many samples or the pair is
-    ``ambiguous`` and dropped. At 5 s sampling, 4 is about 20 s."""
+    ``ambiguous`` and dropped. At 5 s sampling, 4 is about 20 s.
 
-    trend_sched_penalty_nm: float = 0.0
-    """Scheduled-service penalty applied to trend's aerodrome choice. Zero
-    reproduces the original behaviour, which applied none."""
+    Left at the production value: its gain in the sweep was measured on top of
+    a raised flight-level cap that is not being adopted, so it recovers ground
+    that is never given away here."""
+
+    trend_sched_penalty_nm: float = 10.0
+    """Scheduled-service penalty applied to trend's aerodrome choice.
+
+    **Changed from 0.** This is the one tuned trend value the pipeline confirms:
+    worth +234 score, and across the hundred busiest aerodromes it improves 4
+    departures and 5 arrivals while worsening none. It re-ranks candidates
+    without changing how many are answered, so coverage is untouched and only
+    accuracy moves."""
 
     # -- endpoint --------------------------------------------------------
-    endpoint_radius_nm: float = 40.0
+    endpoint_radius_nm: float = 30.0
+    """**Changed from 40.** An interior optimum of the radius x height sweep,
+    and one the pipeline reproduces exactly -- the endpoint sweep filters the
+    same cached candidate table the pipeline reads, so harness and pipeline
+    agree to the flight."""
+
     endpoint_height_ft: float = 15000.0
     """Height above *field elevation*, not above sea level -- a fixed altitude
-    cut-off means nothing at an aerodrome sitting at 5,000 ft."""
+    cut-off means nothing at an aerodrome sitting at 5,000 ft.
+
+    Confirmed at the value it already had: the sweep's argmax lands here."""
 
     endpoint_sched_penalty_nm: float = 10.0
     endpoint_candidate_radius_nm: float = 110.0
