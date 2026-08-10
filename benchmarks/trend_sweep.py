@@ -187,6 +187,10 @@ def main() -> None:
                     default=["2025-06-05", "2025-06-06", "2025-06-07"])
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--build", action="store_true", help="rebuild the vote cache")
+    ap.add_argument("--build-only", action="store_true",
+                    help="build the vote cache and stop, without sweeping. The "
+                         "cache is an input several jobs share, so building it "
+                         "is a separate step from scoring 371 cells over it.")
     ap.add_argument("--tracks", default=TRACKS,
                     help=f"track table to build the cache from (default {TRACKS}; "
                          f"use {TRACKS_2024} for the 2024 period)")
@@ -213,6 +217,11 @@ def main() -> None:
         print("building the vote cache (one pass over the tracks)...")
         (build_cache(spark, args.days, tracks=args.tracks, add_h3=args.add_h3)
          .write.mode("overwrite").parquet(args.cache))
+    if args.build_only:
+        print("vote cache built; stopping before the sweep (--build-only)")
+        spark.stop()
+        return
+
     votes = spark.read.parquet(args.cache).cache()
     print(f"vote cache: {votes.count():,} (track, aerodrome) pairs")
 

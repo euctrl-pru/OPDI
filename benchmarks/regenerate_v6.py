@@ -246,7 +246,8 @@ def stages() -> list:
         Stage("03_trend_votes_2025",
               [sys.executable, "-u", "benchmarks/trend_sweep.py",
                "--months", "202506", "--days", *DAYS_2025, "--build",
-               "--executors", "10", "--results-dir", "/tmp/v6_votecache_2025"],
+               "--build-only", "--executors", "10",
+               "--results-dir", "/tmp/v6_votecache_2025"],
               T_VOTES, ["benchmarks/trend_sweep.py"],
               "vote counts per (track, aerodrome) at every FL cap, in one pass"),
 
@@ -254,8 +255,8 @@ def stages() -> list:
               [sys.executable, "-u", "benchmarks/trend_sweep.py",
                "--months", "202406", "--days", *DAYS_2024, "--build",
                "--tracks", T_TRACKS24, "--add-h3", "--cache", T_VOTES24,
-               "--out-name", "trend_sweep_2024.csv", "--executors", "10",
-               "--results-dir", "/tmp/v6_votecache_2024"],
+               "--out-name", "trend_sweep_2024.csv", "--build-only",
+               "--executors", "10", "--results-dir", "/tmp/v6_votecache_2024"],
               T_VOTES24, ["benchmarks/trend_sweep.py"],
               "second period; its tracks pre-date H3 so the index is computed"),
 
