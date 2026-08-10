@@ -168,7 +168,11 @@ def main() -> None:
     # benchmark exists to measure.
     ident = (c.groupBy("track_id").agg(
                  F.min("icao24").alias("icao24"),
-                 F.min("flight_id").alias("callsign"),
+                 # Trimmed. ADS-B callsigns are space-padded to eight
+                 # characters and the ground-truth callsign is not, so an
+                 # untrimmed join matches nothing at all -- which shows up as
+                 # every variant scoring exactly 0.00%, not as an error.
+                 F.trim(F.min("flight_id")).alias("callsign"),
                  F.min("t_first").alias("t_start"))
              .withColumn("icao24", F.lower("icao24"))
              .withColumn("day", F.to_date("t_start")))
@@ -188,6 +192,12 @@ def main() -> None:
 
     def run(label, pred):
         m = score(pred, ident, gt)
+        if m["adep_coverage"] == 0 and m["ades_coverage"] == 0:
+            raise SystemExit(
+                f"{label!r} scored zero coverage on both roles. That is not a "
+                f"result -- with {gt.count():,} ground-truth flights and a "
+                f"non-empty candidate set it means the identity join matched "
+                f"nothing. Check icao24 case and callsign padding.")
         m["model"] = label
         rows.append(m)
         print(f"  {label:<38} ADEP {m['adep_coverage']:6.2%}/{m['adep_accuracy']:6.2%}"
