@@ -18,10 +18,22 @@ Log: `$CLAUDE_JOB_DIR/tmp/v61c/chain.log`
 5 s window — instead of `"modulo"`, which keeps a row only if one exists at the
 single second per window congruent to zero.
 
-Measured previously on one day: **+0.26 pp arrival coverage, −0.12 pp accuracy**,
-departures flat. Below the 0.5 pp bar, adopted anyway on the argument that the
-bin-based rule is the correct one and does not depend on the OpenSky archive
-carrying positions forward. v6.1 re-measures it on three days.
+**There is no current measurement of this.** The only figure that exists --
++0.26 pp arrival coverage, -0.12 pp accuracy, departures flat -- comes from the
+earlier decimation study, and it should not be quoted as the sampler's benefit:
+
+* one day, 2025-06-05, not the three-day sample;
+* measured *before* the ranking rule changed from H3 ring count to exact
+  haversine, so on an algorithm since materially altered;
+* at `endpoint` 30 NM / 15,000 ft applied to both roles, which is not the
+  shipped configuration;
+* and it is exactly the kind of carried-over number V6's own rule forbids.
+
+The `decimation` job in this run produces the current figure, both arms, three
+days, against the shipped configuration. Whether it clears the 0.5 pp bar is
+open until then. The adoption rests on the argument that the bin-based rule is
+the correct one and does not depend on the archive carrying positions forward
+-- not on a measured gain.
 
 **`track_id` values will differ** from those published under the modulo rule,
 because the rescued rows sit at track boundaries and the splitter breaks on
