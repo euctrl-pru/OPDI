@@ -371,13 +371,13 @@ def jobs() -> list:
             "slope, or OLS over the window",
             inputs=[T_CAND, T_TRACKS, T_REF]),
 
-        Job("decimation", "benchmarks/decimation_end_to_end.py",
-            ["--days", *DAYS_2025, "--month", "202506", "--skip-ingest",
-             "--skip-build", "--executors", "10"],
-            {"arm_comparison.csv": "decimation_v6.csv"},
-            CORE + ["src/opdi/ingestion/osn_statevectors.py"],
-            "bucket decimation against the modulo rule, end to end",
-            inputs=[T_CAND, T_REF]),
+        Job("sampler_comparison", "benchmarks/sampler_comparison.py", [],
+            {"sampler_comparison.csv": "sampler_comparison_v6.csv"},
+            CORE + ["benchmarks/sampler_comparison.py"],
+            "bucket against modulo across every parameter cell of two full "
+            "runs. Replaces the end-to-end decimation harness, whose two arms "
+            "had drifted onto different periods and which cannot be run at all "
+            "now that the bucket rule is the production default"),
 
         Job("merge_diagnosis", "benchmarks/merge_diagnosis.py",
             ["--executors", "8"],
