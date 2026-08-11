@@ -171,3 +171,33 @@ the OpenSky archive carrying positions forward. The measurement now says the
 correctness costs nothing, which is the useful thing to know. It should be
 documented as neutral on accuracy and adopted on principle, not sold as an
 improvement.
+
+## New result: bearing improves `trend`, as a tie-break
+
+The comparison that had never been made. `trend` is what ships for arrivals and
+it fails by *misnaming*, so the variants that suit it are a rerank or a
+tie-break -- not the rescue used on the endpoint family.
+
+| variant | ADES cov | ADES acc | correct | wrong | vs shipped |
+|---|---|---|---|---|---|
+| base: trend as shipped | 69.76% | 97.33% | 64,583 | 1,769 | — |
+| tie-break within 1 NM | 69.76% | 97.75% | 64,857 | 1,495 | +822 |
+| **tie-break within 2 NM** | 69.76% | **97.91%** | 64,963 | **1,389** | **+1,140** |
+| tie-break within 5 NM | 69.76% | 95.77% | 63,542 | 2,810 | -3,123 |
+| rerank by alignment | 69.76% | 69.07% | 45,830 | 20,522 | -56,259 |
+| veto (best, >10 deg) | 20.39% | 99.35% | 19,263 | 127 | -42,036 |
+
+**+0.58 pp accuracy at zero coverage cost** -- 380 wrong answers become correct.
+Interior optimum at 2 NM. This clears the 0.5 pp bar, and unlike a coverage
+change it involves no trade-off at all: the same flights are answered, more of
+them correctly.
+
+Why the shape makes sense: alignment cannot *name* an aerodrome, because every
+aerodrome on the same radial behind the right one is equally aligned -- hence
+rerank losing 56,259. But it can separate two candidates that are already
+nearly equidistant, which is exactly what the distance band restricts it to.
+
+**Not adopted.** This is a new algorithmic component, not a parameter: the
+pipeline would need the track course computed in the flight-list path. One
+period, one measurement. It is the strongest candidate for the next change and
+should be reviewed rather than shipped overnight.
