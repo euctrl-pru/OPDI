@@ -379,6 +379,16 @@ def jobs() -> list:
             "bucket decimation against the modulo rule, end to end",
             inputs=[T_CAND, T_REF]),
 
+        Job("merge_diagnosis", "benchmarks/merge_diagnosis.py",
+            ["--executors", "8"],
+            {"merge_shapes.csv": "merge_shapes_v6.csv",
+             "merge_agreement.csv": "merge_agreement_v6.csv"},
+            CORE,
+            "whether taking the two roles from different methods loses "
+            "arrivals, or only moves which track the benchmark pairs with each "
+            "reference flight",
+            inputs=[T_REF]),
+
         Job("pipeline_path_ring", "benchmarks/flight_list_v6.py",
             ["--months", "202506", "--days", *DAYS_2025,
              "--trend-sweep", str(DATA / "trend_sweep_2025.csv"),
