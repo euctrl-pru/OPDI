@@ -353,6 +353,42 @@ The chain resumed at 22:15 with the six remaining pipeline jobs. Stages and
 sweeps are recorded and current, so no `--with-stages` and no `--rebuild-stage`:
 rebuilding a cache that is already right costs an hour and changes nothing.
 
+### The ladder, first six rungs (2025, both roles from `trend`)
+
+| Rung | Dep score | Δ dep | Arr score | Δ arr |
+|---|---|---|---|---|
+| L00 legacy | 63,064 | — | 60,600 | — |
+| L01 + exact-distance ranking | 62,539 | **−525** | 60,255 | **−345** |
+| L02 + exact radius cut | 62,512 | −27 | 60,255 | **0** |
+| L03 + smooth before the cut | 62,714 | +202 | 60,211 | −44 |
+| L04 + scheduled-service penalty | 63,563 | +849 | 61,072 | +861 |
+| L05 + flight-level cap FL60 | 67,185 | +3,622 | 61,748 | +676 |
+
+Three things worth stating carefully.
+
+**Exact ranking is an enabler, not an improvement.** On its own, at legacy
+thresholds, it *costs* 345 arrivals and 525 departures. Version 6 measured the
+same sign at the same point. What it buys is what happens four rungs later: with
+exact ranking the flight-level cap gains 676 arrivals, and under the old
+ring-count selection version 6 measured the identical change *losing* about
+1,700. So the honest sentence is not "exact ranking is worth X" -- it is "exact
+ranking is what makes the cap tunable at all", and any report that quotes the
+first rung alone gets the story backwards.
+
+**The exact radius cut is inert here, and that is correct.** Arrivals are
+byte-identical -- same coverage, same 63,243 correct, same 1,494 wrong -- and
+departures move by 27. That pattern is the signature that flagged the inert
+scheduled-service penalty in version 6, so it deserves a check rather than a
+shrug: departures *did* move, so the parameter reaches the code. The reason it
+does almost nothing is geometry. The zone table is banded in 5 NM steps, the
+legacy radius is 30 NM, and 30 falls exactly on a band boundary -- so the band
+filter and the exact cut select almost the same samples. It would matter at a
+radius that falls *between* boundaries, and 30 does not.
+
+**The scheduled-service penalty is the first unambiguous win**: +849 departures
+and +861 arrivals, and it is the one tuned value version 6 also confirmed
+through the pipeline.
+
 ### Two things to watch for, and what to do about them
 
 **The vote cache is the job most likely to fail.** It pre-filters on
