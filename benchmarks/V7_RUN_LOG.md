@@ -149,6 +149,8 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 20:50 | vote cache 2025 | started |
 | 21:18 | both vote caches | built, all 14 caps |
 | 21:18 | trend_sweep_2025 | **staged** — 560 cells |
+| 21:47 | trend_sweep_2024 | staged |
+| 21:47 | endpoint_sweep_2025 | staged (radius x height, penalty) |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -267,6 +269,56 @@ less informative. The score turns where those two cross.
 
 The shipped arrival cap of FL60 scores 60,844 against FL50's 60,902 — a
 difference of 58 flights in 95,116, which is noise. The value is safe.
+
+### Cleaning changed the optimal vote margin, and the radius
+
+Ranking all 560 cells by both periods together -- each period's score divided by
+its own reference count -- the shipped arrival cell places **20th of 560**. It is
+beaten consistently, on both periods, by two changes.
+
+**The vote margin should be 0, not 2.** At FL60 / 20 NM / 10 NM penalty:
+
+| Margin | 2025 coverage | 2025 accuracy | 2025 score | 2024 score |
+|---|---|---|---|---|
+| **0** | 68.86% | 97.73% | **61,031** | **52,482** |
+| 2 | 68.56% | 97.77% | 60,844 | 52,317 |
+| 4 | 68.12% | 97.81% | 60,546 | 52,149 |
+| 8 | 67.36% | 97.87% | 59,972 | 51,751 |
+| 16 | 65.80% | 97.95% | 58,741 | 50,900 |
+
+Monotonic on both periods: every increase in the margin costs coverage and buys
+almost no accuracy -- 2.3 points of coverage from margin 0 to 16, for 0.22 of
+accuracy.
+
+**This is an interaction with cleaning, and it is the interesting part.** The
+vote margin exists to stop noise flipping a climb/descent call. Cleaning already
+removes that noise -- it masks a fifth of barometric altitudes and nearly half
+the velocity columns -- so the margin is now defending against something that is
+largely gone, and all it does is refuse flights it could have answered. The
+value shipped, 2, was tuned on **raw** tracks in version 6, where it was worth
+about 150 flights. On cleaned tracks its job has been done for it.
+
+**The radius should be 30 NM, not 20.** An interior optimum on both periods:
+
+| Radius | 2025 score | 2024 score |
+|---|---|---|
+| 15 NM | 59,417 | 51,190 |
+| 20 NM | 60,844 | 52,317 |
+| **30 NM** | **60,988** | **52,534** |
+| 40 NM | 60,931 | 52,500 |
+| 60 NM | 60,828 | 52,371 |
+
+Version 6's joint ranking preferred 30 NM too, and shipped 20 NM on a
+single-period argmax. Two periods and a different input treatment now agree.
+
+**Nothing is being changed mid-run.** These are sweep figures, and this study's
+rule is that the sweep proposes and the pipeline disposes -- the whole reason
+version 6 went wrong was a value adopted on harness evidence that the pipeline
+contradicted. The ladder walks both the margin and the radius as their own
+rungs, so `ladder_2025` and `ladder_2024` will price exactly what the shipped
+values cost. If the pipeline agrees, this is a defaults change for a follow-up
+with two periods of evidence behind it, not something to ship tonight by
+editing a config while the run that would have tested it is still going.
 
 ### Two things to watch for, and what to do about them
 
