@@ -15,7 +15,9 @@ git-lfs, because OSN pulls them with a shallow clone of this repo.
 
 ## Pipeline prefixes
 
-Measured 2026-08-08: **42.69 GB** across the whole bucket.
+Measured 2026-08-12: **67.40 GB** across the whole bucket, of which
+**42.81 GB is `opdi/osn_symposium_paper_2026/` and belongs to another
+project** — leave it alone. OPDI's own footprint is about 24 GB.
 
 The ADEP/ADES version 4 study ran the pipeline itself rather than a private
 harness, so several of these were rewritten by that run and no longer hold what
@@ -23,7 +25,8 @@ earlier notes here described. The column says which.
 
 | Prefix | Size | Objects | Contents |
 |---|---|---|---|
-| `opdi/osn_statevectors_v2/` | 6.13 GB | 469 | **Rewritten 2026-08.** 142,630,930 rows for 2025-06-05/06/07, already reduced to the Europe bbox and 5 s at ingest — step 01 applies both filters before anything is written, so the raw global 1 s feed is never persisted. |
+| `opdi/osn_statevectors_v2/` | — | — | **Deleted 2026-08-12 with approval.** Step 01's output for 2025-06-05/06/07: bbox- and 5 s-reduced at ingest, so the raw global 1 s feed was never persisted. It is consumed only by step 02, which was complete, and it is regenerable by re-ingesting from the OpenSky archive (about 40 minutes). Deleted to make room for the cleaned track tables. |
+| `opdi/osn_tracks_clean/` | ~10 GB | — | **New 2026-08.** Step 02a output: `osn_tracks` with implausible values masked to NULL and rows preserved, plus `segment_id` at coverage gaps. This is what the flight list reads from v4.0.0 onward — before that, step 02a wrote a table nothing consumed. |
 | `opdi/osn_tracks/` | 10.16 GB | 5 | **Rewritten 2026-08**, same three days. Full track schema incl. `track_id`, `h3_res_7`, `h3_res_12`, `*_altitude_c`. This is *not* the 2025-08-01 snapshot earlier revisions of this file described; that one was deleted. |
 | `opdi/h3_airport_detection_zones/` | 0.22 GB | 152 | **Regenerated 2026-08.** 33,751,619 (aerodrome, cell) rows for the 1,353 large and medium aerodromes in the bbox. H3 res-7 cells in concentric bands — 5 NM steps to 40 NM, then 10 NM steps to 110 NM — with `min_c_radius_nm` / `max_c_radius_nm` on every row, so a consumer picks its own radius at read time. Reaches 110 NM so the same table can serve ASMA 40/100 NM ring crossings. |
 | `opdi/opdi_endpoint_candidates/` | 0.16 GB | 20 | **New 2026-08.** 7,491,655 rows. For each track's first and last sample, every aerodrome whose zone contains it, with the exact great-circle distance, field elevation and height above it. Written by `pipeline/flights.py:build_endpoint_candidates` with `mode="overwrite"` — it appended in an early revision and silently doubled itself. This cache is what makes a threshold sweep a filter rather than a pipeline run. |
@@ -39,15 +42,25 @@ Gone, deliberately:
 
 * `opdi/opdi_h3_airspace_ref/` — step 00c output, read by nothing in the
   codebase. Deleted; step 00c regenerates it if an airspace event ever needs it.
+* `opdi/research/sv_bucket/`, `research/tracks_bucket/`, `research/cand_bucket/`
+  — 6.83 GB, the decimation study's **experimental arm**. Deleted 2026-08-12
+  with approval, and redundant rather than merely old: the bin-based sampler is
+  now the production default, so `osn_tracks` *is* the bucket-sampled table and
+  a second copy under a research name preserved nothing. The published
+  decimation paper renders from committed CSVs and never read them. Only
+  `benchmarks/decimation_end_to_end.py` and `arrivals_bucket_vs_trend.py`
+  reference them, and neither is in the V6 or V7 chain.
 * `opdi/research/statevectors/` — superseded. Step 01 has an `ingest_from_s3`
   path for the `opensky` environment that does what `osn_sample.py` was written
   to do, so research reads the pipeline's own state vectors.
 
 Not this work:
 
-* `opdi/osn_symposium_paper_2026/` — 13.09 GB, 86 objects, written by a
-  concurrent job. Recorded here so it is not mistaken for an unidentified
-  prefix. Do not build on it or delete it.
+* `opdi/osn_symposium_paper_2026/` — **42.81 GB, 309 objects** as of
+  2026-08-12, written by a concurrent job and still growing. Recorded here so it
+  is not mistaken for an unidentified prefix. Do not build on it or delete it.
+  It is now the single largest thing in the bucket, well over half of the total,
+  so any headroom calculation has to start by setting it aside.
 
 ---
 
@@ -85,10 +98,13 @@ bucket is full, and they fail **at the end of a job**, after the work is done
 and the results have been printed to stdout but before they are persisted. A
 whole chain can therefore appear to run and leave nothing behind.
 
-Production is ~48 GB and the quota is around 100 GB, so research output has to
-be pruned rather than accumulated. Track builds are the expensive artefact
-(~4 GB per 3-day sample per filter variant) and are all rebuildable from the
-state vectors, which are the thing worth keeping.
+The quota is around 100 GB. As of 2026-08-12 the bucket holds 67.40 GB, of
+which 42.81 GB is another project's symposium data -- so OPDI has about 24 GB
+in use and rather less headroom than the raw total suggests.
+
+Track builds are the expensive artefact (~10 GB per 3-day sample per variant).
+Since v4.0.0 there are two per period, raw and cleaned, and the cleaned one is
+what the flight list reads.
 
 Check before a long run:
 
@@ -175,9 +191,14 @@ All under `opdi/research/`, deliberately separate from the pipeline prefixes abo
 | `opdi/research/adep_ades/cascade_diag/<tag>_<ladder>_vs_<control>/` | 0.00 GB | `--diagnose-cascade` | Per-rung attribution for M6: how many flights each rung answered, its accuracy on them, and the control's accuracy on the same flights. | v1–v3 |
 | `opdi/research/adep_ades/abstain_sweep/<airport_set>/` | 0.00 GB | `--sweep-abstain` | M7 coverage/accuracy over the endpoint distance x height grid (8 x 6 = 48 rows). | v1–v3 |
 
-**Prune `research/tracks/` first.** At 11.93 GB it is by far the largest research
-artefact, it belongs to versions 1–3, and it is fully rebuildable from the state
-vectors. Version 4 does not read it — the pipeline builds its own tracks.
+::: warning
+**Do not prune `research/tracks/`.** An earlier revision of this file
+recommended it as the first thing to delete, on the grounds that version 4 did
+not read it. Versions 6 and 7 do: it is the **second period**, 2024-06-05/07,
+and it is the only sample any parameter is validated against. It is also no
+longer rebuildable from state vectors on this bucket, because the 2024 state
+vectors were never ingested here.
+:::
 
 ### Reproducing version 4
 
