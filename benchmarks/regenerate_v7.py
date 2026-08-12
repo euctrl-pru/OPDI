@@ -110,12 +110,25 @@ class Stage:
     def key(self):
         return f"table:{self.produces}"
 
+    #: Below this a "table" is committer scaffolding, not data. A run killed
+    #: mid-write leaves the magic committer's `.pendingset` markers behind --
+    #: tens of objects and a few kilobytes -- and a table with objects in it
+    #: otherwise reads as present, so the chain would *record* the wreckage
+    #: rather than rebuild it. Nothing would fail; every figure downstream would
+    #: just be computed from a table that is not there.
+    MIN_BYTES = 1_000_000
+
     def stale(self):
         ident = provenance.s3_identity(self.produces)
         if ident.get("error"):
             return {self.produces: f"cannot check ({ident['error']})"}
         if not ident.get("objects"):
             return {self.produces: "table absent or empty"}
+        if ident.get("bytes", 0) < self.MIN_BYTES:
+            return {self.produces:
+                    f"only {ident['bytes'] / 1e6:.2f} MB across "
+                    f"{ident['objects']} objects -- committer scaffolding from "
+                    f"an interrupted write, not a table"}
         entry = provenance.load_manifest(DATA).get(self.key)
         if entry is None:
             return {self.produces: "present, but no provenance recorded"}
@@ -139,7 +152,10 @@ class Stage:
         ident = provenance.s3_identity(self.produces)
         entry = provenance.load_manifest(DATA).get(self.key)
         stale_input = provenance.inputs_changed(entry, self.inputs) if entry else ""
-        present = bool(ident.get("objects")) and not stale_input and not rebuild
+        # Same threshold as `stale`: committer leftovers are not a table, and
+        # recording them as one is the quietest way to lose a whole run.
+        real = ident.get("bytes", 0) >= self.MIN_BYTES
+        present = real and not stale_input and not rebuild
         note = self.notes
         if stale_input:
             print(f"  {stale_input} -- rebuilding rather than recording")

@@ -89,4 +89,46 @@ track tables add roughly 22 GB, landing near 89 GB against a ~100 GB quota.
 
 ## Progress
 
-<!-- appended as the run proceeds -->
+### 2026-08-12 13:03 — 16:37 · step 02a, 2025
+
+`osn_tracks_clean` written: **202 objects, 9.86 GB**. About 3.5 hours, most of
+it the shuffle behind `repartition("track_id")`.
+
+### 2026-08-12 16:39 — 16:57 · chain started, then stopped and restarted
+
+The chain began, recorded the three upstream tables that were already present,
+and started cleaning the 2024 period. **Stopped after 18 minutes and
+relaunched**, for a defect that would not have surfaced for another eight hours.
+
+**What was wrong.** The 2024 tracks are a research copy built before step 02
+attached an H3 index, so they have no `h3_res_7`. The flight list's `trend` path
+joins aerodrome detection zones on exactly that column, so `ladder_2024`,
+`modes_2024` and `grid_2024` would every one of them have died on a missing
+column — after the ladders and grids for 2025 had already run.
+
+Caught by checking the 2024 schema against what the cleaner and the pipeline
+each require, rather than by waiting for it. The fix attaches the index to the
+cleaned 2024 output, which makes that table a drop-in for the real detection
+code; the 2025 tracks already carry it because step 02 puts it there.
+
+**Two further defects found while fixing it:**
+
+1. **The redirect was applied to the wrong thing.** It mapped the table *name*,
+   and `table_ref` registers a Spark temp view named after the table — so the
+   cleaner's `SELECT * FROM research/tracks` would not have parsed, a slash not
+   being a legal identifier. It now redirects `_s3_path` instead, which leaves
+   the view named `osn_tracks` while reading the 2024 copy, and covers reads,
+   writes and schema probes in one place rather than three that can disagree.
+2. **An interrupted write looked like a finished table.** Killing the chain left
+   the magic committer's `.pendingset` markers behind: 34 objects, 0.14 MB. A
+   stage checks presence by object count, so on restart it would have *recorded*
+   that wreckage as the 2024 clean tracks and moved on. Nothing would have
+   failed; every 2024 figure would simply have been computed from a table that
+   was not there. Stages now require a table to exceed 1 MB before they will
+   believe in it, and the restart correctly reports the leftovers as
+   "committer scaffolding from an interrupted write, not a table".
+
+Nothing real was lost: no data had been committed, only markers.
+
+### 2026-08-12 16:58 · chain relaunched
+

@@ -42,17 +42,42 @@ PERIODS = {
         "source": "research/tracks",
         "target": "research/tracks_clean",
         "log": "OPDI_live/logs/02a_track_cleaning_2024.log",
+        # The 2024 tracks pre-date H3 indexing. Step 02 attaches `h3_res_7`
+        # nowadays and the flight list's trend path joins aerodrome zones on it,
+        # so without this the second period cannot run through the pipeline at
+        # all -- it fails on a missing column, and it fails several hours into a
+        # chain rather than at the start of one. Adding it here makes the
+        # cleaned 2024 table a drop-in for the real detection code, which is the
+        # whole point of measuring the second period through the pipeline.
+        "add_h3": True,
     },
 }
 
 
+def add_h3_index(df, resolution: int = 7):
+    """Attach ``h3_res_7``, for tracks built before step 02 computed it."""
+    import h3_pyspark
+    from pyspark.sql import functions as F
+
+    return (df.withColumn("_res", F.lit(resolution))
+              .withColumn(f"h3_res_{resolution}",
+                          h3_pyspark.geo_to_h3("lat", "lon", "_res"))
+              .drop("_res"))
+
+
 def redirect(source: str, target: str) -> None:
-    """Point the cleaner's table names at this period's copies, and replace.
+    """Point the cleaner's tables at this period's copies, and replace on write.
 
     Wrapping ``StorageManager`` rather than editing ``cleaner.py`` keeps the
-    research period out of the production code path. Reads and writes are
-    mapped by the *same* dictionary, so a source that is redirected and a target
-    that is not cannot happen.
+    research period out of the production code path.
+
+    The redirect is applied to **``_s3_path``**, not to the table name. That
+    matters: ``table_ref`` registers a Spark temp view *named after the table*,
+    and a name containing a slash -- ``research/tracks`` -- is not a valid SQL
+    identifier, so the cleaner's ``SELECT * FROM {source}`` would fail to parse.
+    Mapping the path instead leaves the view named ``osn_tracks`` while it reads
+    the 2024 copy, and covers reads, writes and schema probes in one place
+    rather than three that can disagree.
 
     The **first** write to the target is forced to ``overwrite``. ``cleaner.py``
     writes with the default mode, which is append -- correct for the daily
@@ -67,31 +92,28 @@ def redirect(source: str, target: str) -> None:
 
     if getattr(StorageManager, "_v7_clean_redirect", False):
         return
-    orig_read, orig_write = StorageManager.read_table, StorageManager.write_table
+    orig_path, orig_write = StorageManager._s3_path, StorageManager.write_table
     mapping = {cl.SOURCE_TABLE: source, cl.TARGET_TABLE: target}
     replaced = set()
 
-    def read_table(self, name, *a, **kw):
-        return orig_read(self, mapping.get(name, name), *a, **kw)
+    def _s3_path(self, name, *a, **kw):
+        return orig_path(self, mapping.get(name, name), *a, **kw)
 
     def write_table(self, df, name, *a, **kw):
-        mapped = mapping.get(name, name)
-        if mapped == target and target not in replaced:
+        if mapping.get(name, name) == target and target not in replaced:
             replaced.add(target)
             kw["mode"] = "overwrite"
-            print(f"  -> REPLACING {mapped} (first write of this rebuild)")
+            print(f"  -> REPLACING {target} (first write of this rebuild)")
         else:
-            print(f"  -> writing {mapped}")
-        return orig_write(self, df, mapped, *a, **kw)
+            print(f"  -> writing {mapping.get(name, name)}")
+        return orig_write(self, df, name, *a, **kw)
 
-    def table_ref(self, name, *a, **kw):
-        return orig_ref(self, mapping.get(name, name), *a, **kw)
-
-    orig_ref = StorageManager.table_ref
-    StorageManager.read_table = read_table
+    StorageManager._s3_path = _s3_path
     StorageManager.write_table = write_table
-    StorageManager.table_ref = table_ref
     StorageManager._v7_clean_redirect = True
+    if mapping[cl.SOURCE_TABLE] != cl.SOURCE_TABLE:
+        print(f"  redirect: {cl.SOURCE_TABLE} -> {source}, "
+              f"{cl.TARGET_TABLE} -> {target}")
 
 
 def main() -> None:
@@ -143,6 +165,24 @@ def main() -> None:
             "nothing and report success. Enable it or drop the stage.")
 
     redirect(period["source"], period["target"])
+
+    if period.get("add_h3"):
+        # Wrapping the name `cleaner` imported, so the index is attached to the
+        # cleaned frame on its way to the write. Doing it here rather than in
+        # `cleaner.py` keeps a research period's shortcoming out of the pipeline
+        # step: the 2025 tracks already carry `h3_res_7` because step 02 puts it
+        # there, and only this 2024 copy predates that.
+        from opdi.cleaning import cleaner as cl
+
+        inner = cl.clean_tracks
+
+        def clean_and_index(df, conf=None):
+            return add_h3_index(inner(df, conf))
+
+        cl.clean_tracks = clean_and_index
+        print("  attaching h3_res_7: these tracks pre-date step 02's index, "
+              "and the flight list's trend path joins aerodrome zones on it")
+
     c = TrackCleaner(spark, cfg, log_file_path=period["log"])
     c.create_table_if_not_exists()
     # process_month, not process_date_range: one month, and naming it is
