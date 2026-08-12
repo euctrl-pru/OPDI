@@ -75,8 +75,43 @@ PERIODS = {
         "days": ["2024-06-05", "2024-06-06", "2024-06-07"],
         "tracks": "research/tracks_clean",
         "raw_tracks": "research/tracks",
+        # The endpoint candidate cache for this period. `process_dai` builds
+        # the cache when it is missing for the month, and its default target is
+        # the production table -- which holds 2025 and which the write guard
+        # would refuse anyway. Naming the period's own cache is what lets the
+        # `endpoint` modes run here at all.
+        "candidates": "research/cand_2024",
     },
 }
+
+
+def redirect_candidates(table: str) -> None:
+    """Point the endpoint candidate cache at a period's own copy.
+
+    The 2025 cache lives at the pipeline's own table name; the 2024 one cannot,
+    because that name is taken by a different period's data. Mapping it here
+    rather than parameterising ``flights.py`` keeps a benchmark's need out of
+    the production code path.
+
+    Both reads and writes are mapped, deliberately and together: a run that read
+    one period's candidates and wrote another's would produce a flight list
+    nothing in the output could identify as wrong.
+    """
+    from opdi.utils.storage import StorageManager
+
+    if getattr(StorageManager, "_v7_cand_redirect", False):
+        return
+    orig_path = StorageManager._s3_path
+    # `_s3_path`, not the table name: `table_ref` registers a Spark temp view
+    # named after the table, and `research/cand_2024` is not a legal SQL
+    # identifier.
+    def _s3_path(self, name, *a, **kw):
+        return orig_path(self, table if name == "opdi_endpoint_candidates"
+                         else name, *a, **kw)
+
+    StorageManager._s3_path = _s3_path
+    StorageManager._v7_cand_redirect = True
+    print(f"  endpoint candidates redirected to {table}")
 
 
 def guard_writes(allowed_prefix: str = "research/") -> None:
@@ -446,6 +481,8 @@ def main() -> None:
     spark = build_spark(args.cores, args.driver_memory, distributed=True)
     spark.sparkContext.setLogLevel("ERROR")
     guard_writes()
+    if period.get("candidates"):
+        redirect_candidates(period["candidates"])
 
     from opdi.config import OPDIConfig
 

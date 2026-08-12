@@ -36,37 +36,43 @@ from pyspark.sql import functions as F
 import osn_sample
 from osn_sample import build_spark, load_dotenv
 
-TRACKS_2024 = "s3a://eurocontrol/opdi/research/tracks"
+#: The second period's tracks. **Cleaned**, since v4.0.0: the flight list
+#: reads cleaned tracks, so candidates built from raw ones would give the two
+#: periods different input treatment while every table said they matched.
+TRACKS_2024 = "s3a://eurocontrol/opdi/research/tracks_clean"
 ENDS_2024 = "research/tracks_2024_ends"
 CAND_2024 = "research/cand_2024"
 
 
-def redirect(ends_table: str, cand_table: str):
-    """Point the pipeline's table names at the 2024 copies.
+def redirect(cand_table: str):
+    """Send the candidate *write* to the 2024 copy, and nowhere else.
 
     Wrapping StorageManager rather than editing the pipeline keeps this out of
-    the production code path entirely. The write guard is deliberate: the
-    candidate builder's default target is a production prefix, and a dropped
-    argument would overwrite it.
+    the production code path entirely. The guard is deliberate: the candidate
+    builder's default target is a production prefix, and a dropped argument
+    would overwrite the 2025 cache.
+
+    Reads are **not** redirected here. They used to be, by mapping the name
+    ``osn_tracks`` -- which stopped working the moment the processor began
+    resolving its track table from the configuration, because it then asks for
+    ``osn_tracks_clean`` and the mapping never fires. The failure is silent and
+    is the worst kind available: the 2024 candidates would have been built from
+    the *2025* tracks, and every table would still have said 2024. The track
+    source is now passed to the processor explicitly instead.
     """
     from opdi.utils.storage import StorageManager
 
     if getattr(StorageManager, "_c24", False):
         return
-    orig_read, orig_write = StorageManager.read_table, StorageManager.write_table
-    mapping = {"osn_tracks": ends_table, "opdi_endpoint_candidates": cand_table}
-
-    def read_table(self, name, *a, **kw):
-        return orig_read(self, mapping.get(name, name), *a, **kw)
+    orig_write = StorageManager.write_table
 
     def write_table(self, df, name, *a, **kw):
-        target = mapping.get(name, name)
+        target = cand_table if name == "opdi_endpoint_candidates" else name
         if not target.startswith("research/"):
             raise RuntimeError(f"refusing to write {target!r} outside research/")
         print(f"  -> writing {target}")
         return orig_write(self, df, target, *a, **kw)
 
-    StorageManager.read_table = read_table
     StorageManager.write_table = write_table
     StorageManager._c24 = True
 
@@ -80,6 +86,9 @@ def main() -> None:
                          "this like any other job")
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4053)
+    ap.add_argument("--tracks", default=TRACKS_2024,
+                    help=f"track table to reduce to endpoints (default "
+                         f"{TRACKS_2024})")
     ap.add_argument("--skip-ends", action="store_true",
                     help="reuse an existing endpoint table")
     args = ap.parse_args()
@@ -99,7 +108,8 @@ def main() -> None:
     if not args.skip_ends:
         import h3_pyspark
 
-        tr = (spark.read.parquet(TRACKS_2024)
+        print(f"reducing {args.tracks} to endpoints")
+        tr = (spark.read.parquet(args.tracks)
               .filter(F.to_date("event_time").isin(args.days))
               .dropna(subset=["lat", "lon", "track_id"]))
         w = Window.partitionBy("track_id").orderBy("event_time")
@@ -120,9 +130,11 @@ def main() -> None:
         (ends.write.mode("overwrite")
          .parquet(f"s3a://eurocontrol/opdi/{ENDS_2024}"))
 
-    redirect(ENDS_2024, CAND_2024)
+    redirect(CAND_2024)
     proc = FlightListProcessor(
-        spark, cfg, log_dir=str(REPO / "OPDI_live" / "logs" / "cand2024"))
+        spark, cfg, log_dir=str(REPO / "OPDI_live" / "logs" / "cand2024"),
+        tracks_table=ENDS_2024)
+    print(f"  reading endpoints from {proc.tracks_table}")
     proc.build_endpoint_candidates(date(2024, 6, 1), rebuild=True)
 
     cand = spark.read.parquet(f"s3a://eurocontrol/opdi/{CAND_2024}")

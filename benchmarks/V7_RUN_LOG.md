@@ -132,3 +132,27 @@ Nothing real was lost: no data had been committed, only markers.
 
 ### 2026-08-12 16:58 · chain relaunched
 
+### 2026-08-12 17:35 · two more cross-period bugs, fixed while the cleaning runs
+
+Both would have hit the 2024 half only, and both are the silent kind.
+
+1. **The 2024 candidate builder read the 2025 tracks.** Its redirect mapped the
+   name `osn_tracks`, and the processor stopped asking for that the moment it
+   began resolving its track table from the configuration -- it now asks for
+   `osn_tracks_clean`, so the mapping never fired and the read fell through to
+   the 2025 table. The 2024 candidates would have been built from 2025 data
+   with every table still saying 2024. The track source is now passed to the
+   processor explicitly and the redirect covers the write alone.
+2. **The 2024 builder read *raw* tracks.** `TRACKS_2024` pointed at
+   `research/tracks`, so the two periods would have had different input
+   treatment while the report claimed they matched. Now `research/tracks_clean`.
+3. **`flight_list_v7` on 2024 had no candidate cache to use.** `process_dai`
+   builds the cache when the month is missing from its log, and its default
+   target is the production table -- which holds 2025, and which the write guard
+   would have refused. The period now names its own cache and the redirect
+   points reads and writes at it together.
+
+Known and accepted: the 2024 vote-cache stage still passes `--add-h3`, which
+recomputes an index the cleaned tracks now carry. It writes the same values, so
+it costs some CPU and nothing else. Not worth restarting the chain for.
+
