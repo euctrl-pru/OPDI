@@ -22,11 +22,13 @@ minimum distance at each cap. Every combination of cap, margin, radius and
 penalty is then a filter and a comparison over a small table -- the same trick
 that made the endpoint sweeps affordable.
 
-One approximation: the altitude smoothing is computed over the samples below the
-widest cap and the votes are then counted within each narrower cap, where the
-pipeline would smooth only the samples it keeps. The window spans two samples
-either side, so this differs only where a track crosses a cap boundary, and only
-for the samples immediately adjacent to it.
+The altitude smoothing is computed over the samples below the widest cap and the
+votes are then counted within each narrower cap. This used to be an
+approximation -- the pipeline smoothed only the samples it kept, so the two
+differed for the samples immediately adjacent to a cap boundary. It is no
+longer one: ``DetectionConfig.trend_smooth_before_cut`` makes the pipeline
+smooth first as well, which closed one of the two remaining differences between
+this sweep and the code that ships.
 
     python benchmarks/trend_sweep.py --build --results-dir <dir>
 """
@@ -58,7 +60,12 @@ CACHE = table("research/trend_votes")
 #: they pre-date H3 indexing, so `h3_res_7` has to be computed at read time.
 TRACKS_2024 = fixed("research/tracks")
 
-#: Caps to cache votes at. 40 is production.
+#: Caps to cache votes at. 40 is what the published algorithm used.
+#:
+#: Mutable, and set from ``--fl-caps`` in :func:`main` before anything reads it.
+#: The cache carries one vote pair per cap in a single pass, so extending the
+#: range costs one wider pre-filter rather than one pass per cap -- which is
+#: what makes a fourteen-cap grid affordable at all.
 FL_CAPS = (20, 30, 40, 60, 80, 100, 120, 150, 200)
 #: Zone bands to cache out to. 30 NM is production. Wider than any radius
 #: swept, so the radius stays a query-time filter rather than a rebuild.
@@ -200,11 +207,26 @@ def main() -> None:
                          "pre-date H3 indexing")
     ap.add_argument("--cache", default=CACHE, help="where the vote cache lives")
     ap.add_argument("--out-name", default="trend_sweep.csv")
+    ap.add_argument("--fl-caps", nargs="+", type=int, default=None,
+                    help="flight-level caps to cache and sweep. The cache is "
+                         "built for exactly these, so a sweep asking for a cap "
+                         "the cache was not built with has no column to read "
+                         "-- pass the same list to both.")
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4041)
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
+
+    # Set before build_votes or the sweep reads it. A module global rather than
+    # a parameter because the cache's *column names* encode the caps, so the
+    # builder and the reader must agree by construction and not by argument
+    # passing.
+    if args.fl_caps:
+        global FL_CAPS
+        FL_CAPS = tuple(sorted(set(args.fl_caps)))
+    print(f"flight-level caps: {', '.join(f'FL{c}' for c in FL_CAPS)}")
+
     load_dotenv()
     osn_sample.UI_PORT = args.ui_port
     osn_sample.RESEARCH_EXECUTORS = args.executors

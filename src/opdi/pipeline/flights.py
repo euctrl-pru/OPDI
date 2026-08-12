@@ -197,9 +197,15 @@ class FlightListProcessor:
         spark: SparkSession,
         config: OPDIConfig,
         log_dir: str = "OPDI_live/logs",
+        tracks_table: Optional[str] = None,
     ):
         self.spark = spark
         self.config = config
+        # Explicit override for the track source. The pipeline never passes it;
+        # it exists so a benchmark can run the real detection code over a
+        # research copy of the tracks -- a second period, say -- without
+        # reimplementing the step or moving data into the production prefix.
+        self._tracks_table_override = tracks_table
         self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.resolution = config.h3.airport_detection_resolution
@@ -237,6 +243,8 @@ class FlightListProcessor:
         Falls back to the raw table when cleaning is disabled, so the choice
         cannot select a table that step 02a was never asked to write.
         """
+        if getattr(self, "_tracks_table_override", None):
+            return self._tracks_table_override
         cleaning = getattr(self.config, "cleaning", None)
         if cleaning is None:
             return "osn_tracks"
