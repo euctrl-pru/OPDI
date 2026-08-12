@@ -443,46 +443,53 @@ Revised estimate from here: about an hour for the 2025 ladder, an hour for 2024,
 forty minutes for the two mode comparisons, an hour and a half for the two
 grids.
 
-### The re-run found something: the legacy algorithm is not deterministic
+### The re-run found something: tie resolution is not deterministic
 
-The accidental re-run of `ladder_2025` was meant to be a reproducibility check.
-It reproduced **eleven of twelve comparable rungs byte for byte** -- same
-coverage, same correct, same wrong, same score. One rung did not:
+The accidental re-run of `ladder_2025` was meant as a reproducibility check.
+With all thirteen rungs now comparable, **eleven reproduce byte for byte** --
+same coverage, same correct, same wrong, same score. Two do not:
 
-| Rung | Run 1 arrivals | Run 2 arrivals |
-|---|---|---|
-| **L00 legacy** | 60,600 | **60,603** |
-| every other rung | identical | identical |
+| Rung | Run 1 arrivals | Run 2 arrivals | Difference |
+|---|---|---|---|
+| L00 legacy | 60,600 | 60,603 | 3 flights |
+| L09 out-of-area | 62,277 | 62,265 | 12 flights |
+| the other eleven | identical | identical | — |
 
-Three flights in 95,116, and only on the rung that uses `trend_rank_by="ring"`.
+Out of 95,116 reference flights, that is 0.003% and 0.013%. Departures are
+identical on every rung.
 
-**Why it is specific to ring selection.** Under ring, `df_min` keeps every
-sample whose `distance_from_center` equals the track's minimum -- and that
-column is an *integer* ring count, so ties are routine. Several rows can survive
-for the same track with identical `distance_km`, and the tie among them is then
-settled by `row_number()` over an ordering that does not separate them, and by
-`first(apt_ident)` in a `groupBy` that carries no ordering at all. Which row wins
-depends on how the shuffle happens to land.
+**What the two have in common is ties.** Under `trend_rank_by="ring"`, `df_min`
+keeps every sample whose `distance_from_center` equals the track's minimum --
+and that column is an *integer* ring count, so several rows routinely survive
+with identical `distance_km`. The winner among them is then settled by a
+`row_number()` over an ordering that does not separate them, and by
+`first(apt_ident)` in a `groupBy` that carries no ordering at all. Which row
+wins depends on how the shuffle lands.
 
-Under exact-distance ranking the ties are gone before that point: `df_min` keeps
-each candidate aerodrome's own closest approach, and continuous distances
-essentially never tie. Every haversine rung reproduced exactly.
+The out-of-area rung is the one that adds the most rows to the flight list, and
+the benchmark pairs each reference flight with the nearest track by start time
+-- so it too has more ties to resolve, in the *alignment* rather than in the
+detection. That is a measurement effect, not an algorithm one, and it is the
+same alignment fragility version 6 documented when the two roles came from
+different methods.
 
-**Not fixing it, and the reason matters.** The obvious repair -- make the
-tie-break deterministic -- would change what `DetectionConfig.legacy()`
-produces, and `legacy()` exists for exactly one purpose: to reproduce data that
-has already been published. That data was produced by this algorithm, ties and
-all. Making the preset deterministic would make it reproduce something the
-releases never contained.
+**The shipped configuration reproduced exactly.** L12 -- the last rung, verified
+by `verify_plan` to be `DetectionConfig()` on cleaned tracks -- is identical
+across both runs, as are all ten other exact-distance rungs.
 
-So this is reported rather than repaired, and it is worth reporting, because it
-is an argument for the study's central change that nobody was looking for:
-**exact-distance ranking does not arbitrate the ties, it removes them.** The
-shipped algorithm is exactly reproducible; the one it replaces is not.
+**Not repairing the legacy path.** Making its tie-break deterministic would
+change what `DetectionConfig.legacy()` produces, and that preset exists for one
+purpose: reproducing data already published. That data was made by this
+algorithm, ties and all. A deterministic preset would reproduce something no
+release ever contained.
 
-Cost of discovering this: nothing. It fell out of a re-run taken for a different
-reason, which is the argument for not exempting jobs from re-running when their
-fingerprint changes.
+So this is reported rather than repaired, and it is an argument for the study's
+central change that nobody went looking for: **exact-distance ranking does not
+arbitrate the ties, it removes them.** What ships is exactly reproducible; what
+it replaces is not, by about one flight in thirty thousand.
+
+Cost of discovering it: nothing. It fell out of a re-run taken for a different
+reason, which is the case against exempting jobs whose fingerprint changed.
 
 ### Two things to watch for, and what to do about them
 
