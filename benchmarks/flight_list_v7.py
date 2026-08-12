@@ -75,6 +75,13 @@ PERIODS = {
         "days": ["2024-06-05", "2024-06-06", "2024-06-07"],
         "tracks": "research/tracks_clean",
         "raw_tracks": "research/tracks",
+        # The raw 2024 tracks pre-date step 02's H3 indexing, and the ladder's
+        # early rungs read them deliberately -- they are where the published
+        # data starts. The index is computed on read rather than materialised:
+        # a second 12 GB copy of a table that already exists, to add one
+        # derived column, is not worth the bucket. The cleaned copy carries the
+        # column already, so only the raw one needs this.
+        "index_on_read": ["research/tracks"],
         # The endpoint candidate cache for this period. `process_dai` builds
         # the cache when it is missing for the month, and its default target is
         # the production table -- which holds 2025 and which the write guard
@@ -112,6 +119,44 @@ def redirect_candidates(table: str) -> None:
     StorageManager._s3_path = _s3_path
     StorageManager._v7_cand_redirect = True
     print(f"  endpoint candidates redirected to {table}")
+
+
+def index_on_read(tables) -> None:
+    """Attach ``h3_res_7`` when reading a table built before step 02 computed it.
+
+    The flight list's `trend` path joins aerodrome detection zones on that
+    column, so a track table without it cannot be read by the real detection
+    code at all. Computing it on read costs one cheap column expression per
+    scan and no storage; materialising a second copy of an 11.9 GB table to add
+    one derived column would cost the bucket a sixth of its free space to store
+    something reproducible from what is already there.
+
+    Guarded on the column being absent, so this is a no-op the day step 02's
+    output replaces the research copy.
+    """
+    if not tables:
+        return
+    from opdi.utils.storage import StorageManager
+
+    if getattr(StorageManager, "_v7_h3_on_read", False):
+        return
+    orig_read = StorageManager.read_table
+    wanted = set(tables)
+
+    def read_table(self, name, *a, **kw):
+        df = orig_read(self, name, *a, **kw)
+        if name in wanted and "h3_res_7" not in df.columns:
+            import h3_pyspark
+
+            df = (df.withColumn("_res", F.lit(7))
+                    .withColumn("h3_res_7",
+                                h3_pyspark.geo_to_h3("lat", "lon", "_res"))
+                    .drop("_res"))
+        return df
+
+    StorageManager.read_table = read_table
+    StorageManager._v7_h3_on_read = True
+    print(f"  h3_res_7 computed on read for: {', '.join(sorted(wanted))}")
 
 
 def guard_writes(allowed_prefix: str = "research/") -> None:
@@ -481,6 +526,7 @@ def main() -> None:
     spark = build_spark(args.cores, args.driver_memory, distributed=True)
     spark.sparkContext.setLogLevel("ERROR")
     guard_writes()
+    index_on_read(period.get("index_on_read"))
     if period.get("candidates"):
         redirect_candidates(period["candidates"])
 

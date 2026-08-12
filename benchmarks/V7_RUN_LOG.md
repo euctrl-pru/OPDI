@@ -153,6 +153,8 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 21:47 | endpoint_sweep_2025 | staged (radius x height, penalty) |
 | 21:41 | endpoint_sweep_2024 | staged — all five sweeps done |
 | 21:41 | ladder_2025 | **failed on rung 1**, fixed, chain resumed 22:15 |
+| 23:12 | ladder_2025 | **staged** — all 13 rungs |
+| 23:12 | ladder_2024 | failed on rung 1, fixed, resumed 23:20 |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -388,6 +390,32 @@ radius that falls *between* boundaries, and 30 does not.
 **The scheduled-service penalty is the first unambiguous win**: +849 departures
 and +861 arrivals, and it is the one tuned value version 6 also confirmed
 through the pipeline.
+
+### 23:12 · the 2024 ladder failed for the mirror-image of the earlier reason
+
+```
+AnalysisException: A column with name `h3_res_7` cannot be resolved
+```
+
+The same missing index as before, on the other table. This afternoon's fix
+attached `h3_res_7` to the **cleaned** 2024 tracks; the ladder's first eleven
+rungs read the **raw** ones deliberately, because that is where the published
+data starts. Those are still unindexed.
+
+Fixed by computing the column on read rather than materialising it: a second
+12 GB copy of an 11.9 GB table, to add one derived column reproducible from two
+others, would cost a sixth of the bucket's free space to store nothing new. The
+wrapper is guarded on the column being absent, so it becomes a no-op the day
+step 02's own output replaces the research copy.
+
+**Cost: nothing computed was lost.** `ladder_2025` had already staged all
+thirteen rungs, and the failure was on the first rung of the next job.
+
+Twice now the pattern has been the same: a table built before some step existed,
+read by code that assumes the step ran. Worth naming as a class rather than as
+two incidents -- the research copies of the second period pre-date H3 indexing,
+cleaning, and the current schema, and anything newly pointed at them should be
+checked against what it expects rather than tried.
 
 ### Two things to watch for, and what to do about them
 
