@@ -147,6 +147,8 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 20:50 | 02a, 2024 | **done**, 202 objects, 6.17 GB |
 | 20:50 | candidates | both periods built |
 | 20:50 | vote cache 2025 | started |
+| 21:18 | both vote caches | built, all 14 caps |
+| 21:18 | trend_sweep_2025 | **staged** — 560 cells |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -231,6 +233,40 @@ closing rate, the approach cone -- has failed where a position-based one worked.
   5,430,694 candidates. The log line `reducing .../research/tracks_clean to
   endpoints` is the fix from 17:35 working -- before it, this would silently
   have read the 2025 tracks.
+
+### The flight-level curve closes
+
+The review's sharpest question was whether the cap should go higher: *"It seems
+to be getting better the higher we go."* Followed to FL300 on cleaned tracks, at
+vote margin 2 and 20 NM, it does not.
+
+| Cap | Dep coverage | Dep accuracy | Dep score | Arr coverage | Arr accuracy | Arr score |
+|---|---|---|---|---|---|---|
+| FL25 | 59.92% | 99.43% | 56,019 | 64.34% | 98.67% | 58,757 |
+| FL40 | 68.51% | 99.34% | 63,875 | 66.77% | 98.37% | 60,402 |
+| FL50 | 70.88% | 99.27% | 65,944 | 67.91% | 98.10% | **60,902** |
+| FL60 | 71.91% | 99.21% | 66,766 | 68.56% | 97.77% | 60,844 |
+| FL75 | 73.20% | 99.15% | 67,856 | 69.17% | 97.31% | 60,471 |
+| FL100 | 75.19% | 99.01% | 69,391 | 70.13% | 95.61% | 57,931 |
+| FL125 | 76.77% | 98.62% | **69,995** | 71.07% | 94.07% | 55,578 |
+| FL150 | 77.61% | 97.91% | 69,188 | 71.63% | 92.94% | 53,710 |
+| FL200 | 78.45% | 95.87% | 65,369 | 72.59% | 90.60% | 49,576 |
+| FL250 | 78.96% | 93.66% | 60,819 | 73.27% | 87.71% | 43,995 |
+| FL300 | 79.68% | 90.80% | 54,872 | 73.92% | 84.96% | 38,584 |
+
+**Departures peak at FL125 and arrivals at FL50**, and both fall away steeply
+after: by FL300 departures have lost 15,123 points from their peak and arrivals
+22,318.
+
+The intuition behind the question was right about the mechanism and wrong about
+the conclusion. Coverage *does* rise monotonically with the cap, all the way to
+FL300 — a higher cap admits more fixes and more fixes mean more answers. But
+accuracy falls faster, because a fix taken at FL300 is a long way from whichever
+aerodrome turns out to be the answer, and the vote it casts is correspondingly
+less informative. The score turns where those two cross.
+
+The shipped arrival cap of FL60 scores 60,844 against FL50's 60,902 — a
+difference of 58 flights in 95,116, which is noise. The value is safe.
 
 ### Two things to watch for, and what to do about them
 
