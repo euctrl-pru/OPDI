@@ -141,6 +141,9 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 17:35 | 02a, 2024 | stage 6 at 30/200 |
 | 18:05 | 02a, 2024 | stage 6 at 70/200 |
 | 18:30 | 02a, 2024 | stage 6 at 95/200 |
+| 19:22 | 02a, 2024 | stage 6 at 169/200 |
+| 19:57 | 02a, 2024 | 195/200, long tail begins |
+| 20:32 | 02a, 2024 | 199/200, no failures, executors 3h21m with no restarts |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -167,6 +170,24 @@ Both would have hit the 2024 half only, and both are the silent kind.
 Known and accepted: the 2024 vote-cache stage still passes `--add-h3`, which
 recomputes an index the cleaned tracks now carry. It writes the same values, so
 it costs some CPU and nothing else. Not worth restarting the chain for.
+
+### Cleaning is expensive, and skewed
+
+Both periods took about three and a half hours for three days of tracks, and
+both spent most of it in one stage: the shuffle behind `repartition("track_id")`
+in `cleaner.py`. Both also ended with a long tail -- the last five tasks of two
+hundred taking as long as the preceding fifty -- which is hash-partition skew,
+a few `track_id` buckets carrying far more data than the rest.
+
+Worth knowing before anyone plans a backfill: cleaning a month rather than three
+days is not a linear extrapolation of a fast job, it is a linear extrapolation
+of a slow one. If it ever needs to be faster, the repartition is the thing to
+look at, not the cleaning stages themselves.
+
+Also worth knowing when watching one run: the S3A **magic committer stages every
+task's output and commits at the end**, so the target table reads 0.00 GB right
+up until the job finishes and then jumps to its full size. An empty target
+part-way through a write is the expected state, not evidence of failure.
 
 ### Two things to watch for, and what to do about them
 
