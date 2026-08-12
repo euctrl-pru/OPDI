@@ -88,15 +88,28 @@ def test_unknown_mode_is_rejected():
         assert bad not in modes
 
 
-@pytest.mark.parametrize("field_name", [f for f in DetectionConfig().__dataclass_fields__])
-def test_every_field_carries_its_unit_or_is_unitless(field_name):
+@pytest.mark.parametrize(
+    "field_name,field", list(DetectionConfig().__dataclass_fields__.items())
+)
+def test_every_measurement_carries_its_unit(field_name, field):
     """The package convention: units live in field names so a threshold cannot
-    be read in the wrong one. Counts and levels are the exceptions."""
-    # Counts, levels and the categoricals. `trend_rank_by` names a rule and
-    # `adep_mode`/`ades_mode` name algorithms, so a unit suffix would be a lie.
-    unitless = {"trend_max_fl", "trend_smooth_half_window", "trend_vote_margin",
-                "trend_rank_by", "adep_mode", "ades_mode"}
-    assert field_name in unitless or field_name.endswith(("_nm", "_ft"))
+    be read in the wrong one.
+
+    Stated as a rule about *measurements* rather than as a list of exceptions,
+    so adding a switch does not mean editing the test. A bool is a decision and
+    a str names a rule or an algorithm; neither measures anything, so a unit
+    suffix on either would be a lie. Everything numeric measures something.
+    """
+    # `field.type` is the annotation: a type object here, a string under
+    # `from __future__ import annotations`. Both spellings are accepted, and
+    # neither is `isinstance(..., type)` -- which is true of `float` as well
+    # and would exempt every field in the class.
+    if field.type in (bool, str, "bool", "str"):
+        return
+    # The two numeric exceptions: a count of samples and a flight level, both
+    # of which carry their unit in the name already ("fl", "window", "margin").
+    counts = {"trend_max_fl", "trend_smooth_half_window", "trend_vote_margin"}
+    assert field_name in counts or field_name.endswith(("_nm", "_ft"))
 
 
 def test_shipped_defaults_are_the_values_the_study_supports():
@@ -151,6 +164,86 @@ def test_ranking_rule_is_exact_distance_by_default_and_rings_under_legacy():
     """
     assert DetectionConfig().trend_rank_by == "haversine"
     assert DetectionConfig.legacy().trend_rank_by == "ring"
+
+
+def test_every_new_behaviour_is_off_under_legacy():
+    """`legacy()` must reproduce the published algorithm, not approximate it.
+
+    Each of these is a capability the published lists were built without. A new
+    field that defaults to on and is *not* turned off here would silently change
+    what a legacy run produces, which is the one thing the preset exists to
+    prevent -- and it would do so without failing anything.
+    """
+    legacy = DetectionConfig.legacy()
+    assert legacy.trend_ooa is False
+    assert legacy.trend_bearing_tiebreak_nm == 0.0
+    assert legacy.trend_smooth_before_cut is False
+    assert legacy.trend_radius_exact is False
+    assert legacy.trend_rank_by == "ring"
+
+
+def test_the_shipped_new_behaviours_are_on():
+    """The other half of the pairing above: on by default, off under legacy."""
+    d = DetectionConfig()
+    assert d.trend_ooa is True
+    # An interior optimum -- 5 NM turns negative and no band at all is
+    # catastrophic, so this is not an "as large as possible" threshold.
+    assert d.trend_bearing_tiebreak_nm == 2.0
+    assert d.trend_smooth_before_cut is True
+    assert d.trend_radius_exact is True
+
+
+def test_version_string_is_new_and_the_published_ones_are_untouched():
+    """Published version strings are frozen; a changed algorithm gets a new one.
+
+    Both old strings stay in the module because a legacy run must still stamp
+    them. If someone ever "tidies" them away, a re-processed month stops
+    matching the release it was meant to reproduce.
+    """
+    from opdi.pipeline.flights import (  # noqa: PLC0415
+        FLIGHT_LIST_VERSION,
+        LEGACY_ENDPOINT_VERSION,
+        LEGACY_TREND_VERSION,
+    )
+
+    assert FLIGHT_LIST_VERSION == "v4.0.0"
+    assert LEGACY_TREND_VERSION == "v2.0.0"
+    assert LEGACY_ENDPOINT_VERSION == "v3.0.0"
+    assert FLIGHT_LIST_VERSION not in (LEGACY_TREND_VERSION, LEGACY_ENDPOINT_VERSION)
+
+
+def test_cleaned_tracks_feed_the_flight_list_but_only_when_cleaning_runs():
+    """Step 02a wrote a table nothing read until 2026-08.
+
+    The fallback matters as much as the default: selecting the cleaned table
+    when cleaning is switched off would point step 03 at something step 02a was
+    never asked to write.
+    """
+    from opdi.config import CleaningConfig  # noqa: PLC0415
+
+    class Stub:
+        """Only what `tracks_table` reads."""
+
+        def __init__(self, cleaning):
+            self.config = self
+            self.cleaning = cleaning
+
+        tracks_table = FlightListProcessor.tracks_table
+
+    assert CleaningConfig().feeds_flight_list is True
+    assert Stub(CleaningConfig()).tracks_table == "osn_tracks_clean"
+
+    import dataclasses  # noqa: PLC0415
+
+    off = dataclasses.replace(CleaningConfig(), enabled=False)
+    assert Stub(off).tracks_table == "osn_tracks"
+
+    unwired = dataclasses.replace(CleaningConfig(), feeds_flight_list=False)
+    assert Stub(unwired).tracks_table == "osn_tracks"
+
+    # A config predating the field at all must not select a table that may not
+    # exist.
+    assert Stub(None).tracks_table == "osn_tracks"
 
 
 def test_defaults_differ_from_legacy_so_the_preset_is_load_bearing():

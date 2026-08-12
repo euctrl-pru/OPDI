@@ -62,8 +62,70 @@ BORDER_MARGIN_NM = 30.0
 #: name, and saying so is a different -- and correct -- answer from silence.
 OOA = "OOA"
 
+#: The ``version`` stamped on every flight-list row.
+#:
+#: **Never mutate a published version string.** A released dataset must stay
+#: reproducible by name, so an algorithm change gets a new string and the old
+#: behaviour stays reachable through :meth:`DetectionConfig.legacy`.
+#:
+#: ``v4.0.0`` covers the 2026-08 change set, and it is one string for the whole
+#: flight list rather than one per path. Before it, the trend path stamped
+#: ``v2.0.0`` and the endpoint path ``v3.0.0``, and :meth:`_merge_roles`
+#: coalesced them -- so a merged list carried whichever version the departure
+#: side happened to have, and a consumer could not tell which algorithm named
+#: which end. What changed under this version:
+#:
+#: * candidates ranked on exact great-circle distance, not H3 ring count;
+#: * departures from ``endpoint``, arrivals from ``trend``, by default;
+#: * the tuned thresholds in :class:`~opdi.config.DetectionConfig`;
+#: * ``trend`` can emit the out-of-area label;
+#: * the flight list reads cleaned tracks (step 02a).
+#:
+#: One more change is not reachable through ``legacy()`` at all: the
+#: state-vector sampler moved from a fixed-phase filter to a bin-based one, so
+#: ``track_id`` values differ. Re-ingesting an old month reproduces the
+#: aerodromes but not the identifiers.
+FLIGHT_LIST_VERSION = "v4.0.0"
+
+#: What the paths stamped before ``v4.0.0``. Kept so
+#: :meth:`DetectionConfig.legacy` runs reproduce released data byte for byte.
+LEGACY_TREND_VERSION = "v2.0.0"
+LEGACY_ENDPOINT_VERSION = "v3.0.0"
+
 NM_PER_DEG = 60.0
 EARTH_R_NM = 3440.065
+
+#: How far either side of a track's endpoint the course is measured over.
+#: Seven minutes, matching the window the bearing study swept on.
+COURSE_WINDOW_S = 7 * 60
+
+#: Below these a bearing is position noise rather than a heading, and the
+#: course is left null -- which sorts last, so the tie-break simply does not
+#: fire and distance decides alone.
+COURSE_MIN_SAMPLES = 5
+COURSE_MIN_BASELINE_S = 60
+
+
+def bearing_deg(lat1, lon1, lat2, lon2):
+    """Initial great-circle bearing from point 1 to point 2, in degrees."""
+    d_lon = radians(lon2 - lon1)
+    y = sin(d_lon) * cos(radians(lat2))
+    x = (
+        cos(radians(lat1)) * sin(radians(lat2))
+        - sin(radians(lat1)) * cos(radians(lat2)) * cos(d_lon)
+    )
+    return (F.degrees(atan2(y, x)) + 360.0) % 360.0
+
+
+def angle_between(a, b):
+    """Smallest absolute angle between two bearings, 0-180 degrees.
+
+    ``pmod``, not ``%``: Spark's remainder keeps the sign of the dividend, so
+    ``(-350) % 360`` is ``-350`` rather than ``10``. With ``%`` this returns
+    340 degrees for bearings 20 degrees apart whenever the pair straddles
+    north, which inverts the metric on a large share of cases.
+    """
+    return F.abs(F.pmod(a - b + 180.0, lit(360.0)) - 180.0)
 
 
 def haversine_nm(lat1, lon1, lat2, lon2):
@@ -162,6 +224,48 @@ class FlightListProcessor:
         )
 
         os.makedirs(log_dir, exist_ok=True)
+
+    @property
+    def tracks_table(self) -> str:
+        """Which track table this step reads: cleaned (02a) or raw (02).
+
+        Resolved in one place so the two callers -- the trend path and the
+        endpoint candidate builder -- can never disagree. Reading different
+        track tables would produce a flight list whose two halves came from
+        different data, and nothing in the output would say so.
+
+        Falls back to the raw table when cleaning is disabled, so the choice
+        cannot select a table that step 02a was never asked to write.
+        """
+        cleaning = getattr(self.config, "cleaning", None)
+        if cleaning is None:
+            return "osn_tracks"
+        if getattr(cleaning, "enabled", False) and getattr(
+            cleaning, "feeds_flight_list", False
+        ):
+            return "osn_tracks_clean"
+        return "osn_tracks"
+
+    def _version_for(self, path: str) -> str:
+        """The ``version`` string a row from *path* carries.
+
+        A run configured exactly as the published ones were -- legacy
+        thresholds, legacy ranking, uncleaned tracks -- stamps what those runs
+        stamped, so re-processing a past month reproduces its version column
+        along with its aerodromes. Anything else is :data:`FLIGHT_LIST_VERSION`.
+
+        Deciding this from the configuration rather than from a flag means the
+        stamp cannot disagree with the algorithm that produced the row, which is
+        the failure a version string exists to prevent.
+
+        ``nearest`` shares ``endpoint``'s assembly and was never published, so
+        it is not special-cased.
+        """
+        from opdi.config import DetectionConfig
+
+        if self.detection == DetectionConfig.legacy() and self.tracks_table == "osn_tracks":
+            return LEGACY_TREND_VERSION if path == "trend" else LEGACY_ENDPOINT_VERSION
+        return FLIGHT_LIST_VERSION
 
     # ------------------------------------------------------------------
     # Progress tracking
@@ -269,6 +373,100 @@ class FlightListProcessor:
         )
         return j.withColumn("eff_nm", col("dist_nm") + penalty)
 
+    def _track_border_flags(self, month: date) -> DataFrame:
+        """Per track: whether its first and last fix sit at the bbox edge.
+
+        The evidence behind an out-of-area label, reduced to two booleans per
+        track. ``endpoint`` gets this for free -- it is already looking at the
+        endpoints -- but ``trend`` never looks at them, so it needs its own
+        pass. That pass is two window functions over ``track_id`` rather than a
+        join, which is why it is affordable to add to a path that does not
+        otherwise need the endpoints at all.
+
+        Identity columns come along because this frame is outer-joined into the
+        trend table: a track whose altitude trace showed nothing near any
+        aerodrome has no row there at all, and a flight that entered the area
+        already airborne and left it still airborne is exactly such a track.
+        Without them it could be labelled but not named.
+        """
+        sv = self._get_data_within_timeframe(self.tracks_table, month)
+        sv = sv.dropna(subset=["lat", "lon", "track_id"])
+        sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
+        sv = sv.withColumn("event_time", F.to_timestamp(col("event_time")))
+        sv = sv.withColumn("_border", at_border(col("lat"), col("lon")))
+
+        w = Window.partitionBy("track_id").orderBy("event_time")
+        w_desc = Window.partitionBy("track_id").orderBy(col("event_time").desc())
+        return (
+            sv.withColumn("_rn", row_number().over(w))
+            .withColumn("_rr", row_number().over(w_desc))
+            .filter((col("_rn") == 1) | (col("_rr") == 1))
+            .groupBy("track_id")
+            .agg(
+                # min_by/max_by would skip nulls; the border flag is never null
+                # here because lat/lon were dropped above.
+                F.max(when(col("_rn") == 1, col("_border"))).alias("adep_at_border"),
+                F.max(when(col("_rr") == 1, col("_border"))).alias("ades_at_border"),
+                F.min("event_time").alias("_first_seen"),
+                F.max("event_time").alias("_last_seen"),
+                F.min("icao24").alias("_ICAO24"),
+                F.min("flight_id").alias("_FLT_ID"),
+            )
+            .withColumn("_DOF", to_date(col("_first_seen")))
+        )
+
+    def _label_trend_out_of_area(self, t: DataFrame, month: date) -> DataFrame:
+        """Give ``trend`` the out-of-area label that ``endpoint`` already has.
+
+        ``trend`` names an aerodrome or says nothing, and those are not the only
+        two possibilities: a flight that entered the observed area already
+        airborne has an origin no feed here can name, and reporting that is a
+        different -- and correct -- answer from silence. Roughly one arrival in
+        twelve is in that position, and until this existed every one of them was
+        a null indistinguishable from a detection failure.
+
+        The test is the one ``classify_endpoints`` uses, deliberately: a fix
+        within :data:`BORDER_MARGIN_NM` of the ingestion bbox edge. Precedence
+        is the same too -- **aerodrome first, border second**. The other order
+        looks equivalent and is not: Ponta Delgada sits about 8 NM inside the
+        western edge, and letting the border test win labels its departures
+        out-of-area with the aircraft still on the runway.
+
+        The join is an outer one because a track can be missing from the trend
+        table entirely, which is the commonest case for an overflight.
+        """
+        flags = self._track_border_flags(month)
+        j = t.join(flags, t.id == flags.track_id, "outer")
+
+        named = {"ADEP": "adep_source", "ADES": "ades_source"}
+        for apt_col, src_col in named.items():
+            border = col(f"{apt_col.lower()}_at_border")
+            j = j.withColumn(
+                src_col,
+                when(col(apt_col).isNotNull(), lit("aerodrome"))
+                .when(border, lit("out_of_area"))
+                .otherwise(lit("undetermined")),
+            )
+            j = j.withColumn(
+                apt_col,
+                when(col(apt_col).isNotNull(), col(apt_col))
+                .when(border, lit(OOA)),
+            )
+
+        # Identity from whichever side has it: a track present only in the
+        # border frame has none of the trend table's columns populated.
+        return j.select(
+            F.coalesce(col("id"), col("track_id")).alias("id"),
+            "ADEP", "ADES", "ADEP_P", "ADES_P",
+            F.coalesce(col("ICAO24"), col("_ICAO24")).alias("ICAO24"),
+            F.coalesce(col("FLT_ID"), col("_FLT_ID")).alias("FLT_ID"),
+            F.coalesce(col("first_seen"), col("_first_seen")).alias("first_seen"),
+            F.coalesce(col("last_seen"), col("_last_seen")).alias("last_seen"),
+            F.coalesce(col("DOF"), col("_DOF")).alias("DOF"),
+            F.coalesce(col("version"), lit(FLIGHT_LIST_VERSION)).alias("version"),
+            "adep_source", "ades_source",
+        )
+
     def build_endpoint_candidates(
         self,
         month: date,
@@ -290,7 +488,7 @@ class FlightListProcessor:
             print(f"  endpoint candidates for {month:%Y-%m} already built, skipping")
             return
 
-        sv = self._get_data_within_timeframe("osn_tracks", month)
+        sv = self._get_data_within_timeframe(self.tracks_table, month)
         sv = sv.dropna(subset=["lat", "lon", "track_id"])
         sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
 
@@ -376,7 +574,7 @@ class FlightListProcessor:
         Returns:
             DataFrame of state vectors near airports.
         """
-        sv = self._get_data_within_timeframe("osn_tracks", month)
+        sv = self._get_data_within_timeframe(self.tracks_table, month)
 
         sv_f = sv.dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
         sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
@@ -399,20 +597,52 @@ class FlightListProcessor:
         sv_f = sv_f.withColumn("last_seen", f_max("event_time").over(window_track))
         sv_f = sv_f.withColumn("DOF", to_date("first_seen"))
 
-        # Filter to low altitude (below FL40) and join with airport zones
+        # Smooth *before* the flight-level cut, so the rolling mean at the
+        # boundary is a mean of five samples rather than of whatever happens to
+        # fall below the cap. Cutting first truncates the window exactly where
+        # the altitude is changing fastest, which is the worst place to lose
+        # half of it -- and it is a difference between this path and the sweep
+        # harness that the harness never had.
+        #
+        # Partitioned by track alone, deliberately. Downstream the smoothing
+        # window is partitioned by aerodrome as well, but barometric altitude
+        # is a property of the track: the same series repeated once per
+        # candidate aerodrome smooths to the same values, and doing it here
+        # means it is computed once.
+        if getattr(self.detection, "trend_smooth_before_cut", False):
+            half = self.detection.trend_smooth_half_window
+            w_smooth = (
+                Window.partitionBy("track_id")
+                .orderBy("event_time")
+                .rowsBetween(-half, half)
+            )
+            sv_f = sv_f.withColumn(
+                "smoothed_altitude", F.avg("baro_altitude").over(w_smooth)
+            )
+
+        # Filter to low altitude and join with airport zones
         sv_low_alt = sv_f.filter(col("flight_level") <= self.detection.trend_max_fl)
+
         # The zone table is generated out to its full ring reach, so the
         # detection radius has to be applied here. Without this filter the join
         # would match aerodromes as far out as the rings go -- a large, silent
         # change in behaviour disguised as a reference-data update.
-        radius_col = next(
-            (c for c in ("apt_max_c_radius_nm", "max_c_radius_nm") if c in sdf_apt.columns),
+        exact = getattr(self.detection, "trend_radius_exact", False)
+        radius_nm = self.detection.trend_radius_nm
+        # A *band* is a ring of hexagons, and it carries both bounds. Cutting on
+        # the outer bound keeps only bands lying wholly inside the radius, which
+        # discards hexagons that straddle it -- and so discards samples that are
+        # genuinely within the radius. Cutting on the inner bound keeps every
+        # band that could contain such a sample, which is the superset the exact
+        # test then narrows correctly.
+        band_col = next(
+            (c for c in (("apt_min_c_radius_nm", "min_c_radius_nm") if exact
+                         else ("apt_max_c_radius_nm", "max_c_radius_nm"))
+             if c in sdf_apt.columns),
             None,
         )
-        if radius_col:
-            sdf_apt = sdf_apt.filter(
-                col(radius_col) <= self.detection.trend_radius_nm
-            )
+        if band_col:
+            sdf_apt = sdf_apt.filter(col(band_col) <= radius_nm)
         else:
             # Pre-dates the banded reference, which was clipped at generation
             # time -- so no filter is the correct behaviour. Said out loud
@@ -426,6 +656,23 @@ class FlightListProcessor:
         sv_nearby_apt = sv_low_alt.join(
             sdf_apt, sv_low_alt.h3_res_7 == sdf_apt.apt_hex_id, "left"
         )
+
+        if exact:
+            # The exact cut, in nautical miles rather than in hexagons. The
+            # null test keeps unmatched samples: this is a left join, and a
+            # sample near no aerodrome must survive it -- dropping those would
+            # remove tracks from the flight list entirely rather than leaving
+            # them unnamed.
+            sv_nearby_apt = sv_nearby_apt.filter(
+                col("apt_ident").isNull()
+                | (
+                    haversine_nm(
+                        col("lat"), col("lon"),
+                        col("apt_latitude_deg"), col("apt_longitude_deg"),
+                    )
+                    <= lit(float(radius_nm))
+                )
+            )
         return sv_nearby_apt
 
     @staticmethod
@@ -540,12 +787,19 @@ class FlightListProcessor:
             ["icao24", "flight_id", "track_id", "apt_ident"]
         ).orderBy("event_time")
 
-        # Smoothed altitude
-        window_avg = Window.partitionBy(
-            ["icao24", "flight_id", "track_id", "apt_ident"]
-        ).orderBy("event_time").rowsBetween(-smooth_half_window, smooth_half_window)
-
-        df_m = df.withColumn("smoothed_altitude", F.avg("baro_altitude").over(window_avg))
+        # Smoothed altitude. Already present when the caller smoothed before
+        # the flight-level cut, which is the better place to do it -- see
+        # `_fetch_and_label_sv`. Recomputing here would undo that by averaging
+        # the smoothed values a second time.
+        if "smoothed_altitude" in df.columns:
+            df_m = df
+        else:
+            window_avg = Window.partitionBy(
+                ["icao24", "flight_id", "track_id", "apt_ident"]
+            ).orderBy("event_time").rowsBetween(-smooth_half_window, smooth_half_window)
+            df_m = df.withColumn(
+                "smoothed_altitude", F.avg("baro_altitude").over(window_avg)
+            )
         df_m = df_m.withColumn(
             "altitude_change",
             col("smoothed_altitude") - F.lag("smoothed_altitude").over(window_spec),
@@ -580,10 +834,64 @@ class FlightListProcessor:
         )
 
     @staticmethod
+    def _endpoint_courses(df: DataFrame, window_s: float = COURSE_WINDOW_S) -> DataFrame:
+        """Direction of travel near each track's departure or arrival fix.
+
+        The course is the bearing from the far edge of a time window **to** the
+        fix itself. The window sits after the fix for a departure and before it
+        for an arrival, so in both cases this points along the track *toward*
+        the aerodrome that should be the answer -- and a correctly identified
+        aerodrome reads close to zero for either role, with no sign convention
+        to get wrong.
+
+        Two guards, both of which return a null course rather than a bad one:
+        fewer than :data:`COURSE_MIN_SAMPLES` distinct fixes, or a baseline
+        shorter than :data:`COURSE_MIN_BASELINE_S`. Over a few seconds a bearing
+        is position noise, not a heading. Nulls sort last wherever the course is
+        used, so a track without one falls back to distance alone.
+        """
+        w = Window.partitionBy("track_id", "status")
+        d = df.withColumn(
+            "_t_end",
+            when(col("status") == "take-off", f_min("event_time").over(w))
+            .otherwise(f_max("event_time").over(w)),
+        ).withColumn(
+            "_off",
+            F.abs(unix_timestamp("event_time") - unix_timestamp("_t_end")),
+        ).filter(col("_off") <= float(window_s))
+
+        return (
+            d.groupBy("track_id", "status")
+            .agg(
+                # Distinct times, not rows: the zone join repeats each sample
+                # once per candidate aerodrome, so a row count would pass this
+                # guard on a single fix seen near five aerodromes.
+                F.countDistinct("event_time").alias("_n"),
+                F.max("_off").alias("_span"),
+                F.min_by("lat", "_off").alias("_near_lat"),
+                F.min_by("lon", "_off").alias("_near_lon"),
+                F.max_by("lat", "_off").alias("_far_lat"),
+                F.max_by("lon", "_off").alias("_far_lon"),
+            )
+            .withColumn(
+                "course",
+                when(
+                    (col("_n") >= COURSE_MIN_SAMPLES)
+                    & (col("_span") >= COURSE_MIN_BASELINE_S),
+                    bearing_deg(col("_far_lat"), col("_far_lon"),
+                                col("_near_lat"), col("_near_lon")),
+                ),
+            )
+            .select("track_id", "status", "course", "_near_lat", "_near_lon")
+        )
+
+    @staticmethod
     def _compute_flight_table(
         df: DataFrame,
         sched_penalty_nm: float = 0.0,
         rank_by: str = "ring",
+        bearing_tiebreak_nm: float = 0.0,
+        version: str = FLIGHT_LIST_VERSION,
     ) -> DataFrame:
         """
         Create the flight table from classified tracks.
@@ -751,7 +1059,44 @@ class FlightListProcessor:
                 )
                 order_col = col("_eff_km")
 
-        window_closest = Window.partitionBy(key_columns).orderBy(order_col)
+        # The ordering key. Distance decides, except among candidates that
+        # distance cannot separate.
+        order_by = [order_col.asc_nulls_last()]
+
+        if bearing_tiebreak_nm:
+            # Alignment cannot *name* an aerodrome: every field on the same
+            # radial behind the right one is equally well aligned, which is why
+            # ranking by alignment alone is catastrophic. What it can do is
+            # separate two candidates that are already effectively equidistant,
+            # and the band is what restricts it to exactly that.
+            crs = FlightListProcessor._endpoint_courses(df)
+            flight_table = flight_table.join(crs, ["track_id", "status"], "left")
+            flight_table = flight_table.withColumn(
+                "align_deg",
+                angle_between(
+                    col("course"),
+                    bearing_deg(col("_near_lat"), col("_near_lon"),
+                                col("apt_latitude_deg"), col("apt_longitude_deg")),
+                ),
+            )
+            band_km = float(bearing_tiebreak_nm) * 1.852
+            w_best = Window.partitionBy(key_columns)
+            flight_table = flight_table.withColumn(
+                "_best_km", f_min(order_col).over(w_best)
+            ).withColumn(
+                "_in_band", order_col <= col("_best_km") + lit(band_km)
+            )
+            order_by = [
+                # Inside the band first, then best-aligned within it, and only
+                # then distance. A track with no usable course has a null
+                # alignment, which sorts last inside the band and leaves the
+                # distance ordering untouched.
+                col("_in_band").desc(),
+                when(col("_in_band"), col("align_deg")).asc_nulls_last(),
+                order_col.asc_nulls_last(),
+            ]
+
+        window_closest = Window.partitionBy(key_columns).orderBy(*order_by)
 
         df_numbered = flight_table.withColumn("row_number", row_number().over(window_closest))
         df_numbered = df_numbered.withColumn("is_most_likely", col("row_number") == 1)
@@ -792,7 +1137,7 @@ class FlightListProcessor:
             .withColumnRenamed("flight_id", "FLT_ID")
         )
 
-        flight_table = flight_table.withColumn("version", lit("v2.0.0"))
+        flight_table = flight_table.withColumn("version", lit(version))
         flight_table = flight_table.withColumn("ADEP_P", concat_ws(", ", col("ADEP_P")))
         flight_table = flight_table.withColumn("ADES_P", concat_ws(", ", col("ADES_P")))
 
@@ -802,7 +1147,11 @@ class FlightListProcessor:
         )
 
     @staticmethod
-    def _flight_table_from_endpoints(classified: DataFrame, cand: DataFrame) -> DataFrame:
+    def _flight_table_from_endpoints(
+        classified: DataFrame,
+        cand: DataFrame,
+        version: str = FLIGHT_LIST_VERSION,
+    ) -> DataFrame:
         """Assemble the flight table from classified endpoints.
 
         Produces the same schema as :meth:`_compute_flight_table` so the two
@@ -846,7 +1195,7 @@ class FlightListProcessor:
 
         ft = dep.join(arr, "track_id", "outer")
         ft = ft.withColumn("DOF", to_date(col("first_seen")))
-        ft = ft.withColumn("version", lit("v3.0.0"))
+        ft = ft.withColumn("version", lit(version))
         ft = ft.withColumnRenamed("track_id", "id").withColumnRenamed(
             "icao24", "ICAO24"
         ).withColumnRenamed("flight_id", "FLT_ID")
@@ -917,7 +1266,7 @@ class FlightListProcessor:
         Returns:
             DataFrame of overflight records.
         """
-        sv = self._get_data_within_timeframe("osn_tracks", month)
+        sv = self._get_data_within_timeframe(self.tracks_table, month)
         fl = self._get_data_within_timeframe(
             "opdi_flight_list",
             month,
@@ -940,7 +1289,7 @@ class FlightListProcessor:
 
         for col_name in ["ADEP", "ADES", "ADEP_P", "ADES_P"]:
             sv_f = sv_f.withColumn(col_name, lit(None).cast("string"))
-        sv_f = sv_f.withColumn("version", lit("v2.0.0"))
+        sv_f = sv_f.withColumn("version", lit(self._version_for("trend")))
 
         sv_f = sv_f.select(
             "id", "ADEP", "ADES", "ADEP_P", "ADES_P",
@@ -1087,16 +1436,23 @@ class FlightListProcessor:
                 sv_classified,
                 sched_penalty_nm=d.trend_sched_penalty_nm,
                 rank_by=getattr(d, "trend_rank_by", "ring"),
+                bearing_tiebreak_nm=getattr(d, "trend_bearing_tiebreak_nm", 0.0),
+                version=self._version_for("trend"),
             )
-            # The trend path names an aerodrome or drops the flight; it has no
-            # out-of-area concept, so every answer it gives is an aerodrome.
-            tables["trend"] = t.withColumn(
-                "adep_source",
-                when(col("ADEP").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
-            ).withColumn(
-                "ades_source",
-                when(col("ADES").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
-            )
+            if getattr(d, "trend_ooa", False):
+                # Three states, not two: named an aerodrome, came from outside
+                # the observed area, could not tell.
+                tables["trend"] = self._label_trend_out_of_area(t, month)
+            else:
+                # The legacy behaviour: an aerodrome or a null, with no way to
+                # distinguish "outside the area" from "could not tell".
+                tables["trend"] = t.withColumn(
+                    "adep_source",
+                    when(col("ADEP").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
+                ).withColumn(
+                    "ades_source",
+                    when(col("ADES").isNotNull(), lit("aerodrome")).otherwise(lit("undetermined")),
+                )
 
         for m in needed & {"endpoint", "nearest"}:
             # Deliberately not keyed to skip_if_processed: rebuilding the
@@ -1113,7 +1469,9 @@ class FlightListProcessor:
                 abstention_height_ft=abstention_height_ft,
                 sched_penalty_nm=sched_penalty_nm,
             )
-            tables[m] = self._flight_table_from_endpoints(classified, cand)
+            tables[m] = self._flight_table_from_endpoints(
+                classified, cand, version=self._version_for(m)
+            )
 
         flight_table = self._merge_roles(
             tables[adep_mode], tables[ades_mode], adep_mode, ades_mode

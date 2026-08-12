@@ -402,6 +402,26 @@ class CleaningConfig:
     ILS alignment). Off by default: it needs the fat executor image, so the
     default path stays dependency-free. See ``cleaning/pandas_udf.py``."""
 
+    # -- Does anything downstream actually read the cleaned table? -------
+    feeds_flight_list: bool = True
+    """Whether step 03 reads ``osn_tracks_clean`` or the uncleaned
+    ``osn_tracks``.
+
+    **This was `False` in effect until 2026-08.** Step 02a wrote a cleaned
+    table and ``pipeline/flights.py`` read the raw one, so the cleaning step
+    existed, was tested, and fed nothing. Naming the choice makes it a decision
+    rather than an oversight, and makes "clean versus raw" a measurable
+    comparison rather than a code edit.
+
+    Turning cleaning off (:attr:`enabled`) falls back to the raw table
+    automatically, so this can never select a table that was never built.
+
+    Note that cleaning **masks bad values to NULL and keeps the row**, and the
+    detection path drops samples with no barometric altitude -- so every masked
+    altitude is one fewer candidate sample. Expect this to cost coverage and
+    buy accuracy; which way the exchange falls is a measurement, not an
+    assumption."""
+
 
 @dataclass
 class DetectionConfig:
@@ -506,6 +526,65 @@ class DetectionConfig:
     without changing how many are answered, so coverage is untouched and only
     accuracy moves."""
 
+    trend_smooth_before_cut: bool = True
+    """Smooth barometric altitude **before** the flight-level cut, not after.
+
+    **Changed from False in effect.** The cut used to be applied first, so the
+    rolling mean at the boundary averaged only the samples that survived it --
+    a truncated window exactly where the altitude is changing fastest, which is
+    the worst place to lose half of it. The research sweep never had this
+    problem, and it is one of the two differences that kept the sweep and the
+    pipeline from agreeing on ``trend``."""
+
+    trend_radius_exact: bool = True
+    """Cut the detection radius on exact distance rather than on H3 band.
+
+    **Changed from False in effect.** The zone table is a set of hexagon rings,
+    each carrying an inner and outer radius. Selecting bands whose *outer*
+    radius is within the detection radius keeps only rings lying wholly inside
+    it, and so discards hexagons that straddle the boundary -- along with
+    samples that are genuinely within the radius. Selecting on the *inner*
+    radius and then testing exact great-circle distance keeps precisely the
+    samples the radius names.
+
+    The same reasoning as ``trend_rank_by``: a hexagon index is a coarse
+    approximation of a distance, and where a distance is what is meant, the
+    distance should be measured."""
+
+    trend_bearing_tiebreak_nm: float = 2.0
+    """Distance band, in nautical miles, within which ``trend`` breaks ties on
+    alignment rather than on distance. Zero disables it.
+
+    **New.** Among candidates whose effective distances differ by less than
+    this, distance is not informative -- they are equidistant to within the
+    measurement -- so the one the track's course actually points at wins.
+    Outside the band, distance decides alone and alignment is never consulted.
+
+    The band is the whole mechanism, and the sweep shows why: at 5 NM the rule
+    turns negative, and ranking by alignment *without* a band is catastrophic.
+    Alignment cannot name an aerodrome, because every field on the same radial
+    behind the right one is equally well aligned. It can only separate two
+    candidates that distance has already declared equal.
+
+    2 NM is an interior optimum: the research sweep measured +1,140 score and
+    +0.58 pp of arrival accuracy at **zero** coverage cost -- the same flights
+    answered, 380 more of them correctly."""
+
+    trend_ooa: bool = True
+    """Whether ``trend`` may emit the out-of-area marker.
+
+    **New, and previously impossible.** ``trend`` named an aerodrome or said
+    nothing, and those are not the only two possibilities: a flight that
+    entered the observed area already airborne has an origin no feed here can
+    name. Since the shipped configuration takes arrivals from ``trend``, and
+    roughly one arrival in twelve is genuinely out-of-area, every one of them
+    used to be a null indistinguishable from a detection failure.
+
+    The test and its precedence are ``endpoint``'s, deliberately: a fix within
+    the border margin of the ingestion bbox, and aerodrome first, border
+    second. Reversing that order labels departures from aerodromes near the
+    edge as out-of-area with the aircraft still on the runway."""
+
     # -- endpoint --------------------------------------------------------
     endpoint_radius_nm: float = 30.0
     """**Changed from 40.** An interior optimum of the radius x height sweep,
@@ -562,6 +641,11 @@ class DetectionConfig:
             trend_vote_margin=4,
             trend_sched_penalty_nm=0.0,
             trend_rank_by="ring",
+            # None of these existed before; all must be off for a legacy run.
+            trend_smooth_before_cut=False,
+            trend_radius_exact=False,
+            trend_bearing_tiebreak_nm=0.0,
+            trend_ooa=False,
             endpoint_radius_nm=40.0,
             endpoint_height_ft=15000.0,
             endpoint_sched_penalty_nm=10.0,
