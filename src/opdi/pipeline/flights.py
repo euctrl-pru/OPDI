@@ -1044,15 +1044,21 @@ class FlightListProcessor:
             print(f"Month DAI {month} already processed. Skipping.")
             return
 
+        d = self.detection
+
         # Departures and arrivals are not equally hard, and the rules that suit
         # them differ, so each role gets its own. `mode` remains as an alias
         # that sets both, so every existing caller is unaffected.
+        #
+        # The fallback is the *config*, not a literal, so a caller that passes
+        # nothing gets the recommended configuration rather than whichever
+        # algorithm happened to be written here. `DetectionConfig.legacy()`
+        # sets both to "trend", which is what published lists were built with.
         if adep_mode is None:
-            adep_mode = mode if mode is not None else "trend"
+            adep_mode = mode if mode is not None else getattr(d, "adep_mode", "trend")
         if ades_mode is None:
-            ades_mode = mode if mode is not None else "trend"
+            ades_mode = mode if mode is not None else getattr(d, "ades_mode", "trend")
 
-        d = self.detection
         if abstention_radius_nm is None:
             abstention_radius_nm = d.endpoint_radius_nm
         if abstention_height_ft is None:

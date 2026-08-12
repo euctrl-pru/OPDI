@@ -92,10 +92,10 @@ def test_unknown_mode_is_rejected():
 def test_every_field_carries_its_unit_or_is_unitless(field_name):
     """The package convention: units live in field names so a threshold cannot
     be read in the wrong one. Counts and levels are the exceptions."""
-    # Counts, levels and one categorical. `trend_rank_by` names a rule rather
-    # than measuring anything, so a unit suffix would be a lie.
+    # Counts, levels and the categoricals. `trend_rank_by` names a rule and
+    # `adep_mode`/`ades_mode` name algorithms, so a unit suffix would be a lie.
     unitless = {"trend_max_fl", "trend_smooth_half_window", "trend_vote_margin",
-                "trend_rank_by"}
+                "trend_rank_by", "adep_mode", "ades_mode"}
     assert field_name in unitless or field_name.endswith(("_nm", "_ft"))
 
 
@@ -119,6 +119,26 @@ def test_shipped_defaults_are_the_values_the_study_supports():
     assert d.endpoint_radius_nm == 30.0
     assert d.endpoint_height_ft == 15000.0
     assert d.endpoint_sched_penalty_nm == 10.0
+
+
+def test_the_recommended_configuration_is_what_a_caller_gets_by_default():
+    """Which algorithm serves which role is a shipped decision, not a caller's.
+
+    Until these fields existed, `process_dai` fell back to the literal "trend"
+    for both roles, so every entry point that did not name the modes -- the CLI
+    included -- ran a configuration this study recommends for neither role. The
+    thresholds were tuned and the algorithm choice was not applied, which is the
+    worst of both.
+    """
+    d = DetectionConfig()
+    assert d.adep_mode == "endpoint"
+    assert d.ades_mode == "trend"
+    assert {d.adep_mode, d.ades_mode} <= {"trend", "endpoint", "nearest"}
+
+    # Published lists were built from `trend` alone; `endpoint` served nothing.
+    legacy = DetectionConfig.legacy()
+    assert legacy.adep_mode == "trend"
+    assert legacy.ades_mode == "trend"
 
 
 def test_ranking_rule_is_exact_distance_by_default_and_rings_under_legacy():

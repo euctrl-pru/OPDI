@@ -149,6 +149,115 @@ df.show(10)
 
 See `notebooks/opensky_quickstart.ipynb` for a ready-to-run notebook.
 
+## Building a flight list
+
+Step 03 turns tracks into a flight list: one row per flight with a departure
+aerodrome (`ADEP`), a destination (`ADES`), and how each was determined.
+
+Departures and arrivals are **not** produced by the same algorithm, because
+they are not equally hard. Departures use `endpoint` — the aerodrome nearest
+the track's first fix, accepted only if that fix is close and low, and
+abstained on otherwise. Arrivals use `trend` — a vote over smoothed barometric
+altitude near each candidate aerodrome, which decides climb from descent.
+Both rank candidates on exact great-circle distance, with a penalty against
+aerodromes without scheduled service.
+
+Both the algorithms and their thresholds are `DetectionConfig` defaults, and
+those defaults are the values measured in
+[the ADEP/ADES detection study](https://www.eurocontrol.int/opdi) — so the
+recommended configuration is what you get by passing nothing:
+
+```python
+from datetime import date
+
+from opdi.config import OPDIConfig
+from opdi.pipeline.flights import FlightListProcessor
+from opdi.utils.spark_helpers import get_spark
+
+config = OPDIConfig.for_environment("opensky")
+spark = get_spark("opensky", distributed=True, app_name="OPDI flight list")
+
+FlightListProcessor(spark, config).process_dai(
+    month=date(2025, 6, 1),   # any date inside the month to process
+)
+```
+
+`process_dai` reads `osn_tracks` for the month, builds the endpoint candidate
+cache if it is not already there, and appends to `opdi_flight_list`. Pass
+`write_mode="overwrite"` and a `table_name` of your own to build a comparison
+table instead of extending the published one.
+
+To use one algorithm for both roles — for a like-for-like comparison, say —
+name it explicitly:
+
+```python
+processor.process_dai(month=date(2025, 6, 1), mode="trend")           # both roles
+processor.process_dai(month=date(2025, 6, 1), ades_mode="endpoint")   # arrivals only
+```
+
+The shipped settings, all overridable on `DetectionConfig`:
+
+| Parameter | Ships as | Applies to |
+|---|---|---|
+| `adep_mode` | `"endpoint"` | which algorithm names the departure |
+| `ades_mode` | `"trend"` | which algorithm names the destination |
+| `trend_max_fl` | FL60 | `trend` — samples above this are ignored |
+| `trend_radius_nm` | 20 NM | `trend` — zone radius for the sample-to-aerodrome join |
+| `trend_vote_margin` | 2 | `trend` — climb votes must beat descent votes by this many |
+| `trend_sched_penalty_nm` | 10 NM | `trend` — added to an aerodrome without scheduled service |
+| `trend_rank_by` | `"haversine"` | `trend` — exact distance, not H3 ring count |
+| `endpoint_radius_nm` | 30 NM | `endpoint` — how far the first/last fix may be |
+| `endpoint_height_ft` | 15,000 ft | `endpoint` — above *field elevation*, not sea level |
+| `endpoint_sched_penalty_nm` | 10 NM | `endpoint` |
+
+To override one, build the config with a modified `DetectionConfig`:
+
+```python
+import dataclasses
+
+from opdi.config import DetectionConfig, OPDIConfig
+
+config = OPDIConfig.for_environment("opensky")
+config.detection = dataclasses.replace(config.detection, trend_max_fl=80)
+```
+
+### Reproducing a flight list published before 2026
+
+The defaults changed in 2026. Re-running an older month with them will **not**
+reproduce what was released — the thresholds moved and so did the rule for
+choosing among candidate aerodromes. `DetectionConfig.legacy()` returns the
+values every earlier release was built with:
+
+```python
+from opdi.config import DetectionConfig, OPDIConfig
+
+config = OPDIConfig.for_environment("opensky")
+# FL40, 30 NM, margin 4, no penalty, ring ranking, and `trend` for both roles
+config.detection = DetectionConfig.legacy()
+
+FlightListProcessor(spark, config).process_dai(month=date(2024, 6, 1))
+```
+
+One caveat `legacy()` cannot cover: the state-vector sampler changed at the
+same time, from a fixed-phase `event_time % 5` filter to keeping the newest row
+in each 5 s bin. The rescued rows sit at track boundaries, so `track_id` values
+differ. Re-ingesting an old month reproduces the *aerodromes* but not the
+identifiers.
+
+### From the command line
+
+```bash
+# Flight list only, for one month — uses the DetectionConfig defaults
+opdi run --step 03 --env opensky --start 2025-06-01 --end 2025-07-01
+
+# Override the algorithm for one role
+opdi run --step 03 --env opensky --start 2025-06-01 --end 2025-07-01 \
+    --adep-mode endpoint --ades-mode trend
+
+# Everything the flight list depends on, in order
+opdi run --env opensky --start 2025-06-01 --end 2025-07-01
+```
+
 ## Package structure
 
 ```

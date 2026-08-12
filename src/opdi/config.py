@@ -524,6 +524,29 @@ class DetectionConfig:
     """How far the cached candidate table reaches. Wider than any detection
     radius on purpose, so the radius stays sweepable without a rebuild."""
 
+    # -- which algorithm serves which role -------------------------------
+    adep_mode: str = "endpoint"
+    """Algorithm naming the departure aerodrome: ``trend``, ``endpoint`` or
+    ``nearest``.
+
+    **Changed from ``trend``.** The two roles are not equally hard and the
+    rules that suit them differ, which is the study's second result after the
+    ranking rule. Departures are decided by geometry -- the first fix of a
+    departing track is on or near the runway -- so ``endpoint`` wins outright.
+
+    This lives in the config rather than only in ``process_dai``'s arguments so
+    that the recommended configuration is what a caller gets by default. Before
+    it did, every entry point that did not pass the modes explicitly -- the CLI
+    among them -- silently ran ``trend`` for both roles, which is a
+    configuration this study recommends for neither."""
+
+    ades_mode: str = "trend"
+    """Algorithm naming the destination aerodrome.
+
+    Unchanged, and unchanged for a reason: an arriving track's last fix is
+    often the point reception was lost rather than the point it landed, so
+    geometry alone is weaker here than the altitude trend."""
+
     @classmethod
     def legacy(cls) -> "DetectionConfig":
         """The constants in force before the V6 tuning.
@@ -543,6 +566,10 @@ class DetectionConfig:
             endpoint_height_ft=15000.0,
             endpoint_sched_penalty_nm=10.0,
             endpoint_candidate_radius_nm=110.0,
+            # Both roles from `trend`: the published lists never used
+            # `endpoint` for anything.
+            adep_mode="trend",
+            ades_mode="trend",
         )
 
 
