@@ -155,6 +155,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 21:41 | ladder_2025 | **failed on rung 1**, fixed, chain resumed 22:15 |
 | 23:12 | ladder_2025 | **staged** — all 13 rungs |
 | 23:12 | ladder_2024 | failed on rung 1, fixed, resumed 23:20 |
+| 23:20 | ladder_2025 | re-running: the fix changed its fingerprint |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -416,6 +417,31 @@ read by code that assumes the step ran. Worth naming as a class rather than as
 two incidents -- the research copies of the second period pre-date H3 indexing,
 cleaning, and the current schema, and anything newly pointed at them should be
 checked against what it expects rather than tried.
+
+### Decision 6 · letting the 2025 ladder re-run rather than exempting it
+
+Fixing `flight_list_v7.py` changed the fingerprint of every job that declares it
+as a dependency, so `ladder_2025` -- staged and complete an hour earlier -- came
+back stale and is running again. The fix cannot possibly affect it: the on-read
+H3 indexing is guarded on the column being absent, and the 2025 tracks carry it.
+
+**Letting it re-run anyway**, for two reasons.
+
+The first is the discipline. The entire point of fingerprinting the source files
+is that the *author* does not get to decide which changes could not have
+mattered. This study's history is a list of changes that could not have mattered
+and did -- an inert penalty, a redirect that stopped firing, a ranking rule that
+inverted a conclusion. An exemption mechanism would be used exactly when
+someone was confident, which is exactly when it would be wrong.
+
+The second is that it costs an hour and buys a reproducibility check. The rerun
+should reproduce the thirteen rungs **exactly**. If it does, that is evidence
+the chain is deterministic; if it does not, that is a finding worth more than
+the hour.
+
+Revised estimate from here: about an hour for the 2025 ladder, an hour for 2024,
+forty minutes for the two mode comparisons, an hour and a half for the two
+grids.
 
 ### Two things to watch for, and what to do about them
 
