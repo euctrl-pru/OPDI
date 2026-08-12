@@ -144,6 +144,9 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 19:22 | 02a, 2024 | stage 6 at 169/200 |
 | 19:57 | 02a, 2024 | 195/200, long tail begins |
 | 20:32 | 02a, 2024 | 199/200, no failures, executors 3h21m with no restarts |
+| 20:50 | 02a, 2024 | **done**, 202 objects, 6.17 GB |
+| 20:50 | candidates | both periods built |
+| 20:50 | vote cache 2025 | started |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -188,6 +191,46 @@ Also worth knowing when watching one run: the S3A **magic committer stages every
 task's output and commits at the end**, so the target table reads 0.00 GB right
 up until the job finishes and then jumps to its full size. An empty target
 part-way through a write is the expected state, not evidence of failure.
+
+### First result: what cleaning actually masks
+
+Both periods cleaned, and the NULL rates afterwards are close enough to call the
+two identically treated -- which is the point of cleaning the second period at
+all.
+
+| Column | 2025 | 2024 |
+|---|---|---|
+| `baro_altitude` | 21.36% | 20.44% |
+| `lat` / `lon` | 17.99% | 17.47% |
+| `geo_altitude` | 12.11% | 11.39% |
+| `heading` | 44.52% | 43.53% |
+| `velocity` | 44.50% | 43.48% |
+| `vert_rate` | 44.48% | 43.44% |
+
+Two things follow.
+
+**The prediction that cleaning costs coverage now has a size.** The trend path
+drops fixes with no barometric altitude, and cleaning masks about **one fix in
+five**. That is not a rounding effect, and the ladder's last rung is where it
+gets priced. Whether the accuracy bought is worth it at `k = 2` is exactly the
+question the rung answers -- but nobody should be surprised if arrival coverage
+falls by a visible margin.
+
+**The velocity columns are nearly half null, and that is correct.** ADS-B sends
+position and velocity in separate message types, so identical consecutive
+velocity values mean *repeated*, not *measured*. Masking them is the
+stale-broadcast rule the PRC challenge work established, and a 44% rate is the
+archive's carry-forward padding showing up honestly rather than a defect. It
+also explains why every rate-based signal this study has tried -- vertical rate,
+closing rate, the approach cone -- has failed where a position-based one worked.
+
+### Candidate caches, both periods
+
+* 2025: built from `osn_tracks_clean`.
+* 2024: 306,366 endpoint rows reduced from `research/tracks_clean`, giving
+  5,430,694 candidates. The log line `reducing .../research/tracks_clean to
+  endpoints` is the fix from 17:35 working -- before it, this would silently
+  have read the 2025 tracks.
 
 ### Two things to watch for, and what to do about them
 
