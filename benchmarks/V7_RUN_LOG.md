@@ -1,0 +1,92 @@
+# V7 run log
+
+Written as the run proceeds, so its state is legible without reading a Spark
+log, and so every decision made without review is visible afterwards.
+
+Updated roughly every 25 minutes while the chain is running.
+
+---
+
+## What is being run
+
+```
+python benchmarks/regenerate_v7.py --with-stages
+```
+
+Everything from trajectory cleaning through both periods: caches, four research
+sweeps, two thirteen-rung ladders, two mode comparisons and two flight-level
+grids — all through `FlightListProcessor.process_dai`, the code path that writes
+the published flight list.
+
+Roughly 66 pipeline runs. Estimated 15–20 hours.
+
+## What changed in the code first
+
+Five changes, each behind a `DetectionConfig` field that `DetectionConfig.legacy()`
+turns off, so every published flight list stays reproducible by name.
+
+| Field | Ships as | What it does |
+|---|---|---|
+| `trend_rank_by` | `haversine` | Rank candidates on exact distance rather than H3 ring count. The enabling change: under ring selection a tuned flight-level cap *loses* ground and under exact distance the same value gains it. |
+| `trend_radius_exact` | `True` | Cut the detection radius on distance rather than on hexagon band. Selecting bands by outer radius discarded hexagons straddling the boundary, and with them samples genuinely inside it. |
+| `trend_smooth_before_cut` | `True` | Smooth barometric altitude before the flight-level cut, not after. The cut used to truncate the smoothing window exactly where altitude changes fastest. |
+| `trend_bearing_tiebreak_nm` | `2.0` | Among candidates whose distances differ by less than 2 NM, prefer the one the track's course points at. |
+| `trend_ooa` | `True` | Let `trend` emit the out-of-area marker. Arrivals ship from `trend`, and about one arrival in twelve genuinely originates outside the observed area — every one of them used to be a null indistinguishable from a detection failure. |
+
+Plus two that are not thresholds:
+
+* **`adep_mode` / `ades_mode` moved into the config**, defaulting to `endpoint`
+  for departures and `trend` for arrivals. Before this, `process_dai` fell back
+  to the literal `"trend"` for both roles, so the CLI and every other entry
+  point that did not name the modes ran a configuration the study recommends for
+  neither. The thresholds were tuned and the algorithm choice was not applied.
+* **The flight list reads `osn_tracks_clean`.** Step 02a wrote a table nothing
+  consumed; cleaning existed, was tested, and fed nothing.
+
+New version string: **`v4.0.0`**, one for the whole flight list. Before it the
+trend path stamped `v2.0.0` and the endpoint path `v3.0.0` and the merge
+coalesced them, so a merged list carried whichever version the departure side
+happened to have.
+
+## Decisions taken without review
+
+| # | Decision | Why |
+|---|---|---|
+| 1 | The out-of-area join is filtered back to rows naming at least one end | The join must be an outer one, because a flight that crossed the area without descending near an aerodrome has no row in the trend table and is exactly the flight the label exists for. Unfiltered it also admits every other unmatched track — thousands of rows naming nothing at either end, which would not fail but would change the denominator of every per-aerodrome count. |
+| 2 | `clean_tracks.py` forces the first write of a rebuild to overwrite | `cleaner.py` writes with the default mode, which is append. Correct for the daily pipeline, where each run adds a month the table does not have; exactly wrong for a rebuild of the same month, which would double the table. A doubled table does not fail — it silently weights every aggregate that reads it. |
+| 3 | The pipeline flight-level grid runs at one radius, not two | Fourteen caps at two radii is fifty-six full `process_dai` runs across the two periods. The radius is already answered twice over — by the research sweep on both periods, and by the ladder, which walks it as its own rung. The cap is the parameter that needed the pipeline, because it is the one version 6 measured through a grid that stopped before the curve turned. |
+| 4 | **The sampler is not re-measured in V7** | There is no fixed-phase arm left to compare against, and these sweeps run on cleaned tracks over a different flight-level grid — so a comparison against version 6's arm would be confounded by the cleaning and the grid rather than measuring the sampler. Two arms on different data is precisely the failure this study keeps producing. V7 cites version 6's measurement and says it is cited. |
+| 5 | Per-role algorithm lives in the configuration, not beside it | An earlier draft carried the roles alongside the detection config, and `verify_plan` caught the two disagreeing on the very first run. One source of truth rather than two. |
+
+## Bugs caught before the run
+
+* **The ladder did not end at the shipped configuration.** `verify_plan` asserts
+  that the last rung matches `DetectionConfig()` in its detection settings, its
+  per-role algorithms *and* its track table, and it failed — the roles were
+  tracked in two places and had diverged. A ladder that ends anywhere else is
+  not a decomposition of the change being made, and nothing in the output would
+  have said so.
+* **Batch S3 deletes fail on this endpoint.** `DeleteObjects` needs a
+  `Content-Md5` header botocore does not send; single-object deletes are
+  unaffected. Already documented in `DATASETS.md`, and worth re-reading before
+  any cleanup: a failed delete does not look like a failure, and the next run
+  quietly reuses the data you were trying to replace.
+
+## Storage
+
+Deleted 2026-08-12 **with approval**, freeing 16.51 GB:
+
+* `research/sv_bucket`, `research/tracks_bucket`, `research/cand_bucket`
+  (6.83 GB) — the decimation study's experimental arm, redundant since the
+  bin-based sampler became the production default, which makes `osn_tracks`
+  itself the bucket-sampled table.
+* `osn_statevectors_v2` (9.68 GB) — step 01's output, consumed only by step 02,
+  which is complete, and regenerable from the OpenSky archive.
+
+Bucket after: **67.40 GB**, of which 42.81 GB is `osn_symposium_paper_2026` and
+belongs to another project. OPDI's own footprint is about 24 GB. The two cleaned
+track tables add roughly 22 GB, landing near 89 GB against a ~100 GB quota.
+
+## Progress
+
+<!-- appended as the run proceeds -->

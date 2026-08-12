@@ -109,68 +109,104 @@ def guard_writes(allowed_prefix: str = "research/") -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_plan(args) -> dict:
-    """Every run this module can build: name -> (detection, adep, ades).
+#: Marks a run that must read the *uncleaned* tracks. Everything else resolves
+#: its track table from the configuration, which since v4.0.0 means the cleaned
+#: one. Named rather than passed as a boolean so the plan reads as data.
+RAW = "raw"
+
+
+def build_plan(args, period) -> dict:
+    """Every run this module can build: name -> (detection, adep, ades, tracks).
 
     Written as one function returning one dict so the whole experiment is
     readable in one place. Nothing here reads a sweep CSV: V6 derived its
-    "tuned" configuration from an argmax at run time, which made the run
-    depend on a file that could be regenerated underneath it. The values these
-    runs use are the ones in ``DetectionConfig``, and the sweeps' job is to
-    justify those rather than to supply them.
+    "tuned" configuration from an argmax at run time, which made the run depend
+    on a file that could be regenerated underneath it. The values these runs use
+    are the ones in ``DetectionConfig``, and the sweeps' job is to justify those
+    rather than to supply them.
+
+    ``tracks`` is the track table the run reads: ``None`` to resolve it from the
+    configuration, or an explicit name.
     """
     from opdi.config import DetectionConfig
 
     L = DetectionConfig.legacy
     S = DetectionConfig
+    raw, clean = period["raw_tracks"], period["tracks"]
 
     def frm(base, **kw):
         """A config differing from *base* in exactly the named fields."""
         return dataclasses.replace(base(), **kw)
 
     # --- the cumulative ladder ------------------------------------------
-    # Order is causal, not alphabetical. The three geometry fixes come first
-    # because they decide what the thresholds are even measuring: under ring
-    # selection a tuned flight-level cap loses ground, and under exact distance
-    # the same value gains it. Tuning first and fixing the geometry afterwards
-    # would attribute the whole difference to the last step applied.
+    #
+    # Each rung adds one change to the rung above and keeps it, so the marginal
+    # worth of a change is the difference between adjacent rows, and the last
+    # rung is the shipped pipeline exactly.
+    #
+    # Order is causal, not alphabetical, and it runs in three blocks:
+    #
+    # 1. **The trend algorithm**, both roles from `trend` so every change is
+    #    attributable to its own line. The three geometry fixes come before the
+    #    thresholds because they decide what the thresholds are even measuring:
+    #    under ring selection a tuned flight-level cap *loses* ground, and under
+    #    exact distance the same value gains it. Tuning first would attribute
+    #    the whole difference to whichever step happened to come last.
+    # 2. **Which algorithm serves which role**, and the endpoint geometry that
+    #    only matters once a role uses it.
+    # 3. **The input**, last: what cleaning is worth given everything else
+    #    already adopted.
+    #
+    # `endpoint_height_ft`, `endpoint_sched_penalty_nm` and the candidate radius
+    # are not rungs because they did not change -- the study confirmed them
+    # where they already were, and a rung that changes nothing measures nothing.
+    # `verify_plan` refuses a ladder containing one.
+    # The per-role algorithm lives in the configuration, so a rung states it the
+    # same way it states every other change and the two cannot disagree. An
+    # earlier version carried the roles alongside the config and `verify_plan`
+    # caught them differing on the very first run -- which is the check working,
+    # and a good argument for one source of truth rather than two.
     steps = [
-        ("L0_legacy", {}),
-        ("L1_exact_rank", dict(trend_rank_by="haversine")),
-        ("L2_exact_radius", dict(trend_radius_exact=True)),
-        ("L3_smooth_first", dict(trend_smooth_before_cut=True)),
-        ("L4_penalty", dict(trend_sched_penalty_nm=S().trend_sched_penalty_nm)),
-        ("L5_flcap", dict(trend_max_fl=S().trend_max_fl)),
-        ("L6_margin", dict(trend_vote_margin=S().trend_vote_margin)),
-        ("L7_radius", dict(trend_radius_nm=S().trend_radius_nm)),
-        ("L8_bearing",
-         dict(trend_bearing_tiebreak_nm=S().trend_bearing_tiebreak_nm)),
-        ("L9_ooa", dict(trend_ooa=True)),
+        # 1 -- the trend algorithm, on raw tracks, both roles from trend
+        ("L00_legacy", {}, raw),
+        ("L01_exact_rank", dict(trend_rank_by="haversine"), raw),
+        ("L02_exact_radius", dict(trend_radius_exact=True), raw),
+        ("L03_smooth_first", dict(trend_smooth_before_cut=True), raw),
+        ("L04_penalty",
+         dict(trend_sched_penalty_nm=S().trend_sched_penalty_nm), raw),
+        ("L05_flcap", dict(trend_max_fl=S().trend_max_fl), raw),
+        ("L06_margin", dict(trend_vote_margin=S().trend_vote_margin), raw),
+        ("L07_radius", dict(trend_radius_nm=S().trend_radius_nm), raw),
+        ("L08_bearing",
+         dict(trend_bearing_tiebreak_nm=S().trend_bearing_tiebreak_nm), raw),
+        ("L09_ooa", dict(trend_ooa=True), raw),
+        # 2 -- roles and endpoint geometry. The endpoint values start at their
+        # legacy settings so the switch of algorithm and the tuning of that
+        # algorithm are two separate lines rather than one confounded one.
+        ("L10_endpoint_departures", dict(adep_mode="endpoint"), raw),
+        ("L11_endpoint_radius",
+         dict(endpoint_radius_nm=S().endpoint_radius_nm), raw),
+        # 3 -- the input. Identical configuration, cleaned tracks.
+        ("L12_clean_tracks", {}, clean),
     ]
+
     ladder, acc = {}, {}
-    for name, delta in steps:
+    for name, delta, tracks in steps:
         acc = {**acc, **delta}
-        # Both roles from `trend`: this ladder is about the trend algorithm,
-        # and mixing in `endpoint` would make each row's change unattributable.
-        ladder[name] = (frm(L, **acc), "trend", "trend")
+        d = frm(L, **acc)
+        ladder[name] = (d, d.adep_mode, d.ades_mode, tracks)
 
     # --- whole configurations, to choose between -------------------------
+    # Alternatives, not increments. Every one reads the cleaned tracks, because
+    # that is what the pipeline does; `legacy` here is the legacy *algorithm* on
+    # current input, and the ladder's first rung is the legacy algorithm on
+    # legacy input. The two together separate the algorithm from the data.
     modes = {
-        "legacy": (L(), L().adep_mode, L().ades_mode),
-        "trend": (S(), "trend", "trend"),
-        "endpoint": (S(), "endpoint", "endpoint"),
-        "nearest": (S(), "nearest", "nearest"),
-        "shipped": (S(), S().adep_mode, S().ades_mode),
-    }
-
-    # --- what cleaning costs and buys ------------------------------------
-    # The same configuration over the two track tables. It is a *run* rather
-    # than a flag because the comparison is the measurement: cleaning masks
-    # implausible values to NULL and the detection path drops samples with no
-    # barometric altitude, so it can only remove candidate samples.
-    cleaning = {
-        "clean_tracks": (S(), S().adep_mode, S().ades_mode),
-        "raw_tracks": (S(), S().adep_mode, S().ades_mode),
+        "legacy": (L(), L().adep_mode, L().ades_mode, clean),
+        "trend": (S(), "trend", "trend", clean),
+        "endpoint": (S(), "endpoint", "endpoint", clean),
+        "nearest": (S(), "nearest", "nearest", clean),
+        "shipped": (S(), S().adep_mode, S().ades_mode, clean),
     }
 
     # --- the flight-level grid -------------------------------------------
@@ -182,43 +218,88 @@ def build_plan(args) -> dict:
         for rd in args.grid_radius:
             grid[f"grid_fl{fl}_r{rd:g}"] = (
                 frm(S, trend_max_fl=int(fl), trend_radius_nm=float(rd)),
-                "trend", "trend")
+                "trend", "trend", clean)
 
-    return {**ladder, **modes, **cleaning, **grid}
+    return {**ladder, **modes, **grid}
+
+
+def ladder_rungs(plan: dict) -> list:
+    """The ladder, in order. Names sort correctly because they are zero-padded."""
+    return sorted(k for k in plan if k.startswith("L") and k[1:3].isdigit())
 
 
 def verify_plan(plan: dict) -> None:
     """Assert the plan says what it means, before anything expensive runs.
 
-    Two checks, both of which would have caught a defect this study actually
-    shipped:
+    Four checks, every one of which corresponds to a defect this study has
+    actually shipped or come close to:
 
     * ``shipped`` must be exactly ``DetectionConfig()``. V6's equivalent was
-      assembled by hand, missed one field, and scored below the baseline it
-      claimed to beat -- and nothing said so.
-    * every ladder rung must differ from the one below it. A rung that changes
-      nothing scores identically to its predecessor, which reads as "this
-      parameter does not matter" and means "this parameter is not reaching the
-      code". That is exactly how the inert scheduled-service penalty hid.
+      assembled by hand, missed one field, and produced a row labelled
+      *recommended* that scored below the baseline it claimed to beat -- and
+      nothing said so.
+    * **the last ladder rung must be the shipped configuration**, in its
+      detection settings, its per-role algorithms *and* its track table. A
+      ladder that ends anywhere else is not a decomposition of the change: it is
+      a decomposition of something adjacent to it, and the difference is
+      invisible in the output.
+    * no two adjacent rungs may be identical. A rung that changes nothing scores
+      identically to its predecessor, which reads as "this parameter does not
+      matter" and means "this parameter is not reaching the code". That is
+      exactly how the inert scheduled-service penalty hid for a whole version.
+    * the first rung must be the legacy algorithm on uncleaned tracks, so the
+      ladder starts where the published data actually starts.
     """
     from opdi.config import DetectionConfig
 
-    shipped = plan["shipped"][0]
-    if shipped != DetectionConfig():
-        diff = [f.name for f in dataclasses.fields(DetectionConfig)
-                if getattr(shipped, f.name) != getattr(DetectionConfig(), f.name)]
-        raise SystemExit(
-            f"the run named 'shipped' is not DetectionConfig(): {diff}. "
-            f"Every figure attributed to the shipped configuration would "
-            f"describe something else.")
+    def diff(a, b):
+        return [f.name for f in dataclasses.fields(DetectionConfig)
+                if getattr(a, f.name) != getattr(b, f.name)]
 
-    rungs = sorted(k for k in plan if k.startswith("L") and k[1:2].isdigit())
-    for lo, hi in zip(rungs, rungs[1:]):
-        if plan[lo][0] == plan[hi][0]:
+    shipped_cfg, shipped_adep, shipped_ades, shipped_tracks = plan["shipped"]
+    if shipped_cfg != DetectionConfig():
+        raise SystemExit(
+            f"the run named 'shipped' is not DetectionConfig(): "
+            f"{diff(shipped_cfg, DetectionConfig())}. Every figure attributed "
+            f"to the shipped configuration would describe something else.")
+
+    rungs = ladder_rungs(plan)
+    if rungs:
+        cfg, adep, ades, tracks = plan[rungs[-1]]
+        problems = []
+        if cfg != shipped_cfg:
+            problems.append(f"detection differs in {diff(cfg, shipped_cfg)}")
+        if (adep, ades) != (shipped_adep, shipped_ades):
+            problems.append(
+                f"roles are {adep}/{ades}, shipped is "
+                f"{shipped_adep}/{shipped_ades}")
+        if tracks != shipped_tracks:
+            problems.append(f"tracks are {tracks!r}, shipped reads "
+                            f"{shipped_tracks!r}")
+        if problems:
             raise SystemExit(
-                f"ladder rungs {lo} and {hi} are the same configuration. A "
-                f"step that changes nothing is not a measurement of that step.")
-    print(f"plan verified: {len(plan)} runs, {len(rungs)} ladder rungs")
+                f"the last ladder rung ({rungs[-1]}) is not the shipped "
+                f"configuration: " + "; ".join(problems) + ". The ladder would "
+                f"decompose a change that is not the one being made.")
+
+        first_cfg, _, _, first_tracks = plan[rungs[0]]
+        if first_cfg != DetectionConfig.legacy():
+            raise SystemExit(
+                f"the first ladder rung ({rungs[0]}) is not the legacy "
+                f"configuration: {diff(first_cfg, DetectionConfig.legacy())}.")
+        if first_tracks == shipped_tracks:
+            raise SystemExit(
+                "the first ladder rung already reads the cleaned tracks, so "
+                "the cleaning rung would measure nothing.")
+
+        for lo, hi in zip(rungs, rungs[1:]):
+            if plan[lo] == plan[hi]:
+                raise SystemExit(
+                    f"ladder rungs {lo} and {hi} are identical. A step that "
+                    f"changes nothing is not a measurement of that step.")
+
+    print(f"plan verified: {len(plan)} runs, {len(rungs)} ladder rungs, "
+          f"ending at the shipped configuration")
 
 
 # ---------------------------------------------------------------------------
@@ -307,16 +388,15 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
     period = PERIODS[args.period]
 
-    plan = build_plan(args)
+    plan = build_plan(args, period)
     verify_plan(plan)
 
     groups = {
-        "ladder": [k for k in plan if k.startswith("L") and k[1:2].isdigit()],
+        "ladder": ladder_rungs(plan),
         "modes": ["legacy", "trend", "endpoint", "nearest", "shipped"],
-        "cleaning": ["clean_tracks", "raw_tracks"],
         "grid": [k for k in plan if k.startswith("grid_")],
     }
-    groups["all"] = groups["ladder"] + groups["modes"] + groups["cleaning"]
+    groups["all"] = groups["ladder"] + groups["modes"]
 
     runs, seen = [], set()
     for name in args.runs:
@@ -332,13 +412,14 @@ def main() -> None:
     print(f"runs ({len(runs)}): {', '.join(runs)}")
     if args.dry_run:
         for r in runs:
-            d, a, s = plan[r]
-            print(f"  {r:<20} ADEP={a:<9} ADES={s:<9} FL{d.trend_max_fl} "
-                  f"r{d.trend_radius_nm:g} m{d.trend_vote_margin} "
-                  f"pen{d.trend_sched_penalty_nm:g} rank={d.trend_rank_by} "
-                  f"exact_r={d.trend_radius_exact} smooth1st="
-                  f"{d.trend_smooth_before_cut} tie={d.trend_bearing_tiebreak_nm:g} "
-                  f"ooa={d.trend_ooa}")
+            d, a, s, tr = plan[r]
+            print(f"  {r:<24} ADEP={a:<9} ADES={s:<9} tracks={str(tr):<22} "
+                  f"FL{d.trend_max_fl} r{d.trend_radius_nm:g} "
+                  f"m{d.trend_vote_margin} pen{d.trend_sched_penalty_nm:g} "
+                  f"rank={d.trend_rank_by} exact_r={d.trend_radius_exact} "
+                  f"smooth1st={d.trend_smooth_before_cut} "
+                  f"tie={d.trend_bearing_tiebreak_nm:g} ooa={d.trend_ooa} "
+                  f"e_r={d.endpoint_radius_nm:g}")
         return
 
     out = args.results_dir
@@ -392,8 +473,7 @@ def main() -> None:
 
     rows, per_apt, per_type = [], [], []
     for run in runs:
-        detection, adep_mode, ades_mode = plan[run]
-        tracks = period["raw_tracks"] if run == "raw_tracks" else period["tracks"]
+        detection, adep_mode, ades_mode, tracks = plan[run]
         table = build(spark, cfg, month, run, detection, adep_mode, ades_mode,
                       log_dir, tracks)
 

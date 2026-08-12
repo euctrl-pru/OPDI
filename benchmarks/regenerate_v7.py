@@ -348,9 +348,11 @@ def jobs() -> list:
             ["--period", "2025", "--runs", "ladder",
              "--out-name", "ladder_2025.csv", "--executors", "10"],
             {"ladder_2025.csv": "ladder_2025.csv"}, PIPE,
-            "ten cumulative steps from the legacy algorithm to the shipped "
-            "one, each run through process_dai itself",
-            inputs=[T_TRACKS_CLN, T_ZONES, T_CAND, T_REF]),
+            "thirteen cumulative steps from the legacy algorithm on raw "
+            "tracks to the shipped pipeline on cleaned ones, each run through "
+            "process_dai itself. verify_plan asserts the last rung IS the "
+            "shipped configuration before any of it runs",
+            inputs=[T_TRACKS_CLN, T_TRACKS, T_ZONES, T_CAND, T_REF]),
 
         Job("ladder_2024", v7,
             ["--period", "2024", "--runs", "ladder",
@@ -361,14 +363,15 @@ def jobs() -> list:
             inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF]),
 
         Job("modes_2025", v7,
-            ["--period", "2025", "--runs", "modes", "cleaning",
+            ["--period", "2025", "--runs", "modes",
              "--per-airport", "--out-name", "modes_2025.csv", "--executors", "10"],
             {"modes_2025.csv": "modes_2025.csv",
              "per_airport_v7.csv": "per_airport_2025.csv",
              "per_type_v7.csv": "per_type_2025.csv"}, PIPE,
-            "the whole configurations the verdict chooses between, plus what "
-            "cleaning costs and buys",
-            inputs=[T_TRACKS_CLN, T_TRACKS, T_ZONES, T_CAND, T_REF]),
+            "the whole configurations the verdict chooses between. What "
+            "cleaning is worth is the ladder's last rung, not a separate run: "
+            "there it is measured given everything else already adopted",
+            inputs=[T_TRACKS_CLN, T_ZONES, T_CAND, T_REF]),
 
         Job("modes_2024", v7,
             ["--period", "2024", "--runs", "modes",
@@ -400,12 +403,19 @@ def jobs() -> list:
             "the same grid on the second period, so the cap is chosen on both",
             inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF]),
 
-        # --- the sampler, kept from V6 and re-pointed ---------------------
-        Job("sampler_comparison", "benchmarks/sampler_comparison.py", [],
-            {"sampler_comparison.csv": "sampler_comparison_v7.csv"},
-            CORE + ["benchmarks/sampler_comparison.py"],
-            "bin-based against fixed-phase across every parameter cell of two "
-            "complete runs"),
+        # The sampler is deliberately NOT re-measured here.
+        #
+        # V6 compared the two samplers across every parameter cell of two
+        # complete runs, on identical grids over identically-treated input, and
+        # found the difference indistinguishable from zero. V7 cannot repeat
+        # that: there is no fixed-phase arm left to compare against, and its
+        # sweeps run on cleaned tracks over a different flight-level grid --
+        # so a comparison against V6's arm would be confounded by the cleaning
+        # and the grid rather than measuring the sampler.
+        #
+        # Two arms on different data is precisely the failure this study keeps
+        # producing, and the honest handling is to cite the measurement that was
+        # made properly rather than to manufacture one that was not.
     ]
 
 
