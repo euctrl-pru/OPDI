@@ -156,3 +156,32 @@ Known and accepted: the 2024 vote-cache stage still passes `--add-h3`, which
 recomputes an index the cleaned tracks now carry. It writes the same values, so
 it costs some CPU and nothing else. Not worth restarting the chain for.
 
+### Two things to watch for, and what to do about them
+
+**The vote cache is the job most likely to fail.** It pre-filters on
+`flight_level <= max(FL_CAPS)`, which this run raises from FL200 to FL300 — and
+most cruise traffic sits in exactly that band, so the join against aerodrome
+zones out to 80 NM grows sharply. It also carries 42 aggregate columns instead
+of 27.
+
+*Contingency, if it dies or runs absurdly long:* rebuild the cache with caps
+capped at FL200 and let the **pipeline** grid close the curve to FL300 on its
+own. The two are independent — `flight_list_v7 --runs grid` runs `process_dai`
+directly and never reads the vote cache — so nothing the review asked for is
+lost. The research sweep already turns well below FL200 on both periods, so
+FL225–300 in the *cache* buys precision on a part of the curve that is
+monotonically falling.
+
+**Out-of-area labelling adds rows, and rows can steal pairings.** `trend` with
+`trend_ooa` on emits a row for a track it would previously have been silent
+about. The benchmark pairs each reference flight with the track starting closest
+to its off-block time, so a new row sharing an aircraft, callsign and date can
+take a pairing from a track that carried a real answer. Version 6 documented
+exactly this effect when departures and arrivals came from different methods.
+
+*What to check in the results:* if `L09_ooa` shows **departure** coverage falling
+while arrival coverage rises, that is the alignment moving and not the algorithm
+getting worse. It should be reported as such rather than corrected away — a
+benchmark that quietly adjusts its own alignment to flatter a result is worth
+less than one that shows where it is fragile.
+
