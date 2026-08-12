@@ -443,6 +443,47 @@ Revised estimate from here: about an hour for the 2025 ladder, an hour for 2024,
 forty minutes for the two mode comparisons, an hour and a half for the two
 grids.
 
+### The re-run found something: the legacy algorithm is not deterministic
+
+The accidental re-run of `ladder_2025` was meant to be a reproducibility check.
+It reproduced **eleven of twelve comparable rungs byte for byte** -- same
+coverage, same correct, same wrong, same score. One rung did not:
+
+| Rung | Run 1 arrivals | Run 2 arrivals |
+|---|---|---|
+| **L00 legacy** | 60,600 | **60,603** |
+| every other rung | identical | identical |
+
+Three flights in 95,116, and only on the rung that uses `trend_rank_by="ring"`.
+
+**Why it is specific to ring selection.** Under ring, `df_min` keeps every
+sample whose `distance_from_center` equals the track's minimum -- and that
+column is an *integer* ring count, so ties are routine. Several rows can survive
+for the same track with identical `distance_km`, and the tie among them is then
+settled by `row_number()` over an ordering that does not separate them, and by
+`first(apt_ident)` in a `groupBy` that carries no ordering at all. Which row wins
+depends on how the shuffle happens to land.
+
+Under exact-distance ranking the ties are gone before that point: `df_min` keeps
+each candidate aerodrome's own closest approach, and continuous distances
+essentially never tie. Every haversine rung reproduced exactly.
+
+**Not fixing it, and the reason matters.** The obvious repair -- make the
+tie-break deterministic -- would change what `DetectionConfig.legacy()`
+produces, and `legacy()` exists for exactly one purpose: to reproduce data that
+has already been published. That data was produced by this algorithm, ties and
+all. Making the preset deterministic would make it reproduce something the
+releases never contained.
+
+So this is reported rather than repaired, and it is worth reporting, because it
+is an argument for the study's central change that nobody was looking for:
+**exact-distance ranking does not arbitrate the ties, it removes them.** The
+shipped algorithm is exactly reproducible; the one it replaces is not.
+
+Cost of discovering this: nothing. It fell out of a re-run taken for a different
+reason, which is the argument for not exempting jobs from re-running when their
+fingerprint changes.
+
 ### Two things to watch for, and what to do about them
 
 **The vote cache is the job most likely to fail.** It pre-filters on
