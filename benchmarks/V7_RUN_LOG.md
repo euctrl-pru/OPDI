@@ -130,6 +130,18 @@ code; the 2025 tracks already carry it because step 02 puts it there.
 
 Nothing real was lost: no data had been committed, only markers.
 
+### Checkpoints
+
+Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
+`repartition("track_id")`, which is where cleaning spends most of its time.
+
+| UTC | Phase | Detail |
+|---|---|---|
+| 17:10 | 02a, 2024 | relaunched with the H3 fix |
+| 17:35 | 02a, 2024 | stage 6 at 30/200 |
+| 18:05 | 02a, 2024 | stage 6 at 70/200 |
+| 18:30 | 02a, 2024 | stage 6 at 95/200 |
+
 ### 2026-08-12 16:58 · chain relaunched
 
 ### 2026-08-12 17:35 · two more cross-period bugs, fixed while the cleaning runs
