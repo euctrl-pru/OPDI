@@ -522,8 +522,13 @@ def main() -> None:
                 f"{n_gt:,} reference flights that means the identity join "
                 f"matched nothing, not that detection failed. Check icao24 "
                 f"case and callsign padding before reading anything into it.")
-        m.update(run=run, period=args.period, adep_mode=adep_mode,
-                 ades_mode=ades_mode, tracks_table=tracks or "config",
+        # Every detection field, plus what identifies the run. `adep_mode` and
+        # `ades_mode` are *not* named separately: they are fields of the config
+        # now, so passing them here too collides with the expansion below and
+        # `dict.update` raises. Which is the right failure -- one source of
+        # truth, or an error.
+        m.update(run=run, period=args.period,
+                 tracks_table=tracks or "config",
                  **{f.name: getattr(detection, f.name)
                     for f in dataclasses.fields(detection)})
         rows.append(m)

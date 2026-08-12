@@ -151,6 +151,8 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 21:18 | trend_sweep_2025 | **staged** — 560 cells |
 | 21:47 | trend_sweep_2024 | staged |
 | 21:47 | endpoint_sweep_2025 | staged (radius x height, penalty) |
+| 21:41 | endpoint_sweep_2024 | staged — all five sweeps done |
+| 21:41 | ladder_2025 | **failed on rung 1**, fixed, chain resumed 22:15 |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -319,6 +321,37 @@ rungs, so `ladder_2025` and `ladder_2024` will price exactly what the shipped
 values cost. If the pipeline agrees, this is a defaults change for a follow-up
 with two periods of evidence behind it, not something to ship tonight by
 editing a config while the run that would have tested it is still going.
+
+### 21:41 · the ladder failed on its first rung
+
+```
+TypeError: dict.update() got multiple values for keyword argument 'adep_mode'
+```
+
+Self-inflicted, and a direct consequence of moving the per-role algorithm into
+`DetectionConfig`. The result row is built by naming the run's identity
+explicitly and then expanding every detection field:
+
+```python
+m.update(run=run, period=..., adep_mode=adep_mode, ades_mode=ades_mode, ...,
+         **{f.name: getattr(detection, f.name) for f in fields(detection)})
+```
+
+Once `adep_mode` became a *field*, it arrived twice.
+
+Fixed by dropping the explicit pair -- the config is the single source of truth
+for them now, which was the point of the move. Verified by reproducing the exact
+`update` call without Spark rather than by relaunching and hoping.
+
+**Cost: about six minutes.** It failed on the first rung, before any pipeline
+run had finished, and everything ahead of it -- all five sweeps -- was already
+staged. Worth saying plainly that a loud crash on rung one is the good version
+of this failure: the same collision inside a rarely-taken branch would have run
+for hours first.
+
+The chain resumed at 22:15 with the six remaining pipeline jobs. Stages and
+sweeps are recorded and current, so no `--with-stages` and no `--rebuild-stage`:
+rebuilding a cache that is already right costs an hour and changes nothing.
 
 ### Two things to watch for, and what to do about them
 
