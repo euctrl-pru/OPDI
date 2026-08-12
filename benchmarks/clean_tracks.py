@@ -47,12 +47,20 @@ PERIODS = {
 
 
 def redirect(source: str, target: str) -> None:
-    """Point the cleaner's table names at this period's copies.
+    """Point the cleaner's table names at this period's copies, and replace.
 
     Wrapping ``StorageManager`` rather than editing ``cleaner.py`` keeps the
     research period out of the production code path. Reads and writes are
     mapped by the *same* dictionary, so a source that is redirected and a target
     that is not cannot happen.
+
+    The **first** write to the target is forced to ``overwrite``. ``cleaner.py``
+    writes with the default mode, which is append -- correct for the daily
+    pipeline, where each run adds a month the table does not have, and exactly
+    wrong for a rebuild of the same month. Re-running would double the table,
+    and a doubled table does not fail: it silently weights every aggregate that
+    reads it. Only the first write, so a multi-month loop still extends rather
+    than keeping only the last month.
     """
     from opdi.utils.storage import StorageManager
     from opdi.cleaning import cleaner as cl
@@ -61,13 +69,19 @@ def redirect(source: str, target: str) -> None:
         return
     orig_read, orig_write = StorageManager.read_table, StorageManager.write_table
     mapping = {cl.SOURCE_TABLE: source, cl.TARGET_TABLE: target}
+    replaced = set()
 
     def read_table(self, name, *a, **kw):
         return orig_read(self, mapping.get(name, name), *a, **kw)
 
     def write_table(self, df, name, *a, **kw):
         mapped = mapping.get(name, name)
-        print(f"  -> writing {mapped}")
+        if mapped == target and target not in replaced:
+            replaced.add(target)
+            kw["mode"] = "overwrite"
+            print(f"  -> REPLACING {mapped} (first write of this rebuild)")
+        else:
+            print(f"  -> writing {mapped}")
         return orig_write(self, df, mapped, *a, **kw)
 
     def table_ref(self, name, *a, **kw):

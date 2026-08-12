@@ -441,7 +441,16 @@ class FlightListProcessor:
         out-of-area with the aircraft still on the runway.
 
         The join is an outer one because a track can be missing from the trend
-        table entirely, which is the commonest case for an overflight.
+        table entirely: a flight that crossed the area without ever descending
+        near an aerodrome has no row there, and it is precisely the flight this
+        label exists for.
+
+        That would also admit every track the border test does *not* fire on --
+        thousands of rows naming nothing at either end -- so the result is
+        filtered back to rows that say something. The population of the flight
+        list therefore grows by exactly the flights that gained a label, and by
+        nothing else. Getting this wrong would not fail: it would quietly add
+        empty rows and change the denominator of every per-aerodrome count.
         """
         flags = self._track_border_flags(month)
         j = t.join(flags, t.id == flags.track_id, "outer")
@@ -463,7 +472,7 @@ class FlightListProcessor:
 
         # Identity from whichever side has it: a track present only in the
         # border frame has none of the trend table's columns populated.
-        return j.select(
+        out = j.select(
             F.coalesce(col("id"), col("track_id")).alias("id"),
             "ADEP", "ADES", "ADEP_P", "ADES_P",
             F.coalesce(col("ICAO24"), col("_ICAO24")).alias("ICAO24"),
@@ -474,6 +483,10 @@ class FlightListProcessor:
             F.coalesce(col("version"), lit(FLIGHT_LIST_VERSION)).alias("version"),
             "adep_source", "ades_source",
         )
+        # Only rows that say something about at least one end. See above: the
+        # outer join is what lets a border-only track appear at all, and this is
+        # what stops it bringing every other unmatched track with it.
+        return out.filter(col("ADEP").isNotNull() | col("ADES").isNotNull())
 
     def build_endpoint_candidates(
         self,
@@ -1594,11 +1607,13 @@ class FlightListProcessor:
             ICAO_OPERATOR STRING COMMENT 'ICAO operator code',
             FIRST_SEEN TIMESTAMP COMMENT 'First ADS-B reception time',
             LAST_SEEN TIMESTAMP COMMENT 'Last ADS-B reception time',
-            VERSION STRING COMMENT 'Processing version'
+            ADEP_SOURCE STRING COMMENT 'How ADEP was decided: aerodrome (named it), out_of_area (the track began outside the observed area), undetermined (could not tell). A null ADEP means the last two, which are not the same thing.',
+            ADES_SOURCE STRING COMMENT 'The same for ADES.',
+            VERSION STRING COMMENT 'Processing version. v4.0.0 onward; earlier lists carried v2.0.0 or v3.0.0 depending on which algorithm named the departure.'
         )
         USING iceberg
         PARTITIONED BY (days(FIRST_SEEN))
-        COMMENT 'OPDI flight list v2. Last updated: {today}.'
+        COMMENT 'OPDI flight list. Last updated: {today}.'
         """
         self.storage.create_table(create_sql)
         print(f"Table {self.project}.opdi_flight_list created/verified.")
