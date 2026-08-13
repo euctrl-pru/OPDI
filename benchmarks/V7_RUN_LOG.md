@@ -167,6 +167,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 04:30 | ladder_2024, modes_2025 | staged; a mislabelled column found in them |
 | 04:32 | chain | stopped, column fixed, relaunched |
 | 06:35 | both ladders + modes_2025 | **staged**, columns correct |
+| 07:01 | modes_2024 | staged — the verdict holds on both samples |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -777,6 +778,36 @@ put to the reader with the accuracy gain beside it, not settle by assertion.
 Its value is entirely in what it enables: the flight-level cap two rungs later
 is worth +4,298 and +5,046, and under the ring selection it replaces, version 6
 measured that same change *losing* about 1,700.
+
+### The verdict, on both samples, in the same order
+
+| Configuration | Departures by | Arrivals by | 2025 | 2024 |
+|---|---|---|---|---|
+| **shipped** | `endpoint` | `trend` | **133,022** | **115,193** |
+| endpoint both roles | `endpoint` | `endpoint` | 131,032 | 114,702 |
+| trend both roles | `trend` | `trend` | 130,072 | 111,070 |
+| legacy | `trend` | `trend` | 122,158 | 100,591 |
+| nearest | `nearest` | `nearest` | 86,837 | 73,490 |
+
+**The ranking is identical on two independent samples**, and the recommendation
+is first on both: **+10,864 (+8.9%)** on 2025 and **+14,602 (+14.5%)** on 2024
+against the algorithm published before 2026.
+
+Three things this table settles that version 6 could only assert.
+
+*The split between roles is worth having.* Both single-algorithm configurations
+score below the split on both periods, so taking departures from one method and
+arrivals from another is not an artefact of the sample it was chosen on.
+
+*`nearest` is not a serious option, and now that is measured twice.* It answers
+far more often -- it never abstains -- and is wrong far more often. Scored, it
+is last by a margin larger than the entire gain from legacy to shipped. This is
+not a criticism of the `traffic` library, which is solving a different problem:
+it names the nearest aerodrome and leaves the judgement to the caller.
+
+*The gain is larger on the harder sample.* 14.5% against 8.9%, in the same
+direction as the ladder's net. An improvement that shrinks where the data is
+poorer would be suspicious; one that grows is doing what it claims.
 
 ### Two things to watch for, and what to do about them
 
