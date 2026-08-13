@@ -842,6 +842,48 @@ sits inside it, and nothing in either measurement argues for moving it.
 That is the review's question answered twice, in the harness and in the code
 that ships, on data neither was tuned against.
 
+### Out-of-area on arrivals is a coin flip, and I had it wrong
+
+Earlier entries here graded out-of-area labelling as "holds" on the strength of
+its **total** delta, +335 and +321. That grading is right about the rung and
+wrong about the shipped configuration, and the difference matters.
+
+The ladder's out-of-area rung has *both* roles coming from `trend`, so its
+departure gain is real -- but **the shipped configuration takes departures from
+`endpoint`**, which has always had the label. So the trend-side out-of-area
+change only ever reaches arrivals in what actually ships, and on arrivals it is
+negative on both samples: −827 and −245.
+
+The precision figures say why:
+
+| Role | Truly out-of-area | Labelled | Recall | **Precision** |
+|---|---|---|---|---|
+| Departures (`endpoint`) | 8.30% | 0.74% | 7.96% | **89.20%** |
+| Arrivals (`trend`) | 8.37% | 0.44% | 2.67% | **50.35%** |
+
+An arrival label is right about half the time. Working the arithmetic: about 419
+arrivals get the label, roughly 211 correctly and 208 wrongly, and each of those
+was previously a *silence*. At `k = 2` that is **−205** -- converting nulls into
+coin-flip answers is exactly the trade the scoring rule is designed to refuse.
+
+**Why the asymmetry is real and not a tuning accident.** A departing track that
+*starts* at the edge of the observed area almost certainly entered it from
+outside. An arriving track that *ends* near the edge is ambiguous: it may be
+leaving the area, or it may be a flight still bound for somewhere inside whose
+reception was simply lost. The border test ported cleanly to departures because
+the geometry supports it, and does not for arrivals.
+
+**What this changes.** `trend_ooa` should not ship on for arrivals as it stands.
+The options are a stricter arrival border test -- requiring the track to be
+heading *out* of the area, which the bearing machinery already computes -- or
+leaving arrival out-of-area to `endpoint` where its precision is 89%. That is a
+V7 recommendation with a measurement behind it, not a defaults change to make
+while the run that measured it is still going.
+
+It is also a reminder about the ladder: a rung is graded on the configuration it
+*is*, not the one that ships. Both readings belong in the report, and the
+distinction has to be drawn where the table is.
+
 ### Two things to watch for, and what to do about them
 
 **The vote cache is the job most likely to fail.** It pre-filters on
