@@ -499,15 +499,29 @@ class DetectionConfig:
     samples: 2 gives the five-sample window ``rowsBetween(-2, 2)``. **Never
     swept** -- inherited, not chosen."""
 
-    trend_vote_margin: int = 2
+    trend_vote_margin: int = 0
     """One direction must beat the other by this many samples or the pair is
-    ``ambiguous`` and dropped. At 5 s sampling, 2 is about 10 s.
+    ``ambiguous`` and dropped. Zero means a simple majority decides.
 
-    **Changed from 4**, on sweep evidence rather than pipeline evidence: the
-    pipeline grid held the margin fixed at 2 while varying the cap and radius,
-    so this is the one adopted value not confirmed by a pipeline sweep of its
-    own. Worth about 150 flights in the harness. Flagged in the report as the
-    weakest link in the recommendation."""
+    **Changed from 4, then from 2.** V6 moved it to 2 on sweep evidence alone,
+    and flagged it as the weakest value in its recommendation. V7 measured it
+    through ``process_dai`` on both periods, applied to the shipped
+    configuration on its own: **+395 and +296** for zero against two.
+
+    The exchange rate is what settles it. Dropping the margin gains 465 correct
+    arrivals for 35 extra wrong ones -- **13 correct per wrong, against a bar of
+    two** -- so coverage rises half a point while accuracy moves by four
+    hundredths.
+
+    **Cleaning is why the margin stopped earning its keep.** It exists to stop
+    noise flipping a climb-or-descent call, and step 02a now masks about a fifth
+    of barometric altitudes and nearly half the velocity columns *before* the
+    vote is counted. The margin was defending against something the cleaner has
+    already removed, and all it did was refuse flights it could have answered.
+
+    That interaction is the reason this value could not have been settled
+    before: it depends on an input treatment that did not previously reach the
+    flight list at all."""
 
     trend_rank_by: str = "haversine"
     """How ``trend`` chooses among candidate aerodromes: ``"haversine"`` or

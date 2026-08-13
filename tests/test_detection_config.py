@@ -127,7 +127,12 @@ def test_shipped_defaults_are_the_values_the_study_supports():
     # 2025, -79 on 2024 -- with the joint sweep preferring 30 as an interior
     # optimum. Reverted on four independent measurements.
     assert d.trend_radius_nm == 30.0
-    assert d.trend_vote_margin == 2
+    # 0, not 2. V6 shipped 2 on sweep evidence and flagged it as its weakest
+    # value; V7 measured it through the pipeline on both periods -- +395 and
+    # +296 -- gaining 465 correct arrivals for 35 wrong, which is 13 per wrong
+    # against a bar of 2. Cleaning removes the noise the margin defended
+    # against, before the vote is counted.
+    assert d.trend_vote_margin == 0
     # The one tuned trend value the pipeline confirmed.
     assert d.trend_sched_penalty_nm == 10.0
     # Endpoint: radius revised, height confirmed where it already was.

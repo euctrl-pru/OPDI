@@ -299,7 +299,10 @@ def build_plan(args, period) -> dict:
                             S().adep_mode, S().ades_mode, clean),
         "reject_trend_ooa": (frm(S, trend_ooa=True),
                              S().adep_mode, S().ades_mode, clean),
-        "reject_margin0": (frm(S, trend_vote_margin=0),
+        # `reject_margin2` rather than `margin0`: zero is now what ships, and
+        # this measures the value it replaced. Kept because V6 shipped 2 and a
+        # reader deserves the number that moved it.
+        "reject_margin2": (frm(S, trend_vote_margin=2),
                            S().adep_mode, S().ades_mode, clean),
     }
 
@@ -499,7 +502,7 @@ def main() -> None:
     groups = {
         "ladder": ladder_rungs(plan),
         "modes": ["legacy", "trend", "endpoint", "nearest", "shipped"],
-        "rejected": ["reject_radius20", "reject_trend_ooa", "reject_margin0"],
+        "rejected": ["reject_radius20", "reject_trend_ooa", "reject_margin2"],
         "grid": [k for k in plan if k.startswith("grid_")],
     }
     groups["all"] = groups["ladder"] + groups["modes"] + groups["rejected"]
