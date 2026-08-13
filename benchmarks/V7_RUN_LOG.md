@@ -171,6 +171,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 08:04 | grid_2025 | staged — the curve closes in the pipeline too |
 | 09:22 | **chain complete** | exit 0, all fifteen outputs staged |
 | 09:43 | defaults changed | radius reverted to 30 NM, trend OOA off; chain re-running |
+| 10:04 | ladder_2025 | died on a transient S3 fault at rung 4; retried |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -957,6 +958,34 @@ number.
 Tests updated, 115 passing, including a new one pinning `trend_ooa` off so
 "the feature is implemented, why is it disabled?" has to be answered against the
 measurement rather than switched on by assumption.
+
+### 10:04 · a transient S3 fault, and how it was told apart from a bug
+
+`ladder_2025` died at rung 4:
+
+```
+NoSuchUploadException: The specified multipart upload does not exist.
+The upload ID may be invalid, or the upload may have been aborted
+or completed. (Status Code: 404)
+```
+
+Not a code fault. The magic committer had an in-flight multipart upload
+cancelled underneath it while writing a flight list.
+
+Checked before retrying, because "transient" is the easiest wrong diagnosis to
+reach for:
+
+* **the bucket is not full** -- 83.87 GB, with the quota around 100. A full
+  bucket fails with `Bucket quota exceeded`, which this is not;
+* **nothing in the failing path changed** -- the write is the same code that
+  succeeded through six previous chain runs tonight;
+* **stale uploads could not be inspected** -- the endpoint denies
+  `ListMultipartUploads`, which is worth recording so the next person does not
+  spend time on it.
+
+Retried. The chain is idempotent and every pipeline job was stale anyway, so a
+retry costs nothing beyond the four minutes already spent. If it recurs at the
+same rung it is not transient and deserves a different answer.
 
 ### Two things to watch for, and what to do about them
 
