@@ -168,6 +168,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 04:32 | chain | stopped, column fixed, relaunched |
 | 06:35 | both ladders + modes_2025 | **staged**, columns correct |
 | 07:01 | modes_2024 | staged — the verdict holds on both samples |
+| 08:04 | grid_2025 | staged — the curve closes in the pipeline too |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -808,6 +809,38 @@ it names the nearest aerodrome and leaves the judgement to the caller.
 *The gain is larger on the harder sample.* 14.5% against 8.9%, in the same
 direction as the ladder's net. An improvement that shrinks where the data is
 poorer would be suspicious; one that grows is doing what it claims.
+
+### The flight-level curve, closed in the pipeline
+
+The review's question was whether the cap should go higher. The research sweep
+said no; this is the same question asked of `process_dai` itself, at 20 NM:
+
+| Cap | Dep coverage | Dep accuracy | Dep score | Arr coverage | Arr accuracy | Arr score |
+|---|---|---|---|---|---|---|
+| FL25 | 61.97% | 98.86% | 56,929 | 65.02% | 98.41% | 58,891 |
+| FL50 | 73.04% | 98.96% | 67,301 | 68.10% | 98.29% | 61,453 |
+| FL60 | 74.10% | 98.96% | 68,279 | 68.72% | 98.18% | 61,793 |
+| **FL75** | 75.43% | 98.83% | 69,230 | 69.19% | 98.00% | **61,858** |
+| FL100 | 77.47% | 98.39% | 70,142 | 70.08% | 96.80% | 60,248 |
+| **FL125** | 79.01% | 97.86% | **70,334** | 70.96% | 95.47% | 58,314 |
+| FL200 | 80.51% | 96.09% | 67,603 | 72.37% | 92.42% | 53,185 |
+| FL300 | 81.67% | 92.73% | 60,742 | 73.72% | 88.30% | 45,510 |
+
+**Departures peak at FL125, arrivals at FL75**, and both fall away steeply: by
+FL300 departures have lost 9,592 from their peak and arrivals 16,348.
+
+Coverage rises monotonically all the way to FL300 -- 81.67% and 73.72% -- which
+is the half of the intuition that was right. Accuracy falls faster, because a
+fix taken at FL300 is a long way from whichever aerodrome turns out to be the
+answer. The score turns where they cross.
+
+The pipeline puts the arrival peak at FL75 where the research sweep put it at
+FL50, with FL60 between them and within a few hundred of both. All three are on
+a plateau: FL50, FL60 and FL75 span 405 flights out of 95,116. The shipped FL60
+sits inside it, and nothing in either measurement argues for moving it.
+
+That is the review's question answered twice, in the harness and in the code
+that ships, on data neither was tuned against.
 
 ### Two things to watch for, and what to do about them
 
