@@ -1102,6 +1102,29 @@ to make while a run is in flight.
 This is the system working as intended: an input moved, it was flagged rather
 than absorbed, and five minutes of checking established it was immaterial.
 
+### 23:50 · stopped the grids mid-run, because they were sweeping a dead radius
+
+The chain reached `grid_2025` and started producing cells named `grid_fl25_r20`.
+The radius had been changed to 30 -- the shipped value -- about twenty minutes
+*after* the chain launched, and a chain loads its job arguments once at start.
+So it was measuring the flight-level curve at a radius the pipeline no longer
+uses.
+
+**Killed it and relaunched `--only grid_2025 grid_2024`.** The other thirteen
+outputs were already staged and current; the two grids were the last jobs, and
+letting them finish would have spent two hours producing a table that had to be
+thrown away. The relaunch confirms `grid_fl25_r30 ... grid_fl300_r30`.
+
+Nothing was lost. Each grid cell overwrites one shared table and the CSV is
+written only at the end of the job, so an interrupted grid leaves no partial
+output to be mistaken for a real one.
+
+**The general lesson, for the next person editing a running chain:** changing
+`regenerate_v7.py` while it runs affects nothing already loaded. Stage
+definitions, job arguments and code paths are all read at launch. A change made
+mid-run either needs a relaunch or it does not take effect -- and the failure is
+silent, because the run continues perfectly happily with the old arguments.
+
 ### Two things to watch for, and what to do about them
 
 **The vote cache is the job most likely to fail.** It pre-filters on
