@@ -166,6 +166,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 04:04 | ladder_2024 | **rung 10 cleared** — the fix validated end to end |
 | 04:30 | ladder_2024, modes_2025 | staged; a mislabelled column found in them |
 | 04:32 | chain | stopped, column fixed, relaunched |
+| 06:35 | both ladders + modes_2025 | **staged**, columns correct |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -730,6 +731,52 @@ superseded either way, so the only question was which order costs less.
 shell and killed the command issuing it, leaving the chain running while
 reporting failure. The same trap as `pgrep -c -f`, in the same session. Killing
 now goes through an explicit PID list built with the matcher excluded.
+
+### The result: twelve changes, graded on two independent samples
+
+Both ladders complete on identical code. Change in **total** score (departures
+plus arrivals) at each rung:
+
+| Step | 2025 Δ | 2024 Δ | Verdict |
+|---|---|---|---|
+| + exact-distance ranking | −873 | −462 | consistently costs |
+| + exact radius cut | −27 | −14 | consistently costs |
+| + smooth before the cut | +158 | +293 | holds |
+| + scheduled-service penalty | +1,710 | +3,450 | holds |
+| + flight-level cap FL60 | +4,298 | +5,046 | holds |
+| + vote margin 2 | +580 | +514 | holds |
+| **+ radius 20 NM** | **+214** | **−79** | **disagrees** |
+| + bearing tie-break | +1,275 | +1,041 | holds |
+| + out-of-area | +335 | +321 | holds |
+| + departures from `endpoint` | +1,955 | +3,632 | holds |
+| + endpoint radius 30 NM | +207 | +66 | holds |
+| + cleaned tracks (**shipped**) | −477 | −592 | consistently costs |
+
+**Net: +9,355 on 2025 and +13,216 on 2024** -- 123,667 → 133,022 and
+101,980 → 115,196. The harder sample gains more, which is the direction a real
+improvement should go.
+
+**Exactly one rung disagrees, and it is the radius.** Eleven of twelve changes
+have the same sign on two independent samples. The one that does not is the
+value this study already flagged from the sweeps, now confirmed from a third
+direction. There is no ambiguity left about it.
+
+**Out-of-area is net positive on both periods, and I had been describing it
+badly.** Earlier entries here reported it as costing arrivals, which is true --
+but departures gain more than arrivals lose, so the total is +335 and +321. The
+arrival cost is the benchmark's pairing; the departure gain is real flights
+correctly identified as starting outside the observed area. Reporting only the
+arrival half made a positive change look like a concession.
+
+**Cleaning costs, consistently and measurably**: −477 and −592. That is the
+price of masking a fifth of barometric altitudes, and it is now a number rather
+than an expectation. Whether it is worth paying is a judgement the report should
+put to the reader with the accuracy gain beside it, not settle by assertion.
+
+**Exact-distance ranking costs on its own, on both samples.** −873 and −462.
+Its value is entirely in what it enables: the flight-level cap two rungs later
+is worth +4,298 and +5,046, and under the ring selection it replaces, version 6
+measured that same change *losing* about 1,700.
 
 ### Two things to watch for, and what to do about them
 
