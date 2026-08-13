@@ -496,7 +496,8 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
 
 
 def calculate_airport_events(
-    sv: DataFrame, month: date, storage: "StorageManager"
+    sv: DataFrame, month: date, storage: "StorageManager",
+    config: Optional[EventConfig] = None,
 ) -> DataFrame:
     """
     Detect airport infrastructure entry/exit events using H3 layout matching.
@@ -514,6 +515,8 @@ def calculate_airport_events(
         DataFrame of airport entry/exit events.
     """
     from opdi.utils.datetime_helpers import get_start_end_of_month
+
+    config = config or EventConfig()
 
     start_ts, end_ts = get_start_end_of_month(month)
     start_lit = to_timestamp(lit(start_ts))
@@ -553,7 +556,7 @@ def calculate_airport_events(
     ]
     sv_f = sv_f.select(columns)
 
-    sv_low_alt = sv_f.filter(col("flight_level") <= 20).cache()
+    sv_low_alt = sv_f.filter(col("flight_level") <= config.airport_max_fl).cache()
     sv_nearby_apt = sv_low_alt.join(flight_list, sv.track_id == flight_list.id, "inner")
 
     apt_sdf = storage.read_table("hexaero_airport_layouts")
@@ -572,30 +575,46 @@ def calculate_airport_events(
         col("event_time").cast("long") - lag(col("event_time").cast("long"), 1).over(window_spec),
     )
     df_labelled = df_labelled.withColumn(
-        "new_trace", when(col("time_diff") > 300, lit(1)).otherwise(lit(0))
+        "new_trace", when(col("time_diff") > config.airport_trace_gap_seconds, lit(1)).otherwise(lit(0))
     )
     df_labelled = df_labelled.withColumn(
         "trace_id", f_sum(col("new_trace")).over(window_spec)
     )
     df_labelled = df_labelled.drop("time_diff", "new_trace")
 
-    # Aggregate entry/exit times
+    # Aggregate entry/exit times.
+    #
+    # ``F.first``/``F.last`` inside a groupBy take *partition* order, not
+    # event_time order, so the reported entry position, altitude and cumulative
+    # measures were not guaranteed to be the values at the reported entry time
+    # -- a row could describe one instant and be stamped with another, with
+    # nothing to indicate it. ``min_by``/``max_by`` pick the value at the
+    # extreme of an explicit ordering column, which is what was meant.
+    if config.airport_events_ordered:
+        def at_entry(c):
+            return F.min_by(c, "event_time")
+
+        def at_exit(c):
+            return F.max_by(c, "event_time")
+    else:
+        at_entry, at_exit = F.first, F.last
+
     result = df_labelled.groupBy(
         "track_id", "icao24", "flight_id",
         "hexaero_apt_icao", "hexaero_osm_id", "hexaero_aeroway", "hexaero_ref", "trace_id",
     ).agg(
         f_min("event_time").alias("entry_time"),
         f_max("event_time").alias("exit_time"),
-        F.first("lat").alias("entry_lat"),
-        F.last("lat").alias("exit_lat"),
-        F.first("lon").alias("entry_lon"),
-        F.last("lon").alias("exit_lon"),
-        F.first("altitude_ft").alias("entry_altitude_ft"),
-        F.last("altitude_ft").alias("exit_altitude_ft"),
-        F.first("cumulative_distance_nm").alias("entry_cumulative_distance_nm"),
-        F.last("cumulative_distance_nm").alias("exit_cumulative_distance_nm"),
-        F.first("cumulative_time_s").alias("entry_cumulative_time_s"),
-        F.last("cumulative_time_s").alias("exit_cumulative_time_s"),
+        at_entry("lat").alias("entry_lat"),
+        at_exit("lat").alias("exit_lat"),
+        at_entry("lon").alias("entry_lon"),
+        at_exit("lon").alias("exit_lon"),
+        at_entry("altitude_ft").alias("entry_altitude_ft"),
+        at_exit("altitude_ft").alias("exit_altitude_ft"),
+        at_entry("cumulative_distance_nm").alias("entry_cumulative_distance_nm"),
+        at_exit("cumulative_distance_nm").alias("exit_cumulative_distance_nm"),
+        at_entry("cumulative_time_s").alias("entry_cumulative_time_s"),
+        at_exit("cumulative_time_s").alias("exit_cumulative_time_s"),
     )
 
     result = result.withColumn(
@@ -747,6 +766,9 @@ class FlightEventProcessor:
     ):
         self.spark = spark
         self.config = config
+        # One place the whole step reads its thresholds from. Before this,
+        # every number in this module was an inline literal.
+        self.events = getattr(config, "events", None) or EventConfig()
         self.storage = StorageManager(spark, config)
         self.project = config.project.project_name
         self.log_dir = log_dir
@@ -784,6 +806,41 @@ class FlightEventProcessor:
         df = self.storage.read_table(table_name)
         return df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
 
+    def _event_id(self, batch_id: str):
+        """Identifier for an event row.
+
+        ``monotonically_increasing_id()`` encodes the partition index, so the
+        same event gets a different id on every run and two runs of one month
+        cannot be reconciled. Worse, ``StorageManager.write_table`` defaults to
+        append: re-processing a month adds a second copy of every event rather
+        than replacing it, and nothing errors -- the table simply weighs each
+        event twice.
+
+        Deriving the id from the event's own identity makes a re-run
+        idempotent in content, so duplicates are at least detectable and
+        removable. It does not make the *write* idempotent; that needs
+        overwrite semantics on the month's partition, which is a separate
+        change to the write path.
+        """
+        if not self.events.deterministic_event_ids:
+            return concat(lit(batch_id), monotonically_increasing_id().cast("string"))
+        return F.sha2(
+            concat_ws(
+                "|",
+                col("track_id"),
+                col("type"),
+                col("event_time").cast("string"),
+                col("version"),
+            ),
+            256,
+        ).substr(1, 32)
+
+    def _measurement_id(self, batch_id: str, kind: str):
+        """Identifier for a measurement row, derived from its own milestone."""
+        if not self.events.deterministic_event_ids:
+            return concat(lit(batch_id + kind), monotonically_increasing_id().cast("string"))
+        return concat(col("id_tmp"), lit(kind.rstrip("_")))
+
     def _etl_flight_events_and_measures(
         self,
         sdf_input: DataFrame,
@@ -814,17 +871,23 @@ class FlightEventProcessor:
 
         if calc_horizontal:
             print(f"Calculating horizontal events (phase) for batch: {batch_id}")
-            df_events = calculate_horizontal_segment_events(sdf_input)
+            df_events = calculate_horizontal_segment_events(sdf_input, self.events)
 
         if calc_vertical:
             print(f"Calculating vertical events (FL crossings) for batch: {batch_id}")
-            df_vertical = calculate_vertical_crossing_events(sdf_input)
-            df_events = df_vertical if df_events is None else df_events.union(df_vertical)
+            # The published detector is kept, not adapted: under legacy() the
+            # literal old code runs, so a re-processed month reproduces
+            # events_v0.0.2 exactly rather than approximately.
+            if self.events.crossing_all_occurrences:
+                df_vertical = calculate_threshold_crossing_events(sdf_input, self.events)
+            else:
+                df_vertical = calculate_vertical_crossing_events(sdf_input)
+            df_events = df_vertical if df_events is None else df_events.unionByName(df_vertical)
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
             df_hexaero = calculate_airport_events(
-                sdf_input, month, self.storage
+                sdf_input, month, self.storage, self.events
             )
             df_events = df_hexaero if df_events is None else df_events.union(df_hexaero)
 
@@ -838,12 +901,9 @@ class FlightEventProcessor:
 
         df_events.cache()
         df_events = df_events.withColumn("source", lit("OSN"))
-        df_events = df_events.withColumn("version", lit("events_v0.0.2"))
+        df_events = df_events.withColumn("version", lit(self.events.events_version))
 
-        df_events = df_events.withColumn(
-            "id_tmp",
-            concat(lit(batch_id), monotonically_increasing_id().cast("string")),
-        ).select(
+        df_events = df_events.withColumn("id_tmp", self._event_id(batch_id)).select(
             col("id_tmp"), col("track_id"), col("type"), col("event_time"),
             col("lon"), col("lat"), col("altitude_ft"), col("source"),
             col("version"), col("info"), col("cumulative_distance_nm"),
@@ -870,10 +930,7 @@ class FlightEventProcessor:
         df_dist = (
             df_events.withColumn("type", lit("Distance flown (NM)"))
             .withColumn("version", lit("distance_v0.0.2"))
-            .withColumn(
-                "id",
-                concat(lit(batch_id + "_d_"), monotonically_increasing_id().cast("string")),
-            )
+            .withColumn("id", self._measurement_id(batch_id, "_d_"))
             .select(
                 col("id"),
                 col("id_tmp").alias("milestone_id"),
@@ -886,10 +943,7 @@ class FlightEventProcessor:
         df_time = (
             df_events.withColumn("type", lit("Time Passed (s)"))
             .withColumn("version", lit("time_v0.0.1"))
-            .withColumn(
-                "id",
-                concat(lit(batch_id + "_t_"), monotonically_increasing_id().cast("string")),
-            )
+            .withColumn("id", self._measurement_id(batch_id, "_t_"))
             .select(
                 col("id"),
                 col("id_tmp").alias("milestone_id"),
@@ -923,8 +977,20 @@ class FlightEventProcessor:
                 print("All events for this month already processed.")
                 return
 
+        # Step 02a writes osn_tracks_clean, and until now only the flight list
+        # (step 03) read it -- so no published event had ever been derived from
+        # a cleaned trajectory. Fall back if the table is absent, because
+        # cleaning is itself optional and a missing table should degrade to the
+        # old behaviour rather than fail the step.
+        source = "osn_tracks"
+        if self.events.feeds_from_clean_tracks and self.storage.table_exists("osn_tracks_clean"):
+            source = "osn_tracks_clean"
+        elif self.events.feeds_from_clean_tracks:
+            print("osn_tracks_clean not found; falling back to raw osn_tracks.")
+        print(f"Reading tracks from: {source}")
+
         sdf_input = (
-            self._get_data_within_timeframe("osn_tracks", month)
+            self._get_data_within_timeframe(source, month)
             .select(
                 "track_id", "lat", "lon", "event_time", "baro_altitude_c",
                 "velocity", "vert_rate", "callsign", "icao24", "heading", "h3_res_12",
