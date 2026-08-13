@@ -173,6 +173,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 09:43 | defaults changed | radius reverted to 30 NM, trend OOA off; chain re-running |
 | 10:04 | ladder_2025 | died on a transient S3 fault at rung 4; retried |
 | 10:55 | ladder_2025 | **staged** on the new defaults — better by 751 |
+| 11:30 | ladder_2024 | staged — every rung now agrees on both samples |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -1024,6 +1025,38 @@ already been adopted on its own merits. Cleaning also costs less: −301 against
 So the value was not merely unsupported; it was holding back two other changes.
 That is an argument for applying a finding rather than tabling it, and it would
 have been invisible in a recommendations table.
+
+### Every rung now agrees on both samples
+
+With the radius reverted and out-of-area off, both ladders re-run:
+
+| Rung | 2025 Δ | 2024 Δ | Verdict |
+|---|---|---|---|
+| exact-distance ranking | −873 | −462 | consistently costs (the enabler) |
+| exact radius cut | −27 | −14 | no material effect |
+| smooth before the cut | +158 | +287 | holds |
+| scheduled-service penalty | +1,710 | +3,456 | holds |
+| flight-level cap FL60 | +4,298 | +5,046 | holds |
+| vote margin 2 | +580 | +514 | holds |
+| bearing tie-break | +1,377 | +1,098 | holds |
+| departures from `endpoint` | +2,977 | +4,099 | holds |
+| endpoint radius 30 NM | +207 | +66 | holds |
+| cleaned tracks (**shipped**) | −301 | −413 | consistently costs |
+
+**Nothing disagrees any more.** The single step whose sign differed between the
+samples was the one removed, and with it gone every remaining change points the
+same way on two independent periods.
+
+**Net: +10,106 on 2025 (was +9,355) and +13,677 on 2024 (was +13,216).** Better
+on both, by 751 and 461.
+
+And the two rungs that improved on 2025 improve on 2024 as well: the bearing
+tie-break from +1,041 to +1,098, the endpoint switch from +3,632 to +4,099. The
+interaction is real on both samples, not a feature of one.
+
+This is the cleanest state the study has reached: eleven changes, two samples,
+one direction each, and a shipped configuration that no measurement in the study
+now contradicts.
 
 ### Two things to watch for, and what to do about them
 
