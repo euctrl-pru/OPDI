@@ -520,24 +520,6 @@ def main() -> None:
             src_log, log_dir / cand_log)
         print(f"reusing endpoint candidate cache per {src_log}")
 
-    # A period with its own candidate cache must be recorded as already built,
-    # or `process_dai` will rebuild it the first time an `endpoint` run asks
-    # for a month the log does not mention -- and it would rebuild it from
-    # whatever track table *that rung* reads, which for the early ladder rungs
-    # is the raw one. The result would be a cache silently derived from
-    # uncleaned data, replacing one derived from cleaned data, with nothing in
-    # the output to say so. The write guard catches the attempt, but a crash
-    # eight rungs in is a poor substitute for not trying.
-    if period.get("candidates"):
-        import pandas as pd
-
-        p = log_dir / cand_log
-        months = list(pd.read_parquet(p).months) if p.exists() else []
-        if month not in months:
-            months.append(month)
-            pd.DataFrame({"months": months}).to_parquet(p)
-        print(f"  {month:%Y-%m} marked as built: this period uses "
-              f"{period['candidates']}, made by the chain's own stage")
 
     load_dotenv()
     osn_sample.RESEARCH_EXECUTORS = args.executors
@@ -556,6 +538,30 @@ def main() -> None:
     # StorageManager unwired, so every table looks absent.
     cfg = OPDIConfig.for_environment("opensky")
     month = datetime.strptime(period["months"][0], "%Y%m").date().replace(day=1)
+
+    # A period with its own candidate cache must be recorded as already built,
+    # or `process_dai` rebuilds it the first time an `endpoint` run asks for a
+    # month the log does not mention -- and it would rebuild from whatever
+    # track table *that rung* reads, which for the early ladder rungs is the
+    # raw one. The result would be a cache silently derived from uncleaned
+    # data, replacing one derived from cleaned data, with nothing in the output
+    # to say so. The write guard catches the attempt, but a crash nine rungs in
+    # is a poor substitute for not trying.
+    #
+    # This sits *after* `month` is derived, deliberately. An earlier revision
+    # put it beside the log-directory setup, where `month` does not yet exist,
+    # and `--dry-run` returns before reaching it -- so the dry run passed and
+    # the real run died on an UnboundLocalError.
+    if period.get("candidates"):
+        import pandas as pd
+
+        log_path = log_dir / cand_log
+        months = list(pd.read_parquet(log_path).months) if log_path.exists() else []
+        if month not in months:
+            months.append(month)
+            pd.DataFrame({"months": months}).to_parquet(log_path)
+        print(f"  {month:%Y-%m} marked as built: this period uses "
+              f"{period['candidates']}, made by the chain's own stage")
 
     # Restricted to the days actually ingested. Without this the reference
     # spans the whole month while the flight lists cover three days, so every
