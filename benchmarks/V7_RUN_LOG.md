@@ -164,6 +164,8 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 02:03 | chain | relaunched, verified running by `chainstat.sh` |
 | 03:21 | ladder_2025 | **staged** (4th run); ladder_2024 started |
 | 04:04 | ladder_2024 | **rung 10 cleared** — the fix validated end to end |
+| 04:30 | ladder_2024, modes_2025 | staged; a mislabelled column found in them |
+| 04:32 | chain | stopped, column fixed, relaunched |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -690,6 +692,44 @@ Nine rungs before it reproduced the earlier 2024 pass exactly, including the
 radius result -- so the one shipped value this study contradicts now has four
 independent confirmations: the pipeline on 2024 twice, and the joint sweep on
 both periods.
+
+### 04:30 · the published CSV claimed a configuration it did not use
+
+`modes_2025.csv` recorded `adep_mode=endpoint, ades_mode=trend` on **every**
+row. Three of the five runs executed something else:
+
+| Run | Recorded | Actually ran |
+|---|---|---|
+| `trend` | endpoint / trend | **trend / trend** |
+| `endpoint` | endpoint / trend | **endpoint / endpoint** |
+| `nearest` | endpoint / trend | **nearest / nearest** |
+| `legacy`, `shipped` | correct | correct |
+
+The cause is mine. When the earlier `dict.update` collision was fixed by
+dropping the explicit mode arguments, the columns fell back to the *config's*
+values -- and a single-mode run is built from `DetectionConfig()`, whose modes
+are endpoint/trend, then run with both roles forced to one algorithm. So the row
+described a configuration that was never executed.
+
+**The scores were right and the report was right**: `build()` passes the modes
+to `process_dai`, and the report labels rows by run name rather than by that
+column. But the CSV is published data, and a reader of it has no way to know.
+This is precisely the mislabelling version 6 shipped and version 7 exists to
+prevent, so it is not something to document and leave.
+
+Fixed with two updates in order -- the configuration first, then the run
+identity and the *executed* modes, which overwrite it. `build()` now also
+returns the resolved track table, so `tracks_table` names the data instead of
+saying `config`. Verified on the case that was wrong, without Spark.
+
+**Stopped the chain to do it.** Fixing now reaches a correct complete dataset
+sooner than letting it finish and re-running afterwards: the partial data is
+superseded either way, so the only question was which order costs less.
+
+**A second self-match, in the stop.** `pkill -f run_v7b.sh` matched its own
+shell and killed the command issuing it, leaving the chain running while
+reporting failure. The same trap as `pgrep -c -f`, in the same session. Killing
+now goes through an explicit PID list built with the matcher excluded.
 
 ### Two things to watch for, and what to do about them
 
