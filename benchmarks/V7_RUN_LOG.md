@@ -159,7 +159,9 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 00:13 | ladder_2025 | re-run **staged**; 11 of 13 rungs byte-identical |
 | 00:40 | ladder_2024 | 6 of 13 rungs, same pattern as 2025 |
 | 01:05 | ladder_2024 | failed at rung 10; the write guard caught a cache rebuild |
-| 01:32 | both ladders | re-running again — third time for 2025 |
+| 00:43 | both ladders | re-running again — third time for 2025 |
+| 01:48 | ladder_2025 | **staged**; ladder_2024 died on an UnboundLocalError |
+| 02:03 | chain | relaunched, verified running by `chainstat.sh` |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -623,6 +625,41 @@ that step has harness evidence only.
 Nothing is being changed while the run is in flight. These go into version 7 as
 a recommendation with the evidence beside each line, and the radius change wants
 one more ladder run to confirm it end to end.
+
+### 01:48 · two monitoring checks were lying, and one status report was wrong
+
+`ladder_2024` failed immediately:
+
+```
+UnboundLocalError: local variable 'month' referenced before assignment
+```
+
+The candidate-log seeding added at 01:05 reads `month`, and it was placed beside
+the log-directory setup -- which runs *before* `month` is derived. `--dry-run`
+returns long before that line, so the dry run passed. Worth recording as a fact
+about the tool rather than the bug: **`--dry-run` validates the plan and almost
+nothing else.**
+
+The bug is a two-line move. The more serious problem was that it went unnoticed,
+because two ways of checking the run were both unreliable:
+
+1. **`pgrep -c -f regenerate_v7.py` matched the checking command's own shell**,
+   which contains that string. It could never return zero, so the chain always
+   looked alive.
+2. **Reading the log's last line looked like progress** when the file had not
+   been written to for some time. A static tail and a live tail are
+   indistinguishable without checking the file's age.
+
+Together those produced a status report describing a chain that had already
+exited. The timestamps in those reports were also extrapolated from timer
+intervals rather than read from the clock, and had drifted ahead of real time.
+
+`benchmarks/../chainstat.sh` now answers the question from evidence that cannot
+be faked by a stale file: it excludes itself from the process match, prints the
+log's age in minutes, and refuses to say "running" when the process count is
+zero or the log has been silent for more than twenty minutes.
+
+Nothing computed was lost: `ladder_2025.csv` was staged before the failure.
 
 ### Two things to watch for, and what to do about them
 
