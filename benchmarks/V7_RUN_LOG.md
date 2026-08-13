@@ -172,6 +172,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 09:22 | **chain complete** | exit 0, all fifteen outputs staged |
 | 09:43 | defaults changed | radius reverted to 30 NM, trend OOA off; chain re-running |
 | 10:04 | ladder_2025 | died on a transient S3 fault at rung 4; retried |
+| 10:55 | ladder_2025 | **staged** on the new defaults — better by 751 |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -986,6 +987,43 @@ reach for:
 Retried. The chain is idempotent and every pipeline job was stale anyway, so a
 retry costs nothing beyond the four minutes already spent. If it recurs at the
 same rung it is not transient and deserves a different answer.
+
+### The defaults change was worth more than removing a bad value
+
+The 2025 ladder on the new defaults, eleven rungs:
+
+| Rung | Total | Δ |
+|---|---|---|
+| L00 legacy | 123,667 | — |
+| L01 exact-distance ranking | 122,794 | −873 |
+| L02 exact radius cut | 122,767 | −27 |
+| L03 smooth before the cut | 122,925 | +158 |
+| L04 scheduled-service penalty | 124,635 | +1,710 |
+| L05 flight-level cap FL60 | 128,933 | +4,298 |
+| L06 vote margin 2 | 129,513 | +580 |
+| **L07 bearing tie-break** | 130,890 | **+1,377** |
+| **L08 departures from `endpoint`** | 133,867 | **+2,977** |
+| L09 endpoint radius 30 NM | 134,074 | +207 |
+| L10 cleaned tracks (**shipped**) | 133,773 | −301 |
+
+**Net +10,106, against +9,355 before — the shipped configuration is 751 better
+than the one this report originally described.**
+
+The interesting part is *where* the gain comes from. It is not simply the
+removal of a value that failed on a second sample. Two other rungs improve:
+
+* the **bearing tie-break** is worth +1,377 at 30 NM against +1,275 at 20;
+* **departures from `endpoint`** is worth +2,977 against +1,955.
+
+That has a mechanism. A wider radius admits more candidate aerodromes per track,
+so there are more near-ties for alignment to resolve -- the tie-break has more
+to do and does it well. The narrow radius was suppressing a change that had
+already been adopted on its own merits. Cleaning also costs less: −301 against
+−477.
+
+So the value was not merely unsupported; it was holding back two other changes.
+That is an argument for applying a finding rather than tabling it, and it would
+have been invisible in a recommendations table.
 
 ### Two things to watch for, and what to do about them
 
