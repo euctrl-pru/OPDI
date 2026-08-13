@@ -583,6 +583,47 @@ for. Four properties that a run would otherwise have to reach rung 10 to test:
 All four hold. That is not proof the remaining rungs will pass, but it is the
 part that could be checked in thirty seconds instead of two hours.
 
+### The detection radius should go back to 30 NM
+
+The four rungs after the flight-level cap, arrival score, both periods:
+
+| Rung | 2025 Δ | 2024 Δ | Verdict |
+|---|---|---|---|
+| L06 vote margin 4 → 2 | +232 | +236 | consistent gain |
+| **L07 radius 30 → 20 NM** | **+20** | **−247** | **disagrees** |
+| L08 bearing tie-break | +1,092 | +534 | consistent, large |
+| L09 out-of-area | −827 | −245 | consistent cost (alignment) |
+
+**The radius is the one shipped value the evidence now contradicts.** In the
+pipeline it gains 20 flights on 2025 -- noise on a sample of 95,116 -- and loses
+247 on 2024. The research sweep, ranked over both periods jointly, independently
+prefers 30 NM as an interior optimum. Two methods, two samples, one answer:
+20 NM was a single-period argmax and it did not hold.
+
+That is exactly the failure mode version 6 was built to catch, appearing in a
+value version 6 shipped. It is not embarrassing that it appeared; it is the
+point of running the second period through the pipeline rather than the harness.
+
+**The bearing tie-break is confirmed twice more.** +1,092 and +534, on top of
+the +1,140 the harness predicted. It is the largest consistent gain in the
+ladder and the strongest-evidenced change in the study.
+
+**The vote margin moves the right way but not far enough.** 4 → 2 gains on both
+periods; the sweep says 0 gains again on both. The ladder never tests 2 → 0, so
+that step has harness evidence only.
+
+**Recommendation forming, graded by evidence:**
+
+| Change | Evidence | Confidence |
+|---|---|---|
+| radius 20 → **30 NM** | pipeline, both periods; sweep, both periods | ship it |
+| bearing tie-break **on** | pipeline, both periods; sweep | ship it (already default) |
+| vote margin 2 → **0** | sweep only, both periods | measure through the pipeline first |
+
+Nothing is being changed while the run is in flight. These go into version 7 as
+a recommendation with the evidence beside each line, and the radius change wants
+one more ladder run to confirm it end to end.
+
 ### Two things to watch for, and what to do about them
 
 **The vote cache is the job most likely to fail.** It pre-filters on
