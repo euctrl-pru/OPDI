@@ -1058,6 +1058,50 @@ This is the cleanest state the study has reached: eleven changes, two samples,
 one direction each, and a shipped configuration that no measurement in the study
 now contradicts.
 
+### 20:03 · the ground truth prefix changed, and it does not matter
+
+The re-run marked the four research sweeps stale for a reason none of the
+earlier runs gave:
+
+```
+input s3a://eurocontrol/opdi/research/reference changed (4 objects -> 6)
+```
+
+That prefix holds the EUROCONTROL reference every score on the page is measured
+against, so it is exactly the change that must not pass unexamined.
+
+**Two files were added, and neither is read by this study.**
+
+| File | Size | Written |
+|---|---|---|
+| `flights_202406.parquet` | 50.63 MB | 2026-08-05 |
+| `flights_202506.parquet` | 51.70 MB | 2026-08-05 |
+| `apdf_202406.parquet` | 86.10 MB | 2026-08-05 |
+| `apdf_202506.parquet` | 90.84 MB | 2026-08-05 |
+| **`apdf_full_202406.parquet`** | 124.86 MB | **2026-08-13 10:38** |
+| **`apdf_full_202506.parquet`** | 132.06 MB | **2026-08-13 10:38** |
+
+`load_ground_truth` reads `flights_{month}.parquet` **by exact name**, not by
+glob, and nothing in the V7 path -- `adep_ades.py`, `flight_list_v7.py`,
+`trend_sweep.py`, `benchmark_modes.py` -- reads `apdf_*` at all. The two files
+the study depends on are untouched: same size, same timestamp, a week old. The
+new pair is movement-level APDF data for the step 04 milestone work, uploaded by
+`mirror_reference.py`.
+
+So the scores are unaffected, and the sweeps re-running will reproduce their
+previous numbers -- a free determinism check rather than wasted time.
+
+**The granularity is worth recording.** `s3_identity` fingerprints a *prefix* by
+object count and bytes, so any file added anywhere under it marks every
+dependent job stale. That is the conservative direction and the right default --
+the alternative is not noticing that the ground-truth directory changed -- but
+it does mean an unrelated upload to a shared prefix costs a re-run. Narrowing it
+to the files a job actually opens would be an improvement, and is not a change
+to make while a run is in flight.
+
+This is the system working as intended: an input moved, it was flagged rather
+than absorbed, and five minutes of checking established it was immaterial.
+
 ### Two things to watch for, and what to do about them
 
 **The vote cache is the job most likely to fail.** It pre-filters on
