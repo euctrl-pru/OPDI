@@ -170,6 +170,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 07:01 | modes_2024 | staged — the verdict holds on both samples |
 | 08:04 | grid_2025 | staged — the curve closes in the pipeline too |
 | 09:22 | **chain complete** | exit 0, all fifteen outputs staged |
+| 09:43 | defaults changed | radius reverted to 30 NM, trend OOA off; chain re-running |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -921,6 +922,41 @@ exactly what that flag is for: the figures are shown and the provenance section
 says they are unverified against the current tree.
 
 Everything else in this run is settled.
+
+### 09:43 · the defaults changed, on review
+
+The first version of this report *stated* two recommendations and left the
+defaults alone, on the principle that a value should not be changed by the
+document measuring it. Reviewed, that principle was misapplied: it guards
+against a report quietly rewriting what it reports on, and it is not a reason to
+keep shipping a value shown to be worse. Both are now changed.
+
+| Field | Was | Now | Why |
+|---|---|---|---|
+| `trend_radius_nm` | 20.0 | **30.0** | The only ladder step whose sign differs between the two samples, +214 and −79, with the joint sweep preferring 30 as an interior optimum. Four measurements agree. |
+| `trend_ooa` | True | **False** | Reaches only arrivals in the shipped configuration, where the label is right 50.35% of the time against `endpoint`'s 89.20%. Each one replaces a silence, so at `k = 2` it loses about 205 per sample. |
+
+**The vote margin is deliberately unchanged.** The sweep prefers 0 on both
+samples and the pipeline has never tested it. Shipping on harness evidence alone
+is the mistake V6 made, and repeating it here while writing the report that
+documents it would be difficult to defend.
+
+**What the change forced, and why that is an improvement.** `verify_plan`
+asserts the last ladder rung *is* `DetectionConfig()`, so the ladder failed
+immediately -- correctly, since it still walked to a radius of 20 and switched
+out-of-area on. Rather than weaken the assertion, the ladder now walks only the
+changes actually adopted (eleven rungs), and the two rejected ones move to a new
+`rejected` group that applies each to the **shipped configuration alone**.
+
+That is a better measurement than the rung was. A rung answers "what would this
+have done at that point in a sequence?"; the delta from shipped answers "should
+this be on?", which is the question. The vote margin at 0 joins the group, so
+the one parameter left hanging on harness evidence finally gets a pipeline
+number.
+
+Tests updated, 115 passing, including a new one pinning `trend_ooa` off so
+"the feature is implemented, why is it disabled?" has to be answered against the
+measurement rather than switched on by assumption.
 
 ### Two things to watch for, and what to do about them
 
