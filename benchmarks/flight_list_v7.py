@@ -256,19 +256,30 @@ def build_plan(args, period) -> dict:
          dict(trend_sched_penalty_nm=S().trend_sched_penalty_nm), raw),
         ("L05_flcap", dict(trend_max_fl=S().trend_max_fl), raw),
         ("L06_margin", dict(trend_vote_margin=S().trend_vote_margin), raw),
-        ("L07_radius", dict(trend_radius_nm=S().trend_radius_nm), raw),
-        ("L08_bearing",
+        ("L07_bearing",
          dict(trend_bearing_tiebreak_nm=S().trend_bearing_tiebreak_nm), raw),
-        ("L09_ooa", dict(trend_ooa=True), raw),
         # 2 -- roles and endpoint geometry. The endpoint values start at their
         # legacy settings so the switch of algorithm and the tuning of that
         # algorithm are two separate lines rather than one confounded one.
-        ("L10_endpoint_departures", dict(adep_mode="endpoint"), raw),
-        ("L11_endpoint_radius",
+        ("L08_endpoint_departures", dict(adep_mode="endpoint"), raw),
+        ("L09_endpoint_radius",
          dict(endpoint_radius_nm=S().endpoint_radius_nm), raw),
         # 3 -- the input. Identical configuration, cleaned tracks.
-        ("L12_clean_tracks", {}, clean),
+        ("L10_clean_tracks", {}, clean),
     ]
+
+    # Two changes measured in V7 and **not** adopted, so they are not rungs:
+    # the ladder walks to what ships, and a rung for a rejected change would
+    # make the last rung something other than `DetectionConfig()`.
+    #
+    #   * the arrival radius at 20 NM -- the only step whose sign differed
+    #     between the two samples, so it stays at its legacy 30 NM;
+    #   * out-of-area on `trend` -- 50% precision on arrivals, which is a losing
+    #     trade against a silence.
+    #
+    # Both are measured by `rejected`, below, against the shipped configuration
+    # rather than mid-ladder, which is the comparison that answers "should this
+    # be on?" rather than "what would it have done at this point in a sequence?"
 
     ladder, acc = {}, {}
     for name, delta, tracks in steps:
@@ -281,6 +292,17 @@ def build_plan(args, period) -> dict:
     # that is what the pipeline does; `legacy` here is the legacy *algorithm* on
     # current input, and the ladder's first rung is the legacy algorithm on
     # legacy input. The two together separate the algorithm from the data.
+    # Each rejected change, applied to the shipped configuration on its own.
+    # The delta against `shipped` is what says whether it should be on.
+    rejected = {
+        "reject_radius20": (frm(S, trend_radius_nm=20.0),
+                            S().adep_mode, S().ades_mode, clean),
+        "reject_trend_ooa": (frm(S, trend_ooa=True),
+                             S().adep_mode, S().ades_mode, clean),
+        "reject_margin0": (frm(S, trend_vote_margin=0),
+                           S().adep_mode, S().ades_mode, clean),
+    }
+
     modes = {
         "legacy": (L(), L().adep_mode, L().ades_mode, clean),
         "trend": (S(), "trend", "trend", clean),
@@ -300,7 +322,7 @@ def build_plan(args, period) -> dict:
                 frm(S, trend_max_fl=int(fl), trend_radius_nm=float(rd)),
                 "trend", "trend", clean)
 
-    return {**ladder, **modes, **grid}
+    return {**ladder, **modes, **rejected, **grid}
 
 
 def ladder_rungs(plan: dict) -> list:
@@ -477,9 +499,10 @@ def main() -> None:
     groups = {
         "ladder": ladder_rungs(plan),
         "modes": ["legacy", "trend", "endpoint", "nearest", "shipped"],
+        "rejected": ["reject_radius20", "reject_trend_ooa", "reject_margin0"],
         "grid": [k for k in plan if k.startswith("grid_")],
     }
-    groups["all"] = groups["ladder"] + groups["modes"]
+    groups["all"] = groups["ladder"] + groups["modes"] + groups["rejected"]
 
     runs, seen = [], set()
     for name in args.runs:

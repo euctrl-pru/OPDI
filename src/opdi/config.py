@@ -478,13 +478,21 @@ class DetectionConfig:
     ``trend_rank_by="haversine"`` the constraint is gone and the gain appears.
     The two settings must move together."""
 
-    trend_radius_nm: float = 20.0
+    trend_radius_nm: float = 30.0
     """Zone radius for the sample-to-aerodrome join.
 
-    **Changed from 30.** Both roles prefer 20 NM at every flight level in the
-    pipeline grid. The margin is small -- a few hundred flights -- but it is
-    consistent across all ten cells rather than a single argmax, which is the
-    kind of evidence a published constant should move on."""
+    **Reverted to 30 in V7**, the value the algorithm always had. V6 moved it to
+    20 on a single period, and it did not hold: measured through ``process_dai``
+    the change gains 214 on the 2025 sample -- noise on 95,116 flights -- and
+    loses 79 on 2024, and it is the *only* step of the V7 ladder whose sign
+    differs between the two samples. Ranked over both periods together, the
+    research sweep puts 30 NM at an interior optimum, beating both 20 and 40.
+
+    Four independent measurements agree, which is why this is a revert rather
+    than an open question. It is also the clearest illustration in the study of
+    why a second period is worth its cost: 20 NM looked consistent across ten
+    cells of a one-period grid, and one independent sample was enough to show
+    that consistency was the sample's and not the algorithm's."""
 
     trend_smooth_half_window: int = 2
     """Half-width of the centred rolling mean over ``baro_altitude``, in
@@ -570,20 +578,43 @@ class DetectionConfig:
     +0.58 pp of arrival accuracy at **zero** coverage cost -- the same flights
     answered, 380 more of them correctly."""
 
-    trend_ooa: bool = True
+    trend_ooa: bool = False
     """Whether ``trend`` may emit the out-of-area marker.
 
-    **New, and previously impossible.** ``trend`` named an aerodrome or said
-    nothing, and those are not the only two possibilities: a flight that
-    entered the observed area already airborne has an origin no feed here can
-    name. Since the shipped configuration takes arrivals from ``trend``, and
-    roughly one arrival in twelve is genuinely out-of-area, every one of them
-    used to be a null indistinguishable from a detection failure.
+    Implemented in V7, measured, and **left off**. The capability is real and
+    the mechanism is sound; the geometry does not support it for the role that
+    matters.
 
-    The test and its precedence are ``endpoint``'s, deliberately: a fix within
-    the border margin of the ingestion bbox, and aerodrome first, border
-    second. Reversing that order labels departures from aerodromes near the
-    edge as out-of-area with the aircraft still on the runway."""
+    ``trend`` named an aerodrome or said nothing, and those are not the only two
+    possibilities: a flight that entered the observed area already airborne has
+    an origin no feed here can name. Roughly one flight in twelve is in that
+    position, so the gap was worth closing.
+
+    **Why it is off.** The shipped configuration takes departures from
+    ``endpoint``, so this switch only ever reaches *arrivals* in practice -- and
+    an arrival label is right barely half the time: 50.35% precision, against
+    89.20% for the same test applied to departures by ``endpoint``. Every label
+    replaces a *silence*, so at the study's exchange rate of two, converting
+    nulls into coin flips loses about 205 points per three-day sample. It costs
+    arrivals on both periods measured, -827 and -245.
+
+    The asymmetry is geometric rather than a tuning accident. A track that
+    *begins* at the edge of the observed area almost certainly entered from
+    outside. A track that *ends* near the edge is ambiguous: it may be leaving,
+    or it may be a flight still bound somewhere inside whose reception was lost.
+    The border test ports cleanly to departures because the geometry supports
+    it, and does not port to arrivals.
+
+    **What would make it shippable.** A direction requirement -- the track must
+    be heading *out* of the area, not merely near its edge. The course is
+    already computed for ``trend_bearing_tiebreak_nm``, so the machinery exists;
+    it has not been built or measured. Until then arrivals get their out-of-area
+    labels from ``endpoint``, where precision is 89%.
+
+    The test and its precedence, when enabled, are ``endpoint``'s deliberately:
+    a fix within the border margin of the ingestion bbox, and aerodrome first,
+    border second. Reversing that order labels departures from aerodromes near
+    the edge as out-of-area with the aircraft still on the runway."""
 
     # -- endpoint --------------------------------------------------------
     endpoint_radius_nm: float = 30.0
@@ -658,6 +689,259 @@ class DetectionConfig:
 
 
 @dataclass
+class EventConfig:
+    """Thresholds for flight event detection (pipeline step 04).
+
+    Named here for the same reason as :class:`CleaningConfig` and
+    :class:`DetectionConfig`: so the benchmark can sweep them. Until this
+    existed, **every** number in ``pipeline/events.py`` was an inline literal --
+    the nine fuzzy membership parameters, the flight levels, the 2000 ft
+    airport-event gate, the 300 s trace gap -- so tuning any of them meant
+    editing the pipeline, and none of them was ever measured.
+
+    **Units are aviation and carried in the field names**, matching the
+    convention the rest of the package follows.
+
+    .. warning::
+
+       The defaults change what step 04 emits. Every event OPDI published under
+       ``events_v0.0.2`` was built with :meth:`legacy`, which is kept reachable
+       so released data stays reproducible -- the same principle as the frozen
+       ``version`` strings themselves.
+    """
+
+    # -- phase classification (the fuzzy detector) ------------------------
+    phase_twindow_seconds: float = 60.0
+    """Width of the majority-smoothing window applied to per-sample phase
+    labels before transitions are read off.
+
+    **New, and the largest divergence from the reference implementation.**
+    OPDI's membership functions are a faithful port of OpenAP's published
+    constants, but OpenAP applies ``phaselabel(twindow=60)`` -- a 60 second
+    majority vote over the per-sample labels -- and the port dropped it. Phases
+    were being decided per state vector at 5 s spacing with no temporal
+    aggregation at all, so a single misclassified sample injects a spurious
+    ``level-start``/``level-end`` pair or destroys a ``take-off`` by breaking
+    the GND->CL adjacency.
+
+    Set to 0 to disable smoothing and reproduce the published behaviour."""
+
+    phase_ground_ceiling_ft: float = 200.0
+    """Upper edge of the ground membership ramp, ``zmf(altitude, 0, ceiling)``.
+
+    Unchanged in value. What changes is *what it is measured against* -- see
+    ``phase_ground_above_field``."""
+
+    phase_ground_above_field: bool = True
+    """Measure the ground membership against **height above field elevation**
+    rather than raw pressure altitude.
+
+    **New.** ``baro_altitude_c`` is uncorrected pressure altitude, so the
+    published detector's ``zmf(alt_ft, 0, 200)`` reaches zero at 200 ft
+    *pressure* altitude. At any aerodrome above ~200 ft AMSL, or on a
+    low-pressure day, no sample is ever classified GND -- and since
+    ``take-off`` requires ``prev_phase == "GND"`` and ``landing`` requires
+    ``flight_phase == "GND"``, **neither event is ever emitted for that
+    flight**. The loss is not random: it is biased against high-elevation
+    aerodromes.
+
+    ``DetectionConfig.endpoint_height_ft`` already measures height above field
+    elevation for exactly this reason; this makes step 04 consistent with
+    step 03."""
+
+    phase_require_complete_rules: bool = True
+    """Require every input of a fuzzy rule to be non-NULL before the rule can
+    win.
+
+    **New.** Spark's ``least``/``greatest`` skip NULLs, so a NULL ``velocity``
+    silently reduces a three-input rule to a two-input minimum and *raises* its
+    activation. Rules with missing inputs were out-competing complete ones,
+    which is precisely backwards."""
+
+    phase_cruise_speed_kt: float = 600.0
+    phase_cruise_speed_sigma_kt: float = 100.0
+    """Centre and width of the cruise speed membership, ``gaussmf(spd, 600, 100)``.
+
+    **Unchanged, deliberately.** These are OpenAP's own published values, so
+    the port is faithful and this is an inherited limitation rather than an
+    OPDI defect. It is real, though: a turboprop at 250 kt scores
+    ``exp(-6.125) = 0.002``, so ``rule_cruise`` never wins and the aircraft
+    gets no ``top-of-climb`` or ``top-of-descent`` at all. Exposed here so the
+    affected population can be *measured* by typecode before anyone argues for
+    deviating from the reference implementation."""
+
+    # -- threshold crossings ---------------------------------------------
+    crossing_levels_fl: tuple = (50, 70, 100, 245)
+    """Flight levels at which crossings are detected. The default is the
+    hard-coded set the published detector used, so the vocabulary does not
+    shift unless someone deliberately changes it."""
+
+    crossing_hysteresis_ft: float = 300.0
+    """Half-width of the dead band around each level, in feet.
+
+    **New, and the reason capturing every crossing is usable at all.** A
+    crossing is registered only when the aircraft passes from below
+    ``L - hysteresis`` to above ``L + hysteresis``. An aircraft cruising *at*
+    FL100 oscillates across the bare boundary on barometric noise and would
+    otherwise emit hundreds of meaningless events; inside the dead band it
+    emits none.
+
+    Consequence worth knowing: a flight that climbs and levels off exactly at
+    FL100 never clears the upper edge, so it registers no FL100 crossing. That
+    case is described by the level-segment and top-of-climb events instead."""
+
+    crossing_all_occurrences: bool = True
+    """Emit every crossing of a level, not only the first and last.
+
+    **New.** The published detector keeps ``row_number`` 1 ascending and 1
+    descending per ``(track_id, level)`` and discards everything between, so a
+    flight that levels off and re-climbs through FL100 loses the middle
+    crossings entirely -- which are exactly the crossings a vertical-efficiency
+    indicator is about."""
+
+    crossing_interpolate: bool = True
+    """Interpolate the crossing time and position to the exact level, instead
+    of reporting the last sample before it.
+
+    **New.** The published detector reports the bracketing sample, biasing
+    every crossing timestamp by up to one sample interval (5 s) always in the
+    same direction. APDF's own ring crossings are interpolated to the second,
+    so an uninterpolated comparison would measure our snapping rather than the
+    algorithm."""
+
+    ring_radii_nm: tuple = (40.0, 100.0)
+    """Distance rings around an aerodrome at which crossings are detected.
+    40 NM is ICAO's ASMA cylinder for KPI08 and the reference area for KPI05;
+    100 NM is the documented variant for aerodromes whose holding sits outside
+    40 NM. ``h3_airport_detection_zones`` already reaches 110 NM, so both are
+    available without regenerating reference data."""
+
+    ring_hysteresis_nm: float = 1.0
+    """Half-width of the dead band around each ring, in nautical miles. Same
+    role as ``crossing_hysteresis_ft``: it suppresses the repeated crossings a
+    track flying tangentially along the ring would otherwise produce."""
+
+    # -- ICAO level segments (KPI17 / KPI19) ------------------------------
+    level_analysis_radius_nm: float = 200.0
+    """Radius around the aerodrome within which the climb or descent trajectory
+    is analysed. ICAO's example value.
+
+    Beyond the 110 NM reach of ``h3_airport_detection_zones``, so this is
+    evaluated as a haversine distance to the aerodrome reference point taken
+    from the flight list, not through H3 bands."""
+
+    level_vertical_speed_limit_ftmin: float = 300.0
+    """Maximum vertical speed for a sample to belong to a level segment.
+    ICAO's example value."""
+
+    level_band_limit_ft: float = 200.0
+    """Altitude band within which samples must stay to remain in one level
+    segment. ICAO's example value."""
+
+    level_min_duration_seconds: float = 20.0
+    """Minimum duration for a level segment to be reported. ICAO's example
+    value."""
+
+    level_exclusion_box_pct: float = 90.0
+    """Percentage of the top-of-climb (or top-of-descent) altitude defining the
+    lower edge of the exclusion box. A level segment above that edge and longer
+    than ``level_exclusion_box_seconds`` is cruise, not a level-off, and is
+    excluded. ICAO's example value."""
+
+    level_exclusion_box_seconds: float = 300.0
+    """Duration above which a segment inside the exclusion box is treated as
+    cruise. ICAO's example value."""
+
+    level_min_altitude_climb_ft: float = 3000.0
+    """Altitude at which level-segment detection starts during climb; the
+    trajectory below it is not analysed. ICAO's example value."""
+
+    level_min_altitude_descent_ft: float = 1800.0
+    """Altitude at which level-segment detection stops during descent. ICAO's
+    example value, and lower than the climb equivalent because an aircraft on
+    final is legitimately close to level."""
+
+    # -- airport events ---------------------------------------------------
+    airport_max_fl: int = 20
+    """Only samples below this flight level are matched against airport layout
+    hexagons. Unchanged in value; previously an inline literal."""
+
+    airport_trace_gap_seconds: float = 300.0
+    """A gap longer than this within one ``(track, osm_id)`` pair starts a new
+    traversal. Unchanged in value; previously an inline literal."""
+
+    airport_events_ordered: bool = True
+    """Take entry and exit attributes from the samples at the entry and exit
+    *times*.
+
+    **New, and a correctness fix rather than a tuning knob.** The published
+    detector uses ``F.first``/``F.last`` inside a ``groupBy``, which take
+    partition order, not ``event_time`` order -- so the reported entry latitude,
+    longitude, altitude and cumulative measures are not guaranteed to be the
+    values at the reported entry time."""
+
+    # -- plumbing ----------------------------------------------------------
+    feeds_from_clean_tracks: bool = True
+    """Read ``osn_tracks_clean`` rather than the raw ``osn_tracks``.
+
+    **New.** Step 02a's cleaning reached the flight list (step 03) and nothing
+    else; step 04 read the raw table, so no published event has ever been
+    derived from a cleaned trajectory. The cleaned table also carries
+    ``segment_id``, which lets the transition logic stop stepping across
+    coverage holes."""
+
+    deterministic_event_ids: bool = True
+    """Derive event IDs from the event's own identity rather than
+    ``monotonically_increasing_id()``.
+
+    **New.** Partition-dependent IDs are not reproducible across runs, and
+    because ``StorageManager.write_table`` defaults to append, re-processing a
+    month duplicates its events instead of replacing them."""
+
+    enable_pandas_stage: bool = False
+    """Enable the ``applyInPandas`` escape hatch for algorithms with no Spark
+    equivalent (holding-pattern detection, and anything else needing the
+    ``traffic`` library at runtime).
+
+    **Off by default and expected to stay off.** It requires the fatter
+    ``docker/Dockerfile.traffic`` executor image; nothing in the current event
+    vocabulary needs it, because the algorithms worth porting -- ILS alignment,
+    track-based runway detection, start-of-movement -- are all closed-form and
+    express natively as column and window expressions."""
+
+    events_version: str = "events_v0.1.0"
+    """Version stamped on events this configuration produces.
+
+    A single string covered every event type before this, so a new detector
+    added to the existing function would silently inherit ``events_v0.0.2`` and
+    change what a published version means. Never mutate a released value."""
+
+    @classmethod
+    def legacy(cls) -> "EventConfig":
+        """The behaviour in force before this configuration existed.
+
+        Every OPDI flight event published up to 2026-08 was built this way.
+        Kept reachable so released data stays reproducible -- the same
+        principle as the frozen ``version`` strings on the events themselves.
+        """
+        return cls(
+            # None of these existed before; all must be off for a legacy run.
+            phase_twindow_seconds=0.0,
+            phase_ground_above_field=False,
+            phase_require_complete_rules=False,
+            crossing_all_occurrences=False,
+            crossing_interpolate=False,
+            airport_events_ordered=False,
+            feeds_from_clean_tracks=False,
+            deterministic_event_ids=False,
+            enable_pandas_stage=False,
+            # Rings did not exist at all.
+            ring_radii_nm=(),
+            events_version="events_v0.0.2",
+        )
+
+
+@dataclass
 class OPDIConfig:
     """Main OPDI configuration container."""
 
@@ -667,6 +951,7 @@ class OPDIConfig:
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     cleaning: CleaningConfig = field(default_factory=CleaningConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
+    events: EventConfig = field(default_factory=EventConfig)
 
     @classmethod
     def for_environment(cls, env: str = "dev") -> "OPDIConfig":

@@ -379,18 +379,20 @@ def jobs() -> list:
             inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF]),
 
         Job("modes_2025", v7,
-            ["--period", "2025", "--runs", "modes",
+            ["--period", "2025", "--runs", "modes", "rejected",
              "--per-airport", "--out-name", "modes_2025.csv", "--executors", "10"],
             {"modes_2025.csv": "modes_2025.csv",
              "per_airport_v7.csv": "per_airport_2025.csv",
              "per_type_v7.csv": "per_type_2025.csv"}, PIPE,
-            "the whole configurations the verdict chooses between. What "
-            "cleaning is worth is the ladder's last rung, not a separate run: "
-            "there it is measured given everything else already adopted",
+            "the whole configurations the verdict chooses between, plus the "
+            "three changes measured and NOT adopted -- each applied to the "
+            "shipped configuration alone, which is the comparison that answers "
+            "'should this be on?' rather than 'what would it have done at this "
+            "point in a sequence?'",
             inputs=[T_TRACKS_CLN, T_ZONES, T_CAND, T_REF]),
 
         Job("modes_2024", v7,
-            ["--period", "2024", "--runs", "modes",
+            ["--period", "2024", "--runs", "modes", "rejected",
              "--per-airport", "--out-name", "modes_2024.csv", "--executors", "10"],
             {"modes_2024.csv": "modes_2024.csv",
              "per_airport_v7.csv": "per_airport_2024.csv",

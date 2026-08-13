@@ -113,18 +113,20 @@ def test_every_measurement_carries_its_unit(field_name, field):
 
 
 def test_shipped_defaults_are_the_values_the_study_supports():
-    """The defaults must match what V6 measured through the pipeline.
+    """The defaults must match what was measured through the pipeline.
 
     Every value here was confirmed by running `process_dai` itself, not by a
-    sweep harness -- with one exception, the vote margin, which the pipeline
-    grid held fixed. The flight-level cap and radius were each rejected once on
-    ring-ranked evidence and reinstated once ranking became exact; pinning them
-    here means a future edit that "restores the production constant" has to
-    argue with a test rather than with a comment.
+    sweep harness -- with one exception, the vote margin, which both pipeline
+    grids held fixed. Pinning them means a future edit has to argue with a test
+    rather than with a comment.
     """
     d = DetectionConfig()
     assert d.trend_max_fl == 60
-    assert d.trend_radius_nm == 20.0
+    # 30, not 20. V6 moved this to 20 on a single period; V7 measured it on two
+    # and it is the only ladder step whose sign differs between them -- +214 on
+    # 2025, -79 on 2024 -- with the joint sweep preferring 30 as an interior
+    # optimum. Reverted on four independent measurements.
+    assert d.trend_radius_nm == 30.0
     assert d.trend_vote_margin == 2
     # The one tuned trend value the pipeline confirmed.
     assert d.trend_sched_penalty_nm == 10.0
@@ -185,12 +187,26 @@ def test_every_new_behaviour_is_off_under_legacy():
 def test_the_shipped_new_behaviours_are_on():
     """The other half of the pairing above: on by default, off under legacy."""
     d = DetectionConfig()
-    assert d.trend_ooa is True
     # An interior optimum -- 5 NM turns negative and no band at all is
     # catastrophic, so this is not an "as large as possible" threshold.
     assert d.trend_bearing_tiebreak_nm == 2.0
     assert d.trend_smooth_before_cut is True
     assert d.trend_radius_exact is True
+
+
+def test_trend_out_of_area_is_implemented_but_not_enabled():
+    """Built, measured, and deliberately off -- which is not the same as absent.
+
+    The switch exists and works; the geometry does not support it for the role
+    that matters. Departures ship from `endpoint`, so this only reaches
+    arrivals, where the label is right 50.35% of the time against `endpoint`'s
+    89.20%. Every label replaces a silence, so at k = 2 that is a losing trade.
+
+    Pinned so that "the feature is implemented, why is it off?" has to be
+    answered against the measurement rather than switched on by assumption.
+    """
+    assert DetectionConfig().trend_ooa is False
+    assert DetectionConfig.legacy().trend_ooa is False
 
 
 def test_version_string_is_new_and_the_published_ones_are_untouched():
