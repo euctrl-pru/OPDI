@@ -169,6 +169,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 06:35 | both ladders + modes_2025 | **staged**, columns correct |
 | 07:01 | modes_2024 | staged — the verdict holds on both samples |
 | 08:04 | grid_2025 | staged — the curve closes in the pipeline too |
+| 09:22 | **chain complete** | exit 0, all fifteen outputs staged |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -883,6 +884,43 @@ while the run that measured it is still going.
 It is also a reminder about the ladder: a rung is graded on the configuration it
 *is*, not the one that ships. Both readings belong in the report, and the
 distinction has to be drawn where the table is.
+
+### 09:22 · complete, and one thing left unresolved
+
+The chain exited 0. Fifteen outputs, both periods, every one produced by
+`regenerate_v7.py`. The report renders with no placeholders, no NA cells and no
+broken cross-references, in HTML and PDF.
+
+**`--check` is not clean, and it should not be forced.** While the run was in
+flight, `src/opdi/config.py` gained a 254-line `EventConfig` class -- step 04
+work from another workstream, along with untracked `pipeline/crossings.py` and
+`tests/test_crossings.py`. `config.py` is a declared dependency of every
+pipeline job, so all six are now marked *"code changed since this was
+produced"*.
+
+Verified: `EventConfig` is not referenced anywhere in `flights.py`,
+`flight_list_v7.py` or `adep_ades.py`. It is added to `OPDIConfig` as a field
+the flight-list path never reads. The numbers are unaffected in substance.
+
+**Re-running would make the provenance worse, not better.** That change is
+*uncommitted*. Re-running now would stamp every V7 figure with a fingerprint
+over somebody else's half-finished working tree, and `git_dirty = True` -- a
+state that will change again when they finish. The recorded provenance would
+then point at a commit that never existed.
+
+So this is left for the user rather than resolved unilaterally, and it is the
+one thing in the run that a person has to decide:
+
+* **re-run the six pipeline jobs once the step 04 work is committed** -- about
+  four hours, and `--check` comes back clean; or
+* **accept the current outputs**, whose numbers are right and whose provenance
+  honestly records that the fingerprint moved after they were written.
+
+The report renders with `OPDI_RENDER=allow-stale` in the meantime, which is
+exactly what that flag is for: the figures are shown and the provenance section
+says they are unverified against the current tree.
+
+Everything else in this run is settled.
 
 ### Two things to watch for, and what to do about them
 
