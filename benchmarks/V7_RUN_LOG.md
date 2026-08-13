@@ -156,6 +156,8 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 23:12 | ladder_2025 | **staged** — all 13 rungs |
 | 23:12 | ladder_2024 | failed on rung 1, fixed, resumed 23:20 |
 | 23:20 | ladder_2025 | re-running: the fix changed its fingerprint |
+| 00:13 | ladder_2025 | re-run **staged**; 11 of 13 rungs byte-identical |
+| 00:40 | ladder_2024 | 6 of 13 rungs, same pattern as 2025 |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -490,6 +492,38 @@ it replaces is not, by about one flight in thirty thousand.
 
 Cost of discovering it: nothing. It fell out of a re-run taken for a different
 reason, which is the case against exempting jobs whose fingerprint changed.
+
+### The 2024 ladder reproduces the shape, not the size
+
+First six rungs, both periods side by side (arrival score, and the change each
+rung makes):
+
+| Rung | 2025 arr | Δ | 2024 arr | Δ |
+|---|---|---|---|---|
+| L00 legacy | 60,600 | — | 48,411 | — |
+| L01 exact ranking | 60,255 | −345 | 48,183 | −228 |
+| L02 exact radius | 60,255 | 0 | 48,178 | −5 |
+| L03 smooth first | 60,211 | −44 | 48,200 | +22 |
+| L04 scheduled-service penalty | 61,072 | **+861** | 51,482 | **+3,282** |
+| L05 flight-level cap FL60 | 61,748 | +676 | 53,178 | +1,696 |
+
+Every sign agrees across the two periods, which is what a second sample is for.
+Two differences in magnitude are worth noting.
+
+**2024 is a harder sample.** Legacy arrival coverage is 60.83% against 2025's
+68.06%, and accuracy 95.25% against 97.87%. Fewer flights are seen well enough
+to name, and more of the names are wrong.
+
+**The scheduled-service penalty is worth nearly four times as much there**:
++3,282 against +861. The penalty exists to stop a military or general-aviation
+field winning on raw proximity, so its value scales with how often that happens
+-- and on the harder sample, with more marginal calls, it happens far more. That
+is the one tuned value version 6 also confirmed through the pipeline, and it is
+now confirmed twice more.
+
+The first three rungs are near-nil or slightly negative on both periods, exactly
+as on 2025: the geometry fixes buy nothing on their own and everything through
+what they let the thresholds do afterwards.
 
 ### Two things to watch for, and what to do about them
 
