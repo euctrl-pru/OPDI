@@ -162,6 +162,8 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 00:43 | both ladders | re-running again — third time for 2025 |
 | 01:48 | ladder_2025 | **staged**; ladder_2024 died on an UnboundLocalError |
 | 02:03 | chain | relaunched, verified running by `chainstat.sh` |
+| 03:21 | ladder_2025 | **staged** (4th run); ladder_2024 started |
+| 04:04 | ladder_2024 | **rung 10 cleared** — the fix validated end to end |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -660,6 +662,34 @@ log's age in minutes, and refuses to say "running" when the process count is
 zero or the log has been silent for more than twenty minutes.
 
 Nothing computed was lost: `ladder_2025.csv` was staged before the failure.
+
+### 04:04 · rung 10 cleared, and the role switch is large on both periods
+
+The rung that killed `ladder_2024` twice tonight -- once on the write guard,
+once on my own `UnboundLocalError` -- completed:
+
+| Period | Departures | Δ | Arrivals | Δ |
+|---|---|---|---|---|
+| 2025 | 71,806 | **+2,734** | 61,486 | −791 |
+| 2024 | 62,980 | **+4,346** | 52,742 | −714 |
+
+Taking departures from `endpoint` is the second-largest single change in the
+study after the flight-level cap, and it is *larger* on the harder sample.
+That fits what the two algorithms read: a departing aircraft's first fix is on
+or near the runway, and `endpoint` uses exactly that, while `trend` needs enough
+of a climb to vote on. Where reception is patchier, having to see a climb costs
+more than having to see one fix.
+
+The arrival cost on both periods, −791 and −714, is the merge alignment: the
+combined list contains departure-only tracks, and the benchmark pairs each
+reference flight with the track starting nearest its off-block time, so some
+arrivals are scored against a track that carries none. Version 6 documented the
+same effect at the same place.
+
+Nine rungs before it reproduced the earlier 2024 pass exactly, including the
+radius result -- so the one shipped value this study contradicts now has four
+independent confirmations: the pipeline on 2024 twice, and the joint sweep on
+both periods.
 
 ### Two things to watch for, and what to do about them
 
