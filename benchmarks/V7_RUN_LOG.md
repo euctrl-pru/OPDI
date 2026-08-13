@@ -158,6 +158,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 23:20 | ladder_2025 | re-running: the fix changed its fingerprint |
 | 00:13 | ladder_2025 | re-run **staged**; 11 of 13 rungs byte-identical |
 | 00:40 | ladder_2024 | 6 of 13 rungs, same pattern as 2025 |
+| 01:05 | ladder_2024 | failed at rung 10; the write guard caught a cache rebuild |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -524,6 +525,37 @@ now confirmed twice more.
 The first three rungs are near-nil or slightly negative on both periods, exactly
 as on 2025: the geometry fixes buy nothing on their own and everything through
 what they let the thresholds do afterwards.
+
+### 01:05 · the write guard earned its keep
+
+`ladder_2024` reached rung 10, the first that takes departures from `endpoint`,
+and stopped:
+
+```
+RuntimeError: refusing to write 'opdi_endpoint_candidates':
+this benchmark writes only under 'research/'
+```
+
+**What would have happened without the guard is worse than the crash.**
+`process_dai` builds the endpoint candidate cache whenever the month is absent
+from its progress log, and the log copied into the run mentions 2025-06 only. So
+it set out to rebuild the cache for 2024-06 -- from whatever track table *that
+rung* reads, which at rung 10 is the **raw** 2024 tracks. The result would have
+been `research/cand_2024` silently replaced by a cache derived from uncleaned
+data, overwriting one derived from cleaned data, with the two periods then
+measured on different input treatment and nothing anywhere saying so.
+
+That is the exact failure this study keeps producing, and this time a guard
+written for a different reason stopped it.
+
+**Fixed by recording the month as already built.** The cache exists and is
+correct -- the chain's own `03_endpoint_candidates_2024` stage made it from
+cleaned tracks. Seeding the run's progress log with the period's month makes
+`process_dai` skip the rebuild rather than attempt one the guard has to refuse.
+A crash eight rungs in is a poor substitute for not trying.
+
+Verified by round-tripping the log file the way `FlightListProcessor` reads it,
+rather than by relaunching and watching.
 
 ### Two things to watch for, and what to do about them
 

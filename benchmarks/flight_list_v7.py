@@ -520,6 +520,25 @@ def main() -> None:
             src_log, log_dir / cand_log)
         print(f"reusing endpoint candidate cache per {src_log}")
 
+    # A period with its own candidate cache must be recorded as already built,
+    # or `process_dai` will rebuild it the first time an `endpoint` run asks
+    # for a month the log does not mention -- and it would rebuild it from
+    # whatever track table *that rung* reads, which for the early ladder rungs
+    # is the raw one. The result would be a cache silently derived from
+    # uncleaned data, replacing one derived from cleaned data, with nothing in
+    # the output to say so. The write guard catches the attempt, but a crash
+    # eight rungs in is a poor substitute for not trying.
+    if period.get("candidates"):
+        import pandas as pd
+
+        p = log_dir / cand_log
+        months = list(pd.read_parquet(p).months) if p.exists() else []
+        if month not in months:
+            months.append(month)
+            pd.DataFrame({"months": months}).to_parquet(p)
+        print(f"  {month:%Y-%m} marked as built: this period uses "
+              f"{period['candidates']}, made by the chain's own stage")
+
     load_dotenv()
     osn_sample.RESEARCH_EXECUTORS = args.executors
     osn_sample.UI_PORT = args.ui_port
