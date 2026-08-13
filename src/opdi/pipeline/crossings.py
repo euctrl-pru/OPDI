@@ -276,6 +276,7 @@ def flight_level_crossings(
     *,
     partition_cols: Optional[Sequence[str]] = None,
     altitude_col: str = "baro_altitude_c",
+    interpolate_cols: Sequence[str] = ("lat", "lon"),
 ) -> DataFrame:
     """Flight level crossings, in the vocabulary of :class:`EventConfig`.
 
@@ -289,7 +290,7 @@ def flight_level_crossings(
         thresholds=list(config.crossing_levels_fl),
         hysteresis=config.crossing_hysteresis_ft / 100.0,
         partition_cols=list(partition_cols or ["track_id"]),
-        interpolate_cols=("lat", "lon"),
+        interpolate_cols=tuple(interpolate_cols),
         up_label="up",
         down_label="down",
         interpolate=config.crossing_interpolate,
