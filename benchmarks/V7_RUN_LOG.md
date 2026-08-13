@@ -159,6 +159,7 @@ Appended every 25 minutes. "Stage 6" is the shuffle-and-write behind
 | 00:13 | ladder_2025 | re-run **staged**; 11 of 13 rungs byte-identical |
 | 00:40 | ladder_2024 | 6 of 13 rungs, same pattern as 2025 |
 | 01:05 | ladder_2024 | failed at rung 10; the write guard caught a cache rebuild |
+| 01:32 | both ladders | re-running again — third time for 2025 |
 
 ### 2026-08-12 16:58 · chain relaunched
 
@@ -556,6 +557,31 @@ A crash eight rungs in is a poor substitute for not trying.
 
 Verified by round-tripping the log file the way `FlightListProcessor` reads it,
 rather than by relaunching and watching.
+
+### The cost of serial discovery, and what to do about it
+
+Every fix to `flight_list_v7.py` changes the fingerprint of both ladders, so
+each one costs about two hours of recomputation. Three fixes in, `ladder_2025`
+has now run three times. The rule not to exempt jobs from re-running is still
+right -- it is what produced the determinism finding -- but the *serial*
+discovery of bugs is what makes it expensive, and that part is fixable.
+
+So the remaining unexecuted paths were audited statically rather than waited
+for. Four properties that a run would otherwise have to reach rung 10 to test:
+
+* `index_on_read` wraps `read_table` and `redirect_candidates` wraps
+  `_s3_path`, and neither captures the other's original -- so the two compose
+  regardless of the order they are installed in, which is what the 2024
+  `endpoint` rungs need.
+* every 2024 run reads a table the period actually declares, so none can fall
+  through to a 2025 default.
+* rung 0 reads a table `index_on_read` covers.
+* the *cleaned* 2024 tracks are deliberately **not** in `index_on_read`: they
+  already carry `h3_res_7`, and recomputing it would be silent waste rather
+  than a visible error.
+
+All four hold. That is not proof the remaining rungs will pass, but it is the
+part that could be checked in thirty seconds instead of two hours.
 
 ### Two things to watch for, and what to do about them
 
