@@ -50,7 +50,8 @@ from pyspark.sql.functions import (
 from pyspark.sql.types import DoubleType
 from pyspark.sql.window import Window
 
-from opdi.config import OPDIConfig
+from opdi.config import EventConfig, OPDIConfig
+from opdi.pipeline.crossings import flight_level_crossings
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.storage import StorageManager
 
@@ -78,7 +79,112 @@ def smf(column, a, b):
 # Event calculation functions
 # ======================================================================
 
-def calculate_horizontal_segment_events(sdf_input: DataFrame) -> DataFrame:
+def _smooth_phase(df: DataFrame, twindow_seconds: float) -> DataFrame:
+    """Majority-smooth the per-sample phase label over a time window.
+
+    OpenAP labels phases per sample and then calls ``phaselabel(twindow=60)``,
+    which takes the majority label over a 60 second window. The OPDI port
+    carried the membership functions across faithfully and dropped the
+    smoothing, so phases were decided per state vector at 5 s spacing with no
+    temporal aggregation whatever -- one misclassified sample is enough to
+    inject a spurious ``level-start``/``level-end`` pair, or to destroy a
+    ``take-off`` by breaking the GND->CL adjacency the detector looks for.
+
+    Ties keep the unsmoothed label. Preferring the incumbent is what makes this
+    a de-flicker rather than a relabel: a sample only moves when the window
+    actually disagrees with it.
+    """
+    if not twindow_seconds or twindow_seconds <= 0:
+        return df
+
+    half = int(twindow_seconds // 2)
+    window = (
+        Window.partitionBy("track_id")
+        .orderBy(col("event_time").cast("long"))
+        .rangeBetween(-half, half)
+    )
+
+    phases = ["GND", "CL", "DE", "CR", "LVL"]
+    for phase in phases:
+        df = df.withColumn(
+            f"_n_{phase}",
+            f_sum(when(col("flight_phase") == phase, 1).otherwise(0)).over(window),
+        )
+    df = df.withColumn("_n_max", F.greatest(*[col(f"_n_{p}") for p in phases]))
+
+    incumbent_wins = F.coalesce(
+        F.when(col("flight_phase") == "GND", col("_n_GND") == col("_n_max"))
+        .when(col("flight_phase") == "CL", col("_n_CL") == col("_n_max"))
+        .when(col("flight_phase") == "DE", col("_n_DE") == col("_n_max"))
+        .when(col("flight_phase") == "CR", col("_n_CR") == col("_n_max"))
+        .when(col("flight_phase") == "LVL", col("_n_LVL") == col("_n_max")),
+        lit(False),
+    )
+    majority = (
+        F.when(col("_n_GND") == col("_n_max"), "GND")
+        .when(col("_n_CL") == col("_n_max"), "CL")
+        .when(col("_n_DE") == col("_n_max"), "DE")
+        .when(col("_n_CR") == col("_n_max"), "CR")
+        .when(col("_n_LVL") == col("_n_max"), "LVL")
+    )
+    df = df.withColumn(
+        "flight_phase",
+        F.when(col("flight_phase").isNull(), col("flight_phase"))
+        .when(incumbent_wins, col("flight_phase"))
+        .otherwise(majority),
+    )
+    return df.drop(*[f"_n_{p}" for p in phases], "_n_max")
+
+
+def calculate_threshold_crossing_events(
+    sdf_input: DataFrame, config: Optional[EventConfig] = None
+) -> DataFrame:
+    """Flight level crossings via the hysteresis detector.
+
+    The published :func:`calculate_vertical_crossing_events` is left untouched
+    beside this one, and ``EventConfig.legacy()`` still routes to it, so a
+    re-processed month reproduces ``events_v0.0.2`` exactly rather than
+    approximately.
+    """
+    config = config or EventConfig()
+
+    src = sdf_input.select(
+        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
+        "cumulative_distance_nm", "cumulative_time_s",
+    )
+    # The cumulative measures are interpolated to the crossing alongside the
+    # position: a measurement attached to an interpolated instant but read off
+    # a neighbouring sample would disagree with its own event.
+    crossings = flight_level_crossings(
+        src.withColumn("cumulative_distance_nm", col("cumulative_distance_nm").cast("double"))
+           .withColumn("cumulative_time_s", col("cumulative_time_s").cast("double")),
+        config,
+        interpolate_cols=("lat", "lon", "cumulative_distance_nm", "cumulative_time_s"),
+    )
+
+    fl = col("threshold").cast("int").cast("string")
+    return crossings.select(
+        col("track_id"),
+        concat(lit("xing-fl"), fl).alias("type"),
+        col("event_time"),
+        col("lon"),
+        col("lat"),
+        (col("threshold") * 100).alias("altitude_ft"),
+        col("cumulative_distance_nm"),
+        col("cumulative_time_s"),
+        to_json(
+            struct(
+                col("crossing_seq").alias("crossing_seq"),
+                col("direction").alias("direction"),
+                col("bracket_seconds").alias("bracket_s"),
+            )
+        ).alias("info"),
+    )
+
+
+def calculate_horizontal_segment_events(
+    sdf_input: DataFrame, config: Optional[EventConfig] = None
+) -> DataFrame:
     """
     Detect flight phase transitions and horizontal segment events.
 
@@ -107,25 +213,50 @@ def calculate_horizontal_segment_events(sdf_input: DataFrame) -> DataFrame:
     df = df.withColumn("roc", col("vert_rate") * 196.850394)
     df = df.withColumn("spd", col("velocity") * 1.94384)
 
-    # Apply fuzzy membership functions
-    df = df.withColumn("alt_gnd", zmf(col("alt"), 0, 200))
+    config = config or EventConfig()
+
+    # Apply fuzzy membership functions. The constants are OpenAP's published
+    # values; the two reachable from config are the ones with a measured or
+    # suspected problem behind them (see EventConfig).
+    df = df.withColumn("alt_gnd", zmf(col("alt"), 0, config.phase_ground_ceiling_ft))
     df = df.withColumn("alt_lo", gaussmf(col("alt"), 10000, 10000))
     df = df.withColumn("alt_hi", gaussmf(col("alt"), 35000, 20000))
     df = df.withColumn("roc_zero", gaussmf(col("roc"), 0, 100))
     df = df.withColumn("roc_plus", smf(col("roc"), 10, 1000))
     df = df.withColumn("roc_minus", zmf(col("roc"), -1000, -10))
-    df = df.withColumn("spd_hi", gaussmf(col("spd"), 600, 100))
+    df = df.withColumn(
+        "spd_hi",
+        gaussmf(col("spd"), config.phase_cruise_speed_kt, config.phase_cruise_speed_sigma_kt),
+    )
     df = df.withColumn("spd_md", gaussmf(col("spd"), 300, 100))
     df = df.withColumn("spd_lo", gaussmf(col("spd"), 0, 50))
 
     df.cache()
 
+    def rule(*members):
+        """Minimum t-norm over a rule's membership functions.
+
+        ``F.least`` *skips* NULLs, so a rule with a missing input silently
+        becomes a minimum over fewer terms -- which can only raise its
+        activation, letting an incomplete rule out-compete a complete one.
+        Under ``phase_require_complete_rules`` a rule with any NULL input
+        yields NULL instead, and ``F.greatest`` then ignores it: it abstains
+        rather than winning on a technicality.
+        """
+        activation = F.least(*members)
+        if not config.phase_require_complete_rules:
+            return activation
+        complete = members[0].isNotNull()
+        for m in members[1:]:
+            complete = complete & m.isNotNull()
+        return F.when(complete, activation)
+
     # Fuzzy logic rules
-    df = df.withColumn("rule_ground", F.least(col("alt_gnd"), col("roc_zero"), col("spd_lo")))
-    df = df.withColumn("rule_climb", F.least(col("alt_lo"), col("roc_plus"), col("spd_md")))
-    df = df.withColumn("rule_descent", F.least(col("alt_lo"), col("roc_minus"), col("spd_md")))
-    df = df.withColumn("rule_cruise", F.least(col("alt_hi"), col("roc_zero"), col("spd_hi")))
-    df = df.withColumn("rule_level", F.least(col("alt_lo"), col("roc_zero"), col("spd_md")))
+    df = df.withColumn("rule_ground", rule(col("alt_gnd"), col("roc_zero"), col("spd_lo")))
+    df = df.withColumn("rule_climb", rule(col("alt_lo"), col("roc_plus"), col("spd_md")))
+    df = df.withColumn("rule_descent", rule(col("alt_lo"), col("roc_minus"), col("spd_md")))
+    df = df.withColumn("rule_cruise", rule(col("alt_hi"), col("roc_zero"), col("spd_hi")))
+    df = df.withColumn("rule_level", rule(col("alt_lo"), col("roc_zero"), col("spd_md")))
 
     # Determine phase by maximum rule activation
     df = df.withColumn(
@@ -144,6 +275,8 @@ def calculate_horizontal_segment_events(sdf_input: DataFrame) -> DataFrame:
         .when(col("aggregated") == col("rule_cruise"), "CR")
         .when(col("aggregated") == col("rule_level"), "LVL"),
     )
+
+    df = _smooth_phase(df, config.phase_twindow_seconds)
 
     df = (
         df.withColumnRenamed("alt", "altitude_ft")
