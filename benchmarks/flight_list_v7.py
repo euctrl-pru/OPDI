@@ -413,7 +413,10 @@ def build(spark, cfg, month, run, detection, adep_mode, ades_mode, log_dir,
         table_name=table,
         write_mode="overwrite",
     )
-    return table
+    # The *resolved* track table, not the argument: `None` means "ask the
+    # config", and a row recording "config" tells a reader nothing about which
+    # data the number came from.
+    return table, proc.tracks_table
 
 
 def load_predictions(spark, table):
@@ -582,8 +585,8 @@ def main() -> None:
     rows, per_apt, per_type = [], [], []
     for run in runs:
         detection, adep_mode, ades_mode, tracks = plan[run]
-        table = build(spark, cfg, month, run, detection, adep_mode, ades_mode,
-                      log_dir, tracks)
+        table, resolved_tracks = build(spark, cfg, month, run, detection,
+                                       adep_mode, ades_mode, log_dir, tracks)
 
         pred, ident = load_predictions(spark, table)
         m = score(pred, ident, gt, k=args.k)
@@ -593,15 +596,24 @@ def main() -> None:
                 f"{n_gt:,} reference flights that means the identity join "
                 f"matched nothing, not that detection failed. Check icao24 "
                 f"case and callsign padding before reading anything into it.")
-        # Every detection field, plus what identifies the run. `adep_mode` and
-        # `ades_mode` are *not* named separately: they are fields of the config
-        # now, so passing them here too collides with the expansion below and
-        # `dict.update` raises. Which is the right failure -- one source of
-        # truth, or an error.
-        m.update(run=run, period=args.period,
-                 tracks_table=tracks or "config",
-                 **{f.name: getattr(detection, f.name)
-                    for f in dataclasses.fields(detection)})
+        # Two updates, in this order, and the order is the point.
+        #
+        # First every detection field, which records the configuration. Then the
+        # run's identity and **the modes that actually executed**, which
+        # overwrite the config's copies of them.
+        #
+        # They differ. A single-mode run like `endpoint` is built from
+        # `DetectionConfig()` -- whose `adep_mode` is "endpoint" and `ades_mode`
+        # is "trend" -- and then *run* with both roles forced to `endpoint`. If
+        # the column recorded the config, the row for that run would claim a
+        # configuration it did not use. That is precisely the mislabelling
+        # version 6 shipped and version 7 exists to prevent, so the executed
+        # value wins and the configured one is not kept: a reader of this CSV
+        # wants to know what ran.
+        m.update({f.name: getattr(detection, f.name)
+                  for f in dataclasses.fields(detection)})
+        m.update(run=run, period=args.period, tracks_table=resolved_tracks,
+                 adep_mode=adep_mode, ades_mode=ades_mode)
         rows.append(m)
         print(f"  ADEP cov={m['adep_coverage']:.2%} acc={m['adep_accuracy']:.2%} "
               f"correct={m['adep_correct']:,} wrong={m['adep_wrong']:,} "
