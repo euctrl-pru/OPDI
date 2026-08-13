@@ -400,14 +400,13 @@ def jobs() -> list:
             "the same configurations on the second period",
             inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF]),
 
-        # Radius 20 NM only. Fourteen caps at two radii is fifty-six full
-        # `process_dai` runs across the two periods, and the radius is already
-        # answered twice over -- by the research sweep on both periods and by
-        # the ladder, which walks it as its own step. The cap is the parameter
-        # that needed the pipeline, because it is the one V6 measured through a
-        # grid that stopped before the curve turned.
+        # One radius, and it must be the **shipped** one. Fourteen caps at two
+        # radii is fifty-six full `process_dai` runs across the two periods, so
+        # the grid varies the cap alone -- but a curve swept at a radius the
+        # pipeline does not use answers a question nobody asked. It ran at
+        # 20 NM until the radius reverted to 30; the two move together.
         Job("grid_2025", v7,
-            ["--period", "2025", "--runs", "grid", "--grid-radius", "20",
+            ["--period", "2025", "--runs", "grid", "--grid-radius", "30",
              "--out-name", "trend_grid_2025.csv", "--executors", "10"],
             {"trend_grid_2025.csv": "trend_grid_2025.csv"}, PIPE,
             "the flight-level cap swept through the pipeline to FL300, so the "
@@ -415,7 +414,7 @@ def jobs() -> list:
             inputs=[T_TRACKS_CLN, T_ZONES, T_CAND, T_REF]),
 
         Job("grid_2024", v7,
-            ["--period", "2024", "--runs", "grid", "--grid-radius", "20",
+            ["--period", "2024", "--runs", "grid", "--grid-radius", "30",
              "--out-name", "trend_grid_2024.csv", "--executors", "10"],
             {"trend_grid_2024.csv": "trend_grid_2024.csv"}, PIPE,
             "the same grid on the second period, so the cap is chosen on both",
