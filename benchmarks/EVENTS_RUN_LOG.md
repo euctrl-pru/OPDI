@@ -22,7 +22,8 @@ times for exactly that reason.
 | R4 runway & touchdown | **done** — detector + ATOT/ALDT events |
 | R5 ground milestones | **done** — AOBT/AIBT; T05 pushback deferred |
 | R6 KPI18 cruise level | **not an event** — see decision 13 |
-| R7 benchmark code + ladder run | **not started** — the remaining work |
+| R7 benchmark code | **done** — `events_gt`, `events_score`, `event_bench` |
+| R7 ladder run | **not run** — needs many hours of serial cluster time |
 | R8 paper | not started |
 
 ---
@@ -54,6 +55,28 @@ times for exactly that reason.
 | 16 | **An unrecognised mode now raises.** | Found while making the argument required: the Iceberg branch was an if/elif/elif with no else, so a typo'd mode string fell through every branch, wrote nothing, and returned success. Not the bug being hunted, but the same shape -- a failure that reports as a success. |
 
 | 17 | **B3 (inline literals to config in `tracks.py`) is dropped: there was nothing to do.** | The altitude-cleaning block already reads `self.altitude_smoothing_window_minutes` and `self.max_vertical_rate_mps`; the only bare numbers in it are inside comments explaining what those values mean. The plan listed it from an earlier survey that had counted the comments. Recorded rather than silently skipped, and rather than manufacturing a change to justify the item. |
+
+| 18 | **The write guard checks the resolved path, not the table name.** | `redirect_event_tables` sends `opdi_flight_events` to a research location by patching `_s3_path`, so a name-based guard would have rejected exactly the writes the redirect makes safe -- and, worse, would have *passed* a write whose name looked safe but whose path had been redirected elsewhere. Checking where the bytes land is the only test that means anything. |
+
+---
+
+## Measured
+
+**Ground truth loader, run on the cluster against 2025-06 (period `2025`).**
+First real measurement of this programme:
+
+| | |
+|---|---|
+| APDF movements in the month | 1,224,742 |
+| reaching `icao24` via the `ID` bridge | **1,154,338 (94.25%)** |
+| milestones on the three benchmark days | 231,880 |
+| ring crossings on those days | 113,444 |
+
+Both derived counts are arithmetically consistent with the bridge, which is
+the check worth having: 231,880 is almost exactly two milestones per reachable
+movement (ATOT+AOBT for a departure, ALDT+AIBT for an arrival), and 113,444 is
+two rings per arrival. A pivot that had dropped or duplicated a phase would
+show up here as a count that is not a clean multiple.
 
 ---
 
