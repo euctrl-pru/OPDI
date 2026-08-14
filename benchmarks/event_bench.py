@@ -51,7 +51,10 @@ LADDER = [
     ("L07_all_crossings", {"crossing_all_occurrences": True}),
     ("L08_interpolated", {"crossing_interpolate": True}),
     ("L09_rings", {"ring_radii_nm": (40.0, 100.0)}),
-    ("L10_shipped", {"events_version": "events_v0.1.0"}),
+    ("L10_runway", {"emit_runway_events": True}),
+    ("L11_blocks", {"emit_block_events": True}),
+    ("L12_level_offs", {"emit_level_offs": True}),
+    ("L13_shipped", {"events_version": "events_v0.1.0"}),
 ]
 
 
@@ -153,9 +156,9 @@ def verify_plan(plan: dict) -> None:
             "rung 0 must be exactly the published algorithm, or the baseline "
             "every gain is measured against is not the baseline"
         )
-    if names and names[-1] == "L10_shipped":
+    if names and names[-1] == "L13_shipped":
         shipped = EventConfig()
-        got = plan["L10_shipped"]
+        got = plan["L13_shipped"]
         differing = [
             f
             for f in EventConfig().__dataclass_fields__

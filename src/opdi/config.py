@@ -849,6 +849,25 @@ class EventConfig:
     role as ``crossing_hysteresis_ft``: it suppresses the repeated crossings a
     track flying tangentially along the ring would otherwise produce."""
 
+    # -- which families are emitted at all --------------------------------
+    #
+    # Each of these families is new in v0.1.0. They need explicit switches
+    # because `legacy()` has to reproduce what `events_v0.0.2` *emitted*, not
+    # merely run with its thresholds -- and the first ladder run proved the
+    # difference: rung 0 emitted 48,134 ATOT and 69,528 ALDT events that no
+    # published dataset contains, so the baseline every gain was measured
+    # against was not the baseline.
+    emit_runway_events: bool = True
+    """Emit ATOT and ALDT. Off under `legacy()`: `events_v0.0.2` has neither."""
+
+    emit_block_events: bool = True
+    """Emit AOBT and AIBT. Off under `legacy()`, same reason."""
+
+    emit_level_offs: bool = True
+    """Emit the ICAO `level-off-*` family. Off under `legacy()`, same reason.
+    Note this is separate from `level-start`/`level-end`, which are published
+    and stay on in both configurations."""
+
     # -- ground movement (T04 off-block / T21 on-block) -------------------
     ground_speed_threshold_kt: float = 2.0
     """Groundspeed above which an aircraft counts as moving. traffic's
@@ -996,6 +1015,9 @@ class EventConfig:
             # None of these existed before; all must be off for a legacy run.
             phase_twindow_seconds=0.0,
             phase_ground_above_field=False,
+            emit_runway_events=False,
+            emit_block_events=False,
+            emit_level_offs=False,
             phase_require_complete_rules=False,
             crossing_all_occurrences=False,
             crossing_interpolate=False,

@@ -1252,15 +1252,16 @@ class FlightEventProcessor:
                 df_vertical = calculate_vertical_crossing_events(sdf_input)
             df_events = df_vertical if df_events is None else df_events.unionByName(df_vertical)
 
-            if df_events is not None:
+            if df_events is not None and self.events.emit_level_offs:
                 level_offs = calculate_level_off_events(
                     sdf_input, df_events, self.events
                 )
                 if level_offs is not None:
                     df_events = df_events.unionByName(level_offs)
 
-            runway_events = calculate_runway_events(
-                sdf_input, month, self.storage, self.events
+            runway_events = (
+                calculate_runway_events(sdf_input, month, self.storage, self.events)
+                if self.events.emit_runway_events else None
             )
             if runway_events is not None:
                 df_events = (
@@ -1281,7 +1282,10 @@ class FlightEventProcessor:
             )
             df_events = df_hexaero if df_events is None else df_events.union(df_hexaero)
 
-            blocks = calculate_block_events(sdf_input, df_hexaero, self.events)
+            blocks = (
+                calculate_block_events(sdf_input, df_hexaero, self.events)
+                if self.events.emit_block_events else None
+            )
             if blocks is not None:
                 df_events = df_events.unionByName(blocks)
 
