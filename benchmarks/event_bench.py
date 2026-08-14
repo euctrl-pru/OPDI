@@ -22,6 +22,7 @@ carried along inside a net gain.
 """
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -172,6 +173,21 @@ def verify_plan(plan: dict) -> None:
         assert plan[a] != plan[b], f"rungs {a} and {b} are identical -- one is a no-op"
 
 
+#: Which OPDI event type claims to be which APDF milestone. `take-off` and
+#: `landing` are the published fuzzy-phase pair; ATOT and ALDT are the new
+#: runway-anchored ones. Both are scored, separately, against the same truth --
+#: that comparison *is* the question the ladder exists to answer, and collapsing
+#: them would hide it.
+TYPE_TO_MILESTONE = {
+    "take-off": "ATOT",
+    "landing": "ALDT",
+    "ATOT": "ATOT",
+    "ALDT": "ALDT",
+    "AOBT": "AOBT",
+    "AIBT": "AIBT",
+}
+
+
 def detected_events(spark, table: str, storage=None):
     """Reshape the written event table into what the scorer expects.
 
@@ -194,9 +210,11 @@ def detected_events(spark, table: str, storage=None):
     info = F.from_json(
         F.col("info"), "runway string, apt_icao string, crossing_seq int, direction string"
     )
+    mapping = F.create_map(*[F.lit(x) for kv in TYPE_TO_MILESTONE.items() for x in kv])
     ev = ev.withColumn("_i", info).select(
         F.col("flight_id").alias("_track_id"),
-        F.col("type").alias("milestone"),
+        F.col("type").alias("det_type"),
+        mapping[F.col("type")].alias("milestone"),
         F.col("event_time"),
         F.col("latitude").alias("det_lat"),
         F.col("longitude").alias("det_lon"),
@@ -209,9 +227,11 @@ def detected_events(spark, table: str, storage=None):
         F.trim(F.col("FLT_ID")).alias("callsign"),
         F.to_date(F.col("FIRST_SEEN")).alias("day"),
     )
-    return ev.join(
-        F.broadcast(fl), ev._track_id == F.col("_fl_id"), "inner"
-    ).drop("_fl_id", "_track_id")
+    return (
+        ev.filter(F.col("milestone").isNotNull())
+        .join(F.broadcast(fl), ev._track_id == F.col("_fl_id"), "inner")
+        .drop("_fl_id", "_track_id")
+    )
 
 
 def extraction_counts(spark, table: str, rung: str):
@@ -307,17 +327,35 @@ def main() -> int:
 
         config = OPDIConfig.for_environment("opensky")
         config.events = cfg
-        proc = FlightEventProcessor(spark, config, log_dir=f"logs/events_{name}")
+        # Clear the per-family progress log first. `process_month` decides what
+        # to compute from those logs *independently* of skip_if_processed, so a
+        # rung whose name was used by an earlier run computes nothing, writes
+        # nothing, and the scorer then reads the earlier run's table and reports
+        # it as this rung's result. That happened: L00_legacy scored the
+        # previous run's contaminated output and looked entirely plausible.
+        log_dir = f"logs/events_{args.period}_{name}"
+        shutil.rmtree(log_dir, ignore_errors=True)
+        proc = FlightEventProcessor(spark, config, log_dir=log_dir)
         proc.process_month(month, skip_if_processed=False)
 
         table = f"s3a://eurocontrol/opdi/{target}"
         inventory.extend(extraction_counts(spark, table, name))
-        detected = detected_events(spark, table, proc.storage)
-        aligned = events_score.align(truth, detected)
-        s = events_score.score(aligned)
-        events_score.guard_not_all_zero(s)
-        for row in s.collect():
-            scored.append({"rung": name, **row.asDict()})
+        detected = detected_events(spark, table, proc.storage).cache()
+        types = [r.det_type for r in detected.select("det_type").distinct().collect()]
+        rung_rows = []
+        for det_type in sorted(types):
+            aligned = events_score.align(
+                truth, detected.filter(F.col("det_type") == det_type)
+            )
+            for row in events_score.score(aligned).collect():
+                rung_rows.append({"rung": name, "det_type": det_type, **row.asDict()})
+        if not rung_rows:
+            print(f"  {name}: emitted no scorable milestone type at all")
+        else:
+            events_score.guard_not_all_zero(
+                spark.createDataFrame(rung_rows).select("n_detected")
+            )
+        scored.extend(rung_rows)
         print(f"  scored {len(scored)} rows so far")
 
     if args.results_dir:
