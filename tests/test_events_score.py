@@ -134,3 +134,27 @@ def test_a_table_of_zeros_is_refused(spark):
 
     with pytest.raises(SystemExit, match="identity-join"):
         guard_not_all_zero(score(align(truth, empty)))
+
+
+def test_the_scorer_and_the_event_table_agree_on_identity(spark):
+    """The integration gap that unit tests missed.
+
+    The event table keys on `flight_id`; ground truth keys on
+    `(icao24, callsign, day)`. The first ladder run spent 68 minutes computing
+    events and then died because nothing bridged the two. These tests fed
+    `align` synthetic frames that already carried `icao24`, so they proved the
+    arithmetic and never the schemas.
+
+    This pins the contract: whatever `detected_events` returns must carry the
+    join keys `align` uses.
+    """
+    import inspect
+
+    from event_bench import detected_events
+
+    src = inspect.getsource(detected_events)
+    for key in ("icao24", "callsign", "day"):
+        assert key in src, (
+            f"detected_events must resolve {key!r}; align() joins on it and a "
+            f"missing key fails only after the events have been computed"
+        )

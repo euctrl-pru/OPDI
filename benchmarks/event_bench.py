@@ -169,23 +169,46 @@ def verify_plan(plan: dict) -> None:
         assert plan[a] != plan[b], f"rungs {a} and {b} are identical -- one is a no-op"
 
 
-def detected_events(spark, table: str):
-    """Reshape the written event table into what the scorer expects."""
+def detected_events(spark, table: str, storage=None):
+    """Reshape the written event table into what the scorer expects.
+
+    The event table keys on ``flight_id``, which is the ``track_id``; the
+    ground truth keys on ``(icao24, callsign, day)``. Those are different
+    identity spaces and the join between them has to be made explicitly --
+    the flight list is what holds both, so it is the bridge.
+
+    This was missed on the first run and cost an hour: the scorer's unit tests
+    fed it synthetic frames that already carried ``icao24``, so they validated
+    the scoring arithmetic and never the identity resolution. A test that
+    constructs its own inputs cannot catch a mismatch between two real
+    schemas.
+
+    ``callsign`` is trimmed because ADS-B pads to eight characters, and
+    ``icao24`` lowered because the reference carries it uppercase; both are the
+    same traps the ground-truth loader closes on its side.
+    """
     ev = spark.read.parquet(table) if table.startswith("s3a://") else spark.table(table)
     info = F.from_json(
         F.col("info"), "runway string, apt_icao string, crossing_seq int, direction string"
     )
-    return (
-        ev.withColumn("_i", info)
-        .select(
-            F.col("flight_id").alias("track_id"),
-            F.col("type").alias("milestone"),
-            F.col("event_time"),
-            F.col("latitude").alias("det_lat"),
-            F.col("longitude").alias("det_lon"),
-            F.col("_i.runway").alias("det_runway"),
-        )
+    ev = ev.withColumn("_i", info).select(
+        F.col("flight_id").alias("_track_id"),
+        F.col("type").alias("milestone"),
+        F.col("event_time"),
+        F.col("latitude").alias("det_lat"),
+        F.col("longitude").alias("det_lon"),
+        F.col("_i.runway").alias("det_runway"),
     )
+
+    fl = storage.read_table("opdi_flight_list").select(
+        F.col("ID").alias("_fl_id"),
+        F.lower(F.col("ICAO24")).alias("icao24"),
+        F.trim(F.col("FLT_ID")).alias("callsign"),
+        F.to_date(F.col("FIRST_SEEN")).alias("day"),
+    )
+    return ev.join(
+        F.broadcast(fl), ev._track_id == F.col("_fl_id"), "inner"
+    ).drop("_fl_id", "_track_id")
 
 
 def extraction_counts(spark, table: str, rung: str):
@@ -259,6 +282,15 @@ def main() -> int:
     truth, rings, report = events_gt.build(spark, args.period)
     truth.cache()
 
+    # Fail before the expensive part, not an hour into it. The first run of
+    # this harness spent 68 minutes computing events and then died on the
+    # scorer's join because the detected side had no `icao24` -- a check that
+    # costs nothing here would have caught it in seconds.
+    required = {"icao24", "callsign", "day", "milestone", "gt_time"}
+    missing = required - set(truth.columns)
+    if missing:
+        raise SystemExit(f"ground truth is missing join keys: {sorted(missing)}")
+
     import datetime as dt
 
     from opdi.pipeline.events import FlightEventProcessor
@@ -277,7 +309,7 @@ def main() -> int:
 
         table = f"s3a://eurocontrol/opdi/{target}"
         inventory.extend(extraction_counts(spark, table, name))
-        detected = detected_events(spark, table)
+        detected = detected_events(spark, table, proc.storage)
         aligned = events_score.align(truth, detected)
         s = events_score.score(aligned)
         events_score.guard_not_all_zero(s)
