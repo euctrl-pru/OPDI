@@ -138,10 +138,13 @@ def jobs():
                 "benchmarks/event_bench.py",
                 ["--period", period, "--out-name", f"ladder_{period}.csv",
                  "--executors", "10"],
-                {f"ladder_{period}.csv": f"ladder_{period}.csv"},
+                {f"ladder_{period}.csv": f"ladder_{period}.csv",
+                 f"inventory_{period}.csv": f"inventory_{period}.csv"},
                 DETECT,
                 "the cumulative ladder from events_v0.0.2 to the shipped "
-                "configuration, one rung per change, scored on this period.",
+                "configuration, one rung per change, scored on this period -- "
+                "plus the extraction inventory, which is the only place the "
+                "families APDF cannot score are visible at all.",
                 inputs=[T_TRACKS_CLEAN, T_REF],
             )
         )
