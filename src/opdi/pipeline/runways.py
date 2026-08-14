@@ -19,10 +19,13 @@ positions are the thing OurAirports is reliable about, and ``traffic`` derives
 its own bearings the same way for the same reason.
 """
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from opdi.config import EventConfig
 
 from opdi.pipeline.flights import angle_between, bearing_deg, haversine_nm
 
@@ -74,7 +77,7 @@ def detect_runway_movements(
     sdf: DataFrame,
     ends: DataFrame,
     thresholds: DataFrame,
-    config,
+    config: "EventConfig",
 ) -> DataFrame:
     """Name the runway and time the movement, per (track, role).
 

@@ -21,18 +21,21 @@ milestones will be missing for a large share of flights. That number is a
 finding to report, not something to tune away.
 """
 
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from opdi.config import EventConfig
 
 KT_PER_MPS = 1.94384
 
 
 def movement_window(
     sdf: DataFrame,
-    config,
+    config: "EventConfig",
     *,
     partition_cols: Sequence[str] = ("track_id",),
     time_col: str = "event_time",

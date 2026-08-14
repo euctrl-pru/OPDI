@@ -31,11 +31,14 @@ segment cannot continue, then forward-fill the anchor within the resulting
 groups -- rather than with a UDF.
 """
 
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from opdi.config import EventConfig
 
 FT_PER_M = 3.28084
 FTMIN_PER_MPS = 196.850394
@@ -43,7 +46,7 @@ FTMIN_PER_MPS = 196.850394
 
 def level_segments(
     sdf: DataFrame,
-    config,
+    config: "EventConfig",
     *,
     partition_cols: Sequence[str] = ("track_id",),
     altitude_col: str = "baro_altitude_c",
@@ -146,7 +149,7 @@ def level_segments(
 
 def classify_level_offs(
     segments: DataFrame,
-    config,
+    config: "EventConfig",
     *,
     toc_time,
     tod_time,

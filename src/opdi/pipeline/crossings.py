@@ -45,11 +45,14 @@ latent fault in the published detector, whose first-match ``when`` chain
 reported only one level when a single sample interval spanned two.
 """
 
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+    from opdi.config import EventConfig
 
 
 def _ordered(partition_cols: Sequence[str], time_col: str) -> Window:
@@ -272,7 +275,7 @@ def _empty_result(
 
 def flight_level_crossings(
     sdf: DataFrame,
-    config,
+    config: "EventConfig",
     *,
     partition_cols: Optional[Sequence[str]] = None,
     altitude_col: str = "baro_altitude_c",
@@ -300,7 +303,7 @@ def flight_level_crossings(
 
 def ring_crossings(
     sdf: DataFrame,
-    config,
+    config: "EventConfig",
     *,
     distance_col: str = "distance_nm",
     partition_cols: Optional[Sequence[str]] = None,
