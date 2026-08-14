@@ -250,7 +250,7 @@ class AirspaceH3Generator:
         spark_df = spark_df.withColumn(
             "validity_end", col("validity_end").cast(TimestampType())
         )
-        self.storage.write_table(spark_df, "opdi_h3_airspace_ref")
+        self.storage.write_table(spark_df, "opdi_h3_airspace_ref", mode="overwrite")
 
     def process_ansp(
         self, urls: Optional[List[str]] = None

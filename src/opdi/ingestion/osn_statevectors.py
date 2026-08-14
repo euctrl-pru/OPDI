@@ -371,7 +371,7 @@ class StateVectorIngestion:
         # Drop partition column (will be added automatically by Iceberg)
         df_cleaned = df_partitioned.drop("event_time_day")
 
-        self.storage.write_table(df_cleaned, "osn_statevectors_v2")
+        self.storage.write_table(df_cleaned, "osn_statevectors_v2", mode="append")
 
         print(f"Written {df_cleaned.count()} records to osn_statevectors_v2")
 
