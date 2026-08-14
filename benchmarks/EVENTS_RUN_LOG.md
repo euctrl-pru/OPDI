@@ -18,8 +18,8 @@ times for exactly that reason.
 | R0 make the config honest | **done** — `7eb5549` |
 | R1 D1 ground membership above field elevation | **done** |
 | R2 ring crossings (KPI05, KPI08) | **done** |
-| R3 ICAO level segments (KPI17, KPI19) | in progress |
-| R4 runway & touchdown | not started |
+| R3 ICAO level segments (KPI17, KPI19) | **done** |
+| R4 runway & touchdown | in progress |
 | R5 ground milestones | not started |
 | R6 KPI18 cruise level | not started |
 | R7 benchmark code + ladder run | not started |
@@ -38,6 +38,9 @@ times for exactly that reason.
 
 | 5 | **Rings are built from the flight's own ADEP/ADES, not from `h3_airport_detection_zones`.** | Both indicators are defined against the flight's own aerodromes -- KPI08's ASMA is a cylinder around the destination, KPI05's reference area one around each end -- and APDF records one crossing per movement for the same reason. It is also far cheaper: the zone table multiplies every sample by every aerodrome within 110 NM and would need its 30 NM `max_radius_nm` ceiling raised in two places, where this multiplies each sample by at most two and needs no reference-table change. The cost is that a ring crossing is not detected for an aerodrome merely overflown, which is correct for these KPIs. |
 | 6 | **Bearing is computed from the interpolated crossing position, not interpolated alongside it.** | A bearing is circular: interpolating between 359 and 1 gives 180, which would be wrong by half a turn on any crossing near due north -- and due north is not rare. |
+
+| 7 | **ICAO level segments are a new family, not a re-tuning of `level-start`/`level-end`.** | The published pair comes from the fuzzy phase classifier and answers "does this look like level flight". ICAO asks a geometric question about a band anchored at the segment's own start. Changing the existing detector to ICAO's rule would silently redefine a published event type; adding a family leaves both available and forces the paper to say they are not interchangeable. |
+| 8 | **Level-offs take TOC/TOD from the horizontal detector's own output rather than recomputing the phase pass.** | Two independent derivations of "where cruise began" would eventually disagree, and the exclusion box is defined against the TOC altitude -- so a disagreement would move the box and change which segments count. |
 
 ---
 
@@ -63,3 +66,13 @@ the test flight's ADEP is EHAM, so rings were correctly built around *both*
 aerodromes and the assertions were mixing the departure's rings into the
 arrival's. Ring assertions now filter on `apt_icao`, and there is a test that
 pins both ends being present rather than treating it as noise.
+
+
+**A segment ends *at* the breaking point, not before it.** The first level
+detector evaluated membership on each sample's step to the *next* one, so the
+last level sample -- the one whose next step is the climb away -- was excluded
+and every level-off came out one sample interval short, always in the same
+direction. That is the same class of one-sided bias the crossing detector was
+built to remove. Membership is now evaluated at the sample itself and the
+forward step only *starts* a segment; the conformance test pins a 90 s
+injected level-off at exactly 90 s.
