@@ -70,7 +70,6 @@ def test_the_shipped_new_behaviours_are_on():
     e = EventConfig()
 
     assert e.phase_twindow_seconds == 60.0
-    assert e.phase_ground_above_field is True
     assert e.phase_require_complete_rules is True
     assert e.crossing_all_occurrences is True
     assert e.crossing_interpolate is True
@@ -109,11 +108,31 @@ def test_the_dead_bands_are_non_zero():
     assert e.ring_hysteresis_nm > 0
 
 
-def test_the_rings_are_the_ones_icao_defines():
-    """40 NM is ICAO's ASMA cylinder for KPI08 and the KPI05 reference area;
-    100 NM is the documented variant for aerodromes whose holding lies outside
-    it. Both are within the 110 NM reach of ``h3_airport_detection_zones``."""
-    assert tuple(EventConfig().ring_radii_nm) == (40.0, 100.0)
+def test_unimplemented_behaviour_ships_inert():
+    """A flag that defaults on and does nothing is worse than no flag.
+
+    Each of these describes a behaviour whose detector does not exist yet.
+    Shipping them on would mean anyone reading ``EventConfig`` -- or trusting
+    this test file -- would conclude that ground membership is measured above
+    field elevation and that ring events are emitted. Neither is true. Each
+    default flips in the commit that implements it, which is also what makes
+    that commit's diff say what it changed.
+    """
+    e = EventConfig()
+
+    # D1: pipeline/events.py does not read this field.
+    assert e.phase_ground_above_field is False
+    # crossings.ring_crossings exists and is tested, but nothing builds the
+    # (sample, aerodrome) distance frame it consumes.
+    assert tuple(e.ring_radii_nm) == ()
+
+
+def test_the_hysteresis_stays_live_while_the_radii_are_inert():
+    """The dead band is the detector's parameter, not the caller's choice of
+    rings, so it keeps its value while ``ring_radii_nm`` is empty. When the
+    radii come back the band must already be right."""
+    assert EventConfig().ring_hysteresis_nm > 0
+    assert EventConfig.legacy().ring_hysteresis_nm > 0
 
 
 def test_level_segment_parameters_are_icaos_published_values():
