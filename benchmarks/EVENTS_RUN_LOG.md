@@ -83,6 +83,8 @@ show up here as a count that is not a clean multiple.
 
 | 21 | **`haversine_nm` returned 10,807 NM for a NULL coordinate; fixed.** | The clamp was `F.least(a, lit(1.0))`, and `F.least` skips NULLs -- so `least(NULL, 1.0)` is `1.0`, and `2*R*asin(1)` is the antipodal distance. A missing position became a point on the far side of the Earth. This is the **same defect class as D4**, in a different module, found only because the ring detector is the first consumer for which it is not benign: aerodrome ranking never picks a candidate 10,807 NM away, so it survived every use until now. Replaced with `when(a > 1, 1).otherwise(a)`, which clamps identically and propagates NULL. |
 
+| 22 | **The `haversine_nm` fix was checked against the published flight list before being kept.** | That helper is shared with step 03, so changing it touches a published algorithm -- which CLAUDE.md treats as something you do not do casually. Both consumers use the distance in a comparison feeding `when(...).otherwise(...)`: the candidate radius filter at `flights.py:392` and the abstention test at `:776`. Spark treats a NULL condition as not-true there, so a candidate that previously scored 10,807 NM (false) and one that now scores NULL (null) fall through the identical branch. The mechanism is corrected; no ADEP/ADES result moves. Checked rather than assumed, because "it is obviously a bug fix" is how published behaviour gets changed by accident. |
+
 ---
 
 ## Things that bit, and what they cost
