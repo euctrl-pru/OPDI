@@ -143,3 +143,31 @@ this box, and the existing reports are all `.qmd` with `{r}` chunks calling
 `system2` into the regeneration script. Converted; it renders, and the bridge
 numbers and provenance table on the page are read from the staged JSON rather
 than typed in.
+
+**68 minutes to discover a join that could have been checked in seconds.**
+The first ladder run computed every event for a month and then died on
+`AnalysisException: icao24 cannot be resolved`. The event table keys on
+`flight_id` -- the `track_id` -- and ground truth keys on
+`(icao24, callsign, day)`; nothing bridged them. The flight list holds both and
+is now the bridge.
+
+The tests did not catch it, and the reason generalises. `test_events_score.py`
+fed `align` frames it constructed itself, which already carried `icao24`. So it
+proved the scoring arithmetic and never the identity resolution: **a test that
+builds its own inputs can only check the half it made up.** Two things were
+added -- a contract test pinning `detected_events` to the keys `align` joins
+on, and a preflight assertion on the ground-truth keys before any compute.
+
+**A monitor that greps for the wrong word is worse than no monitor.** The watch
+filtered on `Traceback|[A-Za-z]+Error`. `AnalysisException` contains neither, so
+for an hour a dead job read as a running one -- and because the log had stopped
+growing, "still at Stage 81" looked like a slow stage rather than a corpse. The
+filter now includes `Exception`, and the periodic status line carries the log's
+*age*, because a stale log and a busy one are indistinguishable from content
+alone. The V7 run log records this same lesson about `chainstat.sh`; it was
+written down and still repeated.
+
+**`pkill -f event_bench.py` kills the shell running it.** Exit 144, and both
+background watchers died with it. `pgrep -c -f regenerate_v7.py` matching its
+own checking shell is recorded in the V7 log too. The bracket idiom
+(`'[e]vent_bench.py'`) avoids the self-match.
