@@ -182,6 +182,62 @@ def calculate_threshold_crossing_events(
     )
 
 
+def attach_field_elevation(
+    sdf: DataFrame, month: date, storage: "StorageManager"
+) -> DataFrame:
+    """Attach the field elevation of each track's ADEP and ADES.
+
+    Ground membership has to be measured against the field, not the ellipsoid:
+    ``baro_altitude_c`` is uncorrected pressure altitude, so a fixed 200 ft
+    cut-off is unreachable at any aerodrome above ~200 ft AMSL, and every
+    ``take-off`` and ``landing`` event for those flights simply never existed.
+
+    **Both** ends are attached rather than one chosen per sample. A track is
+    only ever on the ground at one of its two aerodromes, and cruise sits far
+    above both, so taking the more permissive of the two memberships is correct
+    without needing a per-sample distance to decide which end applies -- which
+    would mean joining aerodrome coordinates to every state vector.
+
+    Columns are left NULL when the flight list names no aerodrome or
+    OurAirports has no elevation for it; the caller coalesces to zero, which is
+    exactly today's behaviour.
+    """
+    if not storage.table_exists("opdi_flight_list"):
+        return sdf
+
+    start_ts, end_ts = get_start_end_of_month(month)
+    fl = (
+        storage.read_table("opdi_flight_list")
+        .filter((col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts))))
+        .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
+    )
+
+    if storage.table_exists("oa_airports"):
+        elev = storage.read_table("oa_airports").select(
+            col("ident").alias("_ident"),
+            col("elevation_ft").cast("double").alias("_elev"),
+        )
+        fl = (
+            fl.join(F.broadcast(elev), fl.adep == col("_ident"), "left")
+            .withColumnRenamed("_elev", "elev_adep_ft")
+            .drop("_ident")
+        )
+        fl = (
+            fl.join(F.broadcast(elev), fl.ades == col("_ident"), "left")
+            .withColumnRenamed("_elev", "elev_ades_ft")
+            .drop("_ident")
+        )
+    else:
+        fl = fl.withColumn("elev_adep_ft", lit(None).cast("double")).withColumn(
+            "elev_ades_ft", lit(None).cast("double")
+        )
+
+    fl = fl.select("_fl_id", "elev_adep_ft", "elev_ades_ft")
+    return sdf.join(
+        F.broadcast(fl), sdf.track_id == col("_fl_id"), "left"
+    ).drop("_fl_id")
+
+
 def calculate_horizontal_segment_events(
     sdf_input: DataFrame, config: Optional[EventConfig] = None
 ) -> DataFrame:
@@ -203,22 +259,40 @@ def calculate_horizontal_segment_events(
         event_time, lon, lat, altitude_ft, cumulative_distance_nm,
         cumulative_time_s, info.
     """
-    df = sdf_input.select(
+    config = config or EventConfig()
+
+    wanted = [
         "track_id", "lat", "lon", "event_time", "baro_altitude_c",
         "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s",
-    )
+    ]
+    # Carried only when the caller attached them, so the detector stays a pure
+    # column-in/column-out function and can be tested without storage.
+    elevations = [c for c in ("elev_adep_ft", "elev_ades_ft") if c in sdf_input.columns]
+    df = sdf_input.select(*wanted, *elevations)
+    use_agl = config.phase_ground_above_field and len(elevations) == 2
 
     # Convert units: meters -> feet, m/s -> ft/min, m/s -> knots
     df = df.withColumn("alt", col("baro_altitude_c") * 3.28084)
     df = df.withColumn("roc", col("vert_rate") * 196.850394)
     df = df.withColumn("spd", col("velocity") * 1.94384)
 
-    config = config or EventConfig()
-
     # Apply fuzzy membership functions. The constants are OpenAP's published
     # values; the two reachable from config are the ones with a measured or
     # suspected problem behind them (see EventConfig).
-    df = df.withColumn("alt_gnd", zmf(col("alt"), 0, config.phase_ground_ceiling_ft))
+    if use_agl:
+        # Height above field, at whichever end the aircraft is actually at.
+        # A missing elevation coalesces to zero, i.e. to today's behaviour,
+        # rather than removing the flight's phases altogether.
+        ceiling = config.phase_ground_ceiling_ft
+        df = df.withColumn(
+            "alt_gnd",
+            F.greatest(
+                zmf(col("alt") - F.coalesce(col("elev_adep_ft"), lit(0.0)), 0, ceiling),
+                zmf(col("alt") - F.coalesce(col("elev_ades_ft"), lit(0.0)), 0, ceiling),
+            ),
+        )
+    else:
+        df = df.withColumn("alt_gnd", zmf(col("alt"), 0, config.phase_ground_ceiling_ft))
     df = df.withColumn("alt_lo", gaussmf(col("alt"), 10000, 10000))
     df = df.withColumn("alt_hi", gaussmf(col("alt"), 35000, 20000))
     df = df.withColumn("roc_zero", gaussmf(col("roc"), 0, 100))
@@ -871,7 +945,10 @@ class FlightEventProcessor:
 
         if calc_horizontal:
             print(f"Calculating horizontal events (phase) for batch: {batch_id}")
-            df_events = calculate_horizontal_segment_events(sdf_input, self.events)
+            phase_input = sdf_input
+            if self.events.phase_ground_above_field:
+                phase_input = attach_field_elevation(sdf_input, month, self.storage)
+            df_events = calculate_horizontal_segment_events(phase_input, self.events)
 
         if calc_vertical:
             print(f"Calculating vertical events (FL crossings) for batch: {batch_id}")

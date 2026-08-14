@@ -746,16 +746,17 @@ class EventConfig:
     Unchanged in value. What changes is *what it is measured against* -- see
     ``phase_ground_above_field``."""
 
-    phase_ground_above_field: bool = False
+    phase_ground_above_field: bool = True
     """Measure the ground membership against **height above field elevation**
     rather than raw pressure altitude.
 
-    .. warning::
-
-       **Declared but not yet implemented.** ``pipeline/events.py`` does not
-       read this field, so setting it True changes nothing. It ships False so
-       the configuration cannot claim a behaviour the code does not perform;
-       the commit that implements the elevation join flips the default.
+    Implemented by ``events.attach_field_elevation``, which attaches the field
+    elevation of **both** the track's ADEP and ADES; the membership takes the
+    more permissive of the two. A track is only ever on the ground at one of
+    its ends and cruise sits far above both, so this is correct without a
+    per-sample distance deciding which end applies. A missing elevation
+    coalesces to zero, i.e. to the published behaviour, rather than removing
+    the flight's phases.
 
     **New.** ``baro_altitude_c`` is uncorrected pressure altitude, so the
     published detector's ``zmf(alt_ft, 0, 200)`` reaches zero at 200 ft

@@ -167,3 +167,86 @@ def test_crossing_events_emit_the_published_type_shape(spark):
     types = {r.type for r in calculate_threshold_crossing_events(sdf, EventConfig()).collect()}
 
     assert types == {"xing-fl50", "xing-fl70", "xing-fl100"}
+
+
+# ---------------------------------------------------------------------------
+# D1 -- ground membership measured above field elevation
+# ---------------------------------------------------------------------------
+
+def _departure(spark, field_elev_ft, with_elevation=True):
+    """A departure from a field at `field_elev_ft`: a run on the ground, then a
+    climb. GND -> CL is what `take-off` looks for.
+
+    Both legs are 75 s, comfortably longer than the 60 s smoothing window. A
+    shorter track is not a smaller version of this test -- it is a different
+    one, because a window wider than the track makes the majority label swallow
+    the transition and no take-off can exist regardless of elevation.
+    """
+    on_ground = [field_elev_ft] * 15
+    climb = [field_elev_ft + 400 * (i + 1) for i in range(15)]
+    sdf = _measured(
+        make_track(
+            spark,
+            [
+                {"t": i * 5, "baro_altitude": _m(a),
+                 "vert_rate": 0.0 if i < len(on_ground) else 12.0,
+                 "velocity": (20 if i < len(on_ground) else 250) / KT_PER_MPS}
+                for i, a in enumerate(on_ground + climb)
+            ],
+        )
+    )
+    if with_elevation:
+        sdf = sdf.withColumn("elev_adep_ft", F.lit(float(field_elev_ft))).withColumn(
+            "elev_ades_ft", F.lit(None).cast("double")
+        )
+    return sdf
+
+
+def test_a_high_elevation_departure_gets_no_takeoff_without_the_fix(spark):
+    """The defect, demonstrated. At a field above the 200 ft ceiling the
+    published detector can never classify a sample as GND, so `take-off`
+    -- which requires prev_phase == GND -- is never emitted at all."""
+    sdf = _departure(spark, 5000, with_elevation=False)
+
+    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig.legacy()).collect()}
+
+    assert "take-off" not in types
+
+
+def test_the_same_departure_yields_a_takeoff_with_the_fix(spark):
+    sdf = _departure(spark, 5000)
+
+    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
+
+    assert "take-off" in types
+
+
+def test_a_sea_level_departure_is_unaffected(spark):
+    """The fix must not change what already worked."""
+    with_fix = {
+        r.type for r in calculate_horizontal_segment_events(_departure(spark, 0), EventConfig()).collect()
+    }
+
+    assert "take-off" in with_fix
+
+
+def test_a_missing_elevation_degrades_to_the_published_behaviour(spark):
+    """A flight whose aerodrome the flight list never named must keep the
+    phases it had, not lose them."""
+    sdf = _departure(spark, 0).withColumn("elev_adep_ft", F.lit(None).cast("double"))
+
+    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
+
+    assert "take-off" in types
+
+
+def test_the_arrival_end_elevation_also_counts(spark):
+    """Both ends are attached because a track is on the ground at one of them;
+    a landing at a high field must resolve against ADES, not ADEP."""
+    sdf = _departure(spark, 5000).withColumn(
+        "elev_adep_ft", F.lit(None).cast("double")
+    ).withColumn("elev_ades_ft", F.lit(5000.0))
+
+    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
+
+    assert "take-off" in types
