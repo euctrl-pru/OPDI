@@ -42,22 +42,55 @@ def test_every_rung_name_is_unique():
     assert len(names) == len(set(names))
 
 
-def test_the_guard_refuses_a_write_outside_research(spark, tmp_path):
-    from opdi.config import OPDIConfig
+@pytest.fixture
+def pristine_storage():
+    """Snapshot and restore ``StorageManager``'s patchable surface.
+
+    ``guard_writes`` patches the *class*, so without this the guard leaks into
+    every test that runs afterwards in the same session -- which is exactly
+    what happened: two unrelated storage tests started failing because they
+    were calling the benchmark's wrapper rather than the real method. A
+    module-level monkeypatch needs a teardown even when the function under test
+    is idempotent.
+    """
     from opdi.utils.storage import StorageManager
 
-    # Fresh class state: the guard is idempotent by design, so reset it.
-    for attr in ("_events_guarded", "_events_orig_write", "_events_orig_path"):
-        if hasattr(StorageManager, attr):
-            delattr(StorageManager, attr)
-    StorageManager.write_table = StorageManager.__dict__.get(
-        "write_table", StorageManager.write_table
-    )
+    saved = {
+        name: getattr(StorageManager, name, None)
+        for name in (
+            "write_table", "_s3_path",
+            "_events_guarded", "_events_orig_write", "_events_orig_path",
+        )
+    }
+    yield StorageManager
+    for name, value in saved.items():
+        if value is None:
+            if hasattr(StorageManager, name):
+                delattr(StorageManager, name)
+        else:
+            setattr(StorageManager, name, value)
 
-    config = OPDIConfig.for_environment("local")
-    storage = StorageManager(spark, config)
+
+def test_the_guard_refuses_a_write_outside_research(spark, pristine_storage):
+    from opdi.config import OPDIConfig
+
+    storage = pristine_storage(spark, OPDIConfig.for_environment("local"))
     guard_writes()
     df = spark.createDataFrame([(1,)], "x int")
 
     with pytest.raises(RuntimeError, match="writes only under"):
         storage.write_table(df, "opdi_flight_events", mode="append")
+
+
+def test_a_redirected_write_is_allowed_through(spark, pristine_storage):
+    """The other half: the redirect is what makes the write legitimate, and the
+    guard has to recognise it by path rather than by name."""
+    from opdi.config import OPDIConfig
+
+    storage = pristine_storage(spark, OPDIConfig.for_environment("local"))
+    guard_writes()
+    redirect_event_tables("research/events_test")
+
+    landing = storage._s3_path("opdi_flight_events")
+
+    assert "/research/events_test" in landing

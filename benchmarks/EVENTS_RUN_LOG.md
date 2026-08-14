@@ -124,3 +124,12 @@ placed thresholds by equal lat/lon offsets and called the result "070"; at
 51 N, where a degree of longitude is 0.63 of a degree of latitude, the true
 bearing was 077. The test was asserting against a number I had assumed rather
 than computed. Fixture offsets are now derived from the intended bearing.
+
+**A class-level monkeypatch needs a teardown even when it is idempotent.**
+`guard_writes` patches `StorageManager` itself, and the first version of its
+test did not restore it -- so the guard leaked into every test running
+afterwards in the same session, and two unrelated storage tests began failing
+because they were calling the benchmark's wrapper instead of the real method.
+Worse, that red suite was committed (`948989d`) before the failures were read;
+the fix is `f0e5cd0`. The lesson is not "add a fixture" -- it is that a suite
+result glanced at is not a suite result checked.
