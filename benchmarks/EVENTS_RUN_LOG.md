@@ -24,7 +24,7 @@ times for exactly that reason.
 | R6 KPI18 cruise level | **not an event** — see decision 13 |
 | R7 benchmark code | **done** — `events_gt`, `events_score`, `event_bench` |
 | R7 ladder run | **not run** — needs many hours of serial cluster time |
-| R8 paper | not started |
+| R8 paper | **done** — `papers/flight-events-v1/`, renders |
 
 ---
 
@@ -67,12 +67,12 @@ First real measurement of this programme:
 
 | | |
 |---|---|
-| APDF movements in the month | 1,224,742 |
-| reaching `icao24` via the `ID` bridge | **1,154,338 (94.25%)** |
-| milestones on the three benchmark days | 231,880 |
-| ring crossings on those days | 113,444 |
+| period | movements | reaching `icao24` | milestones | ring crossings |
+|---|---:|---:|---:|---:|
+| 2025-06 | 1,224,742 | **1,154,338 (94.25%)** | 231,880 | 113,444 |
+| 2024-06 | 1,161,115 | **1,087,091 (93.62%)** | 223,780 | 109,367 |
 
-Both derived counts are arithmetically consistent with the bridge, which is
+Both periods clear 93%, and on each the derived counts are arithmetically consistent with the bridge, which is
 the check worth having: 231,880 is almost exactly two milestones per reachable
 movement (ATOT+AOBT for a departure, ALDT+AIBT for an arrival), and 113,444 is
 two rings per arrival. A pivot that had dropped or duplicated a phase would
@@ -133,3 +133,10 @@ because they were calling the benchmark's wrapper instead of the real method.
 Worse, that red suite was committed (`948989d`) before the failures were read;
 the fix is `f0e5cd0`. The lesson is not "add a fixture" -- it is that a suite
 result glanced at is not a suite result checked.
+
+**Quarto papers in this repo are knitr, not Jupyter.** The first draft of the
+paper used Python chunks and failed to render -- there is no Jupyter kernel on
+this box, and the existing reports are all `.qmd` with `{r}` chunks calling
+`system2` into the regeneration script. Converted; it renders, and the bridge
+numbers and provenance table on the page are read from the staged JSON rather
+than typed in.
