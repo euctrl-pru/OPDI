@@ -85,6 +85,8 @@ show up here as a count that is not a clean multiple.
 
 | 22 | **The `haversine_nm` fix was checked against the published flight list before being kept.** | That helper is shared with step 03, so changing it touches a published algorithm -- which CLAUDE.md treats as something you do not do casually. Both consumers use the distance in a comparison feeding `when(...).otherwise(...)`: the candidate radius filter at `flights.py:392` and the abstention test at `:776`. Spark treats a NULL condition as not-true there, so a candidate that previously scored 10,807 NM (false) and one that now scores NULL (null) fall through the identical branch. The mechanism is corrected; no ADEP/ADES result moves. Checked rather than assumed, because "it is obviously a bug fix" is how published behaviour gets changed by accident. |
 
+| 23 | **Each OPDI type is scored against all four truth milestones; the non-claimed pairings are filtered at render, not at run time.** | Scoring `take-off` produces rows against ALDT, AOBT and AIBT with zero detections -- true statements, but a take-off event is not a failed on-block. The tidy fix is to restrict the truth side per type inside the harness. It is deliberately *not* being made mid-flight: the 2025 ladder is already running, and changing the CSV's shape now would leave the two periods with different schemas, which is a worse problem than a few ignorable rows. Filtered in the report; the harness change belongs with the next full re-run. |
+
 ---
 
 ## Things that bit, and what they cost
