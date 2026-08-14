@@ -849,6 +849,16 @@ class EventConfig:
     role as ``crossing_hysteresis_ft``: it suppresses the repeated crossings a
     track flying tangentially along the ring would otherwise produce."""
 
+    # -- ground movement (T04 off-block / T21 on-block) -------------------
+    ground_speed_threshold_kt: float = 2.0
+    """Groundspeed above which an aircraft counts as moving. traffic's
+    ``StartMoving`` value."""
+
+    ground_move_min_seconds: float = 30.0
+    """How long movement must be sustained before it counts. traffic's value.
+    The sustained part is what separates a push from a jitter in the speed
+    field, which at 5 s sampling is not rare."""
+
     # -- runway identification and ATOT/ALDT (T08 / T17) ------------------
     runway_max_dist_nm: float = 5.0
     """Only samples this close to the aerodrome are considered. traffic's

@@ -54,6 +54,8 @@ from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
 from opdi.pipeline.flights import bearing_deg, haversine_nm
 from opdi.pipeline.level_segments import classify_level_offs, level_segments
+from opdi.pipeline.ground import block_times, movement_window
+from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.storage import StorageManager
 
@@ -255,6 +257,117 @@ def calculate_level_off_events(
         col("end_time").alias("event_time"), *common,
     )
     return starts.unionByName(ends)
+
+
+def calculate_block_events(
+    sdf_input: DataFrame,
+    airport_events: DataFrame,
+    config: Optional[EventConfig] = None,
+) -> Optional[DataFrame]:
+    """Off-block (T04, AOBT) and on-block (T21, AIBT).
+
+    Anchored on the ``exit-parking_position``/``entry-parking_position`` events
+    step 04 already emits from ``hexaero_airport_layouts``, so no OSM query is
+    needed at runtime -- the reason traffic's own parking-position path cannot
+    be used on an offline executor.
+
+    Expect coverage, not accuracy, to be the limitation: an aircraft on a stand
+    is often not received at all.
+    """
+    config = config or EventConfig()
+    movements = movement_window(sdf_input, config)
+    blocks = block_times(movements, airport_events)
+    if blocks is None:
+        return None
+
+    common = [
+        lit(None).cast("double").alias("lon"),
+        lit(None).cast("double").alias("lat"),
+        lit(None).cast("double").alias("altitude_ft"),
+        lit(None).cast("double").alias("cumulative_distance_nm"),
+        lit(None).cast("long").alias("cumulative_time_s"),
+    ]
+    aobt = blocks.filter(col("aobt").isNotNull()).select(
+        col("track_id"), lit("AOBT").alias("type"), col("aobt").alias("event_time"),
+        *common,
+        to_json(struct(col("stand_exit").alias("stand_exit"))).alias("info"),
+    )
+    aibt = blocks.filter(col("aibt").isNotNull()).select(
+        col("track_id"), lit("AIBT").alias("type"), col("aibt").alias("event_time"),
+        *common,
+        to_json(struct(col("stand_entry").alias("stand_entry"))).alias("info"),
+    )
+    return aobt.unionByName(aibt)
+
+
+def calculate_runway_events(
+    sdf_input: DataFrame,
+    month: date,
+    storage: "StorageManager",
+    config: Optional[EventConfig] = None,
+) -> Optional[DataFrame]:
+    """ATOT (T08) and ALDT (T17), with the runway that served them.
+
+    ``take-off`` and ``landing`` keep their published type strings and their
+    fuzzy-phase derivation; these are new types alongside them. The two answer
+    different questions -- the published pair asks where the phase changed, this
+    one asks which runway the movement used and when it left or met it -- and a
+    consumer needs to be able to tell them apart rather than find one silently
+    replaced.
+    """
+    config = config or EventConfig()
+    thresholds = runway_thresholds(storage)
+    if thresholds is None or not storage.table_exists("opdi_flight_list"):
+        return None
+    if not storage.table_exists("oa_airports"):
+        return None
+
+    start_ts, end_ts = get_start_end_of_month(month)
+    fl = (
+        storage.read_table("opdi_flight_list")
+        .filter((col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts))))
+        .select(col("id").alias("track_id"), col("adep"), col("ades"))
+    )
+    ends = fl.select(
+        "track_id", col("adep").alias("apt_ident"), lit("departure").alias("role")
+    ).unionByName(
+        fl.select("track_id", col("ades").alias("apt_ident"), lit("arrival").alias("role"))
+    ).filter(col("apt_ident").isNotNull() & (col("apt_ident") != ""))
+
+    apt = storage.read_table("oa_airports").select(
+        col("ident").alias("_ident"),
+        col("latitude_deg").cast("double").alias("apt_lat"),
+        col("longitude_deg").cast("double").alias("apt_lon"),
+        col("elevation_ft").cast("double").alias("apt_elevation_ft"),
+    )
+    ends = ends.join(F.broadcast(apt), ends.apt_ident == col("_ident"), "inner").drop("_ident")
+
+    moves = detect_runway_movements(sdf_input, ends, thresholds, config)
+
+    # The departure's time is its first surviving sample and the arrival's its
+    # last: a lift-off and a touchdown proxy respectively.
+    event_time = F.when(col("role") == "departure", col("first_time")).otherwise(col("last_time"))
+    type_ = F.when(col("role") == "departure", lit("ATOT")).otherwise(lit("ALDT"))
+
+    return moves.select(
+        col("track_id"),
+        type_.alias("type"),
+        event_time.alias("event_time"),
+        lit(None).cast("double").alias("lon"),
+        lit(None).cast("double").alias("lat"),
+        lit(None).cast("double").alias("altitude_ft"),
+        lit(None).cast("double").alias("cumulative_distance_nm"),
+        lit(None).cast("long").alias("cumulative_time_s"),
+        to_json(
+            struct(
+                col("rwy_ident").alias("runway"),
+                col("apt_ident").alias("apt_icao"),
+                col("role").alias("role"),
+                col("bearing_error").alias("bearing_error_deg"),
+                col("n_samples").alias("n_samples"),
+            )
+        ).alias("info"),
+    )
 
 
 def calculate_ring_crossing_events(
@@ -1146,6 +1259,15 @@ class FlightEventProcessor:
                 if level_offs is not None:
                     df_events = df_events.unionByName(level_offs)
 
+            runway_events = calculate_runway_events(
+                sdf_input, month, self.storage, self.events
+            )
+            if runway_events is not None:
+                df_events = (
+                    runway_events if df_events is None
+                    else df_events.unionByName(runway_events)
+                )
+
             rings = calculate_ring_crossing_events(
                 sdf_input, month, self.storage, self.events
             )
@@ -1158,6 +1280,10 @@ class FlightEventProcessor:
                 sdf_input, month, self.storage, self.events
             )
             df_events = df_hexaero if df_events is None else df_events.union(df_hexaero)
+
+            blocks = calculate_block_events(sdf_input, df_hexaero, self.events)
+            if blocks is not None:
+                df_events = df_events.unionByName(blocks)
 
         if calc_seen:
             print(f"Calculating first_seen/last_seen events for batch: {batch_id}")
