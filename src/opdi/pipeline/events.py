@@ -53,6 +53,7 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
 from opdi.pipeline.flights import bearing_deg, haversine_nm
+from opdi.pipeline.level_segments import classify_level_offs, level_segments
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.storage import StorageManager
 
@@ -181,6 +182,79 @@ def calculate_threshold_crossing_events(
             )
         ).alias("info"),
     )
+
+
+def calculate_level_off_events(
+    sdf_input: DataFrame,
+    horizontal_events: DataFrame,
+    config: Optional[EventConfig] = None,
+) -> Optional[DataFrame]:
+    """ICAO level-offs in climb (KPI17) and descent (KPI19).
+
+    Takes top-of-climb and top-of-descent from the horizontal detector's own
+    output rather than recomputing the phase classification, so the two
+    families cannot disagree about where cruise began.
+
+    Emitted as a *separate* family from ``level-start``/``level-end``. Those
+    come from the fuzzy phase classifier and answer "does this look like level
+    flight"; ICAO asks a geometric question about a band anchored at the
+    segment's own start. Both are published and they are not interchangeable --
+    the paper has to say so.
+    """
+    config = config or EventConfig()
+
+    tops = horizontal_events.filter(col("type").isin("top-of-climb", "top-of-descent"))
+    toc = tops.filter(col("type") == "top-of-climb").select(
+        col("track_id").alias("_toc_id"),
+        col("event_time").alias("toc_time"),
+        col("altitude_ft").alias("toc_alt"),
+    )
+    tod = tops.filter(col("type") == "top-of-descent").select(
+        col("track_id").alias("_tod_id"),
+        col("event_time").alias("tod_time"),
+        col("altitude_ft").alias("tod_alt"),
+    )
+
+    segs = level_segments(sdf_input, config)
+    segs = segs.join(toc, segs.track_id == col("_toc_id"), "left").drop("_toc_id")
+    segs = segs.join(tod, segs.track_id == col("_tod_id"), "left").drop("_tod_id")
+    # A flight with no cruise has no climb or descent phase to attribute a
+    # level-off to; ICAO's exclusion box is defined against the TOC altitude.
+    segs = segs.filter(col("toc_time").isNotNull() & col("tod_time").isNotNull())
+
+    labelled = classify_level_offs(
+        segs, config,
+        toc_time=col("toc_time"), tod_time=col("tod_time"),
+        toc_altitude_ft=col("toc_alt"), tod_altitude_ft=col("tod_alt"),
+    )
+
+    leg = F.when(col("kpi") == "KPI17", lit("climb")).otherwise(lit("descent"))
+    info = to_json(
+        struct(
+            col("kpi").alias("kpi"),
+            col("duration_seconds").alias("duration_s"),
+            col("distance_nm").alias("distance_nm"),
+            col("level_ft").alias("level_ft"),
+        )
+    )
+    common = [
+        col("track_id"),
+        lit(None).cast("double").alias("lon"),
+        lit(None).cast("double").alias("lat"),
+        col("level_ft").alias("altitude_ft"),
+        lit(None).cast("double").alias("cumulative_distance_nm"),
+        lit(None).cast("long").alias("cumulative_time_s"),
+        info.alias("info"),
+    ]
+    starts = labelled.select(
+        concat(lit("level-off-"), leg, lit("-start")).alias("type"),
+        col("start_time").alias("event_time"), *common,
+    )
+    ends = labelled.select(
+        concat(lit("level-off-"), leg, lit("-end")).alias("type"),
+        col("end_time").alias("event_time"), *common,
+    )
+    return starts.unionByName(ends)
 
 
 def calculate_ring_crossing_events(
@@ -1064,6 +1138,13 @@ class FlightEventProcessor:
             else:
                 df_vertical = calculate_vertical_crossing_events(sdf_input)
             df_events = df_vertical if df_events is None else df_events.unionByName(df_vertical)
+
+            if df_events is not None:
+                level_offs = calculate_level_off_events(
+                    sdf_input, df_events, self.events
+                )
+                if level_offs is not None:
+                    df_events = df_events.unionByName(level_offs)
 
             rings = calculate_ring_crossing_events(
                 sdf_input, month, self.storage, self.events
