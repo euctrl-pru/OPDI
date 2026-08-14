@@ -19,7 +19,7 @@ times for exactly that reason.
 | R1 D1 ground membership above field elevation | **done** |
 | R2 ring crossings (KPI05, KPI08) | **done** |
 | R3 ICAO level segments (KPI17, KPI19) | **done** |
-| R4 runway & touchdown | in progress |
+| R4 runway & touchdown | detector **done**, event emission pending |
 | R5 ground milestones | not started |
 | R6 KPI18 cruise level | not started |
 | R7 benchmark code + ladder run | not started |
@@ -41,6 +41,10 @@ times for exactly that reason.
 
 | 7 | **ICAO level segments are a new family, not a re-tuning of `level-start`/`level-end`.** | The published pair comes from the fuzzy phase classifier and answers "does this look like level flight". ICAO asks a geometric question about a band anchored at the segment's own start. Changing the existing detector to ICAO's rule would silently redefine a published event type; adding a family leaves both available and forces the paper to say they are not interchangeable. |
 | 8 | **Level-offs take TOC/TOD from the horizontal detector's own output rather than recomputing the phase pass.** | Two independent derivations of "where cruise began" would eventually disagree, and the exclusion box is defined against the TOC altitude -- so a disagreement would move the box and change which segments count. |
+
+| 9 | **Only `TrackBasedRunwayDetection` is ported, not its polygon sibling.** | The polygon variant needs OpenAP for its phase call, shapely for a trapeze, and recurses into a second alignment pass. The track-based one is a filter, a median and a broadcast join, and its parallel-runway tie-break -- which traffic does with shapely -- is a cross-track distance in closed form. |
+| 10 | **Runway bearings are computed from threshold positions, not from `le_heading_degT`.** | Those columns are frequently null in OurAirports and, where present, sometimes magnetic rather than true. traffic derives its own the same way, for the same reason. |
+| 11 | **ATOT and ALDT are taken as the extremes of the runway-detection window, and reported as proxies.** | The earliest surviving sample of a departure is a lift-off proxy, the latest of an arrival a touchdown proxy. Measuring their bias against APDF is the benchmark's job; assuming it is zero would be the mistake. |
 
 ---
 
@@ -76,3 +80,15 @@ direction. That is the same class of one-sided bias the crossing detector was
 built to remove. Membership is now evaluated at the sample itself and the
 forward step only *starts* a segment; the conformance test pins a 90 s
 injected level-off at exactly 90 s.
+
+
+**`&` binds tighter than `>=` in Python.** `F.col("n") >= F.lit(4) & F.col(x).isNotNull()`
+parses as `n >= (4 & isNotNull)`. Here it raised a type error, which is the
+lucky case -- with two compatible operands it would have been a silently
+different filter. Parenthesised, with a comment saying why.
+
+**A degree of longitude is not a degree of latitude.** The first runway fixture
+placed thresholds by equal lat/lon offsets and called the result "070"; at
+51 N, where a degree of longitude is 0.63 of a degree of latitude, the true
+bearing was 077. The test was asserting against a number I had assumed rather
+than computed. Fixture offsets are now derived from the intended bearing.
