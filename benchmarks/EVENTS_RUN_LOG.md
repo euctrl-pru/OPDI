@@ -81,6 +81,8 @@ show up here as a count that is not a clean multiple.
 | 19 | **The ladder is run baseline-first and truncated rather than interpolated.** | A rung takes well over an hour: the processor runs every detector over a month of cleaned tracks, and the first also warms the reference joins. Eleven rungs across two periods is not achievable in one sitting. So the order is `L00_legacy`, then `L10_shipped`, then intermediates -- which yields the comparison that matters even if the run is cut short. Rungs not run are reported as not run; nothing is estimated from its neighbours, because a ladder's whole value is attribution and an interpolated rung attributes a gain to a change that was never tested. |
 | 20 | **`extraction_counts` is reported for every rung, not only the scored ones.** | The scorer reaches four event types. Step 04 emits roughly twenty. Without an inventory the level-offs, top-of-climb and top-of-descent, airport entry/exit and first/last-seen families appear nowhere -- and a family that stopped being emitted would register as an absence rather than a regression, which is the harder failure to notice. It is also the number consumers need for the table-growth question. |
 
+| 21 | **`haversine_nm` returned 10,807 NM for a NULL coordinate; fixed.** | The clamp was `F.least(a, lit(1.0))`, and `F.least` skips NULLs -- so `least(NULL, 1.0)` is `1.0`, and `2*R*asin(1)` is the antipodal distance. A missing position became a point on the far side of the Earth. This is the **same defect class as D4**, in a different module, found only because the ring detector is the first consumer for which it is not benign: aerodrome ranking never picks a candidate 10,807 NM away, so it survived every use until now. Replaced with `when(a > 1, 1).otherwise(a)`, which clamps identically and propagates NULL. |
+
 ---
 
 ## Things that bit, and what they cost
@@ -171,3 +173,17 @@ written down and still repeated.
 background watchers died with it. `pgrep -c -f regenerate_v7.py` matching its
 own checking shell is recorded in the V7 log too. The bracket idiom
 (`'[e]vent_bench.py'`) avoids the self-match.
+
+**The 25-crossings-per-flight anomaly was one line in a helper.** The inventory
+showed 2.85 M 40 NM crossings and 3.20 M at 100 NM against 236,899 tracks, with
+*identical* counts for both rings on the worst flights -- a signature real
+geometry cannot produce. It traced to a transponder parked at Budapest emitting
+for the entire 72-hour sample: cleaning nulled its repeated positions as stale
+broadcasts, `haversine_nm` turned each NULL into 10,807 NM, and the distance
+series alternated between 0.7 NM and the antipode, crossing both rings on
+almost every sample.
+
+Worth noting what found it. Not the tests, and not the scored metrics -- the
+**extraction inventory**, which exists only because the report was challenged
+for containing no benchmarking. A count of rows per event type, which nothing
+had been reporting, was what made an impossible number visible.

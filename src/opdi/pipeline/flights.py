@@ -129,14 +129,34 @@ def angle_between(a, b):
 
 
 def haversine_nm(lat1, lon1, lat2, lon2):
-    """Great-circle distance in nautical miles between two column pairs."""
+    """Great-circle distance in nautical miles between two column pairs.
+
+    A NULL coordinate yields NULL, not a distance.
+
+    That has to be said explicitly because the obvious clamp is wrong. This
+    used to end ``F.asin(F.sqrt(F.least(a, lit(1.0))))``, and ``F.least``
+    *skips* NULLs -- so ``least(NULL, 1.0)`` is ``1.0``, giving
+    ``2 * R * asin(1)`` = 10,807 NM, the antipodal distance. A missing position
+    silently became a point on the far side of the Earth.
+
+    It was found in the ring detector, where a parked aircraft whose repeated
+    positions the cleaner had nulled produced a distance series alternating
+    between 0.7 NM and 10,807 NM, and therefore crossed the 40 and 100 NM rings
+    about twenty thousand times each. It is benign in the aerodrome ranking
+    that first used this helper -- an aerodrome 10,807 NM away never wins --
+    which is exactly why it survived.
+
+    ``when(a > 1, 1).otherwise(a)`` clamps the same way but propagates NULL:
+    ``NULL > 1`` is NULL, so the ``otherwise`` branch returns the NULL.
+    """
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
     a = (
         sin(dlat / 2) ** 2
         + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
     )
-    return lit(2 * EARTH_R_NM) * F.asin(F.sqrt(F.least(a, lit(1.0))))
+    clamped = F.when(a > lit(1.0), lit(1.0)).otherwise(a)
+    return lit(2 * EARTH_R_NM) * F.asin(F.sqrt(clamped))
 
 
 def at_border(lat, lon, margin_nm: float = BORDER_MARGIN_NM):

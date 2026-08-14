@@ -255,3 +255,39 @@ def test_ooa_marker_is_what_the_endpoint_path_already_uses():
     """One marker, defined once. Two spellings of "outside the area" in one
     flight list would be indistinguishable from a bug to any consumer."""
     assert OOA == "OOA"
+
+
+def test_a_null_coordinate_gives_a_null_distance(spark):
+    """The clamp must not invent a position.
+
+    `F.least(a, 1.0)` skips NULLs, so a missing coordinate became
+    `asin(1)` = 10,807 NM -- the antipodal distance -- instead of NULL. Benign
+    in aerodrome ranking, where a point 10,807 NM away never wins, and
+    catastrophic in the ring detector: a parked aircraft whose repeated
+    positions the cleaner had nulled oscillated between 0.7 NM and 10,807 NM
+    and crossed both rings twenty thousand times.
+    """
+    from opdi.pipeline.flights import haversine_nm
+
+    df = spark.createDataFrame(
+        [(50.0, 4.0, 50.9, 4.5), (None, None, 50.9, 4.5), (50.0, 4.0, None, None)],
+        "lat1 double, lon1 double, lat2 double, lon2 double",
+    ).withColumn("d", haversine_nm(F.col("lat1"), F.col("lon1"), F.col("lat2"), F.col("lon2")))
+    got = [r.d for r in df.collect()]
+
+    assert got[0] == pytest.approx(56, abs=3)   # a real distance
+    assert got[1] is None
+    assert got[2] is None
+
+
+def test_the_distance_is_still_clamped_for_antipodal_points(spark):
+    """The clamp exists because floating point can push the argument of asin
+    just past 1; removing it would raise instead of returning half a
+    circumference."""
+    from opdi.pipeline.flights import haversine_nm
+
+    df = spark.createDataFrame(
+        [(0.0, 0.0, 0.0, 180.0)], "lat1 double, lon1 double, lat2 double, lon2 double"
+    ).withColumn("d", haversine_nm(F.col("lat1"), F.col("lon1"), F.col("lat2"), F.col("lon2")))
+
+    assert df.collect()[0].d == pytest.approx(10807, abs=5)
