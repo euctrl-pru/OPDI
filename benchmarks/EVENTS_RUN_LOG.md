@@ -19,10 +19,10 @@ times for exactly that reason.
 | R1 D1 ground membership above field elevation | **done** |
 | R2 ring crossings (KPI05, KPI08) | **done** |
 | R3 ICAO level segments (KPI17, KPI19) | **done** |
-| R4 runway & touchdown | detector **done**, event emission pending |
-| R5 ground milestones | not started |
-| R6 KPI18 cruise level | not started |
-| R7 benchmark code + ladder run | not started |
+| R4 runway & touchdown | **done** — detector + ATOT/ALDT events |
+| R5 ground milestones | **done** — AOBT/AIBT; T05 pushback deferred |
+| R6 KPI18 cruise level | **not an event** — see decision 13 |
+| R7 benchmark code + ladder run | **not started** — the remaining work |
 | R8 paper | not started |
 
 ---
@@ -45,6 +45,10 @@ times for exactly that reason.
 | 9 | **Only `TrackBasedRunwayDetection` is ported, not its polygon sibling.** | The polygon variant needs OpenAP for its phase call, shapely for a trapeze, and recurses into a second alignment pass. The track-based one is a filter, a median and a broadcast join, and its parallel-runway tie-break -- which traffic does with shapely -- is a cross-track distance in closed form. |
 | 10 | **Runway bearings are computed from threshold positions, not from `le_heading_degT`.** | Those columns are frequently null in OurAirports and, where present, sometimes magnetic rather than true. traffic derives its own the same way, for the same reason. |
 | 11 | **ATOT and ALDT are taken as the extremes of the runway-detection window, and reported as proxies.** | The earliest surviving sample of a departure is a lift-off proxy, the latest of an arrival a touchdown proxy. Measuring their bias against APDF is the benchmark's job; assuming it is zero would be the mistake. |
+
+| 12 | **Off-block and on-block are anchored on the parking-position events, not on movement alone.** | Without the anchor, a track first received mid-taxi would report its first movement as an off-block. That is a different event, and it would read as an implausibly short taxi rather than as a miss -- a wrong answer dressed as a good one. |
+| 13 | **KPI18 is not implemented as a detector.** | It needs the maximum cruise flight level per flight, the airport pair and its great-circle distance, then reference distributions across similar pairs grouped by aircraft performance class. Every input already exists once TOC/TOD do; none of it is a *milestone*. Building it as an event type would put a statistical aggregate in the event table. It belongs in the benchmark and paper layer, and is recorded here so the omission is deliberate rather than forgotten. |
+| 14 | **T05 (pushback) is deferred.** | Its signal -- stopped, short movement, >=90 degree track reversal, stop, taxi -- is portable, but it needs a reliable stand geometry *and* dense ground reception at the same time. With AOBT coverage itself expected to be the limiting result, a milestone that needs strictly more than AOBT is not worth building before that number is measured. |
 
 ---
 
