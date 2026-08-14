@@ -71,6 +71,8 @@ def test_the_shipped_new_behaviours_are_on():
 
     assert e.phase_twindow_seconds == 60.0
     assert e.phase_require_complete_rules is True
+    # Implemented by events.attach_field_elevation, so no longer inert.
+    assert e.phase_ground_above_field is True
     assert e.crossing_all_occurrences is True
     assert e.crossing_interpolate is True
     assert e.airport_events_ordered is True
@@ -120,8 +122,6 @@ def test_unimplemented_behaviour_ships_inert():
     """
     e = EventConfig()
 
-    # D1: pipeline/events.py does not read this field.
-    assert e.phase_ground_above_field is False
     # crossings.ring_crossings exists and is tested, but nothing builds the
     # (sample, aerodrome) distance frame it consumes.
     assert tuple(e.ring_radii_nm) == ()
