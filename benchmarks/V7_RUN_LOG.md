@@ -128,6 +128,28 @@ invisible until the value is changed rather than tabled.
 Nothing changes sign. One rung -- cleaning -- moves 2024 and not 2025, which is
 reported as "costs on 2024 only" rather than as a disagreement.
 
+### One thing I got wrong, recorded rather than tidied away
+
+Commit `2fda194` -- "Revert the arrival radius to 30 NM and leave trend
+out-of-area off" -- also carries **254 lines of another workstream's
+`EventConfig` class**, which had nothing to do with it.
+
+The cause is that `git add -A -- src/opdi/config.py` stages the *whole file*.
+Two workstreams were editing `config.py` at once, and file-level staging cannot
+separate them; the plan for this run explicitly said not to commit their files,
+and scoping the `git add` to a path was not enough to honour that.
+
+**Not rewriting history to fix it.** Nothing is pushed, so it would be
+technically possible -- but the branch is shared, the other workstream has since
+committed five times on top, and changing SHAs underneath someone else's work to
+correct an attribution error is a worse trade than the error. Their code is
+intact and their tests pass (12 in `test_crossings.py`, 130 overall), and their
+later commits build on it coherently.
+
+The lesson for next time is concrete: when two workstreams edit one file,
+path-scoped staging is not isolation. Either coordinate before committing, or
+commit a patch rather than a file.
+
 ### Still open
 
 * **out-of-area for arrivals needs a direction test.** Built and off: the label
