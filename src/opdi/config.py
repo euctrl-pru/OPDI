@@ -849,6 +849,27 @@ class EventConfig:
     role as ``crossing_hysteresis_ft``: it suppresses the repeated crossings a
     track flying tangentially along the ring would otherwise produce."""
 
+    # -- runway identification and ATOT/ALDT (T08 / T17) ------------------
+    runway_max_dist_nm: float = 5.0
+    """Only samples this close to the aerodrome are considered. traffic's
+    ``TrackBasedRunwayDetection`` value."""
+
+    runway_max_height_ft: float = 1500.0
+    """Ceiling above field elevation for the runway-detection window.
+    traffic's value; note its polygon-based sibling uses 2000 and its own
+    deprecated wrapper passes 5000, an inconsistency in the source."""
+
+    runway_min_vert_rate_ftmin: float = 257.0
+    """Vertical rate that separates the initial climb (or final descent) from
+    ground movement. traffic's value, which is 1.3 m/s expressed in ft/min."""
+
+    runway_min_groundspeed_kt: float = 30.0
+    """Groundspeed floor, to exclude taxiing. traffic's value."""
+
+    runway_max_bearing_deg: float = 10.0
+    """How far the median track may differ from a runway's bearing before that
+    runway stops being a candidate. traffic's value."""
+
     # -- ICAO level segments (KPI17 / KPI19) ------------------------------
     #
     # .. warning::

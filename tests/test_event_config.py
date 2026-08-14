@@ -38,7 +38,7 @@ def test_every_measurement_carries_its_unit(field_name, field):
     # a set of flight levels and a flight level ceiling.
     counts = {"crossing_levels_fl", "airport_max_fl"}
     assert field_name in counts or field_name.endswith(
-        ("_nm", "_ft", "_kt", "_ftmin", "_seconds", "_pct")
+        ("_nm", "_ft", "_kt", "_ftmin", "_seconds", "_pct", "_deg")
     )
 
 
