@@ -61,6 +61,14 @@ def test_every_new_behaviour_is_off_under_legacy():
     assert legacy.feeds_from_clean_tracks is False
     assert legacy.deterministic_event_ids is False
     assert legacy.enable_pandas_stage is False
+    # The families that did not exist in events_v0.0.2 must not be emitted.
+    # The first ladder run shipped a contaminated baseline precisely because
+    # these were wired in unconditionally: rung 0 emitted 48,134 ATOT and
+    # 69,528 ALDT events no published dataset contains, so every gain was
+    # measured against the wrong thing.
+    assert legacy.emit_runway_events is False
+    assert legacy.emit_block_events is False
+    assert legacy.emit_level_offs is False
     # Rings did not exist at all, so a legacy run must emit none.
     assert tuple(legacy.ring_radii_nm) == ()
 
@@ -81,6 +89,9 @@ def test_the_shipped_new_behaviours_are_on():
     # The escape hatch stays shut: it needs the fatter executor image, and
     # nothing in the current vocabulary requires it.
     assert e.enable_pandas_stage is False
+    assert e.emit_runway_events is True
+    assert e.emit_block_events is True
+    assert e.emit_level_offs is True
 
 
 def test_version_string_is_new_and_the_published_one_is_untouched():

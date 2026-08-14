@@ -27,7 +27,7 @@ def test_the_last_rung_is_exactly_what_ships():
     """Otherwise the ladder's verdict is about a configuration nobody runs."""
     plan = build_plan()
 
-    assert plan["L10_shipped"] == EventConfig()
+    assert plan["L13_shipped"] == EventConfig()
 
 
 def test_no_two_adjacent_rungs_are_identical():
