@@ -188,6 +188,43 @@ def detected_events(spark, table: str):
     )
 
 
+def extraction_counts(spark, table: str, rung: str):
+    """What step 04 actually emitted, by event type.
+
+    The scorer only ever sees the milestones APDF can reach, which is four
+    types out of roughly twenty. Everything else -- the level-offs, the
+    top-of-climb and top-of-descent, the airport entry and exit events, the
+    first and last seen -- is invisible in a scored table, so a family that
+    stopped being emitted entirely would not show up as a regression. It would
+    show up as nothing at all, which is worse.
+
+    This is also the number consumers need: it says how much bigger the
+    published event table becomes, per type, which is what they are being asked
+    to ingest.
+    """
+    ev = spark.read.parquet(table) if table.startswith("s3a://") else spark.table(table)
+    return [
+        {"rung": rung, "type": r["type"], "n_events": r["n_events"]}
+        for r in ev.groupBy("type")
+        .agg(F.count(F.lit(1)).alias("n_events"))
+        .orderBy("type")
+        .collect()
+    ]
+
+
+def write_csv(rows, path):
+    import csv
+
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=sorted(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    print(f"  wrote {path}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(events_gt.PERIODS), required=True)
@@ -227,7 +264,7 @@ def main() -> int:
     from opdi.pipeline.events import FlightEventProcessor
 
     month = dt.datetime.strptime(events_gt.PERIODS[args.period]["month"], "%Y%m").date()
-    scored = []
+    scored, inventory = [], []
     for name, cfg in plan.items():
         print(f"\n=== {name} ===")
         target = f"research/events_{args.period}_{name}"
@@ -238,7 +275,9 @@ def main() -> int:
         proc = FlightEventProcessor(spark, config, log_dir=f"logs/events_{name}")
         proc.process_month(month, skip_if_processed=False)
 
-        detected = detected_events(spark, f"s3a://eurocontrol/opdi/{target}")
+        table = f"s3a://eurocontrol/opdi/{target}"
+        inventory.extend(extraction_counts(spark, table, name))
+        detected = detected_events(spark, table)
         aligned = events_score.align(truth, detected)
         s = events_score.score(aligned)
         events_score.guard_not_all_zero(s)
@@ -246,17 +285,10 @@ def main() -> int:
             scored.append({"rung": name, **row.asDict()})
         print(f"  scored {len(scored)} rows so far")
 
-    if args.results_dir and scored:
-        import csv
-
+    if args.results_dir:
         out = Path(args.results_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        path = out / (args.out_name or f"ladder_{args.period}.csv")
-        with open(path, "w", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=sorted(scored[0]))
-            w.writeheader()
-            w.writerows(scored)
-        print(f"\nwrote {path}")
+        write_csv(scored, out / (args.out_name or f"ladder_{args.period}.csv"))
+        write_csv(inventory, out / f"inventory_{args.period}.csv")
     return 0
 
 
