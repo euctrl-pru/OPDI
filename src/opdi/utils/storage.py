@@ -48,9 +48,9 @@ class StorageManager:
             return self.spark.read.parquet(self._s3_path(table_name))
         return self.spark.table(f"{self.project}.{table_name}")
 
-    def write_table(
-        self, df: DataFrame, table_name: str, mode: str = "append"
-    ) -> None:
+    WRITE_MODES = ("append", "overwrite", "insert_overwrite")
+
+    def write_table(self, df: DataFrame, table_name: str, mode: str) -> None:
         """
         Write *df* to *table_name*.
 
@@ -59,7 +59,37 @@ class StorageManager:
             table_name: Bare table name (no project prefix).
             mode: ``"append"`` | ``"overwrite"`` | ``"insert_overwrite"``
                   (the last one maps to Hive-style insertInto).
+
+        ``mode`` is **required and has no default**. It used to default to
+        ``"append"``, which meant a caller that had not thought about
+        re-processing got the option that silently doubles a table: nothing
+        errors, the rows are simply counted twice, and every aggregate reading
+        them is wrong by an amount nothing reports. Three separate places in
+        this repo -- ``rebuild_sample.py``, ``benchmarks/clean_tracks.py`` and
+        the V7 chain -- carry a workaround for that default. Requiring the
+        argument is what stops the *next* call site needing a fourth.
+
+        .. warning::
+
+           ``insert_overwrite`` does **not** mean "replace this month".
+           In Iceberg mode it overwrites the partitions the DataFrame touches,
+           and in S3 mode it overwrites the entire parquet directory. For a
+           table partitioned by something other than time -- as
+           ``opdi_flight_events`` is, by ``(type, version)`` -- it therefore
+           destroys every other month. Re-processing safely needs the month to
+           be a partition, which is a layout change to published data, or a
+           read-filter-rewrite of the whole table. See
+           ``benchmarks/EVENTS_RUN_LOG.md`` decision 15.
         """
+        if mode not in self.WRITE_MODES:
+            # Previously an unrecognised mode fell through every branch in the
+            # Iceberg path and wrote nothing at all, reporting success. A typo
+            # in a mode string was a silent no-op.
+            raise ValueError(
+                f"Unknown write mode {mode!r} for table {table_name!r}; "
+                f"expected one of {', '.join(self.WRITE_MODES)}."
+            )
+
         if self.use_s3:
             s3_mode = "overwrite" if mode in ("overwrite", "insert_overwrite") else "append"
             df.write.mode(s3_mode).parquet(self._s3_path(table_name))
@@ -69,7 +99,7 @@ class StorageManager:
                 df.writeTo(qualified).append()
             elif mode == "overwrite":
                 df.writeTo(qualified).overwrite()
-            elif mode == "insert_overwrite":
+            else:
                 df.write.mode("overwrite").insertInto(f"{self.project}.{table_name}")
 
     def create_table(self, sql: str) -> None:

@@ -1534,7 +1534,7 @@ class FlightListProcessor:
         flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
         flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
         flight_table = flight_table.drop("DOF_day")
-        self.storage.write_table(flight_table, "opdi_flight_list")
+        self.storage.write_table(flight_table, "opdi_flight_list", mode="append")
 
         self._mark_month_processed(month, self._overflight_log)
         print(f"Overflight processing complete for {month}.")

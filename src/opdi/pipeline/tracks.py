@@ -383,7 +383,7 @@ class TrackProcessor:
         # Drop partition column (Iceberg will handle it)
         df_month = df_month.drop("event_time_day")
 
-        self.storage.write_table(df_month, "osn_tracks")
+        self.storage.write_table(df_month, "osn_tracks", mode="append")
 
         # Clean up memory
         df_month.unpersist(blocking=True)

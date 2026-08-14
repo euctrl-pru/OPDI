@@ -427,7 +427,7 @@ class AirportLayoutGenerator:
             df = hexagonify_airport(apt_icao, resolution=self.resolution)
             sdf = self.spark.createDataFrame(df.to_dict(orient="records"), HEXAERO_SCHEMA)
             sdf = sdf.repartition("hexaero_apt_icao").orderBy("hexaero_apt_icao")
-            self.storage.write_table(sdf, "hexaero_airport_layouts")
+            self.storage.write_table(sdf, "hexaero_airport_layouts", mode="overwrite")
             return df
         except Exception as e:
             print(f"Failed to process {apt_icao}. Error: {e}")

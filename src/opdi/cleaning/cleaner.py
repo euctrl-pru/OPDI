@@ -109,7 +109,13 @@ class TrackCleaner:
             cleaned = apply_pandas_stages(cleaned, self.cleaning)
 
         cleaned = cleaned.repartition("track_id")
-        self.storage.write_table(cleaned, TARGET_TABLE)
+        # Append, because the daily pipeline adds a month this table does not
+        # have. Exactly wrong for a *rebuild* of a month already present, which
+        # is why `benchmarks/clean_tracks.py` forces the first write of a
+        # rebuild to overwrite -- see that module, and EVENTS_RUN_LOG.md
+        # decision 15 for why replacing one month in place is not available
+        # without a layout change.
+        self.storage.write_table(cleaned, TARGET_TABLE, mode="append")
 
         if report:
             rates = null_rate_report(self.storage.read_table(TARGET_TABLE))

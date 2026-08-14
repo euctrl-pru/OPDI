@@ -1318,7 +1318,7 @@ class FlightEventProcessor:
             col("info"),
         )
         df_milestones = df_milestones.repartition("type", "version").orderBy("type", "version")
-        self.storage.write_table(df_milestones, "opdi_flight_events")
+        self.storage.write_table(df_milestones, "opdi_flight_events", mode="append")
 
         # Write measurements (distance + time)
         df_dist = (
@@ -1349,7 +1349,7 @@ class FlightEventProcessor:
 
         df_measurements = df_dist.union(df_time)
         df_measurements = df_measurements.repartition("type", "version").orderBy("type", "version")
-        self.storage.write_table(df_measurements, "opdi_measurements")
+        self.storage.write_table(df_measurements, "opdi_measurements", mode="append")
 
     def process_month(self, month: date, skip_if_processed: bool = True) -> None:
         """
