@@ -746,9 +746,16 @@ class EventConfig:
     Unchanged in value. What changes is *what it is measured against* -- see
     ``phase_ground_above_field``."""
 
-    phase_ground_above_field: bool = True
+    phase_ground_above_field: bool = False
     """Measure the ground membership against **height above field elevation**
     rather than raw pressure altitude.
+
+    .. warning::
+
+       **Declared but not yet implemented.** ``pipeline/events.py`` does not
+       read this field, so setting it True changes nothing. It ships False so
+       the configuration cannot claim a behaviour the code does not perform;
+       the commit that implements the elevation join flips the default.
 
     **New.** ``baro_altitude_c`` is uncorrected pressure altitude, so the
     published detector's ``zmf(alt_ft, 0, 200)`` reaches zero at 200 ft
@@ -823,12 +830,20 @@ class EventConfig:
     so an uninterpolated comparison would measure our snapping rather than the
     algorithm."""
 
-    ring_radii_nm: tuple = (40.0, 100.0)
+    ring_radii_nm: tuple = ()
     """Distance rings around an aerodrome at which crossings are detected.
     40 NM is ICAO's ASMA cylinder for KPI08 and the reference area for KPI05;
     100 NM is the documented variant for aerodromes whose holding sits outside
     40 NM. ``h3_airport_detection_zones`` already reaches 110 NM, so both are
-    available without regenerating reference data."""
+    available without regenerating reference data.
+
+    .. warning::
+
+       **Declared but not yet wired.** ``crossings.ring_crossings`` implements
+       the detection and is tested, but nothing builds the (sample, aerodrome)
+       distance frame it consumes, so no ring event is emitted. Ships empty --
+       an empty tuple makes the detector a no-op rather than a silent lie --
+       and the commit that wires the distance join sets it to ``(40.0, 100.0)``."""
 
     ring_hysteresis_nm: float = 1.0
     """Half-width of the dead band around each ring, in nautical miles. Same
@@ -836,6 +851,15 @@ class EventConfig:
     track flying tangentially along the ring would otherwise produce."""
 
     # -- ICAO level segments (KPI17 / KPI19) ------------------------------
+    #
+    # .. warning::
+    #
+    #    **Declared but not yet implemented.** No detector reads any of the
+    #    eight ``level_*`` fields yet. They are recorded here because they are
+    #    *ICAO's* published parameter values, not ours to choose, and pinning
+    #    them is what makes the eventual conformance claim checkable -- no data
+    #    source holds level-segment truth to score against. Until the detector
+    #    exists these values describe an intention, not a behaviour.
     level_analysis_radius_nm: float = 200.0
     """Radius around the aerodrome within which the climb or descent trajectory
     is analysed. ICAO's example value.
