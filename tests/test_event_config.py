@@ -122,17 +122,20 @@ def test_unimplemented_behaviour_ships_inert():
     """
     e = EventConfig()
 
-    # crossings.ring_crossings exists and is tested, but nothing builds the
-    # (sample, aerodrome) distance frame it consumes.
-    assert tuple(e.ring_radii_nm) == ()
+    # Nothing is inert any more: D1 landed in 098a11d and the rings in the
+    # commit after it. The test is kept because the *mechanism* is the point --
+    # the next unimplemented flag belongs here, shipped off, until it works.
+    assert e.enable_pandas_stage is False
 
 
-def test_the_hysteresis_stays_live_while_the_radii_are_inert():
-    """The dead band is the detector's parameter, not the caller's choice of
-    rings, so it keeps its value while ``ring_radii_nm`` is empty. When the
-    radii come back the band must already be right."""
+def test_the_rings_are_the_ones_icao_defines():
+    """40 NM is ICAO's ASMA cylinder for KPI08 and the KPI05 reference area;
+    100 NM is the documented variant for aerodromes whose holding lies outside
+    it."""
+    assert tuple(EventConfig().ring_radii_nm) == (40.0, 100.0)
     assert EventConfig().ring_hysteresis_nm > 0
-    assert EventConfig.legacy().ring_hysteresis_nm > 0
+    # A legacy run emits no ring event at all -- they did not exist.
+    assert tuple(EventConfig.legacy().ring_radii_nm) == ()
 
 
 def test_level_segment_parameters_are_icaos_published_values():

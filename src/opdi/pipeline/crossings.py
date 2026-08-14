@@ -304,6 +304,7 @@ def ring_crossings(
     *,
     distance_col: str = "distance_nm",
     partition_cols: Optional[Sequence[str]] = None,
+    interpolate_cols: Sequence[str] = ("lat", "lon", "flight_level"),
 ) -> DataFrame:
     """Aerodrome ring crossings.
 
@@ -317,7 +318,7 @@ def ring_crossings(
         thresholds=list(config.ring_radii_nm),
         hysteresis=config.ring_hysteresis_nm,
         partition_cols=list(partition_cols or ["track_id", "apt_ident"]),
-        interpolate_cols=("lat", "lon", "flight_level"),
+        interpolate_cols=tuple(interpolate_cols),
         # Distance grows as the aircraft leaves, so the sense of the words is
         # the opposite of the vertical case.
         up_label="outbound",

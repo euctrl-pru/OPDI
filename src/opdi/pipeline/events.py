@@ -51,7 +51,8 @@ from pyspark.sql.types import DoubleType
 from pyspark.sql.window import Window
 
 from opdi.config import EventConfig, OPDIConfig
-from opdi.pipeline.crossings import flight_level_crossings
+from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
+from opdi.pipeline.flights import bearing_deg, haversine_nm
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.storage import StorageManager
 
@@ -176,6 +177,109 @@ def calculate_threshold_crossing_events(
             struct(
                 col("crossing_seq").alias("crossing_seq"),
                 col("direction").alias("direction"),
+                col("bracket_seconds").alias("bracket_s"),
+            )
+        ).alias("info"),
+    )
+
+
+def calculate_ring_crossing_events(
+    sdf_input: DataFrame,
+    month: date,
+    storage: "StorageManager",
+    config: Optional[EventConfig] = None,
+) -> Optional[DataFrame]:
+    """Crossings of the ASMA rings around a flight's own ADEP and ADES.
+
+    ICAO defines both indicators these serve against the flight's *own*
+    aerodromes -- KPI08's ASMA is a cylinder around the destination, KPI05's
+    reference area a cylinder around origin and destination -- so the rings are
+    built from the flight list rather than from ``h3_airport_detection_zones``.
+    That is also what APDF's ``C40_``/``C100_`` columns record: one crossing per
+    movement, not one per aerodrome overflown.
+
+    It is the cheaper construction as well. The zone table would multiply every
+    sample by every aerodrome within 110 NM and then need its 30 NM
+    ``max_radius_nm`` ceiling raised in two places; this multiplies each sample
+    by at most two, and needs no reference-table change at all.
+
+    Returns None when no radii are configured, so the caller can skip the union.
+    """
+    config = config or EventConfig()
+    radii = list(config.ring_radii_nm)
+    if not radii:
+        return None
+    if not (storage.table_exists("opdi_flight_list") and storage.table_exists("oa_airports")):
+        return None
+
+    start_ts, end_ts = get_start_end_of_month(month)
+    fl = (
+        storage.read_table("opdi_flight_list")
+        .filter((col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts))))
+        .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
+    )
+    ends = fl.select("_fl_id", col("adep").alias("apt_ident")).unionByName(
+        fl.select("_fl_id", col("ades").alias("apt_ident"))
+    ).filter(col("apt_ident").isNotNull() & (col("apt_ident") != "")).distinct()
+
+    apt = storage.read_table("oa_airports").select(
+        col("ident").alias("_apt_ident"),
+        col("latitude_deg").cast("double").alias("apt_lat"),
+        col("longitude_deg").cast("double").alias("apt_lon"),
+    )
+    ends = ends.join(
+        F.broadcast(apt), ends.apt_ident == col("_apt_ident"), "inner"
+    ).drop("_apt_ident")
+
+    work = sdf_input.select(
+        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
+        "cumulative_distance_nm", "cumulative_time_s",
+    ).join(F.broadcast(ends), col("track_id") == col("_fl_id"), "inner").drop("_fl_id")
+
+    work = (
+        work.withColumn(
+            "distance_nm", haversine_nm(col("lat"), col("lon"), col("apt_lat"), col("apt_lon"))
+        )
+        .withColumn("flight_level", col("baro_altitude_c") * 3.28084 / 100.0)
+        .withColumn("cumulative_distance_nm", col("cumulative_distance_nm").cast("double"))
+        .withColumn("cumulative_time_s", col("cumulative_time_s").cast("double"))
+    )
+
+    crossings = ring_crossings(
+        work,
+        config,
+        partition_cols=["track_id", "apt_ident", "apt_lat", "apt_lon"],
+        interpolate_cols=(
+            "lat", "lon", "flight_level",
+            "cumulative_distance_nm", "cumulative_time_s",
+        ),
+    )
+
+    # Bearing is computed *from* the interpolated crossing position, not
+    # interpolated alongside it: a bearing is circular, and averaging 359 and 1
+    # gives 180. From the aerodrome outwards, matching APDF's C40_BEARING.
+    crossings = crossings.withColumn(
+        "bearing_deg",
+        bearing_deg(col("apt_lat"), col("apt_lon"), col("lat"), col("lon")),
+    )
+
+    ring = col("threshold").cast("int").cast("string")
+    return crossings.select(
+        col("track_id"),
+        concat(lit("xing-"), ring, lit("nm")).alias("type"),
+        col("event_time"),
+        col("lon"),
+        col("lat"),
+        (col("flight_level") * 100).alias("altitude_ft"),
+        col("cumulative_distance_nm"),
+        col("cumulative_time_s"),
+        to_json(
+            struct(
+                col("crossing_seq").alias("crossing_seq"),
+                col("direction").alias("direction"),
+                col("apt_ident").alias("apt_icao"),
+                col("bearing_deg").alias("bearing"),
+                col("flight_level").alias("flight_level"),
                 col("bracket_seconds").alias("bracket_s"),
             )
         ).alias("info"),
@@ -960,6 +1064,12 @@ class FlightEventProcessor:
             else:
                 df_vertical = calculate_vertical_crossing_events(sdf_input)
             df_events = df_vertical if df_events is None else df_events.unionByName(df_vertical)
+
+            rings = calculate_ring_crossing_events(
+                sdf_input, month, self.storage, self.events
+            )
+            if rings is not None:
+                df_events = rings if df_events is None else df_events.unionByName(rings)
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")

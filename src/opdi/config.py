@@ -831,20 +831,18 @@ class EventConfig:
     so an uninterpolated comparison would measure our snapping rather than the
     algorithm."""
 
-    ring_radii_nm: tuple = ()
+    ring_radii_nm: tuple = (40.0, 100.0)
     """Distance rings around an aerodrome at which crossings are detected.
     40 NM is ICAO's ASMA cylinder for KPI08 and the reference area for KPI05;
     100 NM is the documented variant for aerodromes whose holding sits outside
     40 NM. ``h3_airport_detection_zones`` already reaches 110 NM, so both are
     available without regenerating reference data.
 
-    .. warning::
-
-       **Declared but not yet wired.** ``crossings.ring_crossings`` implements
-       the detection and is tested, but nothing builds the (sample, aerodrome)
-       distance frame it consumes, so no ring event is emitted. Ships empty --
-       an empty tuple makes the detector a no-op rather than a silent lie --
-       and the commit that wires the distance join sets it to ``(40.0, 100.0)``."""
+    Wired by ``events.calculate_ring_crossing_events``, which builds the
+    distance frame from the flight's **own** ADEP and ADES rather than from the
+    zone table: both indicators are defined against the flight's origin and
+    destination, and APDF records one crossing per movement for the same
+    reason."""
 
     ring_hysteresis_nm: float = 1.0
     """Half-width of the dead band around each ring, in nautical miles. Same

@@ -17,8 +17,8 @@ times for exactly that reason.
 |---|---|
 | R0 make the config honest | **done** — `7eb5549` |
 | R1 D1 ground membership above field elevation | **done** |
-| R2 ring crossings (KPI05, KPI08) | in progress |
-| R3 ICAO level segments (KPI17, KPI19) | not started |
+| R2 ring crossings (KPI05, KPI08) | **done** |
+| R3 ICAO level segments (KPI17, KPI19) | in progress |
 | R4 runway & touchdown | not started |
 | R5 ground milestones | not started |
 | R6 KPI18 cruise level | not started |
@@ -35,6 +35,9 @@ times for exactly that reason.
 | 2 | **A missing elevation coalesces to zero rather than dropping the flight.** | `NULL` would propagate through the membership and remove every phase for a flight whose aerodrome the flight list never named — turning a gap in *reference* data into a loss of *events*. Coalescing to zero degrades exactly to the published behaviour, which is the right failure direction. |
 | 3 | **`attach_field_elevation` is called by the processor, not inside the detector.** | Keeps `calculate_horizontal_segment_events` a pure column-in/column-out function that tests can drive without a `StorageManager`. The detector uses the elevation columns when they are present and ignores them otherwise. |
 | 4 | **The inert-flag test is updated in the same commit that implements the flag.** | R0 shipped `phase_ground_above_field=False` with a test pinning it inert. R1 flips it, and the full suite failed until that test moved — which is the mechanism working, not a nuisance. Each flag's default and its test move together with its implementation. |
+
+| 5 | **Rings are built from the flight's own ADEP/ADES, not from `h3_airport_detection_zones`.** | Both indicators are defined against the flight's own aerodromes -- KPI08's ASMA is a cylinder around the destination, KPI05's reference area one around each end -- and APDF records one crossing per movement for the same reason. It is also far cheaper: the zone table multiplies every sample by every aerodrome within 110 NM and would need its 30 NM `max_radius_nm` ceiling raised in two places, where this multiplies each sample by at most two and needs no reference-table change. The cost is that a ring crossing is not detected for an aerodrome merely overflown, which is correct for these KPIs. |
+| 6 | **Bearing is computed from the interpolated crossing position, not interpolated alongside it.** | A bearing is circular: interpolating between 359 and 1 gives 180, which would be wrong by half a turn on any crossing near due north -- and due north is not rare. |
 
 ---
 
@@ -53,3 +56,10 @@ mine again: lengthening the ground leg from 3 to 15 samples left the
 altitude while reporting a 2,300 ft/min climb. The guard now keys off the leg
 length. Both failures were caught by the sea-level control case — worth keeping
 a control arm in any test whose subject is a threshold.
+
+**A flight has two ends.** The first ring tests asserted on all crossings and
+failed with extra rows and a crossing time 34 s early. The detector was right:
+the test flight's ADEP is EHAM, so rings were correctly built around *both*
+aerodromes and the assertions were mixing the departure's rings into the
+arrival's. Ring assertions now filter on `apt_icao`, and there is a test that
+pins both ends being present rather than treating it as noise.
