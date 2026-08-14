@@ -87,6 +87,56 @@ Bucket after: **67.40 GB**, of which 42.81 GB is `osn_symposium_paper_2026` and
 belongs to another project. OPDI's own footprint is about 24 GB. The two cleaned
 track tables add roughly 22 GB, landing near 89 GB against a ~100 GB quota.
 
+## Final state — 2026-08-14 02:23 UTC
+
+**Complete.** Fifteen outputs, both periods, `--check` clean: every figure in the
+report is traceable to the code currently checked out.
+
+### What ships
+
+| | shipped | legacy | gain |
+|---|---|---|---|
+| 2025 | 134,168 | 122,158 | **+12,010 (+9.8%)** |
+| 2024 | 115,953 | 100,591 | **+15,362 (+15.3%)** |
+
+`endpoint` for departures, `trend` for arrivals, on cleaned tracks, candidates
+ranked on exact great-circle distance. The gain is larger on the harder sample,
+which is the direction a real improvement should go.
+
+### Three values changed on the evidence
+
+Each measured against the shipped configuration on its own, both samples:
+
+| Was → is | 2025 | 2024 |
+|---|---|---|
+| radius 20 NM → **30 NM** | +181 | +334 |
+| out-of-area on `trend` → **off** | +470 | +14 |
+| vote margin 2 → **0** | +395 | +296 |
+
+All three were shipped values version 6 had settled. Together they are worth
+about 1,150 on the 2025 sample, and none of it comes from a new algorithm --
+only from measuring constants on a second period and acting on the answer.
+
+The radius was the instructive one: it was not merely unsupported, it was
+*suppressing* two other changes. At 30 NM the bearing tie-break and the switch
+of departures to `endpoint` are both worth more, because a wider radius admits
+more candidates and so more near-ties for alignment to resolve. That is
+invisible until the value is changed rather than tabled.
+
+### Every rung agrees across the two samples
+
+Nothing changes sign. One rung -- cleaning -- moves 2024 and not 2025, which is
+reported as "costs on 2024 only" rather than as a disagreement.
+
+### Still open
+
+* **out-of-area for arrivals needs a direction test.** Built and off: the label
+  is right about half the time because a track *ending* near the boundary may be
+  leaving or may have lost reception. The course is already computed for the
+  bearing tie-break, so the machinery exists and the rule does not.
+* **a third, held-out period.** Every value here is chosen on the two samples it
+  is validated on. Needs committed Network Manager reference for a chosen month.
+
 ## Progress
 
 ### 2026-08-12 13:03 — 16:37 · step 02a, 2025
