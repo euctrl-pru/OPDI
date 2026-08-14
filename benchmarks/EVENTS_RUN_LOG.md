@@ -78,6 +78,9 @@ movement (ATOT+AOBT for a departure, ALDT+AIBT for an arrival), and 113,444 is
 two rings per arrival. A pivot that had dropped or duplicated a phase would
 show up here as a count that is not a clean multiple.
 
+| 19 | **The ladder is run baseline-first and truncated rather than interpolated.** | A rung takes well over an hour: the processor runs every detector over a month of cleaned tracks, and the first also warms the reference joins. Eleven rungs across two periods is not achievable in one sitting. So the order is `L00_legacy`, then `L10_shipped`, then intermediates -- which yields the comparison that matters even if the run is cut short. Rungs not run are reported as not run; nothing is estimated from its neighbours, because a ladder's whole value is attribution and an interpolated rung attributes a gain to a change that was never tested. |
+| 20 | **`extraction_counts` is reported for every rung, not only the scored ones.** | The scorer reaches four event types. Step 04 emits roughly twenty. Without an inventory the level-offs, top-of-climb and top-of-descent, airport entry/exit and first/last-seen families appear nowhere -- and a family that stopped being emitted would register as an absence rather than a regression, which is the harder failure to notice. It is also the number consumers need for the table-growth question. |
+
 ---
 
 ## Things that bit, and what they cost
