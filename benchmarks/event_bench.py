@@ -38,6 +38,24 @@ from opdi.config import EventConfig, OPDIConfig
 #: Where a benchmark run may write. Anything else is a bug, loudly.
 RESEARCH_PREFIX = "research/"
 
+#: Which track tables each period actually lives in. The 2025 sample is in the
+#: production tables; the 2024 sample was never ingested there and lives under
+#: research/ -- so a run that does not redirect reads 2025 tracks, filters them
+#: to June 2024, finds nothing, and reports every rung as empty. That happened.
+#: `flight_list_v7.PERIODS` carries the same mapping for the same reason.
+PERIOD_TRACKS = {
+    "2025": {"raw": "osn_tracks", "clean": "osn_tracks_clean", "index_on_read": []},
+    "2024": {
+        "raw": "research/tracks",
+        "clean": "research/tracks_clean",
+        # The raw 2024 tracks pre-date step 02's H3 indexing, and the early
+        # rungs read them deliberately. Computing the index on read costs one
+        # column expression per scan; materialising a second 12 GB copy to add
+        # a derived column would cost the bucket a sixth of its free space.
+        "index_on_read": ["research/tracks"],
+    },
+}
+
 #: The ladder. Each rung is (name, {field: value}) applied cumulatively on top
 #: of `EventConfig.legacy()`, so rung 0 is the published algorithm and the last
 #: rung must equal the shipped configuration -- `verify_plan` asserts both.
@@ -126,6 +144,62 @@ def redirect_event_tables(target: str) -> None:
         return orig_write(self, df, table_name, mode)
 
     StorageManager.write_table = write_table
+
+
+def redirect_tracks(period: str) -> None:
+    """Point the track reads at the period's own tables.
+
+    Patches ``_s3_path`` rather than the table name, as
+    ``redirect_event_tables`` does and for the same reason: ``table_ref``
+    registers a temp view named after the table, and ``research/tracks_clean``
+    is not a legal SQL identifier.
+    """
+    spec = PERIOD_TRACKS[period]
+    if spec["raw"] == "osn_tracks" and spec["clean"] == "osn_tracks_clean":
+        return
+    from opdi.utils.storage import StorageManager
+
+    mapping = {"osn_tracks": spec["raw"], "osn_tracks_clean": spec["clean"]}
+    orig = getattr(StorageManager, "_events_track_path", None)
+    if orig is None:
+        orig = StorageManager._s3_path
+        StorageManager._events_track_path = orig
+
+    def _s3_path(self, table_name):
+        return orig(self, mapping.get(table_name, table_name))
+
+    StorageManager._s3_path = _s3_path
+
+
+def index_on_read(tables) -> None:
+    """Attach ``h3_res_12`` when reading a table built before step 02 had it.
+
+    Step 04's airport events join the layout table on that column, so a track
+    table without it cannot be read by the real detector at all. Guarded on the
+    column being absent, so this is a no-op once the research copy is replaced.
+    """
+    if not tables:
+        return
+    from opdi.utils.storage import StorageManager
+
+    if getattr(StorageManager, "_events_h3_on_read", False):
+        return
+    orig_read = StorageManager.read_table
+    wanted = set(tables)
+
+    def read_table(self, table_name):
+        df = orig_read(self, table_name)
+        resolved = getattr(self, "_s3_path")(table_name)
+        if any(w in str(resolved) for w in wanted) and "h3_res_12" not in df.columns:
+            import h3_pyspark
+
+            df = df.withColumn(
+                "h3_res_12", h3_pyspark.geo_to_h3("lat", "lon", F.lit(12))
+            )
+        return df
+
+    StorageManager.read_table = read_table
+    StorageManager._events_h3_on_read = True
 
 
 def build_plan(only=None) -> dict:
@@ -300,6 +374,8 @@ def main() -> int:
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     spark.conf.set("spark.sql.shuffle.partitions", "96")
+    redirect_tracks(args.period)
+    index_on_read(PERIOD_TRACKS[args.period]["index_on_read"])
     guard_writes()
 
     truth, rings, report = events_gt.build(spark, args.period)
@@ -350,7 +426,13 @@ def main() -> int:
             for row in events_score.score(aligned).collect():
                 rung_rows.append({"rung": name, "det_type": det_type, **row.asDict()})
         if not rung_rows:
-            print(f"  {name}: emitted no scorable milestone type at all")
+            raise SystemExit(
+                f"{name}: emitted no scorable milestone type at all. A rung "
+                f"that produces nothing is a configuration or input fault, not "
+                f"a result -- on 2024 this meant the run was reading the 2025 "
+                f"track tables and filtering them to a month they do not "
+                f"contain."
+            )
         else:
             events_score.guard_not_all_zero(
                 spark.createDataFrame(rung_rows).select("n_detected")
