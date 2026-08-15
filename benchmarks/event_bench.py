@@ -44,7 +44,10 @@ RESEARCH_PREFIX = "research/"
 #: to June 2024, finds nothing, and reports every rung as empty. That happened.
 #: `flight_list_v7.PERIODS` carries the same mapping for the same reason.
 PERIOD_TRACKS = {
-    "2025": {"raw": "osn_tracks", "clean": "osn_tracks_clean", "index_on_read": []},
+    "2025": {"raw": "osn_tracks", "clean": "osn_tracks_clean", "index_on_read": [],
+             # The production flight list covers this period, so identity comes
+             # from it -- the same source step 03 and the V7 study used.
+             "identity": "flight_list"},
     "2024": {
         "raw": "research/tracks",
         "clean": "research/tracks_clean",
@@ -53,6 +56,11 @@ PERIOD_TRACKS = {
         # column expression per scan; materialising a second 12 GB copy to add
         # a derived column would cost the bucket a sixth of its free space.
         "index_on_read": ["research/tracks", "research/tracks_clean"],
+        # No flight list exists for this period, so identity is derived from
+        # the tracks. Stated per period rather than inferred: the flight list
+        # is not *empty* for 2024, it is *the wrong period*, and a row count
+        # cannot tell those apart.
+        "identity": "tracks",
     },
 }
 
@@ -276,7 +284,8 @@ TYPE_TO_MILESTONE = {
 }
 
 
-def detected_events(spark, table: str, storage=None, tracks=None):
+def detected_events(spark, table: str, storage=None, tracks=None,
+                    identity: str = "flight_list"):
     """Reshape the written event table into what the scorer expects.
 
     The event table keys on ``flight_id``, which is the ``track_id``; the
@@ -315,7 +324,7 @@ def detected_events(spark, table: str, storage=None, tracks=None):
         F.trim(F.col("FLT_ID")).alias("callsign"),
         F.to_date(F.col("FIRST_SEEN")).alias("day"),
     )
-    if fl.limit(1).count() == 0 or tracks is not None:
+    if identity == "tracks":
         # The flight list is period-specific and only the 2025 one exists in
         # the production table, so an out-of-sample period would resolve no
         # identity at all and every rung would score zero. Identity does not
@@ -448,7 +457,10 @@ def main() -> int:
         tracks = proc.storage.read_table(
             "osn_tracks_clean" if cfg.feeds_from_clean_tracks else "osn_tracks"
         ).select("track_id", "icao24", "callsign", "event_time")
-        detected = detected_events(spark, table, proc.storage, tracks).cache()
+        detected = detected_events(
+            spark, table, proc.storage, tracks,
+            identity=PERIOD_TRACKS[args.period]["identity"],
+        ).cache()
         types = [r.det_type for r in detected.select("det_type").distinct().collect()]
         rung_rows = []
         for det_type in sorted(types):
