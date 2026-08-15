@@ -276,7 +276,7 @@ TYPE_TO_MILESTONE = {
 }
 
 
-def detected_events(spark, table: str, storage=None):
+def detected_events(spark, table: str, storage=None, tracks=None):
     """Reshape the written event table into what the scorer expects.
 
     The event table keys on ``flight_id``, which is the ``track_id``; the
@@ -315,6 +315,21 @@ def detected_events(spark, table: str, storage=None):
         F.trim(F.col("FLT_ID")).alias("callsign"),
         F.to_date(F.col("FIRST_SEEN")).alias("day"),
     )
+    if fl.limit(1).count() == 0 or tracks is not None:
+        # The flight list is period-specific and only the 2025 one exists in
+        # the production table, so an out-of-sample period would resolve no
+        # identity at all and every rung would score zero. Identity does not
+        # need the flight list: the tracks carry icao24, the callsign and a
+        # first-seen day, which is what `adep_ades.track_identity` uses. The
+        # flight list is still required by the *detectors* that need ADEP/ADES
+        # -- airport events, rings, runway, blocks -- so a period without one
+        # yields the phase and crossing families only, and says so.
+        fl = tracks.groupBy("track_id").agg(
+            F.lower(F.first("icao24", ignorenulls=True)).alias("icao24"),
+            F.trim(F.first("callsign", ignorenulls=True)).alias("callsign"),
+            F.to_date(F.min("event_time")).alias("day"),
+        ).withColumnRenamed("track_id", "_fl_id")
+
     return (
         ev.filter(F.col("milestone").isNotNull())
         .join(F.broadcast(fl), ev._track_id == F.col("_fl_id"), "inner")
@@ -430,7 +445,10 @@ def main() -> int:
 
         table = f"s3a://eurocontrol/opdi/{target}"
         inventory.extend(extraction_counts(spark, table, name))
-        detected = detected_events(spark, table, proc.storage).cache()
+        tracks = proc.storage.read_table(
+            "osn_tracks_clean" if cfg.feeds_from_clean_tracks else "osn_tracks"
+        ).select("track_id", "icao24", "callsign", "event_time")
+        detected = detected_events(spark, table, proc.storage, tracks).cache()
         types = [r.det_type for r in detected.select("det_type").distinct().collect()]
         rung_rows = []
         for det_type in sorted(types):
