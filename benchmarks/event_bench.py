@@ -52,7 +52,7 @@ PERIOD_TRACKS = {
         # rungs read them deliberately. Computing the index on read costs one
         # column expression per scan; materialising a second 12 GB copy to add
         # a derived column would cost the bucket a sixth of its free space.
-        "index_on_read": ["research/tracks"],
+        "index_on_read": ["research/tracks", "research/tracks_clean"],
     },
 }
 
@@ -172,11 +172,22 @@ def redirect_tracks(period: str) -> None:
 
 
 def index_on_read(tables) -> None:
-    """Attach ``h3_res_12`` when reading a table built before step 02 had it.
+    """Backfill the columns step 02 adds, for tables written before it did.
 
-    Step 04's airport events join the layout table on that column, so a track
-    table without it cannot be read by the real detector at all. Guarded on the
-    column being absent, so this is a no-op once the research copy is replaced.
+    Two are needed and both are guarded on absence, so this is a no-op the day
+    the research copies are replaced by step 02's own output.
+
+    ``h3_res_12`` -- step 04's airport events join the layout table on it, so a
+    track table without it cannot be read by the real detector at all.
+
+    ``baro_altitude_c`` -- step 02's rolling-mean altitude repair. The 2024
+    research tracks predate it, and every event detector reads it. Falling back
+    to the raw ``baro_altitude`` is the honest substitute rather than a
+    silently different one: it is what the column *was* before the repair
+    existed, so a 2024 legacy rung reading it is closer to what
+    ``events_v0.0.2`` actually saw in 2024 than a repaired column would be.
+    The repair itself is not reproduced here -- doing so would mean running
+    step 02 over the period, which is a different experiment.
     """
     if not tables:
         return
@@ -190,12 +201,15 @@ def index_on_read(tables) -> None:
     def read_table(self, table_name):
         df = orig_read(self, table_name)
         resolved = getattr(self, "_s3_path")(table_name)
-        if any(w in str(resolved) for w in wanted) and "h3_res_12" not in df.columns:
-            import h3_pyspark
+        if any(w in str(resolved) for w in wanted):
+            if "h3_res_12" not in df.columns:
+                import h3_pyspark
 
-            df = df.withColumn(
-                "h3_res_12", h3_pyspark.geo_to_h3("lat", "lon", F.lit(12))
-            )
+                df = df.withColumn(
+                    "h3_res_12", h3_pyspark.geo_to_h3("lat", "lon", F.lit(12))
+                )
+            if "baro_altitude_c" not in df.columns and "baro_altitude" in df.columns:
+                df = df.withColumn("baro_altitude_c", F.col("baro_altitude"))
         return df
 
     StorageManager.read_table = read_table
