@@ -40,7 +40,7 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
 
-PAPER = REPO.parent / "opdi-portal" / "papers" / "flight-events-v1"
+PAPER = REPO.parent / "opdi-portal" / "papers" / "flight-events-v3"
 DATA = PAPER / "data"
 
 PERIODS = ("2025", "2024")
@@ -146,6 +146,25 @@ def jobs():
                 "plus the extraction inventory, which is the only place the "
                 "families APDF cannot score are visible at all.",
                 inputs=[T_TRACKS_CLEAN, T_REF],
+            )
+        )
+    for period in ("2025",):
+        out.append(
+            Job(
+                f"compare_{period}",
+                "benchmarks/events_compare.py",
+                ["--period", period, "--executors", "6"],
+                {f"rings_{period}.csv": f"rings_{period}.csv",
+                 f"runway_{period}.csv": f"runway_{period}.csv",
+                 f"floor_{period}.csv": f"floor_{period}.csv"},
+                SCORE + ["benchmarks/events_compare.py", "benchmarks/event_bench.py"],
+                "ring crossings against C40/C100_CROSS_TIME and position, runway "
+                "identity against AP_C_RWY, and the spread between two "
+                "EUROCONTROL derivations of the same crossing -- the yardstick "
+                "the ring result has to be read against. Reads event tables the "
+                "ladder already wrote; re-runs no detector. 2024 is absent "
+                "because it emits none of these families.",
+                inputs=[T_REF],
             )
         )
     return out
