@@ -274,3 +274,45 @@ def test_defaults_differ_from_legacy_so_the_preset_is_load_bearing():
     # Precisely: the scheduled-service penalty and the endpoint radius moved.
     assert DetectionConfig.legacy().trend_sched_penalty_nm == 0.0
     assert DetectionConfig.legacy().endpoint_radius_nm == 40.0
+
+
+def test_legacy_stays_on_the_sea_level_datum():
+    """Released data was built with a flight-level cut; the preset must keep it.
+
+    If the preset silently moved onto the field-elevation datum, every
+    reprocessed month would differ from what was published at exactly the
+    aerodromes the change is meant to help -- and `legacy()` exists precisely
+    so that cannot happen.
+    """
+    legacy = DetectionConfig.legacy()
+    assert legacy.trend_max_datum == "msl"
+    assert legacy.trend_max_fl == 40
+
+
+def test_the_shipped_default_is_the_field_datum():
+    d = DetectionConfig()
+    assert d.trend_max_datum == "field"
+    assert d.trend_max_height_ft == 6000.0
+    # Retained, not removed: the msl branch still reads it, and `legacy()`
+    # still needs a flight level to reproduce released data with.
+    assert d.trend_max_fl == 60
+
+
+def test_an_unknown_datum_is_rejected_at_construction():
+    """A typo must fail loudly. Falling through to one of the two branches
+    would apply a cut nobody asked for and report it as the other one.
+    """
+    with pytest.raises(ValueError, match="trend_max_datum"):
+        DetectionConfig(trend_max_datum="agl")
+
+
+def test_the_datum_participates_in_equality():
+    """`_version_for` decides whether a run is a legacy one by comparing the
+    whole config against `legacy()`. That only works if the datum is part of
+    the comparison -- otherwise a field-datum run wearing legacy thresholds
+    would stamp a published version string it does not reproduce.
+    """
+    import dataclasses  # noqa: PLC0415
+
+    legacy = DetectionConfig.legacy()
+    assert dataclasses.replace(legacy, trend_max_datum="field") != legacy
