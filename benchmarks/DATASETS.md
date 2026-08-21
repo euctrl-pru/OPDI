@@ -275,3 +275,35 @@ Pointing it at the driver's venv path makes executors fail with
 
 Python workers are unavoidable even with no UDFs: `spark.createDataFrame` on a
 Python list (the airport cell offsets) is enough to spawn them.
+
+## Ground truth semantics
+
+Settled empirically for Task 4 (`track_truth.py`), against `reference/flights_202506.parquet`
+(957,396 rows) and `reference/apdf_202506.parquet` (612,395 DEP rows, similar ARR count), by
+joining NM to APDF on `(callsign, day, aerodrome)` — **not** on callsign alone across the
+whole month. Callsign alone is close to a cross join (~600k x 957k rows) and can exhaust a
+16 GB pod's memory before it prints anything; adding a day key (and, for the tighter check,
+the aerodrome) brings it down to an ordinary merge.
+
+**`TAXI_TIME_3` is taxi-out time only** (off-block `AOBT_3` to actual take-off), not total
+(out + in) taxi time:
+
+- `AOBT_3 + TAXI_TIME_3` predicts the real ATOT (APDF DEP `MVT_TIME_UTC`) with **median error
+  0 s and IQR 17 s** (462,676 distinct callsign/day keys, 499,497 merged rows on a
+  callsign+day join; IQR tightens to 14 s when the join also keys on `ADEP`). 93.5% of matched
+  rows land within +-300 s, 93.8% within +-1 h — the remaining tail is callsign-reuse /
+  multi-leg join noise, not inference error.
+- `ARVT_3` is *already* a landing time (ALDT-like), not a gate/in-block arrival time: against
+  real APDF ALDT (ARR `MVT_TIME_UTC`, joined on `(callsign, day, ADES)`) it matches with
+  median error 0 s and IQR 25 s (467,868 merged rows). This is also why
+  `(ARVT_3 - AOBT_3) - FLT_DUR_3` reproduces `TAXI_TIME_3`'s own distribution almost exactly
+  (means 12.396 vs 12.399 minutes) — there is no separate taxi-in term hiding inside `ARVT_3`.
+
+**Conclusion:** the ~120 s IQR threshold this question was checked against is not crossed —
+17 s and 25 s are both roughly an order of magnitude under it. NM-inferred boundary times
+(`AOBT_3 + TAXI_TIME_3` for take-off, `ARVT_3` for landing) are therefore precise enough to
+use **both for matching and for boundary error**, not restricted to APDF-covered aerodromes
+only. `track_truth.py` still stamps `t_source` (`"apdf"` vs `"nm_inferred"`) on every row of
+`load_flight_intervals`, so a later study can revisit this per airport if some subgroup turns
+out not to hold — but the blanket "boundary error only at APDF airports" fallback is not
+needed for this dataset.

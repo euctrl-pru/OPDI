@@ -7,6 +7,7 @@ Iceberg, no credentials -- the suite must be runnable on a laptop and in CI.
 import datetime as dt
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -19,6 +20,7 @@ import pytest
 # suite, before any SparkSession is built.
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     BooleanType,
