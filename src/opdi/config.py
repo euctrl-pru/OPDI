@@ -1032,6 +1032,38 @@ class EventConfig:
 
 
 @dataclass
+class SegmentationConfig:
+    """Track segmentation thresholds. Aviation units, unit in every field name.
+
+    These belong to the v2 segmentation study and are read by
+    ``pipeline/segmentation``. The frozen ``track_gap_*`` fields on
+    ``IngestionConfig`` are untouched: ``tracks.py:_add_track_id`` still reads
+    them and still produces the published ``track_id``.
+    """
+
+    gap_minutes: float = 30.0
+    """Gap above which a track is split, at any altitude (minutes)."""
+
+    low_alt_gap_minutes: float = 15.0
+    """Gap above which a track is split when low (minutes)."""
+
+    low_alt_ft: float = 5000.0
+    """Altitude below which the shorter gap rule applies (feet)."""
+
+    ground_dwell_minutes: float = 5.0
+    """On-ground dwell above which a ground contact is a turnaround (minutes)."""
+
+    turnaround_max_height_ft: float = 1000.0
+    """Height above field elevation below which a turnaround can occur (feet)."""
+
+    turnaround_max_speed_kt: float = 40.0
+    """Ground speed below which an aircraft counts as stationary (knots)."""
+
+    descent_floor_ft: float = 1500.0
+    """Altitude a descent must reach before a following climb is a new sortie (feet)."""
+
+
+@dataclass
 class OPDIConfig:
     """Main OPDI configuration container."""
 
@@ -1042,6 +1074,7 @@ class OPDIConfig:
     cleaning: CleaningConfig = field(default_factory=CleaningConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     events: EventConfig = field(default_factory=EventConfig)
+    segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
 
     @classmethod
     def for_environment(cls, env: str = "dev") -> "OPDIConfig":

@@ -12,9 +12,12 @@ from conftest import make_track
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.methods import (
     airframe_only,
+    airport_anchored,
+    ground_anchored,
     legacy,
     no_month_suffix,
     traffic_style,
+    vertical_profile,
 )
 
 P = SegmentationParams()
@@ -130,3 +133,101 @@ def test_airframe_only_still_splits_a_null_callsign_airframe_on_gaps(spark):
         {"t": 45 * 60, "callsign": None, "baro_altitude": 10000.0},
     ])
     assert n_tracks(assign_track_id(df, airframe_only(), P)) == 2
+
+
+# -- A5: ground-anchored -----------------------------------------------------
+
+def _continuous_turnaround(spark):
+    """Two flights with an 8 minute on-ground turnaround and NO data gap.
+
+    Legacy cannot split this: the gap never exceeds 15 minutes, so neither rule
+    fires. This is the case A5 exists for.
+    """
+    rows = []
+    for i in range(5):                                    # inbound descent
+        rows.append({"t": i * 60, "baro_altitude": 3000.0 - i * 600, "on_ground": False,
+                     "velocity": 100.0})
+    for i in range(8):                                    # 8 min on stand
+        rows.append({"t": 300 + i * 60, "baro_altitude": 0.0, "on_ground": True,
+                     "velocity": 0.0})
+    for i in range(5):                                    # outbound climb
+        rows.append({"t": 780 + i * 60, "baro_altitude": i * 600, "on_ground": False,
+                     "velocity": 100.0})
+    return make_track(spark, rows)
+
+
+def test_legacy_merges_a_continuous_turnaround(spark):
+    """The defect A5 exists to remove."""
+    assert n_tracks(assign_track_id(_continuous_turnaround(spark), legacy(), P)) == 1
+
+
+def test_ground_anchored_splits_a_continuous_turnaround(spark):
+    p = SegmentationParams(ground_dwell_minutes=5.0)
+    assert n_tracks(assign_track_id(_continuous_turnaround(spark), ground_anchored(), p)) == 2
+
+
+def test_ground_anchored_ignores_a_touch_and_go(spark):
+    """A 60 second ground contact is not a turnaround, whatever else it is."""
+    rows = [{"t": i * 30, "baro_altitude": 1000.0 - i * 300, "on_ground": False,
+             "velocity": 100.0} for i in range(4)]
+    rows += [{"t": 120 + i * 30, "baro_altitude": 0.0, "on_ground": True,
+              "velocity": 80.0} for i in range(2)]
+    rows += [{"t": 180 + i * 30, "baro_altitude": i * 300, "on_ground": False,
+              "velocity": 100.0} for i in range(4)]
+    p = SegmentationParams(ground_dwell_minutes=5.0)
+    assert n_tracks(assign_track_id(make_track(spark, rows), ground_anchored(), p)) == 1
+
+
+# -- A6: airport-anchored -----------------------------------------------------
+
+def test_airport_anchored_requires_the_break_to_be_at_an_airport(spark):
+    """A slow, low, long dwell away from any aerodrome is not a turnaround.
+
+    Legacy's 15-minute low-altitude rule fires on it regardless. This is the
+    high-field-elevation case inverted: the test is proximity, not altitude.
+    """
+    rows = [{"t": 0, "baro_altitude": 100.0, "on_ground": True, "velocity": 0.0,
+             "near_airport": False, "field_elev_ft": 0.0}]
+    rows += [{"t": 20 * 60, "baro_altitude": 100.0, "on_ground": True, "velocity": 0.0,
+              "near_airport": False, "field_elev_ft": 0.0}]
+    df = make_track(spark, rows)
+    assert n_tracks(assign_track_id(df, airport_anchored(), P)) == 1
+    assert n_tracks(assign_track_id(df, legacy(), P)) == 2
+
+
+def test_airport_anchored_uses_height_above_field_not_barometric_altitude(spark):
+    """An aircraft parked at a 6,000 ft aerodrome is on the ground, not at altitude.
+
+    ``track_quality.py`` names this exact case: legacy's ``baro_altitude < 1524 m``
+    never fires, so the turnaround is missed and two flights merge.
+    """
+    rows = [
+        {"t": 0, "baro_altitude": 1900.0, "on_ground": True, "velocity": 0.0,
+         "near_airport": True, "field_elev_ft": 6200.0},
+        {"t": 20 * 60, "baro_altitude": 1900.0, "on_ground": True, "velocity": 0.0,
+         "near_airport": True, "field_elev_ft": 6200.0},
+    ]
+    df = make_track(spark, rows)
+    assert n_tracks(assign_track_id(df, legacy(), P)) == 1        # missed
+    assert n_tracks(assign_track_id(df, airport_anchored(), P)) == 2   # caught
+
+
+# -- A7: vertical-profile -----------------------------------------------------
+
+def test_vertical_profile_splits_on_a_descent_climb_cycle_with_no_gap_and_no_ground(spark):
+    """Ground contact is not always broadcast. The profile still shows two sorties."""
+    rows = [{"t": i * 60, "baro_altitude": 9000.0 - i * 900} for i in range(10)]
+    rows += [{"t": 600 + i * 60, "baro_altitude": i * 900} for i in range(10)]
+    for r in rows:
+        r["on_ground"] = False
+    p = SegmentationParams(descent_floor_ft=1500.0)
+    assert n_tracks(assign_track_id(make_track(spark, rows), vertical_profile(), p)) == 2
+
+
+def test_vertical_profile_does_not_split_a_step_descent_in_the_cruise(spark):
+    """FL350 -> FL310 is a level change, not a landing."""
+    rows = [{"t": i * 60, "baro_altitude": 10600.0, "on_ground": False} for i in range(5)]
+    rows += [{"t": 300 + i * 60, "baro_altitude": 9400.0, "on_ground": False}
+             for i in range(5)]
+    p = SegmentationParams(descent_floor_ft=1500.0)
+    assert n_tracks(assign_track_id(make_track(spark, rows), vertical_profile(), p)) == 1
