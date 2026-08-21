@@ -16,7 +16,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import SparkSession, DataFrame, Column
 from pyspark.sql import functions as F
 from pyspark.sql.functions import (
     broadcast,
@@ -94,6 +94,66 @@ LEGACY_ENDPOINT_VERSION = "v3.0.0"
 
 NM_PER_DEG = 60.0
 EARTH_R_NM = 3440.065
+
+#: Metres to feet. The same factor `events.py` publishes `altitude_ft` with and
+#: that `_fetch_and_label_sv` derives `flight_level` with, named once so the
+#: conversions cannot drift apart.
+FT_PER_M = 3.28084
+
+
+def height_above_field(baro_altitude_m: Column, elevation_ft: Column) -> Column:
+    """Height in feet above an aerodrome's own field elevation.
+
+    A NULL elevation coalesces to zero, which leaves height above the standard
+    pressure datum -- that is, exactly the published behaviour. Two cases rely
+    on that and both are deliberate:
+
+    * an aerodrome whose elevation OurAirports does not carry degrades to the
+      old cut rather than dropping out of detection, the same convention
+      ``phase_ground_above_field`` set in step 04;
+    * a sample matching *no* aerodrome carries a NULL elevation out of the
+      trend path's left join, and those rows must pass through untouched --
+      dropping them would remove tracks from the flight list entirely rather
+      than leaving them unnamed.
+    """
+    return baro_altitude_m * FT_PER_M - F.coalesce(elevation_ft, F.lit(0.0))
+
+
+def trend_altitude_cut(detection) -> Column:
+    """The trend vote's altitude condition, on whichever datum is configured.
+
+    Expects ``baro_altitude`` and ``apt_elevation_ft`` on the field datum, and
+    ``flight_level`` on the sea-level one.
+    """
+    if getattr(detection, "trend_max_datum", "msl") == "field":
+        return height_above_field(
+            col("baro_altitude"), col("apt_elevation_ft")
+        ) <= lit(float(detection.trend_max_height_ft))
+
+    # Verbatim, not an equivalent. `flight_level` is an integer cast, so this
+    # admits everything below 6,100 ft at FL60 -- rewriting it as a comparison
+    # in feet would move the published cut by up to 99 ft silently.
+    return col("flight_level") <= lit(int(detection.trend_max_fl))
+
+
+def trend_prefilter_ceiling_ft(detection, max_field_elevation_ft: float) -> float:
+    """Ceiling in feet for the cheap pre-filter ahead of the aerodrome join.
+
+    The exact cut needs an aerodrome and so can only run after the join, but
+    the join is only affordable because most samples never reach it. This is
+    the union bound that keeps both: a sample survives the exact cut at *some*
+    aerodrome only if it is within the cap of the highest field in the
+    reference set, so cutting there provably discards nothing the exact test
+    would have kept.
+
+    Bounded by the aerodromes actually present rather than by a constant. A
+    hardcoded ceiling would fail the way every threshold bug in this codebase
+    fails -- by quietly never firing once the reference set moved.
+    """
+    if getattr(detection, "trend_max_datum", "msl") == "field":
+        return float(detection.trend_max_height_ft) + float(max_field_elevation_ft)
+    # The integer cast again: FL60 reaches 6,100 ft.
+    return (float(detection.trend_max_fl) + 1.0) * 100.0
 
 #: How far either side of a track's endpoint the course is measured over.
 #: Seven minutes, matching the window the bearing study swept on.
