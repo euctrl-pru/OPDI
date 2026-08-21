@@ -307,3 +307,64 @@ only. `track_truth.py` still stamps `t_source` (`"apdf"` vs `"nm_inferred"`) on 
 `load_flight_intervals`, so a later study can revisit this per airport if some subgroup turns
 out not to hold — but the blanket "boundary error only at APDF airports" fallback is not
 needed for this dataset.
+
+### Reproducing these numbers
+
+Both sides run against the committed reference parquet, no cluster and no credentials. Per the
+project's provenance rule, a number without a recipe is unverified rather than fact — this is
+that recipe, for both the departure-side number and the arrival-side one.
+
+**Departure side** (`AOBT_3 + TAXI_TIME_3` vs real ATOT). The naive `dep.merge(nm,
+left_on="AP_C_FLTID", right_on="AIRCRAFT_ID")` merges on callsign alone across the whole
+month — close to a cross join (612k x 957k rows) that can exhaust a 16 GB pod before it prints
+anything. Add a day key to both sides first:
+
+```bash
+.venv310/bin/python - <<'PY'
+import pandas as pd
+nm = pd.read_parquet("reference/flights_202506.parquet",
+                      columns=["AIRCRAFT_ADDRESS", "AIRCRAFT_ID", "ADEP", "ADES",
+                               "AOBT_3", "ARVT_3", "TAXI_TIME_3"])
+ap = pd.read_parquet("reference/apdf_202506.parquet",
+                      columns=["AP_C_FLTID", "ADEP_ICAO", "ADES_ICAO",
+                               "SRC_PHASE", "MVT_TIME_UTC"])
+dep = ap[ap.SRC_PHASE == "DEP"].copy()
+dep["_day"] = dep["MVT_TIME_UTC"].dt.date
+nm = nm.copy()
+nm["_day"] = nm["AOBT_3"].dt.date
+d = dep.merge(nm, left_on=["AP_C_FLTID", "_day"], right_on=["AIRCRAFT_ID", "_day"],
+              how="inner")
+d["atot_hat"] = d.AOBT_3 + pd.to_timedelta(d.TAXI_TIME_3, unit="m")
+err = (d.atot_hat - d.MVT_TIME_UTC).dt.total_seconds()
+print("ATOT inference error (s):", err.describe())
+print("IQR (s):", err.quantile(0.75) - err.quantile(0.25))
+PY
+```
+
+**Arrival side** (`ARVT_3` vs real ALDT) — the number that unlocks boundary error across the
+whole ECAC sample instead of only APDF airports. Same day-key hazard applies; join on
+`(callsign, day, ADES)` for the tighter, less noisy check:
+
+```bash
+.venv310/bin/python - <<'PY'
+import pandas as pd
+nm = pd.read_parquet("reference/flights_202506.parquet",
+                      columns=["AIRCRAFT_ADDRESS", "AIRCRAFT_ID", "ADEP", "ADES",
+                               "AOBT_3", "ARVT_3", "TAXI_TIME_3"])
+ap = pd.read_parquet("reference/apdf_202506.parquet",
+                      columns=["AP_C_FLTID", "ADEP_ICAO", "ADES_ICAO",
+                               "SRC_PHASE", "MVT_TIME_UTC"])
+arr = ap[ap.SRC_PHASE == "ARR"].copy()
+arr["_day"] = arr["MVT_TIME_UTC"].dt.date
+nm = nm.copy()
+nm["_arr_day"] = nm["ARVT_3"].dt.date
+d = arr.merge(nm, left_on=["AP_C_FLTID", "_day", "ADES_ICAO"],
+              right_on=["AIRCRAFT_ID", "_arr_day", "ADES"], how="inner")
+err = (d.ARVT_3 - d.MVT_TIME_UTC).dt.total_seconds()
+print("ARVT_3 vs real ALDT error (s):", err.describe())
+print("IQR (s):", err.quantile(0.75) - err.quantile(0.25))
+PY
+```
+
+Both are throwaway pandas diagnostics reading committed files on the driver -- the "everything
+is native Spark" rule governs `track_truth.py` itself, not this kind of one-off probe.
