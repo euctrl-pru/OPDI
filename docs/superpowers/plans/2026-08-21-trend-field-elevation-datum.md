@@ -940,6 +940,12 @@ Expected: PASS, no regressions. Pay attention to `test_detection_config.py` and 
 
 - [ ] **Step 7: Measure the pre-filter's cost**
 
+> **Deferred to Task 7 during execution.** This step needs `flight_list_v61.py`,
+> which Task 7 creates. Writing a scratch script to run it earlier would mean
+> paying for a track scan twice and measuring a code path that is not the one
+> that ships. The abort threshold below still applies, unchanged, and the
+> measurement is a required part of Task 7's verification rather than optional.
+
 The spec flags this as the secondary risk and requires it be measured rather than assumed. The pre-filter widens from FL60 to roughly FL60 + the highest field in the zone table — plausibly around FL150 — so about 2× the altitude band entering the join.
 
 Run one month of `process_dai` both ways on the cluster and record wall time and the row count entering the zone join:

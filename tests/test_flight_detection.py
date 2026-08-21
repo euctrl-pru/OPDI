@@ -332,6 +332,72 @@ def _survives(spark, rows, detection):
     return [r["_i"] in keep for r in df.select("_i").collect()]
 
 
+def _processor_with_airports(spark, rows):
+    """A FlightListProcessor whose only storage table is `oa_airports`.
+
+    The real StorageManager needs S3 and Kerberos; the two helpers under test
+    read exactly one table, so a stub is honest here rather than a shortcut.
+    """
+    from opdi.config import DetectionConfig
+
+    class _Storage:
+        def table_exists(self, name):
+            return name == "oa_airports"
+
+        def read_table(self, name):
+            assert name == "oa_airports"
+            return spark.createDataFrame(rows, "ident string, elevation_ft double")
+
+    proc = FlightListProcessor.__new__(FlightListProcessor)
+    proc.storage = _Storage()
+    proc.spark = spark
+    proc.detection = DetectionConfig()
+    proc._max_elev_ft = None
+    return proc
+
+
+def test_attach_field_elevation_keeps_unmatched_rows(spark):
+    """The helper is shared with the endpoint path, and the trend path feeds it
+    left-joined rows whose apt_ident is NULL. Those must come back with a NULL
+    elevation, not be dropped -- an inner join here would silently delete every
+    sample that matched no aerodrome, and with it every track that has none.
+    """
+    proc = _processor_with_airports(spark, [("EHAM", -11.0), ("LTCE", 5763.0)])
+    cand = spark.createDataFrame(
+        [("EHAM",), ("LTCE",), (None,), ("ZZZZ",)], "apt_ident string"
+    )
+    got = {r["apt_ident"]: r["apt_elevation_ft"] for r in proc._attach_field_elevation(cand).collect()}
+
+    assert got["EHAM"] == pytest.approx(-11.0)
+    assert got["LTCE"] == pytest.approx(5763.0)
+    assert got[None] is None          # matched no aerodrome
+    assert got["ZZZZ"] is None        # aerodrome absent from the reference
+    assert len(got) == 4              # nothing dropped
+
+
+def test_max_field_elevation_comes_from_the_zone_table_not_the_world(spark):
+    """The pre-filter's width is set by the highest aerodrome that can actually
+    match. Taking the max over all of OurAirports would drag in fields above
+    14,000 ft that the bounding box excludes, widening the pre-filter by two
+    thirds for aerodromes no sample can ever be joined to.
+    """
+    proc = _processor_with_airports(
+        spark, [("EHAM", -11.0), ("LTCE", 5763.0), ("ZUDC", 14472.0)]
+    )
+    zones = spark.createDataFrame([("EHAM",), ("LTCE",)], "apt_ident string")
+    assert proc._max_field_elevation_ft(zones) == pytest.approx(5763.0)
+
+
+def test_max_field_elevation_is_zero_without_a_reference(spark):
+    """No reference means no elevation to subtract, so the field datum must
+    degrade to the sea-level cut rather than widening the pre-filter by a NULL.
+    """
+    proc = _processor_with_airports(spark, [("EHAM", -11.0)])
+    proc.storage.table_exists = lambda name: False
+    zones = spark.createDataFrame([("EHAM",)], "apt_ident string")
+    assert proc._max_field_elevation_ft(zones) == 0.0
+
+
 def test_height_above_field_subtracts_the_elevation(spark):
     from opdi.pipeline.flights import height_above_field
 
