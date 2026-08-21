@@ -238,8 +238,8 @@ def test_version_is_new_unless_the_run_is_a_legacy_one():
             self.detection = detection
             self.tracks_table = tracks
 
-    assert Stub(DetectionConfig(), "osn_tracks_clean")._version_for("trend") == "v4.0.0"
-    assert Stub(DetectionConfig(), "osn_tracks_clean")._version_for("endpoint") == "v4.0.0"
+    assert Stub(DetectionConfig(), "osn_tracks_clean")._version_for("trend") == "v5.0.0"
+    assert Stub(DetectionConfig(), "osn_tracks_clean")._version_for("endpoint") == "v5.0.0"
 
     legacy = DetectionConfig.legacy()
     assert Stub(legacy, "osn_tracks")._version_for("trend") == "v2.0.0"
@@ -247,8 +247,35 @@ def test_version_is_new_unless_the_run_is_a_legacy_one():
 
     # Legacy thresholds over *cleaned* tracks is not a legacy run: the input
     # differs, so the output cannot be claimed to reproduce a release.
-    assert Stub(legacy, "osn_tracks_clean")._version_for("trend") == "v4.0.0"
+    assert Stub(legacy, "osn_tracks_clean")._version_for("trend") == "v5.0.0"
     assert OPDIConfig().detection == DetectionConfig()
+
+
+def test_the_datum_alone_makes_a_run_non_legacy():
+    """`_version_for` decides by comparing the whole config against `legacy()`,
+    so the datum has to be part of that comparison.
+
+    Everything here *except* the datum is the legacy preset. If the comparison
+    ignored `trend_max_datum`, this run would stamp v2.0.0 -- promising a
+    reproduction of released data while cutting altitude on a datum released
+    data never used.
+    """
+    import dataclasses  # noqa: PLC0415
+
+    from opdi.config import DetectionConfig  # noqa: PLC0415
+
+    class Stub:
+        _version_for = FlightListProcessor._version_for
+
+        def __init__(self, detection, tracks):
+            self.detection = detection
+            self.tracks_table = tracks
+
+    legacy = DetectionConfig.legacy()
+    assert Stub(legacy, "osn_tracks")._version_for("trend") == "v2.0.0"
+
+    on_field = dataclasses.replace(legacy, trend_max_datum="field")
+    assert Stub(on_field, "osn_tracks")._version_for("trend") == "v5.0.0"
 
 
 def test_ooa_marker_is_what_the_endpoint_path_already_uses():

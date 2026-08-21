@@ -227,7 +227,7 @@ def test_version_string_is_new_and_the_published_ones_are_untouched():
         LEGACY_TREND_VERSION,
     )
 
-    assert FLIGHT_LIST_VERSION == "v4.0.0"
+    assert FLIGHT_LIST_VERSION == "v5.0.0"
     assert LEGACY_TREND_VERSION == "v2.0.0"
     assert LEGACY_ENDPOINT_VERSION == "v3.0.0"
     assert FLIGHT_LIST_VERSION not in (LEGACY_TREND_VERSION, LEGACY_ENDPOINT_VERSION)

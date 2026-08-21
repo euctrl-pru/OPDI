@@ -247,6 +247,40 @@ The paper should be written from these numbers rather than from the Erzurum
 case, which illustrates the mechanism honestly but overstates how much of the
 sample it applies to.
 
+### The version string, and a correction to the item listed as outstanding
+
+The "still outstanding" note above — that the sampler and ranking changes need
+a new algorithm `version` — **was already done**. `FLIGHT_LIST_VERSION` was
+`v4.0.0`, and its comment lists exactly those changes. The note is stale
+against the code; read it as closed.
+
+That mattered because the v6.1 design argued for bumping on the premise that
+several changes had accumulated behind an unversioned string. They had not. The
+real reason to bump is narrower and still holds: **v4.0.0 was never released,
+so no published dataset is affected, but research runs on the cluster already
+carry it** — and the datum change makes those a different algorithm under the
+same name. That is what a version string exists to prevent, and it is cheaper
+to bump before the first release than to argue later about which `v4.0.0` a
+table was built by.
+
+`FLIGHT_LIST_VERSION` is now `v5.0.0`. The `osn_tracks`/flight-list DDL comment
+moved with it. `LEGACY_TREND_VERSION` (`v2.0.0`) and `LEGACY_ENDPOINT_VERSION`
+(`v3.0.0`) are untouched, as they must be.
+
+### What this does to V6
+
+**V6's pipeline jobs now read stale, and that is correct rather than a
+regression.** `regenerate_v6.py:PIPE` fingerprints `flights.py` and
+`config.py`, and V6's `recommended` run is built from `DetectionConfig()`
+defaults — so under the new default that run genuinely would produce different
+numbers. V6's committed CSVs and its PDF are untouched and remain what V6
+published; only a re-render would recompute them.
+
+**Do not try to freeze V6 by editing `flight_list_v6.py`** — that edit is
+itself a fingerprint change, and would mark the same jobs stale for a different
+reason. `DetectionConfig.legacy()` pins `trend_max_datum="msl"`, so released
+data stays reproducible either way.
+
 Busiest aerodromes at or above 1,500 ft, 2025 sample:
 
 | Aerodrome | Elevation ft | Movements |

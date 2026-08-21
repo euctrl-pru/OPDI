@@ -68,7 +68,7 @@ OOA = "OOA"
 #: reproducible by name, so an algorithm change gets a new string and the old
 #: behaviour stays reachable through :meth:`DetectionConfig.legacy`.
 #:
-#: ``v4.0.0`` covers the 2026-08 change set, and it is one string for the whole
+#: ``v5.0.0`` covers the 2026-08 change set, and it is one string for the whole
 #: flight list rather than one per path. Before it, the trend path stamped
 #: ``v2.0.0`` and the endpoint path ``v3.0.0``, and :meth:`_merge_roles`
 #: coalesced them -- so a merged list carried whichever version the departure
@@ -79,15 +79,24 @@ OOA = "OOA"
 #: * departures from ``endpoint``, arrivals from ``trend``, by default;
 #: * the tuned thresholds in :class:`~opdi.config.DetectionConfig`;
 #: * ``trend`` can emit the out-of-area label;
-#: * the flight list reads cleaned tracks (step 02a).
+#: * the flight list reads cleaned tracks (step 02a);
+#: * **v6.1:** ``trend``'s altitude cut is measured above field elevation
+#:   rather than as a flight level.
 #:
 #: One more change is not reachable through ``legacy()`` at all: the
 #: state-vector sampler moved from a fixed-phase filter to a bin-based one, so
 #: ``track_id`` values differ. Re-ingesting an old month reproduces the
 #: aerodromes but not the identifiers.
-FLIGHT_LIST_VERSION = "v4.0.0"
+#:
+#: **Bumped from v4.0.0 rather than extended.** v4.0.0 was never released, so
+#: no *published* dataset is affected -- but research runs on the cluster
+#: already carry it, and the datum change makes those a different algorithm
+#: under the same name. That is precisely what a version string exists to
+#: prevent, and it costs nothing to bump before the first release rather than
+#: to argue afterwards about which v4.0.0 a table was built by.
+FLIGHT_LIST_VERSION = "v5.0.0"
 
-#: What the paths stamped before ``v4.0.0``. Kept so
+#: What the paths stamped before ``v5.0.0``. Kept so
 #: :meth:`DetectionConfig.legacy` runs reproduce released data byte for byte.
 LEGACY_TREND_VERSION = "v2.0.0"
 LEGACY_ENDPOINT_VERSION = "v3.0.0"
@@ -1767,7 +1776,7 @@ class FlightListProcessor:
             LAST_SEEN TIMESTAMP COMMENT 'Last ADS-B reception time',
             ADEP_SOURCE STRING COMMENT 'How ADEP was decided: aerodrome (named it), out_of_area (the track began outside the observed area), undetermined (could not tell). A null ADEP means the last two, which are not the same thing.',
             ADES_SOURCE STRING COMMENT 'The same for ADES.',
-            VERSION STRING COMMENT 'Processing version. v4.0.0 onward; earlier lists carried v2.0.0 or v3.0.0 depending on which algorithm named the departure.'
+            VERSION STRING COMMENT 'Processing version. v5.0.0 onward; earlier lists carried v2.0.0 or v3.0.0 depending on which algorithm named the departure.'
         )
         USING iceberg
         PARTITIONED BY (days(FIRST_SEEN))
