@@ -44,6 +44,7 @@ TRACK_SCHEMA = StructType(
         StructField("vert_rate", DoubleType(), True),
         StructField("on_ground", BooleanType(), True),
         StructField("last_contact", DoubleType(), True),
+        StructField("callsign", StringType(), True),
     ]
 )
 
@@ -93,6 +94,7 @@ def make_track(
                 _as_float(sample.get("vert_rate", 0.0)),
                 sample.get("on_ground", False),
                 _as_float(sample.get("last_contact", float(offset))),
+                sample.get("callsign", "TEST123"),
             )
         )
     return spark.createDataFrame(rows, schema=TRACK_SCHEMA)
