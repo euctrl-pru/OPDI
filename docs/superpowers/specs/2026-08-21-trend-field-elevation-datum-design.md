@@ -160,7 +160,21 @@ prose; it does not present two parallel sets of tables.
 |---|---|
 | **A — datum swap** | Shipped configuration, run twice: `trend_max_datum="msl"` at `trend_max_fl=60` against `trend_max_datum="field"` at `trend_max_height_ft=6000`. Numerically the same ceiling, different datum — so the arm isolates one variable and nothing else. |
 | **B — cap sweep** | The above-field optimum found on its own terms, rather than inherited from the datum we are abandoning. |
-| **C — per-elevation bands** | Coverage and accuracy change banded by field elevation (<500 / 500–1500 / 1500–3000 / >3000 ft). |
+| **C — per-elevation bands** | Coverage and accuracy change banded by field elevation (<500 / 500–1500 / 1500–3000 / >3000 ft), plus a per-aerodrome view and a leave-one-out check on each treatment band. |
+
+> **Amended 2026-08-21, after the feasibility census.** The census passed the
+> gate — ~700 movements per role in `>3000` across 26 aerodromes, both periods
+> agreeing — but showed each treatment band is dominated by a single aerodrome:
+> LEMD is 40% of `1500-3000`, LTAC is 54% of `>3000`. Band means alone cannot
+> then separate an elevation effect from a Madrid effect, so Arm C also reports
+> per-aerodrome deltas and re-computes each band with its largest contributor
+> removed. Without that, criterion 3 below is a test that cannot fail.
+>
+> The census also tempered the expected effect size. The Erzurum example that
+> motivates this spec (5,763 ft, ~240 ft of vote room under FL60) is real but
+> rare — it carries under ~110 movements. The elevated traffic that exists sits
+> at 1,500–3,500 ft, where FL60 still leaves 3,000–4,100 ft to vote in. The
+> paper should argue from that population, not from Erzurum.
 | **D — pipeline fidelity** | The winning cell re-run through `process_dai` itself, so the shipped figure is a pipeline figure and not a harness figure. |
 
 ### 5. Paper and diagrams

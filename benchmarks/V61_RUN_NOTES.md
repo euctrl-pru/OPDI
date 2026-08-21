@@ -201,3 +201,63 @@ nearly equidistant, which is exactly what the distance band restricts it to.
 pipeline would need the track course computed in the flight-list path. One
 period, one measurement. It is the strongest candidate for the next change and
 should be reviewed rather than shipped overnight.
+
+## v6.1 feasibility census (2026-08-21)
+
+Run before any code changed, to find out whether the sample can answer the
+question the study asks. `benchmarks/elevation_census.py`, both periods,
+in-area ground truth only.
+
+Ground-truthed movements per field-elevation band:
+
+| Band | 2024-06 arr / dep | 2025-06 arr / dep | Aerodromes (2025 arr / dep) |
+|---|---|---|---|
+| `<500` | 65,176 / 65,156 | 66,637 / 66,648 | 490 / 497 |
+| `500-1500` | 15,154 / 15,223 | 15,287 / 15,354 | 164 / 169 |
+| `1500-3000` | 4,239 / 4,218 | 4,434 / 4,430 | 77 / 78 |
+| `>3000` | 686 / 691 | 706 / 705 | 26 / 26 |
+| `unknown` | 163 / 159 | 117 / 115 | 48 / 54 |
+
+**The gate passes.** The bar was ~200 movements in `>3000` per period across at
+least 5 aerodromes; the sample carries ~700 per role across 26. The two periods
+agree closely, which is what makes the second one worth having.
+
+**Two things the census changed about the study.**
+
+**1. The treatment bands are dominated by one aerodrome each.** Madrid (LEMD,
+1,998 ft) alone carries 3,559 of the ~8,900 movements in `1500-3000`, and
+Ankara (LTAC, 3,125 ft) carries 756 of the ~1,411 in `>3000` -- 40% and 54%
+respectively. A band-level gain is therefore not automatically an elevation
+effect; it could be a Madrid effect or an Ankara effect wearing a band's name.
+
+Arm C must report a **per-aerodrome view and a leave-one-out check** on each
+treatment band, not band means alone. Without it the study's discriminating
+measurement is not actually discriminating, which would leave the whole design
+resting on a number that cannot fail.
+
+**2. The expected effect is smaller than the design's motivating example.** The
+spec reasons from Erzurum at 5,763 ft, where FL60 leaves about 240 ft to vote
+in. Erzurum is real but rare: it does not reach the top fifteen elevated
+aerodromes by traffic, so it carries fewer than ~110 movements. The elevated
+traffic that actually exists sits at 1,500-3,500 ft -- LEMD keeps ~4,100 ft of
+vote room under FL60, LTAC ~2,975 ft. That is a reduction in vote room, not its
+near-elimination.
+
+The paper should be written from these numbers rather than from the Erzurum
+case, which illustrates the mechanism honestly but overstates how much of the
+sample it applies to.
+
+Busiest aerodromes at or above 1,500 ft, 2025 sample:
+
+| Aerodrome | Elevation ft | Movements |
+|---|---|---|
+| LEMD Madrid | 1,998 | 3,559 |
+| LTAC Ankara | 3,125 | 756 |
+| GCXO Tenerife North | 2,076 | 639 |
+| GMMX Marrakesh | 1,545 | 557 |
+| LBSF Sofia | 1,742 | 540 |
+| UGTB Tbilisi | 1,624 | 514 |
+| UDYZ Yerevan | 2,838 | 384 |
+| BKPR Pristina | 1,789 | 240 |
+| OJAI Amman | 2,395 | 232 |
+| EDJA Memmingen | 2,077 | 206 |

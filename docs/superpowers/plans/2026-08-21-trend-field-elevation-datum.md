@@ -1436,6 +1436,14 @@ Expected: FAIL — the arms do not exist yet.
 
 - [ ] **Step 4: Write Arm C's scorer**
 
+> **Amended after Task 1's census.** Each treatment band is dominated by one
+> aerodrome — LEMD is 40% of `1500-3000`, LTAC is 54% of `>3000`. So `per_band`
+> alone cannot tell an elevation effect from a Madrid effect. Add two things
+> alongside it: `per_aerodrome()`, giving the delta for each elevated aerodrome
+> individually, and a leave-one-out column on `per_band()` that re-scores each
+> band with its largest contributor removed. Both write into
+> `elevation_bands.csv` so the paper can show them beside the band means.
+
 Create `benchmarks/elevation_arms.py`:
 
 ```python
