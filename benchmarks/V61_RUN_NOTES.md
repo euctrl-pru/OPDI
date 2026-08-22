@@ -267,14 +267,57 @@ table was built by.
 moved with it. `LEGACY_TREND_VERSION` (`v2.0.0`) and `LEGACY_ENDPOINT_VERSION`
 (`v3.0.0`) are untouched, as they must be.
 
+### A pre-existing bug: the paper path breaks inside a worktree
+
+`regenerate_v6.py` and `regenerate_v7.py` both resolve the portal as
+`REPO.parent / "opdi-portal"`. That is right when `opdi/` sits directly in the
+workspace root and **wrong inside a git worktree**, which lives at
+`opdi/.claude/worktrees/<name>` — three levels deeper — so the path becomes
+`.../worktrees/opdi-portal`, which does not exist.
+
+The failure is silent and actively misleading. Every job reports **"output
+missing"**, which is indistinguishable from "never generated" and means the
+opposite of a fingerprint result. A `--check` run from a worktree therefore
+looks like evidence about staleness when it is a path bug, and it will say the
+same thing however current the paper actually is.
+
+`regenerate_v61.py` resolves the portal by walking up to the first sibling
+`opdi-portal`, with `OPDI_PORTAL` as an override, and a test pins it.
+
+**Not fixed in V6 or V7.** Editing them is out of scope for this study — though
+worth noting that `regenerate_v6.py` is *not* in any job's `code_paths`, so
+fixing it would in fact be fingerprint-neutral. It is a real bug for anyone
+rendering those papers from a worktree, and it should be fixed separately.
+
 ### What this does to V6
 
 **V6's pipeline jobs now read stale, and that is correct rather than a
-regression.** `regenerate_v6.py:PIPE` fingerprints `flights.py` and
-`config.py`, and V6's `recommended` run is built from `DetectionConfig()`
-defaults — so under the new default that run genuinely would produce different
-numbers. V6's committed CSVs and its PDF are untouched and remain what V6
-published; only a re-render would recompute them.
+regression.** Measured rather than predicted, by comparing V6's recorded
+`code_fingerprint` against the current tree — `--check` cannot answer this from
+a worktree, for the path reason above:
+
+| | outputs |
+|---|---|
+| stale, and depends on `flights.py` / `config.py` | **7** |
+| current, and does not | **9** |
+| stale, and does *not* depend on pipeline source | 4 |
+
+The first two rows are the mechanism working as intended: the datum change
+marks exactly the jobs whose results it could have changed, and leaves the
+endpoint sweeps, `sampler_comparison`, `merge_*`, `bearing_whole_sample` and
+`vertical_measure` current. V6's `recommended` run is built from
+`DetectionConfig()` defaults, so under the new default it genuinely would
+produce different numbers.
+
+**The last row is not this study's doing.** `decimation_v6.csv`,
+`trend_bearing_v6.csv` and both `trend_sweep_*.csv` depend on `adep_ades.py`,
+`osn_sample.py` and `trend_sweep.py`, none of which this branch touches. They
+were already stale at the branch point, from earlier work on
+`feature/flight-events-v3`. Worth knowing before someone reads a V6 `--check`
+and attributes all thirteen jobs to the datum change.
+
+V6's committed CSVs and its PDF are untouched and remain what V6 published;
+only a re-render would recompute them.
 
 **Do not try to freeze V6 by editing `flight_list_v6.py`** — that edit is
 itself a fingerprint change, and would mark the same jobs stale for a different
