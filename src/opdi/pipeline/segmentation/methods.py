@@ -2,17 +2,36 @@
 
 Each returns a :class:`~opdi.pipeline.segmentation.base.BreakRule`. No Spark
 session logic lives here -- an arm is a grouping, a predicate and a flag.
+
+**Every domain arm (A5-A7) ORs the legacy gap rule in as a floor.** Two reasons,
+and they are the standing rule for any arm added later:
+
+1. *The ladder measures one change at a time.* Each domain arm is "legacy plus
+   one idea", so its delta from A0 is attributable to that idea alone. An arm
+   that also silently *removed* legacy's splits would report a delta that mixes
+   two changes, and the study could not say which one moved the number.
+2. *An arm whose inputs are missing must degrade to legacy, not to one track a
+   month.* A6 depends on ``near_airport`` and ``field_elev_ft``, which Task 6
+   supplies by a left join -- so every sample away from a covered aerodrome gets
+   NULL. With no floor, an airframe that never gets a reception gap at a covered
+   aerodrome would have its entire month assigned to a single track, and A6
+   would score as a catastrophic merger for reasons having nothing to do with
+   its idea.
+
+The cost of the floor is stated where it bites: A6 can only ever *add* splits to
+legacy's, so it cannot suppress legacy's spurious low-altitude split away from
+any aerodrome. See :func:`airport_anchored`.
 """
 
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 from opdi.pipeline.segmentation.base import (
-    _ALT_FT,
-    _SPD_KT,
     BreakRule,
     altitude_ft,
     gap_minutes,
+    segment_window,
+    speed_kt,
 )
 
 __all__ = [
@@ -24,8 +43,13 @@ __all__ = [
     "airport_anchored",
     "vertical_profile",
     "recommended",
+    "TRAFFIC_DEFAULT_GAP_MINUTES",
     "ARMS",
 ]
+
+#: ``traffic``'s documented default for :meth:`Flight.split`. Defined here, above
+#: its only use, because it is the one number an A3 sweep would want to vary.
+TRAFFIC_DEFAULT_GAP_MINUTES = 10.0
 
 
 def legacy() -> BreakRule:
@@ -73,9 +97,9 @@ def traffic_style() -> BreakRule:
     """
 
     def expr(p):
-        w = Window.partitionBy("_grp").orderBy("_ts")
-        prev_alt = F.lag(F.col(_ALT_FT)).over(w)
-        both_airborne = (F.col(_ALT_FT) >= p.low_alt_ft) & (prev_alt >= p.low_alt_ft)
+        w = segment_window()
+        prev_alt = F.lag(altitude_ft()).over(w)
+        both_airborne = (altitude_ft() >= p.low_alt_ft) & (prev_alt >= p.low_alt_ft)
         return (gap_minutes() > TRAFFIC_DEFAULT_GAP_MINUTES) & ~both_airborne
 
     return BreakRule(
@@ -84,10 +108,6 @@ def traffic_style() -> BreakRule:
         break_expr=expr,
         month_suffix=False,
     )
-
-
-#: ``traffic``'s documented default for ``Flight.split``.
-TRAFFIC_DEFAULT_GAP_MINUTES = 10.0
 
 
 def airframe_only() -> BreakRule:
@@ -121,7 +141,7 @@ def ground_anchored() -> BreakRule:
     """
 
     def expr(p):
-        w = Window.partitionBy("_grp").orderBy("_ts")
+        w = segment_window()
         # A ground run's length: time from the first to the last of the
         # consecutive on-ground samples immediately preceding this one.
         ground_start = F.last(
@@ -129,11 +149,13 @@ def ground_anchored() -> BreakRule:
         ).over(w.rowsBetween(Window.unboundedPreceding, -1))
         prev_ts = F.lag("_ts").over(w)
         prev_ground = F.lag("on_ground").over(w)
-        dwell_min = (F.unix_timestamp(prev_ts) - F.unix_timestamp(ground_start)) / 60.0
+        ground_run_min = (
+            F.unix_timestamp(prev_ts) - F.unix_timestamp(ground_start)
+        ) / 60.0
         turnaround = (
             ~F.col("on_ground")
             & prev_ground
-            & (dwell_min >= p.ground_dwell_minutes)
+            & (ground_run_min >= p.ground_dwell_minutes)
         )
         return turnaround | legacy().break_expr(p)
 
@@ -152,30 +174,75 @@ def airport_anchored() -> BreakRule:
     joins them from ``h3_airport_detection_zones`` and ``oa_airports`` before
     calling the engine.
 
-    Two things this fixes that no altitude threshold can. An aircraft parked at a
+    The case this fixes that no altitude threshold can: an aircraft parked at a
     6,000 ft aerodrome never satisfies ``baro_altitude < 1524 m``, so legacy
-    misses the turnaround and merges two flights -- the case
-    ``track_quality.py`` names. And a long, slow, low dwell in the middle of
-    nowhere satisfies legacy's low-altitude rule and is split, when it is not a
-    turnaround at all.
+    misses the turnaround and merges two flights -- the case ``track_quality.py``
+    names. **Height above field, not barometric altitude, is the test.**
 
-    Height above field, not barometric altitude, is the test.
+    A turnaround is recognised two ways, and the arm fires on either:
+
+    * *a reception gap* -- the previous sample was stationary at an aerodrome and
+      at least ``ground_dwell_minutes`` passed before the next one arrived;
+    * *a run of parked samples* -- a continuous stationary-at-aerodrome run
+      lasting at least ``ground_dwell_minutes``, broken at the first sample that
+      moves again. This is the same accumulation :func:`ground_anchored` does,
+      and it is what makes the arm comparable with A5. Before it existed the arm
+      used the previous-sample gap as its dwell, which for a run of parked
+      samples is the *sampling period* -- seconds -- so A6 fired only on
+      reception gaps, and an A5-vs-A6 comparison conflated "on-ground flag versus
+      airport geometry" with "continuous coverage versus gap-only".
+
+    **Missing inputs.** ``near_airport`` is coalesced to ``False`` and
+    ``field_elev_ft`` to ``0.0``, so the predicate is a real boolean rather than
+    NULL wherever the join found nothing. A sample with no ``near_airport`` can
+    never trigger A6's own rule, so the arm degrades to the legacy floor there. A
+    sample that *is* near a known aerodrome but whose elevation is unknown is
+    tested at sea level -- i.e. on barometric altitude, exactly as legacy would,
+    which is the conservative direction: it can miss a high-field turnaround, it
+    cannot invent a low-field one.
+
+    **The legacy floor's cost, stated.** Because the legacy gap rule is ORed in
+    (see the module docstring), A6 can only ever *add* splits to legacy's. The
+    inverse case an earlier draft claimed -- a long, slow, low dwell in the
+    middle of nowhere that satisfies legacy's low-altitude rule and is split when
+    it is not a turnaround at all -- is therefore **not** fixed by this arm. That
+    is a deliberate consequence of the one-change-at-a-time ladder, not an
+    oversight; an arm that suppressed legacy splits would need to be a separate
+    rung.
     """
 
     def expr(p):
-        w = Window.partitionBy("_grp").orderBy("_ts")
-        height_ft = F.col(_ALT_FT) - F.col("field_elev_ft")
+        w = segment_window()
+        height_ft = altitude_ft() - F.coalesce(F.col("field_elev_ft"), F.lit(0.0))
         stationary = (
-            F.col("near_airport")
+            F.coalesce(F.col("near_airport"), F.lit(False))
             & (height_ft < p.turnaround_max_height_ft)
-            & (F.coalesce(F.col(_SPD_KT), F.lit(0.0)) < p.turnaround_max_speed_kt)
+            & (F.coalesce(speed_kt(), F.lit(0.0)) < p.turnaround_max_speed_kt)
         )
         prev_stationary = F.lag(stationary).over(w)
-        dwell_min = gap_minutes()
-        # A break where the previous sample was stationary at an aerodrome and
-        # enough time passed for a turnaround -- whether that time was a gap in
-        # reception or a run of parked samples.
-        return prev_stationary & (dwell_min >= p.ground_dwell_minutes)
+        prev_ts = F.lag("_ts").over(w)
+        # Start of the stationary run: the last sample before this one at which
+        # the aircraft was *not* stationary at an aerodrome. NULL when the group
+        # has never moved, in which case the group's own first sample anchors it.
+        run_start = F.coalesce(
+            F.last(
+                F.when(~stationary, F.col("_ts")), ignorenulls=True
+            ).over(w.rowsBetween(Window.unboundedPreceding, -1)),
+            F.first(F.col("_ts")).over(w.rowsBetween(Window.unboundedPreceding, 0)),
+        )
+        parked_run_min = (
+            F.unix_timestamp(prev_ts) - F.unix_timestamp(run_start)
+        ) / 60.0
+
+        # Gap arm: fires once, at the sample that ends the silence.
+        gap_turnaround = prev_stationary & (gap_minutes() >= p.ground_dwell_minutes)
+        # Parked-run arm: fires once, at the first sample that moves again.
+        parked_turnaround = (
+            ~stationary
+            & prev_stationary
+            & (parked_run_min >= p.ground_dwell_minutes)
+        )
+        return gap_turnaround | parked_turnaround | legacy().break_expr(p)
 
     return BreakRule(
         name="airport_anchored",
@@ -195,19 +262,27 @@ def vertical_profile() -> BreakRule:
 
     The floor test is what keeps a cruise step-descent (FL350 -> FL310) from
     counting: that never approaches the floor.
+
+    The legacy gap rule is ORed in as a floor, as for A5 and A6 -- see the module
+    docstring for why.
+
+    An earlier draft also carried a ``was_below`` term: a running max over
+    ``rowsBetween(unboundedPreceding, -1)`` asserting some earlier sample had
+    been at or below the floor. It was unreachable dead weight, and the most
+    expensive expression in the arm. ``climbing_away`` already requires the *lag*
+    row to be at or below the floor, and that lag row is inside ``was_below``'s
+    own window, so ``climbing_away`` implies ``was_below == 1`` for every row.
+    Removed rather than replaced: the condition the docstring implies -- "a
+    descent reached the floor" -- is exactly what the lag row being at or below
+    the floor already says.
     """
 
     def expr(p):
-        w = Window.partitionBy("_grp").orderBy("_ts")
-        below_floor = F.col(_ALT_FT) <= p.descent_floor_ft
-        # The most recent sample at or below the floor, before this one.
-        was_below = F.max(F.when(below_floor, 1).otherwise(0)).over(
-            w.rowsBetween(Window.unboundedPreceding, -1)
+        w = segment_window()
+        climbing_away = (altitude_ft() > p.descent_floor_ft) & (
+            F.lag(altitude_ft()).over(w) <= p.descent_floor_ft
         )
-        climbing_away = (F.col(_ALT_FT) > p.descent_floor_ft) & (
-            F.lag(F.col(_ALT_FT)).over(w) <= p.descent_floor_ft
-        )
-        return (was_below == 1) & climbing_away
+        return climbing_away | legacy().break_expr(p)
 
     return BreakRule(
         name="vertical_profile",

@@ -1035,10 +1035,22 @@ class EventConfig:
 class SegmentationConfig:
     """Track segmentation thresholds. Aviation units, unit in every field name.
 
-    These belong to the v2 segmentation study and are read by
-    ``pipeline/segmentation``. The frozen ``track_gap_*`` fields on
-    ``IngestionConfig`` are untouched: ``tracks.py:_add_track_id`` still reads
-    them and still produces the published ``track_id``.
+    These belong to the v2 segmentation study. They reach the engine through
+    ``SegmentationParams.from_config``, which is the *only* thing that reads
+    them -- nothing in ``pipeline/segmentation`` picks them up implicitly, so a
+    run that builds a bare ``SegmentationParams()`` uses that dataclass's own
+    defaults instead. Those defaults and these are asserted identical field by
+    field by ``tests/test_segmentation_base.py``, so the two cannot drift apart
+    unnoticed.
+
+    (Before ``from_config`` existed this class was read by nothing at all, and
+    this docstring's claim that ``pipeline/segmentation`` read it was false:
+    setting ``OPDIConfig().segmentation.low_alt_ft`` produced no effect and no
+    error.)
+
+    The frozen ``track_gap_*`` fields on ``IngestionConfig`` are untouched:
+    ``tracks.py:_add_track_id`` still reads them and still produces the published
+    ``track_id``.
     """
 
     gap_minutes: float = 30.0

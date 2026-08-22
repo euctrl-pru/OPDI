@@ -66,6 +66,47 @@ def test_overlap_join_does_not_cross_airframes(spark):
     assert overlap_join(a, gt).count() == 0
 
 
+def test_overlap_join_keeps_duplicate_state_vectors(spark):
+    """Two identical raw samples must stay two rows, not collapse into one.
+
+    The "pick the earlier interval" window used to partition on
+    ``(a.icao24, a.event_time)`` -- the *sample* key, not a row identity -- so
+    any duplicate state vector was silently dropped by the ``_r == 1`` filter.
+    Raw OSN state vectors can contain duplicates: dedup on
+    ``(track_id, timestamp)`` is listed in the project's evidence base as a
+    cleaning step not yet implemented, so this harness cannot assume it. Dropping
+    them undercounts the contingency table every metric in ``track_score.py`` is
+    computed from.
+    """
+    gt = _gt(spark, [{"flight_key": "F1", "icao24": "abc123",
+                      "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
+                      "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=2)}])
+    dup = {"icao24": "abc123", "event_time": _T0 + dt.timedelta(minutes=30),
+           "track_id": "T1"}
+    assert overlap_join(_assign(spark, [dup, dict(dup)]), gt).count() == 2
+
+
+def test_overlap_join_still_deduplicates_across_touching_intervals(spark):
+    """The duplicate fix must not reopen the boundary-sample double count.
+
+    One sample, two ground-truth intervals that touch at its instant: still one
+    output row, assigned to the earlier leg. This is the property the old
+    sample-keyed window got right for the wrong reason.
+    """
+    gt = _gt(spark, [
+        {"flight_key": "F1", "icao24": "abc123",
+         "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
+         "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=1)},
+        {"flight_key": "F2", "icao24": "abc123",
+         "gt_adep": "BIKF", "gt_ades": "EBBR", "t_source": "apdf",
+         "t_off": _T0 + dt.timedelta(hours=1), "t_land": _T0 + dt.timedelta(hours=2)},
+    ])
+    a = _assign(spark, [{"icao24": "abc123", "event_time": _T0 + dt.timedelta(hours=1),
+                         "track_id": "T1"}])
+    out = overlap_join(a, gt).collect()
+    assert len(out) == 1 and out[0]["flight_key"] == "F1"
+
+
 def test_overlap_join_assigns_a_sample_to_only_one_flight_when_intervals_touch(spark):
     """Back-to-back legs must not double-count the sample at the boundary."""
     gt = _gt(spark, [

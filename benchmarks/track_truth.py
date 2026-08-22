@@ -14,9 +14,17 @@ median error 0 s and IQR 17 s -- well under the ~120 s threshold that would
 have forced boundary error to be reported only at APDF airports. ``ARVT_3``
 is itself already a landing time (ALDT-like, not gate-arrival), matching real
 APDF ALDT with median error 0 s and IQR 25 s. NM-inferred times are therefore
-trusted here for both matching *and* boundary error, not matching alone --
-``t_source`` still travels with every row so a later study can revisit this
-per airport if some subgroup turns out not to hold.
+precise enough *in principle* for both matching and boundary error, not matching
+alone -- ``t_source`` still travels with every row so a later study can revisit
+this per airport if some subgroup turns out not to hold.
+
+**What consumes them today is narrower, deliberately.**
+``track_score.py:boundary_error`` still restricts itself to ``t_source ==
+"apdf"``. That is conservatism, not a contradiction of the paragraph above:
+narrowing a claim after seeing the numbers is safe, widening it is a
+claim-scope decision, and it is recorded as **open** rather than settled. The
+measurement here says widening would probably be justified; nothing here says
+it has been done. Read the two files together, not either one alone.
 
 **The join does not use callsign.** ``adep_ades.py:load_ground_truth`` joins on
 ``(icao24, callsign, day)``, which is right for the flight-list studies and wrong
@@ -260,6 +268,18 @@ def overlap_join(assign: DataFrame, gt: DataFrame) -> DataFrame:
     intervals is assigned to the earlier one, so back-to-back legs cannot
     double-count the boundary sample and inflate every merge statistic.
 
+    **The "pick the earlier interval" window partitions on the assignment row,
+    not on ``(icao24, event_time)``.** That distinction is not cosmetic: raw OSN
+    state vectors can contain duplicate rows for the same airframe and instant
+    (dedup on ``(track_id, timestamp)`` is listed in the project's evidence base
+    as not yet implemented), and a window partitioned on the *sample* key would
+    have collapsed every such duplicate to a single row -- silently undercounting
+    the contingency table that every metric in ``track_score.py`` is computed
+    from. A synthetic per-row id keeps duplicates as duplicates, so a
+    segmentation is scored over the samples it was actually given. This is the
+    same device ``load_flight_intervals`` uses for ``_nm_id``, and for the same
+    reason: the natural key is not a row identity.
+
     The output select is an explicit, fixed list -- not a pass-through of
     whatever ``gt`` happens to carry. A generic pass-through was tried and
     reverted: against production ``gt`` (``load_flight_intervals``'s output)
@@ -268,6 +288,7 @@ def overlap_join(assign: DataFrame, gt: DataFrame) -> DataFrame:
     for arm A4. Naming the columns here means ground truth missing one of
     them fails fast at the join, which is what a benchmark harness should do.
     """
+    assign = assign.withColumn("_a_row", F.monotonically_increasing_id())
     j = assign.alias("a").join(
         gt.alias("g"),
         (F.col("a.icao24") == F.col("g.icao24"))
@@ -275,7 +296,10 @@ def overlap_join(assign: DataFrame, gt: DataFrame) -> DataFrame:
         & (F.col("a.event_time") <= F.col("g.t_land")),
         "inner",
     )
-    w = Window.partitionBy("a.icao24", "a.event_time").orderBy(F.col("g.t_off").asc())
+    # Ordered on t_off alone: an exact tie there means two ground-truth flights
+    # claiming the identical take-off instant for one airframe, which cannot
+    # happen for physically distinct legs.
+    w = Window.partitionBy("a._a_row").orderBy(F.col("g.t_off").asc())
     return (
         j.withColumn("_r", F.row_number().over(w))
         .filter(F.col("_r") == 1)

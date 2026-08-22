@@ -14,6 +14,20 @@ Units: parameters are aviation (minutes, feet, knots); ``osn_tracks`` is SI
 ``cleaning/native.py`` follows, and for the same reason: a threshold 3.28x too
 large simply never fires.
 
+The **arm contract**. A break expression is handed a frame on which the engine
+has already computed everything an arm is allowed to depend on, and those names
+are part of the contract, not engine internals:
+
+* ``_grp`` -- the hashed group key, whatever ``BreakRule.group_cols`` said
+* ``_ts``  -- ``event_time`` as a timestamp, the engine's ordering column
+* the three accessors :func:`gap_minutes`, :func:`altitude_ft`, :func:`speed_kt`
+* :func:`segment_window` -- the engine's own ``partitionBy(_grp).orderBy(_ts)``
+
+An arm that needs a window **must** call :func:`segment_window` rather than
+rebuild one. A hand-built ``Window.partitionBy("icao24", "callsign")`` would
+silently disagree with the engine's grouping for any arm whose ``group_cols``
+are not those two, and nothing in the output would show it.
+
 Unit epsilon: the frozen algorithm compares ``baro_altitude < 1524.0`` (metres);
 the engine compares ``baro_altitude * FT_PER_M < 5000.0`` (feet). These are not
 bit-identical -- they differ on the interval [1524.0, 1524.00005) metres, a band
@@ -23,13 +37,24 @@ scaled, never the stored value, and no real ADS-B sample lands in a 0.05 mm
 band. Do not "fix" this by comparing in metres.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Callable, List
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
+from pyspark.sql.window import WindowSpec
 
-__all__ = ["BreakRule", "SegmentationParams", "assign_track_id", "FT_PER_M", "KT_PER_MPS"]
+__all__ = [
+    "BreakRule",
+    "SegmentationParams",
+    "assign_track_id",
+    "segment_window",
+    "gap_minutes",
+    "altitude_ft",
+    "speed_kt",
+    "FT_PER_M",
+    "KT_PER_MPS",
+]
 
 #: Reused from the pipeline's own conversions so the two can never drift.
 FT_PER_M = 3.28084
@@ -42,8 +67,12 @@ _GAP_MIN = "_gap_minutes"
 _ALT_FT = "_alt_ft"
 #: Ground speed in knots. Scaled for comparison only; never written.
 _SPD_KT = "_spd_kt"
+#: The hashed group key. Part of the arm contract -- see the module docstring.
+_GRP = "_grp"
+#: ``event_time`` as a timestamp; the engine's ordering column. Arm contract.
+_TS = "_ts"
 
-_TEMP_COLS = [_GAP_MIN, _ALT_FT, _SPD_KT, "_grp", "_brk", "_offset", "_ts"]
+_TEMP_COLS = [_GAP_MIN, _ALT_FT, _SPD_KT, _GRP, "_brk", "_offset", _TS]
 
 
 @dataclass(frozen=True)
@@ -65,15 +94,52 @@ class SegmentationParams:
     turnaround_max_speed_kt: float = 40.0
     descent_floor_ft: float = 1500.0
 
+    @classmethod
+    def from_config(cls, config) -> "SegmentationParams":
+        """Build the engine's parameters from ``OPDIConfig``.
+
+        ``config.SegmentationConfig`` carries the same seven fields with the same
+        defaults, and this is the only thing that reads it. Without this method
+        the two were a coincidence rather than a link: someone setting
+        ``OPDIConfig().segmentation.low_alt_ft`` would have observed no effect and
+        no error. ``tests/test_segmentation_base.py`` asserts the two default
+        sets are identical field by field, so they cannot drift apart again.
+
+        Accepts either an ``OPDIConfig`` or a ``SegmentationConfig`` directly.
+        """
+        seg = getattr(config, "segmentation", config)
+        missing = [f.name for f in fields(cls) if not hasattr(seg, f.name)]
+        if missing:
+            raise TypeError(
+                f"{type(seg).__name__} is missing segmentation fields: {missing}"
+            )
+        return cls(**{f.name: getattr(seg, f.name) for f in fields(cls)})
+
 
 @dataclass(frozen=True)
 class BreakRule:
-    """One arm: how to group, when to break, and whether to suffix the month."""
+    """One arm: how to group, when to break, and whether to suffix the month.
+
+    ``break_expr`` is required and comes second, ahead of the two fields that
+    have defaults. It used to be typed as required while defaulting to ``None``,
+    so a ``BreakRule`` built without one constructed happily and then died inside
+    :func:`assign_track_id` with ``TypeError: 'NoneType' object is not
+    callable`` -- a message that names neither the rule nor the missing field.
+    Every construction in this package is by keyword, so the order change is not
+    a breaking one.
+    """
 
     name: str
+    break_expr: Callable[["SegmentationParams"], Column]
     group_cols: List[str] = field(default_factory=lambda: ["icao24", "callsign"])
-    break_expr: Callable[[SegmentationParams], Column] = None
     month_suffix: bool = True
+
+    def __post_init__(self):
+        if not callable(self.break_expr):
+            raise TypeError(
+                f"BreakRule({self.name!r}): break_expr must be callable, got "
+                f"{type(self.break_expr).__name__}"
+            )
 
 
 def assign_track_id(
@@ -86,18 +152,18 @@ def assign_track_id(
     columns. Ids are never compared across arms -- partitions are.
     """
     out = (
-        df.withColumn("_ts", F.to_timestamp("event_time"))
+        df.withColumn(_TS, F.to_timestamp("event_time"))
         .withColumn(
-            "_grp", F.substring(F.sha2(F.concat_ws("", *rule.group_cols), 256), 1, 16)
+            _GRP, F.substring(F.sha2(F.concat_ws("", *rule.group_cols), 256), 1, 16)
         )
         .withColumn(_ALT_FT, F.col("baro_altitude") * FT_PER_M)
         .withColumn(_SPD_KT, F.col("velocity") * KT_PER_MPS)
     )
 
-    w = Window.partitionBy("_grp").orderBy("_ts")
+    w = segment_window()
     out = out.withColumn(
         _GAP_MIN,
-        (F.unix_timestamp("_ts") - F.unix_timestamp(F.lag("_ts").over(w))) / 60.0,
+        (F.unix_timestamp(_TS) - F.unix_timestamp(F.lag(_TS).over(w))) / 60.0,
     )
 
     out = out.withColumn("_brk", F.when(rule.break_expr(params), 1).otherwise(0))
@@ -105,15 +171,27 @@ def assign_track_id(
     running = w.rowsBetween(Window.unboundedPreceding, 0)
     out = out.withColumn("_offset", F.sum("_brk").over(running))
 
-    parts = [F.col("_grp"), F.lit("_"), F.col("_offset")]
+    parts = [F.col(_GRP), F.lit("_"), F.col("_offset")]
     if rule.month_suffix:
         parts += [
-            F.lit("_"), F.year("_ts").cast("string"),
-            F.lit("_"), F.month("_ts").cast("string"),
+            F.lit("_"), F.year(_TS).cast("string"),
+            F.lit("_"), F.month(_TS).cast("string"),
         ]
     out = out.withColumn("track_id", F.concat(*parts))
 
     return out.drop(*_TEMP_COLS)
+
+
+def segment_window() -> WindowSpec:
+    """The engine's own ordering window: ``partitionBy(_grp).orderBy(_ts)``.
+
+    Part of the arm contract. Four arms need a window and every one of them used
+    to rebuild it from the private column names by copy-paste; an arm that
+    guessed ``Window.partitionBy("icao24", "callsign")`` would have got a
+    *different* partition from the engine's for any arm grouping on something
+    else, with nothing in the output to show it.
+    """
+    return Window.partitionBy(_GRP).orderBy(_TS)
 
 
 def gap_minutes() -> Column:

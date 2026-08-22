@@ -91,26 +91,55 @@ def test_a_dominant_track_with_a_stray_fragment_is_not_clean(spark):
     assert r["fragmented_pct"] == pytest.approx(100.0)
 
 
-def test_the_three_outcomes_are_mutually_exclusive_and_sum_to_100(spark):
-    """No flight may be counted twice. An earlier draft counted a 60/40 split as
-    both clean and fragmented, which made the rates sum to more than 100."""
-    m = _matched(spark, [
-        ("T1", "F1", 10),
-        ("T2", "F2", 6), ("T3", "F2", 4),
-        ("T4", "F3", 5), ("T4", "F4", 5),
-    ])
-    r = match_rates(m)
-    total = r["clean_match_pct"] + r["fragmented_pct"] + r["merged_pct"]
-    assert total == pytest.approx(100.0)
+# ``test_the_three_outcomes_are_mutually_exclusive_and_sum_to_100`` used to live
+# here. It was deleted: it ran the same fixture as
+# ``test_clean_match_counts_only_one_to_one_flights``, which already asserts
+# 25/25/50 exactly, so summing those three to 100 was arithmetic on numbers the
+# neighbouring test had already pinned. The case it was *meant* to catch -- a
+# flight that is both merged and fragmented, which an unguarded implementation
+# counts twice -- is covered for real by
+# ``test_a_flight_both_merged_and_fragmented_counts_as_merged``.
+
+
+BOUNDARY_FIELDS = ("off_err_p50_s", "off_err_p90_s", "land_err_p50_s", "land_err_p90_s")
 
 
 def test_score_arm_returns_a_flat_row_of_scalars(spark):
+    """Every field is a number -- except the boundary errors with no APDF data.
+
+    This fixture is ``t_source="nm_inferred"``, which ``boundary_error`` filters
+    out entirely, so it has no APDF flight at all. The four boundary fields must
+    therefore be ``None``: a blank CSV cell, not a number. An earlier version of
+    this assertion (``isinstance(v, (int, float))`` over every value) walked this
+    exact path and blessed the bug it should have caught.
+    """
     m = _matched(spark, [("T1", "F1", 10)])
     row = score_arm(m)
     assert set(row) >= {"v_measure", "homogeneity", "completeness",
                         "clean_match_pct", "fragmented_pct", "merged_pct",
                         "n_flights", "n_tracks"}
-    assert all(isinstance(v, (int, float)) for v in row.values())
+    assert row["n_apdf_flights"] == 0
+    for f in BOUNDARY_FIELDS:
+        assert row[f] is None, f
+    numeric = {k: v for k, v in row.items() if k not in BOUNDARY_FIELDS}
+    assert all(isinstance(v, (int, float)) for v in numeric.values())
+
+
+def test_boundary_error_on_an_empty_apdf_sample_is_none_not_zero(spark):
+    """A missing measurement must not report the best possible score.
+
+    ``float(e["off_p50"] or 0)`` coerced a NULL percentile to ``0.0`` -- and for
+    boundary error, 0.0 seconds is *perfect*. An arm with no APDF coverage at all
+    therefore outscored every arm that had actually been measured, which is the
+    one direction in which a degenerate default is dangerous. ``vmeasure`` and
+    ``match_rates`` degrade to 0.0 meaning "bad", so they are safe; this one
+    inverts, so it returns None.
+    """
+    m = _matched(spark, [("T1", "F1", 10)], t_source="nm_inferred")
+    e = boundary_error(m)
+    assert e["n_apdf_flights"] == 0
+    for f in BOUNDARY_FIELDS:
+        assert e[f] is None, f
 
 
 def test_boundary_error_measures_the_gap_to_apdf_truth(spark):

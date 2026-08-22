@@ -157,11 +157,37 @@ def match_rates(matched: DataFrame) -> dict:
 def boundary_error(matched: DataFrame) -> dict:
     """Seconds between a track's ends and the flight's ATOT/ALDT.
 
-    Only over flights whose ``t_source`` is ``"apdf"``. NM-inferred endpoints
-    carry the taxi-time inference's own error, and reporting a boundary accuracy
-    that is mostly that error would be a measurement of the wrong thing.
+    Only over flights whose ``t_source`` is ``"apdf"``.
+
+    **That restriction is deliberate conservatism, not a settled fact, and this
+    module and ``track_truth.py`` must not be read as disagreeing.** The original
+    reason was that NM-inferred endpoints carry the taxi-time inference's own
+    error, and reporting a boundary accuracy that is mostly that error would
+    measure the wrong thing. That error has since been measured (Task 4 Step 1;
+    see ``benchmarks/DATASETS.md``, "Ground truth semantics"): ``AOBT_3 +
+    TAXI_TIME_3`` matches real APDF ATOT with **median 0 s, IQR 17 s**, and
+    ``ARVT_3`` matches real APDF ALDT with **median 0 s, IQR 25 s** -- roughly an
+    order of magnitude under the ~120 s that would have forced the restriction.
+
+    So the filter is kept only because *narrowing a claim after seeing the
+    numbers is safe and widening it is not*. Widening it to every ``t_source``
+    would raise the denominator from PRU-covered aerodromes to all of ECAC, and
+    on the measured evidence that is probably right -- but it is a claim-scope
+    decision for the study's author, and it is **open**. ``t_source`` travels
+    with every row precisely so it can be reopened per airport.
+
+    Do not "reconcile" the two modules by deleting either statement: the
+    measurement in ``track_truth.py`` and the restriction here are both true.
     """
     apdf = matched.filter(F.col("t_source") == "apdf")
+    # F.first on t_off/t_land assumes both are constant within a flight_key.
+    # For t_off that is structural: flight_key is a hash *over* t_off, so two
+    # rows with the same key cannot disagree about it. For t_land it is an
+    # assumption, not a guarantee -- it rests on (aircraft, callsign, day, ADEP,
+    # ADES, second-precision t_off) identifying at most one physical leg, which
+    # is a statement about the world rather than about the hash. It is believed
+    # safe and is not enforced here; if it were ever violated, F.first would pick
+    # one t_land arbitrarily rather than fail.
     ends = apdf.groupBy("flight_key", "track_id").agg(
         F.min("event_time").alias("trk_start"),
         F.max("event_time").alias("trk_end"),
@@ -200,17 +226,32 @@ def boundary_error(matched: DataFrame) -> dict:
         ).alias("land_p90"),
     ).first()
 
+    n = e["n_apdf_flights"] or 0
+    # With no APDF-sourced rows every percentile is NULL. Coercing that to 0.0 --
+    # which this did -- reports the *best possible* boundary error, so an arm
+    # with no APDF coverage at all outscored every arm that was actually
+    # measured. vmeasure and match_rates degrade to 0.0 meaning "bad" and are
+    # safe; this one inverts, so it must return None and leave the CSV cell
+    # blank rather than answer a question it has no data for.
+    def _sec(v):
+        return None if n == 0 or v is None else float(v)
+
     return {
-        "n_apdf_flights": e["n_apdf_flights"] or 0,
-        "off_err_p50_s": float(e["off_p50"] or 0),
-        "off_err_p90_s": float(e["off_p90"] or 0),
-        "land_err_p50_s": float(e["land_p50"] or 0),
-        "land_err_p90_s": float(e["land_p90"] or 0),
+        "n_apdf_flights": n,
+        "off_err_p50_s": _sec(e["off_p50"]),
+        "off_err_p90_s": _sec(e["off_p90"]),
+        "land_err_p50_s": _sec(e["land_p50"]),
+        "land_err_p90_s": _sec(e["land_p90"]),
     }
 
 
 def score_arm(matched: DataFrame) -> dict:
-    """Every metric for one arm, as one flat row ready for a CSV."""
+    """Every metric for one arm, as one flat row ready for a CSV.
+
+    Every value is a number except the four ``*_err_p*_s`` fields, which are
+    ``None`` when the arm's sample contains no APDF-sourced flight -- a blank
+    cell, not a fictitious perfect score. See :func:`boundary_error`.
+    """
     matched = matched.cache()
     row = {"n_tracks": matched.select("track_id").distinct().count()}
     row.update(vmeasure(matched))
