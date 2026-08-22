@@ -197,3 +197,60 @@ def test_flight_key_distinguishes_same_day_same_route_legs_by_off_block_time(spa
     assert len(rows) == 2
     assert rows[0]["t_off"] != rows[1]["t_off"]
     assert rows[0]["flight_key"] != rows[1]["flight_key"]
+
+
+def test_load_flight_intervals_disambiguates_competing_apdf_candidates_by_proximity(
+    spark, tmp_path
+):
+    """Two competing APDF departure candidates, both structurally eligible for
+    both of two same-day same-route legs (same callsign, day, ADEP) before
+    disambiguation runs. Existing tests exercise the disambiguation pathway
+    but never its actual decision: the empty-APDF case has nothing to choose
+    between, and real multi-leg rotations key on different aerodromes so each
+    partition only ever sees one real candidate. This is the case round 2's
+    proximity window exists for -- given two genuinely competing candidates,
+    does each NM row get the nearer one, not just *a* one?"""
+    flights_rows = [
+        Row(AIRCRAFT_ADDRESS="synth02", AIRCRAFT_ID="SYN2", ADEP="EBBR", ADES="BIKF",
+            AOBT_3=dt.datetime(2025, 6, 5, 8, 0, 0), ARVT_3=dt.datetime(2025, 6, 5, 10, 0, 0),
+            TAXI_TIME_3=10),
+        Row(AIRCRAFT_ADDRESS="synth02", AIRCRAFT_ID="SYN2", ADEP="EBBR", ADES="BIKF",
+            AOBT_3=dt.datetime(2025, 6, 5, 14, 0, 0), ARVT_3=dt.datetime(2025, 6, 5, 16, 0, 0),
+            TAXI_TIME_3=10),
+    ]
+    apdf_rows = [
+        # Two DEP candidates sharing (callsign, day, ADEP) -- both eligible
+        # for both NM rows on the equality join alone. 08:05 sits close to
+        # the 08:00 leg's own estimate (08:00 + 10 min taxi = 08:10) and far
+        # from the 14:00 leg's; 14:07 is the mirror.
+        Row(AP_C_FLTID="SYN2", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 8, 5, 0)),
+        Row(AP_C_FLTID="SYN2", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 14, 7, 0)),
+        # One unambiguous ARR candidate per leg, so both legs actually reach
+        # t_source == "apdf" instead of the assertion testing a t_source that
+        # can never be anything but "nm_inferred".
+        Row(AP_C_FLTID="SYN2", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 10, 5, 0)),
+        Row(AP_C_FLTID="SYN2", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 16, 5, 0)),
+    ]
+    spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
+        str(tmp_path / "flights_200002.parquet")
+    )
+    spark.createDataFrame(apdf_rows, schema=_SYNTH_APDF_SCHEMA).write.parquet(
+        str(tmp_path / "apdf_200002.parquet")
+    )
+
+    gt = load_flight_intervals(
+        spark, months=["200002"], days=["2025-06-05"], reference_base=str(tmp_path)
+    )
+    rows = gt.filter(gt.icao24 == "synth02").orderBy("t_off").collect()
+
+    assert len(rows) == 2  # no row lost, no fan-out
+
+    morning, afternoon = rows
+    assert morning["t_off"] == dt.datetime(2025, 6, 5, 8, 5, 0)  # ~08:05, not ~14:07
+    assert afternoon["t_off"] == dt.datetime(2025, 6, 5, 14, 7, 0)  # ~14:07, not ~08:05
+    assert morning["t_source"] == "apdf"
+    assert afternoon["t_source"] == "apdf"

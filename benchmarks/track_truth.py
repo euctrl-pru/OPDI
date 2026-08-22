@@ -151,6 +151,8 @@ def load_flight_intervals(
         & (nm.gt_adep == dep.apdf_adep),
         "left",
     )
+    # Ordered on proximity alone, no secondary key: exactly-equidistant
+    # candidates tie non-deterministically (rare -- sub-second exact ties).
     w_dep = Window.partitionBy(nm._nm_id).orderBy(
         F.abs(
             F.unix_timestamp(dep.atot)
