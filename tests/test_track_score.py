@@ -142,6 +142,35 @@ def test_boundary_error_measures_the_gap_to_apdf_truth(spark):
     assert e["land_err_p90_s"] == pytest.approx(100.0)
 
 
+def test_boundary_error_breaks_an_exact_track_tie_deterministically(spark):
+    """An APDF flight split exactly evenly across two tracks must be counted once.
+
+    F1 has 2 samples on each of two tracks -- an exact tie on ``n``, the count
+    ``boundary_error`` uses to pick a flight's dominant track. Before the fix,
+    ``best = ends.join(w, "flight_key").filter(F.col("n") == F.col("best_n"))``
+    had no tie-break at all: with two rows tied for ``best_n``, both survived
+    the filter, so the flight was double-counted into ``n_apdf_flights`` and
+    both tracks' errors leaked into every percentile.
+
+    Track ids are chosen so the (correct) tie-break -- dominant ``n``, then
+    ``track_id`` ascending -- picks ``Ta``. ``Ta``'s and ``Tb``'s errors are
+    chosen apart on purpose (200 s/400 s vs 50 s/50 s) so that, if both rows
+    survived, the percentiles would land on ``Tb``'s smaller values instead --
+    not just double the count, but silently answer with the wrong track.
+    """
+    m = _matched(
+        spark,
+        [("Ta", "F1", [200, 3200]), ("Tb", "F1", [50, 3550])],
+        t_source="apdf",
+    )
+    e = boundary_error(m)
+    assert e["n_apdf_flights"] == 1
+    assert e["off_err_p50_s"] == pytest.approx(200.0)
+    assert e["off_err_p90_s"] == pytest.approx(200.0)
+    assert e["land_err_p50_s"] == pytest.approx(400.0)
+    assert e["land_err_p90_s"] == pytest.approx(400.0)
+
+
 def test_a_flight_both_merged_and_fragmented_counts_as_merged(spark):
     """The priority rule the module's docstring exists to state.
 

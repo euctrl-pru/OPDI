@@ -169,8 +169,20 @@ def boundary_error(matched: DataFrame) -> dict:
         F.first("t_land").alias("t_land"),
         F.count(F.lit(1)).alias("n"),
     )
-    w = ends.groupBy("flight_key").agg(F.max("n").alias("best_n"))
-    best = ends.join(w, "flight_key").filter(F.col("n") == F.col("best_n"))
+    # One row per flight: its dominant track. Same tie-break as match_rates and
+    # for the same reason -- an exact sample-count tie across two tracks must not
+    # pick arbitrarily (and, before this fix, an unbroken tie on `n` kept *both*
+    # rows, double-counting the flight into n_apdf_flights and every percentile).
+    # There is no merge/pure distinction to prefer here, so the ordering is just
+    # dominant sample count, then track_id for a total order.
+    tie_break = Window.partitionBy("flight_key").orderBy(
+        F.col("n").desc(), F.col("track_id").asc()
+    )
+    best = (
+        ends.withColumn("_rank", F.row_number().over(tie_break))
+        .filter(F.col("_rank") == 1)
+        .drop("_rank")
+    )
 
     e = best.select(
         F.count(F.lit(1)).alias("n_apdf_flights"),
