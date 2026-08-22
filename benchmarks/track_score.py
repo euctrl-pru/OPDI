@@ -24,7 +24,7 @@ measurement of it.
 
 import math
 
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 __all__ = ["contingency", "vmeasure", "match_rates", "boundary_error", "score_arm"]
@@ -113,11 +113,24 @@ def match_rates(matched: DataFrame) -> dict:
         F.count(F.lit(1)).alias("n_flights_for_track")
     )
     # One row per flight: its dominant track, and how many flights that track holds.
+    # A flight can be tied between several tracks with equal sample counts (e.g. an
+    # exact 50/50 split). The tie-break must be deterministic -- a metric that can
+    # change label between runs without the code changing defeats this repo's
+    # provenance discipline -- and must favour a merged track over a pure one,
+    # since that matches the documented "merge is the worse failure" priority.
+    # per_track is joined in *before* breaking the tie, so the ordering can see
+    # n_flights_for_track; track_id gives a total order for the remaining case of
+    # a tie between two tracks that are equally (non-)merged.
+    tie_break = Window.partitionBy("flight_key").orderBy(
+        F.col("n_flights_for_track").desc(), F.col("track_id").asc()
+    )
     best = (
         c.join(per_flight, "flight_key")
         .filter(F.col("n") == F.col("best_n"))
-        .dropDuplicates(["flight_key"])
         .join(per_track, "track_id")
+        .withColumn("_rank", F.row_number().over(tie_break))
+        .filter(F.col("_rank") == 1)
+        .drop("_rank")
     )
 
     is_merged = F.col("n_flights_for_track") > 1
