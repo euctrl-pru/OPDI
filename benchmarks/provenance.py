@@ -126,6 +126,15 @@ def s3_identity(prefix: str) -> dict:
         for page in s3.get_paginator("list_objects_v2").paginate(
                 Bucket=bucket, Prefix=key.rstrip("/") + "/"):
             for o in page.get("Contents", []):
+                # Skip the zero-byte directory marker. MinIO leaves a key like
+                # `research/trend_votes_agl/` behind when a prefix is emptied,
+                # and counting it made a *deleted* table look populated -- so
+                # `Stage.stale` reported it current and the chain skipped the
+                # rebuild. The table was gone and the manifest said it was
+                # fine, which is the exact pairing this module exists to
+                # prevent.
+                if o["Size"] == 0 and o["Key"].endswith("/"):
+                    continue
                 n += 1
                 total += o["Size"]
                 ts = o["LastModified"].isoformat()
