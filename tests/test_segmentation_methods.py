@@ -202,18 +202,31 @@ def _gapped_dwell(spark, near_airport=True, field_elev_ft=6200.0):
 
 
 def test_airport_anchored_requires_the_break_to_be_at_an_airport(spark):
-    """Proximity is the test. The same dwell away from an aerodrome is nothing.
+    """A slow, low, long dwell away from any aerodrome is not a turnaround.
 
-    Only ``near_airport`` differs between the two frames and legacy splits
-    neither, so the whole difference in the answer is attributable to proximity.
+    Legacy's 15-minute low-altitude rule fires on it regardless. This is the
+    high-field-elevation case inverted: the test is proximity, not altitude.
 
-    **This is now the only direction the arm can express.** Because the legacy
-    gap rule is ORed in as a floor (see ``methods.py``'s module docstring), A6
-    can only *add* splits to legacy's -- it cannot suppress legacy's spurious
-    low-altitude split for a slow, low, long dwell in the middle of nowhere. An
-    earlier draft of this test asserted exactly that suppression; it is
-    unreachable under the floor ruling and was removed rather than weakened.
+    This is the arm's *suppression* property, and it is only reachable because
+    A6's floor is :func:`legacy_general_gap` alone. Under a full legacy floor the
+    low-altitude rule would fire through the floor and A6 would report 2 -- the
+    assertion would be unsatisfiable, since an arm ORing in a rule can never
+    split less than that rule does. 20 minutes is under the 30-minute general
+    rule, so the floor stays silent and the arm answers for itself.
     """
+    rows = [{"t": 0, "baro_altitude": 100.0, "on_ground": True, "velocity": 0.0,
+             "near_airport": False, "field_elev_ft": 0.0}]
+    rows += [{"t": 20 * 60, "baro_altitude": 100.0, "on_ground": True, "velocity": 0.0,
+              "near_airport": False, "field_elev_ft": 0.0}]
+    df = make_track(spark, rows)
+    assert n_tracks(assign_track_id(df, airport_anchored(), P)) == 1
+    assert n_tracks(assign_track_id(df, legacy(), P)) == 2
+
+
+def test_airport_anchored_isolates_proximity_from_every_other_input(spark):
+    """Only ``near_airport`` differs between the two frames, and legacy splits
+    neither -- so the whole difference in the answer is attributable to
+    proximity, with no help from altitude, speed or the floor."""
     at_field = _gapped_dwell(spark, near_airport=True)
     nowhere = _gapped_dwell(spark, near_airport=False)
     assert n_tracks(assign_track_id(at_field, legacy(), P)) == 1
@@ -239,19 +252,20 @@ def test_airport_anchored_uses_height_above_field_not_barometric_altitude(spark)
     assert n_tracks(assign_track_id(sea_level, airport_anchored(), P)) == 1
 
 
-def test_airport_anchored_degrades_to_legacy_when_its_inputs_are_missing(spark):
+def test_airport_anchored_still_splits_on_a_long_gap_when_its_inputs_are_missing(spark):
     """Task 6 supplies ``near_airport``/``field_elev_ft`` by a left join.
 
-    Every sample away from a covered aerodrome therefore arrives NULL. Without
-    an explicit coalesce and without the legacy floor, ``stationary`` would be
-    NULL, no break would ever fire, and an entire month of an airframe would land
-    in one track -- A6 scoring as a catastrophic merger for reasons that have
-    nothing to do with its idea. It must instead be exactly legacy here.
+    Every sample away from a covered aerodrome therefore arrives NULL. Without an
+    explicit coalesce and without a floor, ``stationary`` would be NULL, no break
+    would ever fire, and an entire month of an airframe would land in one track
+    -- A6 scoring as a catastrophic merger for reasons that have nothing to do
+    with its idea. This is the property the floor exists for, and the *general*
+    gap rule alone is enough to guarantee it: a 45-minute gap still splits.
     """
     rows = [
         {"t": 0, "baro_altitude": 300.0, "near_airport": None, "field_elev_ft": None},
         {"t": 45 * 60, "baro_altitude": 300.0,
-         "near_airport": None, "field_elev_ft": None},   # 45 min gap -> legacy splits
+         "near_airport": None, "field_elev_ft": None},   # 45 min gap: over 30
         {"t": 46 * 60, "baro_altitude": 300.0, "near_airport": None, "field_elev_ft": None},
     ]
     df = make_track(spark, rows)

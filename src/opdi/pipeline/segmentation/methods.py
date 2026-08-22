@@ -3,24 +3,36 @@
 Each returns a :class:`~opdi.pipeline.segmentation.base.BreakRule`. No Spark
 session logic lives here -- an arm is a grouping, a predicate and a flag.
 
-**Every domain arm (A5-A7) ORs the legacy gap rule in as a floor.** Two reasons,
+**Every domain arm (A5-A7) ORs a legacy gap rule in as a floor.** Two reasons,
 and they are the standing rule for any arm added later:
 
 1. *The ladder measures one change at a time.* Each domain arm is "legacy plus
    one idea", so its delta from A0 is attributable to that idea alone. An arm
    that also silently *removed* legacy's splits would report a delta that mixes
    two changes, and the study could not say which one moved the number.
-2. *An arm whose inputs are missing must degrade to legacy, not to one track a
-   month.* A6 depends on ``near_airport`` and ``field_elev_ft``, which Task 6
-   supplies by a left join -- so every sample away from a covered aerodrome gets
-   NULL. With no floor, an airframe that never gets a reception gap at a covered
-   aerodrome would have its entire month assigned to a single track, and A6
-   would score as a catastrophic merger for reasons having nothing to do with
-   its idea.
+2. *An arm whose inputs are missing must not degrade to one track a month.* A6
+   depends on ``near_airport`` and ``field_elev_ft``, which Task 6 supplies by a
+   left join -- so every sample away from a covered aerodrome gets NULL. With no
+   floor, an airframe that never gets a reception gap at a covered aerodrome
+   would have its entire month assigned to a single track, and A6 would score as
+   a catastrophic merger for reasons having nothing to do with its idea.
 
-The cost of the floor is stated where it bites: A6 can only ever *add* splits to
-legacy's, so it cannot suppress legacy's spurious low-altitude split away from
-any aerodrome. See :func:`airport_anchored`.
+**Which floor: the part of legacy the arm is not replacing.** Legacy is two
+rules, and this module names them separately -- :func:`legacy_general_gap` (any
+gap over ``gap_minutes``, at any altitude) and :func:`legacy_low_altitude_gap` (a
+shorter gap, below ``low_alt_ft``). A5 and A7 take **both**, because neither
+replaces anything: A5 adds the continuous-turnaround split, A7 adds the
+descent-climb split, and a full floor costs a purely additive arm nothing.
+
+A6 takes **only the general gap rule**, and that is the one exception. A6's whole
+thesis is that legacy's ``altitude < 5,000 ft`` test is a *crude proxy* for "at an
+aerodrome" and that real airport geometry is better -- so inheriting the
+low-altitude rule would make the arm floor itself on the very rule it exists to
+replace, and reason 1 above would forbid measuring the replacement at all. Reason
+2 is still satisfied without it: an airframe with NULL inputs still splits on any
+gap over 30 minutes, so no month-long track can form. See
+:func:`airport_anchored`, which is the only arm claiming to *remove* a legacy
+split and therefore the only one where a full floor conflicts.
 """
 
 from pyspark.sql import Window
@@ -36,6 +48,8 @@ from opdi.pipeline.segmentation.base import (
 
 __all__ = [
     "legacy",
+    "legacy_general_gap",
+    "legacy_low_altitude_gap",
     "no_month_suffix",
     "traffic_style",
     "airframe_only",
@@ -52,18 +66,43 @@ __all__ = [
 TRAFFIC_DEFAULT_GAP_MINUTES = 10.0
 
 
+def legacy_general_gap(p):
+    """Legacy's altitude-independent half: any gap over ``gap_minutes`` splits.
+
+    Named separately from :func:`legacy_low_altitude_gap` because the two halves
+    are not interchangeable as an arm's floor -- see the module docstring. This
+    half asserts only "a long enough silence is a new track", which no arm in the
+    study disputes, so it is safe for every arm to inherit.
+    """
+    return gap_minutes() > p.gap_minutes
+
+
+def legacy_low_altitude_gap(p):
+    """Legacy's other half: a *shorter* gap counts, when below ``low_alt_ft``.
+
+    This is production's proxy for "the aircraft is on the ground somewhere" --
+    it uses barometric altitude because that is all it has. It is exactly the
+    rule :func:`airport_anchored` exists to replace with real airport geometry,
+    which is why A6 is the one arm that does not inherit it as a floor.
+    """
+    return (gap_minutes() > p.low_alt_gap_minutes) & (altitude_ft() < p.low_alt_ft)
+
+
 def legacy() -> BreakRule:
     """A0 -- the production algorithm, as parameters of the engine.
 
     Split when the gap exceeds ``gap_minutes``, or exceeds
     ``low_alt_gap_minutes`` below ``low_alt_ft``. The month suffix is kept: it is
     what production does, and A2 exists to measure removing it.
+
+    The two disjuncts are :func:`legacy_general_gap` and
+    :func:`legacy_low_altitude_gap`; A0's behaviour is their OR and is unchanged
+    by having been given names.
     """
     return BreakRule(
         name="legacy",
         group_cols=["icao24", "callsign"],
-        break_expr=lambda p: (gap_minutes() > p.gap_minutes)
-        | ((gap_minutes() > p.low_alt_gap_minutes) & (altitude_ft() < p.low_alt_ft)),
+        break_expr=lambda p: legacy_general_gap(p) | legacy_low_altitude_gap(p),
         month_suffix=True,
     )
 
@@ -174,10 +213,17 @@ def airport_anchored() -> BreakRule:
     joins them from ``h3_airport_detection_zones`` and ``oa_airports`` before
     calling the engine.
 
-    The case this fixes that no altitude threshold can: an aircraft parked at a
-    6,000 ft aerodrome never satisfies ``baro_altitude < 1524 m``, so legacy
-    misses the turnaround and merges two flights -- the case ``track_quality.py``
-    names. **Height above field, not barometric altitude, is the test.**
+    **Two things this fixes that no altitude threshold can**, and the arm is
+    measured on both:
+
+    1. *A split legacy misses.* An aircraft parked at a 6,000 ft aerodrome never
+       satisfies ``baro_altitude < 1524 m``, so legacy misses the turnaround and
+       merges two flights -- the case ``track_quality.py`` names. Height above
+       field, not barometric altitude, is the test.
+    2. *A split legacy invents.* A long, slow, low dwell in the middle of nowhere
+       satisfies legacy's low-altitude rule and is split, when it is not a
+       turnaround at all. A6 does not split it, because it is not at an
+       aerodrome.
 
     A turnaround is recognised two ways, and the arm fires on either:
 
@@ -201,14 +247,19 @@ def airport_anchored() -> BreakRule:
     which is the conservative direction: it can miss a high-field turnaround, it
     cannot invent a low-field one.
 
-    **The legacy floor's cost, stated.** Because the legacy gap rule is ORed in
-    (see the module docstring), A6 can only ever *add* splits to legacy's. The
-    inverse case an earlier draft claimed -- a long, slow, low dwell in the
-    middle of nowhere that satisfies legacy's low-altitude rule and is split when
-    it is not a turnaround at all -- is therefore **not** fixed by this arm. That
-    is a deliberate consequence of the one-change-at-a-time ladder, not an
-    oversight; an arm that suppressed legacy splits would need to be a separate
-    rung.
+    **Its floor is deliberately only half of legacy.** A6 ORs in
+    :func:`legacy_general_gap` -- any gap over ``gap_minutes`` -- and pointedly
+    **not** :func:`legacy_low_altitude_gap`. Every other domain arm takes both.
+
+    The reason is that A6's thesis *is* that legacy's ``altitude < 5,000 ft`` test
+    is a crude proxy for "at an aerodrome" and that real airport geometry is
+    better. An arm cannot measure the replacement of a rule while also inheriting
+    that rule as its own floor: property 2 above would be unreachable by
+    construction, because A6 would then only ever *add* splits to legacy's. The
+    general gap rule carries no such claim -- "a long enough silence is a new
+    track" is not what this arm disputes -- so keeping it costs property 2
+    nothing while still guaranteeing that an airframe whose ``near_airport`` is
+    NULL for a whole month cannot end up in a single track.
     """
 
     def expr(p):
@@ -242,7 +293,11 @@ def airport_anchored() -> BreakRule:
             & prev_stationary
             & (parked_run_min >= p.ground_dwell_minutes)
         )
-        return gap_turnaround | parked_turnaround | legacy().break_expr(p)
+        # Floor: the general gap rule only. NOT legacy_low_altitude_gap -- that
+        # is the rule this arm exists to replace, and an arm cannot measure a
+        # replacement while flooring itself on the thing replaced. See the
+        # module docstring and this function's own.
+        return gap_turnaround | parked_turnaround | legacy_general_gap(p)
 
     return BreakRule(
         name="airport_anchored",
