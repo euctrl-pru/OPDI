@@ -53,18 +53,18 @@ def _joined(spark, rows, step_s=30):
 
 
 def test_a_climb_above_a_high_field_is_counted_at_the_field_cap(spark):
-    """Six samples climbing from 5,800 m to 6,100 m near a 5,763 ft field.
+    """Six samples climbing from 3,960 m to 4,260 m near a 5,763 ft field.
 
-    Those sit about 19,000-20,000 ft above sea level and 13,300-14,300 ft above
-    the field. At the 15,000 ft above-field cap every sample votes; at 4,000 ft
+    Those sit about 13,000-14,000 ft above sea level and 7,200-8,200 ft above
+    the field. At the 12,000 ft above-field cap every sample votes; at 4,000 ft
     above field none of them do.
     """
-    rows = [("LTCE", 5763.0, 5800.0 + 60 * i) for i in range(6)]
+    rows = [("LTCE", 5763.0, 3960.0 + 60 * i) for i in range(6)]
     got = add_height_votes(_joined(spark, rows)).first()
 
-    assert got["up_agl_15000"] == 5      # five deltas across six samples
-    assert got["dn_agl_15000"] == 0
-    assert got["up_agl_4000"] == 0       # all of it is far above 4,000 ft AGL
+    assert got["up_agl_12000"] == 5      # five deltas across six samples
+    assert got["dn_agl_12000"] == 0
+    assert got["up_agl_4000"] == 0       # all of it is above 4,000 ft AGL
 
 
 def test_the_field_cap_admits_what_the_flight_level_cap_excludes(spark):
@@ -116,8 +116,8 @@ def test_a_descent_votes_down_not_up(spark):
     arrival and departure while leaving every count plausible."""
     rows = [("EHAM", -11.0, 2000.0 - 100 * i) for i in range(5)]
     got = add_height_votes(_joined(spark, rows)).first()
-    assert got["dn_agl_15000"] == 4
-    assert got["up_agl_15000"] == 0
+    assert got["dn_agl_12000"] == 4
+    assert got["up_agl_12000"] == 0
 
 
 def test_predictions_reads_the_family_the_datum_names(spark):
@@ -134,6 +134,27 @@ def test_predictions_reads_the_family_the_datum_names(spark):
     # Same flight on the sea-level datum at FL60: no sample qualifies, so the
     # method says nothing rather than saying the same thing.
     assert predictions(votes, 60, 0, 30.0, 0.0, datum="msl").count() == 0
+
+
+def test_the_height_caps_do_not_widen_the_prefilter():
+    """The top of HEIGHT_CAPS silently sets the cost of the whole cache build.
+
+    The pre-filter must admit `max(HEIGHT_CAPS) + highest field`, so raising
+    the top cap widens a scan that has nothing to do with the caps anyone would
+    ship. At 20,000 ft over a 6,723 ft field that meant FL268 instead of FL200 --
+    a third more altitude band, a shuffle that thrashed executors, and no tasks
+    completed for the better part of an hour. Nothing failed; it just stopped
+    making progress, which is the worst way for a cost regression to present.
+
+    6,723 ft is the highest matchable field measured on the real zone table.
+    """
+    HIGHEST_FIELD_FT = 6723.0
+    implied_fl = int((max(HEIGHT_CAPS) + HIGHEST_FIELD_FT) / 100) + 1
+    assert implied_fl <= max(FL_CAPS), (
+        f"HEIGHT_CAPS tops out at {max(HEIGHT_CAPS):,} ft, which forces the "
+        f"pre-filter to FL{implied_fl} -- above FL{max(FL_CAPS)}, so the cache "
+        f"build scans more altitude than it ever has."
+    )
 
 
 def test_an_unknown_datum_is_rejected():

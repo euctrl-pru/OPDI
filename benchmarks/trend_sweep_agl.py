@@ -97,10 +97,23 @@ FL_CAPS = (20, 30, 40, 60, 80, 100, 120, 150, 200)
 #: Comparing 6,000 ft above field against FL60 would move the ceiling and the
 #: datum at the same time, and the arm is meant to move exactly one thing.
 #:
+#: **The top of this range sets the cost of the whole build.** The pre-filter
+#: below has to admit ``max(HEIGHT_CAPS) + highest field``, so a 20,000 ft cap
+#: over a 6,723 ft field meant pre-filtering at FL268 rather than the FL200
+#: this cache has always used -- a third more altitude band, and with it a
+#: shuffle that thrashed executors and completed no tasks for the better part
+#: of an hour. Capping at 12,000 ft puts the bound at FL188, below FL200, so
+#: the pre-filter reverts to exactly what V6 used and the widening disappears.
+#:
+#: Nothing is lost by it. 20,000 ft above field is cruise, not a terminal-area
+#: vote, and no configuration anyone would ship sits near it -- the shipped cut
+#: is around 6,000. A cap the study would never recommend is not worth a third
+#: of the scan.
+#:
 #: Mutable, like FL_CAPS, and set from ``--height-caps`` before anything reads
 #: it -- the cache's column names encode these, so the builder and the reader
 #: must agree by construction rather than by argument passing.
-HEIGHT_CAPS = (2000, 3000, 4000, 6100, 8000, 10000, 12000, 15000, 20000)
+HEIGHT_CAPS = (2000, 3000, 4000, 6100, 8000, 10000, 12000)
 #: Zone bands to cache out to. 30 NM is production. Wider than any radius
 #: swept, so the radius stays a query-time filter rather than a rebuild.
 CACHE_RADIUS_NM = 80.0
@@ -347,7 +360,13 @@ def main() -> None:
     osn_sample.RESEARCH_EXECUTORS = args.executors
     spark = build_spark(6, "8g", distributed=True)
     spark.sparkContext.setLogLevel("ERROR")
-    spark.conf.set("spark.sql.shuffle.partitions", "300")
+    # 500, not V6's 300. This cache carries two families of vote columns rather
+    # than one -- about 52 aggregate expressions against V6's 31 -- so each
+    # group holds correspondingly more state through the shuffle. Smaller
+    # partitions keep that within an executor. The failure it avoids is not a
+    # crash: it is a stage that retries indefinitely, completing no tasks while
+    # executors are lost and replaced.
+    spark.conf.set("spark.sql.shuffle.partitions", "500")
     out = Path(args.results_dir)
     out.mkdir(parents=True, exist_ok=True)
 

@@ -267,6 +267,43 @@ table was built by.
 moved with it. `LEGACY_TREND_VERSION` (`v2.0.0`) and `LEGACY_ENDPOINT_VERSION`
 (`v3.0.0`) are untouched, as they must be.
 
+### The vote cache thrashed, and the top height cap was why
+
+First attempt at building `research/trend_votes_agl` ran for about fifty
+minutes on one shuffle stage and completed **zero of its 35 tasks**. Nothing
+failed and nothing was logged: executors were quietly lost and replaced — a
+fresh set of ten, age two minutes, while the driver still reported `(0 + 20) /
+35`. No `OutOfMemoryError`, no `OOMKilled` event. The only visible symptom was
+the absence of progress.
+
+The cause was `HEIGHT_CAPS` topping out at 20,000 ft. The pre-filter has to
+admit `max(HEIGHT_CAPS) + highest matchable field`, and the run printed its own
+evidence:
+
+```
+vote-cache pre-filter: FL268 (highest matchable field 6,723 ft)
+```
+
+FL268 against the FL200 this cache has always used — a third more altitude
+band into a shuffle that also carries two families of vote columns instead of
+one.
+
+**Fixed by capping `HEIGHT_CAPS` at 12,000 ft**, which puts the bound at FL188
+— below FL200 — so the pre-filter reverts to exactly V6's and the widening
+disappears entirely. Nothing is lost: 20,000 ft above field is cruise, not a
+terminal-area vote, and the shipped cut is around 6,000. Shuffle partitions
+also went from 300 to 500, since the aggregate is ~52 expressions against V6's
+31.
+
+A test pins the coupling, because it is invisible in the code: raising the top
+cap changes the cost of a scan that has nothing to do with the caps anyone
+would ship.
+
+**Worth noting for the next study:** the highest *matchable* field is 6,723 ft,
+not OurAirports' global 14,472 ft. Bounding the pre-filter by the zone table
+rather than the whole reference was already worth 78 flight levels before this
+fix.
+
 ### A pre-existing bug: the paper path breaks inside a worktree
 
 `regenerate_v6.py` and `regenerate_v7.py` both resolve the portal as
