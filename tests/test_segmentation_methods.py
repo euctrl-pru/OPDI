@@ -364,6 +364,54 @@ def test_vertical_profile_does_not_split_a_step_descent_in_the_cruise(spark):
     assert n_tracks(assign_track_id(make_track(spark, rows), vertical_profile(), p)) == 1
 
 
+def test_vertical_profile_does_not_split_a_departure_climb_with_no_prior_descent(spark):
+    """A cold track's first departure is not a new sortie.
+
+    The arm's thesis is "a descent reaching the floor, *then* a climb back
+    through it". The implementation used to require only the second half --
+    ``altitude_ft() > floor`` with the lag row ``<= floor`` -- which fires on
+    **any** upward crossing of 1,500 ft, including the very first departure of
+    a track that has never descended anywhere. That is not the idea A7 exists
+    to test, so A7's measured result was unattributable: it could have been the
+    idea failing or the code not being the idea.
+
+    This track only ever climbs, from the ground up through the floor and on
+    to the cruise. No gap, no month boundary, so the legacy floor is silent and
+    the arm answers for itself. The old code returned 2.
+    """
+    rows = [{"t": i * 60, "baro_altitude": float(a), "on_ground": False,
+             "field_elev_ft": 0.0}
+            for i, a in enumerate([0, 100, 200, 500, 1000, 2000, 3000, 4000])]
+    p = SegmentationParams(descent_floor_ft=1500.0)
+    df = make_track(spark, rows)
+    assert n_tracks(assign_track_id(df, vertical_profile(), p)) == 1
+
+
+def test_vertical_profile_uses_height_above_field_not_barometric_altitude(spark):
+    """At a 6,200 ft aerodrome, MSL altitude never goes near the floor.
+
+    The arm compared barometric MSL, so at any field above ``descent_floor_ft``
+    the lag row was never at or below the floor, no crossing was ever seen, and
+    A7 degenerated to bare legacy -- the exact blindness ``airport_anchored``'s
+    docstring argues legacy suffers from, repeated in the arm that was supposed
+    to be independent of it. ``field_elev_ft`` is already on the frame.
+
+    Here the aircraft descends to 1,900 m (6,234 ft MSL, 34 ft above a 6,200 ft
+    field) and climbs away again. Height above field crosses 1,500 ft downward
+    and then upward; MSL altitude never drops below 6,234 ft. Legacy splits
+    nothing (no gap, and 1,900 m is above its 1,524 m low-altitude rule), so
+    the split is A7's alone. The old code returned 1.
+    """
+    profile_m = [3000, 2400, 2100, 1900, 1900, 2100, 2400, 3000]
+    rows = [{"t": i * 60, "baro_altitude": float(a), "on_ground": False,
+             "field_elev_ft": 6200.0}
+            for i, a in enumerate(profile_m)]
+    p = SegmentationParams(descent_floor_ft=1500.0)
+    df = make_track(spark, rows)
+    assert n_tracks(assign_track_id(df, legacy(), p)) == 1
+    assert n_tracks(assign_track_id(df, vertical_profile(), p)) == 2
+
+
 # -- A8 and the registry -------------------------------------------------------
 
 def test_every_registered_arm_runs(spark):

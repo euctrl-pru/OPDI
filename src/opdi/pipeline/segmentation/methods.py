@@ -310,34 +310,77 @@ def airport_anchored() -> BreakRule:
 def vertical_profile() -> BreakRule:
     """A7 -- a flight is one climb-cruise-descent cycle.
 
-    A descent reaching ``descent_floor_ft`` followed by a climb away from it is a
-    new sortie, whether or not there was a gap and whether or not ground contact
-    was broadcast. This catches merges that no gap rule can reach, and it is the
-    only arm that works when the transponder never reports ``on_ground``.
+    A descent reaching ``descent_floor_ft`` **above the field**, followed by a
+    climb back through it, is a new sortie -- whether or not there was a gap and
+    whether or not ground contact was broadcast. This catches merges that no gap
+    rule can reach, and it is the only arm that works when the transponder never
+    reports ``on_ground``.
+
+    Both halves of that sentence are conditions, and the arm is worthless
+    without either:
+
+    * *the descent* -- some earlier sample crossed the floor **downwards**
+      (previous sample above it, this one at or below). Without this the rule
+      fires on any upward crossing of the floor, including the very first
+      departure of a cold track, which is not a new sortie at all and is the
+      opposite of what the arm claims to detect. A track split there also
+      carries the *next* leg's ``ATOT -> floor`` samples, so it scores as a
+      merger for a reason that has nothing to do with the arm's thesis.
+    * *the climb back through it* -- this row is above the floor and the
+      previous one was not. This is where the break is placed, so the departing
+      leg begins at the crossing.
+
+    The downward-crossing flag is a running max over
+    ``rowsBetween(unboundedPreceding, -1)``, so it is monotone within a group:
+    once the aircraft has come down through the floor, every later climb through
+    it splits. That is the intended reading -- any upward crossing after a
+    descent *is* preceded by a descent -- and it costs one more window
+    aggregation than the incorrect version did.
+
+    **Height above field, not barometric MSL.** ``field_elev_ft`` is joined onto
+    the frame by Task 6's runner, exactly as for :func:`airport_anchored`, and
+    is coalesced to 0.0 where the join found nothing (sea level -- the same
+    conservative direction A6 documents). Comparing MSL made the arm degenerate
+    to bare legacy at any aerodrome above 1,500 ft elevation: a parked aircraft
+    there already reads above the floor, the lag row is never at or below it,
+    and no crossing is ever seen. That is precisely the blindness A6's docstring
+    argues legacy suffers from, and there is no reason for A7 to inherit it.
+
+    Per this repo's unit rule the comparison is scaled, never the stored column:
+    ``altitude_ft()`` is the engine's aviation-unit accessor over the SI
+    ``baro_altitude``, and ``descent_floor_ft`` is aviation with the unit in its
+    name. See ``base.py``'s module docstring.
 
     The floor test is what keeps a cruise step-descent (FL350 -> FL310) from
     counting: that never approaches the floor.
 
     The legacy gap rule is ORed in as a floor, as for A5 and A6 -- see the module
     docstring for why.
-
-    An earlier draft also carried a ``was_below`` term: a running max over
-    ``rowsBetween(unboundedPreceding, -1)`` asserting some earlier sample had
-    been at or below the floor. It was unreachable dead weight, and the most
-    expensive expression in the arm. ``climbing_away`` already requires the *lag*
-    row to be at or below the floor, and that lag row is inside ``was_below``'s
-    own window, so ``climbing_away`` implies ``was_below == 1`` for every row.
-    Removed rather than replaced: the condition the docstring implies -- "a
-    descent reached the floor" -- is exactly what the lag row being at or below
-    the floor already says.
     """
 
     def expr(p):
         w = segment_window()
-        climbing_away = (altitude_ft() > p.descent_floor_ft) & (
-            F.lag(altitude_ft()).over(w) <= p.descent_floor_ft
+        height_ft = altitude_ft() - F.coalesce(F.col("field_elev_ft"), F.lit(0.0))
+        prev_height_ft = F.lag(height_ft).over(w)
+        # The descent half: a downward crossing of the floor, anywhere earlier
+        # in the group. NULL-safe -- the group's first row has no lag, so the
+        # when/otherwise makes it a 0 rather than propagating a NULL through
+        # the running max.
+        descended_to_floor = (height_ft <= p.descent_floor_ft) & (
+            prev_height_ft > p.descent_floor_ft
         )
-        return climbing_away | legacy().break_expr(p)
+        reached_floor_before = (
+            F.max(F.when(descended_to_floor, 1).otherwise(0)).over(
+                w.rowsBetween(Window.unboundedPreceding, -1)
+            )
+            == 1
+        )
+        # The climb half: back up through the floor. This is where the break
+        # goes, so the departing leg starts at the crossing.
+        climbing_away = (height_ft > p.descent_floor_ft) & (
+            prev_height_ft <= p.descent_floor_ft
+        )
+        return (climbing_away & reached_floor_before) | legacy().break_expr(p)
 
     return BreakRule(
         name="vertical_profile",
