@@ -276,6 +276,23 @@ def test_defaults_differ_from_legacy_so_the_preset_is_load_bearing():
     assert DetectionConfig.legacy().endpoint_radius_nm == 40.0
 
 
+@pytest.mark.parametrize("env", ["opensky", "local", "dev", "live"])
+def test_the_pipeline_gets_the_field_datum_in_every_environment(env):
+    """The datum has to reach the *pipeline*, not just the benchmarks.
+
+    `opdi run --step 03` builds its config through `OPDIConfig.for_environment`
+    and hands it to `FlightListProcessor`, which falls back to `legacy()` when
+    a config carries no detection block. So an environment factory that forgot
+    to populate one would silently run the sea-level cut while every test on
+    `DetectionConfig()` still passed -- the change would look shipped and not
+    be.
+    """
+    cfg = OPDIConfig.for_environment(env)
+    assert cfg.detection is not None, f"{env} carries no detection config"
+    assert cfg.detection.trend_max_datum == "field"
+    assert cfg.detection.trend_max_height_ft == 6000.0
+
+
 def test_legacy_stays_on_the_sea_level_datum():
     """Released data was built with a flight-level cut; the preset must keep it.
 
