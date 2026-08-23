@@ -15,9 +15,41 @@ git-lfs, because OSN pulls them with a shallow clone of this repo.
 
 ## Pipeline prefixes
 
-Measured 2026-08-12: **67.40 GB** across the whole bucket, of which
-**42.81 GB is `opdi/osn_symposium_paper_2026/` and belongs to another
-project** — leave it alone. OPDI's own footprint is about 24 GB.
+> ⚠️ **Re-measure before planning against these figures.** The line below read
+> 67.40 GB for ten days while the bucket grew to 96.89 GB. A study was planned
+> against the stale number and had to stop at the point of writing, because the
+> remaining headroom was smaller than what it needed. This bucket is written by
+> several concurrent projects, so a figure here is a snapshot, not a standing
+> fact. The one-liner under "The bucket has a quota" takes about a minute.
+
+Measured **2026-08-23: 96.89 GB** across the whole bucket — **3.11 GB of
+headroom**, and it grew by 1.29 GB during the twenty minutes the audit took.
+Of that, **42.81 GB is `opdi/osn_symposium_paper_2026/` and belongs to another
+project** — leave it alone. OPDI's own footprint is now about 54 GB.
+
+(Previously recorded here: 67.40 GB on 2026-08-12. Most of the 29.5 GB of growth
+since is the flight-events V3 ladder — 58 `research/events_20{24,25}_*` prefixes
+totalling 11.41 GB, written 2026-08-14/15 — plus
+`research/trend_votes_agl{,_2024}` at 1.29 GB written 2026-08-22.)
+
+### Inventory at 2026-08-23
+
+Everything above 0.5 GB, with what consumes it.
+
+| GB | Prefix | Last written | Consumed by |
+|---|---|---|---|
+| 42.81 | `osn_symposium_paper_2026/` | 2026-08-09 | **Another project.** Note it has *not* grown in two weeks, contrary to the "still growing" note this file used to carry. |
+| 11.93 | `research/tracks/` | 2026-08-05 | V6/V7 second period. **Do not prune** — not rebuildable, since the 2024 state vectors were never ingested here. |
+| 11.41 | `research/events_20{24,25}_*` (58 prefixes) | 2026-08-14/15 | Flight-events V3 ladder. Written by `event_bench.py`, read by rung name by `events_compare.py`. |
+| 10.16 | `osn_tracks/` | 2026-08-10 | Pipeline step 02. V7's early ladder rungs read the raw table deliberately. |
+| 9.86 | `osn_tracks_clean/` | 2026-08-12 | Pipeline step 02a; what the flight list reads from v4.0.0 on. |
+| 6.17 | `research/tracks_clean/` | 2026-08-12 | V7's 2024 period. **Regenerable** — `clean_tracks.py --period 2024` from `research/tracks`. |
+| 1.29 | `research/trend_votes_agl{,_2024}/` | 2026-08-22 | Not referenced by any committed code as of this writing — live work in progress. |
+| 1.20 | `research/trend_votes{,_2024}/` | 2026-08-12 | Read by both `regenerate_v6.py` and `regenerate_v7.py`. |
+| 0.54 | `research/reference/` | 2026-08-13 | Ground-truth mirror, so remote executors can read it. |
+
+The ~40 `research/flight_list_v{6,7}_*` prefixes are 0.01 GB each, roughly 0.3 GB
+in total — not worth pruning.
 
 The ADEP/ADES version 4 study ran the pipeline itself rather than a private
 harness, so several of these were rewritten by that run and no longer hold what
