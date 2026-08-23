@@ -250,6 +250,16 @@ T_SV       = "s3a://eurocontrol/opdi/osn_statevectors_v2"
 T_REF      = "s3a://eurocontrol/opdi/research/reference"
 T_CAND24   = "s3a://eurocontrol/opdi/research/cand_2024"
 
+#: The same 2024 tracks, named the way *the pipeline* wants them.
+#:
+#: `trend_sweep_agl.py` reads parquet directly and needs the full URI;
+#: `FlightListProcessor(tracks_table=...)` takes a bucket-relative name and
+#: prefixes it itself. Passing the URI to the latter produced the splice
+#: `s3a://eurocontrol/opdi/s3a:/eurocontrol/opdi/research/tracks` and a
+#: PATH_NOT_FOUND two hours into a run. Two names because there are genuinely
+#: two conventions, written down so the next caller picks the right one.
+T_TRACKS24_NAME = "research/tracks"
+
 #: The installed console script, not ``python -m opdi.cli``: a module
 #: invocation resolves `opdi` to ``opdi.py`` at the repo root, which shadows the
 #: package in ``src/`` and fails with a bare ModuleNotFoundError.
@@ -341,7 +351,8 @@ def jobs() -> list:
     out = []
     for period, months, days, tracks, votes in (
         ("2025", "202506", DAYS_2025, None, T_VOTES),
-        ("2024", "202406", DAYS_2024, T_TRACKS24, T_VOTES24),
+        # The pipeline's spelling, not the sweep's -- see T_TRACKS24_NAME.
+        ("2024", "202406", DAYS_2024, T_TRACKS24_NAME, T_VOTES24),
     ):
         tracks_arg = ["--tracks", tracks] if tracks else []
         cand = T_CAND if period == "2025" else T_CAND24

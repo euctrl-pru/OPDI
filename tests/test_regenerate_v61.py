@@ -88,6 +88,38 @@ def test_every_staged_output_name_is_unique():
             seen[staged] = job.name
 
 
+def test_the_pipeline_gets_a_relative_track_name_not_a_uri():
+    """Two conventions, and mixing them fails two hours into a run.
+
+    `trend_sweep_agl.py` reads parquet directly and wants a full `s3a://` URI.
+    `FlightListProcessor(tracks_table=...)` wants a bucket-relative name and
+    prefixes it itself, so handing it the URI splices
+    `s3a://eurocontrol/opdi/s3a:/eurocontrol/opdi/research/tracks` and dies on
+    PATH_NOT_FOUND -- after the 2025 half of the study has already run.
+    """
+    for job in regenerate_v61.jobs():
+        if "flight_list_v61" not in job.script:
+            continue
+        args = job.args
+        if "--tracks" not in args:
+            continue
+        value = args[args.index("--tracks") + 1]
+        assert not value.startswith(("s3a://", "s3://")), (
+            f"{job.name} passes a URI to the pipeline: {value!r}"
+        )
+
+
+def test_the_sweep_gets_a_uri_not_a_relative_name():
+    """The mirror image: the sweep reads parquet itself and a bare name would
+    resolve against the working directory."""
+    for job in regenerate_v61.jobs():
+        if "trend_sweep_agl" not in job.script:
+            continue
+        args = job.args
+        if "--cache" in args:
+            assert args[args.index("--cache") + 1].startswith("s3a://"), job.name
+
+
 def test_the_portal_is_found_from_inside_a_worktree():
     """`REPO.parent / "opdi-portal"` is right when opdi/ sits in the workspace
     root and wrong inside a git worktree, which lives three levels deeper.
