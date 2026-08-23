@@ -397,6 +397,19 @@ def main() -> None:
     caps = HEIGHT_CAPS if args.datum == "field" else FL_CAPS
     legacy_cap = 6100 if args.datum == "field" else 40
 
+    # Fail on the cap, here, rather than on a column name inside Spark later.
+    # Every cap this sweep will ask for has to exist as a column family in the
+    # cache, and the two are connected only by convention -- so check the
+    # connection before spending a session on it.
+    family = HEIGHT_CAPS if args.datum == "field" else FL_CAPS
+    unknown = [c for c in (*caps, legacy_cap) if c not in family]
+    if unknown:
+        raise SystemExit(
+            f"cap(s) {unknown} are not in the {args.datum} family {family}. "
+            f"The cache has no column for them, and Spark would report that as "
+            f"a missing column rather than as a missing cap."
+        )
+
     def cell(cap, margin, radius, pen):
         # `score` returns the counts exactly; they used to be reconstructed
         # here as round(ratio * n), which is off by up to a flight either way
@@ -425,7 +438,11 @@ def main() -> None:
     # not appear anywhere in the output.
     rows = []
     print(f"stage 0: the legacy setting\n{HDR}")
-    m = cell(40, 4, 30.0, 0.0)
+    # `legacy_cap`, not a literal 40. On the field datum there is no column
+    # called `up_agl_40` -- 40 is a flight level, and the above-field family is
+    # keyed in feet -- so the literal fails with an AnalysisException naming a
+    # column, several minutes into a sweep, rather than a cap.
+    m = cell(legacy_cap, 4, 30.0, 0.0)
     m["stage"] = 0
     m["legacy"] = True
     rows.append(m)
