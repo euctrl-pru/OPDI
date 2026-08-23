@@ -113,7 +113,11 @@ def test_a_dominant_track_with_a_stray_fragment_is_not_clean(spark):
 # ``test_a_flight_both_merged_and_fragmented_counts_as_merged``.
 
 
-BOUNDARY_FIELDS = ("off_err_p50_s", "off_err_p90_s", "land_err_p50_s", "land_err_p90_s")
+BOUNDARY_FIELDS = (
+    "off_err_p50_s", "off_err_p90_s", "land_err_p50_s", "land_err_p90_s",
+    "off_signed_p10_s", "off_signed_p50_s", "off_signed_p90_s",
+    "land_signed_p10_s", "land_signed_p50_s", "land_signed_p90_s",
+)
 
 
 def test_score_arm_returns_a_flat_row_of_scalars(spark):
@@ -181,6 +185,60 @@ def test_boundary_error_measures_the_gap_to_apdf_truth(spark):
     assert e["off_err_p90_s"] == pytest.approx(90.0)
     assert e["land_err_p50_s"] == pytest.approx(45.0)
     assert e["land_err_p90_s"] == pytest.approx(100.0)
+
+
+def test_boundary_error_reports_the_sign_of_each_overhang(spark):
+    """The signed fields, and the direction they point.
+
+    ``abs()`` cannot tell a track that starts *before* take-off -- the normal
+    case, an OPDI track includes taxi -- from one that starts *after* it, which
+    means the departure was lost to another track. The signed convention is
+    ``trk_start - t_off`` and ``trk_end - t_land``, so the normal case is
+    negative ``off`` and positive ``land``.
+
+    T1 is the normal shape: it starts 300 s before ATOT and ends 600 s after
+    ALDT (taxi-out, taxi-in). T2 is the broken shape: it starts 120 s *after*
+    ATOT and ends 200 s *before* ALDT. Both report the same kind of absolute
+    number; only the sign separates them, and with p10/p50/p90 over the two
+    flights the two populations sit at opposite ends of the distribution.
+    """
+    m = _matched(spark, [("T1", "F1", [5]), ("T2", "F2", [5])], t_source="apdf")
+    extents = spark.createDataFrame([
+        Row(track_id="T1",
+            trk_start=_T0 - dt.timedelta(seconds=300),
+            trk_end=_T0 + dt.timedelta(hours=1) + dt.timedelta(seconds=600)),
+        Row(track_id="T2",
+            trk_start=_T0 + dt.timedelta(seconds=120),
+            trk_end=_T0 + dt.timedelta(hours=1) - dt.timedelta(seconds=200)),
+    ])
+    e = boundary_error(m, extents)
+    assert e["n_apdf_flights"] == 2
+    # nearest-rank percentile_approx over two values: p10/p50 -> smaller,
+    # p90 -> larger.
+    assert e["off_signed_p10_s"] == pytest.approx(-300.0)
+    assert e["off_signed_p50_s"] == pytest.approx(-300.0)
+    assert e["off_signed_p90_s"] == pytest.approx(120.0)
+    assert e["land_signed_p10_s"] == pytest.approx(-200.0)
+    assert e["land_signed_p50_s"] == pytest.approx(-200.0)
+    assert e["land_signed_p90_s"] == pytest.approx(600.0)
+    # The absolute fields are unchanged in meaning, and cannot see the sign:
+    # both flights' departure overhangs are positive numbers there.
+    assert e["off_err_p90_s"] == pytest.approx(300.0)
+
+
+def test_boundary_error_raises_when_extents_misses_a_track(spark):
+    """The fail-loud contract the join's own comment states.
+
+    An inner join here would silently drop the flight from ``n_apdf_flights``
+    and from every percentile, producing a plausible CSV row and no error --
+    exactly what the comment claimed to prevent. ``extents`` covering only T1
+    while ``matched`` also holds T2 must raise, and the message must say how
+    many track_ids were missing.
+    """
+    m = _matched(spark, [("T1", "F1", 5), ("T2", "F2", 5)], t_source="apdf")
+    partial = _extents_from(m).filter("track_id = 'T1'")
+    with pytest.raises(ValueError, match="missing 1 track_id"):
+        boundary_error(m, partial)
 
 
 def test_boundary_error_breaks_an_exact_track_tie_deterministically(spark):

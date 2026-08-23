@@ -175,6 +175,35 @@ def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
 
     Only over flights whose ``t_source`` is ``"apdf"``.
 
+    **Both an absolute and a signed view are reported, and the signed one is
+    the diagnostic.** The sign convention is ``trk_start - t_off`` for the
+    departure side and ``trk_end - t_land`` for the arrival side, so a
+    *negative* ``off`` means the track starts **before** take-off and a
+    *positive* ``land`` means it ends **after** landing. Both of those are the
+    normal, correct case: an OPDI track includes ground movement by design --
+    the pipeline publishes ``entry-taxiway`` and ``entry-parking_position``
+    events off these same tracks -- while ground truth's ``[t_off, t_land]``
+    is airborne only, so a stand-to-stand track legitimately overhangs the
+    interval on both sides.
+
+    ``abs()`` destroys exactly the distinction that matters. A track starting
+    20 min before ATOT (taxi-out, correct) and one starting 20 min after it
+    (the departure was lost to some other track -- broken) produce the
+    identical absolute number. On the 2025 sample the measured
+    ``off_err_p50_s`` is 109 s: *not* the taxi-out inflation one might expect,
+    because departure ADS-B coverage typically begins near the runway rather
+    than at the stand -- but at 109 s absolute there is no way to tell which
+    of the two populations above that median is made of, or in what mixture.
+    The arrival side does carry real taxi-in (``land_err_p50_s`` = 374 s, a
+    textbook European taxi-in).
+
+    ``p10`` is reported alongside ``p50``/``p90`` because, once signed, the
+    interesting tail is on *both* sides: a merge shows as a large negative
+    ``off`` or a large positive ``land``, a lost departure as a large positive
+    ``off``. The four absolute fields are kept exactly as they were so the
+    already-published runs stay comparable -- the signed fields are an
+    addition, not a replacement.
+
     **That restriction is deliberate conservatism, not a settled fact, and this
     module and ``track_truth.py`` must not be read as disagreeing.** The original
     reason was that NM-inferred endpoints carry the taxi-time inference's own
@@ -241,30 +270,56 @@ def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
         ends.withColumn("_rank", F.row_number().over(tie_break))
         .filter(F.col("_rank") == 1)
         .drop("_rank")
-        # Inner: every track_id reaching here came from `matched`, which itself
-        # came from an `assign` table -- and `extents` is built from that same
+        # Left, deliberately, even though a miss is impossible in a correct
+        # call: every track_id reaching here came from `matched`, which came
+        # from an `assign` table -- and `extents` is built from that same
         # `assign` table (see track_methods.py:run_arm), so it must cover every
         # track_id here. A miss would mean extents were computed from something
-        # other than this run's own assignment, which should fail loudly rather
-        # than silently drop the flight from the percentile.
-        .join(extents, "track_id", "inner")
+        # other than this run's own assignment, and that must fail loudly.
+        # An *inner* join is precisely the silent drop this comment used to
+        # disclaim: the flight would vanish from n_apdf_flights and from every
+        # percentile, leaving a plausible-looking CSV row and no error at all.
+        # Left join plus an explicit check makes the behaviour match the claim.
+        .join(extents, "track_id", "left")
+    ).cache()
+
+    missing = (
+        best.filter(F.col("trk_start").isNull())
+        .select("track_id")
+        .distinct()
     )
+    n_missing = missing.count()
+    if n_missing:
+        sample = [r["track_id"] for r in missing.limit(5).collect()]
+        best.unpersist()
+        raise ValueError(
+            f"boundary_error: `extents` is missing {n_missing} track_id(s) that "
+            f"`matched` contains, e.g. {sample}. extents must be computed from "
+            "the same assignment table as matched -- see track_methods.run_arm."
+        )
+
+    # Signed, per the convention in the docstring: trk_start - t_off and
+    # trk_end - t_land. Not abs() -- the sign is the diagnostic.
+    off_signed = "(unix_timestamp(trk_start) - unix_timestamp(t_off))"
+    land_signed = "(unix_timestamp(trk_end) - unix_timestamp(t_land))"
+
+    def _q(delta: str, q: float, alias: str):
+        return F.expr(f"percentile_approx({delta}, {q})").alias(alias)
 
     e = best.select(
         F.count(F.lit(1)).alias("n_apdf_flights"),
-        F.expr(
-            "percentile_approx(abs(unix_timestamp(trk_start) - unix_timestamp(t_off)), 0.5)"
-        ).alias("off_p50"),
-        F.expr(
-            "percentile_approx(abs(unix_timestamp(trk_start) - unix_timestamp(t_off)), 0.9)"
-        ).alias("off_p90"),
-        F.expr(
-            "percentile_approx(abs(unix_timestamp(trk_end) - unix_timestamp(t_land)), 0.5)"
-        ).alias("land_p50"),
-        F.expr(
-            "percentile_approx(abs(unix_timestamp(trk_end) - unix_timestamp(t_land)), 0.9)"
-        ).alias("land_p90"),
+        _q(f"abs{off_signed}", 0.5, "off_p50"),
+        _q(f"abs{off_signed}", 0.9, "off_p90"),
+        _q(f"abs{land_signed}", 0.5, "land_p50"),
+        _q(f"abs{land_signed}", 0.9, "land_p90"),
+        _q(off_signed, 0.1, "off_s_p10"),
+        _q(off_signed, 0.5, "off_s_p50"),
+        _q(off_signed, 0.9, "off_s_p90"),
+        _q(land_signed, 0.1, "land_s_p10"),
+        _q(land_signed, 0.5, "land_s_p50"),
+        _q(land_signed, 0.9, "land_s_p90"),
     ).first()
+    best.unpersist()
 
     n = e["n_apdf_flights"] or 0
     # With no APDF-sourced rows every percentile is NULL. Coercing that to 0.0 --
@@ -282,6 +337,12 @@ def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
         "off_err_p90_s": _sec(e["off_p90"]),
         "land_err_p50_s": _sec(e["land_p50"]),
         "land_err_p90_s": _sec(e["land_p90"]),
+        "off_signed_p10_s": _sec(e["off_s_p10"]),
+        "off_signed_p50_s": _sec(e["off_s_p50"]),
+        "off_signed_p90_s": _sec(e["off_s_p90"]),
+        "land_signed_p10_s": _sec(e["land_s_p10"]),
+        "land_signed_p50_s": _sec(e["land_s_p50"]),
+        "land_signed_p90_s": _sec(e["land_s_p90"]),
     }
 
 
@@ -292,9 +353,11 @@ def score_arm(matched: DataFrame, extents: DataFrame) -> dict:
     :func:`track_extents`, over the *full* assignment table -- see
     :func:`boundary_error` for why it cannot be derived from ``matched``.
 
-    Every value is a number except the four ``*_err_p*_s`` fields, which are
-    ``None`` when the arm's sample contains no APDF-sourced flight -- a blank
-    cell, not a fictitious perfect score. See :func:`boundary_error`.
+    Every value is a number except the four ``*_err_p*_s`` and six
+    ``*_signed_p*_s`` fields, which are ``None`` when the arm's sample contains
+    no APDF-sourced flight -- a blank cell, not a fictitious perfect score. See
+    :func:`boundary_error`, which also states the signed fields' sign
+    convention (negative ``off`` = track starts before take-off).
     """
     matched = matched.cache()
     row = {"n_tracks": matched.select("track_id").distinct().count()}
