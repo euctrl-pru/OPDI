@@ -36,21 +36,25 @@ the same way.
 import argparse
 import dataclasses
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 sys.path.insert(0, str(REPO / "src"))
 
-from pyspark.sql import functions as F
-
-import osn_sample
-from osn_sample import build_spark, load_dotenv
-from adep_ades import (
-    airport_locations, airport_types, label_ground_truth, load_ground_truth,
-    score, per_airport_counts, per_type_counts,
+import osn_sample  # noqa: E402
+from adep_ades import (  # noqa: E402
+    airport_locations,
+    airport_types,
+    label_ground_truth,
+    load_ground_truth,
+    per_airport_counts,
+    per_type_counts,
+    score,
 )
+from osn_sample import build_spark, load_dotenv  # noqa: E402
+from pyspark.sql import functions as F  # noqa: E402
 
 #: Where flight lists land. Under ``research/`` and suffixed, so the published
 #: flight list is never the target -- and ``guard_writes`` enforces it rather
@@ -157,6 +161,56 @@ def index_on_read(tables) -> None:
     StorageManager.read_table = read_table
     StorageManager._v7_h3_on_read = True
     print(f"  h3_res_7 computed on read for: {', '.join(sorted(wanted))}")
+
+
+def redirect_tracks(assign_table: str, tracks_table: str) -> None:
+    """Point the flight list at a research segmentation's ``track_id``.
+
+    The arm wrote only ``(icao24, event_time, track_id)``. The flight list
+    needs full tracks, so the assignment is joined onto the shared cleaned
+    track table on read and the original ``track_id`` replaced. Reading one
+    shared track table for every arm is deliberate: it means an ADEP/ADES
+    difference between arms cannot be an artefact of a different track build.
+
+    ``tracks_table`` must be the exact table name ``FlightListProcessor``
+    resolves for this run -- ``self.tracks_table`` in ``flights.py`` -- not a
+    fixed pair of names. It calls ``self.storage.read_table(self.tracks_table)``
+    exactly once per data pull, and that resolved name varies by period and by
+    run: ``"osn_tracks_clean"`` when 2025 resolves it from the config,
+    ``"research/tracks_clean"`` when the 2024 period passes it as an explicit
+    ``tracks_table_override``, or ``"osn_tracks"``/``"research/tracks"`` for a
+    ladder rung that reads raw tracks. A wrapper matching a hardcoded
+    ``("osn_tracks", "osn_tracks_clean")`` pair -- an earlier draft of this
+    function -- would silently pass the 2024 ``shipped`` run straight through
+    unredirected, because ``"research/tracks_clean"`` is in neither name.
+    Matching the single resolved name the caller passes in is what keeps the
+    redirect and the run in sync for both periods.
+
+    Reads only. Writes are already confined to ``research/`` by
+    ``guard_writes``.
+    """
+    from opdi.utils.storage import StorageManager
+
+    if getattr(StorageManager, "_tc_track_redirect", False):
+        return
+    orig_read = StorageManager.read_table
+
+    def read_table(self, name, *a, **kw):
+        df = orig_read(self, name, *a, **kw)
+        if name != tracks_table:
+            return df
+        assign = self.spark.read.parquet(assign_table).withColumnRenamed(
+            "track_id", "_new_track_id"
+        )
+        return (
+            df.drop("track_id")
+            .join(assign, ["icao24", "event_time"], "inner")
+            .withColumnRenamed("_new_track_id", "track_id")
+        )
+
+    StorageManager.read_table = read_table
+    StorageManager._tc_track_redirect = True
+    print(f"  tracks redirected: {tracks_table} + {assign_table}")
 
 
 def guard_writes(allowed_prefix: str = "research/") -> None:
@@ -385,7 +439,7 @@ def verify_plan(plan: dict) -> None:
             raise SystemExit(
                 f"the last ladder rung ({rungs[-1]}) is not the shipped "
                 f"configuration: " + "; ".join(problems) + ". The ladder would "
-                f"decompose a change that is not the one being made.")
+                "decompose a change that is not the one being made.")
 
         first_cfg, _, _, first_tracks = plan[rungs[0]]
         if first_cfg != DetectionConfig.legacy():
@@ -489,6 +543,9 @@ def main() -> None:
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="8g")
     ap.add_argument("--ui-port", type=int, default=4057)
+    ap.add_argument("--track-assign", default=None,
+                    help="assignment table whose track_id replaces the tracks' own "
+                         "(see redirect_tracks)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan and exit; no cluster needed")
     args = ap.parse_args()
@@ -559,6 +616,14 @@ def main() -> None:
     index_on_read(period.get("index_on_read"))
     if period.get("candidates"):
         redirect_candidates(period["candidates"])
+    if args.track_assign:
+        # The table name a research arm's assignment replaces: the same
+        # `clean` table `build_plan`'s "shipped" entry reads for this period
+        # -- `None` (config-resolved, i.e. "osn_tracks_clean") for 2025, an
+        # explicit "research/tracks_clean" for 2024. This flag is only ever
+        # used with `--runs shipped`, so that is the one table this run
+        # actually pulls tracks from.
+        redirect_tracks(args.track_assign, period["tracks"] or "osn_tracks_clean")
 
     from opdi.config import OPDIConfig
 
