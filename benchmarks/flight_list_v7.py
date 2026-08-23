@@ -214,11 +214,21 @@ def redirect_tracks(assign_table: str, tracks_table: str) -> None:
 
 
 def guard_writes(allowed_prefix: str = "research/") -> None:
-    """Refuse any write outside ``research/``.
+    """Refuse any write that would land outside ``research/``.
 
     ``process_dai``'s default table name is the published flight list, so a
     dropped argument overwrites production. This makes that failure loud
     instead of silent and irreversible.
+
+    **The check is on the destination path, not the table name.** Those differ
+    whenever ``redirect_candidates`` is active: it maps ``_s3_path``, so a write
+    of the logical name ``opdi_endpoint_candidates`` physically lands at
+    ``research/cand_...``. Guarding the name alone rejected that legitimate
+    write while a *genuine* production write -- the thing this guard exists to
+    stop -- was caught only because the production table happens not to be
+    named ``research/``-anything. Both readings were wrong for the same reason:
+    the name is not where the bytes go. Resolving the path fixes the false
+    negative and the false positive together.
     """
     from opdi.utils.storage import StorageManager
 
@@ -227,11 +237,15 @@ def guard_writes(allowed_prefix: str = "research/") -> None:
     orig_write = StorageManager.write_table
 
     def write_table(self, df, table_name, *a, **kw):
-        if not str(table_name).startswith(allowed_prefix):
+        name = str(table_name)
+        dest = self._s3_path(name)
+        allowed_root = f"{self.base_path}/{allowed_prefix}"
+        if not (name.startswith(allowed_prefix) or dest.startswith(allowed_root)):
             raise RuntimeError(
-                f"refusing to write {table_name!r}: this benchmark writes only "
-                f"under {allowed_prefix!r}")
-        print(f"  -> writing {table_name}")
+                f"refusing to write {name!r} (resolves to {dest!r}): this "
+                f"benchmark writes only under {allowed_prefix!r}")
+        print(f"  -> writing {name}" + (f" -> {dest}" if not
+                                        name.startswith(allowed_prefix) else ""))
         return orig_write(self, df, table_name, *a, **kw)
 
     StorageManager.write_table = write_table
