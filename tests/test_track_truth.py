@@ -295,3 +295,51 @@ def test_load_flight_intervals_disambiguates_competing_apdf_candidates_by_proxim
     assert afternoon["t_off"] == dt.datetime(2025, 6, 5, 14, 7, 0)  # ~14:07, not ~08:05
     assert morning["t_source"] == "apdf"
     assert afternoon["t_source"] == "apdf"
+
+
+def test_load_flight_intervals_excludes_a_flight_landing_after_the_sample_window(
+    spark, tmp_path
+):
+    """A midnight-crosser's t_land is real; its samples are not.
+
+    ``track_methods``/``track_sweep`` filter state vectors on
+    ``to_date(event_time).isin(days)``, but ground truth is keyed on the
+    *departure* day. A flight leaving 2025-06-05 22:00 and landing 06-06 00:30
+    therefore keeps its true ``t_land`` while the samples available to score it
+    stop at 23:59:59 -- so its track's ``trk_end`` is a clipping artefact and
+    ``boundary_error`` reads ~30 minutes of fabricated overhang for a track
+    that may be perfectly correct.
+
+    The old boundary computation was structurally immune to this, because it
+    took ``trk_end`` from ``matched``, which is clipped to ``[t_off, t_land]``
+    by construction. Moving to real track extents removed that immunity, so
+    the guard has to live here instead: ground truth is restricted to flights
+    whose entire ``[t_off, t_land]`` lies inside the sampled window.
+
+    The two legs differ only in their times, so nothing but window membership
+    can explain one surviving and the other not.
+    """
+    flights_rows = [
+        # wholly inside 2025-06-05: kept
+        Row(AIRCRAFT_ADDRESS="synth03", AIRCRAFT_ID="SYN3", ADEP="EBBR", ADES="BIKF",
+            AOBT_3=dt.datetime(2025, 6, 5, 8, 0, 0),
+            ARVT_3=dt.datetime(2025, 6, 5, 10, 0, 0), TAXI_TIME_3=10),
+        # departs on 2025-06-05, lands on 06-06: excluded
+        Row(AIRCRAFT_ADDRESS="synth03", AIRCRAFT_ID="SYN3", ADEP="EBBR", ADES="BIKF",
+            AOBT_3=dt.datetime(2025, 6, 5, 22, 0, 0),
+            ARVT_3=dt.datetime(2025, 6, 6, 0, 30, 0), TAXI_TIME_3=10),
+    ]
+    spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
+        str(tmp_path / "flights_200003.parquet")
+    )
+    spark.createDataFrame([], schema=_SYNTH_APDF_SCHEMA).write.parquet(
+        str(tmp_path / "apdf_200003.parquet")
+    )
+
+    gt = load_flight_intervals(
+        spark, months=["200003"], days=["2025-06-05"], reference_base=str(tmp_path)
+    )
+    rows = gt.filter(gt.icao24 == "synth03").collect()
+    assert len(rows) == 1
+    assert rows[0]["t_off"] == dt.datetime(2025, 6, 5, 8, 10, 0)
+    assert rows[0]["t_land"] == dt.datetime(2025, 6, 5, 10, 0, 0)

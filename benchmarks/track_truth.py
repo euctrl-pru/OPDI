@@ -38,6 +38,8 @@ committed ``reference/`` directory so they run against real production data with
 no cluster and no credentials.
 """
 
+import datetime as dt
+
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
@@ -45,6 +47,25 @@ REFERENCE_BASE = "s3a://eurocontrol/opdi/research/reference"
 #: overridable per call via the ``reference_base`` keyword -- see module docstring.
 
 __all__ = ["load_flight_intervals", "load_apdf_times", "overlap_join"]
+
+
+def _sample_window(days: list):
+    """``(first_midnight, next_midnight_after_the_last_day)`` for *days*.
+
+    The upper bound is exclusive and sits at the midnight *after* the last
+    sampled day, because a sample at 23:59:59 is in the window and one at
+    00:00:00 the next day is not. Derived from ``min``/``max`` of the caller's
+    own day list; ``None`` when no days were given, in which case no window
+    restriction applies. Accepts ``str`` or ``datetime.date`` entries, as the
+    day filter does.
+    """
+    if not days:
+        return None
+    parsed = sorted(dt.date.fromisoformat(str(d)) for d in days)
+    return (
+        f"{parsed[0]} 00:00:00",
+        f"{parsed[-1] + dt.timedelta(days=1)} 00:00:00",
+    )
 
 
 def load_apdf_times(
@@ -99,6 +120,27 @@ def load_flight_intervals(
 
     ``t_source`` records whether the interval's endpoints are APDF-measured or
     NM-inferred, so the paper can report boundary error only where it is real.
+
+    **Ground truth is restricted to flights that fit entirely inside the
+    sampled window**, i.e. ``t_off >= 00:00 of the first day in *days*`` and
+    ``t_land < 00:00 of the day after the last``. That is not tidiness; it is
+    what keeps a scored boundary error real. A caller filters state vectors on
+    ``to_date(event_time).isin(days)`` while this function keys ground truth on
+    the *departure* day, and the two windows do not close at the same instant:
+    a flight leaving 2025-06-07 22:00 and landing 06-08 00:30 keeps its true
+    ``t_land`` while its samples stop at 23:59:59, so the track's ``trk_end``
+    is a clipping artefact and ``track_score.boundary_error`` reports ~30 min
+    of fabricated overhang for a track that may be perfectly correct. The
+    mirror case at the leading edge is the opposite and equally unwanted: a
+    track continuing from the previous day has its ``trk_start`` clipped up to
+    midnight, *understating* an overhang.
+
+    The old boundary computation was structurally immune -- it took
+    ``trk_end`` from ``matched``, which ``overlap_join`` clips to
+    ``[t_off, t_land]`` by construction -- so this guard only became necessary
+    when real track extents replaced it. The window is derived from
+    ``min``/``max`` of ``days`` rather than taken as a parameter, so it cannot
+    drift from the day list the same call already filters on.
     """
     frames = []
     for m in months:
@@ -120,6 +162,18 @@ def load_flight_intervals(
     nm = nm.filter(F.col("icao24").isNotNull()).withColumn("day", F.to_date("aobt"))
     if days:
         nm = nm.filter(F.col("day").isin([str(d) for d in days]))
+    # Whole-interval containment in the sampled window -- see the docstring.
+    # Expressed on t_off/t_land, not on `day`: `day` is the departure day,
+    # which is exactly the thing that fails to bound a midnight-crosser's
+    # arrival. F.lit(True) when no days were given, so the chain below is the
+    # same shape either way.
+    window = _sample_window(days)
+    in_window = (
+        F.lit(True)
+        if window is None
+        else (F.col("t_off") >= F.lit(window[0]).cast("timestamp"))
+        & (F.col("t_land") < F.lit(window[1]).cast("timestamp"))
+    )
 
     # A synthetic per-row id. APDF is no longer deduplicated to one row per
     # (callsign, day, aerodrome) -- see load_apdf_times -- so a same-day
@@ -256,6 +310,7 @@ def load_flight_intervals(
         )
         .filter(F.col("t_off").isNotNull() & F.col("t_land").isNotNull())
         .filter(F.col("t_land") > F.col("t_off"))
+        .filter(in_window)
         .select("flight_key", "icao24", "callsign", "gt_adep", "gt_ades",
                 "t_off", "t_land", "t_source", "day")
     )
