@@ -98,6 +98,18 @@ def main():
         help="skip grid cells already present in an existing output CSV, and "
              "append the new cells to it instead of overwriting it",
     )
+    # Grid overrides. Step 3 requires extending the grid whenever a winning value
+    # lands on an edge -- "an optimum at an edge is not an optimum; it is where
+    # you stopped looking". Extending it by editing the constants above would
+    # leave the committed defaults disagreeing with the run that produced the
+    # results, and nothing in the CSV would say which grid it came from. As
+    # arguments, the extension lands in the provenance argv instead.
+    ap.add_argument("--grid-gap", nargs="+", type=int, default=None,
+                    help=f"override GAP_MIN (default {GAP_MIN})")
+    ap.add_argument("--grid-low-alt-gap", nargs="+", type=int, default=None,
+                    help=f"override LOW_ALT_GAP_MIN (default {LOW_ALT_GAP_MIN})")
+    ap.add_argument("--grid-low-alt-ft", nargs="+", type=int, default=None,
+                    help=f"override LOW_ALT_FT (default {LOW_ALT_FT})")
     args = ap.parse_args()
     out_name = args.out_name or f"sweep_{args.period}.csv"
 
@@ -114,7 +126,10 @@ def main():
 
     n_gt = None  # populated only when this run actually loads ground truth
 
-    grid = list(itertools.product(GAP_MIN, LOW_ALT_GAP_MIN, LOW_ALT_FT))
+    gap_grid = args.grid_gap or GAP_MIN
+    low_gap_grid = args.grid_low_alt_gap or LOW_ALT_GAP_MIN
+    low_ft_grid = args.grid_low_alt_ft or LOW_ALT_FT
+    grid = list(itertools.product(gap_grid, low_gap_grid, low_ft_grid))
     # a low-altitude rule looser than the general one is inert
     grid = [(g, lg, lft) for (g, lg, lft) in grid if lg <= g]
     todo = [cell for cell in grid if cell not in skip]
