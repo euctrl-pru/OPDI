@@ -9,7 +9,7 @@ import datetime as dt
 
 import pytest
 from pyspark.sql import Row
-from track_score import boundary_error, match_rates, score_arm, vmeasure
+from track_score import boundary_error, match_rates, score_arm, track_extents, vmeasure
 
 _T0 = dt.datetime(2025, 6, 5, 8, 0, 0)
 
@@ -39,6 +39,18 @@ def _matched(spark, pairs, t_source="nm_inferred", t_off=_T0, t_land=_T0 + dt.ti
                 t_source=t_source,
             ))
     return spark.createDataFrame(rows)
+
+
+def _extents_from(matched):
+    """``track_extents`` over ``matched``'s own rows.
+
+    For every test in this file except the boundary-fix ones below, ``matched``
+    already contains every sample a track has -- there is no wider assignment
+    it was clipped from -- so extents computed from it reproduce exactly what
+    the pre-fix code computed inline from ``matched`` itself. Passing this is
+    how the other tests stay numerically unchanged by the ``extents`` parameter.
+    """
+    return track_extents(matched.select("track_id", "event_time"))
 
 
 def test_perfect_segmentation_scores_one(spark):
@@ -114,7 +126,7 @@ def test_score_arm_returns_a_flat_row_of_scalars(spark):
     exact path and blessed the bug it should have caught.
     """
     m = _matched(spark, [("T1", "F1", 10)])
-    row = score_arm(m)
+    row = score_arm(m, _extents_from(m))
     assert set(row) >= {"v_measure", "homogeneity", "completeness",
                         "clean_match_pct", "fragmented_pct", "merged_pct",
                         "n_flights", "n_tracks"}
@@ -136,7 +148,7 @@ def test_boundary_error_on_an_empty_apdf_sample_is_none_not_zero(spark):
     inverts, so it returns None.
     """
     m = _matched(spark, [("T1", "F1", 10)], t_source="nm_inferred")
-    e = boundary_error(m)
+    e = boundary_error(m, _extents_from(m))
     assert e["n_apdf_flights"] == 0
     for f in BOUNDARY_FIELDS:
         assert e[f] is None, f
@@ -163,7 +175,7 @@ def test_boundary_error_measures_the_gap_to_apdf_truth(spark):
         [("T1", "F1", [30, 3555]), ("T2", "F2", [90, 3500])],
         t_source="apdf",
     )
-    e = boundary_error(m)
+    e = boundary_error(m, _extents_from(m))
     assert e["n_apdf_flights"] == 2
     assert e["off_err_p50_s"] == pytest.approx(30.0)
     assert e["off_err_p90_s"] == pytest.approx(90.0)
@@ -192,12 +204,57 @@ def test_boundary_error_breaks_an_exact_track_tie_deterministically(spark):
         [("Ta", "F1", [200, 3200]), ("Tb", "F1", [50, 3550])],
         t_source="apdf",
     )
-    e = boundary_error(m)
+    e = boundary_error(m, _extents_from(m))
     assert e["n_apdf_flights"] == 1
     assert e["off_err_p50_s"] == pytest.approx(200.0)
     assert e["off_err_p90_s"] == pytest.approx(200.0)
     assert e["land_err_p50_s"] == pytest.approx(400.0)
     assert e["land_err_p90_s"] == pytest.approx(400.0)
+
+
+def test_boundary_error_sees_a_merge_that_extends_past_the_interval(spark):
+    """The bug this module's ``extents`` parameter exists to fix.
+
+    ``overlap_join`` restricts ``matched`` to samples already inside
+    ``[t_off, t_land]`` -- that is what an inner join on containment means. A
+    track's *real* first/last sample is not so restricted: a track merging two
+    flights starts before one flight's ATOT and/or ends after another's ALDT,
+    and that overhang is exactly what a boundary-error metric must be able to
+    see, because merging is the failure this whole study exists to catch.
+
+    ``matched`` here holds only two in-interval samples (5 s inside each edge)
+    -- as ``overlap_join`` would actually produce for a merged track, since it
+    physically cannot pass through samples outside the interval. Measured with
+    ``_extents_from(m)`` -- the pre-fix computation, ``trk_start``/``trk_end``
+    taken from ``matched`` itself -- the error is ~5 s: indistinguishable from
+    ordinary sampling noise, and this assertion is run first specifically to
+    prove the old computation really did produce that number here, not assumed.
+    Measured with ``true_extents`` -- the track's real span, built the way
+    ``track_methods.py`` builds it in production, from the *full* assignment
+    table rather than from ``matched`` -- the same track reports the real
+    ~1800 s overhang on both sides.
+    """
+    m = _matched(
+        spark,
+        [("TMERGED", "F1", [5, 3595])],
+        t_source="apdf",
+    )
+
+    pre_fix = boundary_error(m, _extents_from(m))
+    assert pre_fix["off_err_p50_s"] == pytest.approx(5.0)
+    assert pre_fix["land_err_p50_s"] == pytest.approx(5.0)
+
+    true_extents = spark.createDataFrame([
+        Row(track_id="TMERGED",
+            trk_start=_T0 - dt.timedelta(seconds=1800),
+            trk_end=_T0 + dt.timedelta(hours=1) + dt.timedelta(seconds=1800)),
+    ])
+    fixed = boundary_error(m, true_extents)
+    assert fixed["n_apdf_flights"] == 1
+    assert fixed["off_err_p50_s"] == pytest.approx(1800.0)
+    assert fixed["off_err_p90_s"] == pytest.approx(1800.0)
+    assert fixed["land_err_p50_s"] == pytest.approx(1800.0)
+    assert fixed["land_err_p90_s"] == pytest.approx(1800.0)
 
 
 def test_a_flight_both_merged_and_fragmented_counts_as_merged(spark):

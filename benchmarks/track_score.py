@@ -27,7 +27,23 @@ import math
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
-__all__ = ["contingency", "vmeasure", "match_rates", "boundary_error", "score_arm"]
+__all__ = [
+    "contingency", "vmeasure", "match_rates", "track_extents", "boundary_error", "score_arm",
+]
+
+
+def track_extents(assign: DataFrame) -> DataFrame:
+    """One row per track: its true first and last sample time.
+
+    Computed from the **full assignment table** -- ``(icao24, event_time,
+    track_id)``, before ``overlap_join`` restricts anything to a ground-truth
+    interval -- not from ``matched``. See :func:`boundary_error`'s docstring
+    for why the distinction is load-bearing rather than cosmetic.
+    """
+    return assign.groupBy("track_id").agg(
+        F.min("event_time").alias("trk_start"),
+        F.max("event_time").alias("trk_end"),
+    )
 
 
 def contingency(matched: DataFrame) -> DataFrame:
@@ -154,8 +170,8 @@ def match_rates(matched: DataFrame) -> dict:
     }
 
 
-def boundary_error(matched: DataFrame) -> dict:
-    """Seconds between a track's ends and the flight's ATOT/ALDT.
+def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
+    """Seconds between a track's *true* ends and the flight's ATOT/ALDT.
 
     Only over flights whose ``t_source`` is ``"apdf"``.
 
@@ -178,6 +194,25 @@ def boundary_error(matched: DataFrame) -> dict:
 
     Do not "reconcile" the two modules by deleting either statement: the
     measurement in ``track_truth.py`` and the restriction here are both true.
+
+    **``extents`` -- not ``matched`` -- supplies ``trk_start``/``trk_end``, and
+    that is load-bearing, not a style choice.** An earlier version computed them
+    as ``F.min``/``F.max("event_time")`` over ``matched`` itself. But every row
+    in ``matched`` already satisfies ``t_off <= event_time <= t_land`` --
+    ``track_truth.overlap_join`` filters on exactly that -- so ``trk_start`` and
+    ``trk_end`` could *only* land inside ``[t_off, t_land]`` by construction.
+    Three consequences, all silent: the error was one-sided (a track starting
+    before ATOT or ending after ALDT was invisible); what it actually measured
+    was the gap from the nearest in-interval sample to the edge, i.e. sampling
+    cadence, not boundary accuracy; and worst, a track merging two flights --
+    the failure this whole study exists to catch -- starts before one flight's
+    ATOT and/or ends after another's ALDT, and would have scored near-zero error
+    for it. ``extents`` is built by :func:`track_extents` from the *unfiltered*
+    assignment table, so a track's real first/last sample can fall on either
+    side of the interval, and a merge shows up as a large error rather than
+    none. See ``tests/test_track_score.py`` for the fixture that makes this
+    concrete: it is asserted to report ~5 s of error under the old computation
+    (indistinguishable from noise) and the true ~1800 s under this one.
     """
     apdf = matched.filter(F.col("t_source") == "apdf")
     # F.first on t_off/t_land assumes both are constant within a flight_key.
@@ -189,8 +224,6 @@ def boundary_error(matched: DataFrame) -> dict:
     # safe and is not enforced here; if it were ever violated, F.first would pick
     # one t_land arbitrarily rather than fail.
     ends = apdf.groupBy("flight_key", "track_id").agg(
-        F.min("event_time").alias("trk_start"),
-        F.max("event_time").alias("trk_end"),
         F.first("t_off").alias("t_off"),
         F.first("t_land").alias("t_land"),
         F.count(F.lit(1)).alias("n"),
@@ -208,6 +241,13 @@ def boundary_error(matched: DataFrame) -> dict:
         ends.withColumn("_rank", F.row_number().over(tie_break))
         .filter(F.col("_rank") == 1)
         .drop("_rank")
+        # Inner: every track_id reaching here came from `matched`, which itself
+        # came from an `assign` table -- and `extents` is built from that same
+        # `assign` table (see track_methods.py:run_arm), so it must cover every
+        # track_id here. A miss would mean extents were computed from something
+        # other than this run's own assignment, which should fail loudly rather
+        # than silently drop the flight from the percentile.
+        .join(extents, "track_id", "inner")
     )
 
     e = best.select(
@@ -245,8 +285,12 @@ def boundary_error(matched: DataFrame) -> dict:
     }
 
 
-def score_arm(matched: DataFrame) -> dict:
+def score_arm(matched: DataFrame, extents: DataFrame) -> dict:
     """Every metric for one arm, as one flat row ready for a CSV.
+
+    ``extents`` is one row per track_id (``trk_start``, ``trk_end``) from
+    :func:`track_extents`, over the *full* assignment table -- see
+    :func:`boundary_error` for why it cannot be derived from ``matched``.
 
     Every value is a number except the four ``*_err_p*_s`` fields, which are
     ``None`` when the arm's sample contains no APDF-sourced flight -- a blank
@@ -256,6 +300,6 @@ def score_arm(matched: DataFrame) -> dict:
     row = {"n_tracks": matched.select("track_id").distinct().count()}
     row.update(vmeasure(matched))
     row.update(match_rates(matched))
-    row.update(boundary_error(matched))
+    row.update(boundary_error(matched, extents))
     matched.unpersist()
     return row
