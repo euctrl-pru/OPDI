@@ -33,6 +33,14 @@ endpoint rejects batch ``DeleteObjects`` with ``MissingContentMD5`` (DATASETS.md
 cannot reach anything else in a bucket that also holds another project's
 42.81 GB and a colleague's live study.
 
+**Both halves of that streaming survive a crash.** The delete runs on the
+failure path as well as the success path, so an exception in scoring cannot
+orphan an assignment table on a bucket with single-digit GB of headroom; and
+each arm's metric row is appended to the results CSV and flushed as soon as it
+is scored, so a failure on arm 8 does not discard arms 1-7 -- whose tables are
+already deleted, and whose numbers would otherwise cost a full cluster re-run.
+``track_sweep.py`` writes its cells the same way.
+
     python benchmarks/track_methods.py --period 2025 --arms all \\
         --results-dir ../opdi-portal/papers/track-construction-v1/data
 
@@ -184,6 +192,33 @@ def delete_assignment(s3, arm_name: str, period: str) -> tuple:
     return n, freed
 
 
+def release_assignment(s3, arm_name, period, out, keep_assignments, failed=False):
+    """Delete this arm's assignment table -- on the failure path too.
+
+    Called from both branches of :func:`run_arm`, because the table must not
+    outlive the arm either way: the whole point of the streamed design is that
+    peak S3 footprint is one assignment table, and an orphan left behind by a
+    crash silently breaks that against a bucket with single-digit GB of
+    headroom.
+
+    ``failed`` says an exception is already propagating. In that case a *second*
+    failure, in the delete itself, is reported and swallowed rather than allowed
+    to replace the real traceback with an S3 error -- the prefix is printed so
+    the orphan can be removed by hand. On the success path a delete failure is a
+    genuine problem and propagates.
+    """
+    if keep_assignments:
+        print(f"  -- keeping {out} (--keep-assignments)")
+        return
+    try:
+        n_del, freed = delete_assignment(s3, arm_name, period)
+        print(f"  -- deleted {n_del} objects ({freed / 1e9:.3f} GB) from {out}")
+    except Exception as exc:  # noqa: BLE001 -- reported, never hidden
+        if not failed:
+            raise
+        print(f"  !! ORPHAN LEFT at {assign_prefix(arm_name, period)}: {exc}")
+
+
 def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments):
     rule = ARMS[arm_name]()
     assigned = assign_track_id(sv, rule, params)
@@ -196,27 +231,30 @@ def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments):
     n_obj, n_bytes = prefix_size(s3, assign_prefix(arm_name, period))
     print(f"  -> {out} ({n_obj} objects, {n_bytes / 1e9:.3f} GB)")
 
-    assign = spark.read.parquet(out)
-    # Track extents come from the full assignment table, not from `matched`:
-    # `overlap_join` restricts `matched` to samples already inside some
-    # ground-truth flight's [t_off, t_land], so a track's real first/last
-    # sample -- the thing that shows a merge extending past the interval --
-    # would otherwise be structurally invisible. See
-    # track_score.boundary_error's docstring.
-    extents = track_extents(assign)
-    matched = track_truth.overlap_join(assign, gt)
-    row = score_arm(matched, extents)
+    # The delete used to be on the success path only. Scoring is the part that
+    # can raise -- `vmeasure` collects the whole contingency table to the driver
+    # -- so the one failure mode that matters left the table behind on S3
+    # exactly when nothing was going to come back for it.
+    try:
+        assign = spark.read.parquet(out)
+        # Track extents come from the full assignment table, not from `matched`:
+        # `overlap_join` restricts `matched` to samples already inside some
+        # ground-truth flight's [t_off, t_land], so a track's real first/last
+        # sample -- the thing that shows a merge extending past the interval --
+        # would otherwise be structurally invisible. See
+        # track_score.boundary_error's docstring.
+        extents = track_extents(assign)
+        matched = track_truth.overlap_join(assign, gt)
+        row = score_arm(matched, extents)
+    except BaseException:
+        release_assignment(s3, arm_name, period, out, keep_assignments, failed=True)
+        raise
+
     row.update({
         "arm": arm_name, "period": period,
         "assign_objects": n_obj, "assign_bytes": n_bytes,
     })
-
-    if keep_assignments:
-        print(f"  -- keeping {out} (--keep-assignments)")
-    else:
-        n_del, freed = delete_assignment(s3, arm_name, period)
-        print(f"  -- deleted {n_del} objects ({freed / 1e9:.3f} GB) from {out}")
-
+    release_assignment(s3, arm_name, period, out, keep_assignments)
     return row
 
 
@@ -272,20 +310,33 @@ def main():
         descent_floor_ft=cfg.descent_floor_ft,
     )
 
-    rows = []
-    for arm in arms:
-        print(f"\n=== {arm} ({args.period}) ===")
-        rows.append(run_arm(spark, s3, arm, args.period, sv, gt, params, args.keep_assignments))
-        for k, v in rows[-1].items():
-            print(f"  {k:20} {v}")
-
     args.results_dir.mkdir(parents=True, exist_ok=True)
     out = args.results_dir / args.out_name
 
-    with out.open("w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=sorted(rows[0]))
-        w.writeheader()
-        w.writerows(rows)
+    # Each arm's row is appended and flushed the moment it is scored -- the
+    # same pattern track_sweep.py uses, so the two files read alike. Writing
+    # the CSV after the loop meant a crash on arm 8 discarded arms 1-7, whose
+    # assignment tables had already been deleted: the work was not recoverable
+    # without re-running the whole ladder on the cluster.
+    rows = []
+    fh = out.open("w", newline="")
+    writer = None
+    try:
+        for arm in arms:
+            print(f"\n=== {arm} ({args.period}) ===")
+            row = run_arm(
+                spark, s3, arm, args.period, sv, gt, params, args.keep_assignments
+            )
+            rows.append(row)
+            if writer is None:
+                writer = csv.DictWriter(fh, fieldnames=sorted(row))
+                writer.writeheader()
+            writer.writerow(row)
+            fh.flush()
+            for k, v in row.items():
+                print(f"  {k:20} {v}")
+    finally:
+        fh.close()
 
     provenance.record(
         args.results_dir,
