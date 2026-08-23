@@ -48,6 +48,7 @@ from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from track_methods import (  # noqa: E402
     ASSIGN_BASE,
+    BUCKET,
     PERIODS,
     attach_airport_context,
     delete_assignment,
@@ -78,6 +79,45 @@ from opdi.pipeline.segmentation.methods import ARMS  # noqa: E402
 #: entirely -- and using it here would silently benchmark an arm's own track
 #: build against itself rather than against V7's recommended parameters.
 V7_RECOMMENDED_RUN = "shipped"
+
+#: Endpoint candidates are **track-derived** -- ``build_endpoint_candidates``
+#: groups state vectors per ``track_id`` and carries it into the cache -- so
+#: each arm needs its own. Sharing one table would score every arm against
+#: whichever arm wrote last, with nothing in the output to show it. Measured at
+#: ~0.15 GB each (``opdi_endpoint_candidates`` 0.146 GB), so eight cost ~1.2 GB.
+CAND_PREFIX = "research/cand_tc"
+
+
+def candidates_table(arm: str, period: str) -> str:
+    """Storage-relative candidate table for one (arm, period).
+
+    Under ``research/`` so ``guard_writes`` permits the write. The production
+    cache is written ``mode="overwrite"``; pointing an arm at it would destroy
+    data this study does not own.
+    """
+    return f"{CAND_PREFIX}_{arm}_{period}"
+
+
+def delete_prefix(s3, prefix: str) -> tuple:
+    """Delete every object under *prefix*. Returns ``(count, bytes_freed)``.
+
+    Same discipline as ``track_methods.delete_assignment``: single-object
+    deletes, because the OpenSky endpoint rejects batch ``DeleteObjects`` with
+    ``MissingContentMD5``; and every key re-checked against the prefix before
+    it goes, because this bucket also holds another project's 42.81 GB and a
+    colleague's live study, and there is no undo.
+    """
+    if not prefix.startswith("opdi/research/"):
+        raise ValueError(f"refusing to delete outside opdi/research/: {prefix!r}")
+    n = freed = 0
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
+        for o in page.get("Contents", []):
+            key = o["Key"]
+            assert key.startswith(prefix), f"refusing to delete outside {prefix}: {key}"
+            s3.delete_object(Bucket=BUCKET, Key=key)
+            n += 1
+            freed += o["Size"]
+    return n, freed
 
 
 def stage_assignments(period: str, arms: list, days: list, executors: int,
@@ -171,6 +211,14 @@ def main():
                 "--period", args.period,
                 "--runs", V7_RECOMMENDED_RUN,
                 "--track-assign", assign,
+                # Its own candidate table, per arm. Endpoint candidates are
+                # derived from track_id, so they cannot be shared: with one
+                # table each arm would be scored against whichever arm wrote
+                # last, silently. And the production cache is written with
+                # mode="overwrite", so pointing at it would destroy data this
+                # study does not own. flight_list_v7 refuses --track-assign
+                # without this flag.
+                "--candidates-table", candidates_table(arm, args.period),
                 "--results-dir", str(args.results_dir),
                 "--out-name", out.name,
                 "--executors", str(args.executors),
@@ -194,6 +242,11 @@ def main():
             n_del, freed = delete_assignment(s3, arm, args.period)
             print(f"  -- deleted {n_del} objects ({freed / 1e9:.3f} GB) "
                   f"for {arm}/{args.period}")
+            n_del, freed = delete_prefix(
+                s3, f"opdi/{candidates_table(arm, args.period)}/"
+            )
+            print(f"  -- deleted {n_del} candidate objects "
+                  f"({freed / 1e9:.3f} GB) for {arm}/{args.period}")
 
     if not rows:
         return

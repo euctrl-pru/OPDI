@@ -546,9 +546,25 @@ def main() -> None:
     ap.add_argument("--track-assign", default=None,
                     help="assignment table whose track_id replaces the tracks' own "
                          "(see redirect_tracks)")
+    ap.add_argument("--candidates-table", default=None,
+                    help="endpoint-candidate table for this run, overriding the "
+                         "period's own. Required alongside --track-assign: "
+                         "candidates are derived from track_id, so a research "
+                         "arm must not share the production cache")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan and exit; no cluster needed")
     args = ap.parse_args()
+
+    # Fail here rather than forty minutes in, at the write. A redirected
+    # track_id makes the endpoint candidates arm-specific, and the production
+    # cache is written with mode="overwrite", so the pairing is mandatory. The
+    # write guard does catch this, but only after a full build has been paid
+    # for, and only because the production table happens not to sit under
+    # research/ -- which is luck, not a check.
+    if args.track_assign and not args.candidates_table:
+        ap.error("--track-assign requires --candidates-table: endpoint candidates "
+                 "are derived from track_id, so a research arm cannot share the "
+                 "production cache (it is written with mode='overwrite')")
 
     sys.stdout.reconfigure(line_buffering=True)
     period = PERIODS[args.period]
@@ -614,7 +630,16 @@ def main() -> None:
     spark.sparkContext.setLogLevel("ERROR")
     guard_writes()
     index_on_read(period.get("index_on_read"))
-    if period.get("candidates"):
+    # --candidates-table wins over the period's own mapping. Endpoint candidates
+    # are track-derived -- `build_endpoint_candidates` groups state vectors by
+    # `track_id` and carries it into the cache -- so a run whose `track_id` came
+    # from a research arm MUST NOT read or write the shared cache. Two failures
+    # it prevents, both silent: the write is `mode="overwrite"`, so an unguarded
+    # run destroys the production cache; and with one shared table every arm
+    # would be scored against whichever arm happened to write last.
+    if args.candidates_table:
+        redirect_candidates(args.candidates_table)
+    elif period.get("candidates"):
         redirect_candidates(period["candidates"])
     if args.track_assign:
         # The table name a research arm's assignment replaces: the same
