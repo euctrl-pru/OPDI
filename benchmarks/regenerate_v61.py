@@ -358,6 +358,37 @@ def jobs() -> list:
         cand = T_CAND if period == "2025" else T_CAND24
         trk = T_TRACKS if period == "2025" else T_TRACKS24
 
+        # The pipeline arms are 2025 only, and not by preference.
+        #
+        # `process_dai` reads `h3_res_7` straight off the track table, because
+        # step 02 puts it there. The 2024 tracks (`research/tracks`) were built
+        # by an earlier version of this study and pre-date H3 indexing, so the
+        # column does not exist and the run dies on UNRESOLVED_COLUMN. The
+        # sweep harness works around it with `--add-h3`, computing the index at
+        # read time; the pipeline has no such option, and teaching production to
+        # reindex tracks so a benchmark can use an old table would be the wrong
+        # direction entirely.
+        #
+        # V6 met this and resolved it the same way: every one of its 2024 jobs
+        # is a harness job, and it ran `process_dai` on 2025 alone. So the
+        # second period confirms through the sweeps, which read a vote cache
+        # that *was* built with the index computed.
+        if period != "2025":
+            for datum, label in (("field", "height"), ("msl", "fl")):
+                out.append(Job(
+                    f"{label}_sweep_{period}", "benchmarks/trend_sweep_agl.py",
+                    ["--months", months, "--days", *days, "--cache", votes,
+                     "--datum", datum, "--out-name", "trend_sweep.csv",
+                     "--executors", "10"],
+                    {"trend_sweep.csv": f"{label}_sweep_{period}.csv"},
+                    CORE + ["benchmarks/trend_sweep_agl.py",
+                            "benchmarks/elevation_bands.py"],
+                    f"the {datum} curve on the second period. With the pipeline "
+                    f"arms unavailable here, the paired sweeps are this "
+                    f"period's whole confirmation",
+                    inputs=[votes, T_ZONES, T_REF]))
+            continue
+
         # --- Arm A: the datum swap, one variable -------------------------
         out.append(Job(
             f"datum_swap_{period}", "benchmarks/flight_list_v61.py",

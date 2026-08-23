@@ -70,12 +70,33 @@ def test_no_job_runs_v6s_scripts():
 
 def test_both_periods_are_covered():
     """An arm measured on one period and reported as the study's result is the
-    failure this study's own notes keep recording."""
+    failure this study's own notes keep recording.
+
+    The *sweeps* must cover both periods. The pipeline arms cannot -- see the
+    next test -- so the second period confirms through the paired sweeps, and
+    that is asserted rather than assumed.
+    """
     names = {j.name for j in regenerate_v61.jobs()}
-    for arm in ("datum_swap", "elevation_bands", "height_sweep", "fl_sweep",
-                "height_pipeline"):
+    for arm in ("height_sweep", "fl_sweep"):
         assert f"{arm}_2025" in names, arm
         assert f"{arm}_2024" in names, arm
+
+
+def test_the_pipeline_arms_are_2025_only():
+    """Stated as a rule so nobody re-adds a 2024 pipeline arm that cannot run.
+
+    `process_dai` reads `h3_res_7` straight off the track table. The 2024
+    tracks pre-date H3 indexing, so the column is absent and the run dies on
+    UNRESOLVED_COLUMN -- after the 2025 half has already been computed, which
+    is the expensive place to discover it. V6 met the same wall and ran the
+    pipeline on 2025 alone.
+    """
+    names = {j.name for j in regenerate_v61.jobs()}
+    for arm in ("datum_swap", "elevation_bands", "height_pipeline"):
+        assert f"{arm}_2025" in names, arm
+        assert f"{arm}_2024" not in names, (
+            f"{arm}_2024 cannot run: the 2024 tracks carry no h3_res_7"
+        )
 
 
 def test_every_staged_output_name_is_unique():
@@ -141,7 +162,9 @@ def test_arm_c_consumes_what_arm_a_produces():
     file, Arm C fails on a missing path hours into a run -- or worse, reads a
     stale copy left by an earlier one."""
     jobs = {j.name: j for j in regenerate_v61.jobs()}
-    for period in ("2025", "2024"):
+    # 2025 only: the pipeline arms cannot run on 2024, so there is no Arm A
+    # output there for Arm C to consume.
+    for period in ("2025",):
         produced = set(jobs[f"datum_swap_{period}"].outputs.values())
         assert f"per_airport_datum_{period}.csv" in produced
         consumed = " ".join(jobs[f"elevation_bands_{period}"].args)
