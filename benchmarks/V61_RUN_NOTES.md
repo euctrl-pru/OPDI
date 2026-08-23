@@ -316,6 +316,38 @@ unrepresentative — such fields are rare in the sample, and they sit in the one
 band where the method is independently broken. The population that actually
 benefits is 1,500–3,500 ft: Madrid, Ankara, Sofia, Tbilisi.
 
+### Second period, and the ceiling: both confirm
+
+The 2024 sample cannot run the pipeline arms — its tracks pre-date H3 indexing
+and `process_dai` reads `h3_res_7` directly, so it dies on UNRESOLVED_COLUMN.
+V6 met the same wall and ran the pipeline on 2025 alone. The sweeps get around
+it because their vote cache is built with the index computed at read time, so
+the second period confirms the **ceiling** and the **datum comparison** — which
+is what it is able to confirm, and the report claims no more.
+
+**The ceiling replicates.** 6,100 ft above field is the optimum on both periods,
+at every radius from 20 NM outward, production's 30 NM included — an interior
+peak falling away on both sides. A value that survives an independent sample a
+year apart is tuned rather than fitted, so `trend_max_height_ft` needs no change
+and the "provisional, inherited" caveat is retired.
+
+**The datum comparison replicates, including its sign.** Best above-field cell
+against best sea-level cell: −0.02% on 2025, −0.25% on 2024. Both fractions of a
+percent, both the same direction.
+
+**Why the aggregate is the wrong instrument.** 70.0% of ground-truth arrivals
+sit in the `<500 ft` band, where the two datums are the same test by
+construction. A change that cannot move the majority of the sample cannot move
+an average over it, so the aggregate reading is dominated by the aerodromes the
+fix was never about. That is the retrospective justification for making the band
+breakdown the discriminating measurement and reading it first.
+
+**`height_pipeline_2025` was not run, deliberately.** It would walk the ceiling
+through `process_dai` — the check that catches a harness optimum failing to
+survive production. Here it would confirm a value nothing is changing, so it is
+left in the registry rather than spent on a shared cluster. Worth running the
+moment anyone proposes moving the ceiling.
+
 ### The vote cache thrashed, and the top height cap was why
 
 First attempt at building `research/trend_votes_agl` ran for about fifty
