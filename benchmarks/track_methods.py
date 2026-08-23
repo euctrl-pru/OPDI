@@ -21,6 +21,14 @@ Peak S3 footprint is one assignment table, not sixteen. Pass
 ``--keep-assignments`` to skip the deletion, for a future run with headroom to
 spare -- default is to delete.
 
+**The abort gates on free space, not on the total**, and it is re-checked
+before every arm (:func:`require_headroom`). Because the run streams, the
+absolute total is the wrong quantity: what kills a run is a write that has
+nowhere to go, and that depends only on what is free. The total also moves --
+89.47 GB when this check was added, against the 96.89 GB measured on
+2026-08-23 -- both because arms write and delete as they go and because the
+bucket is shared, so a threshold on the total would be stale by the next run.
+
 That streaming is not only a space saving. It means every arm is scored against
 byte-identical input samples, so a difference between two arms cannot be an
 artefact of a different track build -- which, with a ~10 GB non-deterministic
@@ -98,6 +106,14 @@ PERIODS = {
 ZONES = "s3a://eurocontrol/opdi/h3_airport_detection_zones"
 AIRPORTS = "s3a://eurocontrol/opdi/oa_airports"
 
+#: Nominal quota on the OpenSky bucket. Not measured -- there is no API for it
+#: -- so it is stated here as the one assumption the free-space check rests on.
+BUCKET_QUOTA_GB = 100.0
+#: Refuse to start an arm with less than this free. One assignment table is
+#: ~0.31 GB, so 2 GB is roughly six arms' worth of margin against a quota
+#: failure that would otherwise strike after the job printed its results.
+MIN_FREE_GB = 2.0
+
 #: Radius within which a sample counts as "at an aerodrome" for arm A6. 5 NM is
 #: the innermost band the zone table provides and is roughly an airport boundary.
 NEAR_AIRPORT_NM = 5.0
@@ -168,6 +184,42 @@ def bucket_total_gb(s3) -> float:
     """Whole-bucket usage, for the headroom check every run starts with."""
     _, total = prefix_size(s3, "")
     return total / 1e9
+
+
+def require_headroom(s3, label: str) -> float:
+    """Abort unless at least ``MIN_FREE_GB`` of quota is free. Returns free GB.
+
+    **The gate is free space, not the absolute total.** The brief originally
+    said "stop above 85 GB", written when the bucket was believed to be
+    ~67 GB; it is 89.47 GB today, so a literal 85 GB abort would refuse to run
+    at all -- and it would be gating on the wrong quantity anyway. This runner
+    streams: peak footprint is *one* assignment table, measured at ~0.31 GB,
+    not the sixteen an earlier draft assumed. What can actually kill a run is
+    a write that exceeds quota, which fails after the job has printed its
+    results and before anything persists, and that depends only on what is
+    free.
+
+    Checked **before every arm**, not once at startup: the total moves during a
+    run -- each arm writes ~0.31 GB and gets it back on delete, ``--keep-assignments``
+    never gets it back, and the bucket is shared with another project and a
+    colleague's live study, so it can move for reasons this process does not
+    control.
+    """
+    used = bucket_total_gb(s3)
+    free = BUCKET_QUOTA_GB - used
+    print(
+        f"bucket ({label}): {used:.2f} GB used of ~{BUCKET_QUOTA_GB:.0f} GB, "
+        f"{free:.2f} GB free"
+    )
+    if free < MIN_FREE_GB:
+        raise SystemExit(
+            f"aborting before {label}: only {free:.2f} GB free of the "
+            f"~{BUCKET_QUOTA_GB:.0f} GB quota ({used:.2f} GB used), below the "
+            f"{MIN_FREE_GB:.2f} GB this runner requires. One assignment table "
+            "is ~0.31 GB and a write that exceeds quota fails after the job "
+            "has printed its results. Free space, or pass a smaller --days."
+        )
+    return free
 
 
 def delete_assignment(s3, arm_name: str, period: str) -> tuple:
@@ -280,7 +332,9 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
     load_dotenv()
     s3 = s3_client()
-    print(f"bucket: {bucket_total_gb(s3):.2f} GB used of ~100 GB before this run")
+    # Once here, before Spark starts, so a bucket with no room costs a second
+    # rather than a session; and again before each arm, in the loop below.
+    require_headroom(s3, "startup")
 
     osn_sample.UI_PORT = args.ui_port
     osn_sample.RESEARCH_EXECUTORS = args.executors
@@ -324,6 +378,7 @@ def main():
     try:
         for arm in arms:
             print(f"\n=== {arm} ({args.period}) ===")
+            require_headroom(s3, f"arm {arm}")
             row = run_arm(
                 spark, s3, arm, args.period, sv, gt, params, args.keep_assignments
             )
@@ -355,7 +410,10 @@ def main():
         notes=f"near_airport radius for arm A6: {NEAR_AIRPORT_NM} NM. days={days}.",
     )
     print(f"\n-> {out}")
-    print(f"bucket: {bucket_total_gb(s3):.2f} GB used of ~100 GB after this run")
+    print(
+        f"bucket: {bucket_total_gb(s3):.2f} GB used of ~{BUCKET_QUOTA_GB:.0f} GB "
+        "after this run"
+    )
     spark.stop()
 
 
