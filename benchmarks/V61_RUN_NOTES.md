@@ -267,6 +267,55 @@ table was built by.
 moved with it. `LEGACY_TREND_VERSION` (`v2.0.0`) and `LEGACY_ENDPOINT_VERSION`
 (`v3.0.0`) are untouched, as they must be.
 
+### Result, first period: the mechanism is real and does not pay for itself
+
+2025-06-05..07, both arms through `process_dai` itself, FL60 against 6,100 ft
+above field — the same ceiling, so only the datum moves.
+
+**Arm C, arrivals, read before the headline** (Δ is field minus sea level):
+
+| Band | Aerodromes | Truth | Correct MSL | Δ | Δ less top mover | Δ less busiest | Δ relative |
+|---|---|---|---|---|---|---|---|
+| `<500` *(control)* | 490 | 66,612 | 49,514 | +57 | +33 | +57 | **+0.12%** |
+| `500-1500` | 164 | 15,285 | 12,593 | +28 | +17 | +28 | +0.22% |
+| `1500-3000` | 77 | 4,434 | 1,919 | +109 | +70 | +110 | **+5.7%** |
+| `>3000` | 26 | 705 | 5 | 0 | 0 | 0 | — |
+
+The relative column is the honest one: the bands differ in size by two orders of
+magnitude, so absolute deltas flatter the big ones. On that basis the effect in
+the treatment band is about **forty times** the control's, and it survives both
+robustness checks the census forced.
+
+**Departures move by exactly zero in every band.** `endpoint` serves departures
+and never reads `trend`'s cut, so anything else there would have meant the
+change was reaching somewhere it should not. Cheapest available confirmation
+that the intervention is the one described.
+
+**But the cost side fails two of the three adoption criteria:**
+
+| Run | Coverage | Accuracy | Correct | Wrong | Score (k=2) |
+|---|---|---|---|---|---|
+| `legacy` | 66.99% | 98.19% | 62,564 | 1,151 | 60,262 |
+| `datum_msl` | 68.29% | 98.58% | 64,031 | 923 | 62,185 |
+| `datum_field` | 68.60% | 98.42% | 64,225 | 1,028 | **62,169** |
+
+194 more correct arrivals for 105 more wrong. Coverage +0.31 pp against a
+0.5 pp bar; accuracy −0.16 pp; score sixteen points the wrong way. **Does not
+ship on this evidence.** The criteria were fixed in the design before any of
+these numbers existed, which is the only reason this counts as a result.
+
+**The `>3000` band is not a null result about the datum.** Five correct
+arrivals out of 705, on *both* datums, is a recall of 0.7% — a method receiving
+almost nothing rather than one mis-tuned. Most of that band's traffic sits over
+the Anatolian plateau, and the feasibility census already showed the same
+pattern: an aerodrome the feed barely sees cannot be named on any datum.
+
+This retires the design's motivating example. Erzurum at 5,763 ft, with ~240 ft
+of vote room under FL60, is arithmetically correct and **doubly**
+unrepresentative — such fields are rare in the sample, and they sit in the one
+band where the method is independently broken. The population that actually
+benefits is 1,500–3,500 ft: Madrid, Ankara, Sofia, Tbilisi.
+
 ### The vote cache thrashed, and the top height cap was why
 
 First attempt at building `research/trend_votes_agl` ran for about fifty
