@@ -199,7 +199,40 @@ V6 already explains both methods at `index.qmd:336` and `index.qmd:456`. Audit
 what is there, carry across what still holds, and write only the genuinely
 missing steps — do not duplicate existing text.
 
-## Success criteria
+## Adoption decision — supersedes the criteria below
+
+**Decided 2026-08-23: the change ships, on correctness grounds, independent of
+the benchmark.**
+
+The criteria below were written to answer "is this worth doing?" That was the
+wrong question to gate on. A ceiling measured from sea level is not the same
+test at different aerodromes — 6,000 ft of usable climb at Amsterdam, 2,975 at
+Ankara, about 240 at Erzurum — and nobody chose that gradient. It is an artefact
+of which datum the threshold happened to be written against, and it makes the
+method's willingness to answer depend on the terrain under the aerodrome rather
+than on the evidence in the trajectory. `endpoint` was corrected on exactly this
+reasoning in V6, and step 04 in the same release; `trend` was the last one left.
+
+So the benchmark's job here is not to veto the fix but to **price** it, which it
+has done. Measured on 2025-06-05…07 through `process_dai` itself:
+
+* arrivals coverage **68.29% → 68.60%** (+0.31 pp)
+* arrivals accuracy **98.58% → 98.42%** (−0.16 pp)
+* **+194 correct, +105 wrong**; score at *k*=2 down 16
+* relative gain **+5.7%** in the 1,500–3,000 ft band against **+0.12%** in the
+  sea-level control, surviving both robustness controls
+* departures unchanged in every band, as they must be
+
+Criteria 1 and 2 below are therefore **not met**, and the change is adopted
+anyway. That is recorded rather than quietly dropped: a study whose bar moves to
+meet its outcome has measured nothing. The bar did not move — a decision
+overrode it, and those are different things.
+
+One consequence carries forward: the shipped ceiling is inherited from a sweep
+conducted on the datum now abandoned, so it is **provisional, not tuned**. The
+`height_sweep_*` arms answer that, and they are cheap.
+
+## Success criteria *(as originally written — superseded above)*
 
 The change ships to production only if **all three** hold:
 
