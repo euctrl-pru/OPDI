@@ -626,15 +626,26 @@ def main() -> None:
     # triggers a rebuild the write guard would refuse. Copying that one log in
     # makes the existing cache visible; the DAI log is deliberately left out so
     # this run records its own progress rather than appending to production's.
-    log_dir = out / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # With --candidates-table the cache is this run's own and starts empty, so
+    # the log must start empty too and must not be shared. Both matter, and both
+    # were found the hard way: several arms writing into one --results-dir share
+    # one "logs" directory, so arm 1 built its candidates, recorded the month as
+    # done, and every later arm skipped the build and then failed reading the
+    # table it had never written. Seeding it from production's log does the same
+    # thing to arm 1.
     cand_log = "03_osn-endpoint_candidates-etl-log.parquet"
-    src_log = args.pipeline_logs / cand_log
-    if src_log.exists() and not (log_dir / cand_log).exists():
-        import shutil
-        (shutil.copytree if src_log.is_dir() else shutil.copy2)(
-            src_log, log_dir / cand_log)
-        print(f"reusing endpoint candidate cache per {src_log}")
+    if args.candidates_table:
+        log_dir = out / f"logs-{args.candidates_table.replace('/', '_')}"
+        log_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        log_dir = out / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        src_log = args.pipeline_logs / cand_log
+        if src_log.exists() and not (log_dir / cand_log).exists():
+            import shutil
+            (shutil.copytree if src_log.is_dir() else shutil.copy2)(
+                src_log, log_dir / cand_log)
+            print(f"reusing endpoint candidate cache per {src_log}")
 
 
     load_dotenv()
@@ -685,7 +696,12 @@ def main() -> None:
     # put it beside the log-directory setup, where `month` does not yet exist,
     # and `--dry-run` returns before reaching it -- so the dry run passed and
     # the real run died on an UnboundLocalError.
-    if period.get("candidates"):
+    # Not when --candidates-table is set: this shortcut says "the candidates
+    # already exist, made by the chain's own stage", which is true of the
+    # period's own table and false of a per-arm one that nothing has written
+    # yet. Marking it built made every 2024 arm skip the build and then fail
+    # reading an absent table.
+    if period.get("candidates") and not args.candidates_table:
         import pandas as pd
 
         log_path = log_dir / cand_log
