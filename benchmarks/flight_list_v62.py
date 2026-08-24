@@ -51,6 +51,7 @@ production flight list and a mistyped argument would otherwise overwrite it.
 
 import argparse
 import csv
+import dataclasses
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -422,6 +423,27 @@ def main() -> None:
     # by hand can disagree with the one that ships; this one cannot.
     recommended = DetectionConfig()
 
+    # The datum pair: one variable, at the shipped geometry.
+    #
+    # Distinct from the path walk's rung 5, and both are wanted. Rung 5 moves
+    # the datum at the *swept-tuned* geometry, which says what the datum is
+    # worth to a configuration tuned around it; this pair moves it at the
+    # *shipped* geometry, which says what the change did to production. They
+    # can disagree, and a study that reported only one would not know.
+    #
+    # Both start from `DetectionConfig()` and change only the datum and the
+    # ceiling, at the same admitted band -- FL60 reaches 6,100 ft, so 6,100 is
+    # the matching above-field ceiling. This pair also produces the per-airport
+    # counts the elevation banding is read from, so the banded numbers cannot
+    # disagree with the headline ones.
+    datum = {
+        "datum_msl": dataclasses.replace(
+            recommended, trend_max_datum="msl", trend_max_fl=60),
+        "datum_field": dataclasses.replace(
+            recommended, trend_max_datum="field",
+            trend_max_height_ft=DATUM_ARM_CEILING_FT),
+    }
+
     # A grid of trend settings, run through the pipeline rather than the sweep
     # harness. This exists because the harness's optimum was found against a
     # ranking rule the pipeline did not have; now that it does, the harness is
@@ -444,6 +466,11 @@ def main() -> None:
     plan = {
         **{k_: (v_, "trend", "trend") for k_, v_ in grid.items()},
         **{k_: (v_, "trend", "trend") for k_, v_ in path.items()},
+        # At the shipped modes, not forced to trend/trend: the pair is meant to
+        # measure what the datum did to production, and production takes
+        # departures from endpoint.
+        **{k_: (v_, recommended.adep_mode, recommended.ades_mode)
+           for k_, v_ in datum.items()},
         "recommended": (recommended, "endpoint", "trend"),
         "legacy": (DetectionConfig.legacy(), "trend", "trend"),
         "trend": (single("trend"), "trend", "trend"),
