@@ -601,11 +601,17 @@ def jobs() -> list:
             inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
 
         # --- the datum arms, carried over from v6.1 -------------------------
+        # The sweeps are passed even though the datum arms do not tune from
+        # them: `flight_list_v62.py` requires both, and builds the path walk
+        # and grid whether or not the run list asks for those runs.
         Job("datum_swap_2025", "benchmarks/flight_list_v62.py",
             ["--months", "202506", "--days", *DAYS_2025,
+             "--trend-sweep", str(DATA / "height_sweep_2025.csv"),
+             "--trend-sweep-msl", str(DATA / "fl_sweep_2025.csv"),
+             "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
              "--runs", "datum_msl", "datum_field", "legacy",
-             "--out-name", "datum_comparison.csv", "--executors", "10"],
-            {"datum_comparison.csv": "datum_swap_2025.csv",
+             "--trend-rank-by", "haversine", "--executors", "10"],
+            {"mode_comparison_v6.csv": "datum_swap_2025.csv",
              "per_airport_v6.csv": "per_airport_datum_2025.csv"},
             CORE + ["src/opdi/pipeline/flights.py", "src/opdi/config.py",
                     "benchmarks/flight_list_v62.py"],

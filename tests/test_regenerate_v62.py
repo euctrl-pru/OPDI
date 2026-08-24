@@ -297,6 +297,52 @@ def test_the_grid_brackets_the_shipped_ceiling():
     assert 6100 in flight_list_v62.GRID_HEIGHT_CAPS
 
 
+def _script_source(job):
+    return (Path(__file__).resolve().parent.parent / job.script).read_text()
+
+
+def test_every_flag_a_job_passes_exists_in_the_script_it_runs():
+    """argparse rejects unknown flags, and the run dies at second zero -- but
+    only once it is reached, which for a job at the end of the chain is hours
+    in, after everything before it has already been computed.
+
+    This caught `--out-name` being passed to `flight_list_v62.py`, which is
+    v6.1's interface: the flag was never ported when the job was repointed at
+    the new script.
+    """
+    for job in regenerate_v62.jobs():
+        src = _script_source(job)
+        for flag in (a for a in _args(job) if a.startswith("--")):
+            assert f'"{flag}"' in src, (
+                f"{job.name} passes {flag}, which {job.script} does not define")
+
+
+def test_every_required_flag_is_supplied():
+    """The mirror image: a missing required flag is the same failure, and the
+    same delay before anyone finds out."""
+    import re
+    for job in regenerate_v62.jobs():
+        src = _script_source(job)
+        required = set(re.findall(
+            r'add_argument\(\s*"(--[a-z0-9-]+)"[^)]*required=True', src, re.S))
+        passed = {a for a in _args(job) if a.startswith("--")}
+        # `--results-dir` is supplied by the runner, not by the job.
+        missing = required - passed - {"--results-dir"}
+        assert not missing, f"{job.name} omits required {sorted(missing)}"
+
+
+def test_every_expected_output_is_a_filename_the_script_writes():
+    """A job whose `outputs` key names a file the script never produces fails
+    in `Job.run` with 'did not produce X' -- after the Spark work is done and
+    thrown away. This caught `datum_comparison.csv`, which is what v6.1's
+    runner wrote and v6.2's does not."""
+    for job in regenerate_v62.jobs():
+        src = _script_source(job)
+        for produced in job.outputs:
+            assert produced in src, (
+                f"{job.name} expects {produced}, which {job.script} never writes")
+
+
 def test_arm_c_consumes_what_arm_a_produces():
     """Arm C reads Arm A's per-airport CSV by name. If Arm A stops staging that
     file, Arm C fails on a missing path hours into a run -- or worse, reads a
