@@ -30,12 +30,44 @@ def test_the_paper_is_v62_and_not_v6_v61_or_v7():
     assert regenerate_v62.DATA.parent.name == "adep-ades-detection-v6.2"
 
 
-def test_no_job_writes_into_a_frozen_paper():
+def test_only_the_equivalence_check_may_even_mention_v6s_directory():
+    """V6 is frozen. One job reads its committed sweep -- that is the evidence
+    for retiring two jobs -- and no other job has any business naming it.
+
+    V7 and v6.1 are off limits entirely.
+    """
     for job in regenerate_v62.jobs():
         joined = " ".join(_args(job))
-        assert "adep-ades-detection-v6/" not in joined, job.name
         assert "adep-ades-detection-v7/" not in joined, job.name
         assert "adep-ades-detection-v6.1/" not in joined, job.name
+        if "adep-ades-detection-v6/" in joined:
+            assert job.name == "sweep_equivalence", (
+                f"{job.name} names V6's directory; only the equivalence check "
+                f"may, and only to read it")
+
+
+def test_every_output_is_staged_by_name_not_by_path():
+    """`Job.run` copies each output into this study's own DATA directory, so a
+    bare filename cannot escape it. A path here would mean a job writing
+    wherever it likes -- including over a frozen paper's figures."""
+    for job in regenerate_v62.jobs():
+        for produced, staged in job.outputs.items():
+            assert "/" not in produced, f"{job.name}: {produced}"
+            assert "/" not in staged, f"{job.name}: {staged}"
+
+
+def test_the_equivalence_check_reads_both_periods_and_needs_no_cluster():
+    """A one-period check would license retiring only one of the two jobs.
+    And it must stay cluster-free, or the cheapest guard in the study becomes
+    the one nobody can run."""
+    jobs = {j.name: j for j in regenerate_v62.jobs()}
+    args = " ".join(_args(jobs["sweep_equivalence"]))
+    assert "trend_sweep_2025.csv" in args
+    assert "trend_sweep_2024.csv" in args
+    assert "fl_sweep_2025.csv" in args
+    assert "fl_sweep_2024.csv" in args
+    assert "--executors" not in args
+    assert jobs["sweep_equivalence"].inputs == []
 
 
 def test_the_vote_caches_are_the_agl_ones():

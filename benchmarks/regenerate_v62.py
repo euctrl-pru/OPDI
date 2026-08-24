@@ -74,6 +74,11 @@ def _find_portal() -> Path:
 PAPER = _find_portal() / "papers" / "adep-ades-detection-v6.2"
 DATA = PAPER / "data"
 
+#: V6's committed data, READ ONLY. The equivalence check joins against it, and
+#: that is the only reason this study knows where V6's directory is. Nothing
+#: writes here -- a test asserts it.
+V6_DATA = _find_portal() / "papers" / "adep-ades-detection-v6" / "data"
+
 DAYS_2025 = ["2025-06-05", "2025-06-06", "2025-06-07"]
 DAYS_2024 = ["2024-06-05", "2024-06-06", "2024-06-07"]
 
@@ -421,6 +426,25 @@ def jobs() -> list:
             "the sea-level curve on the second period, and the replacement for "
             "V6's trend_sweep_2024",
             inputs=[T_VOTES24, T_ZONES, T_REF]),
+
+        # --- the evidence for retiring V6's trend sweeps --------------------
+        #
+        # Needs no cluster: it reads two committed CSVs. Registered as a job
+        # anyway, because "the sea-level arm reproduces V6's sweep" is a load-
+        # bearing claim -- two jobs were deleted on the strength of it -- and a
+        # load-bearing claim asserted in prose is exactly what this module
+        # exists to stop.
+        Job("sweep_equivalence", "benchmarks/sweep_equivalence.py",
+            ["--pairs",
+             f"2025={V6_DATA / 'trend_sweep_2025.csv'},"
+             f"{DATA / 'fl_sweep_2025.csv'}",
+             f"2024={V6_DATA / 'trend_sweep_2024.csv'},"
+             f"{DATA / 'fl_sweep_2024.csv'}"],
+            {"sweep_equivalence.csv": "sweep_equivalence.csv"},
+            ["benchmarks/sweep_equivalence.py"],
+            "cell-by-cell join of V6's committed trend sweep against the "
+            "sea-level arm of this study's paired sweep, on both periods. Any "
+            "non-zero count here means retiring V6's sweep jobs was wrong"),
 
         # --- the endpoint family: datum-independent ------------------------
         #
