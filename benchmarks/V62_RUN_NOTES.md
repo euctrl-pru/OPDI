@@ -124,10 +124,109 @@ the check usable.
 
 ## Results
 
-<!-- Filled in when the campaign completes. Deliberately empty rather than
-     populated with numbers carried over from v6.1: the whole point of the
-     campaign is that the pipeline arms are recomputed on the shipped datum,
-     and quoting the old ones here would defeat it. -->
+All 19 jobs current; 27 CSVs, all traced to a command, none unverified.
+
+### The headline
+
+`recommended` scores **134,132** against `legacy`'s **122,158** across both
+roles — a gain of **+11,974** on 95,116 reference flights.
+
+### The datum, at the shipped geometry
+
+`datum_field` against `datum_msl`, arrivals, everything else held: **+194
+correct, +105 wrong, score −16**; coverage +0.31 pp, accuracy −0.15 pp. And
+**departures +0 correct**, which is the check that matters — `endpoint` serves
+that role and the datum must not touch it.
+
+These reproduce v6.1's numbers exactly, which is a real validation: the arms
+moved from `flight_list_v61.py` to `flight_list_v62.py` and the port changed
+nothing but the file they live in.
+
+### The bands, which are the discriminating measurement
+
+| Band | n | Δ correct | relative | leave-one-out | ex-busiest |
+|---|---|---|---|---|---|
+| `<500` | 66,612 | +57 | +0.12% | +33 | +57 |
+| `500-1500` | 15,285 | +28 | +0.22% | +17 | +28 |
+| `1500-3000` | 4,434 | **+109** | **+5.68%** | +70 | +110 |
+| `>3000` | 705 | 0 | — | 0 | 0 |
+| departures, every band | — | **0** | — | 0 | 0 |
+
+The gradient is what elevation predicts, and the `1500-3000` result survives
+both robustness controls: dropping the largest mover still leaves +70, and
+dropping the busiest aerodrome leaves +110. Not a Madrid artefact.
+
+### 6,000 ft against 6,100 ft — settled, in favour of what ships
+
+Through `process_dai`, best arrival score at **6,000 ft is 61,698** and at
+**6,100 ft is 61,654**. 6,000 wins at both radii (+40 at 20 NM, +44 at 30 NM).
+Inside sampling noise, so the conclusion is that the shipped value stands, not
+that 6,100 is beaten — but the sweep's preference for 6,100 does not survive
+contact with the pipeline, which is the pattern V6 found for its FL cap.
+
+This is the check v6.1 deliberately skipped, on the belief that 6,100 was
+already shipping. It was not.
+
+### The tuning ladder, with the datum as its fifth rung
+
+| Rung | Exact distance | Ring selection |
+|---|---|---|
+| `path0_legacy` | 59,884 | 60,262 |
+| `path1_penalty` | +825 | +279 |
+| `path2_ceiling` | +791 | **−1,642** |
+| `path3_margin` | +160 | +124 |
+| `path4_radius` | −193 | −64 |
+| `path5_datum` | **+11** | **−187** |
+
+The datum rung is worth **+11** under exact distance — negligible, and exactly
+what @sec-dilution predicts, since 70.0% of arrivals sit in the `<500` band
+where the two datums are the same test. The ladder also reproduces V6's central
+result independently: the ceiling step is +791 under exact distance and −1,642
+under ring, same parameter and same data with opposite signs.
+
+Rungs 0–4 sit on the sea-level datum and rung 5 is the only one that moves it.
+That is the design working; see the plan-bug note above for what the
+alternative would have reported.
+
+## What this study found about earlier versions
+
+Two claims in V6's published report do not hold, and both were found by
+computing what V6 had typed.
+
+**`trend_radius_nm` does not ship at 20 NM.** V6's "What ships" table says it
+does; `DetectionConfig()` has **30**. The recommendation was made and never
+applied, and every later version copied the claim rather than measuring it.
+V6.2's table is generated from the `recommended` run — a bare
+`DetectionConfig()` — so it cannot drift again. `trend_vote_margin` is
+similarly **0**, not the 2 V6 records.
+
+**Arrivals do not prefer the tighter radius at every cell.** V6 reports that
+both roles do, and cites it as the stronger evidence for lowering the radius.
+On the shipped datum arrivals prefer the *wider* 30 NM at every ceiling from
+6,000 ft up — which includes the ceiling that ships. So the un-applied
+recommendation turned out to be the right thing not to apply.
+
+Neither is corrected in `config.py` here. Changing a published default is the
+maintainers' decision; this study's job was to make the gap visible.
+
+## Input drift, and a verification withdrawn
+
+`opdi_endpoint_candidates` was rebuilt on 2026-08-22, after V6 published:
+12% smaller, fresh-broadcast share roughly tripled (0.10 → 0.35). `cand_2024`,
+`research/reference` and both vote caches also moved. Only
+`h3_airport_detection_zones` and `osn_tracks` are marker-only — byte-identical
+with the same mtime.
+
+**Ground truth did not move for this study.** `research/reference` grew by
+gaining other periods; the three-day slice still carries 95,116 and 92,799
+reference flights, the same counts V6 reported, and `sweep_equivalence`
+confirms it independently at 371 cells with zero differences on each period.
+
+The cost is that the endpoint family's numbers are no longer comparable to
+V6's, so the intended *direct* verification that the datum leaves departures
+alone is unavailable and is not claimed. The within-study evidence — departures
++0 in every band, both arms on the same candidate table — stands in its place
+and is reported as the weaker thing it is.
 
 ## Not run
 
