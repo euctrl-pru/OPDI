@@ -30,9 +30,14 @@ def test_the_paper_is_v62_and_not_v6_v61_or_v7():
     assert regenerate_v62.DATA.parent.name == "adep-ades-detection-v6.2"
 
 
-def test_only_the_equivalence_check_may_even_mention_v6s_directory():
-    """V6 is frozen. One job reads its committed sweep -- that is the evidence
-    for retiring two jobs -- and no other job has any business naming it.
+#: The only jobs with any business naming V6's directory, and both only read
+#: it: one compares its committed sweep, the other its recorded input
+#: identities. Any third would need justifying, so the list is explicit.
+V6_READERS = {"sweep_equivalence", "input_drift"}
+
+
+def test_only_the_named_checks_may_even_mention_v6s_directory():
+    """V6 is frozen. Two jobs read it as evidence; no other job should name it.
 
     V7 and v6.1 are off limits entirely.
     """
@@ -41,9 +46,20 @@ def test_only_the_equivalence_check_may_even_mention_v6s_directory():
         assert "adep-ades-detection-v7/" not in joined, job.name
         assert "adep-ades-detection-v6.1/" not in joined, job.name
         if "adep-ades-detection-v6/" in joined:
-            assert job.name == "sweep_equivalence", (
-                f"{job.name} names V6's directory; only the equivalence check "
+            assert job.name in V6_READERS, (
+                f"{job.name} names V6's directory; only {sorted(V6_READERS)} "
                 f"may, and only to read it")
+
+
+def test_the_drift_check_reads_v6s_manifest():
+    """The claim that v6.2 recomputes v6 with one variable changed is only
+    true if nothing else moved. It did -- the candidate table was rebuilt --
+    so the drift is measured on every render rather than remembered here."""
+    jobs = {j.name: j for j in regenerate_v62.jobs()}
+    args = " ".join(_args(jobs["input_drift"]))
+    assert "_manifest.json" in args
+    assert "adep-ades-detection-v6/" in args
+    assert "--executors" not in args      # no cluster needed
 
 
 def test_every_output_is_staged_by_name_not_by_path():

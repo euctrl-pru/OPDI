@@ -446,18 +446,39 @@ def jobs() -> list:
             "sea-level arm of this study's paired sweep, on both periods. Any "
             "non-zero count here means retiring V6's sweep jobs was wrong"),
 
+        # --- what moved underneath this study since V6 ----------------------
+        #
+        # V6.2 claims to recompute V6 with one variable changed. That claim is
+        # checkable, and it does not fully hold: `opdi_endpoint_candidates` was
+        # rebuilt after V6 published. Measuring the drift is the only way the
+        # report can say which of its numbers are comparable to V6's.
+        Job("input_drift", "benchmarks/input_drift.py",
+            ["--baseline", str(V6_DATA / "_manifest.json")],
+            {"input_drift.csv": "input_drift.csv"},
+            ["benchmarks/input_drift.py"],
+            "each input table's identity as V6 recorded it, against the table "
+            "as it stands now. Distinguishes the zero-byte directory marker "
+            "that s3_identity stopped counting -- bookkeeping -- from a table "
+            "genuinely rebuilt, which moves every figure derived from it"),
+
         # --- the endpoint family: datum-independent ------------------------
         #
-        # These four are expected to reproduce V6's numbers exactly. They are
-        # re-run rather than carried over because their recorded input identity
-        # moved when `provenance.s3_identity` stopped counting MinIO's
-        # zero-byte directory marker, and hand-patching a manifest to clear a
-        # staleness flag is the precise failure that module exists to prevent.
+        # These four do not read the trend altitude cut at all, so the datum
+        # cannot move them.
         #
-        # Running them buys something real: V6.1 could only *infer* that the
-        # datum change leaves departures alone, from departures scoring zero in
-        # every elevation band. Recomputing the endpoint path under the new
-        # code and getting the same numbers verifies it directly.
+        # They were expected to reproduce V6's numbers exactly, and they do
+        # not. The reason is not the datum: `opdi_endpoint_candidates` was
+        # rebuilt on 2026-08-22, after V6 published -- 12% smaller, with the
+        # fresh-broadcast share roughly tripled. `input_drift` above measures
+        # that, and the report states it rather than presenting the difference
+        # as a result.
+        #
+        # The consequence is worth being precise about. It costs this study the
+        # *direct* verification that the datum leaves departures alone -- V6's
+        # endpoint numbers and V6.2's are no longer a controlled comparison.
+        # What survives is the within-study evidence: departures score zero in
+        # every elevation band of `elevation_bands_2025`, where both arms read
+        # the same candidate table. Weaker, and reported as such.
         Job("endpoint_sweeps", "benchmarks/benchmark_modes.py",
             ["--months", "202506", "--days", *DAYS_2025, "--sweeps-only"],
             {"sweep_radius_height.csv": "sweep_radius_height_2025.csv",
