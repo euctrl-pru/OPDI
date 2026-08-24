@@ -135,7 +135,11 @@ def jobs() -> list:
         out.append(Job(
             name=f"arms_{period}",
             script="benchmarks/track_methods.py",
-            args=["--period", period, "--arms", "all"],
+            # --out-name is explicit: track_methods.py defaults to "arms.csv",
+            # so declaring the staged name alone leaves the job producing a
+            # file this spec never looks for.
+            args=["--period", period, "--arms", "all",
+                  "--out-name", f"arms_{period}.csv"],
             outputs={f"arms_{period}.csv": f"arms_{period}.csv"},
             code_paths=SEG + SCORE + ["benchmarks/track_methods.py"],
             notes="Eight segmentation arms scored against NM/APDF ground truth.",
