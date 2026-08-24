@@ -438,9 +438,47 @@ def test_every_registered_arm_runs(spark):
         assert n_tracks(out) >= 1, name
 
 
-def test_recommended_is_at_least_as_aggressive_as_the_arms_it_combines(spark):
-    """A8 is A5 OR A6, so it can never split less than either of them."""
-    df = _continuous_parked_turnaround(spark)
-    combined = n_tracks(assign_track_id(df, recommended(), P))
-    assert combined >= n_tracks(assign_track_id(df, ground_anchored(), P))
-    assert combined >= n_tracks(assign_track_id(df, airport_anchored(), P))
+def _blank_callsign_gap(spark):
+    """One continuous flight whose callsign drops out in the middle.
+
+    This is the common case, not a corner: 42.4% of legacy's tracks on the 2025
+    sample are blank-callsign tracks produced exactly this way.
+    """
+    rows = [{"t": i * 60, "callsign": "ABC123"} for i in range(5)]
+    rows += [{"t": (5 + i) * 60, "callsign": ""} for i in range(5)]
+    rows += [{"t": (10 + i) * 60, "callsign": "ABC123"} for i in range(5)]
+    return make_track(spark, rows)
+
+
+def test_recommended_does_not_split_when_the_callsign_merely_blanks_out(spark):
+    """The fragmentation A8 exists to fix, and legacy's own failure mode.
+
+    ``legacy`` groups on ``(icao24, callsign)``, so the blank run lands in a
+    group of its own and the one flight becomes two tracks. A8 groups on the
+    airframe and carries the last *real* callsign across the blanks, so it stays
+    one. Asserting legacy's count as well makes this a comparison rather than a
+    number that could drift to 1 for an unrelated reason and still pass.
+
+    Two, not three: both ``ABC123`` runs share one group, and the 6 minutes
+    between them is under ``low_alt_gap_minutes``, so nothing splits them from
+    each other. Only the blank run separates. Written as three first, and the
+    test corrected the expectation.
+    """
+    df = _blank_callsign_gap(spark)
+    assert n_tracks(assign_track_id(df, legacy(), P)) == 2
+    assert n_tracks(assign_track_id(df, recommended(), P)) == 1
+
+
+def test_recommended_splits_when_the_callsign_genuinely_changes(spark):
+    """The merging A8 exists to avoid, which ``airframe_only`` cannot.
+
+    Two flights of one airframe, continuous samples and no gap between them --
+    so no gap rule can separate them and only the callsign says there are two.
+    ``airframe_only`` drops callsign entirely and returns one track; A8 returns
+    two. 3.3% of airframe_only's real tracks are this case.
+    """
+    rows = [{"t": i * 60, "callsign": "ABC123"} for i in range(5)]
+    rows += [{"t": (5 + i) * 60, "callsign": "XYZ789"} for i in range(5)]
+    df = make_track(spark, rows)
+    assert n_tracks(assign_track_id(df, airframe_only(), P)) == 1
+    assert n_tracks(assign_track_id(df, recommended(), P)) == 2

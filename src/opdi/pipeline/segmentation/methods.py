@@ -393,19 +393,57 @@ def vertical_profile() -> BreakRule:
 def recommended() -> BreakRule:
     """A8 -- the combination the study recommends.
 
-    Placeholder until the ladder has run: currently ground-anchored grouping with
-    the airport test as a guard. **Task 9 replaces this body with whatever the
-    measured results support, and the paper states the evidence.** Do not ship a
-    v2 on this default.
+    Group on the airframe; split when the callsign really changes. Derived from
+    the measured ladder, not chosen in advance. The evidence, both periods
+    agreeing throughout:
+
+    * **Dropping callsign from the group key is the single largest gain in the
+      study.** ``airframe_only`` takes clean matching from 49.64% to 88.55%
+      (2025) and 52.33% to 89.79% (2024), cutting fragmentation from ~50% to
+      ~7%. Nothing else is close: the whole A1 parameter sweep -- 262 cells,
+      every axis extended until it turned over -- spans 0.95 points and beats
+      production by 0.21.
+    * **But it is not free.** 4,314 of ``airframe_only``'s 131,498 tracks (3.3%)
+      contain more than one *real* callsign: two flights of one airframe joined
+      into a single track.
+    * **Legacy fragments because of blanks, not because of callsign changes.**
+      With callsign in the group key, samples whose callsign is null form tracks
+      of their own -- 42.4% of legacy's tracks are blank-labelled. That is the
+      fragmentation, and it is an artefact of the key rather than of the flight.
+
+    The two failures have different causes, so they can be fixed independently:
+    group on ``icao24`` alone, so a blank or flickering callsign no longer starts
+    a track, and break when the last *non-blank* callsign differs from the
+    current one, so two genuinely different flights still separate.
+
+    ``F.last(..., ignorenulls=True)`` carries the last real callsign across the
+    blanks, which is precisely the property the group key used to supply and that
+    ``airframe_only`` gave up. Comparing raw ``callsign`` would break on every
+    blank sample and reproduce legacy's fragmentation.
+
+    **Shipping this changes ``track_id`` for all data from that release forward**,
+    in shape as well as value -- there is no ``_{year}_{month}`` suffix. The study
+    recommends; it does not schedule.
     """
 
     def expr(p):
-        return ground_anchored().break_expr(p) | airport_anchored().break_expr(p)
+        w = segment_window()
+        real = F.when(
+            F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "", F.col("callsign")
+        )
+        prev_real = F.last(real, ignorenulls=True).over(
+            w.rowsBetween(Window.unboundedPreceding, -1)
+        )
+        # Only a real-to-real transition counts. A blank never opens a track, and
+        # the first real callsign after a run of blanks continues the track
+        # already open unless it differs from the last real one seen.
+        callsign_change = real.isNotNull() & prev_real.isNotNull() & (real != prev_real)
+        return F.coalesce(callsign_change, F.lit(False)) | legacy().break_expr(p)
 
     return BreakRule(
         name="recommended",
         group_cols=["icao24"],
-        break_expr=lambda p: F.coalesce(expr(p), F.lit(False)),
+        break_expr=expr,
         month_suffix=False,
     )
 
