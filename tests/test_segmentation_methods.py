@@ -469,6 +469,38 @@ def test_recommended_does_not_split_when_the_callsign_merely_blanks_out(spark):
     assert n_tracks(assign_track_id(df, recommended(), P)) == 1
 
 
+def test_recommended_does_not_reach_back_past_a_gap_for_the_previous_callsign(spark):
+    """The bug the bounded lookback exists to prevent.
+
+    Two flights of one airframe, separated by a 40-minute silence so the gap
+    rule already splits them. The second starts with blank callsigns and only
+    resolves to ``XYZ789`` part way in.
+
+    With an unbounded ``F.last``, that resolution is compared against
+    ``ABC123`` from *before* the gap, and the second flight splits in its own
+    middle -- three tracks where there are two flights. Measured on real data
+    that cost 31 points of fragmentation. Bounding the lookback to the gap
+    threshold keeps the comparison inside one track.
+    """
+    rows = [{"t": i * 60, "callsign": "ABC123"} for i in range(5)]
+    rows += [{"t": 40 * 60 + i * 60, "callsign": ""} for i in range(5)]
+    rows += [{"t": 45 * 60 + i * 60, "callsign": "XYZ789"} for i in range(5)]
+    df = make_track(spark, rows)
+    assert n_tracks(assign_track_id(df, recommended(), P)) == 2
+
+
+def test_recommended_ignores_callsign_padding(spark):
+    """ADS-B pads callsigns to eight characters; that is not a change.
+
+    Comparing untrimmed values would split this single flight in two, and the
+    failure would look exactly like a genuine callsign change.
+    """
+    rows = [{"t": i * 60, "callsign": "ABC123  "} for i in range(5)]
+    rows += [{"t": (5 + i) * 60, "callsign": "ABC123"} for i in range(5)]
+    df = make_track(spark, rows)
+    assert n_tracks(assign_track_id(df, recommended(), P)) == 1
+
+
 def test_recommended_splits_when_the_callsign_genuinely_changes(spark):
     """The merging A8 exists to avoid, which ``airframe_only`` cannot.
 
