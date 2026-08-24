@@ -73,6 +73,31 @@ def test_the_pipeline_grid_brackets_the_shipped_ceiling():
     assert DetectionConfig().trend_max_height_ft in flight_list_v62.GRID_HEIGHT_CAPS
 
 
+def test_a_worktree_resolves_its_pipeline_logs_to_the_main_checkout():
+    """`OPDI_live/logs` is repo-level state and a worktree has no copy.
+
+    Left worktree-relative, the endpoint-candidate progress log is not found,
+    `process_dai` concludes the candidate table needs rebuilding, and it tries
+    to write `opdi_endpoint_candidates` -- production. The write guard stops
+    it, but only after the run has spent its time getting there.
+    """
+    wt = Path("/repo/.claude/worktrees/some-branch")
+    assert flight_list_v62.main_checkout(wt) == Path("/repo")
+
+
+def test_a_normal_checkout_is_left_alone():
+    plain = Path("/repo")
+    assert flight_list_v62.main_checkout(plain) == plain
+
+
+def test_a_directory_merely_called_worktrees_is_not_treated_as_one():
+    """The marker is `.claude/worktrees/<name>`, not the word anywhere in the
+    path -- otherwise a project directory named `worktrees` would silently
+    redirect its own pipeline logs three levels up."""
+    p = Path("/repo/worktrees/thing")
+    assert flight_list_v62.main_checkout(p) == p
+
+
 def test_the_datum_arm_ceiling_matches_the_integer_flight_level_cut():
     """`flight_level` is an integer cast, so FL60 admits everything below
     6100 ft. Comparing the datums at 6000 would move the ceiling and the

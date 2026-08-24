@@ -80,6 +80,29 @@ OUT_TMPL = "research/flight_list_v62_{run}"
 #: have no measured baseline of its own to compare the tuned settings against.
 RUNS = ("legacy", "trend", "endpoint", "nearest", "combined", "recommended")
 
+def main_checkout(repo: Path = REPO) -> Path:
+    """The real repository root, even when running from a git worktree.
+
+    ``OPDI_live/logs`` is repo-level shared state, not per-worktree state: it
+    holds the pipeline's progress logs, and the endpoint-candidate log is what
+    tells ``process_dai`` the candidate table is already built.
+
+    A worktree lives at ``<repo>/.claude/worktrees/<name>``, and does not carry
+    a copy. So ``REPO / "OPDI_live" / "logs"`` resolves to a path that does not
+    exist, the pipeline concludes the candidates need rebuilding, and it tries
+    to write ``opdi_endpoint_candidates`` -- the production table. The write
+    guard catches that, but only after the run has already spent its time, and
+    a benchmark that cannot run from a worktree is a benchmark nobody runs
+    from one.
+
+    Three levels up from ``<repo>/.claude/worktrees/<name>`` is ``<repo>``.
+    """
+    parts = repo.parts
+    if len(parts) >= 3 and parts[-2] == "worktrees" and parts[-3] == ".claude":
+        return repo.parent.parent.parent
+    return repo
+
+
 def msl_equivalent_height_ft(fl: int) -> float:
     """The above-field ceiling admitting the same band as ``flight_level <= fl``.
 
@@ -244,7 +267,7 @@ def main() -> None:
     ap.add_argument("--k", type=float, default=2.0,
                     help="wrong-answer penalty used to pick the argmax")
     ap.add_argument("--pipeline-logs", type=Path,
-                    default=REPO / "OPDI_live" / "logs",
+                    default=main_checkout() / "OPDI_live" / "logs",
                     help="where the pipeline keeps its progress logs; the "
                          "endpoint candidate log is read from here so the "
                          "existing cache is reused rather than rebuilt")
