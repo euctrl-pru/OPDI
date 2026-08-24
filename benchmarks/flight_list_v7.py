@@ -54,6 +54,7 @@ from adep_ades import (  # noqa: E402
     score,
 )
 from osn_sample import build_spark, load_dotenv  # noqa: E402
+from pyspark.sql import Window  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 
 #: Where flight lists land. Under ``research/`` and suffixed, so the published
@@ -163,7 +164,49 @@ def index_on_read(tables) -> None:
     print(f"  h3_res_7 computed on read for: {', '.join(sorted(wanted))}")
 
 
-def redirect_tracks(assign_table: str, tracks_table: str) -> None:
+def dominant_callsign(df, track_col: str):
+    """Replace each track's callsigns with its most frequent non-blank one.
+
+    ``flights.py:441`` labels a flight ``F.min("flight_id")`` -- the
+    lexicographically smallest callsign in the track, and a blank sorts first.
+    That is exactly right while callsign is part of the track's group key,
+    because then every track is callsign-homogeneous by construction and
+    ``F.min`` cannot lose anything. It stops being right the moment an arm
+    drops callsign from that key: measured on 2025, **64% of ``airframe_only``
+    tracks carry a real callsign alongside null/blank ones**, and ``F.min``
+    returns the blank, so the flight never matches its ground truth. That, and
+    not the segmentation, is what collapses ADEP/ADES coverage from 80% to 54%.
+
+    Most frequent, not first: picking the alphabetically smallest *real*
+    callsign would fix the blank problem by re-introducing the arbitrary
+    tie-break that caused it. Ties break on the callsign itself, so the result
+    is deterministic rather than dependent on partitioning.
+    """
+    blank = F.trim(F.coalesce(F.col("callsign"), F.lit(""))) == ""
+    counts = (
+        df.filter(~blank)
+        .groupBy(track_col, "callsign")
+        .agg(F.count(F.lit(1)).alias("_n"))
+    )
+    rank = Window.partitionBy(track_col).orderBy(
+        F.col("_n").desc(), F.col("callsign").asc()
+    )
+    best = (
+        counts.withColumn("_r", F.row_number().over(rank))
+        .filter(F.col("_r") == 1)
+        .select(track_col, F.col("callsign").alias("_dom_cs"))
+    )
+    # Left join: a track with no non-blank callsign anywhere keeps its blank,
+    # which is the honest answer -- there is no identity to recover.
+    return (
+        df.join(best, track_col, "left")
+        .withColumn("callsign", F.coalesce(F.col("_dom_cs"), F.col("callsign")))
+        .drop("_dom_cs")
+    )
+
+
+def redirect_tracks(assign_table: str, tracks_table: str,
+                    fix_callsign: bool = False) -> None:
     """Point the flight list at a research segmentation's ``track_id``.
 
     The arm wrote only ``(icao24, event_time, track_id)``. The flight list
@@ -202,11 +245,13 @@ def redirect_tracks(assign_table: str, tracks_table: str) -> None:
         assign = self.spark.read.parquet(assign_table).withColumnRenamed(
             "track_id", "_new_track_id"
         )
-        return (
-            df.drop("track_id")
-            .join(assign, ["icao24", "event_time"], "inner")
-            .withColumnRenamed("_new_track_id", "track_id")
-        )
+        out = df.drop("track_id").join(assign, ["icao24", "event_time"], "inner")
+        # Backfill against the NEW track id, before it is renamed: the whole
+        # point is to make the arm's tracks callsign-homogeneous the way the
+        # legacy grouping made them by construction.
+        if fix_callsign:
+            out = dominant_callsign(out, "_new_track_id")
+        return out.withColumnRenamed("_new_track_id", "track_id")
 
     StorageManager.read_table = read_table
     StorageManager._tc_track_redirect = True
@@ -560,6 +605,12 @@ def main() -> None:
     ap.add_argument("--track-assign", default=None,
                     help="assignment table whose track_id replaces the tracks' own "
                          "(see redirect_tracks)")
+    ap.add_argument("--fix-callsign", action="store_true",
+                    help="label each redirected track with its most frequent "
+                         "non-blank callsign before the flight list reads it. "
+                         "Only meaningful with --track-assign; measures what "
+                         "flights.py's F.min('flight_id') costs an arm that "
+                         "does not group on callsign")
     ap.add_argument("--candidates-table", default=None,
                     help="endpoint-candidate table for this run, overriding the "
                          "period's own. Required alongside --track-assign: "
@@ -673,7 +724,8 @@ def main() -> None:
         # explicit "research/tracks_clean" for 2024. This flag is only ever
         # used with `--runs shipped`, so that is the one table this run
         # actually pulls tracks from.
-        redirect_tracks(args.track_assign, period["tracks"] or "osn_tracks_clean")
+        redirect_tracks(args.track_assign, period["tracks"] or "osn_tracks_clean",
+                        fix_callsign=args.fix_callsign)
 
     from opdi.config import OPDIConfig
 

@@ -176,6 +176,12 @@ def main():
     ap.add_argument("--arms", nargs="+", default=["all"])
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--executors", type=int, default=10)
+    ap.add_argument("--fix-callsign", action="store_true",
+                    help="pass --fix-callsign to the flight list: label each "
+                         "track with its most frequent non-blank callsign. "
+                         "Isolates how much of an arm's ADEP/ADES result is "
+                         "flights.py's F.min('flight_id') rather than the "
+                         "segmentation itself")
     ap.add_argument(
         "--days", nargs="+", default=None,
         help="override the period's day list, e.g. a single day for a smoke test",
@@ -223,6 +229,8 @@ def main():
                 "--out-name", out.name,
                 "--executors", str(args.executors),
             ]
+            if args.fix_callsign:
+                cmd.append("--fix-callsign")
             print(f"\n=== {arm} ===\n  {' '.join(cmd)}")
             subprocess.run(cmd, check=True)  # sequential: one Spark job at a time
 
