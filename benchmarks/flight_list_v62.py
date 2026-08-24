@@ -517,6 +517,18 @@ def main() -> None:
                  trend_sched_penalty_nm=detection.trend_sched_penalty_nm,
                  trend_rank_by=getattr(detection, "trend_rank_by", "ring"),
                  trend_max_fl_v=detection.trend_max_fl,
+                 # The datum, and the ceiling on it. Without these two the
+                 # grid rows are indistinguishable: `trend_max_fl` is inert
+                 # while the datum is `field`, so every cell of a height grid
+                 # would report the same cap and the table would collapse.
+                 trend_max_datum=detection.trend_max_datum,
+                 trend_max_height_ft=detection.trend_max_height_ft,
+                 # One column that means the right thing on either datum, so
+                 # the report can key on it without re-deciding which field to
+                 # read at every table.
+                 trend_ceiling=(detection.trend_max_height_ft
+                                if detection.trend_max_datum == "field"
+                                else detection.trend_max_fl),
                  endpoint_radius_nm=detection.endpoint_radius_nm,
                  endpoint_height_ft=detection.endpoint_height_ft,
                  endpoint_sched_penalty_nm=detection.endpoint_sched_penalty_nm)
