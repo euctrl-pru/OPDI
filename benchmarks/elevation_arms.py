@@ -11,12 +11,12 @@ band rests on a single aerodrome: LEMD is 40% of `1500-3000`, LTAC 54% of
 Madrid effect. `delta_correct_loo` re-computes each band with its largest
 contributor removed, which is what makes the claim capable of failing.
 
-This reads what `flight_list_v61.py` already wrote -- `per_airport_v61.csv`,
+This reads what `flight_list_v62.py` already wrote -- `per_airport_v6.csv`,
 produced by the same `per_airport_counts` the rest of the study is scored with
 -- rather than re-scoring. The arithmetic is therefore pandas, and it costs a
 Spark session only to read the aerodrome elevations.
 
-    python benchmarks/elevation_arms.py --per-airport <dir>/per_airport_v61.csv \\
+    python benchmarks/elevation_arms.py --per-airport <dir>/per_airport_v6.csv \\
         --results-dir <dir>
 """
 
@@ -143,7 +143,7 @@ def band_summary(per_airport: pd.DataFrame, elevations: pd.DataFrame) -> pd.Data
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--per-airport", type=Path, required=True,
-                    help="per_airport_v61.csv from flight_list_v61.py, carrying "
+                    help="per_airport_v6.csv from flight_list_v62.py, carrying "
                          "both datum arms")
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--executors", type=int, default=2)
