@@ -34,7 +34,34 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-DATA = REPO.parent / "opdi-portal" / "papers" / "adep-ades-detection-v6" / "data"
+
+
+def _find_portal() -> Path:
+    """Locate the ``opdi-portal`` checkout.
+
+    ``REPO.parent / "opdi-portal"`` is right when ``opdi/`` sits directly in
+    the workspace root and wrong inside a git worktree -- which lives at
+    ``opdi/.claude/worktrees/<name>``, three levels deeper, so the naive path
+    points at ``.../worktrees/opdi-portal``. This job then reports "no
+    comparable outputs found", which reads as a data problem and is a path bug.
+
+    ``OPDI_PORTAL`` overrides, for a checkout laid out some third way.
+    """
+    import os
+
+    override = os.environ.get("OPDI_PORTAL")
+    if override:
+        return Path(override)
+    for base in (REPO, *REPO.parents):
+        candidate = base.parent / "opdi-portal"
+        if (candidate / "papers").is_dir():
+            return candidate
+    raise SystemExit(
+        "cannot find the opdi-portal checkout beside this repository. "
+        "Set OPDI_PORTAL to its path.")
+
+
+DATA = _find_portal() / "papers" / "adep-ades-detection-v6" / "data"
 BASELINE = DATA / "modulo_baseline"
 
 
