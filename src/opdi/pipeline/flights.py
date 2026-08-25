@@ -88,13 +88,12 @@ OOA = "OOA"
 #:
 #: ``v5.0.0``: a flight is labelled with its track's dominant non-blank callsign
 #: rather than ``F.min("flight_id")``, and the column is resolved to that one
-#: value at every point the track table is read -- see :func:`resolve_flight_id`.
-#: Under legacy segmentation the two rules agree on every track, because
-#: callsign is part of the track's group key and the track is therefore
-#: callsign-homogeneous; so the bump describes a capability rather than a
-#: correction to published data. The value does change for any segmentation that
-#: does not carry callsign in its group key, and published data must say which
-#: rule produced it. Never mutate a released value.
+#: value once, where the track table is read -- see
+#: :meth:`_get_data_within_timeframe` and :func:`resolve_flight_id`. A run that
+#: stamps a legacy string is exempt, so it still reproduces its release byte for
+#: byte. The value changes for any segmentation that does not carry callsign in
+#: its group key, and published data must say which rule produced it. Never
+#: mutate a released value.
 FLIGHT_LIST_VERSION = "v5.0.0"
 
 #: What the paths stamped before ``v4.0.0``. Kept so
@@ -247,9 +246,11 @@ def resolve_flight_id(sv: DataFrame, track_col: str = "track_id") -> DataFrame:
     the column here, at the point the track table is read, restores the invariant
     the module was written on instead of patching each site that depends on it.
 
-    Resolve on the **unfiltered** frame. Three of the four callers reduce to one
-    or two samples per track a few lines later; a mode taken over those rows ties
-    back to the alphabet and reproduces the original bug in a subtler form.
+    Resolve on the **unfiltered** frame -- which is why the single caller is
+    :meth:`FlightListProcessor._get_data_within_timeframe` and not any of the
+    paths downstream of it. Three of those paths reduce to one or two samples
+    per track within a few lines, and a mode taken over those rows ties back to
+    the alphabet, reproducing the original bug in a subtler form.
 
     **Import this; do not copy it.** ``events.py`` groups on ``flight_id``
     without aggregating it too, so it needs the same treatment, and it already
@@ -418,13 +419,53 @@ class FlightListProcessor:
     def _get_data_within_timeframe(
         self, table_name: str, month: date, time_col: str = "event_time"
     ) -> DataFrame:
-        """Retrieve records from a table within a monthly timeframe."""
+        """Retrieve records from a table within a monthly timeframe.
+
+        Reads of the **track table** additionally rename ``callsign`` to
+        ``flight_id`` and resolve it to one value per track. Both used to happen
+        at each of the four call sites, which meant four different populations:
+        each site had already applied its own ``dropna`` -- ``lat, lon,
+        track_id`` in two of them, ``lat, lon, baro_altitude, track_id`` in the
+        third, none in the fourth -- so a sample carrying a callsign but no
+        position, or no barometric altitude, voted in some tallies and not
+        others. A track could therefore be named differently by the departure
+        path than by the arrival path, from one table.
+
+        Doing it here makes the population the whole month of the track table,
+        once, for every consumer. It is also the seam
+        ``benchmarks/flight_list_v7.py`` patches (``read_table``), so the
+        production rule and the benchmark rule now apply to the same rows and
+        not merely by the same expression -- which is what makes comparing their
+        outputs meaningful.
+
+        **Not applied when the run is reproducing released data.** A legacy run
+        stamps :data:`LEGACY_TREND_VERSION`, and those strings exist so that
+        re-processing a past month reproduces it byte for byte; changing what
+        that run publishes while it stamps an old version is the one thing a
+        version string must prevent. Resolution is a no-op on legacy tracks
+        anyway -- callsign is part of their group key, so they are homogeneous
+        by construction -- with one exception it must not make: a callsign of
+        all spaces is blank to :func:`dominant_flight_id` but is not blank to
+        ``fillna``, and the released lists carry the spaces.
+
+        After the month filter, deliberately: the filter is what prunes
+        partitions, and an aggregate in front of it would scan the whole table
+        once per month processed.
+        """
         start_ts, end_ts = get_start_end_of_month(month)
         start_lit = to_timestamp(lit(start_ts))
         end_lit = to_timestamp(lit(end_ts))
 
         df = self.storage.read_table(table_name)
-        return df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
+        df = df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
+
+        if table_name != self.tracks_table:
+            return df
+
+        df = df.withColumnRenamed("callsign", "flight_id")
+        if self._version_for("trend") != FLIGHT_LIST_VERSION:
+            return df
+        return resolve_flight_id(df)
 
     def _load_airports_hex(self, airports_hex_path: Optional[str] = None) -> DataFrame:
         """
@@ -518,11 +559,10 @@ class FlightListProcessor:
         """
         sv = self._get_data_within_timeframe(self.tracks_table, month)
         sv = sv.dropna(subset=["lat", "lon", "track_id"])
-        sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
-        # Before the endpoint filter below, not after: the mode has to be taken
-        # over the whole track, and over two endpoint samples it ties back to
-        # the alphabet -- which is the bug it exists to remove.
-        sv = resolve_flight_id(sv)
+        # flight_id arrives renamed and resolved to one value per track; see
+        # _get_data_within_timeframe. The fillna still matters on a legacy run,
+        # which is not resolved.
+        sv = sv.fillna({"flight_id": ""})
         sv = sv.withColumn("event_time", F.to_timestamp(col("event_time")))
         sv = sv.withColumn("_border", at_border(col("lat"), col("lon")))
 
@@ -541,11 +581,12 @@ class FlightListProcessor:
                 F.min("event_time").alias("_first_seen"),
                 F.max("event_time").alias("_last_seen"),
                 F.min("icao24").alias("_ICAO24"),
-                # After resolve_flight_id every row of the track carries the
-                # same value, so the choice of aggregate no longer decides
-                # anything. ``first`` says that; ``min`` implied a decision --
-                # and made the wrong one, because "" sorts before every real
-                # callsign.
+                # Every row of the track carries the same value by the time it
+                # gets here -- resolved on a v5.0.0 run, homogeneous by
+                # construction on a legacy one -- so the choice of aggregate no
+                # longer decides anything. ``first`` says that; ``min`` implied
+                # a decision, and made the wrong one, because "" sorts before
+                # every real callsign.
                 F.first("flight_id").alias("_FLT_ID"),
             )
             .withColumn("_DOF", to_date(col("_first_seen")))
@@ -639,11 +680,7 @@ class FlightListProcessor:
 
         sv = self._get_data_within_timeframe(self.tracks_table, month)
         sv = sv.dropna(subset=["lat", "lon", "track_id"])
-        sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
-        # Before the endpoint filter below, for the reason given in
-        # :func:`resolve_flight_id`: over the two endpoint samples alone the
-        # mode ties, and the tie-break is the alphabet again.
-        sv = resolve_flight_id(sv)
+        sv = sv.fillna({"flight_id": ""})
 
         w = Window.partitionBy("track_id").orderBy("event_time")
         ends = (
@@ -730,13 +767,12 @@ class FlightListProcessor:
         sv = self._get_data_within_timeframe(self.tracks_table, month)
 
         sv_f = sv.dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
-        sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
-        sv_f = sv_f.fillna({"flight_id": ""})
         # Everything downstream of here groups and joins on flight_id without
         # ever aggregating it -- ten sites, from the take-off/landing status
         # groupings to the outer join that pairs them. One value per track is
-        # the invariant they were written on, and this is where it is restored.
-        sv_f = resolve_flight_id(sv_f)
+        # the invariant they were written on; _get_data_within_timeframe is
+        # where it is restored.
+        sv_f = sv_f.fillna({"flight_id": ""})
         sv_f = sv_f.withColumn("event_time", F.to_timestamp(col("event_time")))
         sv_f = sv_f.withColumn(
             "flight_level", (col("baro_altitude") * 3.28084 / 100).cast("int")
@@ -1431,18 +1467,17 @@ class FlightListProcessor:
             time_col="first_seen",
         ).select("id")
 
-        # Resolved here for the same reason as the three detection paths, and
-        # for one more: this method keeps only the *first* row of each track, so
-        # without resolution an overflight is labelled with whatever the airframe
-        # happened to be broadcasting at its earliest sample -- routinely nothing
-        # at all, since the callsign is often blank until the crew sets it. The
-        # rows this method emits go into ``opdi_flight_list`` alongside the
-        # detected flights, so a blank here is a blank in the published table.
+        # No fillna here, unlike the three detection paths: this one publishes
+        # FLT_ID straight from the column. On a v5.0.0 run it arrives resolved
+        # and already blank-filled; on a legacy run it must stay exactly as the
+        # released lists carry it, nulls and padding included.
         #
-        # Before the first-row filter, necessarily: after it there is one sample
-        # per track and the mode is that sample.
-        sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
-        sv = resolve_flight_id(sv)
+        # Resolution matters most on this path. It keeps only each track's
+        # *first* row, so an unresolved overflight is named after whatever the
+        # airframe happened to be broadcasting at its earliest sample --
+        # routinely nothing, since the callsign is often blank until the crew
+        # sets it -- and these rows go into opdi_flight_list beside the detected
+        # flights, so a blank here is a blank in published data.
 
         window_track = Window.partitionBy("track_id")
         sv = sv.withColumn("event_time", F.to_timestamp(col("event_time")))

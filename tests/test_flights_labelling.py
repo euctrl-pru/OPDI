@@ -135,51 +135,139 @@ def test_resolution_is_a_no_op_on_a_legacy_style_track(spark):
     assert out == ["SAS123", "SAS123"]
 
 
-# --- the overflight path writes into the same published table ---------------
+# --- the one place the track table is read ----------------------------------
+#
+# Resolution lives in _get_data_within_timeframe rather than at each path that
+# reads tracks, so these exercise the real method with a stubbed storage layer
+# rather than a stubbed reader. A stubbed reader would test nothing now.
 
-def _overflights(spark, sv_rows, fl_ids=()):
-    """Run ``_fetch_overflights`` over a hand-built track table.
 
-    Stubbed the way ``test_version_is_new_unless_the_run_is_a_legacy_one``
-    stubs ``_version_for``: the method is bound to a bare object carrying only
-    the attributes it actually touches, so the path can be exercised without a
-    StorageManager, a catalogue or a month of data.
-    """
-    from datetime import date
+class _FakeStorage:
+    """The two-line surface of StorageManager that the reader actually uses."""
 
-    from opdi.pipeline.flights import FlightListProcessor
+    def __init__(self, tables):
+        self._tables = tables
 
-    sv = spark.createDataFrame(
-        sv_rows, "track_id string, icao24 string, callsign string, event_time timestamp"
+    def read_table(self, name):
+        return self._tables[name]
+
+
+def _processor(tables, legacy=False):
+    from opdi.pipeline.flights import (
+        FLIGHT_LIST_VERSION,
+        LEGACY_TREND_VERSION,
+        FlightListProcessor,
     )
-    fl = spark.createDataFrame([(i,) for i in fl_ids], "id string")
 
     class Stub:
+        _get_data_within_timeframe = FlightListProcessor._get_data_within_timeframe
         _fetch_overflights = FlightListProcessor._fetch_overflights
 
         def __init__(self):
             self.tracks_table = "osn_tracks"
+            self.storage = _FakeStorage(tables)
 
-        def _get_data_within_timeframe(self, table, month, time_col="event_time"):
-            return sv if table == self.tracks_table else fl
+        def _version_for(self, path):
+            return LEGACY_TREND_VERSION if legacy else FLIGHT_LIST_VERSION
 
-        def _version_for(self, role):
-            return "v5.0.0"
+    return Stub()
 
-    return Stub()._fetch_overflights(date(2025, 6, 1)).collect()
+
+def _ts(minute):
+    from datetime import datetime
+
+    return datetime(2025, 6, 1, 12, minute, 0)
+
+
+def _read(spark, rows, schema, table="osn_tracks", legacy=False):
+    from datetime import date
+
+    df = spark.createDataFrame(rows, schema)
+    proc = _processor({table: df}, legacy=legacy)
+    return proc._get_data_within_timeframe(table, date(2025, 6, 1))
+
+
+_TRACK_SCHEMA = "track_id string, lat double, callsign string, event_time timestamp"
+
+
+def test_the_reader_resolves_over_rows_a_later_dropna_would_remove(spark):
+    """The population is the month, not whatever each path kept.
+
+    Every path that reads tracks applies its own dropna -- two on
+    ``lat, lon, track_id``, one on ``lat, lon, baro_altitude, track_id``, the
+    overflight path none at all. While resolution sat at those four sites, a
+    sample carrying a callsign but no position voted in some tallies and not
+    others, and one table could name a track differently depending on which
+    path asked. Here ZZZ999 is the majority only if the position-less rows
+    count, which is also what the V7 benchmark counts.
+    """
+    out = _read(spark, [
+        ("t1", None, "ZZZ999", _ts(0)),
+        ("t1", None, "ZZZ999", _ts(1)),
+        ("t1", 50.0, "AAA111", _ts(2)),
+    ], _TRACK_SCHEMA)
+    assert {r["flight_id"] for r in out.collect()} == {"ZZZ999"}
+
+
+def test_the_reader_renames_callsign_for_every_track_table_consumer(spark):
+    """The four paths used to each do this rename themselves."""
+    out = _read(spark, [("t1", 50.0, "SAS123", _ts(0))], _TRACK_SCHEMA)
+    assert "flight_id" in out.columns and "callsign" not in out.columns
+
+
+def test_the_reader_leaves_other_tables_alone(spark):
+    """It also reads opdi_flight_list and opdi_endpoint_candidates. Renaming or
+    resolving those would be a silent schema change to tables that have their
+    own meaning for these columns."""
+    out = _read(spark, [("t1", 50.0, "SAS123", _ts(0))], _TRACK_SCHEMA,
+                table="opdi_flight_list")
+    assert "callsign" in out.columns and "flight_id" not in out.columns
+
+
+def test_the_reader_does_not_resolve_when_the_run_stamps_a_legacy_version(spark):
+    """Legacy strings exist so a re-processed month reproduces its release.
+
+    Resolution is a no-op on legacy tracks -- callsign is in their group key, so
+    they are homogeneous -- with one exception it must not make: a callsign of
+    all spaces is blank to dominant_flight_id and would become "", while the
+    released lists carry the spaces. So the exemption is on the version stamp,
+    not on an argument about homogeneity.
+    """
+    out = _read(spark, [
+        ("t1", 50.0, "        ", _ts(0)),
+        ("t1", 50.0, None, _ts(1)),
+    ], _TRACK_SCHEMA, legacy=True)
+    assert sorted(r["flight_id"] or "<null>" for r in out.collect()) == [
+        "        ", "<null>",
+    ]
+
+
+# --- the overflight path writes into the same published table ---------------
+
+_OF_SCHEMA = "track_id string, icao24 string, callsign string, event_time timestamp"
+
+
+def _overflights(spark, sv_rows, fl_ids=(), legacy=False):
+    """Run ``_fetch_overflights`` over a hand-built track table."""
+    from datetime import date
+
+    sv = spark.createDataFrame(sv_rows, _OF_SCHEMA)
+    fl = spark.createDataFrame(
+        [(i, _ts(0)) for i in fl_ids], "id string, first_seen timestamp"
+    )
+    proc = _processor({"osn_tracks": sv, "opdi_flight_list": fl}, legacy=legacy)
+    return proc._fetch_overflights(date(2025, 6, 1)).collect()
 
 
 def _sv_row(track, cs, minute):
-    from datetime import datetime
-
-    return (track, "abc123", cs, datetime(2025, 6, 1, 12, minute, 0))
+    return (track, "abc123", cs, _ts(minute))
 
 
 def test_an_overflight_is_named_by_the_callsign_its_track_flew(spark):
     """The first sample decides FLT_ID on this path, and it is routinely blank.
 
-    ``_fetch_overflights`` keeps only each track's earliest row, so before the
-    fix the published FLT_ID was whatever the airframe happened to be
+    ``_fetch_overflights`` keeps only each track's earliest row, so without
+    resolution the published FLT_ID is whatever the airframe happened to be
     broadcasting at that instant -- often nothing, because the callsign is blank
     until the crew sets it. These rows land in ``opdi_flight_list`` next to the
     detected flights, so a blank here is a blank in the published table.
@@ -213,13 +301,42 @@ def test_an_overflight_track_still_yields_exactly_one_row(spark):
 def test_an_overflight_that_never_broadcast_a_callsign_is_blank_not_null(spark):
     """It stays in the list, unlabelled.
 
-    This is a change to the published column: the overflight path used to emit
-    NULL here while the three detection paths emitted "". One published table
-    should not carry two spellings of "no callsign", and FLIGHT_LIST_VERSION
-    v5.0.0 is what says the rule changed.
+    This is a change to the published column on a v5.0.0 run: the overflight
+    path used to emit NULL here while the three detection paths emitted "".
+    One published table should not carry two spellings of "no callsign".
     """
     rows = _overflights(spark, [_sv_row("t1", None, 0), _sv_row("t1", None, 6)])
     assert [r["FLT_ID"] for r in rows] == [""]
+
+
+def test_a_legacy_overflight_keeps_the_value_its_release_published(spark):
+    """The other branch of the exemption, on the path that motivated it.
+
+    A legacy re-run must publish what the release published: the first sample's
+    callsign, NULL and all. Without this test the conditional is a published
+    code path nothing exercises until someone re-runs a legacy month, which is
+    how it would quietly rot.
+    """
+    rows = _overflights(spark, [
+        _sv_row("t1", None, 0),
+        _sv_row("t1", "RYR456", 4),
+        _sv_row("t1", "RYR456", 8),
+    ], legacy=True)
+    assert [r["FLT_ID"] for r in rows] == [None]
+
+
+def test_a_legacy_overflight_keeps_a_padded_blank_callsign_verbatim(spark):
+    """Why the exemption is not "restore NULL where resolution produced ''".
+
+    A callsign of eight spaces is blank to dominant_flight_id but is not NULL,
+    so a reconstruction rule would turn it into NULL and the release carries
+    spaces. Only skipping resolution reproduces it.
+    """
+    rows = _overflights(spark, [
+        _sv_row("t1", "        ", 0),
+        _sv_row("t1", "        ", 6),
+    ], legacy=True)
+    assert [r["FLT_ID"] for r in rows] == ["        "]
 
 
 def test_an_overflight_already_in_the_flight_list_is_still_excluded(spark):
