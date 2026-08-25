@@ -113,8 +113,16 @@ def _manifest_paths(manifest) -> set:
 
 
 def code_on_main(manifest, ref: str, repo) -> list:
-    """Paths named in the manifest that do not exist at `ref`."""
-    return [p for p in sorted(_manifest_paths(manifest))
+    """Repo-relative paths named in the manifest that do not exist at `ref`.
+
+    Absolute paths are skipped. A `Stage`'s command begins with an interpreter
+    or an installed console script -- `/…/.venv310/bin/python`, `/…/bin/opdi` --
+    and asking git whether those are tracked is a category error that reports
+    the venv as missing from main on every single run.
+    """
+    rel = [p for p in sorted(_manifest_paths(manifest))
+           if not p.startswith("/")]
+    return [p for p in rel
             if _git("cat-file", "-e", f"{ref}:{p}", repo=repo).returncode != 0]
 
 
@@ -181,10 +189,26 @@ def detection_config_from(repo) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("data", type=Path, help="the paper's data/ directory")
+    # `origin/main` is the question that matters at merge time: were these
+    # figures produced by code that is on main? On a branch still in flight the
+    # honest answer is "not yet", which is not a defect -- pass `--ref HEAD`
+    # there to ask the weaker but still useful question, "were they produced by
+    # code that is committed at all?"
     ap.add_argument("--ref", default="origin/main")
+    # Two different questions, so two different flags. `--repo` names the
+    # checkout whose `opdi` package is being reported on -- main, normally.
+    # `--git-repo` names the checkout whose history the refs are resolved in,
+    # which during development is the worktree holding the branch. Conflating
+    # them resolves HEAD in the wrong repository and reports every commit on
+    # the branch as "not an ancestor of HEAD".
     ap.add_argument("--repo", type=Path,
-                    default=Path(__file__).resolve().parent.parent)
+                    default=Path(__file__).resolve().parent.parent,
+                    help="checkout whose opdi package is checked")
+    ap.add_argument("--git-repo", type=Path, default=None,
+                    help="checkout whose history --ref is resolved in "
+                         "(default: this script's own)")
     args = ap.parse_args()
+    git_repo = args.git_repo or Path(__file__).resolve().parent.parent
 
     cfg = detection_config_from(args.repo)
     print(f"opdi loaded from {cfg.pop('_from')}")
@@ -209,15 +233,15 @@ def main() -> None:
     failed |= bool(diffs)
 
     ref = args.ref
-    if not ref_exists(ref, args.repo):
+    if not ref_exists(ref, git_repo):
         # Loud, not silent. A check that cannot run without a network is a
         # check people disable; one that skips quietly is worse still.
         print(f"\nSKIPPING code and SHA checks: {ref} not available locally")
     else:
-        for p in code_on_main(args.data / "_manifest.json", ref, args.repo):
+        for p in code_on_main(args.data / "_manifest.json", ref, git_repo):
             print(f"  MISSING on {ref}: {p}")
             failed = True
-        for s in shas_on_main(args.data / "_manifest.json", ref, args.repo):
+        for s in shas_on_main(args.data / "_manifest.json", ref, git_repo):
             print(f"  {s}")
             failed = True
 
