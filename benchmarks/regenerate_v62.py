@@ -1,15 +1,16 @@
 """
-The executable definition of the v6.1 analysis: `trend` on the field-elevation
-datum.
+The executable definition of the V6.2 analysis.
 
-Every number in ``papers/adep-ades-detection-v6.1/`` is produced by exactly one
+Every number in ``papers/adep-ades-detection-v6.2/`` is produced by exactly one
 job listed here, with exactly the arguments listed here. The report renders by
 calling this module; the numbers on the page are therefore the numbers this
 code produces, not numbers someone once copied into a directory.
 
-Forked from ``regenerate_v6.py``, which stays as V6's. Every arm runs on
-**both periods** and the report pools them: the second period is confirmation,
-not a second set of tables.
+V6.2 is V6's study recomputed on the datum that ships: the trend altitude cut
+is a height above the aerodrome's own field elevation, not a flight level. V6
+remains frozen and reproducible -- ``regenerate_v6.py`` and ``flight_list_v6.py``
+are untouched, and this module writes neither into V6's paper directory nor
+into its vote caches.
 
 Each job declares the source files it depends on. An output is **stale** when
 the fingerprint over those files differs from the one recorded when the output
@@ -18,9 +19,9 @@ while editing this docstring marks nothing. Age is not staleness: a file
 written a month ago by unchanged code is current, and one written a minute ago
 by since-changed code is not.
 
-    python benchmarks/regenerate_v61.py --check     # what is stale, run nothing
-    python benchmarks/regenerate_v61.py             # run only what is stale
-    python benchmarks/regenerate_v61.py --force     # run everything
+    python benchmarks/regenerate_v62.py --check     # what is stale, run nothing
+    python benchmarks/regenerate_v62.py             # run only what is stale
+    python benchmarks/regenerate_v62.py --force     # run everything
 
 ``--check`` needs no credentials and no cluster. Running a stale job needs
 both, because the numbers come from Spark over S3 against Network Manager
@@ -40,7 +41,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import flight_list_v62  # noqa: E402
 import provenance  # noqa: E402
+
 
 def _find_portal() -> Path:
     """Locate the ``opdi-portal`` checkout.
@@ -68,8 +71,13 @@ def _find_portal() -> Path:
     )
 
 
-PAPER = _find_portal() / "papers" / "adep-ades-detection-v6.1"
+PAPER = _find_portal() / "papers" / "adep-ades-detection-v6.2"
 DATA = PAPER / "data"
+
+#: V6's committed data, READ ONLY. The equivalence check joins against it, and
+#: that is the only reason this study knows where V6's directory is. Nothing
+#: writes here -- a test asserts it.
+V6_DATA = _find_portal() / "papers" / "adep-ades-detection-v6" / "data"
 
 DAYS_2025 = ["2025-06-05", "2025-06-06", "2025-06-07"]
 DAYS_2024 = ["2024-06-05", "2024-06-06", "2024-06-07"]
@@ -78,9 +86,9 @@ DAYS_2024 = ["2024-06-05", "2024-06-06", "2024-06-07"]
 #: a dependency worth re-running for is a dependency worth writing down.
 CORE = ["benchmarks/adep_ades.py", "benchmarks/osn_sample.py"]
 PIPE = CORE + ["src/opdi/pipeline/flights.py", "src/opdi/config.py",
-               "benchmarks/flight_list_v61.py"]
-#: Arm C reads the pipeline's per-airport output, so it inherits the pipeline's
-#: dependencies as well as its own banding.
+               "benchmarks/flight_list_v62.py"]
+#: Arm C reads the banding along with the counts, so a band edit must mark it
+#: stale. It is the study's discriminating measurement.
 BANDS = PIPE + ["benchmarks/elevation_arms.py", "benchmarks/elevation_bands.py"]
 
 
@@ -241,9 +249,10 @@ T_TRACKS   = "s3a://eurocontrol/opdi/osn_tracks"
 T_TRACKS24 = "s3a://eurocontrol/opdi/research/tracks"
 T_ZONES    = "s3a://eurocontrol/opdi/h3_airport_detection_zones"
 T_CAND     = "s3a://eurocontrol/opdi/opdi_endpoint_candidates"
-#: v6.1's own vote caches, deliberately *not* V6's `research/trend_votes`.
-#: Writing into V6's prefix would leave its paper reproducible only against a
-#: cache built for a different study.
+#: The paired vote caches, deliberately *not* V6's `research/trend_votes`.
+#: They carry both `up_fl_*` and `up_agl_*` counts, which is what lets one
+#: build serve both datums. Writing into V6's prefix would leave its paper
+#: reproducible only against a cache built for a different study.
 T_VOTES    = "s3a://eurocontrol/opdi/research/trend_votes_agl"
 T_VOTES24  = "s3a://eurocontrol/opdi/research/trend_votes_agl_2024"
 T_SV       = "s3a://eurocontrol/opdi/osn_statevectors_v2"
@@ -310,12 +319,14 @@ def stages() -> list:
               [sys.executable, "-u", "benchmarks/trend_sweep_agl.py",
                "--months", "202506", "--days", *DAYS_2025, "--build",
                "--build-only", "--cache", T_VOTES, "--executors", "10",
-               "--results-dir", "/tmp/v61_votecache_2025"],
+               "--results-dir", "/tmp/v62_votecache_2025"],
               T_VOTES, ["benchmarks/trend_sweep_agl.py",
                         "benchmarks/elevation_bands.py"],
               "vote counts per (track, aerodrome) at every cap on BOTH datums, "
-              "in one pass. Writes v6.1's own prefix; V6's trend_votes is left "
-              "alone so V6 stays reproducible",
+              "in one pass. This is what lets the sea-level sweep and the "
+              "above-field sweep be the same measurement read two ways. Writes "
+              "its own prefix; V6's trend_votes is left alone so V6 stays "
+              "reproducible",
               inputs=[T_TRACKS, T_ZONES]),
 
         Stage("03_trend_votes_agl_2024",
@@ -323,7 +334,7 @@ def stages() -> list:
                "--months", "202406", "--days", *DAYS_2024, "--build",
                "--tracks", T_TRACKS24, "--add-h3", "--cache", T_VOTES24,
                "--build-only", "--executors", "10",
-               "--results-dir", "/tmp/v61_votecache_2024"],
+               "--results-dir", "/tmp/v62_votecache_2024"],
               T_VOTES24, ["benchmarks/trend_sweep_agl.py",
                           "benchmarks/elevation_bands.py"],
               "second period; its tracks pre-date H3 so the index is computed"),
@@ -340,131 +351,287 @@ def stages() -> list:
 
 
 def jobs() -> list:
-    """The four arms of the v6.1 study, in dependency order.
+    """Every job behind the report, in dependency order.
 
-    Every arm runs on both periods. The report pools them and treats 2024 as
-    confirmation in prose rather than as a duplicate set of tables -- but the
-    job list carries both explicitly, because an arm measured on one period and
-    quietly reported as the study's result is the failure this study's own
-    notes keep recording.
+    Three things distinguish this list from V6's.
+
+    **V6's two `trend_sweep` jobs are gone.** `trend_sweep_agl.py` is a strict
+    superset of `trend_sweep.py` -- same FL_CAPS, MARGINS, RADII_NM,
+    PENALTIES_NM -- and its cache carries both datums' votes, so one run per
+    period yields the sea-level curve and the above-field curve together. That
+    is not an assumption: the sea-level arm was compared against V6's committed
+    `trend_sweep_2025.csv` and `trend_sweep_2024.csv` on the join key
+    (stage, stage2_role, fl_cap, radius_nm, penalty_nm, margin, k, legacy),
+    giving 371 shared cells and zero differing cells on each period. Keeping
+    both would be two jobs computing the same numbers on the same datum.
+
+    **The pipeline arms read the above-field sweep**, because that is the datum
+    they run on, and additionally the sea-level sweep for the path walk's lower
+    rungs -- see `flight_list_v62.trend_ceiling_kwargs` for why mixing them
+    silently mismeasures the rung that moves the datum.
+
+    **The pipeline arms are 2025 only.** `process_dai` reads `h3_res_7` off the
+    track table; the 2024 tracks pre-date H3 indexing, so the column is absent
+    and the run dies on UNRESOLVED_COLUMN -- after the 2025 half has already
+    been computed, which is the expensive place to find out. V6 met the same
+    wall and ran the pipeline on 2025 alone. The second period confirms through
+    the paired sweeps, which read a cache built with the index computed.
     """
-    out = []
-    for period, months, days, tracks, votes in (
-        ("2025", "202506", DAYS_2025, None, T_VOTES),
-        # The pipeline's spelling, not the sweep's -- see T_TRACKS24_NAME.
-        ("2024", "202406", DAYS_2024, T_TRACKS24_NAME, T_VOTES24),
-    ):
-        tracks_arg = ["--tracks", tracks] if tracks else []
-        cand = T_CAND if period == "2025" else T_CAND24
-        trk = T_TRACKS if period == "2025" else T_TRACKS24
-
-        # The pipeline arms are 2025 only, and not by preference.
-        #
-        # `process_dai` reads `h3_res_7` straight off the track table, because
-        # step 02 puts it there. The 2024 tracks (`research/tracks`) were built
-        # by an earlier version of this study and pre-date H3 indexing, so the
-        # column does not exist and the run dies on UNRESOLVED_COLUMN. The
-        # sweep harness works around it with `--add-h3`, computing the index at
-        # read time; the pipeline has no such option, and teaching production to
-        # reindex tracks so a benchmark can use an old table would be the wrong
-        # direction entirely.
-        #
-        # V6 met this and resolved it the same way: every one of its 2024 jobs
-        # is a harness job, and it ran `process_dai` on 2025 alone. So the
-        # second period confirms through the sweeps, which read a vote cache
-        # that *was* built with the index computed.
-        if period != "2025":
-            for datum, label in (("field", "height"), ("msl", "fl")):
-                out.append(Job(
-                    f"{label}_sweep_{period}", "benchmarks/trend_sweep_agl.py",
-                    ["--months", months, "--days", *days, "--cache", votes,
-                     "--datum", datum, "--out-name", "trend_sweep.csv",
-                     "--executors", "10"],
-                    {"trend_sweep.csv": f"{label}_sweep_{period}.csv"},
-                    CORE + ["benchmarks/trend_sweep_agl.py",
-                            "benchmarks/elevation_bands.py"],
-                    f"the {datum} curve on the second period. With the pipeline "
-                    f"arms unavailable here, the paired sweeps are this "
-                    f"period's whole confirmation",
-                    inputs=[votes, T_ZONES, T_REF]))
-            continue
-
-        # --- Arm A: the datum swap, one variable -------------------------
-        out.append(Job(
-            f"datum_swap_{period}", "benchmarks/flight_list_v61.py",
-            ["--months", months, "--days", *days, *tracks_arg,
-             "--runs", "datum_msl", "datum_field", "legacy",
-             "--out-name", "datum_comparison.csv", "--executors", "10"],
-            {"datum_comparison.csv": f"datum_swap_{period}.csv",
-             "per_airport_v61.csv": f"per_airport_datum_{period}.csv"},
-            PIPE,
-            "Arm A: FL60 against 6,100 ft above field, through process_dai "
-            "itself. The ceiling is identical -- flight_level is an int cast, "
-            "so FL60 reaches 6,100 -- which leaves the datum as the only "
-            "difference. `legacy` rides along as the published-constants control",
-            inputs=[trk, T_ZONES, cand, T_REF]))
-
-        # --- Arm C: the bands, read off Arm A's per-airport output --------
-        #
-        # Deliberately downstream of Arm A rather than a second scoring pass:
-        # it reads the same `per_airport_counts` output the rest of the study
-        # is scored with, so the banded numbers cannot disagree with the
-        # headline ones.
-        out.append(Job(
-            f"elevation_bands_{period}", "benchmarks/elevation_arms.py",
-            ["--per-airport", str(DATA / f"per_airport_datum_{period}.csv")],
-            {"elevation_bands.csv": f"elevation_bands_{period}.csv",
-             "elevation_per_airport.csv": f"elevation_per_airport_{period}.csv"},
-            BANDS,
-            "Arm C, the discriminating measurement: the datum's effect banded "
-            "by field elevation, with both robustness controls. The census "
-            "showed each treatment band rests on one aerodrome, so band means "
-            "alone cannot separate an elevation effect from a Madrid effect",
-            inputs=[T_REF]))
-
-        # --- Arm B: the above-field ceiling swept over the cache ----------
-        out.append(Job(
-            f"height_sweep_{period}", "benchmarks/trend_sweep_agl.py",
-            ["--months", months, "--days", *days, "--cache", votes,
+    return [
+        # --- the paired sweeps: both datums, both periods ------------------
+        Job("height_sweep_2025", "benchmarks/trend_sweep_agl.py",
+            ["--months", "202506", "--days", *DAYS_2025, "--cache", T_VOTES,
              "--datum", "field", "--out-name", "trend_sweep.csv",
              "--executors", "10"],
-            {"trend_sweep.csv": f"height_sweep_{period}.csv"},
+            {"trend_sweep.csv": "height_sweep_2025.csv"},
             CORE + ["benchmarks/trend_sweep_agl.py",
                     "benchmarks/elevation_bands.py"],
-            "Arm B: the above-field ceiling swept on its own terms, rather "
-            "than inherited from the datum being abandoned",
-            inputs=[votes, T_ZONES, T_REF]))
+            "the above-field ceiling swept on its own terms, rather than "
+            "inherited from the datum being abandoned",
+            inputs=[T_VOTES, T_ZONES, T_REF]),
 
-        # --- Arm B, control: the same sweep on the sea-level datum --------
-        out.append(Job(
-            f"fl_sweep_{period}", "benchmarks/trend_sweep_agl.py",
-            ["--months", months, "--days", *days, "--cache", votes,
+        Job("fl_sweep_2025", "benchmarks/trend_sweep_agl.py",
+            ["--months", "202506", "--days", *DAYS_2025, "--cache", T_VOTES,
              "--datum", "msl", "--out-name", "trend_sweep.csv",
              "--executors", "10"],
-            {"trend_sweep.csv": f"fl_sweep_{period}.csv"},
+            {"trend_sweep.csv": "fl_sweep_2025.csv"},
             CORE + ["benchmarks/trend_sweep_agl.py",
                     "benchmarks/elevation_bands.py"],
             "the same sweep on the sea-level datum, out of the same cache. "
             "Without it the height sweep has no like-for-like curve to be read "
-            "against, and a shape would be reported where a comparison belongs",
-            inputs=[votes, T_ZONES, T_REF]))
+            "against, and a shape would be reported where a comparison belongs. "
+            "Also the replacement for V6's trend_sweep_2025, which it "
+            "reproduces cell for cell",
+            inputs=[T_VOTES, T_ZONES, T_REF]),
 
-        # --- Arm D: pipeline fidelity at the swept ceiling ----------------
-        out.append(Job(
-            f"height_pipeline_{period}", "benchmarks/flight_list_v61.py",
-            ["--months", months, "--days", *days, *tracks_arg,
-             "--runs", "height_3000", "height_4000", "height_6100",
-             "height_8000", "height_10000", "height_12000",
-             "--out-name", "datum_comparison.csv", "--executors", "10"],
-            {"datum_comparison.csv": f"height_pipeline_{period}.csv"},
-            PIPE,
-            "Arm D: the above-field ceiling walked through process_dai itself, "
-            "so the shipped figure is a pipeline figure and not a harness one "
-            "-- the check V6 makes a point of and the reason its tuned FL cap "
-            "did not survive contact with production",
-            inputs=[trk, T_ZONES, cand, T_REF]))
+        Job("height_sweep_2024", "benchmarks/trend_sweep_agl.py",
+            ["--months", "202406", "--days", *DAYS_2024, "--cache", T_VOTES24,
+             "--datum", "field", "--out-name", "trend_sweep.csv",
+             "--executors", "10"],
+            {"trend_sweep.csv": "height_sweep_2024.csv"},
+            CORE + ["benchmarks/trend_sweep_agl.py",
+                    "benchmarks/elevation_bands.py"],
+            "the above-field curve on the second period. With the pipeline "
+            "arms unavailable here, the paired sweeps are this period's whole "
+            "confirmation",
+            inputs=[T_VOTES24, T_ZONES, T_REF]),
 
-    return out
+        Job("fl_sweep_2024", "benchmarks/trend_sweep_agl.py",
+            ["--months", "202406", "--days", *DAYS_2024, "--cache", T_VOTES24,
+             "--datum", "msl", "--out-name", "trend_sweep.csv",
+             "--executors", "10"],
+            {"trend_sweep.csv": "fl_sweep_2024.csv"},
+            CORE + ["benchmarks/trend_sweep_agl.py",
+                    "benchmarks/elevation_bands.py"],
+            "the sea-level curve on the second period, and the replacement for "
+            "V6's trend_sweep_2024",
+            inputs=[T_VOTES24, T_ZONES, T_REF]),
+
+        # --- the evidence for retiring V6's trend sweeps --------------------
+        #
+        # Needs no cluster: it reads two committed CSVs. Registered as a job
+        # anyway, because "the sea-level arm reproduces V6's sweep" is a load-
+        # bearing claim -- two jobs were deleted on the strength of it -- and a
+        # load-bearing claim asserted in prose is exactly what this module
+        # exists to stop.
+        Job("sweep_equivalence", "benchmarks/sweep_equivalence.py",
+            ["--pairs",
+             f"2025={V6_DATA / 'trend_sweep_2025.csv'},"
+             f"{DATA / 'fl_sweep_2025.csv'}",
+             f"2024={V6_DATA / 'trend_sweep_2024.csv'},"
+             f"{DATA / 'fl_sweep_2024.csv'}"],
+            {"sweep_equivalence.csv": "sweep_equivalence.csv"},
+            ["benchmarks/sweep_equivalence.py"],
+            "cell-by-cell join of V6's committed trend sweep against the "
+            "sea-level arm of this study's paired sweep, on both periods. Any "
+            "non-zero count here means retiring V6's sweep jobs was wrong"),
+
+        # --- what moved underneath this study since V6 ----------------------
+        #
+        # V6.2 claims to recompute V6 with one variable changed. That claim is
+        # checkable, and it does not fully hold: `opdi_endpoint_candidates` was
+        # rebuilt after V6 published. Measuring the drift is the only way the
+        # report can say which of its numbers are comparable to V6's.
+        Job("input_drift", "benchmarks/input_drift.py",
+            ["--baseline", str(V6_DATA / "_manifest.json")],
+            {"input_drift.csv": "input_drift.csv"},
+            ["benchmarks/input_drift.py"],
+            "each input table's identity as V6 recorded it, against the table "
+            "as it stands now. Distinguishes the zero-byte directory marker "
+            "that s3_identity stopped counting -- bookkeeping -- from a table "
+            "genuinely rebuilt, which moves every figure derived from it"),
+
+        # --- the endpoint family: datum-independent ------------------------
+        #
+        # These four do not read the trend altitude cut at all, so the datum
+        # cannot move them.
+        #
+        # They were expected to reproduce V6's numbers exactly, and they do
+        # not. The reason is not the datum: `opdi_endpoint_candidates` was
+        # rebuilt on 2026-08-22, after V6 published -- 12% smaller, with the
+        # fresh-broadcast share roughly tripled. `input_drift` above measures
+        # that, and the report states it rather than presenting the difference
+        # as a result.
+        #
+        # The consequence is worth being precise about. It costs this study the
+        # *direct* verification that the datum leaves departures alone -- V6's
+        # endpoint numbers and V6.2's are no longer a controlled comparison.
+        # What survives is the within-study evidence: departures score zero in
+        # every elevation band of `elevation_bands_2025`, where both arms read
+        # the same candidate table. Weaker, and reported as such.
+        Job("endpoint_sweeps", "benchmarks/benchmark_modes.py",
+            ["--months", "202506", "--days", *DAYS_2025, "--sweeps-only"],
+            {"sweep_radius_height.csv": "sweep_radius_height_2025.csv",
+             "sweep_penalty.csv": "sweep_penalty_2025.csv",
+             "sweep_cone.csv": "sweep_cone_2025.csv"}, CORE,
+            "--sweeps-only: this script can also score pipeline output written "
+            "by another run, which the report does not use",
+            inputs=[T_CAND, T_REF]),
+
+        Job("endpoint_sweeps_2024", "benchmarks/benchmark_modes.py",
+            ["--months", "202406", "--days", *DAYS_2024, "--sweeps-only",
+             "--candidates", T_CAND24],
+            {"sweep_radius_height.csv": "sweep_radius_height_2024.csv"}, CORE,
+            "the endpoint grid on the second period",
+            inputs=[T_CAND24, T_REF]),
+
+        Job("bearing", "benchmarks/bearing_whole_sample.py",
+            ["--months", "202506", "--days", *DAYS_2025, "--executors", "10"],
+            {"whole_sample.csv": "bearing_whole_sample_v6.csv"},
+            CORE + ["benchmarks/abstained_vertical.py"],
+            "rescue / veto / replace / rerank against the endpoint baseline",
+            inputs=[T_CAND, T_TRACKS, T_REF]),
+
+        Job("vertical_measure", "benchmarks/vertical_measure.py",
+            ["--executors", "10"],
+            {"vertical_measure.csv": "vertical_measure_v6.csv"},
+            CORE + ["benchmarks/abstained_vertical.py"],
+            "which vertical measure can be trusted: broadcast rate, two-point "
+            "slope, or OLS over the window",
+            inputs=[T_CAND, T_TRACKS, T_REF]),
+
+        # --- unchanged from V6 ---------------------------------------------
+        Job("sampler_comparison", "benchmarks/sampler_comparison.py", [],
+            {"sampler_comparison.csv": "sampler_comparison_v6.csv"},
+            CORE + ["benchmarks/sampler_comparison.py"],
+            "bucket against modulo across every parameter cell of two full "
+            "runs. Replaces the end-to-end decimation harness, whose two arms "
+            "had drifted onto different periods and which cannot be run at all "
+            "now that the bucket rule is the production default"),
+
+        Job("merge_diagnosis", "benchmarks/merge_diagnosis.py",
+            ["--executors", "8"],
+            {"merge_shapes.csv": "merge_shapes_v6.csv",
+             "merge_agreement.csv": "merge_agreement_v6.csv"},
+            CORE,
+            "whether taking the two roles from different methods loses "
+            "arrivals, or only moves which track the benchmark pairs with each "
+            "reference flight",
+            inputs=[T_REF]),
+
+        Job("trend_bearing", "benchmarks/trend_bearing.py",
+            ["--months", "202506", "--days", *DAYS_2025, "--executors", "10"],
+            {"trend_bearing.csv": "trend_bearing_v6.csv"},
+            CORE + ["benchmarks/abstained_vertical.py",
+                    "benchmarks/trend_sweep_agl.py"],
+            "bearing applied to trend rather than to the endpoint family: "
+            "rerank, tie-break and veto against the shipped configuration",
+            inputs=[T_VOTES, T_TRACKS, T_REF]),
+
+        # --- the pipeline arms, on the shipped datum ------------------------
+        Job("modes_2025", "benchmarks/flight_list_v62.py",
+            ["--months", "202506", "--days", *DAYS_2025,
+             "--trend-sweep", str(DATA / "height_sweep_2025.csv"),
+             "--trend-sweep-msl", str(DATA / "fl_sweep_2025.csv"),
+             "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
+             "--runs", "legacy", "trend", "endpoint", "nearest", "combined",
+             "recommended", "--trend-rank-by", "haversine", "--executors", "10"],
+            {"mode_comparison_v6.csv": "mode_comparison_v6.csv",
+             "per_airport_v6.csv": "per_airport_v6.csv",
+             "per_type_v6.csv": "per_type_v6.csv"}, PIPE,
+            "real process_dai runs; this is what the verdict is scored on",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
+
+        Job("trend_grid_2025", "benchmarks/flight_list_v62.py",
+            ["--months", "202506", "--days", *DAYS_2025,
+             "--trend-sweep", str(DATA / "height_sweep_2025.csv"),
+             "--trend-sweep-msl", str(DATA / "fl_sweep_2025.csv"),
+             "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
+             "--runs", *[f"grid_h{c}_r{r:g}_m2"
+                         for c in flight_list_v62.GRID_HEIGHT_CAPS
+                         for r in (20, 30)],
+             "--grid-height", *[str(c) for c in flight_list_v62.GRID_HEIGHT_CAPS],
+             "--grid-radius", "20", "30", "--grid-margin", "2",
+             "--trend-rank-by", "haversine", "--executors", "10"],
+            {"mode_comparison_v6.csv": "trend_grid_v6.csv"}, PIPE,
+            "the trend ceiling x radius swept through process_dai itself, in "
+            "feet above field elevation. Brackets the shipped 6,000 ft with "
+            "the 6,100 the sweep preferred: the sweep grid never contained "
+            "6,000, so until this runs the claim that the ceiling is tuned "
+            "rests on a grid missing the shipped value",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
+
+        Job("pipeline_path_ring_2025", "benchmarks/flight_list_v62.py",
+            ["--months", "202506", "--days", *DAYS_2025,
+             "--trend-sweep", str(DATA / "height_sweep_2025.csv"),
+             "--trend-sweep-msl", str(DATA / "fl_sweep_2025.csv"),
+             "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
+             "--runs", "path0_legacy", "path1_penalty", "path2_ceiling",
+             "path3_margin", "path4_radius", "path5_datum",
+             "--trend-rank-by", "ring", "--executors", "10"],
+            {"mode_comparison_v6.csv": "pipeline_path_ring_v6.csv"}, PIPE,
+            "the same path under the OLD ring-count selection. Kept as a job "
+            "rather than an archived file because the ring-vs-exact comparison "
+            "is the report's central result, and half of it must not be a "
+            "number nobody can regenerate",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
+
+        Job("pipeline_path_2025", "benchmarks/flight_list_v62.py",
+            ["--months", "202506", "--days", *DAYS_2025,
+             "--trend-sweep", str(DATA / "height_sweep_2025.csv"),
+             "--trend-sweep-msl", str(DATA / "fl_sweep_2025.csv"),
+             "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
+             "--runs", "path0_legacy", "path1_penalty", "path2_ceiling",
+             "path3_margin", "path4_radius", "path5_datum",
+             "--trend-rank-by", "haversine", "--executors", "10"],
+            {"mode_comparison_v6.csv": "pipeline_path_v6.csv",
+             "per_airport_v6.csv": "per_airport_path_v6.csv"}, PIPE,
+            "the arrival tuning walked one parameter at a time, with the datum "
+            "as the fifth and final rung",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
+
+        # --- the datum arms, carried over from v6.1 -------------------------
+        # The sweeps are passed even though the datum arms do not tune from
+        # them: `flight_list_v62.py` requires both, and builds the path walk
+        # and grid whether or not the run list asks for those runs.
+        Job("datum_swap_2025", "benchmarks/flight_list_v62.py",
+            ["--months", "202506", "--days", *DAYS_2025,
+             "--trend-sweep", str(DATA / "height_sweep_2025.csv"),
+             "--trend-sweep-msl", str(DATA / "fl_sweep_2025.csv"),
+             "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
+             "--runs", "datum_msl", "datum_field", "legacy",
+             "--trend-rank-by", "haversine", "--executors", "10"],
+            {"mode_comparison_v6.csv": "datum_swap_2025.csv",
+             "per_airport_v6.csv": "per_airport_datum_2025.csv"},
+            CORE + ["src/opdi/pipeline/flights.py", "src/opdi/config.py",
+                    "benchmarks/flight_list_v62.py"],
+            "FL60 against 6,100 ft above field, through process_dai itself. "
+            "The ceiling is identical -- flight_level is an int cast, so FL60 "
+            "reaches 6,100 -- which leaves the datum as the only difference. "
+            "`legacy` rides along as the published-constants control",
+            inputs=[T_TRACKS, T_ZONES, T_CAND, T_REF]),
+
+        Job("elevation_bands_2025", "benchmarks/elevation_arms.py",
+            ["--per-airport", str(DATA / "per_airport_datum_2025.csv")],
+            {"elevation_bands.csv": "elevation_bands_2025.csv",
+             "elevation_per_airport.csv": "elevation_per_airport_2025.csv"},
+            BANDS,
+            "the discriminating measurement: the datum's effect banded by "
+            "field elevation, with both robustness controls. The census showed "
+            "each treatment band rests on one aerodrome, so band means alone "
+            "cannot separate an elevation effect from a Madrid effect",
+            inputs=[T_REF]),
+    ]
 
 
 def main() -> None:
