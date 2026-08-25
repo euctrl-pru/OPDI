@@ -367,3 +367,35 @@ def test_arm_c_consumes_what_arm_a_produces():
     assert "per_airport_datum_2025.csv" in produced
     consumed = " ".join(_args(jobs["elevation_bands_2025"]))
     assert "per_airport_datum_2025.csv" in consumed
+
+def test_no_job_reads_a_cache_it_did_not_declare():
+    """A declared input that is not the real one reads as verified and is not.
+
+    `trend_bearing.py` imported v6's `research/trend_votes` while this registry
+    declared the paired `trend_votes_agl` as its input. Nothing noticed until
+    v6's cache was deleted from the bucket and the job died on PATH_NOT_FOUND
+    -- so the provenance had been wrong for the whole study without a symptom.
+
+    This checks the coupling in the direction that can be checked statically:
+    a job declaring a vote cache must run a script that imports its cache from
+    the module owning that cache.
+    """
+    import re
+    repo = Path(__file__).resolve().parent.parent
+    owner = {
+        "research/trend_votes_agl": "trend_sweep_agl",
+        "research/trend_votes": "trend_sweep",
+    }
+    for job in regenerate_v62.jobs():
+        declared = [i for i in job.inputs if "trend_votes" in i]
+        if not declared:
+            continue
+        src = (repo / job.script).read_text()
+        imports_cache = re.search(r"from (\w+) import [^\n]*\bCACHE\b", src)
+        if not imports_cache:
+            continue          # the job names its cache on the command line
+        want = owner["research/trend_votes_agl" if "_agl" in declared[0]
+                     else "research/trend_votes"]
+        assert imports_cache.group(1) == want, (
+            f"{job.name} declares {declared[0]} but {job.script} imports "
+            f"CACHE from {imports_cache.group(1)}")
