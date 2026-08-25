@@ -163,7 +163,16 @@ def test_segmentation_config_and_params_agree_field_by_field():
     side gains, loses or re-defaults a field, it fails here rather than in a
     study whose numbers silently came from the other set of thresholds.
     """
-    cfg_fields = {f.name: f.default for f in dataclasses.fields(SegmentationConfig)}
+    # ``method`` selects *which* algorithm runs; every other field is a
+    # threshold *within* one. ``SegmentationParams`` carries only thresholds,
+    # because an arm is chosen by the caller passing a ``BreakRule`` rather than
+    # by a string the engine interprets. Excluded by name rather than by a rule
+    # like "strings do not count", so a future non-threshold field has to be
+    # considered here instead of slipping through a loophole.
+    SELECTORS = {"method"}
+
+    cfg_fields = {f.name: f.default for f in dataclasses.fields(SegmentationConfig)
+                  if f.name not in SELECTORS}
     par_fields = {f.name: f.default for f in dataclasses.fields(SegmentationParams)}
     assert cfg_fields == par_fields
 

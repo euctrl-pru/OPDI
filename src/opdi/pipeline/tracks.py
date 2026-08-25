@@ -40,8 +40,20 @@ class TrackProcessor:
     - Cumulative distance calculation
     - Altitude outlier detection and smoothing
 
-    CRITICAL: The track ID generation algorithm must remain unchanged
-    as it ensures consistency with historical data and downstream systems.
+    **Track identity is versioned, not frozen.** This class used to carry a
+    "CRITICAL - DO NOT MODIFY" warning on the id algorithm. That was the wrong
+    way to state a real constraint: changing the algorithm changes ``track_id``
+    for everything produced afterwards, so it is a *release* decision that
+    consumers must be told about -- but it is a decision that can be taken, and
+    the track-construction study was commissioned to take it. What must not
+    happen is a silent change, or one that leaves published data unreproducible
+    without saying so.
+
+    So the algorithm is selected by ``config.segmentation.method``. ``legacy``
+    reproduces the published ids byte for byte and remains the default;
+    ``standard`` is the study's recommendation. Both delegate to
+    ``pipeline/segmentation``, so production runs the code the study measured
+    rather than a second implementation of the same prose.
     """
 
     def __init__(
@@ -98,13 +110,22 @@ class TrackProcessor:
         """
         Add unique track ID to each state vector.
 
-        Track ID generation algorithm (CRITICAL - DO NOT MODIFY):
-        1. Create group_id: SHA2(icao24 + callsign, 256) truncated to 16 chars
-        2. Split tracks based on time gaps:
-           - Gap > 30 minutes, OR
-           - Gap > 15 minutes AND altitude < 1524m (5000 ft)
-        3. Calculate offset for each split within a group
-        4. Final track_id: {group_id}_{offset}_{year}_{month}
+        Dispatches on ``config.segmentation.method``.
+
+        ``legacy`` -- the algorithm behind every published dataset:
+        1. group_id: SHA2(icao24 + callsign, 256) truncated to 16 chars
+        2. split on a gap > 30 minutes, or > 15 minutes below 1524 m (5000 ft)
+        3. offset counts the splits before this point within the group
+        4. track_id: ``{group_id}_{offset}_{year}_{month}``
+
+        ``standard`` -- the track-construction study's recommendation, delegated
+        to ``pipeline.segmentation`` so production runs the benchmarked code.
+        Grouping is on ``icao24`` alone, a genuine non-blank callsign change is
+        an additional break, and the id has no year/month suffix.
+
+        The legacy branch below is left exactly as it was written, including its
+        own column names and comments: it is what reproduces the published ids,
+        and the cheapest way to keep it doing that is not to tidy it.
 
         Args:
             df: DataFrame with state vectors
@@ -112,6 +133,10 @@ class TrackProcessor:
         Returns:
             DataFrame with track_id column added
         """
+        method = getattr(self.config.segmentation, "method", "legacy")
+        if method != "legacy":
+            return self._add_track_id_segmentation(df, method)
+
         # Add timestamp column
         df = df.withColumn("event_time_ts", to_timestamp("event_time"))
 
@@ -171,6 +196,38 @@ class TrackProcessor:
                      "time_gap_minutes", "new_group_flag", "offset")
 
         return df
+
+    def _add_track_id_segmentation(self, df: DataFrame, method: str) -> DataFrame:
+        """``track_id`` from a named arm of ``pipeline.segmentation``.
+
+        Delegating rather than reimplementing is the point. The arms were
+        benchmarked through this module, so calling it here means the algorithm
+        in production is the one the study measured -- not a second rendering of
+        the same description, which is exactly how two implementations drift
+        while both look correct.
+
+        Thresholds come from ``config.segmentation`` via ``from_config``, so a
+        deployment can retune without editing code, and the fields carry their
+        units in their names.
+        """
+        from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
+        from opdi.pipeline.segmentation.methods import ARMS
+
+        # "standard" is the production name for the arm the study calls
+        # "recommended". Two names because they answer different questions:
+        # inside the study an arm is one candidate among eight, while a
+        # deployment wants to say which segmentation it is running without
+        # implying a comparison it is not making. Every other arm name is
+        # accepted too, which is what lets the benchmark drive the real
+        # pipeline instead of a harness that only resembles it.
+        resolved = "recommended" if method == "standard" else method
+        if resolved not in ARMS:
+            known = sorted(set(ARMS) | {"standard"})
+            raise ValueError(
+                f"unknown segmentation method {method!r}; known: {', '.join(known)}"
+            )
+        params = SegmentationParams.from_config(self.config.segmentation)
+        return assign_track_id(df, ARMS[resolved](), params)
 
     def _add_h3_encoding(self, df: DataFrame) -> DataFrame:
         """

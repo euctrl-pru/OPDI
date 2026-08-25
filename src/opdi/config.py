@@ -1048,9 +1048,36 @@ class SegmentationConfig:
     setting ``OPDIConfig().segmentation.low_alt_ft`` produced no effect and no
     error.)
 
-    The frozen ``track_gap_*`` fields on ``IngestionConfig`` are untouched:
-    ``tracks.py:_add_track_id`` still reads them and still produces the published
-    ``track_id``.
+    The ``track_gap_*`` fields on ``IngestionConfig`` are untouched: they are what
+    ``method="legacy"`` reads, and it still produces the published ``track_id``
+    byte for byte.
+    """
+
+    method: str = "legacy"
+    """Which segmentation ``tracks.py`` builds ``track_id`` with.
+
+    ``"legacy"`` is the algorithm behind every published dataset: group on
+    ``(icao24, callsign)``, split on a 30-minute gap or a 15-minute gap below
+    5,000 ft, suffix the id with year and month.
+
+    ``"standard"`` is what the track-construction study recommends: group on
+    ``icao24`` alone, so a blank or flickering callsign no longer starts a track;
+    break when the last *non-blank* callsign really changes, so two flights of
+    one airframe still part; keep the legacy gap rules as a floor. Measured over
+    two three-day samples it matches individual flights 90.8% and 91.8% of the
+    time against legacy's 49.6% and 52.3%, and merges less often than legacy
+    does.
+
+    Both dispatch to ``pipeline/segmentation``, so the algorithm production runs
+    is the one the study benchmarked rather than a second implementation of the
+    same description.
+
+    **The default stays ``"legacy"`` deliberately.** Switching it changes
+    ``track_id`` for every subsequent run, in shape as well as value -- the
+    ``standard`` id carries no ``_{year}_{month}`` suffix -- which is a release
+    decision rather than a default. It also wants the flight list's callsign
+    labelling fixed first: done in the other order, the study measures a
+    34-point ADEP/ADES coverage loss in between.
     """
 
     gap_minutes: float = 30.0
