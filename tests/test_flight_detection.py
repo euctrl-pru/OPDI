@@ -238,8 +238,8 @@ def test_version_is_new_unless_the_run_is_a_legacy_one():
             self.detection = detection
             self.tracks_table = tracks
 
-    assert Stub(DetectionConfig(), "osn_tracks_clean")._version_for("trend") == "v4.0.0"
-    assert Stub(DetectionConfig(), "osn_tracks_clean")._version_for("endpoint") == "v4.0.0"
+    assert Stub(DetectionConfig(), "osn_tracks_clean")._version_for("trend") == "v5.0.0"
+    assert Stub(DetectionConfig(), "osn_tracks_clean")._version_for("endpoint") == "v5.0.0"
 
     legacy = DetectionConfig.legacy()
     assert Stub(legacy, "osn_tracks")._version_for("trend") == "v2.0.0"
@@ -247,7 +247,7 @@ def test_version_is_new_unless_the_run_is_a_legacy_one():
 
     # Legacy thresholds over *cleaned* tracks is not a legacy run: the input
     # differs, so the output cannot be claimed to reproduce a release.
-    assert Stub(legacy, "osn_tracks_clean")._version_for("trend") == "v4.0.0"
+    assert Stub(legacy, "osn_tracks_clean")._version_for("trend") == "v5.0.0"
     assert OPDIConfig().detection == DetectionConfig()
 
 

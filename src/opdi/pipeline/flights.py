@@ -85,7 +85,17 @@ OOA = "OOA"
 #: state-vector sampler moved from a fixed-phase filter to a bin-based one, so
 #: ``track_id`` values differ. Re-ingesting an old month reproduces the
 #: aerodromes but not the identifiers.
-FLIGHT_LIST_VERSION = "v4.0.0"
+#:
+#: ``v5.0.0``: a flight is labelled with its track's dominant non-blank callsign
+#: rather than ``F.min("flight_id")``, and the column is resolved to that one
+#: value at every point the track table is read -- see :func:`resolve_flight_id`.
+#: Under legacy segmentation the two rules agree on every track, because
+#: callsign is part of the track's group key and the track is therefore
+#: callsign-homogeneous; so the bump describes a capability rather than a
+#: correction to published data. The value does change for any segmentation that
+#: does not carry callsign in its group key, and published data must say which
+#: rule produced it. Never mutate a released value.
+FLIGHT_LIST_VERSION = "v5.0.0"
 
 #: What the paths stamped before ``v4.0.0``. Kept so
 #: :meth:`DetectionConfig.legacy` runs reproduce released data byte for byte.
@@ -174,6 +184,87 @@ def at_border(lat, lon, margin_nm: float = BORDER_MARGIN_NM):
         | (lat >= lit(max_lat) - dlat)
         | (lon <= lit(min_lon) + dlon)
         | (lon >= lit(max_lon) - dlon)
+    )
+
+
+def dominant_flight_id(df: DataFrame, track_col: str = "track_id") -> DataFrame:
+    """The callsign a track actually flew, one row per track.
+
+    Replaces ``F.min("flight_id")``. The minimum is the lexicographically
+    smallest callsign in the track, and every reader of the track table fills
+    null callsigns with ``""``, which sorts before everything -- so any track
+    carrying one blank sample was labelled blank.
+
+    That was correct while ``callsign`` was part of the track's group key: every
+    track was then callsign-homogeneous and the minimum was the only value
+    present. It stops being correct the moment a segmentation groups on the
+    airframe alone. Measured on 2025, 64% of such tracks carry a real callsign
+    alongside blanks, and the resulting blank labels drop ADEP/ADES coverage
+    from 80% to 54% -- a collapse with no segmentation cause at all.
+
+    **Most frequent, not smallest-real.** Choosing the alphabetically smallest
+    real callsign would fix the blank by restoring the arbitrary tie-break that
+    caused the problem. Ties break on the callsign itself, so the result is
+    deterministic rather than dependent on how Spark partitioned the input.
+
+    A track that never broadcast a callsign has **no row here**: this function
+    does not invent a blank. :func:`resolve_flight_id` restores ``""`` through
+    its left join, so an unlabelled flight stays in the frame rather than
+    dropping out of every downstream denominator.
+
+    This is deliberately the same operation as ``dominant_callsign`` in
+    ``benchmarks/flight_list_v7.py``, down to the tie-break, so the production
+    flight list and the V1 benchmark repair can be compared as one change
+    rather than two similar ones.
+    """
+    blank = F.trim(F.coalesce(F.col("flight_id"), lit(""))) == ""
+    counts = (
+        df.filter(~blank)
+        .groupBy(track_col, "flight_id")
+        .agg(F.count(lit(1)).alias("_n"))
+    )
+    rank = Window.partitionBy(track_col).orderBy(
+        F.col("_n").desc(), F.col("flight_id").asc()
+    )
+    return (
+        counts.withColumn("_r", row_number().over(rank))
+        .filter(F.col("_r") == 1)
+        .select(track_col, F.col("flight_id").alias("_dominant_flight_id"))
+    )
+
+
+def resolve_flight_id(sv: DataFrame, track_col: str = "track_id") -> DataFrame:
+    """Give every sample of a track the one callsign that track flew.
+
+    The rest of this module uses ``flight_id`` as a grouping and join key -- at
+    ten separate sites, and never aggregated. That is only safe while every
+    track carries exactly one value, which legacy segmentation guarantees by
+    construction because callsign is part of the track's group key.
+
+    A segmentation that groups on the airframe alone breaks the guarantee, and
+    then a track carrying two callsigns *fans out into two rows* at every one of
+    those keys -- one physical track becoming several flight-list rows. Resolving
+    the column here, at the point the track table is read, restores the invariant
+    the module was written on instead of patching each site that depends on it.
+
+    Resolve on the **unfiltered** frame. Two of the callers reduce to the two
+    endpoint samples of each track a few lines later; a mode taken over two rows
+    ties back to the alphabet and reproduces the original bug in a subtler form.
+
+    A track that never broadcast a callsign keeps ``""``: an unlabelled flight,
+    not an absent one. Hence the left join -- an inner one would drop it and
+    shrink the denominator of every downstream rate. The coalesce spells the
+    blank explicitly because downstream code compares against ``""`` and a NULL
+    would slip past those comparisons as a different bug.
+    """
+    labels = dominant_flight_id(sv, track_col)
+    return (
+        sv.join(labels, on=track_col, how="left")
+        .withColumn(
+            "flight_id",
+            F.coalesce(F.col("_dominant_flight_id"), lit("")),
+        )
+        .drop("_dominant_flight_id")
     )
 
 
@@ -420,6 +511,10 @@ class FlightListProcessor:
         sv = self._get_data_within_timeframe(self.tracks_table, month)
         sv = sv.dropna(subset=["lat", "lon", "track_id"])
         sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
+        # Before the endpoint filter below, not after: the mode has to be taken
+        # over the whole track, and over two endpoint samples it ties back to
+        # the alphabet -- which is the bug it exists to remove.
+        sv = resolve_flight_id(sv)
         sv = sv.withColumn("event_time", F.to_timestamp(col("event_time")))
         sv = sv.withColumn("_border", at_border(col("lat"), col("lon")))
 
@@ -438,7 +533,12 @@ class FlightListProcessor:
                 F.min("event_time").alias("_first_seen"),
                 F.max("event_time").alias("_last_seen"),
                 F.min("icao24").alias("_ICAO24"),
-                F.min("flight_id").alias("_FLT_ID"),
+                # After resolve_flight_id every row of the track carries the
+                # same value, so the choice of aggregate no longer decides
+                # anything. ``first`` says that; ``min`` implied a decision --
+                # and made the wrong one, because "" sorts before every real
+                # callsign.
+                F.first("flight_id").alias("_FLT_ID"),
             )
             .withColumn("_DOF", to_date(col("_first_seen")))
         )
@@ -532,6 +632,10 @@ class FlightListProcessor:
         sv = self._get_data_within_timeframe(self.tracks_table, month)
         sv = sv.dropna(subset=["lat", "lon", "track_id"])
         sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
+        # Before the endpoint filter below, for the reason given in
+        # :func:`resolve_flight_id`: over the two endpoint samples alone the
+        # mode ties, and the tie-break is the alphabet again.
+        sv = resolve_flight_id(sv)
 
         w = Window.partitionBy("track_id").orderBy("event_time")
         ends = (
@@ -620,6 +724,11 @@ class FlightListProcessor:
         sv_f = sv.dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
         sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
         sv_f = sv_f.fillna({"flight_id": ""})
+        # Everything downstream of here groups and joins on flight_id without
+        # ever aggregating it -- ten sites, from the take-off/landing status
+        # groupings to the outer join that pairs them. One value per track is
+        # the invariant they were written on, and this is where it is restored.
+        sv_f = resolve_flight_id(sv_f)
         sv_f = sv_f.withColumn("event_time", F.to_timestamp(col("event_time")))
         sv_f = sv_f.withColumn(
             "flight_level", (col("baro_altitude") * 3.28084 / 100).cast("int")
@@ -1629,7 +1738,7 @@ class FlightListProcessor:
             LAST_SEEN TIMESTAMP COMMENT 'Last ADS-B reception time',
             ADEP_SOURCE STRING COMMENT 'How ADEP was decided: aerodrome (named it), out_of_area (the track began outside the observed area), undetermined (could not tell). A null ADEP means the last two, which are not the same thing.',
             ADES_SOURCE STRING COMMENT 'The same for ADES.',
-            VERSION STRING COMMENT 'Processing version. v4.0.0 onward; earlier lists carried v2.0.0 or v3.0.0 depending on which algorithm named the departure.'
+            VERSION STRING COMMENT 'Processing version. v5.0.0 onward; v4.0.0 labelled a flight with the alphabetically smallest callsign in its track, and lists before that carried v2.0.0 or v3.0.0 depending on which algorithm named the departure.'
         )
         USING iceberg
         PARTITIONED BY (days(FIRST_SEEN))

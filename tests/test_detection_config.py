@@ -220,6 +220,11 @@ def test_version_string_is_new_and_the_published_ones_are_untouched():
     Both old strings stay in the module because a legacy run must still stamp
     them. If someone ever "tidies" them away, a re-processed month stops
     matching the release it was meant to reproduce.
+
+    The current string is pinned too, so that changing it is a deliberate act
+    with a test to update rather than a silent edit. It went ``v4.0.0`` ->
+    ``v5.0.0`` when the flight list started labelling a track with its dominant
+    non-blank callsign instead of ``F.min("flight_id")``.
     """
     from opdi.pipeline.flights import (  # noqa: PLC0415
         FLIGHT_LIST_VERSION,
@@ -227,7 +232,7 @@ def test_version_string_is_new_and_the_published_ones_are_untouched():
         LEGACY_TREND_VERSION,
     )
 
-    assert FLIGHT_LIST_VERSION == "v4.0.0"
+    assert FLIGHT_LIST_VERSION == "v5.0.0"
     assert LEGACY_TREND_VERSION == "v2.0.0"
     assert LEGACY_ENDPOINT_VERSION == "v3.0.0"
     assert FLIGHT_LIST_VERSION not in (LEGACY_TREND_VERSION, LEGACY_ENDPOINT_VERSION)
