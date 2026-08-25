@@ -343,3 +343,193 @@ def test_load_flight_intervals_excludes_a_flight_landing_after_the_sample_window
     assert len(rows) == 1
     assert rows[0]["t_off"] == dt.datetime(2025, 6, 5, 8, 10, 0)
     assert rows[0]["t_land"] == dt.datetime(2025, 6, 5, 10, 0, 0)
+
+
+# -- the APDF departure join must key on the take-off day, not the off-block
+# day. A taxi that crosses midnight separates the two: 2,272 of 957,396 NM
+# flights in 202506 (0.237 %) and 2,102 of 935,887 in 202406 (0.225 %),
+# measured over the committed reference extracts.
+
+
+def test_apdf_departure_is_attached_when_the_taxi_crosses_midnight(spark, tmp_path):
+    """Off-block 23:52, airborne 00:16: the milestone is real and must be used.
+
+    ``day`` is ``to_date(AOBT_3)`` and APDF's ``mvt_day`` is the take-off day,
+    so keying the departure join on ``day`` misses this leg entirely and drops
+    it to ``t_source = "nm_inferred"`` -- lossy rather than wrong, but
+    systematically lossy: ``boundary_error`` is APDF-only, so the flights it
+    never sees would be exactly the midnight-taxi ones, in a study about taxi
+    behaviour. The key is ``to_date(AOBT_3 + TAXI_TIME_3)``, which ``CLAUDE.md``
+    records as matching real APDF ATOT to a median of 0 s (IQR 17 s).
+    """
+    flights_rows = [
+        Row(AIRCRAFT_ADDRESS="synth04", AIRCRAFT_ID="SYN4", ADEP="EBBR", ADES="BIKF",
+            AOBT_3=dt.datetime(2025, 6, 4, 23, 52, 0),
+            ARVT_3=dt.datetime(2025, 6, 5, 4, 30, 0), TAXI_TIME_3=22),
+    ]
+    apdf_rows = [
+        # real ATOT, two minutes after the NM estimate of 00:14, on 06-05
+        Row(AP_C_FLTID="SYN4", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 16, 0)),
+        Row(AP_C_FLTID="SYN4", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 4, 32, 0)),
+    ]
+    spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
+        str(tmp_path / "flights_200004.parquet")
+    )
+    spark.createDataFrame(apdf_rows, schema=_SYNTH_APDF_SCHEMA).write.parquet(
+        str(tmp_path / "apdf_200004.parquet")
+    )
+
+    gt = load_flight_intervals(
+        spark, months=["200004"], days=["2025-06-05"], reference_base=str(tmp_path)
+    )
+    rows = gt.filter(gt.icao24 == "synth04").collect()
+    assert len(rows) == 1
+    assert rows[0]["t_source"] == "apdf"
+    assert rows[0]["t_off"] == dt.datetime(2025, 6, 5, 0, 16, 0)
+    assert rows[0]["t_land"] == dt.datetime(2025, 6, 5, 4, 32, 0)
+    # `day` keeps its documented meaning: the off-block day, not the key the
+    # departure join now uses.
+    assert rows[0]["day"] == dt.date(2025, 6, 4)
+
+
+def test_apdf_departure_does_not_attach_a_movement_from_the_off_block_day(
+    spark, tmp_path
+):
+    """The old key's silently-wrong half, not just its lossy half.
+
+    The same callsign departed the same aerodrome at 20:00 on the off-block
+    day. Keyed on ``day``, that movement is the *only* eligible candidate for a
+    leg that pushed back at 23:52 -- so the join attaches a take-off nearly four
+    hours before push-back, and ``t_source`` still reads "apdf". Keyed on the
+    take-off day, only the 00:16 movement is eligible.
+    """
+    flights_rows = [
+        Row(AIRCRAFT_ADDRESS="synth05", AIRCRAFT_ID="SYN5", ADEP="EBBR", ADES="BIKF",
+            AOBT_3=dt.datetime(2025, 6, 4, 23, 52, 0),
+            ARVT_3=dt.datetime(2025, 6, 5, 4, 30, 0), TAXI_TIME_3=22),
+    ]
+    apdf_rows = [
+        # an earlier movement of the same callsign, on the off-block day
+        Row(AP_C_FLTID="SYN5", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 4, 20, 0, 0)),
+        # this leg's own take-off
+        Row(AP_C_FLTID="SYN5", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 16, 0)),
+        Row(AP_C_FLTID="SYN5", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 4, 32, 0)),
+    ]
+    spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
+        str(tmp_path / "flights_200005.parquet")
+    )
+    spark.createDataFrame(apdf_rows, schema=_SYNTH_APDF_SCHEMA).write.parquet(
+        str(tmp_path / "apdf_200005.parquet")
+    )
+
+    gt = load_flight_intervals(
+        spark, months=["200005"], days=["2025-06-05"], reference_base=str(tmp_path)
+    )
+    rows = gt.filter(gt.icao24 == "synth05").collect()
+    assert len(rows) == 1
+    assert rows[0]["t_off"] == dt.datetime(2025, 6, 5, 0, 16, 0)
+
+
+def test_apdf_departure_still_matches_an_ordinary_same_day_leg(spark, tmp_path):
+    """Moving the key must not lose the 99.8 % of legs whose taxi stays put.
+
+    Off-block and take-off on the same day is the normal case, and it has to go
+    on matching exactly as before -- including the proximity choice between two
+    candidates that share the new key.
+    """
+    flights_rows = [
+        Row(AIRCRAFT_ADDRESS="synth06", AIRCRAFT_ID="SYN6", ADEP="EBBR", ADES="BIKF",
+            AOBT_3=dt.datetime(2025, 6, 5, 8, 0, 0),
+            ARVT_3=dt.datetime(2025, 6, 5, 10, 0, 0), TAXI_TIME_3=10),
+        Row(AIRCRAFT_ADDRESS="synth06", AIRCRAFT_ID="SYN6", ADEP="EBBR", ADES="BIKF",
+            AOBT_3=dt.datetime(2025, 6, 5, 14, 0, 0),
+            ARVT_3=dt.datetime(2025, 6, 5, 16, 0, 0), TAXI_TIME_3=10),
+    ]
+    apdf_rows = [
+        Row(AP_C_FLTID="SYN6", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 8, 5, 0)),
+        Row(AP_C_FLTID="SYN6", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 14, 7, 0)),
+        Row(AP_C_FLTID="SYN6", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 10, 5, 0)),
+        Row(AP_C_FLTID="SYN6", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 16, 5, 0)),
+    ]
+    spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
+        str(tmp_path / "flights_200006.parquet")
+    )
+    spark.createDataFrame(apdf_rows, schema=_SYNTH_APDF_SCHEMA).write.parquet(
+        str(tmp_path / "apdf_200006.parquet")
+    )
+
+    gt = load_flight_intervals(
+        spark, months=["200006"], days=["2025-06-05"], reference_base=str(tmp_path)
+    )
+    rows = gt.filter(gt.icao24 == "synth06").orderBy("t_off").collect()
+    assert len(rows) == 2
+    assert rows[0]["t_off"] == dt.datetime(2025, 6, 5, 8, 5, 0)
+    assert rows[1]["t_off"] == dt.datetime(2025, 6, 5, 14, 7, 0)
+    assert rows[0]["t_source"] == rows[1]["t_source"] == "apdf"
+
+
+def test_apdf_departure_does_not_inflate_a_ground_truth_interval(spark, tmp_path):
+    """The consequence that reaches the metrics, in the shape it really had.
+
+    A nightly EDDV->LTAI service, reproduced from the real case: icao24 4bce13,
+    SXS9ZZ, off-block 2025-06-05 23:52 + 10 min taxi, down 06-06 03:16. APDF
+    holds this leg's take-off at 06-06 00:02:15 and *yesterday's rotation* at
+    06-05 00:20:03. Keyed on the off-block day, only yesterday's is eligible,
+    and pairing it with this leg's own ARVT_3 gives a 26.9-hour ground-truth
+    interval.
+
+    That is not a labelling nicety: ``overlap_join`` assigns by containment, so
+    an interval that long swallows a whole day of the airframe's samples --
+    including its neighbouring legs' -- into one flight, in a study whose
+    headline statistic is how often a segmentation merges flights. Nor does
+    ``t_source`` flag it: LTAI is not APDF-covered, so ``aldt`` is null and the
+    row reads "nm_inferred" while carrying an APDF take-off from the wrong day.
+    """
+    flights_rows = [
+        Row(AIRCRAFT_ADDRESS="synth07", AIRCRAFT_ID="SYN7", ADEP="EDDV", ADES="LTAI",
+            AOBT_3=dt.datetime(2025, 6, 5, 23, 52, 0),
+            ARVT_3=dt.datetime(2025, 6, 6, 3, 16, 0), TAXI_TIME_3=10),
+    ]
+    apdf_rows = [
+        # yesterday's rotation of the same nightly service
+        Row(AP_C_FLTID="SYN7", ADEP_ICAO="EDDV", ADES_ICAO="LTAI", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 20, 3)),
+        # this leg's own take-off, 15 s from NM's estimate
+        Row(AP_C_FLTID="SYN7", ADEP_ICAO="EDDV", ADES_ICAO="LTAI", SRC_PHASE="DEP",
+            MVT_TIME_UTC=dt.datetime(2025, 6, 6, 0, 2, 15)),
+        # no ARR row: LTAI is not APDF-covered, so t_source stays nm_inferred
+    ]
+    spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
+        str(tmp_path / "flights_200007.parquet")
+    )
+    spark.createDataFrame(apdf_rows, schema=_SYNTH_APDF_SCHEMA).write.parquet(
+        str(tmp_path / "apdf_200007.parquet")
+    )
+
+    # The real study's three-day window, not a single day. With a one-day
+    # window the mis-attached 06-05 00:20 take-off falls outside it and the row
+    # is merely dropped -- a different failure, and one that hides this one.
+    # Widened, the inflated interval survives into the output, as it did in the
+    # 2025 sample.
+    gt = load_flight_intervals(
+        spark, months=["200007"],
+        days=["2025-06-05", "2025-06-06", "2025-06-07"],
+        reference_base=str(tmp_path),
+    )
+    rows = gt.filter(gt.icao24 == "synth07").collect()
+    assert len(rows) == 1
+    assert rows[0]["t_off"] == dt.datetime(2025, 6, 6, 0, 2, 15)
+    duration_h = (rows[0]["t_land"] - rows[0]["t_off"]).total_seconds() / 3600.0
+    assert duration_h < 4, f"ground-truth interval inflated to {duration_h:.1f} h"
+    # The label is unchanged by this fix, and says less than it appears to:
+    # a measured ATOT with no measured ALDT still reads "nm_inferred".
+    assert rows[0]["t_source"] == "nm_inferred"

@@ -90,6 +90,34 @@ def _prefilter_days(days: list):
     )
 
 
+def _estimated_atot(aobt, taxi_min):
+    """NM's own take-off estimate: ``AOBT_3 + TAXI_TIME_3``, as a timestamp.
+
+    ``CLAUDE.md`` records this as matching real APDF ATOT with median error 0 s
+    and IQR 17 s, measured in Task 4 Step 1 -- which is why it is trusted both
+    to stand in for a missing milestone and to say which day a take-off falls
+    on.
+
+    One definition, three users: the departure join's day key, that join's
+    proximity ordering, and ``t_off``'s fallback where APDF has no milestone at
+    all. Those were three copies of the same arithmetic, and the day key is the
+    one that must not drift from the others -- a key computed one way and an
+    estimate ranked another would match candidates on one clock and choose
+    between them on a different one.
+
+    Arithmetic goes through unix seconds because Spark cannot add a *column* of
+    minutes as an interval: ``INTERVAL`` literals are parsed at plan time and
+    cannot take a column operand. ``coalesce(taxi_min, 0.0)`` reads a missing
+    ``TAXI_TIME_3`` as "departed instantly"; measured against
+    ``flights_202506.parquet`` (957,396 rows) it is null in 0 of them, so the
+    coalesce is a formality -- re-measure if this module is ever pointed at a
+    month where that rate is not zero.
+    """
+    return (F.unix_timestamp(aobt) + F.coalesce(taxi_min, F.lit(0.0)) * 60).cast(
+        "timestamp"
+    )
+
+
 def load_apdf_times(
     spark: SparkSession, months: list, reference_base: str = REFERENCE_BASE
 ) -> tuple:
@@ -257,34 +285,60 @@ def load_flight_intervals(
     # rather than collapsed into one.
     dep, arr = load_apdf_times(spark, months, reference_base=reference_base)
 
-    # **Known, unfixed, and measured: this join key is a day key too.** ``day``
-    # is ``to_date(AOBT_3)`` (off-block) while ``dep.mvt_day`` is
+    # **The departure join keys on the take-off day, not the off-block day.**
+    # ``day`` is ``to_date(AOBT_3)`` (off-block) while ``dep.mvt_day`` is
     # ``to_date(MVT_TIME_UTC)`` (take-off), and a taxi that crosses midnight
-    # puts them on different days -- 2,272 of 957,396 NM flights in 202506
+    # puts the two on different days -- 2,272 of 957,396 NM flights in 202506
     # (0.237 %) and 2,102 of 935,887 in 202406 (0.225 %), measured over the
-    # committed reference extracts. Such a flight loses its APDF departure
-    # match and falls back to ``t_source = "nm_inferred"``: lossy rather than
-    # wrong, and ``boundary_error`` (APDF only) then never sees it, so the
-    # flights excluded are systematically the midnight-taxi ones. Left as it
-    # stands here deliberately -- changing it moves flights between
-    # ``t_source`` branches and therefore moves published numbers, which is a
-    # plan decision, not an implementation one. The arrival side had the same
-    # shape and was fixed (see below); the fix here would mirror it, keying on
-    # ``to_date(AOBT_3 + TAXI_TIME_3)``.
+    # committed reference extracts. Keying on ``day`` was wrong in both of the
+    # ways the arrival side was, and is fixed the same way:
+    #
+    #   * it dropped every midnight-taxi leg to ``t_source = "nm_inferred"``,
+    #     which is lossy rather than wrong -- but not harmlessly so.
+    #     ``track_score.boundary_error`` restricts itself to APDF rows, so the
+    #     flights it never saw were systematically the midnight-taxi ones. A
+    #     lossy fallback that loses a random 0.2 % is noise; one that loses a
+    #     0.2 % correlated with taxi behaviour, in a study about taxi
+    #     behaviour, is a bias;
+    #   * and where the same callsign had an earlier movement from the same
+    #     aerodrome on the off-block day -- which for a nightly service means
+    #     *yesterday's rotation* -- that movement was the only candidate the key
+    #     admitted, so the join attached a take-off hours before push-back.
+    #     Measured, not hypothesised. icao24 4bce13, SXS9ZZ, EDDV->LTAI,
+    #     AOBT_3 2025-06-05 23:52 (+10 min taxi): APDF holds a DEP at
+    #     2025-06-06 00:02:15, 15 s from NM's own estimate, and another at
+    #     2025-06-05 00:20:03 -- the night before. The off-block-day key
+    #     admitted only the latter, so this leg's t_off became 2025-06-05
+    #     00:20:03 against its own ARVT_3 of 2025-06-06 03:16: a **26.9-hour
+    #     ground-truth interval**. 10 such intervals over 20 h in the 2025
+    #     sample and 9 in 2024; none over 20 h in 2025 after this fix.
+    #     `overlap_join` assigns by containment, so an interval that long
+    #     swallows a whole day of that airframe's samples -- including its
+    #     neighbouring legs' -- straight into the merge statistic this study
+    #     reports.
+    #
+    #     Note what did *not* protect against it: `t_source` read
+    #     "nm_inferred" for that row, because LTAI is not APDF-covered so
+    #     `aldt` was null, and t_source is "apdf" only when both ends are
+    #     measured. `t_off` takes `atot` whenever it exists, independently of
+    #     the label. So `boundary_error`'s APDF-only restriction was no guard
+    #     here at all. See the t_source computation below.
+    #
+    # The key is ``to_date(AOBT_3 + TAXI_TIME_3)`` -- the same estimate the
+    # proximity ordering below ranks on and ``t_off`` falls back to, computed
+    # once in ``_estimated_atot`` so the three cannot drift apart.
+    est_atot = _estimated_atot(nm.aobt, nm.taxi_min)
     jdep = nm.join(
         dep,
         (nm.callsign == dep.callsign)
-        & (nm.day == dep.mvt_day)
+        & (F.to_date(est_atot) == dep.mvt_day)
         & (nm.gt_adep == dep.apdf_adep),
         "left",
     )
     # Ordered on proximity alone, no secondary key: exactly-equidistant
     # candidates tie non-deterministically (rare -- sub-second exact ties).
     w_dep = Window.partitionBy(nm._nm_id).orderBy(
-        F.abs(
-            F.unix_timestamp(dep.atot)
-            - (F.unix_timestamp(nm.aobt) + F.coalesce(nm.taxi_min, F.lit(0.0)) * 60)
-        ).asc_nulls_last()
+        F.abs(F.unix_timestamp(dep.atot) - F.unix_timestamp(est_atot)).asc_nulls_last()
     )
     jdep = (
         jdep.withColumn("_rdep", F.row_number().over(w_dep))
@@ -331,22 +385,12 @@ def load_flight_intervals(
     )
 
     # APDF where it exists, NM inference otherwise. The inference is stated
-    # rather than hidden: t_source travels with every row.
-    #
-    # Timestamp arithmetic goes through unix seconds. Spark has no way to add a
-    # *column* of minutes as an interval -- `INTERVAL` literals are parsed at
-    # plan time and cannot take a column operand.
-    #
-    # coalesce(taxi_min, 0.0) reads a missing TAXI_TIME_3 as "departed
-    # instantly." Measured against flights_202506.parquet (957,396 rows):
-    # TAXI_TIME_3 is null in 0 of them -- 0.0%. Negligible, so the coalesce is
-    # kept as a formality rather than given a distinct t_source; re-measure if
-    # this module is ever pointed at a month where that rate is not zero.
+    # rather than hidden: t_source travels with every row. The estimate is
+    # _estimated_atot -- the same one the departure join keys and ranks on, so
+    # a flight cannot be matched against one take-off time and then have
+    # another written into t_off.
     t_off = F.coalesce(
-        F.col("atot"),
-        (
-            F.unix_timestamp("aobt") + F.coalesce(F.col("taxi_min"), F.lit(0.0)) * 60
-        ).cast("timestamp"),
+        F.col("atot"), _estimated_atot(F.col("aobt"), F.col("taxi_min"))
     )
     t_land = F.coalesce(F.col("aldt"), F.col("arvt"))
 
@@ -354,6 +398,17 @@ def load_flight_intervals(
         j.withColumn("t_off", t_off)
         .withColumn("t_land", t_land)
         .withColumn(
+            # **"nm_inferred" does not mean "no APDF touched this row."** It
+            # means not *both* ends were measured, which is the right rule for
+            # boundary_error (it needs both) but is weaker than it looks: t_off
+            # above takes `atot` whenever it exists, so a row with a real ATOT
+            # and no ALDT -- an APDF-covered departure to an uncovered
+            # aerodrome -- carries a measured take-off under the "nm_inferred"
+            # label. Observed and left alone deliberately: no consumer reads
+            # t_source as a provenance flag per endpoint today, and splitting
+            # it would move which rows boundary_error counts. Recorded here
+            # rather than fixed in passing, because it is what let the
+            # departure-join defect above reach the output unguarded.
             "t_source",
             F.when(F.col("atot").isNotNull() & F.col("aldt").isNotNull(), "apdf")
             .otherwise("nm_inferred"),
