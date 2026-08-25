@@ -247,9 +247,17 @@ def resolve_flight_id(sv: DataFrame, track_col: str = "track_id") -> DataFrame:
     the column here, at the point the track table is read, restores the invariant
     the module was written on instead of patching each site that depends on it.
 
-    Resolve on the **unfiltered** frame. Two of the callers reduce to the two
-    endpoint samples of each track a few lines later; a mode taken over two rows
-    ties back to the alphabet and reproduces the original bug in a subtler form.
+    Resolve on the **unfiltered** frame. Three of the four callers reduce to one
+    or two samples per track a few lines later; a mode taken over those rows ties
+    back to the alphabet and reproduces the original bug in a subtler form.
+
+    **Import this; do not copy it.** ``events.py`` groups on ``flight_id``
+    without aggregating it too, so it needs the same treatment, and it already
+    imports from this module (``bearing_deg``, ``haversine_nm``). That is the
+    right way in. The wrong way is a second copy: ``utils/geospatial.py`` holds
+    a haversine and a bearing that nothing in ``src/opdi/`` imports, because the
+    pipeline grew its own instead -- which is how the production flight list and
+    the V7 benchmark came to disagree about this very callsign rule.
 
     A track that never broadcast a callsign keeps ``""``: an unlabelled flight,
     not an absent one. Hence the left join -- an inner one would drop it and
@@ -1423,6 +1431,19 @@ class FlightListProcessor:
             time_col="first_seen",
         ).select("id")
 
+        # Resolved here for the same reason as the three detection paths, and
+        # for one more: this method keeps only the *first* row of each track, so
+        # without resolution an overflight is labelled with whatever the airframe
+        # happened to be broadcasting at its earliest sample -- routinely nothing
+        # at all, since the callsign is often blank until the crew sets it. The
+        # rows this method emits go into ``opdi_flight_list`` alongside the
+        # detected flights, so a blank here is a blank in the published table.
+        #
+        # Before the first-row filter, necessarily: after it there is one sample
+        # per track and the mode is that sample.
+        sv = sv.withColumnRenamed("callsign", "flight_id").fillna({"flight_id": ""})
+        sv = resolve_flight_id(sv)
+
         window_track = Window.partitionBy("track_id")
         sv = sv.withColumn("event_time", F.to_timestamp(col("event_time")))
         sv = sv.withColumn("first_seen", f_min("event_time").over(window_track))
@@ -1435,7 +1456,7 @@ class FlightListProcessor:
         sv_f = sv_f.withColumn("DOF", f_min("event_date").over(window_track))
         sv_f = sv_f.withColumnRenamed("track_id", "id")
         sv_f = sv_f.withColumnRenamed("icao24", "ICAO24")
-        sv_f = sv_f.withColumnRenamed("callsign", "FLT_ID")
+        sv_f = sv_f.withColumnRenamed("flight_id", "FLT_ID")
 
         for col_name in ["ADEP", "ADES", "ADEP_P", "ADES_P"]:
             sv_f = sv_f.withColumn(col_name, lit(None).cast("string"))
