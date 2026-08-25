@@ -264,3 +264,34 @@ branch, so one helper that lays out a chain of labelled boxes serves all four
 rather than four hand-placed drawings. That is what makes the approach
 affordable; without it, hand-laying four flowcharts in `grid` would not be
 worth the gain over the existing step tables.
+
+## The pipeline is not bit-reproducible at the margin
+
+Re-running the campaign against main's package reproduced every figure exactly
+**except** the `recommended` row of `mode_comparison_v6.csv`, where 5 arrivals
+of 95,116 moved from correct to wrong -- score 62,147 to 62,132.
+
+It is not a difference between main and the branch. The evidence:
+
+* the recorded configuration is identical in both rows (6,000 ft, 30 NM,
+  margin 0, `field`, `haversine`);
+* every other run -- `legacy`, `trend`, `endpoint`, `nearest`, `combined` --
+  reproduces cell for cell, and a behavioural change in shared code would not
+  spare five of six runs;
+* the movements pair up between **adjacent aerodromes**: EDDF loses one and
+  EDFE gains one, and Frankfurt and Egelsbach are about 10 km apart. LICB,
+  LIMC and LIMJ move the same way.
+
+That is a **tie in the ranking broken differently between runs**. Two candidate
+aerodromes at the same effective distance -- after the scheduled-service
+penalty -- leave the winner to whatever order Spark happened to produce.
+
+`recommended` is the only trend run at the full 30 NM radius, so it admits the
+most candidates and meets the most near-ties. The narrower runs do not show it.
+
+**What this bounds.** Every pipeline figure in the report carries roughly
+±5 flights of run-to-run noise, or about 0.005% of the sample. That is far
+below any effect the report argues from -- the datum's band result is +109 --
+but it means these numbers should not be quoted to the last digit as though
+they were exact, and a difference of a handful of flights between two
+configurations is not a difference at all.
