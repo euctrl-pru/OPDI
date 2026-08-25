@@ -325,7 +325,41 @@ def main() -> None:
             started = datetime.utcnow()
             try:
                 build_tracks(spark, cfg, period, days)
+
+                # **State vectors are dropped here, between step 02 and step
+                # 02a, and the timing is the whole point.** Nothing downstream
+                # reads them -- 02a reads osn_tracks, 03 reads
+                # osn_tracks_clean -- so holding them costs 3.3 GB exactly
+                # while cleaning needs room to write its own 3.3 GB.
+                #
+                # Keeping them through the run put the bucket at ~99.7 GB of a
+                # 100 GB quota, and the write died partway through with
+                # NoSuchUpload: the endpoint aborting a multipart upload it
+                # could not complete. That reads as a transient S3 fault and is
+                # not one -- it happened twice, at the same step, with the same
+                # arithmetic behind it. Dropping them here takes the peak from
+                # ~10 GB to ~6.8 GB.
+                #
+                # --keep-sv still works and is still useful for a *rerun* that
+                # wants to skip the 23-minute ingest -- but it is the wrong
+                # choice on a first run, which is how this was learned.
+                if not (args.keep or args.keep_sv):
+                    n, freed = delete_prefix(s3, f"opdi/{SHARED_SV}/")
+                    print(f"  -- dropped state vectors before cleaning: "
+                          f"{n} objects, {freed / 1e9:.2f} GB "
+                          f"({bucket_free_gb(s3):.2f} GB now free)")
+
                 clean_tracks(spark, cfg, period)
+
+                # Same reasoning one step later: step 03 reads the cleaned
+                # table, so the raw one is dead weight from here.
+                if not args.keep:
+                    n, freed = delete_prefix(
+                        s3, f"opdi/{table_for(method, 'osn_tracks')}/")
+                    print(f"  -- dropped raw tracks before the flight list: "
+                          f"{n} objects, {freed / 1e9:.2f} GB "
+                          f"({bucket_free_gb(s3):.2f} GB now free)")
+
                 build_flight_list(spark, cfg, period, args.airports_hex_path)
 
                 row = {"method": method, "period": args.period,
