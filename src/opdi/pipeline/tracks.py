@@ -134,7 +134,7 @@ class TrackProcessor:
         Returns:
             DataFrame with track_id column added
         """
-        method = getattr(self.config.segmentation, "method", "legacy")
+        method = self.config.segmentation.method
         if method != "legacy":
             return self._add_track_id_segmentation(df, method)
 
