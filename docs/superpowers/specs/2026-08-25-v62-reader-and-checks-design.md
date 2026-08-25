@@ -142,33 +142,67 @@ markers are what a *result* looks like in this paper.
 
 #### What "recommended" means
 
-**The sweep decides, and the sweep is run with main's `opdi` package.** The
-recommendation is not a value typed into this spec, into the paper, or into
-`config.py`. It is the optimum of the sweeps that W5 produces, and those sweeps
-are produced by the code on `main`. So the loop closes on main: main's code
-picks the configuration, and main's configuration is then checked against it.
+**The sweep decides, and the deciding sweep is the one that runs main's `opdi`
+package.** The recommendation is not a value typed into this spec, into the
+paper, or into `config.py`. It is the optimum of the **pipeline grid** — the
+job that calls `process_dai` — produced by the code on `main`. So the loop
+closes on main: main's code picks the configuration, and main's configuration
+is then checked against it.
 
 This is a deliberate change from V6's practice, which recorded a recommendation
 in prose and let it drift from the code for three versions.
 
-**The optimum is taken from the joint two-period ranking, not a single sample's
-argmax.** The machinery exists — `index.qmd` already ranks every cell by both
-periods at once, each period's score divided by its own ground-truth count so
-the larger sample cannot dominate. A single period's argmax moves under noise;
-the joint ranking is what the paper already treats as the credible statement,
-and it is what this check reads.
+#### Why the pipeline grid and not the harness sweep
+
+There are two instruments and **they disagree**:
+
+| | Grid | Says |
+|---|---|---|
+| Harness sweep (`trend_sweep_agl.py`) | 280 cells, both periods | 6,100 ft / margin 2 / 20 NM |
+| Pipeline grid (`flight_list_v62.py`) | 12 cells, 2025 only | 6,000 ft / 30 NM |
+
+Only the pipeline grid calls `process_dai`; the harness sweep is a
+reimplementation that never touches the `opdi` package. Since the criterion is
+*the sweep using main's package*, the pipeline grid is the authority.
+
+The disagreement is not a defect. It is V6's central finding restated — the
+harness optimum need not survive contact with production — and the paper
+already says so: *"'credible' is not 'verified', and the cheapest way to verify
+is to run the thing itself."* The harness sweep stays in the report as
+supporting evidence, and where the two differ the report says which is which.
+
+#### The grid must contain main's configuration
+
+Measured, not assumed: main's cell `(6,000 ft, margin 0, 30 NM, 10 NM)` is
+**absent from the harness grid** — `HEIGHT_CAPS` has no 6,000 — so the check
+could not even report where main ranks. The pipeline grid does carry 6,000 ft
+and 30 NM, but **fixes the vote margin at 2** while main ships **0**, so that
+parameter is currently validated by nothing at all.
+
+So the pipeline grid is extended to sweep the margin: **6 ceilings × 2 radii ×
+3 margins (0, 2, 4) = 36 cells**, up from 12. A parity check against a grid
+that does not contain the thing being checked is not a check.
+
+**The harness sweep is deliberately left at its current caps.** Adding 6,000 ft
+there would mean rebuilding the vote cache — an expensive upstream stage — for
+an instrument that is no longer the authority. The limitation is already stated
+in the report and stays stated.
 
 #### The assertions
 
 1. **Config parity.** A freshly constructed `DetectionConfig()`, imported from
-   **main's** `src/opdi`, equals the jointly-ranked optimum on every parameter
-   the sweeps vary. Mismatch fails, and the failure names each differing
-   parameter with both values.
-2. **Rank and gap are always reported**, pass or fail: where main's
-   configuration places in the joint ranking, out of how many cells, and the
-   normalised score between it and the best cell. A check that only says
-   "pass" teaches nobody anything; the rank is the interesting number even when
-   it is 1.
+   **main's** `src/opdi`, equals the pipeline grid's best cell on every
+   parameter that grid varies — ceiling, radius, vote margin. Mismatch fails,
+   and the failure names each differing parameter with both values.
+2. **Rank and gap are always reported**, pass or fail: where main's cell
+   places in the pipeline grid, out of how many, and the score between it and
+   the best cell. A check that only says "pass" teaches nobody anything; the
+   rank is the interesting number even when it is 1.
+
+   **If main's cell is absent from the grid, that is a failure in its own
+   right**, distinct from a mismatch, and it says so. A parity check against a
+   grid that does not contain the configuration being checked is not a check --
+   which is exactly the state the harness sweep is in today.
 3. **Code presence.** Every script and module named in `data/_manifest.json`
    exists at `origin/main` — `git cat-file -e origin/main:<path>`, no working
    tree needed.
@@ -181,11 +215,14 @@ and it is what this check reads.
 Letting the sweep decide means a grid whose argmax moves could demand a change
 to a published default. That risk is real and is mitigated, not ignored:
 
-* the **joint two-period ranking** is far steadier than either period alone;
-* the **rank and gap are reported on every run**, so a drift toward the edge of
+* the **rank and gap are reported on every run**, so drift toward the edge of
   the plateau is visible long before it flips the argmax;
-* the paper's existing plateau argument — a value on a broad plateau is a safe
-  recommendation, one on a sharp peak is not — stays in the text next to it.
+* the paper's existing plateau argument -- a value on a broad plateau is a safe
+  recommendation, one on a sharp peak is not -- stays in the text next to it;
+* the pipeline grid is **2025 only**, since `process_dai` cannot read the 2024
+  tracks. So it is a single-sample instrument and the report must keep saying
+  so. The harness sweep's two-period agreement stays in the report as the
+  cross-period evidence the pipeline grid cannot supply.
 
 If the check fails, the resolution is a decision, not an automatic edit:
 either main's configuration changes, or the sweep grid is shown to be
@@ -270,20 +307,31 @@ So the campaign is re-run against main:
 * the harness invoked from a checkout of `main`, not a worktree of a branch;
 * `PYTHONPATH` pointing at **main's** `src/opdi`, so `process_dai`,
   `DetectionConfig` and the altitude cut all come from the shipped package;
-* both the pipeline arms and the sweeps, since the sweeps are what decide the
+* both the pipeline arms and the sweeps, since the pipeline grid decides the
   recommendation W2 checks against;
+* **the pipeline grid extended to 36 cells** -- 6 ceilings x 2 radii x 3 vote
+  margins (0, 2, 4) -- so that main's own configuration is on the grid and its
+  margin is tested rather than assumed;
 * every resulting manifest entry recording a `git_sha` on `main` with
   `git_dirty` false — which W2 assertion 4 then verifies rather than assumes.
 
 **This is the expensive part of the work**: 19 jobs, five of them through
 `process_dai`, on a shared cluster. The previous campaign took roughly three
-hours of wall time across two launches, and the namespace quota must be free —
-see `V62_RUN_NOTES.md` on why `ps` is the wrong way to establish that.
+hours across two launches, and the grid growing from 12 cells to 36 adds
+about 1.7 hours at the observed ~4.2 minutes per run -- so budget five hours,
+and the namespace quota must be free. See `V62_RUN_NOTES.md` on why `ps` is the
+wrong way to establish that.
 
-**Expected outcome:** the numbers should be unchanged, because main's code is
-the merge of the branch that produced them. Any figure that *does* move is a
-finding, not a nuisance, and the plan must treat it as one — it would mean the
-merge changed behaviour that nothing noticed.
+**Expected outcome:** the existing numbers should be unchanged, because main's
+code is the merge of the branch that produced them. Any figure that *does* move
+is a finding, not a nuisance -- it would mean the merge changed behaviour that
+nothing noticed. The 24 new grid cells are genuinely new measurements and carry
+no such expectation.
+
+**Known at the time of writing:** main ships margin 0 and the current grid
+fixes margin at 2, so whether main's margin survives the pipeline is an open
+question this campaign answers for the first time. It may fail W2. That is a
+result, not a problem with the check.
 
 **Ordering:** W5 runs after W1 and W2 exist, so that the regenerated numbers
 are checked the moment they land rather than checked later by someone
