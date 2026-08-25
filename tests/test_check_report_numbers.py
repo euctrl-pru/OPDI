@@ -140,10 +140,6 @@ def test_the_paper_is_found_rather_than_skipped():
     assert ".claude" not in str(PAPER)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "The editorial task that converts these results to inline expressions has "
-    "not run yet. strict=True so this fails loudly the moment it starts "
-    "passing, forcing the marker off rather than leaving a permanent xfail."))
 def test_the_real_paper_has_no_undeclared_numbers():
     """The check that matters. Every number in v6.2's prose is computed or
     declared, so none can go stale without this failing."""

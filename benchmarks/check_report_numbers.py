@@ -57,7 +57,7 @@ IDENT = re.compile(
     r"|step \d+"                     # pipeline steps
     r"|res(?:olution)? \d+"          # H3 resolution
     r"|\bv\d+(?:\.\d+)*\b"           # v6, v6.1
-    r"|version \d+(?:\.\d+)*"        # version 6.2
+    r"|[Vv]ersion \d+(?:\.\d+)*"     # version 6.2, and sentence-initial Version
     r"|\bk\s*=\s*\d+"                # the exchange rate
 )
 
