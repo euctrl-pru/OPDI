@@ -1,10 +1,15 @@
-# V6.2 for a first-time reader, and two checks — design
+# V6.2 for a first-time reader, checked against main — design
 
 **Status:** approved in chat 2026-08-25. Implementation plan to follow.
 
-**Scope:** edits to `papers/adep-ades-detection-v6.2` **in place**, plus two new
-verification tools in `opdi/benchmarks`. No cluster campaign: nothing here
-changes what was measured, so every staged figure stays valid.
+**Scope:** edits to `papers/adep-ades-detection-v6.2` **in place**, two new
+verification tools in `opdi/benchmarks`, and a re-run of the campaign against
+the `opdi` package as it stands on `main`.
+
+The re-run is not expected to move any number — main is the merge of the branch
+that produced them — but "merged, therefore equivalent" is an inference, and
+this study exists because inferences about provenance were wrong twice. A
+figure that does move is a finding.
 
 ## Problem
 
@@ -36,9 +41,14 @@ Two further gaps the report does not currently close:
 
 ## Constraints
 
-* **Edit in place.** V6.2 keeps its identity and its numbers. `opdi-portal` is
-  not pushed, so nothing published moves underneath anyone.
-* **No cluster.** Every check must run without Spark, S3 or credentials.
+* **Edit in place.** V6.2 keeps its identity. `opdi-portal` is not pushed, so
+  nothing published moves underneath anyone.
+* **Main is the authority.** Every number in the report is produced by the
+  `opdi` package as it stands on `main`, and every check runs against that same
+  package. Not a worktree, not a branch. See W5.
+* **The checks need no cluster; regenerating the numbers does.** W1 and W2 run
+  from committed files and `git`, so they belong in the test suite. W5 is a
+  full campaign and needs Spark, S3 and credentials.
 * **Both formats.** The paper renders to HTML and PDF. Anything format-specific
   is a defect unless deliberately justified.
 * **No Chromium, no graphviz.** Installed and usable: `DiagrammeR`, `V8`,
@@ -47,8 +57,9 @@ Two further gaps the report does not currently close:
 
 ## Workstreams
 
-Five, ordered so that the checkers produce the editorial work list rather than
-the editorial work being guessed at.
+Six, ordered so that the checkers produce the editorial work list rather than
+the editorial work being guessed at, and so that the regenerated numbers are
+checked the moment they land.
 
 ### W0 — Spike: browser-free diagram rendering
 
@@ -129,23 +140,63 @@ markers are what a *result* looks like in this paper.
 
 **New:** `benchmarks/check_main_parity.py`, plus a test.
 
-Three assertions:
+#### What "recommended" means
 
-1. **Config parity.** Every shipped value the report quotes equals a freshly
-   constructed `DetectionConfig()`. The report already generates its "What
-   ships" table from the `recommended` run's recorded parameters; this asserts
-   that those recorded parameters still match the code *as it stands on main*,
-   which the generated table cannot do by itself.
-2. **Code presence.** Every script and module named in `data/_manifest.json`
-   exists at `origin/main` — checked with `git cat-file -e origin/main:<path>`,
-   which needs no working tree.
-3. **SHA ancestry.** Every manifest entry's `git_sha` is an ancestor of
-   `origin/main`, and its `git_dirty` is false. This catches the mirror of V6's
-   failure: a figure produced by code that never got merged.
+**The sweep decides, and the sweep is run with main's `opdi` package.** The
+recommendation is not a value typed into this spec, into the paper, or into
+`config.py`. It is the optimum of the sweeps that W5 produces, and those sweeps
+are produced by the code on `main`. So the loop closes on main: main's code
+picks the configuration, and main's configuration is then checked against it.
 
-**Offline behaviour:** if `origin/main` is unavailable the test **skips with an
-explicit message**, rather than failing. A check that cannot run without a
-network is a check people disable.
+This is a deliberate change from V6's practice, which recorded a recommendation
+in prose and let it drift from the code for three versions.
+
+**The optimum is taken from the joint two-period ranking, not a single sample's
+argmax.** The machinery exists — `index.qmd` already ranks every cell by both
+periods at once, each period's score divided by its own ground-truth count so
+the larger sample cannot dominate. A single period's argmax moves under noise;
+the joint ranking is what the paper already treats as the credible statement,
+and it is what this check reads.
+
+#### The assertions
+
+1. **Config parity.** A freshly constructed `DetectionConfig()`, imported from
+   **main's** `src/opdi`, equals the jointly-ranked optimum on every parameter
+   the sweeps vary. Mismatch fails, and the failure names each differing
+   parameter with both values.
+2. **Rank and gap are always reported**, pass or fail: where main's
+   configuration places in the joint ranking, out of how many cells, and the
+   normalised score between it and the best cell. A check that only says
+   "pass" teaches nobody anything; the rank is the interesting number even when
+   it is 1.
+3. **Code presence.** Every script and module named in `data/_manifest.json`
+   exists at `origin/main` — `git cat-file -e origin/main:<path>`, no working
+   tree needed.
+4. **SHA ancestry.** Every manifest entry's `git_sha` is an ancestor of
+   `origin/main` with `git_dirty` false. Catches the mirror of V6's failure: a
+   figure produced by code that never got merged.
+
+#### The known tension, and how it is handled
+
+Letting the sweep decide means a grid whose argmax moves could demand a change
+to a published default. That risk is real and is mitigated, not ignored:
+
+* the **joint two-period ranking** is far steadier than either period alone;
+* the **rank and gap are reported on every run**, so a drift toward the edge of
+  the plateau is visible long before it flips the argmax;
+* the paper's existing plateau argument — a value on a broad plateau is a safe
+  recommendation, one on a sharp peak is not — stays in the text next to it.
+
+If the check fails, the resolution is a decision, not an automatic edit:
+either main's configuration changes, or the sweep grid is shown to be
+mis-specified. **This spec does not authorise changing `config.py`.**
+
+#### Offline behaviour
+
+If `origin/main` is unavailable, assertions 3 and 4 **skip with an explicit
+message** rather than failing. A check that cannot run without a network is a
+check people disable. Assertions 1 and 2 need only the local `main` ref and the
+staged sweeps, so they always run.
 
 ### W3 — Editorial for the first-time reader
 
@@ -206,10 +257,49 @@ what to change if you want something other than the recommendation. It is
 verified by W2's config-parity assertion, so the example cannot describe a
 configuration the code does not have.
 
+### W5 — Regenerate every number with main's package
+
+**The report's numbers must come from `main`, not from the branch that
+developed them.** They currently come from `v62-combined`, whose commits are
+now merged — so W2's ancestry assertion would pass — but "merged, therefore
+equivalent" is an inference, and this study exists because inferences about
+provenance were wrong twice.
+
+So the campaign is re-run against main:
+
+* the harness invoked from a checkout of `main`, not a worktree of a branch;
+* `PYTHONPATH` pointing at **main's** `src/opdi`, so `process_dai`,
+  `DetectionConfig` and the altitude cut all come from the shipped package;
+* both the pipeline arms and the sweeps, since the sweeps are what decide the
+  recommendation W2 checks against;
+* every resulting manifest entry recording a `git_sha` on `main` with
+  `git_dirty` false — which W2 assertion 4 then verifies rather than assumes.
+
+**This is the expensive part of the work**: 19 jobs, five of them through
+`process_dai`, on a shared cluster. The previous campaign took roughly three
+hours of wall time across two launches, and the namespace quota must be free —
+see `V62_RUN_NOTES.md` on why `ps` is the wrong way to establish that.
+
+**Expected outcome:** the numbers should be unchanged, because main's code is
+the merge of the branch that produced them. Any figure that *does* move is a
+finding, not a nuisance, and the plan must treat it as one — it would mean the
+merge changed behaviour that nothing noticed.
+
+**Ordering:** W5 runs after W1 and W2 exist, so that the regenerated numbers
+are checked the moment they land rather than checked later by someone
+remembering to.
+
 ## Testing
 
 Both checkers become pytest tests, joining the existing 293. Neither needs a
 cluster. W2's ancestry assertion skips loudly without a remote.
+
+**Tests run against main's `opdi` package.** The venv installs `opdi` as an
+editable install pointing at the **main checkout's** `src` — so a test run from
+a worktree silently imports main's package unless `PYTHONPATH` overrides it.
+That accident is the behaviour this spec wants, but it must become explicit:
+the test that matters asserts `opdi.__file__` resolves under the main checkout,
+so nobody can later "fix" the import path and quietly start testing a branch.
 
 The checkers are themselves tested against **known-bad fixtures** — a snippet
 with a typed result, a manifest entry with a dirty SHA — so that a checker
@@ -225,4 +315,4 @@ empty set.
 * **No change to `config.py`.** The two divergences V6.2 found — the radius and
   the vote margin — stay documented and unfixed. Changing a published default
   is the maintainers' decision, not a side effect of improving a report.
-* No re-run of the campaign.
+* No renaming or re-versioning: v6.2 keeps its identity.
