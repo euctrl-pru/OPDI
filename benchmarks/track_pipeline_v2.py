@@ -57,8 +57,16 @@ from track_score import score_arm, track_extents  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
 
-#: The three tables a run materialises, in the order the steps write them.
-TABLES = ("osn_tracks", "osn_tracks_clean", "opdi_flight_list")
+#: Every table the run materialises, in the order the steps write them.
+#:
+#: `opdi_endpoint_candidates` is here because step 03 writes it, not because
+#: anything reads it afterwards -- and it is written mode="overwrite". Left out
+#: of the redirect it resolves to the production cache, so a run would delete
+#: real data and then feed each arm the previous arm's candidates. The write
+#: guard caught exactly that on the first end-to-end attempt. A table this list
+#: forgets is a table the guard has to stop, and the guard stops the whole run.
+TABLES = ("osn_tracks", "osn_tracks_clean", "opdi_flight_list",
+          "opdi_endpoint_candidates")
 
 RESEARCH_ROOT = "research/tcv2"
 
