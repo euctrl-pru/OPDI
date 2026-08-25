@@ -295,3 +295,24 @@ below any effect the report argues from -- the datum's band result is +109 --
 but it means these numbers should not be quoted to the last digit as though
 they were exact, and a difference of a handful of flights between two
 configurations is not a difference at all.
+
+### The datum rung is inside the noise
+
+Two independent runs of the tuning ladder put the datum rung at **+11** and
+**+8**, against run-to-run noise of roughly ±15 score points (5 flights moving
+between correct and wrong costs 15 at *k* = 2).
+
+So the rung is **not measurably different from zero**, and the report says that
+rather than quoting a figure to the unit.
+
+This is not a weakness in the argument; it is what @sec-dilution predicts.
+Seventy per cent of arrivals are at aerodromes below 500 ft, where the two
+datums are the same test by construction, so an aggregate over the whole
+sample cannot see a change that only acts on the rest. The case for the datum
+rests on the band breakdown -- +109 correct in the 1,500-3,000 ft band,
+surviving both the leave-one-out and drop-the-busiest controls -- and on the
+argument that a cut should mean the same thing at every aerodrome.
+
+The ladder's other rungs are far larger than the noise and unaffected: the
+penalty is +825, the ceiling +791, and the ceiling step still flips sign
+between ranking rules (+791 under exact distance, -1,642 under ring).
