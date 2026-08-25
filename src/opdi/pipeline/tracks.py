@@ -376,13 +376,29 @@ class TrackProcessor:
 
         return df
 
-    def process_month(self, month: date, skip_if_processed: bool = True) -> None:
+    def process_month(
+        self, month: date, skip_if_processed: bool = True, window: tuple = None
+    ) -> None:
         """
         Process tracks for a single month.
 
         Args:
             month: Date representing the first day of the month to process
             skip_if_processed: If True, skip if month already processed
+            window: Optional ``(start, end)`` timestamp strings narrowing the
+                slice read from the state vectors, end-exclusive. ``None``
+                processes the whole month, which is what production does.
+
+        ``window`` exists so a benchmark can run *this* method over a few days
+        rather than reimplementing it. A month of state vectors is ~100 GB
+        materialised, so an end-to-end comparison of two segmentations at month
+        granularity does not fit the bucket -- and a benchmark that reimplements
+        the step to get around that stops measuring the pipeline and starts
+        measuring its own copy, which is the failure the v1 study ran into.
+
+        It does not change what production does: the default is the whole month,
+        and the id's year/month suffix comes from each sample's own timestamp
+        either way.
 
         Example:
             >>> from datetime import date
@@ -403,6 +419,9 @@ class TrackProcessor:
         start_time, end_time = get_start_end_of_month(month)
         start_time_str = datetime.utcfromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
         end_time_str = datetime.utcfromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S")
+        if window is not None:
+            start_time_str, end_time_str = window
+            print(f"  window override: {start_time_str} <= event_time < {end_time_str}")
 
         # Read raw state vectors for the month
         sv_ref = self.storage.table_ref("osn_statevectors_v2")
