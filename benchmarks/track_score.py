@@ -28,7 +28,8 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 __all__ = [
-    "contingency", "vmeasure", "match_rates", "track_extents", "boundary_error", "score_arm",
+    "contingency", "vmeasure", "match_rates", "track_extents", "boundary_offsets",
+    "boundary_error", "score_arm",
 ]
 
 
@@ -170,6 +171,106 @@ def match_rates(matched: DataFrame) -> dict:
     }
 
 
+def boundary_offsets(matched: DataFrame, extents: DataFrame) -> DataFrame:
+    """One row per APDF-sourced ground-truth flight, with its signed offsets.
+
+    The shared half of :func:`boundary_error` and
+    ``benchmarks/track_diagnostics.py``'s ``boundary_histogram``: the sample
+    selection, the dominant-track pick, the ``extents`` join and the signed
+    subtraction -- everything except the aggregation on top.
+
+    Extracted rather than copied. The percentiles and the histogram must not be
+    able to disagree about which flights are in the sample, which track each
+    one is measured against, or which way the sign points; a histogram built
+    from a second implementation of this would look entirely plausible while
+    describing a different population from the percentiles printed beside it,
+    and nothing in either output would say so.
+
+    Returns ``flight_key``, ``track_id``, ``trk_start``, ``off_s``, ``land_s``.
+    Seconds, signed as ``trk_start - t_off`` and ``trk_end - t_land``: a
+    *negative* ``off_s`` means the track starts **before** take-off and a
+    *positive* ``land_s`` means it ends **after** landing. Both are the normal
+    case -- :func:`boundary_error` argues that convention at length, and this
+    docstring must not be read as restating it differently.
+
+    ``trk_start`` is carried through so the caller can see an unmatched track
+    directly rather than inferring it from a NULL offset.
+
+    **The returned frame is cached and the caller must ``unpersist()`` it.**
+    Both consumers scan it more than once; caching in each caller instead is
+    precisely the duplication this function exists to remove.
+
+    Raises ``ValueError`` when ``extents`` misses any ``track_id`` present in
+    ``matched`` -- which can only mean the two came from different assignment
+    tables.
+    """
+    apdf = matched.filter(F.col("t_source") == "apdf")
+    # F.first on t_off/t_land assumes both are constant within a flight_key.
+    # For t_off that is structural: flight_key is a hash *over* t_off, so two
+    # rows with the same key cannot disagree about it. For t_land it is an
+    # assumption, not a guarantee -- it rests on (aircraft, callsign, day, ADEP,
+    # ADES, second-precision t_off) identifying at most one physical leg, which
+    # is a statement about the world rather than about the hash. It is believed
+    # safe and is not enforced here; if it were ever violated, F.first would pick
+    # one t_land arbitrarily rather than fail.
+    ends = apdf.groupBy("flight_key", "track_id").agg(
+        F.first("t_off").alias("t_off"),
+        F.first("t_land").alias("t_land"),
+        F.count(F.lit(1)).alias("n"),
+    )
+    # One row per flight: its dominant track. Same tie-break as match_rates and
+    # for the same reason -- an exact sample-count tie across two tracks must not
+    # pick arbitrarily (and, before this fix, an unbroken tie on `n` kept *both*
+    # rows, double-counting the flight into n_apdf_flights and every percentile).
+    # There is no merge/pure distinction to prefer here, so the ordering is just
+    # dominant sample count, then track_id for a total order.
+    tie_break = Window.partitionBy("flight_key").orderBy(
+        F.col("n").desc(), F.col("track_id").asc()
+    )
+    best = (
+        ends.withColumn("_rank", F.row_number().over(tie_break))
+        .filter(F.col("_rank") == 1)
+        .drop("_rank")
+        # Left, deliberately, even though a miss is impossible in a correct
+        # call: every track_id reaching here came from `matched`, which came
+        # from an `assign` table -- and `extents` is built from that same
+        # `assign` table (see track_methods.py:run_arm), so it must cover every
+        # track_id here. A miss would mean extents were computed from something
+        # other than this run's own assignment, and that must fail loudly.
+        # An *inner* join is precisely the silent drop this comment used to
+        # disclaim: the flight would vanish from n_apdf_flights and from every
+        # percentile, leaving a plausible-looking CSV row and no error at all.
+        # Left join plus an explicit check makes the behaviour match the claim.
+        .join(extents, "track_id", "left")
+        .select(
+            "flight_key",
+            "track_id",
+            "trk_start",
+            # Signed, per the convention in the docstring: trk_start - t_off
+            # and trk_end - t_land. Not abs() -- the sign is the diagnostic.
+            # abs() is applied by boundary_error alone, on top of this.
+            (F.unix_timestamp("trk_start") - F.unix_timestamp("t_off")).alias("off_s"),
+            (F.unix_timestamp("trk_end") - F.unix_timestamp("t_land")).alias("land_s"),
+        )
+    ).cache()
+
+    missing = (
+        best.filter(F.col("trk_start").isNull())
+        .select("track_id")
+        .distinct()
+    )
+    n_missing = missing.count()
+    if n_missing:
+        sample = [r["track_id"] for r in missing.limit(5).collect()]
+        best.unpersist()
+        raise ValueError(
+            f"boundary_offsets: `extents` is missing {n_missing} track_id(s) that "
+            f"`matched` contains, e.g. {sample}. extents must be computed from "
+            "the same assignment table as matched -- see track_methods.run_arm."
+        )
+    return best
+
+
 def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
     """Seconds between a track's *true* ends and the flight's ATOT/ALDT.
 
@@ -242,82 +343,32 @@ def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
     none. See ``tests/test_track_score.py`` for the fixture that makes this
     concrete: it is asserted to report ~5 s of error under the old computation
     (indistinguishable from noise) and the true ~1800 s under this one.
+
+    **The sample selection, the dominant-track pick, the ``extents`` join and
+    the signed subtraction all live in :func:`boundary_offsets`**, which
+    ``benchmarks/track_diagnostics.py``'s ``boundary_histogram`` also calls.
+    What remains here is the aggregation, and the fields it returns are
+    unchanged by that extraction -- V1's published tables quote these numbers,
+    so a change to any of them would be a change to a published result rather
+    than a refactor.
     """
-    apdf = matched.filter(F.col("t_source") == "apdf")
-    # F.first on t_off/t_land assumes both are constant within a flight_key.
-    # For t_off that is structural: flight_key is a hash *over* t_off, so two
-    # rows with the same key cannot disagree about it. For t_land it is an
-    # assumption, not a guarantee -- it rests on (aircraft, callsign, day, ADEP,
-    # ADES, second-precision t_off) identifying at most one physical leg, which
-    # is a statement about the world rather than about the hash. It is believed
-    # safe and is not enforced here; if it were ever violated, F.first would pick
-    # one t_land arbitrarily rather than fail.
-    ends = apdf.groupBy("flight_key", "track_id").agg(
-        F.first("t_off").alias("t_off"),
-        F.first("t_land").alias("t_land"),
-        F.count(F.lit(1)).alias("n"),
-    )
-    # One row per flight: its dominant track. Same tie-break as match_rates and
-    # for the same reason -- an exact sample-count tie across two tracks must not
-    # pick arbitrarily (and, before this fix, an unbroken tie on `n` kept *both*
-    # rows, double-counting the flight into n_apdf_flights and every percentile).
-    # There is no merge/pure distinction to prefer here, so the ordering is just
-    # dominant sample count, then track_id for a total order.
-    tie_break = Window.partitionBy("flight_key").orderBy(
-        F.col("n").desc(), F.col("track_id").asc()
-    )
-    best = (
-        ends.withColumn("_rank", F.row_number().over(tie_break))
-        .filter(F.col("_rank") == 1)
-        .drop("_rank")
-        # Left, deliberately, even though a miss is impossible in a correct
-        # call: every track_id reaching here came from `matched`, which came
-        # from an `assign` table -- and `extents` is built from that same
-        # `assign` table (see track_methods.py:run_arm), so it must cover every
-        # track_id here. A miss would mean extents were computed from something
-        # other than this run's own assignment, and that must fail loudly.
-        # An *inner* join is precisely the silent drop this comment used to
-        # disclaim: the flight would vanish from n_apdf_flights and from every
-        # percentile, leaving a plausible-looking CSV row and no error at all.
-        # Left join plus an explicit check makes the behaviour match the claim.
-        .join(extents, "track_id", "left")
-    ).cache()
-
-    missing = (
-        best.filter(F.col("trk_start").isNull())
-        .select("track_id")
-        .distinct()
-    )
-    n_missing = missing.count()
-    if n_missing:
-        sample = [r["track_id"] for r in missing.limit(5).collect()]
-        best.unpersist()
-        raise ValueError(
-            f"boundary_error: `extents` is missing {n_missing} track_id(s) that "
-            f"`matched` contains, e.g. {sample}. extents must be computed from "
-            "the same assignment table as matched -- see track_methods.run_arm."
-        )
-
-    # Signed, per the convention in the docstring: trk_start - t_off and
-    # trk_end - t_land. Not abs() -- the sign is the diagnostic.
-    off_signed = "(unix_timestamp(trk_start) - unix_timestamp(t_off))"
-    land_signed = "(unix_timestamp(trk_end) - unix_timestamp(t_land))"
+    best = boundary_offsets(matched, extents)
 
     def _q(delta: str, q: float, alias: str):
         return F.expr(f"percentile_approx({delta}, {q})").alias(alias)
 
     e = best.select(
         F.count(F.lit(1)).alias("n_apdf_flights"),
-        _q(f"abs{off_signed}", 0.5, "off_p50"),
-        _q(f"abs{off_signed}", 0.9, "off_p90"),
-        _q(f"abs{land_signed}", 0.5, "land_p50"),
-        _q(f"abs{land_signed}", 0.9, "land_p90"),
-        _q(off_signed, 0.1, "off_s_p10"),
-        _q(off_signed, 0.5, "off_s_p50"),
-        _q(off_signed, 0.9, "off_s_p90"),
-        _q(land_signed, 0.1, "land_s_p10"),
-        _q(land_signed, 0.5, "land_s_p50"),
-        _q(land_signed, 0.9, "land_s_p90"),
+        _q("abs(off_s)", 0.5, "off_p50"),
+        _q("abs(off_s)", 0.9, "off_p90"),
+        _q("abs(land_s)", 0.5, "land_p50"),
+        _q("abs(land_s)", 0.9, "land_p90"),
+        _q("off_s", 0.1, "off_s_p10"),
+        _q("off_s", 0.5, "off_s_p50"),
+        _q("off_s", 0.9, "off_s_p90"),
+        _q("land_s", 0.1, "land_s_p10"),
+        _q("land_s", 0.5, "land_s_p50"),
+        _q("land_s", 0.9, "land_s_p90"),
     ).first()
     best.unpersist()
 

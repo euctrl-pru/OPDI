@@ -71,6 +71,12 @@ SEG = [
 ]
 SCORE = ["benchmarks/track_truth.py", "benchmarks/track_score.py",
          "benchmarks/osn_sample.py"]
+#: The two diagnostics. The census depends on ground truth alone -- it never
+#: reads a state vector -- so it must NOT carry SEG, or every segmentation edit
+#: would mark a result that cannot have changed as stale. The histogram does
+#: read tracks, and carries the same dependencies an arm does.
+DIAG = ["benchmarks/track_diagnostics.py"]
+CENSUS = DIAG + ["benchmarks/track_truth.py"]
 #: The payoff runs the flight list, so it depends on the flight list too.
 FLIGHTS = ["benchmarks/flight_list_v7.py", "src/opdi/pipeline/flights.py",
            "benchmarks/adep_ades.py"]
@@ -217,6 +223,42 @@ def jobs() -> list:
             code_paths=SEG + FLIGHTS + ["benchmarks/track_payoff.py"],
             notes="Same arms with flights.py's F.min('flight_id') worked around; "
                   "legacy is the control and must not move.",
+        ))
+
+    # --- what the containment restriction costs -------------------------
+    # V1 scores only ground-truth flights wholly inside the sampled window.
+    # The defence of that is sound and is in the paper already; what was
+    # missing is its price, which is a number and not an argument. Ground
+    # truth only -- no state vectors, no arms, no S3 writes.
+    for period in ("2025", "2024"):
+        out.append(Job(
+            name=f"containment_{period}",
+            script="benchmarks/track_diagnostics.py",
+            args=["--job", "containment", "--period", period,
+                  "--out-name", f"containment_{period}.csv"],
+            outputs={f"containment_{period}.csv": f"containment_{period}.csv"},
+            code_paths=CENSUS,
+            notes="How many ground-truth flights the wholly-inside-the-window "
+                  "restriction excludes, and how much of each was visible.",
+        ))
+
+    # --- the boundary error as a distribution ---------------------------
+    # p10/p50/p90 cannot tell a symmetric spread from a bimodal mixture, and
+    # the two are different diagnoses. Three arms, not eight: each one is an
+    # assignment table's worth of cluster time, and these are the arms whose
+    # boundary numbers the paper discusses.
+    for period in ("2025", "2024"):
+        out.append(Job(
+            name=f"boundary_hist_{period}",
+            script="benchmarks/track_diagnostics.py",
+            args=["--job", "boundary-hist", "--period", period,
+                  "--arms", "recommended", "legacy", "ground_anchored",
+                  "--out-name", f"boundary_hist_{period}.csv"],
+            outputs={f"boundary_hist_{period}.csv": f"boundary_hist_{period}.csv"},
+            code_paths=SEG + SCORE + DIAG,
+            notes="Signed boundary offsets binned at 30 s over +/-1800 s. "
+                  "Shares track_score.boundary_offsets with boundary_error, so "
+                  "the bins and the published percentiles describe one sample.",
         ))
 
     return out
