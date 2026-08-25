@@ -918,8 +918,7 @@ def calculate_airport_events(
         ),
     ).withColumn("apt", F.array_remove(col("apt"), "")).select("id", "apt")
 
-    sv_f = sv.dropna(subset=["lat", "lon", "baro_altitude_c"])
-    sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
+    sv_f = sv.withColumnRenamed("callsign", "flight_id")
     sv_f = sv_f.fillna({"flight_id": ""})
     # One callsign per track, before flight_id becomes a grouping key below.
     #
@@ -937,6 +936,20 @@ def calculate_airport_events(
     # rule is how the production flight list and its benchmark came to disagree
     # about it in the first place.
     #
+    # **Before the dropna, deliberately -- the vote is over the unfiltered
+    # frame.** ``resolve_flight_id`` documents that as its contract, and it is
+    # the contract because the population a mode is taken over *is* the rule: a
+    # different population is a different rule wearing the same name. Step 03
+    # votes over the whole month of the track table. If step 04 voted only over
+    # samples carrying position and barometric altitude, the two would diverge
+    # on exactly the tracks that matter -- ADS-B sends position and velocity in
+    # separate message types, so a velocity-only sample carries a callsign and
+    # no position, and step 02a's cleaning NULLs the baro_altitude_c it
+    # rejects. A track whose real callsign appears mostly in such samples would
+    # be named SAS123 in opdi_flight_list and "" in the same track's
+    # info.osn_flight_id, from one aircraft on one day. That is the divergence
+    # step 03 refactored away within itself; it must not reappear across steps.
+    #
     # **Not applied when the run is reproducing a release.** ``events_v0.0.2``
     # exists so that re-processing a past month reproduces it, and changing
     # what a run publishes while it stamps an old version is the one thing a
@@ -949,6 +962,7 @@ def calculate_airport_events(
     # rather than on an argument about homogeneity.
     if config.events_version != LEGACY_EVENTS_VERSION:
         sv_f = resolve_flight_id(sv_f)
+    sv_f = sv_f.dropna(subset=["lat", "lon", "baro_altitude_c"])
     sv_f = sv_f.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
     sv_f = sv_f.withColumn("flight_level", col("altitude_ft") / 100)
 

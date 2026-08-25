@@ -101,30 +101,35 @@ def storage(spark):
     })
 
 
-def _crossing(spark, callsigns):
-    """One track rolling along one runway, broadcasting *callsigns* in order.
+def _crossing(spark, samples):
+    """One track rolling along one runway, broadcasting *samples* in order.
 
-    Every sample sits in the same H3 cell, one second apart, on the ground --
-    so the only thing that can split this into more than one event group is the
-    callsign.
+    A sample is a callsign, or a ``(callsign, positional)`` pair. Positional
+    samples sit in the same H3 cell, one second apart, on the ground -- so the
+    only thing that can split this into more than one event group is the
+    callsign. A non-positional sample is a velocity-only broadcast: it carries
+    its callsign and nothing else, exactly as ADS-B delivers it, and the
+    detector's ``dropna`` removes it before any event is formed.
     """
-    rows = [
-        (
-            "trk-1",
-            "abc123",
-            callsign,
-            dt.datetime(2024, 6, 1, 12, 0, i),
-            55.618,
-            12.656,
-            0.0,
-            90.0,
-            0.0,
-            H3_CELL,
-            float(i) * 0.01,
-            float(i),
+    rows = []
+    for i, sample in enumerate(samples):
+        callsign, positional = sample if isinstance(sample, tuple) else (sample, True)
+        rows.append(
+            (
+                "trk-1",
+                "abc123",
+                callsign,
+                dt.datetime(2024, 6, 1, 12, 0, i),
+                55.618 if positional else None,
+                12.656 if positional else None,
+                0.0 if positional else None,
+                90.0,
+                0.0,
+                H3_CELL if positional else None,
+                float(i) * 0.01,
+                float(i),
+            )
         )
-        for i, callsign in enumerate(callsigns)
-    ]
     return spark.createDataFrame(
         rows,
         "track_id string, icao24 string, callsign string, event_time timestamp, "
@@ -134,10 +139,14 @@ def _crossing(spark, callsigns):
     )
 
 
-def _events(spark, storage, callsigns, config=None):
+def _events(spark, storage, samples, config=None):
     return calculate_airport_events(
-        _crossing(spark, callsigns), MONTH, storage, config or EventConfig()
+        _crossing(spark, samples), MONTH, storage, config or EventConfig()
     ).collect()
+
+
+def _published_callsigns(rows):
+    return {json.loads(r["info"])["osn_flight_id"] for r in rows}
 
 
 def test_one_runway_crossing_is_one_event_not_one_per_callsign(spark, storage):
@@ -152,14 +161,14 @@ def test_one_runway_crossing_is_one_event_not_one_per_callsign(spark, storage):
     assert sorted(r["type"] for r in rows) == ["entry-runway", "exit-runway"], (
         f"expected one entry/exit pair, got {[r['type'] for r in rows]}"
     )
-    assert {json.loads(r["info"])["osn_flight_id"] for r in rows} == {"SAS123"}
+    assert _published_callsigns(rows) == {"SAS123"}
 
 
 def test_the_published_callsign_is_the_one_the_track_flew(spark, storage):
     """``osn_flight_id`` reaches the released table, so its value is not a
     detail. The blank the first samples carry must not become the label."""
     rows = _events(spark, storage, ["", "", "SAS123", "SAS123", "SAS123"])
-    assert {json.loads(r["info"])["osn_flight_id"] for r in rows} == {"SAS123"}
+    assert _published_callsigns(rows) == {"SAS123"}
 
 
 def test_a_single_callsign_track_is_untouched(spark, storage):
@@ -167,7 +176,7 @@ def test_a_single_callsign_track_is_untouched(spark, storage):
     to be a no-op on them or it is a regression wearing a fix's clothes."""
     rows = _events(spark, storage, ["SAS123"] * 4)
     assert sorted(r["type"] for r in rows) == ["entry-runway", "exit-runway"]
-    assert {json.loads(r["info"])["osn_flight_id"] for r in rows} == {"SAS123"}
+    assert _published_callsigns(rows) == {"SAS123"}
 
 
 def test_a_track_that_never_broadcast_a_callsign_stays_in_the_events(spark, storage):
@@ -175,7 +184,36 @@ def test_a_track_that_never_broadcast_a_callsign_stays_in_the_events(spark, stor
     the crossing entirely, which is a worse bug than the one being fixed."""
     rows = _events(spark, storage, ["", "", ""])
     assert sorted(r["type"] for r in rows) == ["entry-runway", "exit-runway"]
-    assert {json.loads(r["info"])["osn_flight_id"] for r in rows} == {""}
+    assert _published_callsigns(rows) == {""}
+
+
+def test_the_vote_counts_samples_the_dropna_would_later_remove(spark, storage):
+    """Resolution runs before the dropna, so step 04 votes over what step 03 did.
+
+    The population a mode is taken over *is* the rule. Step 03 resolves on the
+    whole month of the track table; if step 04 resolved after its own
+    ``dropna(lat, lon, baro_altitude_c)`` it would be taking a different mode
+    under the same name, and the two steps would name the same track
+    differently -- SAS123 in ``opdi_flight_list``, "" or AAA111 in that track's
+    own ``info.osn_flight_id``.
+
+    That is not hypothetical: ADS-B sends position and velocity in separate
+    message types, so a velocity-only sample carries a callsign and no
+    position, and step 02a's cleaning NULLs the barometric altitude it rejects.
+    Here SAS123 is the majority only if those three position-less samples
+    count. If they do not, AAA111 wins on 2 to 0 and the assertion fails --
+    which is what makes this test sensitive to the ordering rather than merely
+    compatible with it.
+    """
+    rows = _events(spark, storage, [
+        ("SAS123", False),
+        ("SAS123", False),
+        ("SAS123", False),
+        ("AAA111", True),
+        ("AAA111", True),
+    ])
+    assert sorted(r["type"] for r in rows) == ["entry-runway", "exit-runway"]
+    assert _published_callsigns(rows) == {"SAS123"}
 
 
 # --- the exemption for runs that reproduce a release ------------------------
@@ -195,13 +233,13 @@ def test_a_legacy_run_publishes_the_padded_blank_its_release_published(spark, st
     about homogeneity.
     """
     rows = _events(spark, storage, ["        "] * 4, config=EventConfig.legacy())
-    assert {json.loads(r["info"])["osn_flight_id"] for r in rows} == {"        "}
+    assert _published_callsigns(rows) == {"        "}
 
 
 def test_a_current_run_resolves_that_same_padded_blank_to_empty(spark, storage):
     """The other branch, so the conditional is not a code path nothing runs."""
     rows = _events(spark, storage, ["        "] * 4)
-    assert {json.loads(r["info"])["osn_flight_id"] for r in rows} == {""}
+    assert _published_callsigns(rows) == {""}
 
 
 def test_the_exempt_version_is_the_one_the_legacy_preset_stamps(spark):

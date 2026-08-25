@@ -67,6 +67,39 @@ PERIOD_TRACKS = {
 #: The ladder. Each rung is (name, {field: value}) applied cumulatively on top
 #: of `EventConfig.legacy()`, so rung 0 is the published algorithm and the last
 #: rung must equal the shipped configuration -- `verify_plan` asserts both.
+#:
+#: .. warning::
+#:
+#:    **Rungs L00-L12 inherit ``events_version="events_v0.0.2"`` from
+#:    ``EventConfig.legacy()``, and only ``L13_shipped`` overrides it. Step 04's
+#:    callsign resolution is guarded on that string, so those twelve rungs run
+#:    *unresolved*.**
+#:
+#:    That is correct only over tracks built by the legacy segmentation, where
+#:    a track carries one callsign by construction and resolution would be a
+#:    no-op anyway. Over tracks built by the ``standard`` segmentation, which
+#:    groups on the airframe alone, a track can carry several callsigns --
+#:    `calculate_airport_events` groups on ``flight_id`` without aggregating it,
+#:    so one aircraft crossing one runway once emits one airport event *per
+#:    callsign it happened to broadcast*.
+#:
+#:    So once the segmentation default flips and ``osn_tracks`` is rebuilt, a
+#:    re-run of L00-L12 measures that fan-out rather than the rung, and the
+#:    ``L12 -> L13`` delta bundles two unrelated things: the version bump, and
+#:    the callsign resolution the bump switches on. An event-count change would
+#:    be attributed to a rung that only renamed a string.
+#:
+#:    **Read the deltas below L13 as valid for the tracks they were computed
+#:    over, not as reproducible against a rebuilt table.** Deliberately not
+#:    fixed by re-cutting the ladder: this is the flight-events V3 study's
+#:    published instrument, and changing its rungs would silently redefine
+#:    numbers that study already reports.
+#:
+#:    There is no check that could catch the unsafe case automatically. It
+#:    would have to fail fast when the tracks were built by ``standard``, and
+#:    nothing in the track table records which segmentation produced it -- the
+#:    ``track_id`` format differs, but a benchmark cannot tell a rebuilt table
+#:    from a legacy one without parsing ids and guessing.
 LADDER = [
     ("L00_legacy", {}),
     ("L01_clean_tracks", {"feeds_from_clean_tracks": True}),
