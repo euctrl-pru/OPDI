@@ -52,12 +52,22 @@ from pyspark.sql.window import Window
 
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
-from opdi.pipeline.flights import bearing_deg, haversine_nm
+from opdi.pipeline.flights import bearing_deg, haversine_nm, resolve_flight_id
 from opdi.pipeline.level_segments import classify_level_offs, level_segments
 from opdi.pipeline.ground import block_times, movement_window
 from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.storage import StorageManager
+
+
+#: The events version every published dataset up to 2026-08 carries.
+#:
+#: Named here because this module has to *test* for it -- a run stamping a
+#: released string has to reproduce that release, so the one behaviour change
+#: below is skipped for it. ``EventConfig.legacy()`` sets it; the two are
+#: asserted equal in ``tests/test_events_labelling.py`` so a rename cannot make
+#: the guard quietly stop firing.
+LEGACY_EVENTS_VERSION = "events_v0.0.2"
 
 
 # ======================================================================
@@ -911,6 +921,34 @@ def calculate_airport_events(
     sv_f = sv.dropna(subset=["lat", "lon", "baro_altitude_c"])
     sv_f = sv_f.withColumnRenamed("callsign", "flight_id")
     sv_f = sv_f.fillna({"flight_id": ""})
+    # One callsign per track, before flight_id becomes a grouping key below.
+    #
+    # The groupBy that aggregates entry and exit times carries flight_id
+    # without aggregating it. That is sound only while a track holds one
+    # callsign, which legacy segmentation guarantees by construction -- the
+    # callsign is part of the track's group key -- and which a segmentation
+    # grouping on the airframe alone does not. Without this, a track that
+    # broadcast two callsigns while crossing one runway becomes two groups and
+    # emits two entry-runway events for one crossing, and the ``info`` JSON
+    # below publishes flight_id as ``osn_flight_id``, so the duplication
+    # reaches the milestone table rather than staying an internal artefact.
+    #
+    # Same helper as step 03, imported rather than copied: two copies of this
+    # rule is how the production flight list and its benchmark came to disagree
+    # about it in the first place.
+    #
+    # **Not applied when the run is reproducing a release.** ``events_v0.0.2``
+    # exists so that re-processing a past month reproduces it, and changing
+    # what a run publishes while it stamps an old version is the one thing a
+    # version string must prevent. Resolution would be a no-op on legacy tracks
+    # anyway -- they are callsign-homogeneous by construction -- with one
+    # exception it must not make: OpenSky pads callsigns to eight characters,
+    # so an aircraft that set none broadcasts spaces, which ``fillna`` keeps
+    # verbatim but ``dominant_flight_id`` trims and reads as blank. The
+    # released events carry the spaces. Hence the test is on the version stamp
+    # rather than on an argument about homogeneity.
+    if config.events_version != LEGACY_EVENTS_VERSION:
+        sv_f = resolve_flight_id(sv_f)
     sv_f = sv_f.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
     sv_f = sv_f.withColumn("flight_level", col("altitude_ft") / 100)
 

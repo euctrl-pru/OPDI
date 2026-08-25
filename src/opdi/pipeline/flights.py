@@ -431,8 +431,11 @@ class FlightListProcessor:
         others. A track could therefore be named differently by the departure
         path than by the arrival path, from one table.
 
-        Doing it here makes the population the whole month of the track table,
-        once, for every consumer. It is also the seam
+        Doing it here makes the population the same for all four: the whole
+        month of the track table, before any path's dropna. It does not make it
+        one computation -- all four still call this method, so the plan still
+        builds four subplans and resolves four times. What the move buys is a
+        uniform population, not a saved shuffle. It is also the seam
         ``benchmarks/flight_list_v7.py`` patches (``read_table``), so the
         production rule and the benchmark rule now apply to the same rows and
         not merely by the same expression -- which is what makes comparing their
