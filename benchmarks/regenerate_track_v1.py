@@ -114,6 +114,13 @@ class Job:
         Writing to scratch first means a job that dies halfway leaves the
         committed data untouched rather than half-replacing it with something
         that renders but is wrong.
+
+        The stamping re-records rather than copies, because the runner knows
+        things the script does not -- the staged name, and the full dependency
+        set this spec declares. It carries the script's own ``inputs`` and
+        ``input_tables`` across: those are row counts and table identities only
+        the run can know, and re-recording without them is what left every
+        staged output carrying ``inputs: {}``.
         """
         with tempfile.TemporaryDirectory(prefix=f"tcv1_{self.name}_") as tmp:
             cmd = [sys.executable, "-u", str(REPO / self.script),
@@ -128,8 +135,11 @@ class Job:
                     raise SystemExit(f"{self.name} did not produce {produced}")
                 DATA.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, DATA / staged)
+                own = provenance.load_manifest(tmp).get(produced, {})
                 provenance.record(DATA, staged, self.script, self.args,
-                                  self.code_paths, notes=self.notes)
+                                  self.code_paths, inputs=own.get("inputs"),
+                                  input_tables=list(own.get("input_tables") or {}),
+                                  notes=self.notes)
                 print(f"  staged {staged}")
 
 

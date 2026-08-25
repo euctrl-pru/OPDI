@@ -419,28 +419,25 @@ def run_containment(spark, args, period_cfg, days, out_path) -> dict:
     # work worth the name, against a number that would otherwise be wrong in
     # precisely the way nobody can see on the page.
     #
-    # **The check is one-sided, and the asymmetry is a measured fact about V1
-    # rather than slack.** Every flight V1 keeps must be counted inside; if one
-    # is not, the census is narrower than the rule it claims to describe and the
-    # job stops. The reverse direction happens and is legitimate:
-    # `load_flight_intervals` filters on `day = to_date(AOBT_3)` -- the
-    # *off-block* day -- before applying its own `t_off`-based window, so a
-    # flight that goes off-block at 23:5x and gets airborne after midnight is
-    # dropped by the day key even though its whole airborne interval lies inside
-    # the window. This job's padded day list finds those; V1 never loads them.
-    # Measured on the committed reference data: 53 flights of 93,026 for 2025
+    # **The check is one-sided.** Every flight V1 keeps must be counted inside;
+    # if one is not, the census is narrower than the rule it claims to describe
+    # and the job stops. The other direction -- flights wholly inside that V1
+    # does not load -- is reported as `surplus` rather than fatal, and it is how
+    # this census found the defect fixed in Task 4b: `load_flight_intervals`
+    # used to filter on `day = to_date(AOBT_3)`, the *off-block* day, before
+    # applying its own `t_off`-based window, so a flight that went off-block at
+    # 23:5x and got airborne after midnight was dropped by the day key even
+    # though its whole airborne interval lay inside the window. Measured on the
+    # committed reference data at the time: 53 flights of 93,026 for 2025
     # (0.06 %) and 55 of 90,867 for 2024, every one of them departure-day 06-04
     # with `t_off` a few seconds past midnight, and zero in the other direction.
-    # A real if small defect in V1's ground truth, surfaced rather than smoothed
-    # over -- it is printed above and returned as its own input count.
     #
-    # It reaches the manifest only when this script is run directly. Run through
-    # `regenerate_track_v1.py`, `Job.run` calls `provenance.record` again after
-    # the script exits, with no `inputs`, and that second call replaces the
-    # entry this one wrote. Pre-existing and not specific to this job --
-    # `track_methods.py` loses its `samples`/`gt_flights` counts the same way --
-    # but stated here rather than left as a comment that promises a manifest
-    # field the manifest does not carry.
+    # `track_truth` now widens that pre-filter past the window and lets
+    # `t_off`/`t_land` decide, so `surplus` is expected to be zero and a
+    # non-zero value is news again -- either a fresh way for the day key to
+    # decide membership, or a sample abutting a month edge, where the widened
+    # day reaches into a month `months` does not load. It is printed below and
+    # returned as its own input count either way.
     v1 = track_truth.load_flight_intervals(spark, period_cfg["months"], days)
     n_kept = v1.count()
     missed = v1.join(inside, "flight_key", "left_anti").count()
@@ -458,8 +455,9 @@ def run_containment(spark, args, period_cfg, days, out_path) -> dict:
     if surplus:
         print(
             f"  note: {surplus:,} further flight(s) lie wholly inside the window "
-            "but V1 never loads them -- off-block before midnight, airborne "
-            "after it, dropped by the departure-day key."
+            "but V1 never loads them. Since Task 4b this should be zero -- check "
+            "whether the sample abuts a month edge (pass the adjacent month in "
+            "`months`) before treating it as a new defect."
         )
 
     for k in CONTAINMENT_FIELDS:

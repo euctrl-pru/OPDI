@@ -68,6 +68,28 @@ def _sample_window(days: list):
     )
 
 
+def _prefilter_days(days: list):
+    """``(first_day - 1, last_day + 1)`` -- the off-block days worth reading.
+
+    A *pruning* bound, deliberately wider than ``_sample_window`` and never the
+    thing that decides membership. ``day`` is ``to_date(AOBT_3)``, the off-block
+    day, while the window is expressed on ``t_off``/``t_land``: a flight that
+    pushes back at 23:5x and gets airborne after midnight carries the previous
+    day's key and belongs in the sample, so the read has to reach one day back.
+    The trailing day is symmetry rather than necessity -- ``t_off >= aobt``
+    under any non-negative taxi time -- and it costs one day of NM rows.
+
+    ``None`` when no days were given, matching ``_sample_window``.
+    """
+    if not days:
+        return None
+    parsed = sorted(dt.date.fromisoformat(str(d)) for d in days)
+    return (
+        str(parsed[0] - dt.timedelta(days=1)),
+        str(parsed[-1] + dt.timedelta(days=1)),
+    )
+
+
 def load_apdf_times(
     spark: SparkSession, months: list, reference_base: str = REFERENCE_BASE
 ) -> tuple:
@@ -141,6 +163,25 @@ def load_flight_intervals(
     when real track extents replaced it. The window is derived from
     ``min``/``max`` of ``days`` rather than taken as a parameter, so it cannot
     drift from the day list the same call already filters on.
+
+    **The ``day`` pre-filter is a pruning aid, not the rule.** ``day`` is
+    ``to_date(AOBT_3)`` -- the off-block day -- and it is filtered to
+    ``[first day - 1, last day + 1]`` (``_prefilter_days``) so that the
+    ``t_off``/``t_land`` comparison above is what actually decides membership.
+    It was previously filtered to ``days`` exactly, which made the off-block
+    day the rule and contradicted the paragraph above: a flight pushing back at
+    23:5x and airborne after midnight was dropped although its whole interval
+    lay inside the window. Task 4's containment census measured the loss at 53
+    flights of 93,026 (2025) and 55 of 90,867 (2024) -- 0.06 %, all in the same
+    direction, so a small systematic bias rather than noise.
+
+    One residual edge, stated because it is silent: ``months`` decides which
+    files are read at all, so when the sample starts on the 1st the widened day
+    reaches into the *previous month* and finds nothing unless the caller also
+    passes that month. ``CLAUDE.md`` makes the same point about ``apdf_tidy()``
+    covering one month at a time. Both V1 study samples are mid-June, so
+    neither is affected; a sample abutting a month edge should pass the
+    adjacent month in ``months``.
     """
     frames = []
     for m in months:
@@ -161,7 +202,16 @@ def load_flight_intervals(
 
     nm = nm.filter(F.col("icao24").isNotNull()).withColumn("day", F.to_date("aobt"))
     if days:
-        nm = nm.filter(F.col("day").isin([str(d) for d in days]))
+        # Pruning only, one day wider than the window on each side -- see
+        # _prefilter_days. This used to be `day.isin(days)`, which made the
+        # off-block day decide membership and dropped every flight that pushed
+        # back before midnight and got airborne after it. Cast the bounds to
+        # date explicitly: `day` is a DateType and a bare string literal leaves
+        # the comparison's casting to the analyser.
+        lo, hi = _prefilter_days(days)
+        nm = nm.filter(
+            F.col("day").between(F.lit(lo).cast("date"), F.lit(hi).cast("date"))
+        )
     # Whole-interval containment in the sampled window -- see the docstring.
     # Expressed on t_off/t_land, not on `day`: `day` is the departure day,
     # which is exactly the thing that fails to bound a midnight-crosser's
@@ -206,6 +256,21 @@ def load_flight_intervals(
     # of per natural key so that colliding legs are resolved independently
     # rather than collapsed into one.
     dep, arr = load_apdf_times(spark, months, reference_base=reference_base)
+
+    # **Known, unfixed, and measured: this join key is a day key too.** ``day``
+    # is ``to_date(AOBT_3)`` (off-block) while ``dep.mvt_day`` is
+    # ``to_date(MVT_TIME_UTC)`` (take-off), and a taxi that crosses midnight
+    # puts them on different days -- 2,272 of 957,396 NM flights in 202506
+    # (0.237 %) and 2,102 of 935,887 in 202406 (0.225 %), measured over the
+    # committed reference extracts. Such a flight loses its APDF departure
+    # match and falls back to ``t_source = "nm_inferred"``: lossy rather than
+    # wrong, and ``boundary_error`` (APDF only) then never sees it, so the
+    # flights excluded are systematically the midnight-taxi ones. Left as it
+    # stands here deliberately -- changing it moves flights between
+    # ``t_source`` branches and therefore moves published numbers, which is a
+    # plan decision, not an implementation one. The arrival side had the same
+    # shape and was fixed (see below); the fix here would mirror it, keying on
+    # ``to_date(AOBT_3 + TAXI_TIME_3)``.
     jdep = nm.join(
         dep,
         (nm.callsign == dep.callsign)
@@ -232,16 +297,17 @@ def load_flight_intervals(
 
     # The arrival join keys on the arrival day, not the departure day. j.day
     # (as it was before this fix) is derived from AOBT_3 -- the departure
-    # day -- and using it here was wrong: the dep-side day match is safe
-    # because both its sides anchor to the same physical event (departure),
-    # but ARVT_3 and APDF ARR's MVT_TIME_UTC both anchor to arrival, which
-    # is not the same calendar day as departure for a flight that crosses
-    # midnight. Keying on the departure day there was doubly wrong: it
-    # dropped every midnight-crosser to nm_inferred (safe but lossy), and for
-    # a same-day-same-route callsign collision where one leg crosses
-    # midnight, it could let a departure day coincide with a *different*
-    # leg's real arrival day and attach the wrong leg's ALDT while t_source
-    # still read "apdf" -- silently wrong, not safely absent. Keying on
+    # day -- and using it here was wrong: the dep-side day match is at least
+    # anchored near departure on both sides (off-block and take-off, minutes
+    # apart -- though see the note above the dep join, where a midnight taxi
+    # separates even those), but ARVT_3 and APDF ARR's MVT_TIME_UTC both
+    # anchor to arrival, which is hours away and not the same calendar day as
+    # departure for a flight that crosses midnight. Keying on the departure day
+    # there was doubly wrong: it dropped every midnight-crosser to nm_inferred
+    # (safe but lossy), and for a same-day-same-route callsign collision where
+    # one leg crosses midnight, it could let a departure day coincide with a
+    # *different* leg's real arrival day and attach the wrong leg's ALDT while
+    # t_source still read "apdf" -- silently wrong, not safely absent. Keying on
     # to_date(arvt) instead matches what this module's own DATASETS.md
     # calibration script already does (`nm["ARVT_3"].dt.date`), and recovers
     # midnight-crossing APDF matches instead of trading them away.
