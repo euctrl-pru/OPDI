@@ -65,18 +65,43 @@ DATA = PAPER / "data"
 #: Source files whose contents define a result. Named explicitly: a dependency
 #: worth re-running for is a dependency worth writing down.
 SEG = [
+    # __init__.py is not filler. It is what `from opdi.pipeline.segmentation
+    # import assign_track_id` actually resolves, so it decides *which*
+    # implementation every arm runs; re-pointing one name there would change
+    # every number in the study while base.py and methods.py stayed byte-
+    # identical. Low-churn, but a dependency's churn rate is not what makes it
+    # a dependency.
+    "src/opdi/pipeline/segmentation/__init__.py",
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/segmentation/methods.py",
     "src/opdi/config.py",
 ]
 SCORE = ["benchmarks/track_truth.py", "benchmarks/track_score.py",
          "benchmarks/osn_sample.py"]
+#: ``track_methods.py`` is a dependency of four other jobs, not just the ladder
+#: it is named for. ``track_sweep`` and ``track_payoff`` import ``PERIODS`` and
+#: ``attach_airport_context`` from it -- which days a run covers, and the
+#: airport-context columns arm A6 branches on; ``track_diagnostics`` reads
+#: ``PERIODS`` for the census window and *calls* ``run_arm`` for the histogram.
+#: All four omitted it.
+#:
+#: The omission does not merely fail to mark an output stale. It writes the
+#: hole into the manifest, and every later staleness check inherits it -- so
+#: after a re-run, a change to the day list or the zone join would read as
+#: "current" indefinitely. That is why this was worth fixing before the
+#: regeneration rather than after it.
+METHODS = ["benchmarks/track_methods.py"]
 #: The two diagnostics. The census depends on ground truth alone -- it never
 #: reads a state vector -- so it must NOT carry SEG, or every segmentation edit
 #: would mark a result that cannot have changed as stale. The histogram does
 #: read tracks, and carries the same dependencies an arm does.
 DIAG = ["benchmarks/track_diagnostics.py"]
-CENSUS = DIAG + ["benchmarks/track_truth.py"]
+#: The census still does not carry SEG or track_score, and that is deliberate
+#: rather than an instance of the same omission fixed above: it never segments
+#: and never scores, so neither can move its number. It *does* read
+#: ``track_methods.PERIODS`` for the months and days it counts over, which is
+#: exactly the sort of thing that has to be declared.
+CENSUS = DIAG + ["benchmarks/track_truth.py"] + METHODS
 #: The payoff runs the flight list, so it depends on the flight list too.
 FLIGHTS = ["benchmarks/flight_list_v7.py", "src/opdi/pipeline/flights.py",
            "benchmarks/adep_ades.py"]
@@ -157,7 +182,7 @@ def jobs() -> list:
             args=["--period", period, "--arms", "all",
                   "--out-name", f"arms_{period}.csv"],
             outputs={f"arms_{period}.csv": f"arms_{period}.csv"},
-            code_paths=SEG + SCORE + ["benchmarks/track_methods.py"],
+            code_paths=SEG + SCORE + METHODS,
             notes="Eight segmentation arms scored against NM/APDF ground truth.",
         ))
 
@@ -172,7 +197,7 @@ def jobs() -> list:
               "--grid-low-alt-ft", *LOW_FT,
               "--out-name", "sweep_2025_stage1.csv"],
         outputs={"sweep_2025_stage1.csv": "sweep_2025_stage1.csv"},
-        code_paths=SEG + SCORE + ["benchmarks/track_sweep.py"],
+        code_paths=SEG + SCORE + METHODS + ["benchmarks/track_sweep.py"],
         notes="Stage 1: 235 cells, one day, to locate the optimum.",
     ))
     # Stage 1 put low_alt_ft's optimum on the grid edge with the curve still
@@ -188,7 +213,7 @@ def jobs() -> list:
               "--grid-low-alt-ft", "15000", "20000", "30000",
               "--out-name", "sweep_2025_stage1_ext.csv"],
         outputs={"sweep_2025_stage1_ext.csv": "sweep_2025_stage1_ext.csv"},
-        code_paths=SEG + SCORE + ["benchmarks/track_sweep.py"],
+        code_paths=SEG + SCORE + METHODS + ["benchmarks/track_sweep.py"],
         notes="Stage 1 extension: low_alt_ft past the edge its optimum landed on.",
     ))
     # Stage 2 re-measures the interesting region on the FULL three days of both
@@ -203,7 +228,7 @@ def jobs() -> list:
                   "--grid-low-alt-ft", "5000", "20000",
                   "--out-name", f"sweep_{period}_stage2.csv"],
             outputs={f"sweep_{period}_stage2.csv": f"sweep_{period}_stage2.csv"},
-            code_paths=SEG + SCORE + ["benchmarks/track_sweep.py"],
+            code_paths=SEG + SCORE + METHODS + ["benchmarks/track_sweep.py"],
             notes="Stage 2: the production cell and the optimum, three days.",
         ))
 
@@ -214,7 +239,7 @@ def jobs() -> list:
             script="benchmarks/track_payoff.py",
             args=["--period", period, "--arms", "all"],
             outputs={f"payoff_{period}.csv": f"payoff_{period}.csv"},
-            code_paths=SEG + FLIGHTS + ["benchmarks/track_payoff.py"],
+            code_paths=SEG + FLIGHTS + METHODS + ["benchmarks/track_payoff.py"],
             notes="V7 'shipped' held fixed; only track_id varies.",
         ))
 
@@ -230,7 +255,7 @@ def jobs() -> list:
             args=["--period", period, "--arms", "recommended", "legacy",
                   "--fix-callsign"],
             outputs={f"payoff_{period}.csv": f"payoff_fixcallsign_{period}.csv"},
-            code_paths=SEG + FLIGHTS + ["benchmarks/track_payoff.py"],
+            code_paths=SEG + FLIGHTS + METHODS + ["benchmarks/track_payoff.py"],
             notes="Same arms with flights.py's F.min('flight_id') worked around; "
                   "legacy is the control and must not move.",
         ))
@@ -265,7 +290,7 @@ def jobs() -> list:
                   "--arms", "recommended", "legacy", "ground_anchored",
                   "--out-name", f"boundary_hist_{period}.csv"],
             outputs={f"boundary_hist_{period}.csv": f"boundary_hist_{period}.csv"},
-            code_paths=SEG + SCORE + DIAG,
+            code_paths=SEG + SCORE + METHODS + DIAG,
             notes="Signed boundary offsets binned at 30 s over +/-1800 s. "
                   "Shares track_score.boundary_offsets with boundary_error, so "
                   "the bins and the published percentiles describe one sample.",
