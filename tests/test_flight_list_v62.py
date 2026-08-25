@@ -105,6 +105,24 @@ def test_the_datum_arm_ceiling_matches_the_integer_flight_level_cut():
     assert flight_list_v62.DATUM_ARM_CEILING_FT == 6100.0
 
 
+def test_the_grid_sweeps_the_margin_main_actually_ships():
+    """The grid fixed the vote margin at 2 while DetectionConfig ships 0, so
+    the shipped value was validated by nothing at all -- and main's
+    configuration was not a cell the grid had ever run, which makes a parity
+    check impossible rather than merely failing."""
+    assert DetectionConfig().trend_vote_margin in flight_list_v62.GRID_MARGINS
+    assert set(flight_list_v62.GRID_MARGINS) == {0, 2, 4}
+
+
+def test_mains_whole_configuration_is_a_cell_of_the_grid():
+    """Ceiling, radius and margin together. Each being present individually is
+    not enough: the parity check looks for one cell matching all three."""
+    c = DetectionConfig()
+    assert c.trend_max_height_ft in flight_list_v62.GRID_HEIGHT_CAPS
+    assert c.trend_radius_nm in (20.0, 30.0)
+    assert c.trend_vote_margin in flight_list_v62.GRID_MARGINS
+
+
 @pytest.mark.parametrize("fl,ft", [(40, 4100.0), (60, 6100.0), (80, 8100.0),
                                    (100, 10100.0), (200, 20100.0)])
 def test_the_msl_equivalent_is_the_top_of_the_flight_level_not_its_face_value(fl, ft):

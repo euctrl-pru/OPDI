@@ -557,11 +557,13 @@ def jobs() -> list:
              "--trend-sweep", str(DATA / "height_sweep_2025.csv"),
              "--trend-sweep-msl", str(DATA / "fl_sweep_2025.csv"),
              "--endpoint-sweep", str(DATA / "sweep_radius_height_2025.csv"),
-             "--runs", *[f"grid_h{c}_r{r:g}_m2"
+             "--runs", *[f"grid_h{c}_r{r:g}_m{m}"
                          for c in flight_list_v62.GRID_HEIGHT_CAPS
-                         for r in (20, 30)],
+                         for r in (20, 30)
+                         for m in flight_list_v62.GRID_MARGINS],
              "--grid-height", *[str(c) for c in flight_list_v62.GRID_HEIGHT_CAPS],
-             "--grid-radius", "20", "30", "--grid-margin", "2",
+             "--grid-radius", "20", "30",
+             "--grid-margin", *[str(m) for m in flight_list_v62.GRID_MARGINS],
              "--trend-rank-by", "haversine", "--executors", "10"],
             {"mode_comparison_v6.csv": "trend_grid_v6.csv"}, PIPE,
             "the trend ceiling x radius swept through process_dai itself, in "
