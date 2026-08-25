@@ -1053,31 +1053,36 @@ class SegmentationConfig:
     byte for byte.
     """
 
-    method: str = "legacy"
-    """Which segmentation ``tracks.py`` builds ``track_id`` with.
+    method: str = "standard"
+    """Which segmentation builds ``track_id``.
 
-    ``"legacy"`` is the algorithm behind every published dataset: group on
-    ``(icao24, callsign)``, split on a 30-minute gap or a 15-minute gap below
-    5,000 ft, suffix the id with year and month.
+    ``"legacy"`` is the rule that produced every release up to and including
+    OPDI v0.0.2: group on ``SHA2(icao24 || callsign)``, split on a gap over
+    ``gap_minutes`` or a shorter gap below ``low_alt_gap_ft``, and suffix the id
+    with ``_{year}_{month}``.
 
-    ``"standard"`` is what the track-construction study recommends: group on
-    ``icao24`` alone, so a blank or flickering callsign no longer starts a track;
-    break when the last *non-blank* callsign really changes, so two flights of
-    one airframe still part; keep the legacy gap rules as a floor. Measured over
-    two three-day samples it matches individual flights 90.8% and 91.8% of the
-    time against legacy's 49.6% and 52.3%, and merges less often than legacy
-    does.
+    ``"standard"`` is the rule this release ships. It groups on the airframe
+    alone and splits when the last *non-blank* callsign genuinely changes. Two
+    independent failures of the legacy key motivate it, and they are separable:
+    blank callsigns formed tracks of their own (42.4% of legacy tracks are
+    blank-labelled, which is where its fragmentation comes from), and a callsign
+    change mid-airframe was invisible once callsign was in the key.
 
-    Both dispatch to ``pipeline/segmentation``, so the algorithm production runs
-    is the one the study benchmarked rather than a second implementation of the
-    same description.
+    .. warning::
 
-    **The default stays ``"legacy"`` deliberately.** Switching it changes
-    ``track_id`` for every subsequent run, in shape as well as value -- the
-    ``standard`` id carries no ``_{year}_{month}`` suffix -- which is a release
-    decision rather than a default. It also wants the flight list's callsign
-    labelling fixed first: done in the other order, the study measures a
-    34-point ADEP/ADES coverage loss in between.
+       **This changes ``track_id`` for all data produced from this release
+       forward**, in shape as well as value -- there is no ``_{year}_{month}``
+       suffix. A consumer joining on ``track_id`` across the boundary gets an
+       empty join rather than an error, which reads as missing data.
+
+       **Nothing in the published data says which rule produced a row.**
+       ``osn_tracks`` carries no version column, so the only way to tell is to
+       know when the row was published. Anyone comparing data across the release
+       has to be told; the table will not tell them.
+
+       Set this back to ``"legacy"`` to reproduce pre-release ``track_id``
+       values. Reproducing them also requires the *raw* altitudes, which
+       ``osn_tracks_clean`` no longer carries -- see the V2 paper.
     """
 
     gap_minutes: float = 30.0

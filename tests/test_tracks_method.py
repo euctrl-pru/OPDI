@@ -2,9 +2,10 @@
 
 The lock in ``test_segmentation_base.py`` proves the *legacy* branch still
 reproduces the published ids. These tests cover the switch itself: that the
-default has not moved, that selecting the new method actually changes the
-partition, that it is the same partition the study benchmarked, and that a
-typo fails loudly instead of silently falling back to legacy.
+default is ``standard`` as of this release, that selecting either method
+explicitly actually changes the partition, that it is the same partition the
+study benchmarked, and that a typo fails loudly instead of silently falling
+back to a default.
 
 That last one matters more than it looks. A dispatch that treats an unknown
 name as "use the default" would let a deployment believe it had switched
@@ -48,17 +49,25 @@ BLANKING = (
 )
 
 
-def test_the_default_is_still_legacy(spark, tmp_path):
-    """Nobody's ids change by upgrading. The switch has to be thrown on purpose."""
-    assert OPDIConfig().segmentation.method == "legacy"
+def test_the_default_is_now_standard(spark, tmp_path):
+    """The switch has been thrown: production ids change unless legacy is selected.
+
+    ``config.py`` ships ``standard`` as the default as of this release; this is
+    the guard that would catch an accidental revert.
+    """
+    assert OPDIConfig().segmentation.method == "standard"
     df = make_track(spark, BLANKING)
-    assert len(_partition(_proc(spark, tmp_path)._add_track_id(df))) == 2
+    assert len(_partition(_proc(spark, tmp_path)._add_track_id(df))) == 1
 
 
 def test_standard_changes_the_partition(spark, tmp_path):
-    """The new method is actually wired through, not just accepted."""
+    """The new method is actually wired through, not just accepted.
+
+    Both arms are selected explicitly here -- this is a comparison of the two
+    algorithms, not a statement about which one is the default.
+    """
     df = make_track(spark, BLANKING)
-    legacy = _partition(_proc(spark, tmp_path)._add_track_id(df))
+    legacy = _partition(_proc(spark, tmp_path, "legacy")._add_track_id(df))
     standard = _partition(_proc(spark, tmp_path, "standard")._add_track_id(df))
     assert len(legacy) == 2
     assert len(standard) == 1

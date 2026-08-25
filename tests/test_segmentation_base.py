@@ -30,8 +30,16 @@ def _partition(df, id_col):
 
 
 def _frozen_track_ids(spark, df, tmp_path):
-    """Run the frozen production algorithm. Never modify tracks.py to make this pass."""
-    proc = TrackProcessor(spark, OPDIConfig(), log_file_path=str(tmp_path / "log.parquet"))
+    """Run the frozen production algorithm. Never modify tracks.py to make this pass.
+
+    "Frozen" means the *legacy* algorithm specifically -- the one this lock
+    exists to pin -- not whatever ``segmentation.method`` currently defaults
+    to. The method is set explicitly so this lock keeps meaning the same thing
+    across the default flip in ``config.py``.
+    """
+    cfg = OPDIConfig()
+    cfg.segmentation.method = "legacy"
+    proc = TrackProcessor(spark, cfg, log_file_path=str(tmp_path / "log.parquet"))
     return proc._add_track_id(df)
 
 
