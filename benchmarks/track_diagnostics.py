@@ -26,10 +26,11 @@ number.
 
 The census reads only Network Manager/APDF reference parquet -- no state
 vectors, no S3 writes. The histogram builds one assignment table per arm and
-deletes it again, reusing ``track_methods``'s streaming, its free-space gate and
-its scoped single-object delete rather than reimplementing any of them; it
-writes under a ``diag_``-prefixed arm directory so that a concurrent
-``track_methods`` run and this one can never delete each other's tables.
+deletes it again by *calling* ``track_methods.run_arm`` -- its streaming, its
+free-space gate and its scoped single-object delete, not a second copy of them
+-- passing its own scoring callable and a ``diag_``-prefixed arm directory, so
+that a concurrent ``track_methods`` run and this one can never delete each
+other's tables.
 
 One Spark job at a time -- ``spark.driver.port`` is pinned, so a second
 concurrent job kills both.
@@ -52,11 +53,10 @@ import track_truth  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import DataFrame, SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
-from track_score import boundary_offsets, track_extents  # noqa: E402
+from track_score import boundary_offsets  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
-from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
-from opdi.pipeline.segmentation.methods import ARMS  # noqa: E402
+from opdi.pipeline.segmentation import SegmentationParams  # noqa: E402
 
 __all__ = ["inside_window", "containment_census", "census_ground_truth",
            "boundary_histogram"]
@@ -350,47 +350,31 @@ def boundary_histogram(
 
 
 def run_arm_histogram(spark, s3, arm_name, period, sv, gt, params, args):
-    """Build one arm's assignment table, histogram it, and delete the table.
+    """One arm's boundary histogram, over ``track_methods``'s streamed runner.
 
-    The same streamed shape as ``track_methods.run_arm`` and, deliberately, the
-    same helpers: peak S3 footprint is one assignment table, the delete runs on
-    the failure path too, and every key deleted is checked against this run's
-    own prefix first.
+    The orchestration -- write the assignment table, take extents from the
+    *full* table, overlap-join it to ground truth, release the table on the
+    failure path as well as the success path -- is
+    :func:`track_methods.run_arm`, called rather than copied. Only two things
+    differ from the ladder's own use of it: what is computed from
+    ``(matched, extents)``, and the ``diag_`` path prefix.
 
-    The prefix is ``diag_<arm>``, not ``<arm>``. ``track_methods`` writes the
-    bare name, and a delete here that matched its prefix would be this study
-    removing a table another process was mid-run on. One job at a time is the
-    rule; a distinct prefix is what makes a broken rule survivable.
+    That prefix matters. ``track_methods`` writes the bare arm name, and a
+    delete here that matched its prefix would be this study removing a table
+    another process was mid-run on. One job at a time is the rule; a distinct
+    prefix is what makes a broken rule survivable.
+
+    The ``meta`` half of the runner's return -- object count and byte size --
+    is dropped: this job's CSV is a bin grid, and the assignment table's size
+    is a property of the arm that ``arms_<period>.csv`` already records.
     """
-    path_arm = f"diag_{arm_name}"
-    rule = ARMS[arm_name]()
-    assigned = assign_track_id(sv, rule, params)
-    out = f"{track_methods.ASSIGN_BASE}/{path_arm}/{period}"
-    (
-        assigned.select("icao24", "event_time", "track_id")
-        .write.mode("overwrite")
-        .parquet(out)
+    rows, _meta = track_methods.run_arm(
+        spark, s3, arm_name, period, sv, gt, params, args.keep_assignments,
+        score=lambda matched, extents: boundary_histogram(
+            matched, extents, args.bin_seconds, args.span_seconds
+        ),
+        path_arm=f"diag_{arm_name}",
     )
-    n_obj, n_bytes = track_methods.prefix_size(
-        s3, track_methods.assign_prefix(path_arm, period)
-    )
-    print(f"  -> {out} ({n_obj} objects, {n_bytes / 1e9:.3f} GB)")
-
-    try:
-        assign = spark.read.parquet(out)
-        # Extents from the FULL assignment table, not from `matched`: see
-        # track_score.boundary_error's docstring for why deriving them from the
-        # overlap-joined frame makes an overhang structurally invisible.
-        extents = track_extents(assign)
-        matched = track_truth.overlap_join(assign, gt)
-        rows = boundary_histogram(matched, extents, args.bin_seconds, args.span_seconds)
-    except BaseException:
-        track_methods.release_assignment(
-            s3, path_arm, period, out, args.keep_assignments, failed=True
-        )
-        raise
-
-    track_methods.release_assignment(s3, path_arm, period, out, args.keep_assignments)
     for r in rows:
         r["arm"] = arm_name
     return rows

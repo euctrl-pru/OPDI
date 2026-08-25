@@ -271,16 +271,49 @@ def release_assignment(s3, arm_name, period, out, keep_assignments, failed=False
         print(f"  !! ORPHAN LEFT at {assign_prefix(arm_name, period)}: {exc}")
 
 
-def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments):
+def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments,
+            score=score_arm, path_arm=None):
+    """Build one arm's assignment table, derive something from it, delete it.
+
+    **The orchestration lives here once**, and the two optional parameters are
+    what keeps it that way. What varies between callers is a single line --
+    what gets computed from ``(matched, extents)``. What does *not* vary is the
+    part that is easy to get subtly wrong and expensive to have wrong in two
+    places: the streamed write, the size accounting, and the release on the
+    failure path as well as the success path.
+
+    ``benchmarks/track_diagnostics.py``'s boundary histogram was briefly a
+    verbatim copy of this function with one call swapped. That is the same
+    defect class the histogram's own scoring half exists to avoid -- a
+    duplicated invariant drifts, and here the copy that would be missed by a
+    future fix to the orphan handling is the one that is *not* the paper's
+    headline path.
+
+    ``score`` is applied to ``(matched, extents)`` and whatever it returns is
+    passed straight back. It defaults to :func:`track_score.score_arm`, which
+    yields one flat metric row.
+
+    ``path_arm`` names the directory under ``ASSIGN_BASE``, defaulting to
+    ``arm_name``. ``track_diagnostics`` passes ``diag_<arm>`` so that its
+    deletes can never match a prefix this runner is mid-write on: one job at a
+    time is the rule, and a distinct prefix is what makes a broken rule
+    survivable.
+
+    Returns ``(result, meta)``. ``meta`` carries the arm, the period and the
+    assignment table's object count and byte size. It is returned beside the
+    result rather than merged into it because ``result`` is only a dict for the
+    default ``score`` -- the histogram's is a list of bins.
+    """
+    path_arm = path_arm or arm_name
     rule = ARMS[arm_name]()
     assigned = assign_track_id(sv, rule, params)
-    out = f"{ASSIGN_BASE}/{arm_name}/{period}"
+    out = f"{ASSIGN_BASE}/{path_arm}/{period}"
     (
         assigned.select("icao24", "event_time", "track_id")
         .write.mode("overwrite")
         .parquet(out)
     )
-    n_obj, n_bytes = prefix_size(s3, assign_prefix(arm_name, period))
+    n_obj, n_bytes = prefix_size(s3, assign_prefix(path_arm, period))
     print(f"  -> {out} ({n_obj} objects, {n_bytes / 1e9:.3f} GB)")
 
     # The delete used to be on the success path only. Scoring is the part that
@@ -297,17 +330,16 @@ def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments):
         # track_score.boundary_error's docstring.
         extents = track_extents(assign)
         matched = track_truth.overlap_join(assign, gt)
-        row = score_arm(matched, extents)
+        result = score(matched, extents)
     except BaseException:
-        release_assignment(s3, arm_name, period, out, keep_assignments, failed=True)
+        release_assignment(s3, path_arm, period, out, keep_assignments, failed=True)
         raise
 
-    row.update({
+    release_assignment(s3, path_arm, period, out, keep_assignments)
+    return result, {
         "arm": arm_name, "period": period,
         "assign_objects": n_obj, "assign_bytes": n_bytes,
-    })
-    release_assignment(s3, arm_name, period, out, keep_assignments)
-    return row
+    }
 
 
 def main():
@@ -379,9 +411,10 @@ def main():
         for arm in arms:
             print(f"\n=== {arm} ({args.period}) ===")
             require_headroom(s3, f"arm {arm}")
-            row = run_arm(
+            row, meta = run_arm(
                 spark, s3, arm, args.period, sv, gt, params, args.keep_assignments
             )
+            row.update(meta)
             rows.append(row)
             if writer is None:
                 writer = csv.DictWriter(fh, fieldnames=sorted(row))

@@ -311,11 +311,32 @@ def load_flight_intervals(
     #     admitted only the latter, so this leg's t_off became 2025-06-05
     #     00:20:03 against its own ARVT_3 of 2025-06-06 03:16: a **26.9-hour
     #     ground-truth interval**. 10 such intervals over 20 h in the 2025
-    #     sample and 9 in 2024; none over 20 h in 2025 after this fix.
+    #     sample and 9 in 2024. After this fix: **none in 2025, and two in
+    #     2024** -- the longest 27.9 h, icao24 4bb194, THY801, LTFM->SKBO.
+    #
+    #     Both post-fix counts are stated because only one of them is zero.
+    #     Quoting the 2025 zero alone would read as "the class of defect is
+    #     eliminated", and it is not. The two survivors are **not** this
+    #     defect: they carry no APDF candidate at either end, so their interval
+    #     is NM's own `AOBT_3`/`ARVT_3` pairing and no join key of ours
+    #     produced it. They are **undiagnosed**, and deliberately not filtered
+    #     -- a sanity bound on interval length would move the denominator of
+    #     every metric in the study, which is a scope decision rather than a
+    #     cleanup. Written down here so the residual outlives the report that
+    #     found it.
+    #
     #     `overlap_join` assigns by containment, so an interval that long
     #     swallows a whole day of that airframe's samples -- including its
-    #     neighbouring legs' -- straight into the merge statistic this study
-    #     reports.
+    #     neighbouring legs' -- into `match_rates`. Note *how*, because it is
+    #     not the inflated merge rate one first assumes. Traced through
+    #     `match_rates`: a neighbouring leg that loses all its samples drops
+    #     out of the `n_flights` **denominator** rather than counting as
+    #     merged; the over-long flight itself now spans several tracks and
+    #     scores **fragmented**; and a genuine merge whose samples all carry
+    #     this one `flight_key` is **masked**. Contaminated in three
+    #     directions, none of them the obvious one -- which is why the earlier
+    #     wording here, "straight into the merge statistic", was wrong and is
+    #     corrected rather than softened.
     #
     #     Note what did *not* protect against it: `t_source` read
     #     "nm_inferred" for that row, because LTAI is not APDF-covered so
