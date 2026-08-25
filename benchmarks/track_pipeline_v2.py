@@ -62,6 +62,14 @@ TABLES = ("osn_tracks", "osn_tracks_clean", "opdi_flight_list")
 
 RESEARCH_ROOT = "research/tcv2"
 
+#: State vectors are step 02's input and do not depend on the segmentation, so
+#: they are ingested once and shared by every method rather than rebuilt per
+#: method. Sharing is also what makes the comparison honest: both methods
+#: segment the *same* bytes, so a difference between them cannot be an artefact
+#: of two ingests that saw the upstream feed at different moments.
+SHARED_SV = f"{RESEARCH_ROOT}/_shared/osn_statevectors_v2"
+SV_TABLE = "osn_statevectors_v2"
+
 PERIODS = {
     "2025": {"month": date(2025, 6, 1),
              "days": ["2025-06-05", "2025-06-06", "2025-06-07"],
@@ -96,6 +104,7 @@ def redirect_tables(method: str) -> None:
         StorageManager._tcv2_orig_s3_path = orig
 
     mapping = {name: table_for(method, name) for name in TABLES}
+    mapping[SV_TABLE] = SHARED_SV
 
     def _s3_path(self, name, *a, **kw):
         return orig(self, mapping.get(name, name), *a, **kw)
@@ -134,15 +143,17 @@ def guard_writes(allowed_prefix: str = "research/") -> None:
     StorageManager._tcv2_guarded = True
 
 
-def delete_method(s3, method: str) -> tuple:
-    """Delete every object this method wrote. Returns (objects, bytes).
+def delete_prefix(s3, prefix: str) -> tuple:
+    """Delete every object under *prefix*. Returns (objects, bytes).
 
     Single-object deletes: the OpenSky endpoint rejects batch ``DeleteObjects``
-    with ``MissingContentMD5``. Every key is re-checked against this method's
-    own prefix first -- the bucket holds another project's data and there is no
-    undo.
+    with ``MissingContentMD5``. Every key is re-checked against the prefix
+    before it goes, and the prefix itself must sit under this study's own root
+    -- the bucket holds another project's data and there is no undo.
     """
-    prefix = f"opdi/{RESEARCH_ROOT}/{method}/"
+    root = f"opdi/{RESEARCH_ROOT}/"
+    if not prefix.startswith(root):
+        raise ValueError(f"refusing to delete outside {root}: {prefix!r}")
     n = freed = 0
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
         for o in page.get("Contents", []):
@@ -154,12 +165,46 @@ def delete_method(s3, method: str) -> tuple:
     return n, freed
 
 
+def delete_method(s3, method: str) -> tuple:
+    """Delete the three tables this method wrote, leaving the shared slice."""
+    return delete_prefix(s3, f"opdi/{RESEARCH_ROOT}/{method}/")
+
+
 def bucket_free_gb(s3) -> float:
     total = 0
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET):
         for o in page.get("Contents", []):
             total += o["Size"]
     return 100.0 - total / 1e9
+
+
+def sv_exists(s3, days) -> bool:
+    """Has the shared state-vector slice already been ingested?"""
+    r = s3.list_objects_v2(Bucket=BUCKET, Prefix=f"opdi/{SHARED_SV}/", MaxKeys=2)
+    return r.get("KeyCount", 0) > 0
+
+
+def ingest_statevectors(spark, cfg, days) -> None:
+    """Step 01, over just the sampled days, into the shared slice.
+
+    Reads the hourly partitions under
+    ``s3a://opensky-hdfs-backup/tables_v4/state_vectors`` -- the same upstream
+    source the production ingest reads -- applies the pipeline's own bounding
+    box and column mapping, and writes ``osn_statevectors_v2``, which the
+    redirect has pointed at the shared slice.
+
+    This is why an end-to-end run is possible at all: ``osn_statevectors_v2``
+    is not resident in our bucket, so the first attempt at step 02 failed with
+    PATH_NOT_FOUND. Materialising a month of it would be ~100 GB; a day of the
+    ECAC box is a few.
+    """
+    from opdi.ingestion.osn_statevectors import StateVectorIngestion
+
+    start = date.fromisoformat(min(days))
+    end = date.fromisoformat(max(days)) + timedelta(days=1)
+    ing = StateVectorIngestion(spark, cfg)
+    ing.create_table_if_not_exists()
+    ing.ingest_from_s3(start, end)
 
 
 def build_tracks(spark, cfg, period, days) -> None:
@@ -230,6 +275,10 @@ def main() -> None:
                     default="data/airport_hex/zones_res7_processed.parquet")
     ap.add_argument("--keep", action="store_true",
                     help="do not delete a method's tables after scoring it")
+    ap.add_argument("--keep-sv", action="store_true",
+                    help="leave the shared state-vector slice behind so a "
+                         "follow-up run skips the ingest; costs a few GB on a "
+                         "shared bucket until removed")
     ap.add_argument("--min-free-gb", type=float, default=8.0,
                     help="abort before a method if less than this is free")
     args = ap.parse_args()
@@ -267,6 +316,12 @@ def main() -> None:
             cfg.segmentation.method = method
             redirect_tables(method)
 
+            # Once, before the first method. Both methods then segment exactly
+            # the same state vectors.
+            if not sv_exists(s3, days):
+                print("  ingesting shared state vectors (step 01)...")
+                ingest_statevectors(spark, cfg, days)
+
             started = datetime.utcnow()
             try:
                 build_tracks(spark, cfg, period, days)
@@ -299,6 +354,14 @@ def main() -> None:
     finally:
         fh.close()
         spark.stop()
+        # The shared slice outlives the per-method loop by design -- both
+        # methods read it -- so it is dropped here, after the last one.
+        # --keep-sv leaves it for a follow-up run to reuse, which saves the
+        # ingest but keeps several GB resident on a shared bucket.
+        if not (args.keep or args.keep_sv):
+            n, freed = delete_prefix(s3, f"opdi/{SHARED_SV}/")
+            print(f"-- deleted {n} shared state-vector objects "
+                  f"({freed / 1e9:.2f} GB)")
 
     if rows:
         provenance.record(
