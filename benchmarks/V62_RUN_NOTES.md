@@ -233,3 +233,34 @@ and is reported as the weaker thing it is.
 Nothing deliberately skipped. `height_pipeline_2025` is not carried over from
 v6.1 as a separate job because `trend_grid_2025` subsumes it — see the 6,000
 against 6,100 note above.
+
+## Diagram rendering without a browser
+
+The four methodology diagrams are HTML-only: `mermaid()` emits its fence only
+under `knitr::is_html_output()`, because rasterising mermaid needs a headless
+Chromium that does not start here. A spike asked whether one source could serve
+both formats using only what is installed.
+
+| Path | Result |
+|---|---|
+| `DiagrammeR` viz.js via `V8`, then `rsvg` | **fails** — this DiagrammeR build ships no `viz.js` at all (0 candidates found) |
+| `igraph` drawn to a PDF device | **works** — valid 1-page PDF |
+| `grid` boxes and arrows | **works** — valid 1-page PDF |
+
+No Chromium process was spawned: every `chrome-headless` entry on the host
+remained 3, 11 or 12 days old.
+
+**So it is feasible, and the recommended path is `grid`.** An R chunk that
+draws with `grid` renders through whatever device Quarto has selected, so the
+same source produces a figure in HTML *and* PDF with no browser and no
+pre-rendered image to keep in step.
+
+`igraph` also works but fights the content: these are flowcharts with
+multi-line box labels, a decision diamond and yes/no edge labels, and igraph's
+strengths are graph layout rather than annotated boxes.
+
+**Practical shape:** all four diagrams are vertical chains with a single
+branch, so one helper that lays out a chain of labelled boxes serves all four
+rather than four hand-placed drawings. That is what makes the approach
+affordable; without it, hand-laying four flowcharts in `grid` would not be
+worth the gain over the existing step tables.
