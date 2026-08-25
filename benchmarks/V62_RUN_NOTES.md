@@ -316,3 +316,35 @@ argument that a cut should mean the same thing at every aerodrome.
 The ladder's other rungs are far larger than the noise and unaffected: the
 penalty is +825, the ceiling +791, and the ceiling step still flips sign
 between ranking rules (+791 under exact distance, -1,642 under ring).
+
+### What the regeneration moved, and why
+
+Eighteen of the twenty-seven figures reproduced **exactly**, including all four
+sweeps, the datum arms, the elevation bands and the original twelve cells of
+the pipeline grid. What moved, and the reason in each case:
+
+| File | Moved | Cause |
+|---|---|---|
+| `trend_grid_v6.csv` | 12 -> 36 rows | the grid was widened on purpose; the original 12 cells reproduce exactly |
+| `input_drift.csv` | all 8 rows | it reports table identities, and the vote caches were rebuilt today |
+| `mode_comparison_v6.csv` | the `recommended` row | tie-breaking noise, ~5 flights |
+| `per_airport_v6.csv`, `per_airport_path_v6.csv` | 34 and 44 cells | the same, seen per aerodrome |
+| `pipeline_path*.csv` | a few points a rung | the same |
+| `bearing_whole_sample_v6.csv` | 1 flight | the same |
+| `vertical_measure_v6.csv` | 14th decimal | floating-point summation order across partitions |
+| `trend_bearing_v6.csv` | **materially** | it now reads the cache its manifest declares |
+
+Only the last is a real change rather than noise, and it is a consequence of
+this branch: `trend_bearing` used to read v6's `research/trend_votes` while the
+registry declared the paired cache. Repointing it moved every figure in that
+section -- `adep_correct` by +737, and the veto variants by far more.
+
+**The section's conclusion is unchanged.** Ranked against the baseline, the
+picture is identical in both runs: reranking by alignment is catastrophic,
+every veto variant scores far below the baseline, and the tie-break variants
+give a modest gain peaking at 2 NM. The large deltas fall on the variants that
+were already hopeless, which went from catastrophically bad to merely very bad.
+
+The old numbers cannot be recovered for comparison -- v6's cache has been
+deleted from the bucket -- but they were the untrustworthy ones: they came from
+a table the manifest never declared.
