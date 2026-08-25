@@ -50,10 +50,11 @@ class TrackProcessor:
     without saying so.
 
     So the algorithm is selected by ``config.segmentation.method``. ``legacy``
-    reproduces the published ids byte for byte and remains the default;
-    ``standard`` is the study's recommendation. Both delegate to
-    ``pipeline/segmentation``, so production runs the code the study measured
-    rather than a second implementation of the same prose.
+    reproduces the published ids byte for byte and remains selectable;
+    ``standard`` is the study's recommendation and, as of this release, the
+    default. Both delegate to ``pipeline/segmentation``, so production runs
+    the code the study measured rather than a second implementation of the
+    same prose.
     """
 
     def __init__(
