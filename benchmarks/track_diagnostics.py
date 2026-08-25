@@ -432,7 +432,15 @@ def run_containment(spark, args, period_cfg, days, out_path) -> dict:
     # (0.06 %) and 55 of 90,867 for 2024, every one of them departure-day 06-04
     # with `t_off` a few seconds past midnight, and zero in the other direction.
     # A real if small defect in V1's ground truth, surfaced rather than smoothed
-    # over -- it is reported in the manifest as its own input count.
+    # over -- it is printed above and returned as its own input count.
+    #
+    # It reaches the manifest only when this script is run directly. Run through
+    # `regenerate_track_v1.py`, `Job.run` calls `provenance.record` again after
+    # the script exits, with no `inputs`, and that second call replaces the
+    # entry this one wrote. Pre-existing and not specific to this job --
+    # `track_methods.py` loses its `samples`/`gt_flights` counts the same way --
+    # but stated here rather than left as a comment that promises a manifest
+    # field the manifest does not carry.
     v1 = track_truth.load_flight_intervals(spark, period_cfg["months"], days)
     n_kept = v1.count()
     missed = v1.join(inside, "flight_key", "left_anti").count()
