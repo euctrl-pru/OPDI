@@ -289,9 +289,18 @@ def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments,
     future fix to the orphan handling is the one that is *not* the paper's
     headline path.
 
-    ``score`` is applied to ``(matched, extents)`` and whatever it returns is
-    passed straight back. It defaults to :func:`track_score.score_arm`, which
-    yields one flat metric row.
+    ``score`` is applied to ``(matched, extents, assign)`` and whatever it
+    returns is passed straight back. It defaults to
+    :func:`track_score.score_arm`, which yields one flat metric row and ignores
+    the third argument.
+
+    ``assign`` is handed over because some measurements cannot be made from
+    ``matched`` at all. ``matched`` is ``overlap_join``'s output, restricted to
+    the *airborne* interval ``[t_off, t_land]``, so anything about the aircraft
+    on the ground -- taxi-out reception, for instance -- is structurally absent
+    from it. A scorer needing that has to see the unfiltered table, and reading
+    it a second time from S3 inside the scorer would both cost a re-read and
+    risk pointing at a different table than the one just written.
 
     ``path_arm`` names the directory under ``ASSIGN_BASE``, defaulting to
     ``arm_name``. ``track_diagnostics`` passes ``diag_<arm>`` so that its
@@ -330,7 +339,7 @@ def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments,
         # track_score.boundary_error's docstring.
         extents = track_extents(assign)
         matched = track_truth.overlap_join(assign, gt)
-        result = score(matched, extents)
+        result = score(matched, extents, assign)
     except BaseException:
         release_assignment(s3, path_arm, period, out, keep_assignments, failed=True)
         raise

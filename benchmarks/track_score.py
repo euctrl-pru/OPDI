@@ -397,12 +397,18 @@ def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
     }
 
 
-def score_arm(matched: DataFrame, extents: DataFrame) -> dict:
+def score_arm(matched: DataFrame, extents: DataFrame, assign: DataFrame = None) -> dict:
     """Every metric for one arm, as one flat row ready for a CSV.
 
     ``extents`` is one row per track_id (``trk_start``, ``trk_end``) from
     :func:`track_extents`, over the *full* assignment table -- see
     :func:`boundary_error` for why it cannot be derived from ``matched``.
+
+    ``assign`` is accepted and ignored. ``track_methods.run_arm`` passes the
+    unfiltered assignment table to every scorer because some measurements are
+    impossible without it; this one needs only what ``extents`` already
+    carries, and takes the argument so the hook has one signature rather than
+    two.
 
     Every value is a number except the four ``*_err_p*_s`` and six
     ``*_signed_p*_s`` fields, which are ``None`` when the arm's sample contains

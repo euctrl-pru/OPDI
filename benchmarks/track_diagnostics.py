@@ -370,7 +370,7 @@ def run_arm_histogram(spark, s3, arm_name, period, sv, gt, params, args):
     """
     rows, _meta = track_methods.run_arm(
         spark, s3, arm_name, period, sv, gt, params, args.keep_assignments,
-        score=lambda matched, extents: boundary_histogram(
+        score=lambda matched, extents, assign: boundary_histogram(
             matched, extents, args.bin_seconds, args.span_seconds
         ),
         path_arm=f"diag_{arm_name}",
