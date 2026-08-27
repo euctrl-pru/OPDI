@@ -7,6 +7,7 @@ have, and would do so invisibly.
 
 import datetime as dt
 
+from pyspark.sql import functions as F
 from pyspark.sql import Row
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType, TimestampType
 from track_truth import load_apdf_times, load_flight_intervals, overlap_join
@@ -560,3 +561,44 @@ def test_apdf_departure_does_not_inflate_a_ground_truth_interval(spark, tmp_path
     # The label is unchanged by this fix, and says less than it appears to:
     # a measured ATOT with no measured ALDT still reads "nm_inferred".
     assert rows[0]["t_source"] == "nm_inferred"
+
+
+def test_endpoint_provenance_is_finer_than_t_source(spark):
+    """A measured arrival at an uncovered departure aerodrome is still measured.
+
+    `t_source` is "apdf" only when both ends are measured. On the real 2025
+    extract 44,841 flights carry a genuine APDF AIBT while only 22,588 are
+    labelled "apdf" -- so a consumer cutting the data by *aerodrome* rather
+    than by flight-pair needs the endpoint flags, and reading `t_source`
+    instead mis-classifies aerodromes whose arrivals are fully measured.
+    """
+    gt = load_flight_intervals(
+        spark, months=["202506"], days=["2025-06-05"], reference_base=_LOCAL_REFERENCE
+    ).cache()
+
+    assert {"dep_measured", "arr_measured"} <= set(gt.columns)
+
+    # Both flags true is a *subset* of what t_source calls "apdf", and
+    # deliberately so: `arr_measured` also demands AIBT, because a capture
+    # fraction without the in-block time has no denominator. APDF leaves
+    # BLOCK_TIME_UTC null on a small fraction of arrival rows, and those rows
+    # are "apdf" to t_source and not measured to this study.
+    both = gt.filter(F.col("dep_measured") & F.col("arr_measured"))
+    apdf = gt.filter(F.col("t_source") == "apdf")
+    assert both.count() <= apdf.count()
+    # The whole of the difference is missing AIBT -- nothing else.
+    assert apdf.filter(
+        ~(F.col("dep_measured") & F.col("arr_measured"))
+        & F.col("aibt").isNotNull()
+    ).count() == 0
+
+    # And the flags are strictly finer: some arrivals are measured on rows
+    # t_source calls inferred. If this ever reaches zero the split has gone
+    # away and the extra columns are dead weight -- which would itself be worth
+    # knowing.
+    finer = gt.filter(F.col("arr_measured") & (F.col("t_source") != "apdf"))
+    assert finer.count() > 0
+
+    # arr_measured must imply a usable arrival ground phase.
+    assert gt.filter(F.col("arr_measured") & F.col("aibt").isNull()).count() == 0
+    gt.unpersist()

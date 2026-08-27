@@ -452,11 +452,14 @@ def load_flight_intervals(
             # above takes `atot` whenever it exists, so a row with a real ATOT
             # and no ALDT -- an APDF-covered departure to an uncovered
             # aerodrome -- carries a measured take-off under the "nm_inferred"
-            # label. Observed and left alone deliberately: no consumer reads
-            # t_source as a provenance flag per endpoint today, and splitting
-            # it would move which rows boundary_error counts. Recorded here
-            # rather than fixed in passing, because it is what let the
-            # departure-join defect above reach the output unguarded.
+            # label. It is also what let the departure-join defect above reach
+            # the output unguarded.
+            #
+            # `t_source` itself is deliberately unchanged, because changing it
+            # would move which rows `boundary_error` counts and therefore which
+            # flights every published V1 number covers. The per-endpoint
+            # answer is carried *beside* it instead, as `dep_measured` and
+            # `arr_measured` -- see below.
             "t_source",
             F.when(F.col("atot").isNotNull() & F.col("aldt").isNotNull(), "apdf")
             .otherwise("nm_inferred"),
@@ -490,11 +493,34 @@ def load_flight_intervals(
         # Neither is part of `flight_key`. Adding them would change every key
         # this module has ever produced.
         .withColumn("aobt", F.coalesce(F.col("apdf_aobt"), F.col("aobt")))
+        # **Per-endpoint provenance.** `t_source` is "apdf" only when *both*
+        # ends are measured, which is the right rule for a metric needing both
+        # -- and wrong for anything computed one end at a time.
+        #
+        # Measured on 2025-06-05/07: 44,841 flights carry a real APDF AIBT, but
+        # only 22,588 are labelled "apdf", because the other 22,254 departed
+        # from an aerodrome APDF does not cover. Reading the flight-level label
+        # as an aerodrome's provenance therefore mis-classifies **26 aerodromes
+        # with 20+ movements whose arrivals are 99-100% measured** -- Helsinki,
+        # Stuttgart, Keflavik, Charleroi among them -- because most of *their*
+        # traffic comes from uncovered aerodromes. A consumer cutting by
+        # aerodrome needs the endpoint, not the pair.
+        #
+        # This is the split the docstring below records as observed and left
+        # alone. It is no longer left alone: the flags are added beside
+        # `t_source` rather than changing it, so nothing that reads `t_source`
+        # moves.
+        .withColumn("dep_measured", F.col("atot").isNotNull())
+        .withColumn(
+            "arr_measured",
+            F.col("aldt").isNotNull() & F.col("aibt").isNotNull(),
+        )
         .filter(F.col("t_off").isNotNull() & F.col("t_land").isNotNull())
         .filter(F.col("t_land") > F.col("t_off"))
         .filter(in_window)
         .select("flight_key", "icao24", "callsign", "gt_adep", "gt_ades",
-                "t_off", "t_land", "aobt", "aibt", "t_source", "day")
+                "t_off", "t_land", "aobt", "aibt", "t_source",
+                "dep_measured", "arr_measured", "day")
     )
 
 
