@@ -201,3 +201,258 @@ nearly equidistant, which is exactly what the distance band restricts it to.
 pipeline would need the track course computed in the flight-list path. One
 period, one measurement. It is the strongest candidate for the next change and
 should be reviewed rather than shipped overnight.
+
+## v6.1 feasibility census (2026-08-21)
+
+Run before any code changed, to find out whether the sample can answer the
+question the study asks. `benchmarks/elevation_census.py`, both periods,
+in-area ground truth only.
+
+Ground-truthed movements per field-elevation band:
+
+| Band | 2024-06 arr / dep | 2025-06 arr / dep | Aerodromes (2025 arr / dep) |
+|---|---|---|---|
+| `<500` | 65,176 / 65,156 | 66,637 / 66,648 | 490 / 497 |
+| `500-1500` | 15,154 / 15,223 | 15,287 / 15,354 | 164 / 169 |
+| `1500-3000` | 4,239 / 4,218 | 4,434 / 4,430 | 77 / 78 |
+| `>3000` | 686 / 691 | 706 / 705 | 26 / 26 |
+| `unknown` | 163 / 159 | 117 / 115 | 48 / 54 |
+
+**The gate passes.** The bar was ~200 movements in `>3000` per period across at
+least 5 aerodromes; the sample carries ~700 per role across 26. The two periods
+agree closely, which is what makes the second one worth having.
+
+**Two things the census changed about the study.**
+
+**1. The treatment bands are dominated by one aerodrome each.** Madrid (LEMD,
+1,998 ft) alone carries 3,559 of the ~8,900 movements in `1500-3000`, and
+Ankara (LTAC, 3,125 ft) carries 756 of the ~1,411 in `>3000` -- 40% and 54%
+respectively. A band-level gain is therefore not automatically an elevation
+effect; it could be a Madrid effect or an Ankara effect wearing a band's name.
+
+Arm C must report a **per-aerodrome view and a leave-one-out check** on each
+treatment band, not band means alone. Without it the study's discriminating
+measurement is not actually discriminating, which would leave the whole design
+resting on a number that cannot fail.
+
+**2. The expected effect is smaller than the design's motivating example.** The
+spec reasons from Erzurum at 5,763 ft, where FL60 leaves about 240 ft to vote
+in. Erzurum is real but rare: it does not reach the top fifteen elevated
+aerodromes by traffic, so it carries fewer than ~110 movements. The elevated
+traffic that actually exists sits at 1,500-3,500 ft -- LEMD keeps ~4,100 ft of
+vote room under FL60, LTAC ~2,975 ft. That is a reduction in vote room, not its
+near-elimination.
+
+The paper should be written from these numbers rather than from the Erzurum
+case, which illustrates the mechanism honestly but overstates how much of the
+sample it applies to.
+
+### The version string, and a correction to the item listed as outstanding
+
+The "still outstanding" note above — that the sampler and ranking changes need
+a new algorithm `version` — **was already done**. `FLIGHT_LIST_VERSION` was
+`v4.0.0`, and its comment lists exactly those changes. The note is stale
+against the code; read it as closed.
+
+That mattered because the v6.1 design argued for bumping on the premise that
+several changes had accumulated behind an unversioned string. They had not. The
+real reason to bump is narrower and still holds: **v4.0.0 was never released,
+so no published dataset is affected, but research runs on the cluster already
+carry it** — and the datum change makes those a different algorithm under the
+same name. That is what a version string exists to prevent, and it is cheaper
+to bump before the first release than to argue later about which `v4.0.0` a
+table was built by.
+
+`FLIGHT_LIST_VERSION` is now `v5.0.0`. The `osn_tracks`/flight-list DDL comment
+moved with it. `LEGACY_TREND_VERSION` (`v2.0.0`) and `LEGACY_ENDPOINT_VERSION`
+(`v3.0.0`) are untouched, as they must be.
+
+### Result, first period: the mechanism is real and does not pay for itself
+
+2025-06-05..07, both arms through `process_dai` itself, FL60 against 6,100 ft
+above field — the same ceiling, so only the datum moves.
+
+**Arm C, arrivals, read before the headline** (Δ is field minus sea level):
+
+| Band | Aerodromes | Truth | Correct MSL | Δ | Δ less top mover | Δ less busiest | Δ relative |
+|---|---|---|---|---|---|---|---|
+| `<500` *(control)* | 490 | 66,612 | 49,514 | +57 | +33 | +57 | **+0.12%** |
+| `500-1500` | 164 | 15,285 | 12,593 | +28 | +17 | +28 | +0.22% |
+| `1500-3000` | 77 | 4,434 | 1,919 | +109 | +70 | +110 | **+5.7%** |
+| `>3000` | 26 | 705 | 5 | 0 | 0 | 0 | — |
+
+The relative column is the honest one: the bands differ in size by two orders of
+magnitude, so absolute deltas flatter the big ones. On that basis the effect in
+the treatment band is about **forty times** the control's, and it survives both
+robustness checks the census forced.
+
+**Departures move by exactly zero in every band.** `endpoint` serves departures
+and never reads `trend`'s cut, so anything else there would have meant the
+change was reaching somewhere it should not. Cheapest available confirmation
+that the intervention is the one described.
+
+**But the cost side fails two of the three adoption criteria:**
+
+| Run | Coverage | Accuracy | Correct | Wrong | Score (k=2) |
+|---|---|---|---|---|---|
+| `legacy` | 66.99% | 98.19% | 62,564 | 1,151 | 60,262 |
+| `datum_msl` | 68.29% | 98.58% | 64,031 | 923 | 62,185 |
+| `datum_field` | 68.60% | 98.42% | 64,225 | 1,028 | **62,169** |
+
+194 more correct arrivals for 105 more wrong. Coverage +0.31 pp against a
+0.5 pp bar; accuracy −0.16 pp; score sixteen points the wrong way. **Does not
+ship on this evidence.** The criteria were fixed in the design before any of
+these numbers existed, which is the only reason this counts as a result.
+
+**The `>3000` band is not a null result about the datum.** Five correct
+arrivals out of 705, on *both* datums, is a recall of 0.7% — a method receiving
+almost nothing rather than one mis-tuned. Most of that band's traffic sits over
+the Anatolian plateau, and the feasibility census already showed the same
+pattern: an aerodrome the feed barely sees cannot be named on any datum.
+
+This retires the design's motivating example. Erzurum at 5,763 ft, with ~240 ft
+of vote room under FL60, is arithmetically correct and **doubly**
+unrepresentative — such fields are rare in the sample, and they sit in the one
+band where the method is independently broken. The population that actually
+benefits is 1,500–3,500 ft: Madrid, Ankara, Sofia, Tbilisi.
+
+### Second period, and the ceiling: both confirm
+
+The 2024 sample cannot run the pipeline arms — its tracks pre-date H3 indexing
+and `process_dai` reads `h3_res_7` directly, so it dies on UNRESOLVED_COLUMN.
+V6 met the same wall and ran the pipeline on 2025 alone. The sweeps get around
+it because their vote cache is built with the index computed at read time, so
+the second period confirms the **ceiling** and the **datum comparison** — which
+is what it is able to confirm, and the report claims no more.
+
+**The ceiling replicates.** 6,100 ft above field is the optimum on both periods,
+at every radius from 20 NM outward, production's 30 NM included — an interior
+peak falling away on both sides. A value that survives an independent sample a
+year apart is tuned rather than fitted, so `trend_max_height_ft` needs no change
+and the "provisional, inherited" caveat is retired.
+
+**The datum comparison replicates, including its sign.** Best above-field cell
+against best sea-level cell: −0.02% on 2025, −0.25% on 2024. Both fractions of a
+percent, both the same direction.
+
+**Why the aggregate is the wrong instrument.** 70.0% of ground-truth arrivals
+sit in the `<500 ft` band, where the two datums are the same test by
+construction. A change that cannot move the majority of the sample cannot move
+an average over it, so the aggregate reading is dominated by the aerodromes the
+fix was never about. That is the retrospective justification for making the band
+breakdown the discriminating measurement and reading it first.
+
+**`height_pipeline_2025` was not run, deliberately.** It would walk the ceiling
+through `process_dai` — the check that catches a harness optimum failing to
+survive production. Here it would confirm a value nothing is changing, so it is
+left in the registry rather than spent on a shared cluster. Worth running the
+moment anyone proposes moving the ceiling.
+
+### The vote cache thrashed, and the top height cap was why
+
+First attempt at building `research/trend_votes_agl` ran for about fifty
+minutes on one shuffle stage and completed **zero of its 35 tasks**. Nothing
+failed and nothing was logged: executors were quietly lost and replaced — a
+fresh set of ten, age two minutes, while the driver still reported `(0 + 20) /
+35`. No `OutOfMemoryError`, no `OOMKilled` event. The only visible symptom was
+the absence of progress.
+
+The cause was `HEIGHT_CAPS` topping out at 20,000 ft. The pre-filter has to
+admit `max(HEIGHT_CAPS) + highest matchable field`, and the run printed its own
+evidence:
+
+```
+vote-cache pre-filter: FL268 (highest matchable field 6,723 ft)
+```
+
+FL268 against the FL200 this cache has always used — a third more altitude
+band into a shuffle that also carries two families of vote columns instead of
+one.
+
+**Fixed by capping `HEIGHT_CAPS` at 12,000 ft**, which puts the bound at FL188
+— below FL200 — so the pre-filter reverts to exactly V6's and the widening
+disappears entirely. Nothing is lost: 20,000 ft above field is cruise, not a
+terminal-area vote, and the shipped cut is around 6,000. Shuffle partitions
+also went from 300 to 500, since the aggregate is ~52 expressions against V6's
+31.
+
+A test pins the coupling, because it is invisible in the code: raising the top
+cap changes the cost of a scan that has nothing to do with the caps anyone
+would ship.
+
+**Worth noting for the next study:** the highest *matchable* field is 6,723 ft,
+not OurAirports' global 14,472 ft. Bounding the pre-filter by the zone table
+rather than the whole reference was already worth 78 flight levels before this
+fix.
+
+### A pre-existing bug: the paper path breaks inside a worktree
+
+`regenerate_v6.py` and `regenerate_v7.py` both resolve the portal as
+`REPO.parent / "opdi-portal"`. That is right when `opdi/` sits directly in the
+workspace root and **wrong inside a git worktree**, which lives at
+`opdi/.claude/worktrees/<name>` — three levels deeper — so the path becomes
+`.../worktrees/opdi-portal`, which does not exist.
+
+The failure is silent and actively misleading. Every job reports **"output
+missing"**, which is indistinguishable from "never generated" and means the
+opposite of a fingerprint result. A `--check` run from a worktree therefore
+looks like evidence about staleness when it is a path bug, and it will say the
+same thing however current the paper actually is.
+
+`regenerate_v61.py` resolves the portal by walking up to the first sibling
+`opdi-portal`, with `OPDI_PORTAL` as an override, and a test pins it.
+
+**Not fixed in V6 or V7.** Editing them is out of scope for this study — though
+worth noting that `regenerate_v6.py` is *not* in any job's `code_paths`, so
+fixing it would in fact be fingerprint-neutral. It is a real bug for anyone
+rendering those papers from a worktree, and it should be fixed separately.
+
+### What this does to V6
+
+**V6's pipeline jobs now read stale, and that is correct rather than a
+regression.** Measured rather than predicted, by comparing V6's recorded
+`code_fingerprint` against the current tree — `--check` cannot answer this from
+a worktree, for the path reason above:
+
+| | outputs |
+|---|---|
+| stale, and depends on `flights.py` / `config.py` | **7** |
+| current, and does not | **9** |
+| stale, and does *not* depend on pipeline source | 4 |
+
+The first two rows are the mechanism working as intended: the datum change
+marks exactly the jobs whose results it could have changed, and leaves the
+endpoint sweeps, `sampler_comparison`, `merge_*`, `bearing_whole_sample` and
+`vertical_measure` current. V6's `recommended` run is built from
+`DetectionConfig()` defaults, so under the new default it genuinely would
+produce different numbers.
+
+**The last row is not this study's doing.** `decimation_v6.csv`,
+`trend_bearing_v6.csv` and both `trend_sweep_*.csv` depend on `adep_ades.py`,
+`osn_sample.py` and `trend_sweep.py`, none of which this branch touches. They
+were already stale at the branch point, from earlier work on
+`feature/flight-events-v3`. Worth knowing before someone reads a V6 `--check`
+and attributes all thirteen jobs to the datum change.
+
+V6's committed CSVs and its PDF are untouched and remain what V6 published;
+only a re-render would recompute them.
+
+**Do not try to freeze V6 by editing `flight_list_v6.py`** — that edit is
+itself a fingerprint change, and would mark the same jobs stale for a different
+reason. `DetectionConfig.legacy()` pins `trend_max_datum="msl"`, so released
+data stays reproducible either way.
+
+Busiest aerodromes at or above 1,500 ft, 2025 sample:
+
+| Aerodrome | Elevation ft | Movements |
+|---|---|---|
+| LEMD Madrid | 1,998 | 3,559 |
+| LTAC Ankara | 3,125 | 756 |
+| GCXO Tenerife North | 2,076 | 639 |
+| GMMX Marrakesh | 1,545 | 557 |
+| LBSF Sofia | 1,742 | 540 |
+| UGTB Tbilisi | 1,624 | 514 |
+| UDYZ Yerevan | 2,838 | 384 |
+| BKPR Pristina | 1,789 | 240 |
+| OJAI Amman | 2,395 | 232 |
+| EDJA Memmingen | 2,077 | 206 |

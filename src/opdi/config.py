@@ -441,8 +441,10 @@ class DetectionConfig:
 
     ``trend``
         Votes on the sign of a smoothed altitude change across every sample
-        below ``trend_max_fl`` inside ``trend_radius_nm``. Its abstention is
-        evidence-based -- "the altitude trace does not clearly rise or fall".
+        below ``trend_max_height_ft`` **above field elevation** inside
+        ``trend_radius_nm`` -- or below ``trend_max_fl``, when
+        ``trend_max_datum`` is ``"msl"``. Its abstention is evidence-based --
+        "the altitude trace does not clearly rise or fall".
 
     ``endpoint``
         Looks at one fix, the track's first or last, and accepts it if it is
@@ -476,7 +478,52 @@ class DetectionConfig:
     lost ground, because it admits samples from higher up where more aerodromes
     share a ring and a ring-count filter cannot separate them. With
     ``trend_rank_by="haversine"`` the constraint is gone and the gain appears.
-    The two settings must move together."""
+    The two settings must move together.
+
+    **Superseded as the shipped cut by ``trend_max_height_ft``**, but retained:
+    it is what ``trend_max_datum="msl"`` reads, and so what ``legacy()`` needs
+    to reproduce released data with."""
+
+    trend_max_height_ft: float = 6000.0
+    """Ceiling for the trend vote, as a height **above field elevation**.
+
+    Read when ``trend_max_datum == "field"``, which is the shipped setting.
+
+    **New in v6.1.** ``trend`` was the last of the three altitude tests still
+    measured against sea level. ``endpoint`` has used ``endpoint_height_ft``
+    above field elevation since V6, and step 04's ground membership moved to the
+    same datum under ``phase_ground_above_field`` -- for the reason recorded
+    there, that a fixed cut-off measured from sea level is not the same test at
+    every aerodrome.
+
+    The failure mode is silence, not error. At FL60 an aerodrome at sea level
+    gets 6,000 ft of climb and descent to vote on; Madrid at 1,998 ft gets about
+    4,100 and Ankara at 3,125 ft about 2,975. The trace has less room to rise or
+    fall clearly, so the method abstains more often, and it abstains in
+    proportion to how high the field sits -- the same bias
+    ``phase_ground_above_field`` documents for step 04.
+
+    Note this is a *height*, not a flight level. "FL60 above field elevation"
+    would be a contradiction: a flight level is by definition referenced to the
+    standard pressure datum."""
+
+    trend_max_datum: str = "field"
+    """Which datum ``trend``'s altitude cut is measured against.
+
+    ``"field"``
+        Height above the candidate aerodrome's own elevation, capped by
+        ``trend_max_height_ft``. The shipped setting.
+    ``"msl"``
+        Flight level above the standard pressure datum, capped by
+        ``trend_max_fl``. What every published flight list was built with, and
+        what :meth:`legacy` pins.
+
+    A switch rather than a replacement, because the two cuts are not
+    interchangeable even at the same nominal ceiling: ``flight_level`` is an
+    integer cast, so ``<= 60`` admits everything below 6,100 ft rather than
+    below 6,000. The ``msl`` branch keeps the original expression verbatim for
+    that reason, and a study comparing the two datums must use 6,100 ft if it
+    wants the ceiling held constant."""
 
     trend_radius_nm: float = 30.0
     """Zone radius for the sample-to-aerodrome join.
@@ -671,6 +718,21 @@ class DetectionConfig:
     often the point reception was lost rather than the point it landed, so
     geometry alone is weaker here than the altitude trend."""
 
+    def __post_init__(self) -> None:
+        """Reject a datum this class does not implement.
+
+        Deliberately loud. Both branches of the cut are reachable and neither
+        is obviously wrong from its output, so a typo that fell through to a
+        default would apply one cut while every log line and version string
+        claimed the other -- the failure this whole change exists to remove.
+        """
+        if self.trend_max_datum not in ("field", "msl"):
+            raise ValueError(
+                f"trend_max_datum must be 'field' or 'msl', got "
+                f"{self.trend_max_datum!r}. Falling back to a default here "
+                f"would apply one altitude cut while reporting the other."
+            )
+
     @classmethod
     def legacy(cls) -> "DetectionConfig":
         """The constants in force before the V6 tuning.
@@ -681,6 +743,11 @@ class DetectionConfig:
         """
         return cls(
             trend_max_fl=40,
+            # The published cut was a flight level, so the preset has to name
+            # the datum as well as the number. Leaving this at the shipped
+            # default would keep FL40's value while measuring it from the
+            # field -- a different algorithm wearing the legacy constants.
+            trend_max_datum="msl",
             trend_radius_nm=30.0,
             trend_smooth_half_window=2,
             trend_vote_margin=4,

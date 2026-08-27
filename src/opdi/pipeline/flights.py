@@ -16,7 +16,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import SparkSession, DataFrame, Column
 from pyspark.sql import functions as F
 from pyspark.sql.functions import (
     broadcast,
@@ -68,7 +68,7 @@ OOA = "OOA"
 #: reproducible by name, so an algorithm change gets a new string and the old
 #: behaviour stays reachable through :meth:`DetectionConfig.legacy`.
 #:
-#: ``v4.0.0`` covers the 2026-08 change set, and it is one string for the whole
+#: ``v5.0.0`` covers the 2026-08 change set, and it is one string for the whole
 #: flight list rather than one per path. Before it, the trend path stamped
 #: ``v2.0.0`` and the endpoint path ``v3.0.0``, and :meth:`_merge_roles`
 #: coalesced them -- so a merged list carried whichever version the departure
@@ -79,30 +79,104 @@ OOA = "OOA"
 #: * departures from ``endpoint``, arrivals from ``trend``, by default;
 #: * the tuned thresholds in :class:`~opdi.config.DetectionConfig`;
 #: * ``trend`` can emit the out-of-area label;
-#: * the flight list reads cleaned tracks (step 02a).
+#: * the flight list reads cleaned tracks (step 02a);
+#: * **v6.1:** ``trend``'s altitude cut is measured above field elevation
+#:   rather than as a flight level.
 #:
 #: One more change is not reachable through ``legacy()`` at all: the
 #: state-vector sampler moved from a fixed-phase filter to a bin-based one, so
 #: ``track_id`` values differ. Re-ingesting an old month reproduces the
 #: aerodromes but not the identifiers.
 #:
-#: ``v5.0.0``: a flight is labelled with its track's dominant non-blank callsign
-#: rather than ``F.min("flight_id")``, and the column is resolved to that one
-#: value once, where the track table is read -- see
+#: **Bumped from v4.0.0 rather than extended.** v4.0.0 was never released, so
+#: no *published* dataset is affected -- but research runs on the cluster
+#: already carry it, and the datum change makes those a different algorithm
+#: under the same name. That is precisely what a version string exists to
+#: prevent, and it costs nothing to bump before the first release rather than
+#: to argue afterwards about which v4.0.0 a table was built by.
+#:
+#: Also in ``v5.0.0``: a flight is labelled with its track's dominant non-blank
+#: callsign rather than ``F.min("flight_id")``, and the column is resolved to
+#: that one value once, where the track table is read -- see
 #: :meth:`_get_data_within_timeframe` and :func:`resolve_flight_id`. A run that
 #: stamps a legacy string is exempt, so it still reproduces its release byte for
 #: byte. The value changes for any segmentation that does not carry callsign in
 #: its group key, and published data must say which rule produced it. Never
 #: mutate a released value.
+#:
+#: The two arrived from different branches and are deliberately one bump: the
+#: datum change and the labelling change are both part of the 2026-08 change
+#: set, and splitting one unreleased change set across two version strings is
+#: exactly what the paragraph above argues against.
 FLIGHT_LIST_VERSION = "v5.0.0"
 
-#: What the paths stamped before ``v4.0.0``. Kept so
+#: What the paths stamped before ``v5.0.0``. Kept so
 #: :meth:`DetectionConfig.legacy` runs reproduce released data byte for byte.
 LEGACY_TREND_VERSION = "v2.0.0"
 LEGACY_ENDPOINT_VERSION = "v3.0.0"
 
 NM_PER_DEG = 60.0
 EARTH_R_NM = 3440.065
+
+#: Metres to feet. The same factor `events.py` publishes `altitude_ft` with and
+#: that `_fetch_and_label_sv` derives `flight_level` with, named once so the
+#: conversions cannot drift apart.
+FT_PER_M = 3.28084
+
+
+def height_above_field(baro_altitude_m: Column, elevation_ft: Column) -> Column:
+    """Height in feet above an aerodrome's own field elevation.
+
+    A NULL elevation coalesces to zero, which leaves height above the standard
+    pressure datum -- that is, exactly the published behaviour. Two cases rely
+    on that and both are deliberate:
+
+    * an aerodrome whose elevation OurAirports does not carry degrades to the
+      old cut rather than dropping out of detection, the same convention
+      ``phase_ground_above_field`` set in step 04;
+    * a sample matching *no* aerodrome carries a NULL elevation out of the
+      trend path's left join, and those rows must pass through untouched --
+      dropping them would remove tracks from the flight list entirely rather
+      than leaving them unnamed.
+    """
+    return baro_altitude_m * FT_PER_M - F.coalesce(elevation_ft, F.lit(0.0))
+
+
+def trend_altitude_cut(detection) -> Column:
+    """The trend vote's altitude condition, on whichever datum is configured.
+
+    Expects ``baro_altitude`` and ``apt_elevation_ft`` on the field datum, and
+    ``flight_level`` on the sea-level one.
+    """
+    if getattr(detection, "trend_max_datum", "msl") == "field":
+        return height_above_field(
+            col("baro_altitude"), col("apt_elevation_ft")
+        ) <= lit(float(detection.trend_max_height_ft))
+
+    # Verbatim, not an equivalent. `flight_level` is an integer cast, so this
+    # admits everything below 6,100 ft at FL60 -- rewriting it as a comparison
+    # in feet would move the published cut by up to 99 ft silently.
+    return col("flight_level") <= lit(int(detection.trend_max_fl))
+
+
+def trend_prefilter_ceiling_ft(detection, max_field_elevation_ft: float) -> float:
+    """Ceiling in feet for the cheap pre-filter ahead of the aerodrome join.
+
+    The exact cut needs an aerodrome and so can only run after the join, but
+    the join is only affordable because most samples never reach it. This is
+    the union bound that keeps both: a sample survives the exact cut at *some*
+    aerodrome only if it is within the cap of the highest field in the
+    reference set, so cutting there provably discards nothing the exact test
+    would have kept.
+
+    Bounded by the aerodromes actually present rather than by a constant. A
+    hardcoded ceiling would fail the way every threshold bug in this codebase
+    fails -- by quietly never firing once the reference set moved.
+    """
+    if getattr(detection, "trend_max_datum", "msl") == "field":
+        return float(detection.trend_max_height_ft) + float(max_field_elevation_ft)
+    # The integer cast again: FL60 reaches 6,100 ft.
+    return (float(detection.trend_max_fl) + 1.0) * 100.0
 
 #: How far either side of a track's endpoint the course is measured over.
 #: Seven minutes, matching the window the bearing study swept on.
@@ -337,6 +411,10 @@ class FlightListProcessor:
             from opdi.config import DetectionConfig
 
             self.detection = DetectionConfig.legacy()
+        # Highest field elevation among matchable aerodromes, computed once on
+        # first use. It sets the trend pre-filter's width, and recomputing it
+        # per month would be one needless aggregate per call.
+        self._max_elev_ft = None
         self.log_dir = log_dir
 
         self._dai_log = os.path.join(log_dir, "03_osn-flight_table-etl-log-v2.parquet")
@@ -660,6 +738,59 @@ class FlightListProcessor:
         # what stops it bringing every other unmatched track with it.
         return out.filter(col("ADEP").isNotNull() | col("ADES").isNotNull())
 
+    def _attach_field_elevation(
+        self, df: DataFrame, ident_col: str = "apt_ident"
+    ) -> DataFrame:
+        """Attach ``apt_elevation_ft`` from OurAirports, keyed on *ident_col*.
+
+        Shared by both detection paths, so they read the same elevation for the
+        same aerodrome by construction. The endpoint path has done this since
+        V6 and the trend path needs it now; two copies of the same broadcast
+        join is precisely how the two would come to disagree.
+
+        Always a left join. The trend path passes rows whose ``apt_ident`` is
+        NULL -- samples near no aerodrome -- and those must survive with a NULL
+        elevation, which ``height_above_field`` then reads as the sea-level
+        datum.
+        """
+        if "apt_elevation_ft" in df.columns:
+            return df
+        if not self.storage.table_exists("oa_airports"):
+            # Without the reference there is no elevation to subtract, so the
+            # field datum degrades to the sea-level one. Expressed as a NULL
+            # column rather than an exception so a cluster without step 00
+            # still runs, exactly as the endpoint path already behaves.
+            return df.withColumn("apt_elevation_ft", lit(None).cast("double"))
+
+        elev_ref = self.storage.read_table("oa_airports").select(
+            col("ident").alias("_elev_ident"),
+            col("elevation_ft").cast("double").alias("apt_elevation_ft"),
+        )
+        return df.join(
+            broadcast(elev_ref), col(ident_col) == col("_elev_ident"), "left"
+        ).drop("_elev_ident")
+
+    def _max_field_elevation_ft(self, sdf_apt: DataFrame) -> float:
+        """Highest field elevation among aerodromes that can actually match.
+
+        Bounded by the zone table, not by OurAirports as a whole: the reference
+        carries fields above 14,000 ft that the ingestion bounding box
+        excludes, and widening the pre-filter for aerodromes no sample can join
+        to would cost the scan for nothing.
+
+        Cached on the instance -- it is one small aggregate, but
+        ``_fetch_and_label_sv`` is called once per month.
+        """
+        if getattr(self, "_max_elev_ft", None) is not None:
+            return self._max_elev_ft
+
+        idents = sdf_apt.select(col("apt_ident")).distinct()
+        row = self._attach_field_elevation(idents).select(
+            f_max("apt_elevation_ft")
+        ).first()
+        self._max_elev_ft = float(row[0]) if row and row[0] is not None else 0.0
+        return self._max_elev_ft
+
     def build_endpoint_candidates(
         self,
         month: date,
@@ -705,14 +836,7 @@ class FlightListProcessor:
         # elevation comes from OurAirports. Without it the height test can only
         # be satisfied by on_ground and the endpoint mode collapses into a
         # surface-samples-only rule.
-        if self.storage.table_exists("oa_airports"):
-            elev_ref = self.storage.read_table("oa_airports").select(
-                col("ident").alias("_elev_ident"),
-                col("elevation_ft").cast("double").alias("apt_elevation_ft"),
-            )
-            cand = cand.join(
-                broadcast(elev_ref), cand.apt_ident == col("_elev_ident"), "left"
-            ).drop("_elev_ident")
+        cand = self._attach_field_elevation(cand)
 
         elev = next(
             (c for c in ("apt_elevation_ft", "elevation_ft") if c in cand.columns), None
@@ -757,8 +881,16 @@ class FlightListProcessor:
         1. Fetch tracks for the month
         2. Add flight level from baro_altitude
         3. Add first_seen, last_seen, DOF per track
-        4. Filter to below FL40
-        5. Join with airport hex zones within 30 NM
+        4. Pre-filter wide, on a ceiling no candidate can survive the exact cut
+           above
+        5. Join with airport hex zones within the detection radius
+        6. Attach each candidate aerodrome's field elevation
+        7. Cut on height above field elevation -- or on flight level, when
+           ``trend_max_datum`` is ``"msl"``
+
+        The cut comes after the join because it needs to know *which* aerodrome
+        a sample is a candidate for before it can subtract an elevation. Before
+        v6.1 it ran at step 4 and so could only be a flight level.
 
         Args:
             month: Month to process.
@@ -817,8 +949,17 @@ class FlightListProcessor:
                 "smoothed_altitude", F.avg("baro_altitude").over(w_smooth)
             )
 
-        # Filter to low altitude and join with airport zones
-        sv_low_alt = sv_f.filter(col("flight_level") <= self.detection.trend_max_fl)
+        # The exact cut needs an aerodrome, so it cannot run here -- but the
+        # join below is only affordable because most samples never reach it.
+        # So: a wide pre-filter now, and the exact per-aerodrome cut after the
+        # join. The ceiling is the cap plus the highest matchable field, which
+        # is the union bound -- no sample that survives the exact cut at any
+        # aerodrome is dropped here. On the sea-level datum the two coincide
+        # and the behaviour is bit-for-bit what it was.
+        ceiling_ft = trend_prefilter_ceiling_ft(
+            self.detection, self._max_field_elevation_ft(sdf_apt)
+        )
+        sv_low_alt = sv_f.filter(col("baro_altitude") * FT_PER_M <= lit(ceiling_ft))
 
         # The zone table is generated out to its full ring reach, so the
         # detection radius has to be applied here. Without this filter the join
@@ -870,7 +1011,18 @@ class FlightListProcessor:
                     <= lit(float(radius_nm))
                 )
             )
-        return sv_nearby_apt
+
+        # Elevation, then the exact altitude cut. Both have to be here rather
+        # than earlier, because both need to know which aerodrome the sample is
+        # a candidate for.
+        #
+        # `apt_ident` is NULL for samples that matched no aerodrome. Those get a
+        # NULL elevation, which `height_above_field` coalesces to zero -- so
+        # they are cut on sea level exactly as before, and the population of
+        # present-but-unnamed tracks does not move as a side effect of a datum
+        # change.
+        sv_nearby_apt = self._attach_field_elevation(sv_nearby_apt)
+        return sv_nearby_apt.filter(trend_altitude_cut(self.detection))
 
     @staticmethod
     def classify_endpoints(
