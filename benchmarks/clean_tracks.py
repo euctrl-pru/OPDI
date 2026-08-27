@@ -31,6 +31,20 @@ from osn_sample import build_spark, load_dotenv
 #: Each period names its own source and target. The 2024 tables live under
 #: ``research/`` because that period is a study copy, not pipeline output.
 PERIODS = {
+    # The third period, same three days of the same month three years running:
+    # reception has a seasonal component, so a June-to-June comparison isolates
+    # network growth while a June-to-February one confounds it with the season.
+    #
+    # Its raw tracks are built by the coverage study's
+    # `scripts/build_tracks_2026.py`, which replicates step 02's transform
+    # chain over ingested state vectors -- neither the 2025 nor the 2024 path
+    # builds a *new* research period from scratch.
+    "2026": {
+        "month": date(2026, 6, 1),
+        "source": "research/tracks_2026",
+        "target": "research/tracks_clean_2026",
+        "log": "OPDI_live/logs/02a_track_cleaning_2026.log",
+    },
     "2025": {
         "month": date(2025, 6, 1),
         "source": "osn_tracks",

@@ -91,6 +91,11 @@ ASSIGN_PREFIX = "opdi/research/track_assign"
 #: ``main()`` reads the whole table and filters on ``to_date(event_time)``
 #: instead of globbing a partition path that does not exist.
 PERIODS = {
+    "2026": {
+        "months": ["202606"],
+        "days": ["2026-06-05", "2026-06-06", "2026-06-07"],
+        "tracks": "s3a://eurocontrol/opdi/research/tracks_clean_2026",
+    },
     "2025": {
         "months": ["202506"],
         "days": ["2025-06-05", "2025-06-06", "2025-06-07"],
