@@ -6,6 +6,13 @@ time. Network Manager ``flights_*.parquet`` gives both, across all of ECAC, at
 off-block and arrival -- but only at PRU-covered aerodromes, so it is the
 calibration, not the denominator.
 
+APDF also carries the two **block** times, ``AOBT`` and ``AIBT``, both of them
+``BLOCK_TIME_UTC`` discriminated by ``SRC_PHASE`` exactly as the movement times
+are. They bound the flight's ground phase, which is what lets a boundary error
+be read as a *fraction* of taxi rather than as an absolute number of seconds.
+``aibt`` is APDF-only and has no NM fallback: ``ARVT_3`` is a landing time, not
+a gate arrival.
+
 ``TAXI_TIME_3`` semantics were measured against APDF in Task 4 Step 1 (see
 ``DATASETS.md`` under "Ground truth semantics" for the full numbers): it is
 **taxi-out time only** (off-block ``AOBT_3`` to actual take-off), not total
@@ -143,6 +150,7 @@ def load_apdf_times(
         F.trim(F.col("AP_C_FLTID")).alias("callsign"),
         F.col("SRC_PHASE"),
         F.col("MVT_TIME_UTC"),
+        F.col("BLOCK_TIME_UTC"),
         F.upper(F.trim(F.col("ADEP_ICAO"))).alias("apdf_adep"),
         F.upper(F.trim(F.col("ADES_ICAO"))).alias("apdf_ades"),
     ).withColumn("mvt_day", F.to_date("MVT_TIME_UTC"))
@@ -155,10 +163,24 @@ def load_apdf_times(
     # prevent. Every candidate is kept; load_flight_intervals disambiguates
     # per NM row by proximity to that row's own time estimate.
     dep = ap.filter(F.col("SRC_PHASE") == "DEP").select(
-        "callsign", "mvt_day", "apdf_adep", F.col("MVT_TIME_UTC").alias("atot")
+        "callsign", "mvt_day", "apdf_adep",
+        F.col("MVT_TIME_UTC").alias("atot"),
+        # Off-block. APDF has no literal AOBT column either: BLOCK_TIME_UTC is
+        # off-block on a DEP row and in-block on an ARR row, which is the same
+        # SRC_PHASE discrimination already applied to MVT_TIME_UTC above.
+        #
+        # Carried so a consumer can normalise boundary error by the flight's
+        # own ground phase. An absolute number of seconds is not comparable
+        # between aerodromes: a track beginning 180 s before take-off saw all of
+        # a regional field's three-minute taxi and about a seventh of a major
+        # hub's twenty-minute one, and the two are indistinguishable once the
+        # denominator is dropped.
+        F.col("BLOCK_TIME_UTC").alias("aobt"),
     )
     arr = ap.filter(F.col("SRC_PHASE") == "ARR").select(
-        "callsign", "mvt_day", "apdf_ades", F.col("MVT_TIME_UTC").alias("aldt")
+        "callsign", "mvt_day", "apdf_ades",
+        F.col("MVT_TIME_UTC").alias("aldt"),
+        F.col("BLOCK_TIME_UTC").alias("aibt"),  # in-block; see `aobt` above
     )
     return dep, arr
 
@@ -366,7 +388,11 @@ def load_flight_intervals(
         .filter(F.col("_rdep") == 1)
         .select(
             nm._nm_id, nm.icao24, nm.callsign, nm.gt_adep, nm.gt_ades,
+            # nm.aobt is NM's own off-block (AOBT_3); dep.aobt is APDF's
+            # measured one. Both are carried and they are not the same column --
+            # hence the alias, without which the later select is ambiguous.
             nm.aobt, nm.arvt, nm.taxi_min, nm.day, dep.atot,
+            dep.aobt.alias("apdf_aobt"),
         )
     )
 
@@ -401,7 +427,8 @@ def load_flight_intervals(
         .filter(F.col("_rarr") == 1)
         .select(
             jdep.icao24, jdep.callsign, jdep.gt_adep, jdep.gt_ades,
-            jdep.aobt, jdep.arvt, jdep.taxi_min, jdep.day, jdep.atot, arr.aldt,
+            jdep.aobt, jdep.arvt, jdep.taxi_min, jdep.day, jdep.atot,
+            F.col("apdf_aobt"), arr.aldt, arr.aibt,
         )
     )
 
@@ -450,11 +477,24 @@ def load_flight_intervals(
                 256,
             ),
         )
+        # Block times, exposed under the names a consumer expects.
+        #
+        # `aobt` prefers APDF's measured off-block and falls back to NM's
+        # AOBT_3, mirroring how `t_off` prefers `atot`. `aibt` has **no NM
+        # fallback and cannot have one**: ARVT_3 is a landing time, not a
+        # gate-arrival, so there is no in-block anywhere outside APDF. It is
+        # therefore NULL at every aerodrome APDF does not cover, and a consumer
+        # computing an arrival ground phase must treat NULL as "unmeasurable
+        # here" rather than as zero.
+        #
+        # Neither is part of `flight_key`. Adding them would change every key
+        # this module has ever produced.
+        .withColumn("aobt", F.coalesce(F.col("apdf_aobt"), F.col("aobt")))
         .filter(F.col("t_off").isNotNull() & F.col("t_land").isNotNull())
         .filter(F.col("t_land") > F.col("t_off"))
         .filter(in_window)
         .select("flight_key", "icao24", "callsign", "gt_adep", "gt_ades",
-                "t_off", "t_land", "t_source", "day")
+                "t_off", "t_land", "aobt", "aibt", "t_source", "day")
     )
 
 

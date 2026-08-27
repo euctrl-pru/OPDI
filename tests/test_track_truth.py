@@ -130,10 +130,32 @@ def test_overlap_join_assigns_a_sample_to_only_one_flight_when_intervals_touch(s
 
 def test_load_apdf_times_resolves_real_columns_and_returns_dep_and_arr_unjoined(spark):
     dep, arr = load_apdf_times(spark, months=["202506"], reference_base=_LOCAL_REFERENCE)
-    assert set(dep.columns) == {"callsign", "mvt_day", "apdf_adep", "atot"}
-    assert set(arr.columns) == {"callsign", "mvt_day", "apdf_ades", "aldt"}
+    assert set(dep.columns) == {"callsign", "mvt_day", "apdf_adep", "atot", "aobt"}
+    assert set(arr.columns) == {"callsign", "mvt_day", "apdf_ades", "aldt", "aibt"}
     assert dep.count() > 0
     assert arr.count() > 0
+
+
+def test_block_times_are_populated_and_bracket_the_movement(spark):
+    """AOBT precedes ATOT and AIBT follows ALDT, in the real extract.
+
+    Both come from one column, `BLOCK_TIME_UTC`, discriminated only by
+    `SRC_PHASE` -- so getting the discrimination backwards would produce a
+    fully populated, entirely wrong pair, with an off-block *after* take-off
+    and an in-block *before* landing. Asserting the order is what catches that;
+    asserting non-nullness alone would not.
+    """
+    dep, arr = load_apdf_times(spark, months=["202506"], reference_base=_LOCAL_REFERENCE)
+
+    d = dep.filter(dep.aobt.isNotNull() & dep.atot.isNotNull())
+    n_dep = dep.count()
+    assert d.count() / n_dep > 0.95, "AOBT is the capture denominator"
+    assert d.filter(d.aobt < d.atot).count() / d.count() > 0.98
+
+    a = arr.filter(arr.aibt.isNotNull() & arr.aldt.isNotNull())
+    n_arr = arr.count()
+    assert a.count() / n_arr > 0.95, "AIBT is the capture denominator"
+    assert a.filter(a.aibt > a.aldt).count() / a.count() > 0.98
 
 
 def test_load_flight_intervals_marks_t_source_apdf_when_both_ends_are_measured(spark):
@@ -206,6 +228,11 @@ _SYNTH_APDF_SCHEMA = StructType(
         StructField("ADES_ICAO", StringType(), True),
         StructField("SRC_PHASE", StringType(), True),
         StructField("MVT_TIME_UTC", TimestampType(), True),
+        # The block time: AOBT on a DEP row, AIBT on an ARR row. None
+        # throughout this file -- no test here exercises the ground phase --
+        # but the column must exist, because `load_apdf_times` selects it and
+        # the real extract always carries it.
+        StructField("BLOCK_TIME_UTC", TimestampType(), True),
     ]
 )
 
@@ -265,16 +292,16 @@ def test_load_flight_intervals_disambiguates_competing_apdf_candidates_by_proxim
         # the 08:00 leg's own estimate (08:00 + 10 min taxi = 08:10) and far
         # from the 14:00 leg's; 14:07 is the mirror.
         Row(AP_C_FLTID="SYN2", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 8, 5, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 8, 5, 0), BLOCK_TIME_UTC=None),
         Row(AP_C_FLTID="SYN2", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 14, 7, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 14, 7, 0), BLOCK_TIME_UTC=None),
         # One unambiguous ARR candidate per leg, so both legs actually reach
         # t_source == "apdf" instead of the assertion testing a t_source that
         # can never be anything but "nm_inferred".
         Row(AP_C_FLTID="SYN2", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 10, 5, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 10, 5, 0), BLOCK_TIME_UTC=None),
         Row(AP_C_FLTID="SYN2", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 16, 5, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 16, 5, 0), BLOCK_TIME_UTC=None),
     ]
     spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
         str(tmp_path / "flights_200002.parquet")
@@ -370,9 +397,9 @@ def test_apdf_departure_is_attached_when_the_taxi_crosses_midnight(spark, tmp_pa
     apdf_rows = [
         # real ATOT, two minutes after the NM estimate of 00:14, on 06-05
         Row(AP_C_FLTID="SYN4", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 16, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 16, 0), BLOCK_TIME_UTC=None),
         Row(AP_C_FLTID="SYN4", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 4, 32, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 4, 32, 0), BLOCK_TIME_UTC=None),
     ]
     spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
         str(tmp_path / "flights_200004.parquet")
@@ -413,12 +440,12 @@ def test_apdf_departure_does_not_attach_a_movement_from_the_off_block_day(
     apdf_rows = [
         # an earlier movement of the same callsign, on the off-block day
         Row(AP_C_FLTID="SYN5", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 4, 20, 0, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 4, 20, 0, 0), BLOCK_TIME_UTC=None),
         # this leg's own take-off
         Row(AP_C_FLTID="SYN5", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 16, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 16, 0), BLOCK_TIME_UTC=None),
         Row(AP_C_FLTID="SYN5", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 4, 32, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 4, 32, 0), BLOCK_TIME_UTC=None),
     ]
     spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
         str(tmp_path / "flights_200005.parquet")
@@ -452,13 +479,13 @@ def test_apdf_departure_still_matches_an_ordinary_same_day_leg(spark, tmp_path):
     ]
     apdf_rows = [
         Row(AP_C_FLTID="SYN6", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 8, 5, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 8, 5, 0), BLOCK_TIME_UTC=None),
         Row(AP_C_FLTID="SYN6", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 14, 7, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 14, 7, 0), BLOCK_TIME_UTC=None),
         Row(AP_C_FLTID="SYN6", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 10, 5, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 10, 5, 0), BLOCK_TIME_UTC=None),
         Row(AP_C_FLTID="SYN6", ADEP_ICAO="EBBR", ADES_ICAO="BIKF", SRC_PHASE="ARR",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 16, 5, 0)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 16, 5, 0), BLOCK_TIME_UTC=None),
     ]
     spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
         str(tmp_path / "flights_200006.parquet")
@@ -502,10 +529,10 @@ def test_apdf_departure_does_not_inflate_a_ground_truth_interval(spark, tmp_path
     apdf_rows = [
         # yesterday's rotation of the same nightly service
         Row(AP_C_FLTID="SYN7", ADEP_ICAO="EDDV", ADES_ICAO="LTAI", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 20, 3)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 5, 0, 20, 3), BLOCK_TIME_UTC=None),
         # this leg's own take-off, 15 s from NM's estimate
         Row(AP_C_FLTID="SYN7", ADEP_ICAO="EDDV", ADES_ICAO="LTAI", SRC_PHASE="DEP",
-            MVT_TIME_UTC=dt.datetime(2025, 6, 6, 0, 2, 15)),
+            MVT_TIME_UTC=dt.datetime(2025, 6, 6, 0, 2, 15), BLOCK_TIME_UTC=None),
         # no ARR row: LTAI is not APDF-covered, so t_source stays nm_inferred
     ]
     spark.createDataFrame(flights_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(

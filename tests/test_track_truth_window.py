@@ -45,6 +45,11 @@ _APDF_SCHEMA = StructType(
         StructField("ADES_ICAO", StringType(), True),
         StructField("SRC_PHASE", StringType(), True),
         StructField("MVT_TIME_UTC", TimestampType(), True),
+        # The block time: AOBT on a DEP row, AIBT on an ARR row. None
+        # throughout this file -- no test here exercises the ground phase --
+        # but the column must exist, because `load_apdf_times` selects it and
+        # the real extract always carries it.
+        StructField("BLOCK_TIME_UTC", TimestampType(), True),
     ]
 )
 
