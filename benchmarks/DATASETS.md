@@ -130,7 +130,13 @@ bucket is full, and they fail **at the end of a job**, after the work is done
 and the results have been printed to stdout but before they are persisted. A
 whole chain can therefore appear to run and leave nothing behind.
 
-The quota is around 100 GB. As of 2026-08-12 the bucket holds 67.40 GB, of
+**The quota is 200 GB as of 2026-08-27** (previously recorded here as ~100 GB;
+raised on the bucket owner's word, and `track_methods.BUCKET_QUOTA_GB` updated
+to match). The paragraph below is kept because the *reasoning* still holds --
+the bucket is shared and the total moves -- but the specific numbers in it
+pre-date the change.
+
+The quota was around 100 GB. As of 2026-08-12 the bucket holds 67.40 GB, of
 which 42.81 GB is another project's symposium data -- so OPDI has about 24 GB
 in use and rather less headroom than the raw total suggests.
 

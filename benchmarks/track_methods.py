@@ -113,7 +113,13 @@ AIRPORTS = "s3a://eurocontrol/opdi/oa_airports"
 
 #: Nominal quota on the OpenSky bucket. Not measured -- there is no API for it
 #: -- so it is stated here as the one assumption the free-space check rests on.
-BUCKET_QUOTA_GB = 100.0
+#:
+#: **Raised from 100 to 200 on 2026-08-27**, on the bucket owner's word. The
+#: old figure was not merely conservative: `require_headroom` computes free
+#: space as this constant minus the measured total, so an understated quota
+#: aborts a run that had ample room, and it does so *before* the run starts --
+#: which reads as a capacity problem rather than as a stale constant.
+BUCKET_QUOTA_GB = 200.0
 #: Refuse to start an arm with less than this free. One assignment table is
 #: ~0.31 GB, so 2 GB is roughly six arms' worth of margin against a quota
 #: failure that would otherwise strike after the job printed its results.
