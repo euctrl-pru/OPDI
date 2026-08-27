@@ -15,3 +15,5 @@ from.
 | flights_202506.parquet | flights_tidy(wef="2025-06-01", til="2025-07-01") | 2026-08-05 | 957,396 |
 | apdf_full_202506.parquet | extract_apdf_full.R (2025-06-01 -> 2025-07-01) | 2026-08-13 | 1,224,742 |
 | apdf_full_202406.parquet | extract_apdf_full.R (2024-06-01 -> 2024-07-01) | 2026-08-13 | 1,161,115 |
+| apdf_202606.parquet | apdf_tidy(wef="2026-06-01", til="2026-07-01") | 2026-08-27 | 1,206,139 |
+| flights_202606.parquet | flights_tidy(wef="2026-06-01", til="2026-07-01") | 2026-08-27 | 970,037 |
