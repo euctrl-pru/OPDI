@@ -237,3 +237,48 @@ def test_histogram_refuses_a_span_that_is_not_a_whole_number_of_bins(spark):
     m, e = _matched_and_extents(spark, [("F1", "T1", 0, 0)])
     with pytest.raises(ValueError, match="whole number of"):
         boundary_histogram(m, e, bin_seconds=7, span_seconds=1800)
+
+
+def test_null_rates_are_percentages_under_short_names(spark):
+    """Percentages, not fractions: every other rate in these CSVs is a percent.
+
+    A lone fraction in a row of percentages is a units bug that reads as a
+    suspiciously good result. Also pins the short names -- ``null_baro_pct``,
+    not ``null_baro_altitude_pct`` -- because the paper quotes them by name.
+    """
+    import track_diagnostics as td
+
+    rows = [
+        (1.0, 2.0, 100.0, 100.0, 50.0, 90.0, 1.0),
+        (1.0, 2.0, None, 100.0, 50.0, 90.0, 1.0),
+        (None, 2.0, None, 100.0, 50.0, 90.0, 1.0),
+        (1.0, 2.0, None, 100.0, 50.0, 90.0, 1.0),
+    ]
+    df = spark.createDataFrame(
+        rows,
+        "lat double, lon double, baro_altitude double, geo_altitude double, "
+        "velocity double, heading double, vert_rate double",
+    )
+    out = td.null_rates(df)
+    assert out["null_baro_pct"] == 75.0
+    assert out["null_lat_pct"] == 25.0
+    assert out["null_lon_pct"] == 0.0
+    assert "null_geo_pct" in out
+    assert not any(k.startswith("null_baro_altitude") for k in out)
+
+
+def test_null_rates_covers_every_column_cleaning_may_mask(spark):
+    """Delegating to native.null_rate_report is what keeps this list honest.
+
+    A column added to ``CLEANED_COLUMNS`` must show up here without anyone
+    editing this module, which is the point of not keeping a second list.
+    """
+    import track_diagnostics as td
+
+    from opdi.cleaning.native import CLEANED_COLUMNS
+
+    schema = ", ".join(f"{c} double" for c in CLEANED_COLUMNS)
+    df = spark.createDataFrame([tuple([1.0] * len(CLEANED_COLUMNS))], schema)
+    out = td.null_rates(df)
+    assert len(out) == len(CLEANED_COLUMNS)
+    assert all(v == 0.0 for v in out.values())

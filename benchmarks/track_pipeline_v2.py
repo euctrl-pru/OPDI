@@ -26,12 +26,18 @@ two differ -- a lesson from v1, where guarding the name rejected legitimate
 redirected writes and caught a genuine production write only by luck.
 
 **One method at a time, and deleted after scoring.** A materialised track table
-is ~3.4 GB per day and its cleaned copy ~3.3 GB; the bucket has single-digit GB
-free and is shared with another project. Two methods resident at once does not
-fit, so this streams: build, score, delete, next.
+is ~3.4 GB per day and its cleaned copy ~3.3 GB, and the bucket is shared with
+another project. Streaming -- build, score, delete, next -- is what keeps the
+peak at one method's worth rather than three, and it is kept even now that the
+quota is known to be 200 GB rather than 100, because the peak is what a
+concurrent run of somebody else's job has to fit alongside.
+
+Because no two methods ever coexist on S3, anything the study needs to compare
+*across* methods has to be summarised to a file before the cleanup. That is
+what :func:`export_track_extents` is for.
 
     python benchmarks/track_pipeline_v2.py --period 2025 --days 2025-06-05 \\
-        --methods legacy standard \\
+        --methods legacy airframe_only standard \\
         --results-dir ../opdi-portal/papers/track-construction-v2/data
 """
 
@@ -48,11 +54,13 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 import adep_ades  # noqa: E402
 import osn_sample  # noqa: E402
 import provenance  # noqa: E402
+import track_diagnostics  # noqa: E402
 import track_truth  # noqa: E402
 from flight_list_v7 import load_predictions  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
-from track_methods import BUCKET, s3_client  # noqa: E402
+from track_continuity import extents_name  # noqa: E402
+from track_methods import BUCKET, BUCKET_QUOTA_GB, s3_client  # noqa: E402
 from track_score import score_arm, track_extents  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
@@ -179,11 +187,20 @@ def delete_method(s3, method: str) -> tuple:
 
 
 def bucket_free_gb(s3) -> float:
+    """Quota minus measured usage.
+
+    The quota comes from ``track_methods.BUCKET_QUOTA_GB`` rather than a
+    literal here. It was a literal ``100.0``, and when the owner raised the
+    real quota to 200 GB that stale copy made a bucket holding 98.5 GB report
+    1.5 GB free -- so the run aborted at its free-space gate, before doing any
+    work, with a message that reads as a full bucket rather than as a constant
+    nobody updated twice. One definition, in the module that documents it.
+    """
     total = 0
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET):
         for o in page.get("Contents", []):
             total += o["Size"]
-    return 100.0 - total / 1e9
+    return BUCKET_QUOTA_GB - total / 1e9
 
 
 def sv_exists(s3, days) -> bool:
@@ -247,13 +264,73 @@ def build_flight_list(spark, cfg, period, airports_hex_path) -> None:
     proc.process_date_range(period["month"], period["month"], airports_hex_path)
 
 
-def score_segmentation(spark, method, period, days) -> dict:
-    """Clustering comparison of the pipeline's own cleaned tracks."""
-    assign = (
+def read_cleaned(spark, method, days):
+    """This method's ``osn_tracks_clean``, restricted to the sampled days.
+
+    One definition for the three things that read it -- the clustering score,
+    the extents export and the null-rate report -- so that all three describe
+    the same population. Filtering on ``to_date(event_time)`` rather than a
+    partition path because the table is not day-partitioned on disk; see
+    ``track_methods.PERIODS``.
+    """
+    return (
         spark.read.parquet(f"s3a://{BUCKET}/opdi/{table_for(method, 'osn_tracks_clean')}")
-        .select("icao24", "event_time", "track_id")
         .filter(F.to_date("event_time").isin(days))
     )
+
+
+def export_track_extents(spark, method, period, days, results_dir) -> dict:
+    """One row per track -- ``track_id, icao24, t_start, t_end, n_points``.
+
+    **This has to happen before the per-method cleanup, and that is the whole
+    reason it exists.** The runner never lets two methods' tables coexist on
+    S3, so by the time ``standard`` has been built there is nothing of
+    ``legacy`` left to compare it against. This summary is small enough to keep
+    -- a few MB per arm against a few GB of table -- and it carries exactly
+    what a cross-arm comparison needs. Without it the continuity question could
+    not be answered at all without doubling the peak footprint.
+
+    ``F.min("icao24")`` is exact rather than arbitrary: every arm in this study
+    groups on ``icao24`` first, so a ``track_id`` belongs to one airframe by
+    construction and the aggregate has one value to choose from. If an arm ever
+    grouped otherwise this would silently start picking, which is why it is
+    said here.
+
+    Returns the totals for the caller's row, so the sample count in the CSV and
+    the denominator behind the null rates come from one pass rather than two
+    that could disagree.
+    """
+    ext = (
+        read_cleaned(spark, method, days)
+        .groupBy("track_id")
+        .agg(
+            F.min("icao24").alias("icao24"),
+            F.date_format(F.min("event_time"), "yyyy-MM-dd HH:mm:ss").alias("t_start"),
+            F.date_format(F.max("event_time"), "yyyy-MM-dd HH:mm:ss").alias("t_end"),
+            F.count(F.lit(1)).alias("n_points"),
+        )
+        .orderBy("track_id")
+    )
+    fields = ["track_id", "icao24", "t_start", "t_end", "n_points"]
+    rows = ext.collect()
+
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out = results_dir / extents_name(method, period)
+    with out.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r[k] for k in fields})
+
+    n_samples = sum(r["n_points"] for r in rows)
+    print(f"  extents: {len(rows)} tracks, {n_samples} samples -> {out.name}")
+    return {"n_tracks_exported": len(rows), "n_samples": n_samples}
+
+
+def score_segmentation(spark, method, period, days) -> dict:
+    """Clustering comparison of the pipeline's own cleaned tracks."""
+    assign = read_cleaned(spark, method, days).select(
+        "icao24", "event_time", "track_id")
     gt = track_truth.load_flight_intervals(spark, period["months"], days)
     extents = track_extents(assign)
     matched = track_truth.overlap_join(assign, gt)
@@ -270,7 +347,13 @@ def score_adep_ades(spark, method, period, days, k) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(PERIODS), default="2025")
-    ap.add_argument("--methods", nargs="+", default=["legacy", "standard"])
+    ap.add_argument("--methods", nargs="+",
+                    default=["legacy", "airframe_only", "standard"],
+                    help="in ablation order. `standard` is `airframe_only` "
+                         "plus the callsign-change break, so running the "
+                         "middle arm is what splits the total gain into the "
+                         "two changes that produced it; drop it and the study "
+                         "reports a sum it cannot decompose")
     ap.add_argument("--days", nargs="+", default=None,
                     help="override the period's day list; one day is ~6.7 GB "
                          "of materialised tables, three is ~20 GB")
@@ -374,6 +457,16 @@ def main() -> None:
                        "days": len(days)}
                 row.update(score_segmentation(spark, method, period, days))
                 row.update(score_adep_ades(spark, method, period, days, args.k))
+
+                # Both of these read osn_tracks_clean, so both must run before
+                # the `finally` below deletes it -- and after build_flight_list,
+                # so a method that fails at step 03 leaves no half-summary
+                # claiming to describe a run that did not finish.
+                row.update(export_track_extents(
+                    spark, method, period, days, args.results_dir))
+                row.update(track_diagnostics.null_rates(
+                    read_cleaned(spark, method, days)))
+
                 row["minutes"] = round(
                     (datetime.utcnow() - started).total_seconds() / 60.0, 1)
                 rows.append(row)
@@ -411,11 +504,23 @@ def main() -> None:
             script="benchmarks/track_pipeline_v2.py", argv=sys.argv[1:],
             code_paths=["benchmarks/track_pipeline_v2.py",
                         "benchmarks/track_truth.py", "benchmarks/track_score.py",
-                        "benchmarks/adep_ades.py",
+                        "benchmarks/adep_ades.py", "benchmarks/osn_sample.py",
+                        "benchmarks/flight_list_v7.py",
+                        # null_rates lives here, and its output is in the row.
+                        "benchmarks/track_diagnostics.py",
+                        # extents_name lives here, so it decides the filename
+                        # the continuity job goes looking for.
+                        "benchmarks/track_continuity.py",
+                        "src/opdi/ingestion/osn_statevectors.py",
                         "src/opdi/pipeline/tracks.py",
                         "src/opdi/cleaning/cleaner.py",
                         "src/opdi/cleaning/native.py",
                         "src/opdi/pipeline/flights.py",
+                        # __init__ decides which implementation
+                        # `assign_track_id` resolves to, so it can change every
+                        # number here while base.py and methods.py stay
+                        # byte-identical.
+                        "src/opdi/pipeline/segmentation/__init__.py",
                         "src/opdi/pipeline/segmentation/base.py",
                         "src/opdi/pipeline/segmentation/methods.py",
                         "src/opdi/config.py"],

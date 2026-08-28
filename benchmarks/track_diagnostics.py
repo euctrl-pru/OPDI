@@ -59,6 +59,7 @@ from opdi.config import OPDIConfig  # noqa: E402
 from opdi.pipeline.segmentation import SegmentationParams  # noqa: E402
 
 __all__ = ["inside_window", "containment_census", "census_ground_truth",
+           "null_rates",
            "boundary_histogram"]
 
 #: Days added on each side of the sampled window when loading ground truth for
@@ -378,6 +379,44 @@ def run_arm_histogram(spark, s3, arm_name, period, sv, gt, params, args):
     for r in rows:
         r["arm"] = arm_name
     return rows
+
+
+#: Short names for the columns ``cleaning/native.py`` may mask to NULL. The
+#: report reads better as ``null_baro_pct`` than ``null_baro_altitude_pct``,
+#: and the mapping is stated once here rather than being guessed at each call.
+NULL_SHORT_NAMES = {"baro_altitude": "baro", "geo_altitude": "geo"}
+
+
+def null_rates(df: DataFrame, columns=None) -> dict:
+    """NULL share per cleaned column, as ``null_<short>_pct`` percentages.
+
+    Step 02a masks bad values to NULL and keeps the row -- the 2024-challenge
+    design, chosen so that "no data" and "interpolated data" stay
+    distinguishable -- so a cleaned table's null rate *is* the cleaning's
+    output volume, and it belongs beside the scores rather than in a separate
+    study. A segmentation change should barely move it: cleaning is
+    track-local, so a different partition of the same samples shifts it a
+    little, but an arm whose null rate jumps has changed what the cleaner sees,
+    and that is a finding rather than a rounding difference.
+
+    Delegates the counting to :func:`opdi.cleaning.native.null_rate_report` --
+    one Spark action over the columns that module declares it may mask -- so
+    that adding a maskable column there adds it here too, rather than leaving
+    this list quietly behind. Rates are converted to percentages, because every
+    other rate in this study's CSVs is a percentage and a lone fraction in the
+    same row is a units bug waiting to be read as one.
+
+    No sample count is returned: the caller has it from the extents export at
+    no extra scan, and recomputing it here would cost a second pass over the
+    table for a number that must then agree with one already in the row.
+    """
+    from opdi.cleaning.native import null_rate_report
+
+    rates = null_rate_report(df) if columns is None else null_rate_report(df, columns)
+    return {
+        f"null_{NULL_SHORT_NAMES.get(c, c)}_pct": 100.0 * v
+        for c, v in rates.items()
+    }
 
 
 def _write_csv(path: Path, fieldnames: list, rows: list) -> None:
