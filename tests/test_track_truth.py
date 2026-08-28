@@ -602,3 +602,41 @@ def test_endpoint_provenance_is_finer_than_t_source(spark):
     # arr_measured must imply a usable arrival ground phase.
     assert gt.filter(F.col("arr_measured") & F.col("aibt").isNull()).count() == 0
     gt.unpersist()
+
+
+def test_arvt3_is_derived_from_aobt_not_observed(spark):
+    """NM holds no measured runway time, and `ARVT_3` is not an exception.
+
+    Its column comment reads "actual as calculated from AOBT", and it
+    reproduces as `AOBT_3 + TAXI_TIME_3 + FLT_DUR_3`. This matters because the
+    whole tier split rests on it: if `ARVT_3` were an observed landing, the
+    estimated-times aerodromes would have a real arrival boundary and their
+    ground coverage could be measured. It is not, and they do not.
+
+    Asserted against the committed extract, not a fixture, because the claim is
+    about the source data rather than about this module.
+    """
+    nm = spark.read.parquet(f"{_LOCAL_REFERENCE}/flights_202506.parquet").select(
+        "AOBT_3", "ARVT_3", "TAXI_TIME_3", "FLT_DUR_3"
+    ).filter(
+        F.col("AOBT_3").isNotNull() & F.col("ARVT_3").isNotNull()
+        & F.col("TAXI_TIME_3").isNotNull() & F.col("FLT_DUR_3").isNotNull()
+    )
+    predicted = (
+        F.unix_timestamp("AOBT_3")
+        + F.col("TAXI_TIME_3") * 60
+        + F.col("FLT_DUR_3") * 60
+    )
+    resid = F.abs(F.unix_timestamp("ARVT_3") - predicted)
+    row = nm.select(
+        F.count(F.lit(1)).alias("n"),
+        F.expr("percentile_approx(%s, 0.5)" % "abs(unix_timestamp(ARVT_3) - "
+               "(unix_timestamp(AOBT_3) + TAXI_TIME_3*60 + FLT_DUR_3*60))")
+        .alias("p50"),
+        F.max(resid).alias("worst"),
+    ).first()
+
+    assert row["n"] > 100_000
+    # Minute-rounding, not independent measurement.
+    assert row["p50"] <= 30, f"median residual {row['p50']}s"
+    assert row["worst"] <= 120, f"worst residual {row['worst']}s"

@@ -10,8 +10,13 @@ APDF also carries the two **block** times, ``AOBT`` and ``AIBT``, both of them
 ``BLOCK_TIME_UTC`` discriminated by ``SRC_PHASE`` exactly as the movement times
 are. They bound the flight's ground phase, which is what lets a boundary error
 be read as a *fraction* of taxi rather than as an absolute number of seconds.
-``aibt`` is APDF-only and has no NM fallback: ``ARVT_3`` is a landing time, not
-a gate arrival.
+``aibt`` is APDF-only and has no NM fallback -- and neither, in truth, is
+``ARVT_3`` a measured landing. Its own column comment says "actual as
+calculated from AOBT", and it reproduces as
+``AOBT_3 + TAXI_TIME_3 + FLT_DUR_3`` to within 7 s at the median and 30 s at
+the maximum over 96,146 flights (2026-06-05/07): the residual is
+minute-rounding. It is a model output, accurate but not observed, and NM
+carries no runway timestamp of any kind.
 
 ``TAXI_TIME_3`` semantics were measured against APDF in Task 4 Step 1 (see
 ``DATASETS.md`` under "Ground truth semantics" for the full numbers): it is
@@ -484,8 +489,11 @@ def load_flight_intervals(
         #
         # `aobt` prefers APDF's measured off-block and falls back to NM's
         # AOBT_3, mirroring how `t_off` prefers `atot`. `aibt` has **no NM
-        # fallback and cannot have one**: ARVT_3 is a landing time, not a
-        # gate-arrival, so there is no in-block anywhere outside APDF. It is
+        # fallback and cannot have one**: ARVT_3 is not a gate arrival, and is
+        # not a measured landing either -- it reproduces as
+        # AOBT_3 + TAXI_TIME_3 + FLT_DUR_3 to within 7 s at the median, so it
+        # carries nothing the off-block time and the two model durations do
+        # not already say. There is no in-block anywhere outside APDF. It is
         # therefore NULL at every aerodrome APDF does not cover, and a consumer
         # computing an arrival ground phase must treat NULL as "unmeasurable
         # here" rather than as zero.
