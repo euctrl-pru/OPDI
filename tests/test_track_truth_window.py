@@ -15,6 +15,7 @@ window membership can explain one surviving and another not.
 """
 
 import datetime as dt
+import itertools
 
 from pyspark.sql import Row
 from pyspark.sql.types import (
@@ -28,6 +29,8 @@ from track_truth import load_flight_intervals
 
 _FLIGHTS_SCHEMA = StructType(
     [
+        # The Samad flight id -- the key APDF is joined on.
+        StructField("ID", IntegerType(), True),
         StructField("AIRCRAFT_ADDRESS", StringType(), True),
         StructField("AIRCRAFT_ID", StringType(), True),
         StructField("ADEP", StringType(), True),
@@ -40,6 +43,7 @@ _FLIGHTS_SCHEMA = StructType(
 
 _APDF_SCHEMA = StructType(
     [
+        StructField("ID", IntegerType(), True),
         StructField("AP_C_FLTID", StringType(), True),
         StructField("ADEP_ICAO", StringType(), True),
         StructField("ADES_ICAO", StringType(), True),
@@ -54,8 +58,15 @@ _APDF_SCHEMA = StructType(
 )
 
 
+_SAM_ID = itertools.count(1)
+
+
 def _leg(icao24, callsign, aobt, arvt, taxi_min=10):
+    # A distinct Samad id per leg. No APDF rows exist in this file -- it tests
+    # the sample window, not the join -- so the ids never match anything and
+    # every leg falls back to NM inference, which is what these tests assert.
     return Row(
+        ID=next(_SAM_ID),
         AIRCRAFT_ADDRESS=icao24, AIRCRAFT_ID=callsign, ADEP="EBBR", ADES="BIKF",
         AOBT_3=aobt, ARVT_3=arvt, TAXI_TIME_3=taxi_min,
     )

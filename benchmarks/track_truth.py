@@ -152,23 +152,23 @@ def load_apdf_times(
         ap = ap.unionByName(f_)
 
     ap = ap.select(
+        # The Samad flight id -- the same identifier NM carries in its own
+        # ``ID`` column. This is the join key; see load_flight_intervals.
+        F.col("ID").cast("long").alias("sam_id"),
         F.trim(F.col("AP_C_FLTID")).alias("callsign"),
         F.col("SRC_PHASE"),
         F.col("MVT_TIME_UTC"),
         F.col("BLOCK_TIME_UTC"),
         F.upper(F.trim(F.col("ADEP_ICAO"))).alias("apdf_adep"),
         F.upper(F.trim(F.col("ADES_ICAO"))).alias("apdf_ades"),
-    ).withColumn("mvt_day", F.to_date("MVT_TIME_UTC"))
+    ).filter(F.col("sam_id").isNotNull())
 
-    # No dropDuplicates on (callsign, mvt_day, aerodrome): that key is not
-    # unique -- same-day, same-route, same-callsign legs (16,174 of 462,676
-    # keys in flights_202506, per Task 4 Step 1) share it, and deduplicating
-    # to one arbitrary row per key would hand both legs the same candidate,
-    # which is exactly the collision flight_key's t_off component exists to
-    # prevent. Every candidate is kept; load_flight_intervals disambiguates
-    # per NM row by proximity to that row's own time estimate.
+    # ``(sam_id, SRC_PHASE)`` is unique -- verified over apdf_202606, where it
+    # holds for every row. So each frame below is one row per flight, and the
+    # joins in load_flight_intervals are one-to-one with no disambiguation
+    # needed.
     dep = ap.filter(F.col("SRC_PHASE") == "DEP").select(
-        "callsign", "mvt_day", "apdf_adep",
+        "sam_id", "apdf_adep",
         F.col("MVT_TIME_UTC").alias("atot"),
         # Off-block. APDF has no literal AOBT column either: BLOCK_TIME_UTC is
         # off-block on a DEP row and in-block on an ARR row, which is the same
@@ -183,7 +183,7 @@ def load_apdf_times(
         F.col("BLOCK_TIME_UTC").alias("aobt"),
     )
     arr = ap.filter(F.col("SRC_PHASE") == "ARR").select(
-        "callsign", "mvt_day", "apdf_ades",
+        "sam_id", "apdf_ades",
         F.col("MVT_TIME_UTC").alias("aldt"),
         F.col("BLOCK_TIME_UTC").alias("aibt"),  # in-block; see `aobt` above
     )
@@ -242,6 +242,7 @@ def load_flight_intervals(
     for m in months:
         frames.append(
             spark.read.parquet(f"{reference_base}/flights_{m}.parquet").select(
+                F.col("ID").cast("long").alias("sam_id"),
                 F.lower(F.col("AIRCRAFT_ADDRESS")).alias("icao24"),
                 F.trim(F.col("AIRCRAFT_ID")).alias("callsign"),
                 F.col("ADEP").alias("gt_adep"),
@@ -312,129 +313,50 @@ def load_flight_intervals(
     # rather than collapsed into one.
     dep, arr = load_apdf_times(spark, months, reference_base=reference_base)
 
-    # **The departure join keys on the take-off day, not the off-block day.**
-    # ``day`` is ``to_date(AOBT_3)`` (off-block) while ``dep.mvt_day`` is
-    # ``to_date(MVT_TIME_UTC)`` (take-off), and a taxi that crosses midnight
-    # puts the two on different days -- 2,272 of 957,396 NM flights in 202506
-    # (0.237 %) and 2,102 of 935,887 in 202406 (0.225 %), measured over the
-    # committed reference extracts. Keying on ``day`` was wrong in both of the
-    # ways the arrival side was, and is fixed the same way:
+    # **Both APDF sides join on the Samad flight id.**
     #
-    #   * it dropped every midnight-taxi leg to ``t_source = "nm_inferred"``,
-    #     which is lossy rather than wrong -- but not harmlessly so.
-    #     ``track_score.boundary_error`` restricts itself to APDF rows, so the
-    #     flights it never saw were systematically the midnight-taxi ones. A
-    #     lossy fallback that loses a random 0.2 % is noise; one that loses a
-    #     0.2 % correlated with taxi behaviour, in a study about taxi
-    #     behaviour, is a bias;
-    #   * and where the same callsign had an earlier movement from the same
-    #     aerodrome on the off-block day -- which for a nightly service means
-    #     *yesterday's rotation* -- that movement was the only candidate the key
-    #     admitted, so the join attached a take-off hours before push-back.
-    #     Measured, not hypothesised. icao24 4bce13, SXS9ZZ, EDDV->LTAI,
-    #     AOBT_3 2025-06-05 23:52 (+10 min taxi): APDF holds a DEP at
-    #     2025-06-06 00:02:15, 15 s from NM's own estimate, and another at
-    #     2025-06-05 00:20:03 -- the night before. The off-block-day key
-    #     admitted only the latter, so this leg's t_off became 2025-06-05
-    #     00:20:03 against its own ARVT_3 of 2025-06-06 03:16: a **26.9-hour
-    #     ground-truth interval**. 10 such intervals over 20 h in the 2025
-    #     sample and 9 in 2024. After this fix: **none in 2025, and two in
-    #     2024** -- the longest 27.9 h, icao24 4bb194, THY801, LTFM->SKBO.
+    # NM's ``ID`` column is documented as the "Internal unique Samad Id", and
+    # APDF carries the same identifier. It is an exact key, and it replaces the
+    # whole apparatus that used to stand in for one: matching on callsign, a
+    # day key, the aerodrome, and then a proximity tie-break to choose between
+    # candidates.
     #
-    #     Both post-fix counts are stated because only one of them is zero.
-    #     Quoting the 2025 zero alone would read as "the class of defect is
-    #     eliminated", and it is not. The two survivors are **not** this
-    #     defect: they carry no APDF candidate at either end, so their interval
-    #     is NM's own `AOBT_3`/`ARVT_3` pairing and no join key of ours
-    #     produced it. They are **undiagnosed**, and deliberately not filtered
-    #     -- a sanity bound on interval length would move the denominator of
-    #     every metric in the study, which is a scope decision rather than a
-    #     cleanup. Written down here so the residual outlives the report that
-    #     found it.
+    # That apparatus was not merely complex, it was wrong at some of the
+    # largest aerodromes, because ``AP_C_FLTID`` is whatever the airport system
+    # holds and that is not always the ATC callsign. Measured over
+    # 2026-06-05/07, flights matched out of NM's total:
     #
-    #     `overlap_join` assigns by containment, so an interval that long
-    #     swallows a whole day of that airframe's samples -- including its
-    #     neighbouring legs' -- into `match_rates`. Note *how*, because it is
-    #     not the inflated merge rate one first assumes. Traced through
-    #     `match_rates`: a neighbouring leg that loses all its samples drops
-    #     out of the `n_flights` **denominator** rather than counting as
-    #     merged; the over-long flight itself now spans several tracks and
-    #     scores **fragmented**; and a genuine merge whose samples all carry
-    #     this one `flight_key` is **masked**. Contaminated in three
-    #     directions, none of them the obvious one -- which is why the earlier
-    #     wording here, "straight into the merge statistic", was wrong and is
-    #     corrected rather than softened.
+    #   * Frankfurt -- 48 of 963 on callsign (APDF carries IATA numbers there,
+    #     "4Y002" against NM's ICAO callsigns); **1,992 of 2,003 on id**.
+    #   * Amsterdam -- 27 of 985; **2,068 of 2,086**.
+    #   * Zurich -- 175 of 561 (APDF zero-pads: "AAL093" against "AAL93");
+    #     **1,187 of 1,198**.
+    #   * Brussels -- 483 of 483, which is why the defect went unnoticed:
+    #     the aerodromes that worked worked perfectly.
     #
-    #     Note what did *not* protect against it: `t_source` read
-    #     "nm_inferred" for that row, because LTAI is not APDF-covered so
-    #     `aldt` was null, and t_source is "apdf" only when both ends are
-    #     measured. `t_off` takes `atot` whenever it exists, independently of
-    #     the label. So `boundary_error`'s APDF-only restriction was no guard
-    #     here at all. See the t_source computation below.
+    # Frankfurt, Amsterdam and Zurich were consequently reported as having no
+    # measured milestones and dropped out of every metric that needs them.
     #
-    # The key is ``to_date(AOBT_3 + TAXI_TIME_3)`` -- the same estimate the
-    # proximity ordering below ranks on and ``t_off`` falls back to, computed
-    # once in ``_estimated_atot`` so the three cannot drift apart.
-    est_atot = _estimated_atot(nm.aobt, nm.taxi_min)
-    jdep = nm.join(
-        dep,
-        (nm.callsign == dep.callsign)
-        & (F.to_date(est_atot) == dep.mvt_day)
-        & (nm.gt_adep == dep.apdf_adep),
-        "left",
-    )
-    # Ordered on proximity alone, no secondary key: exactly-equidistant
-    # candidates tie non-deterministically (rare -- sub-second exact ties).
-    w_dep = Window.partitionBy(nm._nm_id).orderBy(
-        F.abs(F.unix_timestamp(dep.atot) - F.unix_timestamp(est_atot)).asc_nulls_last()
-    )
-    jdep = (
-        jdep.withColumn("_rdep", F.row_number().over(w_dep))
-        .filter(F.col("_rdep") == 1)
-        .select(
-            nm._nm_id, nm.icao24, nm.callsign, nm.gt_adep, nm.gt_ades,
-            # nm.aobt is NM's own off-block (AOBT_3); dep.aobt is APDF's
-            # measured one. Both are carried and they are not the same column --
-            # hence the alias, without which the later select is ambiguous.
-            nm.aobt, nm.arvt, nm.taxi_min, nm.day, dep.atot,
-            dep.aobt.alias("apdf_aobt"),
-        )
+    # The id key also removes three problems the day key created and that the
+    # comments here used to document at length: a taxi crossing midnight put
+    # off-block and take-off on different days; a nightly rotation could attach
+    # yesterday's movement, once producing a 26.9-hour ground-truth interval;
+    # and same-day same-route legs by one airframe collided on the natural key.
+    # None of them can arise from an equality join on a unique id.
+    #
+    # ``sam_id`` is null on 2.7% of APDF rows; those movements simply do not
+    # match, which is the same outcome the old key gave them and better than
+    # matching them to the wrong flight.
+    jdep = nm.join(dep, nm.sam_id == dep.sam_id, "left").select(
+        nm._nm_id, nm.icao24, nm.callsign, nm.gt_adep, nm.gt_ades,
+        nm.aobt, nm.arvt, nm.taxi_min, nm.day, nm.sam_id,
+        dep.atot, dep.aobt.alias("apdf_aobt"),
     )
 
-    # The arrival join keys on the arrival day, not the departure day. j.day
-    # (as it was before this fix) is derived from AOBT_3 -- the departure
-    # day -- and using it here was wrong: the dep-side day match is at least
-    # anchored near departure on both sides (off-block and take-off, minutes
-    # apart -- though see the note above the dep join, where a midnight taxi
-    # separates even those), but ARVT_3 and APDF ARR's MVT_TIME_UTC both
-    # anchor to arrival, which is hours away and not the same calendar day as
-    # departure for a flight that crosses midnight. Keying on the departure day
-    # there was doubly wrong: it dropped every midnight-crosser to nm_inferred
-    # (safe but lossy), and for a same-day-same-route callsign collision where
-    # one leg crosses midnight, it could let a departure day coincide with a
-    # *different* leg's real arrival day and attach the wrong leg's ALDT while
-    # t_source still read "apdf" -- silently wrong, not safely absent. Keying on
-    # to_date(arvt) instead matches what this module's own DATASETS.md
-    # calibration script already does (`nm["ARVT_3"].dt.date`), and recovers
-    # midnight-crossing APDF matches instead of trading them away.
-    j = jdep.join(
-        arr,
-        (jdep.callsign == arr.callsign)
-        & (jdep.gt_ades == arr.apdf_ades)
-        & (F.to_date(jdep.arvt) == arr.mvt_day),
-        "left",
-    )
-    w_arr = Window.partitionBy(jdep._nm_id).orderBy(
-        F.abs(F.unix_timestamp(arr.aldt) - F.unix_timestamp(jdep.arvt)).asc_nulls_last()
-    )
-    j = (
-        j.withColumn("_rarr", F.row_number().over(w_arr))
-        .filter(F.col("_rarr") == 1)
-        .select(
-            jdep.icao24, jdep.callsign, jdep.gt_adep, jdep.gt_ades,
-            jdep.aobt, jdep.arvt, jdep.taxi_min, jdep.day, jdep.atot,
-            F.col("apdf_aobt"), arr.aldt, arr.aibt,
-        )
+    j = jdep.join(arr, jdep.sam_id == arr.sam_id, "left").select(
+        jdep.icao24, jdep.callsign, jdep.gt_adep, jdep.gt_ades,
+        jdep.aobt, jdep.arvt, jdep.taxi_min, jdep.day, jdep.atot,
+        F.col("apdf_aobt"), arr.aldt, arr.aibt,
     )
 
     # APDF where it exists, NM inference otherwise. The inference is stated
