@@ -29,7 +29,7 @@ from pyspark.sql import functions as F
 
 __all__ = [
     "contingency", "vmeasure", "match_rates", "track_extents", "boundary_offsets",
-    "boundary_error", "score_arm",
+    "boundary_error", "score_arm", "score_arm_gated",
 ]
 
 
@@ -422,4 +422,34 @@ def score_arm(matched: DataFrame, extents: DataFrame, assign: DataFrame = None) 
     row.update(match_rates(matched))
     row.update(boundary_error(matched, extents))
     matched.unpersist()
+    return row
+
+
+def score_arm_gated(matched: DataFrame, extents: DataFrame,
+                    matched_gate: DataFrame) -> dict:
+    """The airborne row, plus every gate-to-gate rate under a ``gate_`` prefix.
+
+    ``matched`` is ``track_truth.overlap_join``'s default output -- containment
+    in ``[t_off, t_land]`` -- and ``matched_gate`` is that same join taken over
+    ``("t_off_block", "t_in_block")``. Both are reported because they answer
+    different questions and the paper needs both. The airborne metrics are what
+    every V1 number was computed over and must stay comparable to; the gate
+    metrics say whether the aircraft's time at the stand and on the taxiways
+    ended up in the right track -- which the airborne interval cannot say at
+    all, because it drops those samples before any metric sees them.
+
+    Composition, not a second metric definition. The airborne half is
+    :func:`score_arm`'s dict verbatim, so an arm scored through this function
+    and an arm scored through ``score_arm`` carry the same numbers under the
+    same names, and a CSV gains columns rather than changing them.
+
+    Boundary error is computed once, from the airborne match. It is defined
+    against ``t_off``/``t_land`` -- which ``overlap_join`` emits whichever
+    interval decided membership -- so computing it a second time would produce
+    two columns with the same name and different meanings. Only
+    :func:`match_rates` is repeated, because only it is a statement about which
+    samples landed in which track.
+    """
+    row = score_arm(matched, extents)
+    row.update({f"gate_{k}": v for k, v in match_rates(matched_gate).items()})
     return row
