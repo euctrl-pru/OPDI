@@ -2,19 +2,18 @@
 
 A segmentation is a partition of an airframe's samples; ground truth is another
 partition of the same samples. Comparing two partitions is a solved problem, and
-the two standard scalars land exactly on the two failure modes
+the two scalars this module reports land exactly on the two failure modes
 ``track_quality.py`` names:
 
 * **completeness** -- one flight scattered across tracks -> fragmentation
 * **homogeneity** -- one track carrying several flights -> merging
-* **V-measure** -- their harmonic mean; the smooth objective a sweep can optimise
 
 Everything here is a contingency table plus an entropy sum, so it is a groupBy.
 No UDF, no pandas.
 
-The **headline** number is not V-measure -- nobody has an intuition for it. It is
-``clean_match_pct``: the share of ground-truth flights that occupy exactly one
-track, that track carrying no other flight.
+The **headline** number is neither of those -- nobody has an intuition for an
+entropy ratio. It is ``clean_match_pct``: the share of ground-truth flights that
+occupy exactly one track, that track carrying no other flight.
 
 Not measured here, deliberately: tracks with no ground-truth overlap. GT covers
 NM flights only, so a track that merged an NM flight with a military or GA flight
@@ -28,8 +27,8 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 __all__ = [
-    "contingency", "vmeasure", "match_rates", "track_extents", "boundary_offsets",
-    "boundary_error", "score_arm", "score_arm_gated",
+    "contingency", "homogeneity_completeness", "match_rates", "track_extents",
+    "boundary_offsets", "boundary_error", "score_arm", "score_arm_gated",
 ]
 
 
@@ -61,17 +60,24 @@ def _entropy(counts, total):
     return h
 
 
-def vmeasure(matched: DataFrame) -> dict:
-    """Homogeneity, completeness and their harmonic mean.
+def homogeneity_completeness(matched: DataFrame) -> dict:
+    """Every field of the entropy-based partition comparison this module reports.
+
+    Homogeneity is the merging measure -- 1.0 means no track carries more than
+    one flight. Completeness is the fragmentation measure -- 1.0 means no
+    flight is scattered across more than one track. Together they cover
+    ``track_quality.py``'s two failure modes; V-measure, their harmonic mean,
+    used to be a third key here and is gone -- it misranked arms relative to
+    the headline metric and was never selected on (see ``track_sweep.py``).
 
     The contingency table is small -- tracks times flights per airframe, not
     samples -- so it is collected to the driver and the entropies summed in
-    Python. Spark computes the table; the driver computes three logs.
+    Python. Spark computes the table; the driver computes the logs.
     """
     rows = contingency(matched).collect()
     total = sum(r["n"] for r in rows)
     if total == 0:
-        return {"homogeneity": 0.0, "completeness": 0.0, "v_measure": 0.0}
+        return {"homogeneity": 0.0, "completeness": 0.0}
 
     by_track, by_flight = {}, {}
     joint = {}
@@ -93,9 +99,7 @@ def vmeasure(matched: DataFrame) -> dict:
 
     homogeneity = 1.0 if h_flight == 0 else 1.0 - h_f_given_t / h_flight
     completeness = 1.0 if h_track == 0 else 1.0 - h_t_given_f / h_track
-    denom = homogeneity + completeness
-    v = 0.0 if denom == 0 else 2 * homogeneity * completeness / denom
-    return {"homogeneity": homogeneity, "completeness": completeness, "v_measure": v}
+    return {"homogeneity": homogeneity, "completeness": completeness}
 
 
 def match_rates(matched: DataFrame) -> dict:
@@ -376,9 +380,9 @@ def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
     # With no APDF-sourced rows every percentile is NULL. Coercing that to 0.0 --
     # which this did -- reports the *best possible* boundary error, so an arm
     # with no APDF coverage at all outscored every arm that was actually
-    # measured. vmeasure and match_rates degrade to 0.0 meaning "bad" and are
-    # safe; this one inverts, so it must return None and leave the CSV cell
-    # blank rather than answer a question it has no data for.
+    # measured. homogeneity_completeness and match_rates degrade to 0.0
+    # meaning "bad" and are safe; this one inverts, so it must return None and
+    # leave the CSV cell blank rather than answer a question it has no data for.
     def _sec(v):
         return None if n == 0 or v is None else float(v)
 
@@ -418,7 +422,7 @@ def score_arm(matched: DataFrame, extents: DataFrame, assign: DataFrame = None) 
     """
     matched = matched.cache()
     row = {"n_tracks": matched.select("track_id").distinct().count()}
-    row.update(vmeasure(matched))
+    row.update(homogeneity_completeness(matched))
     row.update(match_rates(matched))
     row.update(boundary_error(matched, extents))
     matched.unpersist()

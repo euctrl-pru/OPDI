@@ -1,6 +1,6 @@
-"""Two diagnostics about V1's own method, rather than about a segmentation arm.
+"""Diagnostics about V1's own method, rather than about a segmentation arm.
 
-Both exist because a reviewer asked a question the study could only answer with
+Each exists because a reviewer asked a question the study could only answer with
 an argument, and an argument is not a measurement.
 
 **The containment census** (``--job containment``). V1 scores only ground-truth
@@ -19,9 +19,20 @@ the two mean different things: a spread is noise to tune against, two modes are
 two populations, one of which is probably a different failure wearing the same
 number.
 
+**The traffic-fill census** (``--job traffic-fill``). A3 runs ``traffic``'s
+``Flight.split()`` rule against a raw OSN frame, but the rule was designed
+against a filled one -- idiomatic ``traffic`` use bfills/ffills or interpolates
+before splitting. ``gap_boundary_nulls`` counts how often the predicate's own
+altitude comparison lands on a NULL, and separately counts "no-gap turnarounds"
+-- a continuous broadcast through a stand -- which is the failure mode no amount
+of filling could fix, because traffic's single gap-length threshold never sees
+a gap at all.
+
     python benchmarks/track_diagnostics.py --job containment --period 2025 \\
         --results-dir ../opdi-portal/papers/track-construction-v1/data
     python benchmarks/track_diagnostics.py --job boundary-hist --period 2025 \\
+        --results-dir ../opdi-portal/papers/track-construction-v1/data
+    python benchmarks/track_diagnostics.py --job traffic-fill --period 2025 \\
         --results-dir ../opdi-portal/papers/track-construction-v1/data
 
 The census reads only Network Manager/APDF reference parquet -- no state
@@ -30,7 +41,8 @@ deletes it again by *calling* ``track_methods.run_arm`` -- its streaming, its
 free-space gate and its scoped single-object delete, not a second copy of them
 -- passing its own scoring callable and a ``diag_``-prefixed arm directory, so
 that a concurrent ``track_methods`` run and this one can never delete each
-other's tables.
+other's tables. The traffic-fill census reads the same cleaned track table the
+arms jobs read, filtered to the period's sampled days, and writes nothing else.
 
 One Spark job at a time -- ``spark.driver.port`` is pinned, so a second
 concurrent job kills both.
@@ -51,7 +63,7 @@ import provenance  # noqa: E402
 import track_methods  # noqa: E402
 import track_truth  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
-from pyspark.sql import DataFrame, SparkSession  # noqa: E402
+from pyspark.sql import DataFrame, SparkSession, Window  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from track_score import boundary_offsets  # noqa: E402
 
@@ -59,7 +71,7 @@ from opdi.config import OPDIConfig  # noqa: E402
 from opdi.pipeline.segmentation import SegmentationParams  # noqa: E402
 
 __all__ = ["inside_window", "containment_census", "census_ground_truth",
-           "null_rates",
+           "null_rates", "gap_boundary_nulls",
            "boundary_histogram"]
 
 #: Days added on each side of the sampled window when loading ground truth for
@@ -89,6 +101,15 @@ CONTAINMENT_FIELDS = [
     "n_clipped_end", "pct_kept", "median_observed_fraction_clipped",
 ]
 HIST_FIELDS = ["arm", "edge", "bin_lower_s", "bin_upper_s", "n"]
+TRAFFIC_FILL_FIELDS = [
+    "period", "n_gaps", "n_null_either_side", "null_pct", "n_no_gap_turnarounds",
+]
+
+#: A3 splits on ``traffic``'s own fixed 10-minute gap threshold, not on OPDI's
+#: configurable ``gap_minutes`` -- the two can differ, and this diagnostic
+#: exists to explain *A3's* behaviour, so it must use A3's number rather than
+#: whatever the pipeline happens to be tuned to today.
+TRAFFIC_GAP_MINUTES = 10.0
 
 
 def inside_window(window_start, window_end):
@@ -419,6 +440,112 @@ def null_rates(df: DataFrame, columns=None) -> dict:
     }
 
 
+def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) -> dict:
+    """How often A3's split predicate cannot see the altitude it needs, and the
+    failure mode that has nothing to do with NULLs at all.
+
+    ``traffic``'s ``Flight.split()`` cuts on a raw timestamp gap alone -- see
+    this module's docstring -- but the rule that decides whether to *keep*
+    A3's split or reclassify it (and every legacy-style low-altitude rule
+    ported alongside it) reads ``baro_altitude_ft`` on both sides of the
+    candidate gap. On a raw OSN frame that value is NULL about a fifth of the
+    time, and a comparison against NULL is not a decision -- it is the absence
+    of one. Counted here as **undecidable**: a candidate gap where the current
+    row's or the previous row's altitude is NULL.
+
+    Two counts, over one pass:
+
+    * ``n_gaps`` / ``n_null_either_side`` / ``null_pct`` -- of every candidate
+      gap (``icao24``-partitioned, time-ordered, more than ``gap_minutes``
+      since the previous sample), how many are undecidable because an
+      altitude either side is missing. This is the part a fill would help.
+    * ``n_no_gap_turnarounds`` -- a maximal run of ``on_ground = true``
+      samples, per ``icao24``, spanning more than ``gap_minutes`` start to
+      end with **no** internal gap above the threshold. This is an aircraft
+      broadcasting continuously through a stand: there is no gap for any
+      threshold to catch, on a raw frame or a filled one, so it is the part a
+      fill could never help. Legacy's second rule -- a shorter gap below
+      5,000 ft -- catches this shape; ``traffic``'s single 10-minute threshold
+      structurally cannot.
+
+    ``gap_minutes`` defaults to :data:`TRAFFIC_GAP_MINUTES` -- ``traffic``'s
+    own fixed threshold, not OPDI's configurable ``gap_minutes`` -- because
+    this diagnostic explains *A3's* behaviour specifically.
+    """
+    w = Window.partitionBy("icao24").orderBy("event_time")
+    prev_time = F.lag("event_time").over(w)
+    prev_alt = F.lag("baro_altitude_ft").over(w)
+    prev_on_ground = F.lag("on_ground").over(w)
+
+    gap_min = (F.col("event_time").cast("long") - prev_time.cast("long")) / 60.0
+    is_gap = gap_min > F.lit(gap_minutes)
+    null_either_side = F.col("baro_altitude_ft").isNull() | prev_alt.isNull()
+
+    annotated = sv.select(
+        "icao24", "event_time", "on_ground",
+        gap_min.alias("gap_min"),
+        is_gap.alias("is_gap"),
+        null_either_side.alias("null_either_side"),
+        prev_on_ground.alias("prev_on_ground"),
+    ).cache()
+
+    try:
+        counts = annotated.select(
+            F.sum(F.when(F.col("is_gap"), 1).otherwise(0)).alias("n_gaps"),
+            F.sum(
+                F.when(F.col("is_gap") & F.col("null_either_side"), 1).otherwise(0)
+            ).alias("n_null_either_side"),
+        ).collect()[0]
+        n_gaps = counts["n_gaps"] or 0
+        n_null = counts["n_null_either_side"] or 0
+
+        # A run of on_ground samples starts where the previous row (in the
+        # full, un-filtered time order) was not on_ground -- or was the first
+        # row of the icao24 partition. A cumulative sum of that indicator,
+        # over every row regardless of on_ground, gives every row in the same
+        # airborne-free stretch a shared id; rows outside any such stretch get
+        # an id too, but they are dropped below and never grouped on.
+        is_run_start = F.col("on_ground") & (
+            F.col("prev_on_ground").isNull() | (~F.col("prev_on_ground"))
+        )
+        run_id = F.sum(F.when(is_run_start, 1).otherwise(0)).over(
+            w.rowsBetween(Window.unboundedPreceding, 0)
+        )
+        runs = annotated.select(
+            "icao24", "event_time", "on_ground", "gap_min",
+            is_run_start.alias("is_run_start"),
+            run_id.alias("run_id"),
+        ).filter(F.col("on_ground"))
+
+        run_stats = runs.groupBy("icao24", "run_id").agg(
+            F.min("event_time").alias("run_start"),
+            F.max("event_time").alias("run_end"),
+            # Only gaps *within* the run count as internal: the run's first
+            # row's `gap_min` is the gap leading *into* the stretch, from
+            # whatever (on_ground or not) preceded it, not a gap inside it.
+            F.max(
+                F.when(~F.col("is_run_start"), F.col("gap_min"))
+            ).alias("max_internal_gap_min"),
+        )
+        span_min = (
+            F.col("run_end").cast("long") - F.col("run_start").cast("long")
+        ) / 60.0
+        no_gap_turnaround = (span_min > F.lit(gap_minutes)) & (
+            F.col("max_internal_gap_min").isNull()
+            | (F.col("max_internal_gap_min") <= F.lit(gap_minutes))
+        )
+        n_no_gap = run_stats.filter(no_gap_turnaround).count()
+    finally:
+        annotated.unpersist()
+
+    return {
+        "n_gaps": n_gaps,
+        "n_null_either_side": n_null,
+        "null_pct": round(100.0 * n_null / n_gaps, 2) if n_gaps else 0.0,
+        "n_no_gap_turnarounds": n_no_gap,
+    }
+
+
 def _write_csv(path: Path, fieldnames: list, rows: list) -> None:
     with path.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -546,9 +673,38 @@ def run_boundary_hist(spark, s3, args, period_cfg, days, out_path) -> dict:
     return {"samples": n_sv, "gt_flights": n_gt}
 
 
+def run_traffic_fill(spark, args, period_cfg, days, out_path) -> dict:
+    """What A3's split predicate cannot see, over the period's raw cleaned track.
+
+    Reads the same cleaned track table the arms jobs read -- ``period_cfg
+    ["tracks"]``, filtered to the sampled days -- and nothing else: no ground
+    truth, no segmentation, no assignment table. ``gap_boundary_nulls`` uses
+    ``traffic``'s own fixed 10-minute threshold by default, not the pipeline's
+    configurable ``gap_minutes``, because this measures A3's behaviour
+    specifically.
+    """
+    sv = spark.read.parquet(period_cfg["tracks"]).filter(
+        F.to_date("event_time").isin(days)
+    ).cache()
+    n_sv = sv.count()
+    print(f"{n_sv:,} samples")
+
+    row = gap_boundary_nulls(sv)
+    sv.unpersist()
+    row["period"] = args.period
+
+    for k in TRAFFIC_FILL_FIELDS:
+        print(f"  {k:22} {row[k]}")
+    _write_csv(out_path, TRAFFIC_FILL_FIELDS, [row])
+    return {"samples": n_sv}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--job", choices=["containment", "boundary-hist"], required=True)
+    ap.add_argument(
+        "--job", choices=["containment", "boundary-hist", "traffic-fill"],
+        required=True,
+    )
     ap.add_argument("--period", choices=sorted(track_methods.PERIODS), default="2025")
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--out-name", default=None,
@@ -586,6 +742,10 @@ def main() -> None:
         inputs = run_containment(spark, args, period_cfg, days, out_path)
         tables = []
         code = ["benchmarks/track_diagnostics.py", "benchmarks/track_truth.py"]
+    elif args.job == "traffic-fill":
+        inputs = run_traffic_fill(spark, args, period_cfg, days, out_path)
+        tables = [period_cfg["tracks"]]
+        code = ["benchmarks/track_diagnostics.py"]
     else:
         inputs = run_boundary_hist(spark, s3, args, period_cfg, days, out_path)
         tables = [period_cfg["tracks"]]

@@ -296,6 +296,27 @@ def jobs() -> list:
                   "the bins and the published percentiles describe one sample.",
         ))
 
+    # --- what A3's split predicate cannot see ----------------------------
+    # traffic's Flight.split() is designed against a gap-filled frame; OPDI
+    # applies it raw. gap_boundary_nulls counts how often the predicate's own
+    # altitude comparison lands on a NULL, and separately counts "no-gap
+    # turnarounds" -- continuous broadcast through a stand -- which no fill
+    # could fix. It reads the same cleaned track table the arms jobs read, but
+    # neither segments nor scores, so it carries METHODS (for PERIODS) and
+    # nothing from SEG or SCORE.
+    for period in ("2025", "2024"):
+        out.append(Job(
+            name=f"traffic_fill_{period}",
+            script="benchmarks/track_diagnostics.py",
+            args=["--job", "traffic-fill", "--period", period,
+                  "--out-name", f"traffic_fill_{period}.csv"],
+            outputs={f"traffic_fill_{period}.csv": f"traffic_fill_{period}.csv"},
+            code_paths=DIAG + METHODS,
+            notes="How often A3's split predicate sees a NULL boundary "
+                  "altitude, and how many turnarounds no gap threshold "
+                  "could ever catch.",
+        ))
+
     return out
 
 

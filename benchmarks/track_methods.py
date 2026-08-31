@@ -337,9 +337,9 @@ def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments,
     print(f"  -> {out} ({n_obj} objects, {n_bytes / 1e9:.3f} GB)")
 
     # The delete used to be on the success path only. Scoring is the part that
-    # can raise -- `vmeasure` collects the whole contingency table to the driver
-    # -- so the one failure mode that matters left the table behind on S3
-    # exactly when nothing was going to come back for it.
+    # can raise -- `homogeneity_completeness` collects the whole contingency
+    # table to the driver -- so the one failure mode that matters left the
+    # table behind on S3 exactly when nothing was going to come back for it.
     try:
         assign = spark.read.parquet(out)
         # Track extents come from the full assignment table, not from `matched`:

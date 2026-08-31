@@ -9,7 +9,13 @@ import datetime as dt
 
 import pytest
 from pyspark.sql import Row
-from track_score import boundary_error, match_rates, score_arm, track_extents, vmeasure
+from track_score import (
+    boundary_error,
+    homogeneity_completeness,
+    match_rates,
+    score_arm,
+    track_extents,
+)
 
 _T0 = dt.datetime(2025, 6, 5, 8, 0, 0)
 
@@ -55,16 +61,15 @@ def _extents_from(matched):
 
 def test_perfect_segmentation_scores_one(spark):
     m = _matched(spark, [("T1", "F1", 10), ("T2", "F2", 10)])
-    v = vmeasure(m)
+    v = homogeneity_completeness(m)
     assert v["homogeneity"] == pytest.approx(1.0)
     assert v["completeness"] == pytest.approx(1.0)
-    assert v["v_measure"] == pytest.approx(1.0)
 
 
 def test_total_merge_has_completeness_one_and_low_homogeneity(spark):
     """One track holding both flights: nothing is scattered, everything is impure."""
     m = _matched(spark, [("T1", "F1", 10), ("T1", "F2", 10)])
-    v = vmeasure(m)
+    v = homogeneity_completeness(m)
     assert v["completeness"] == pytest.approx(1.0)
     assert v["homogeneity"] == pytest.approx(0.0, abs=1e-9)
 
@@ -72,7 +77,7 @@ def test_total_merge_has_completeness_one_and_low_homogeneity(spark):
 def test_total_fragmentation_has_homogeneity_one_and_low_completeness(spark):
     """One flight split across two tracks: every track is pure, nothing is whole."""
     m = _matched(spark, [("T1", "F1", 10), ("T2", "F1", 10)])
-    v = vmeasure(m)
+    v = homogeneity_completeness(m)
     assert v["homogeneity"] == pytest.approx(1.0)
     assert v["completeness"] == pytest.approx(0.0, abs=1e-9)
 
@@ -131,7 +136,7 @@ def test_score_arm_returns_a_flat_row_of_scalars(spark):
     """
     m = _matched(spark, [("T1", "F1", 10)])
     row = score_arm(m, _extents_from(m))
-    assert set(row) >= {"v_measure", "homogeneity", "completeness",
+    assert set(row) >= {"homogeneity", "completeness",
                         "clean_match_pct", "fragmented_pct", "merged_pct",
                         "n_flights", "n_tracks"}
     assert row["n_apdf_flights"] == 0
@@ -147,9 +152,9 @@ def test_boundary_error_on_an_empty_apdf_sample_is_none_not_zero(spark):
     ``float(e["off_p50"] or 0)`` coerced a NULL percentile to ``0.0`` -- and for
     boundary error, 0.0 seconds is *perfect*. An arm with no APDF coverage at all
     therefore outscored every arm that had actually been measured, which is the
-    one direction in which a degenerate default is dangerous. ``vmeasure`` and
-    ``match_rates`` degrade to 0.0 meaning "bad", so they are safe; this one
-    inverts, so it returns None.
+    one direction in which a degenerate default is dangerous.
+    ``homogeneity_completeness`` and ``match_rates`` degrade to 0.0 meaning
+    "bad", so they are safe; this one inverts, so it returns None.
     """
     m = _matched(spark, [("T1", "F1", 10)], t_source="nm_inferred")
     e = boundary_error(m, _extents_from(m))

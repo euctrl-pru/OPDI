@@ -9,11 +9,15 @@ The grid is deliberately wider than plausible on the low side: V6 stopped a swee
 with the curve still rising and read the result as "higher is always better" when
 it had simply not been followed far enough.
 
-The objective is ``clean_match_pct``, not ``v_measure``. Across the eight arms
-already benchmarked (Task 6), v_measure spans only 0.995952-0.997642 -- a range
-of 0.0017 -- while clean_match_pct spans 39.84-88.48, and worse, v_measure
-*misranks*: it places the best arm second-from-bottom. v_measure is still
-recorded per cell for reference; it is never the thing selected on.
+The objective is ``clean_match_pct``, not V-measure. Across the eight arms
+already benchmarked (Task 6), V-measure spanned only 0.995952-0.997642 -- a
+range of 0.0017 -- while clean_match_pct spans 39.84-88.48, and worse,
+V-measure *misranked*: it placed the best arm second-from-bottom. That is why
+V-measure was removed from ``track_score.py`` outright (Task 12) rather than
+merely left unselected here -- a number that misranks the arms is not worth
+carrying alongside one that doesn't. Only ``homogeneity`` and ``completeness``
+-- the merging and fragmentation measures V-measure was averaging -- are still
+recorded per cell, for reference; neither is the thing selected on.
 
 **This grid is 235 cells and runs for hours.** Each cell is scored and appended
 to the output CSV immediately, with a flush after every row, so a crash or a
@@ -247,8 +251,7 @@ def main():
     best = max(rows, key=lambda r: float(r["clean_match_pct"]))
     print(
         f"\nbest: gap={best['gap_minutes']} lowgap={best['low_alt_gap_minutes']} "
-        f"lowalt={best['low_alt_ft']}ft  clean={float(best['clean_match_pct']):.2f}%  "
-        f"v={float(best['v_measure']):.4f}"
+        f"lowalt={best['low_alt_ft']}ft  clean={float(best['clean_match_pct']):.2f}%"
     )
     print(f"-> {out}")
 
