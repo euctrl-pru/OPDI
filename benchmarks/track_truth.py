@@ -592,7 +592,7 @@ def load_flight_intervals(
     # more than once cache it themselves (see track_methods.main).
     #
     # **Nothing above this line moved.** `flight_key`, `t_source`, the filters
-    # and the airborne `t_off`/`t_land` are untouched, and the four new columns
+    # and the airborne `t_off`/`t_land` are untouched, and the gate columns
     # are added to the select rather than replacing anything, so every metric
     # computed over `[t_off, t_land]` is bit-identical to what it was.
     #
