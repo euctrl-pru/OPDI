@@ -19,8 +19,12 @@ recorded per cell for reference; it is never the thing selected on.
 to the output CSV immediately, with a flush after every row, so a crash or a
 killed job loses at most the cell in flight. ``--resume`` reads whatever the
 output file already has and skips any (gap_minutes, low_alt_gap_minutes,
-low_alt_ft) triple already present, so a resumed run picks up where the last one
-stopped rather than repeating cells that already cost cluster time. The
+low_alt_ft, callsign_lookback_minutes) quadruple already present, so a resumed
+run picks up where the last one stopped rather than repeating cells that
+already cost cluster time. A row from a three-axis sweep (written before
+``callsign_lookback_minutes`` existed) has no fourth column at all; ``cell_key``
+reads that as the unset cell rather than raising, so ``--resume`` against a
+committed three-axis CSV still skips correctly. The
 provenance record and the final ``best:`` line are computed from every row in the
 file, including ones written by an earlier, interrupted run -- not only the rows
 this invocation computed.

@@ -109,9 +109,9 @@ class SegmentationParams:
     def from_config(cls, config) -> "SegmentationParams":
         """Build the engine's parameters from ``OPDIConfig``.
 
-        ``config.SegmentationConfig`` carries the same seven fields with the same
-        defaults, and this is the only thing that reads it. Without this method
-        the two were a coincidence rather than a link: someone setting
+        ``config.SegmentationConfig`` carries every field of ``SegmentationParams``
+        with the same defaults, and this is the only thing that reads it. Without
+        this method the two were a coincidence rather than a link: someone setting
         ``OPDIConfig().segmentation.low_alt_ft`` would have observed no effect and
         no error. ``tests/test_segmentation_base.py`` asserts the two default
         sets are identical field by field, so they cannot drift apart again.
