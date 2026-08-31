@@ -69,6 +69,7 @@ from track_score import boundary_offsets  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
 from opdi.pipeline.segmentation import SegmentationParams  # noqa: E402
+from opdi.pipeline.segmentation.base import FT_PER_M  # noqa: E402
 
 __all__ = ["inside_window", "containment_census", "census_ground_truth",
            "null_rates", "gap_boundary_nulls",
@@ -682,10 +683,20 @@ def run_traffic_fill(spark, args, period_cfg, days, out_path) -> dict:
     ``traffic``'s own fixed 10-minute threshold by default, not the pipeline's
     configurable ``gap_minutes``, because this measures A3's behaviour
     specifically.
+
+    ``osn_tracks_clean``/``tracks_clean`` store ``baro_altitude`` in metres --
+    storage is SI, ``cleaning/native.py`` and ``segmentation/base.py`` both
+    convert only at the point of use -- but ``gap_boundary_nulls`` reads
+    ``baro_altitude_ft``, the aviation-unit name its own field names promise.
+    Converting here, once, at the point of use is that same rule; ``FT_PER_M``
+    is imported from ``segmentation/base.py`` rather than retyped, so the
+    pipeline's conversion and this one can never drift apart. No other column
+    ``gap_boundary_nulls`` reads (``icao24``, ``event_time``, ``on_ground``) is
+    unit-bearing, so this is the only conversion this job needs.
     """
     sv = spark.read.parquet(period_cfg["tracks"]).filter(
         F.to_date("event_time").isin(days)
-    ).cache()
+    ).withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M).cache()
     n_sv = sv.count()
     print(f"{n_sv:,} samples")
 

@@ -55,3 +55,36 @@ def test_counts_turnarounds_with_no_gap_at_all(spark):
     out = gap_boundary_nulls(sv, gap_minutes=10.0)
     assert out["n_gaps"] == 0
     assert out["n_no_gap_turnarounds"] >= 1
+
+
+def test_two_short_turnarounds_across_a_real_flight_do_not_merge(spark):
+    """A "maximal run" is bounded by on_ground transitions, not just filtered.
+
+    A run of on_ground samples is only a "no-gap turnaround" if it holds
+    together as one continuous stretch. A wrong implementation that simply
+    groups every on_ground=True row for an icao24 -- ignoring the airborne
+    samples that fall between them -- would treat two short, genuine ground
+    stops around a real flight as one long stretch, because the timestamps of
+    the on_ground-only rows alone still span more than gap_minutes with no gap
+    between *those* timestamps exceeding it either.
+
+    Here: b2 sits on stand for 2 minutes (10:00-10:02), flies (10:05, airborne),
+    then sits on stand again for 3 minutes (10:08-10:11). Each real stop is far
+    too short to be a turnaround. But the on_ground-only timestamps alone --
+    10:00, 10:02, 10:08, 10:11 -- span 11 minutes (> the 10-minute threshold)
+    with consecutive gaps of only 2, 6 and 3 minutes (none > the threshold), so
+    an implementation that does not respect the airborne interruption would
+    wrongly count this as a turnaround. The correct implementation must not:
+    on_ground never holds continuously for more than 3 minutes at a stretch.
+    """
+    sv = spark.createDataFrame(
+        [("b2", _ts("2025-06-05T10:00:00"), 300.0, True),
+         ("b2", _ts("2025-06-05T10:02:00"), 300.0, True),
+         ("b2", _ts("2025-06-05T10:05:00"), 5000.0, False),
+         ("b2", _ts("2025-06-05T10:08:00"), 300.0, True),
+         ("b2", _ts("2025-06-05T10:11:00"), 300.0, True)],
+        "icao24 string, event_time timestamp, baro_altitude_ft double, "
+        "on_ground boolean",
+    )
+    out = gap_boundary_nulls(sv, gap_minutes=10.0)
+    assert out["n_no_gap_turnarounds"] == 0
