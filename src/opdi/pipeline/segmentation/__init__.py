@@ -10,6 +10,7 @@ from opdi.pipeline.segmentation.base import (
     altitude_ft,
     assign_track_id,
     gap_minutes,
+    lookback_minutes,
     segment_window,
     speed_kt,
 )
@@ -22,4 +23,5 @@ __all__ = [
     "gap_minutes",
     "altitude_ft",
     "speed_kt",
+    "lookback_minutes",
 ]

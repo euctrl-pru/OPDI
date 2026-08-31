@@ -1161,6 +1161,9 @@ class SegmentationConfig:
     low_alt_ft: float = 5000.0
     """Altitude below which the shorter gap rule applies (feet)."""
 
+    callsign_lookback_minutes: float | None = None
+    """Bound on A8's callsign lookback, in minutes. ``None`` follows ``gap_minutes``."""
+
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""
 

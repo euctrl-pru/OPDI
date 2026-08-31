@@ -48,7 +48,7 @@ from track_methods import PERIODS, attach_airport_context  # noqa: E402
 from track_score import score_arm, track_extents  # noqa: E402
 
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
-from opdi.pipeline.segmentation.methods import legacy  # noqa: E402
+from opdi.pipeline.segmentation.methods import ARMS  # noqa: E402
 
 #: Production is 30. Swept from well below to well above so the optimum is
 #: interior to the grid rather than at its edge.
@@ -58,14 +58,24 @@ LOW_ALT_GAP_MIN = [3, 5, 10, 15, 20, 30]
 #: Production is 1524 m = 5,000 ft. Aviation units here, per the unit rule.
 LOW_ALT_FT = [1000, 2500, 5000, 7500, 10000]
 
-#: The three-column key identifying a grid cell, used for both the CSV
+#: The four-column key identifying a grid cell, used for both the CSV
 #: fieldnames' identity and the resume skip-set.
-CELL_KEYS = ("gap_minutes", "low_alt_gap_minutes", "low_alt_ft")
+CELL_KEYS = ("gap_minutes", "low_alt_gap_minutes", "low_alt_ft",
+             "callsign_lookback_minutes")
 
 
 def cell_key(row: dict) -> tuple:
-    """The (gap_minutes, low_alt_gap_minutes, low_alt_ft) identity of a row."""
-    return (int(row["gap_minutes"]), int(row["low_alt_gap_minutes"]), int(row["low_alt_ft"]))
+    """The grid-cell identity, tolerant of CSVs written before the 4th axis.
+
+    A row from a three-axis sweep has no `callsign_lookback_minutes` at all and
+    must read as the unset cell -- otherwise `--resume` against any committed V1
+    sweep file raises KeyError instead of skipping.
+    """
+    out = []
+    for k in CELL_KEYS:
+        v = row.get(k, "")
+        out.append(None if v in ("", None, "None") else float(v))
+    return tuple(out)
 
 
 def load_existing_rows(out: Path) -> list:
@@ -110,6 +120,13 @@ def main():
                     help=f"override LOW_ALT_GAP_MIN (default {LOW_ALT_GAP_MIN})")
     ap.add_argument("--grid-low-alt-ft", nargs="+", type=int, default=None,
                     help=f"override LOW_ALT_FT (default {LOW_ALT_FT})")
+    ap.add_argument("--method", default="legacy", choices=sorted(ARMS),
+                    help="which arm to sweep; the grid is the same for all of "
+                         "them, but only `recommended` reads --grid-lookback")
+    ap.add_argument("--grid-lookback", nargs="+", type=float, default=None,
+                    help="callsign_lookback_minutes values. Omit to leave it "
+                         "unset, i.e. following gap_minutes -- which is what "
+                         "every cell of the legacy sweep did.")
     args = ap.parse_args()
     out_name = args.out_name or f"sweep_{args.period}.csv"
 
@@ -129,9 +146,10 @@ def main():
     gap_grid = args.grid_gap or GAP_MIN
     low_gap_grid = args.grid_low_alt_gap or LOW_ALT_GAP_MIN
     low_ft_grid = args.grid_low_alt_ft or LOW_ALT_FT
-    grid = list(itertools.product(gap_grid, low_gap_grid, low_ft_grid))
+    lookback_grid = args.grid_lookback if args.grid_lookback else [None]
+    grid = list(itertools.product(gap_grid, low_gap_grid, low_ft_grid, lookback_grid))
     # a low-altitude rule looser than the general one is inert
-    grid = [(g, lg, lft) for (g, lg, lft) in grid if lg <= g]
+    grid = [c for c in grid if c[1] <= c[0]]
     todo = [cell for cell in grid if cell not in skip]
     print(f"{len(grid)} valid cells, {len(todo)} to compute")
 
@@ -153,7 +171,7 @@ def main():
         n_gt = gt.count()
         print(f"{n_sv:,} samples, {n_gt:,} ground-truth flights")
 
-        rule = legacy()
+        rule = ARMS[args.method]()
 
         # Header fieldnames are fixed up front from the first computed row plus
         # the cell-key columns, so every append uses the same schema regardless
@@ -167,10 +185,11 @@ def main():
         fh = out.open(mode, newline="")
         writer = None
         try:
-            for i, (g, lg, lft) in enumerate(todo, 1):
+            for i, (g, lg, lft, lb) in enumerate(todo, 1):
                 params = SegmentationParams(
                     gap_minutes=float(g), low_alt_gap_minutes=float(lg),
                     low_alt_ft=float(lft),
+                    callsign_lookback_minutes=lb,
                 )
                 assigned = (
                     assign_track_id(sv, rule, params)
@@ -181,6 +200,7 @@ def main():
                 row = score_arm(matched, extents)
                 row.update({
                     "gap_minutes": g, "low_alt_gap_minutes": lg, "low_alt_ft": lft,
+                    "callsign_lookback_minutes": lb,
                     "period": args.period,
                 })
 
@@ -193,8 +213,8 @@ def main():
                 fh.flush()
 
                 print(
-                    f"  [{i}/{len(todo)}] gap={g} lowgap={lg} lowalt={lft}ft  "
-                    f"v={row['v_measure']:.4f} clean={row['clean_match_pct']:.2f}%"
+                    f"  [{i}/{len(todo)}] gap={g} lowgap={lg} lowalt={lft}ft "
+                    f"lookback={lb}  clean={row['clean_match_pct']:.2f}%"
                 )
         finally:
             fh.close()

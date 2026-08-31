@@ -42,6 +42,7 @@ from opdi.pipeline.segmentation.base import (
     BreakRule,
     altitude_ft,
     gap_minutes,
+    lookback_minutes,
     segment_window,
     speed_kt,
 )
@@ -457,7 +458,7 @@ def recommended() -> BreakRule:
         # is itself a break, so there is nothing to carry across.
         recent = (
             F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
-        ) / 60.0 < p.gap_minutes
+        ) / 60.0 < lookback_minutes(p)
 
         callsign_change = (
             real.isNotNull()
