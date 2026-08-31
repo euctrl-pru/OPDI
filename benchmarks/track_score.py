@@ -443,6 +443,27 @@ def score_arm_gated(matched: DataFrame, extents: DataFrame,
     and an arm scored through ``score_arm`` carry the same numbers under the
     same names, and a CSV gains columns rather than changing them.
 
+    **The two rates are not over the same flight population, and the
+    denominators must be read before the percentages are.** ``n_flights``
+    counts flights with at least one sample inside ``[t_off, t_land]``;
+    ``gate_n_flights`` counts flights with at least one sample inside the wider
+    gate interval, which admits flights whose ADS-B never covered the airborne
+    leg at all -- a departure seen only on the taxiway, say. So
+    ``gate_n_flights >= n_flights``, and a reader setting
+    ``gate_clean_match_pct`` beside ``clean_match_pct`` without checking the
+    counts would read a change of *denominator* as a taxi-attachment failure.
+    Report both counts wherever both rates are reported.
+
+    **Not a drop-in ``run_arm`` scorer.** ``track_methods.run_arm`` calls
+    ``score(matched, extents, assign)``, and the third parameter here is
+    ``matched_gate``, not ``assign`` -- the same arity with a different
+    meaning. Passing this function as the ``score`` hook binds the raw
+    assignment table to ``matched_gate``. It fails rather than quietly
+    mis-scoring, since ``assign`` carries no ``flight_key`` -- but it fails at
+    scoring time, after the arm has been built and written. Compose it in a
+    caller's own closure, which builds ``matched_gate`` from the same
+    ``assign`` and ``gt``.
+
     Boundary error is computed once, from the airborne match. It is defined
     against ``t_off``/``t_land`` -- which ``overlap_join`` emits whichever
     interval decided membership -- so computing it a second time would produce

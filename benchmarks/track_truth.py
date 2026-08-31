@@ -217,6 +217,18 @@ def gate_buffers(gt: DataFrame) -> tuple:
     rather than their midpoint, which makes the quantity untestable at fixture
     scale and, more to the point, not the median this docstring names. The
     difference is invisible on a real sample and decisive on a small one.
+
+    **The ``dep_measured`` guard is what makes ``b_dep`` a measurement, and it
+    is not redundant with a NULL check.** ``aobt`` is never NULL on real data
+    -- 0 of 30,369 flights on 2025-06-05, because it falls back to NM's
+    ``AOBT_3`` -- so a NULL filter would exclude nothing. But 37% of those rows
+    have ``t_off`` *derived* as ``aobt + TAXI_TIME_3``, and for them
+    ``t_off - aobt`` is identically ``TAXI_TIME_3``. Without the guard the
+    "measured median taxi-out" would quietly become a restatement of NM's own
+    taxi model, fitted to itself. ``arr_measured`` guards the same way on the
+    arrival side, where ``aibt`` can exist without a measured ``aldt``.
+    ``tests/test_track_gate_interval.py`` carries a fixture row whose values
+    move the median if the guard is dropped.
     """
     row = gt.select(
         F.median(
@@ -235,7 +247,8 @@ def gate_buffers(gt: DataFrame) -> tuple:
     return (float(row["b_dep"] or 0.0), float(row["b_arr"] or 0.0))
 
 
-def attach_gate_interval(gt: DataFrame, b_dep_s: float, b_arr_s: float) -> DataFrame:
+def attach_gate_interval(gt: DataFrame, b_dep_s: float, b_arr_s: float,
+                         window: tuple = None) -> DataFrame:
     """Add the gate-to-gate interval beside the airborne one.
 
     ``least``/``greatest`` are not defensive padding. APDF is operational data
@@ -250,7 +263,33 @@ def attach_gate_interval(gt: DataFrame, b_dep_s: float, b_arr_s: float) -> DataF
     about the movement times ATOT/ALDT. The two travel together because a gate
     interval can be measured at one end and modelled at the other, and a
     consumer cutting by aerodrome needs to know which.
+
+    **``gate_in_window`` exists because the sample window bounds the airborne
+    interval and cannot bound this one.** ``load_flight_intervals`` keeps only
+    flights whose ``[t_off, t_land]`` lies inside the sampled days, and the
+    gate interval is attached *after* that filter and reaches outside it by
+    construction: a flight can be in-window airborne and out-of-window at the
+    gate. Measured on 2025-06-05, 52 flights of 30,369 push back before the
+    window opens and 49 go in-block after it closes -- 0.33%. Their taxi
+    samples are clipped by the caller's own ``to_date(event_time).isin(days)``
+    filter, so their gate rates are computed over a truncated interval, and in
+    the *flattering* direction: fewer samples is fewer chances to fragment.
+
+    The column is exposed and **not** filtered on, deliberately. Filtering here
+    would change which flights the gate metrics cover without saying so;
+    exposing it lets the paper report the gate rate on the unaffected subset
+    and quantify what the remainder costs, which is what the containment census
+    in ``track_diagnostics.py`` does for the airborne window. ``window`` is the
+    ``(lo, hi)`` pair from :func:`_sample_window`; ``None`` means no window was
+    given and the column is ``True`` throughout, mirroring how
+    ``load_flight_intervals`` degrades ``in_window`` to ``F.lit(True)``.
     """
+    in_window = (
+        F.lit(True)
+        if window is None
+        else (F.col("t_off_block") >= F.lit(window[0]).cast("timestamp"))
+        & (F.col("t_in_block") < F.lit(window[1]).cast("timestamp"))
+    )
     return (
         gt.withColumn("gate_dep_measured", F.col("aobt").isNotNull())
         .withColumn("gate_arr_measured", F.col("aibt").isNotNull())
@@ -274,6 +313,8 @@ def attach_gate_interval(gt: DataFrame, b_dep_s: float, b_arr_s: float) -> DataF
                 F.col("t_land"),
             ),
         )
+        # Last, so it can read the two columns above.
+        .withColumn("gate_in_window", in_window)
     )
 
 
@@ -554,12 +595,17 @@ def load_flight_intervals(
     # and the airborne `t_off`/`t_land` are untouched, and the four new columns
     # are added to the select rather than replacing anything, so every metric
     # computed over `[t_off, t_land]` is bit-identical to what it was.
+    #
+    # `window` is handed on so `gate_in_window` can say which flights the gate
+    # interval carries outside the sampled days. It is a flag, not a filter --
+    # see attach_gate_interval.
     b_dep_s, b_arr_s = gate_buffers(flights)
-    return attach_gate_interval(flights, b_dep_s, b_arr_s).select(
+    return attach_gate_interval(flights, b_dep_s, b_arr_s, window=window).select(
         "flight_key", "icao24", "callsign", "gt_adep", "gt_ades",
         "t_off", "t_land", "aobt", "aibt", "t_source",
         "dep_measured", "arr_measured", "day",
         "t_off_block", "t_in_block", "gate_dep_measured", "gate_arr_measured",
+        "gate_in_window",
     )
 
 
