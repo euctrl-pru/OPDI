@@ -123,3 +123,42 @@ def test_pre_gap_stale_signature_separates_boundary_from_baseline(spark):
     # baseline: 5 other samples, none a repeat, none NULL
     assert out["other_repeat_pct"] == 0.0
     assert out["other_null_pct"] == 0.0
+
+
+def test_gate_interval_summary_reports_coverage_buffers_and_widening(spark):
+    """The numbers section D quotes must come from this function, so pin them.
+
+    Two flights. f1 is fully APDF-measured, off-block 600 s before take-off,
+    in-block 300 s after landing, gate interval inside the window. f2 has no
+    block times (the modelled half), and its gate interval crosses the window
+    edge. Coverage 50/50, buffers the measured medians from f1 alone, widening
+    medians bracketed by the two flights.
+    """
+    from track_diagnostics import gate_interval_summary
+
+    gt = spark.createDataFrame(
+        [
+            ("f1", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
+             _ts("2025-06-05T09:50:00"), _ts("2025-06-05T11:05:00"),
+             True, True, _ts("2025-06-05T09:50:00"), _ts("2025-06-05T11:05:00"),
+             True, True, True),
+            ("f2", _ts("2025-06-05T00:05:00"), _ts("2025-06-05T01:00:00"),
+             None, None, False, False,
+             _ts("2025-06-04T23:55:00"), _ts("2025-06-05T01:05:00"),
+             False, False, False),
+        ],
+        "flight_key string, t_off timestamp, t_land timestamp, "
+        "aobt timestamp, aibt timestamp, dep_measured boolean, "
+        "arr_measured boolean, t_off_block timestamp, t_in_block timestamp, "
+        "gate_dep_measured boolean, gate_arr_measured boolean, "
+        "gate_in_window boolean",
+    )
+    out = gate_interval_summary(gt)
+    assert out["gate_dep_measured_pct"] == 50.0
+    assert out["gate_arr_measured_pct"] == 50.0
+    assert out["gate_b_dep_s"] == 600.0
+    assert out["gate_b_arr_s"] == 300.0
+    # both flights widen 600 s on departure and 300 s on arrival
+    assert out["gate_widen_dep_p50_s"] == 600.0
+    assert out["gate_widen_arr_p50_s"] == 300.0
+    assert out["gate_outside_window_pct"] == 50.0

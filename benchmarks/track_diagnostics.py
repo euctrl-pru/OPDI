@@ -73,7 +73,7 @@ from opdi.pipeline.segmentation.base import FT_PER_M  # noqa: E402
 
 __all__ = ["inside_window", "containment_census", "census_ground_truth",
            "null_rates", "gap_boundary_nulls", "pre_gap_stale_signature",
-           "boundary_histogram"]
+           "gate_interval_summary", "boundary_histogram"]
 
 #: Days added on each side of the sampled window when loading ground truth for
 #: the census. One is enough for any flight in this data: the longest ECAC leg
@@ -100,6 +100,18 @@ BIN_SECONDS = 30
 CONTAINMENT_FIELDS = [
     "period", "n_gt_flights", "n_wholly_inside", "n_clipped_start",
     "n_clipped_end", "pct_kept", "median_observed_fraction_clipped",
+    # The gate-to-gate interval, summarised per period so the paper reads these
+    # from a CSV instead of quoting a measurement made in conversation. Per-side
+    # coverage is the load-bearing pair: `aobt` has an NM fallback and sits near
+    # 100%, `aibt` is APDF-only with none. The buffers are the measured medians
+    # `gate_buffers` returns to callers and, until this row existed, nothing
+    # persisted. `gate_outside_window_pct` is the share of kept flights whose
+    # gate interval crosses the sampled window's edge -- their taxi samples are
+    # clipped by the day filter, in the flattering direction.
+    "gate_dep_measured_pct", "gate_arr_measured_pct",
+    "gate_b_dep_s", "gate_b_arr_s",
+    "gate_widen_dep_p50_s", "gate_widen_arr_p50_s",
+    "gate_outside_window_pct",
 ]
 HIST_FIELDS = ["arm", "edge", "bin_lower_s", "bin_upper_s", "n"]
 TRAFFIC_FILL_FIELDS = [
@@ -570,6 +582,51 @@ def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) 
     }
 
 
+def gate_interval_summary(gt: DataFrame) -> dict:
+    """Per-period facts about the gate-to-gate interval, from V1's own frame.
+
+    *gt* is ``load_flight_intervals``'s output -- the flights V1 scores --
+    which since Task 11 carries the block-time columns and flags this reads.
+    Everything here existed transiently before (``gate_buffers`` computes the
+    medians and returns them to a caller that uses and drops them); this
+    persists the numbers the paper needs, so "62% of arrivals carry a measured
+    in-block time" is a cell in a committed CSV rather than a figure someone
+    once printed.
+
+    Widening medians are ``t_off - t_off_block`` and ``t_in_block - t_land``:
+    how much of each flight the airborne interval never saw, per side. The
+    clamp in ``attach_gate_interval`` guarantees both are >= 0.
+    """
+    from track_truth import gate_buffers
+
+    b_dep, b_arr = gate_buffers(gt)
+    widen_dep = F.col("t_off").cast("long") - F.col("t_off_block").cast("long")
+    widen_arr = F.col("t_in_block").cast("long") - F.col("t_land").cast("long")
+
+    agg = gt.select(
+        F.count(F.lit(1)).alias("n"),
+        F.sum(F.when(F.col("gate_dep_measured"), 1).otherwise(0)).alias("dep_m"),
+        F.sum(F.when(F.col("gate_arr_measured"), 1).otherwise(0)).alias("arr_m"),
+        F.sum(F.when(~F.col("gate_in_window"), 1).otherwise(0)).alias("outside"),
+    ).collect()[0]
+    n = agg["n"] or 0
+    pct = lambda x: round(100.0 * (x or 0) / n, 2) if n else 0.0  # noqa: E731
+
+    p50 = gt.select(
+        widen_dep.alias("wd"), widen_arr.alias("wa")
+    ).approxQuantile(["wd", "wa"], [0.5], 0.001)
+
+    return {
+        "gate_dep_measured_pct": pct(agg["dep_m"]),
+        "gate_arr_measured_pct": pct(agg["arr_m"]),
+        "gate_b_dep_s": round(b_dep, 1),
+        "gate_b_arr_s": round(b_arr, 1),
+        "gate_widen_dep_p50_s": round(p50[0][0], 1) if p50 and p50[0] else None,
+        "gate_widen_arr_p50_s": round(p50[1][0], 1) if p50 and p50[1] else None,
+        "gate_outside_window_pct": pct(agg["outside"]),
+    }
+
+
 def pre_gap_stale_signature(
     sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES
 ) -> dict:
@@ -678,6 +735,9 @@ def run_containment(spark, args, period_cfg, days, out_path) -> dict:
     # day reaches into a month `months` does not load. It is printed below and
     # returned as its own input count either way.
     v1 = track_truth.load_flight_intervals(spark, period_cfg["months"], days)
+    # The gate-interval summary reads the same frame the cross-check needs, so
+    # it rides along here rather than paying a second load.
+    row.update(gate_interval_summary(v1))
     n_kept = v1.count()
     missed = v1.join(inside, "flight_key", "left_anti").count()
     inside.unpersist()
