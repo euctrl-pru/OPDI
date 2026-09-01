@@ -362,6 +362,96 @@ def test_take_off_roll_ignores_a_single_fast_sample(spark):
     assert out.filter(F.col("type") == "take-off-roll").count() == 0
 
 
+def _two_aerodrome_crossing_track(spark):
+    """One track that crosses a runway called 07 at each end of its flight.
+
+    An hour apart, so nothing but the traversal key can tell the two apart.
+    Duplicate runway designators between origin and destination are ordinary --
+    07/25 and 09/27 are among the commonest in Europe -- so a key that cannot
+    separate them silently merges a departure aerodrome's crossing with an
+    arrival aerodrome's.
+    """
+    samples = [
+        {"t": base + i * 5, "velocity": _mps(16), "baro_altitude": 0.0,
+         "vert_rate": 0.0, "heading": 160.0}
+        for base in (0, 3600) for i in range(7)
+    ]
+    return _prepared(make_track(spark, samples))
+
+
+def _two_aerodrome_crossing_traversals(spark):
+    """Two crossings of a runway named 07, at two different aerodromes.
+
+    ``trace_id`` is 0 for both, which is not a fixture convenience but what the
+    detector produces: it restarts per (track, OSM way) and so carries no
+    information across aerodromes.
+    """
+    common = dict(
+        max_gs_kt=18.0, median_track_deg=160.0, align_deg=88.0,
+        entry_height_ft=0.0, exit_height_ft=0.0,
+    )
+    first = _traversal(spark, "crossing", 0, 30, apt_ident="EBBR", **common)
+    second = _traversal(spark, "crossing", 3600, 3630, apt_ident="EHAM", **common)
+    return first.unionByName(second)
+
+
+def _roll_across_a_coverage_hole(spark):
+    """Two fast samples 200 s apart and nothing in between.
+
+    Both are above the roll speed, so a hold measured as wall-clock reads 200 s
+    and confirms a take-off roll that was never observed. A traversal may
+    legitimately span a gap of up to `airport_trace_gap_seconds` (300 s), so
+    this is inside the shape of a real traversal, not a malformed one.
+    """
+    return _prepared(make_track(spark, [
+        {"t": 0, "velocity": _mps(60), "baro_altitude": 0.0,
+         "vert_rate": 0.0, "heading": 70.0},
+        {"t": 200, "velocity": _mps(60), "baro_altitude": 0.0,
+         "vert_rate": 0.0, "heading": 70.0},
+    ]))
+
+
+def test_take_off_roll_is_stamped_at_the_start_of_the_roll(spark):
+    """The hold confirms the roll; it does not date it.
+
+    `_departure_track` first exceeds 50 kt at t=25 s and holds it to the end,
+    so `runway_roll_min_seconds` is satisfied at t=30. Reporting t=30 would put
+    every T07 one hold-duration late, always in the same direction -- the bias
+    this module exists to remove from `ATOT`, reintroduced under a new name.
+    """
+    out = runway_milestones(_departure_track(spark), _departure_traversal(spark),
+                            EventConfig())
+    roll = out.filter(F.col("type") == "take-off-roll").collect()
+    assert len(roll) == 1
+    assert (roll[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(25.0)
+
+
+def test_take_off_roll_does_not_hold_across_a_coverage_hole(spark):
+    """A 200 s gap is not a 200 s roll."""
+    out = runway_milestones(_roll_across_a_coverage_hole(spark),
+                            _traversal(spark, "departure", 0, 250), EventConfig())
+    assert out.filter(F.col("type") == "take-off-roll").count() == 0
+
+
+def test_two_crossings_of_a_same_named_runway_stay_two_crossings(spark):
+    """One 07 at the origin, another 07 at the destination, an hour apart.
+
+    With a traversal key blind to the aerodrome these collapse into a single
+    pair whose entry is the origin's and whose exit is the destination's --
+    one "crossing" straddling the entire flight, and two real ones lost.
+    """
+    out = runway_milestones(_two_aerodrome_crossing_track(spark),
+                            _two_aerodrome_crossing_traversals(spark),
+                            EventConfig()).collect()
+
+    assert len(out) == 4
+    seen = {(r["type"], json.loads(r["info"])["apt_icao"]) for r in out}
+    assert seen == {
+        ("runway-crossing-entry", "EBBR"), ("runway-crossing-vacated", "EBBR"),
+        ("runway-crossing-entry", "EHAM"), ("runway-crossing-vacated", "EHAM"),
+    }
+
+
 def test_a_crossing_emits_only_the_two_crossing_types(spark):
     out = runway_milestones(_crossing_track(spark), _crossing_traversal(spark),
                             EventConfig())

@@ -80,10 +80,30 @@ KT_PER_MPS = 1.94384
 AIRBORNE_HYSTERESIS_FT = 5.0
 
 #: Half-width of the dead band around the threshold plane, in nautical miles.
-#: 0.05 NM is about 300 ft -- under half a second at approach speed, so it can
-#: never move ``landing``, but enough that a sample sitting on the plane does
-#: not toggle the trigger.
+#: 0.05 NM is 304 ft, which at 140 kt (236 ft/s) is about 1.3 s -- not a
+#: fraction of a second, as an earlier version of this comment claimed. It does
+#: not matter, and the reason it does not matter is the thing to remember: the
+#: dead band gates *confirmation*, not the reported instant. ``landing`` is
+#: interpolated to the sample pair that straddles the bare plane, which is
+#: earlier than the confirming sample and unaffected by how wide the band is.
+#: What the width buys is that a sample sitting on the plane cannot toggle the
+#: trigger.
 THRESHOLD_PLANE_HYSTERESIS_NM = 0.05
+
+#: Longest gap between two consecutive samples that a take-off roll may span,
+#: in seconds. The hold that confirms ``take-off-roll`` is wall-clock -- the
+#: time between the first fast sample and a later one -- and a traversal is
+#: allowed to span a gap of up to ``airport_trace_gap_seconds`` (300 s), so
+#: without this bound two fast samples either side of a four-minute coverage
+#: hole satisfy a 5 s hold and stamp a roll that was never observed. Thirty
+#: seconds is six times the 5 s nominal ADS-B cadence: generous enough that
+#: ordinary reception dropouts do not break a real roll, short enough that the
+#: hold measures continuous observation rather than elapsed time.
+#:
+#: A module constant rather than an ``EventConfig`` field only because the
+#: config surface is fixed this round; it is a tuning parameter and belongs
+#: there eventually.
+ROLL_MAX_GAP_SECONDS = 30.0
 
 #: Half-width of the dead band around the go-around trigger and recovery
 #: heights, in feet. Wider than ``AIRBORNE_HYSTERESIS_FT`` because it guards a
@@ -91,20 +111,30 @@ THRESHOLD_PLANE_HYSTERESIS_NM = 0.05
 #: normal approach must not enter and leave the trigger repeatedly.
 GOAROUND_HYSTERESIS_FT = 50.0
 
-#: What a traversal is, for windowing purposes. ``trace_id`` is per
-#: ``(track, osm_id)``, so within one runway direction it distinguishes a
-#: second traversal of the same strip; the pair is unique in practice because a
-#: strip is one OSM way.
-TRAVERSAL_KEY = ("track_id", "rwy_ident", "trace_id")
+#: What a traversal is, for windowing purposes.
+#:
+#: ``apt_ident`` is in the key and has to be. ``trace_id`` restarts at 0 for
+#: every ``(track_id, hexaero_osm_id)``, so it carries no information across
+#: aerodromes -- and runway designators repeat: a flight departing 07 at its
+#: origin and crossing a runway also called 07 at its destination produced two
+#: traversals with an identical ``(track_id, "07", "0")``. Everything windowed
+#: on that key then collapsed them into one, giving a single crossing pair
+#: whose entry came from the origin and whose exit came from the destination,
+#: straddling the entire flight. 07/25 and 09/27 are among the commonest
+#: designators in Europe, so this was not a corner case.
+#:
+#: The four together are unique: a runway *direction* belongs to exactly one
+#: strip at one aerodrome, and ``trace_id`` separates repeat traversals of it.
+TRAVERSAL_KEY = ("track_id", "apt_ident", "rwy_ident", "trace_id")
 
 #: Constant-per-traversal columns carried through :func:`threshold_crossings`
 #: by riding along in ``partition_cols``. They do not change the partitioning
 #: -- they are functionally dependent on :data:`TRAVERSAL_KEY` -- and carrying
 #: them this way avoids a second join back to the traversal frame purely to
 #: rebuild ``info``. The same trick ``calculate_ring_crossing_events`` uses for
-#: the aerodrome position.
-TRAVERSAL_INFO = ("apt_ident", "traversal_class", "align_deg", "max_gs_kt",
-                  "osn_flight_id")
+#: the aerodrome position. Disjoint from :data:`TRAVERSAL_KEY`, because the two
+#: are concatenated into one ``partition_cols`` list.
+TRAVERSAL_INFO = ("traversal_class", "align_deg", "max_gs_kt", "osn_flight_id")
 
 #: The standard event frame, as ``events.py`` shapes it. Declared explicitly so
 #: a disabled configuration can return an empty frame of exactly this shape
@@ -459,14 +489,31 @@ def _at_extreme(sdf: DataFrame, ascending: bool) -> DataFrame:
 
 
 def _roll_start(sdf: DataFrame, config: "EventConfig") -> DataFrame:
-    """The first sample whose roll speed has been held long enough.
+    """The sample at which the take-off roll *began*.
 
     Run-length over the ordered window: mark the fast samples, sessionise where
-    fastness *begins*, measure each session from its own start, and take the
-    first sample that has reached ``runway_roll_min_seconds``. A single fast
-    sample -- a high-speed turn-off, a spike in the velocity field -- has a
-    session length of zero and never qualifies, which is the whole point of the
-    threshold.
+    fastness begins, and measure each run from its own start.
+
+    **The hold is a confirmation criterion, not a delay.**
+    ``runway_roll_min_seconds`` decides *whether* a run of fast samples is a
+    take-off roll; it does not decide *when* the roll started, and the answer to
+    that is the run's first sample. Reporting the sample at which the hold was
+    satisfied instead would put ``take-off-roll`` one hold-duration plus up to a
+    sample interval late on every departure -- a systematic bias, always in the
+    same direction, of exactly the kind this module's docstring indicts
+    ``ATOT`` for. So the run is qualified on its *maximum* hold and then
+    reported at its *first* row, which also keeps the position and the
+    timestamp on the same sample.
+
+    A single fast sample -- a high-speed turn-off, a spike in the velocity
+    field -- forms a run whose maximum hold is zero and never qualifies, which
+    is what the threshold is for.
+
+    The run also breaks across a gap wider than :data:`ROLL_MAX_GAP_SECONDS`.
+    Without that, two fast samples either side of a coverage hole are a run
+    holding for the width of the hole, and a traversal is allowed to span up to
+    ``airport_trace_gap_seconds`` of one: the hold has to measure continuous
+    observation, not elapsed time.
     """
     ordered = Window.partitionBy(*TRAVERSAL_KEY).orderBy("event_time")
     running = ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)
@@ -474,9 +521,20 @@ def _roll_start(sdf: DataFrame, config: "EventConfig") -> DataFrame:
     work = sdf.withColumn("_fast", F.col("gs_kt") >= F.lit(config.runway_roll_speed_kt))
     work = work.withColumn("_prev_fast", F.lag("_fast").over(ordered))
     work = work.withColumn(
+        "_gap",
+        F.col("event_time").cast("double")
+        - F.lag(F.col("event_time").cast("double")).over(ordered),
+    )
+    work = work.withColumn(
         "_new_run",
-        F.when(F.col("_fast") & ~F.coalesce(F.col("_prev_fast"), F.lit(False)), 1)
-        .otherwise(0),
+        F.when(
+            F.col("_fast")
+            & (
+                ~F.coalesce(F.col("_prev_fast"), F.lit(False))
+                | (F.coalesce(F.col("_gap"), F.lit(0.0)) > F.lit(ROLL_MAX_GAP_SECONDS))
+            ),
+            1,
+        ).otherwise(0),
     )
     work = work.withColumn("_run", F.sum("_new_run").over(running))
     work = work.filter(F.col("_fast"))
@@ -487,11 +545,15 @@ def _roll_start(sdf: DataFrame, config: "EventConfig") -> DataFrame:
         "_held",
         F.col("event_time").cast("double") - F.col("_run_start").cast("double"),
     )
-    work = work.filter(F.col("_held") >= F.lit(config.runway_roll_min_seconds))
+    # Qualify the whole run, then report its first row: the confirmation and
+    # the timestamp are deliberately different rows.
+    work = work.withColumn("_run_held", F.max("_held").over(run_w))
+    work = work.filter(F.col("_run_held") >= F.lit(config.runway_roll_min_seconds))
     return (
         work.withColumn("_r", F.row_number().over(ordered))
         .filter(F.col("_r") == 1)
-        .drop("_r", "_fast", "_prev_fast", "_new_run", "_run", "_run_start", "_held")
+        .drop("_r", "_fast", "_prev_fast", "_gap", "_new_run", "_run",
+              "_run_start", "_held", "_run_held")
     )
 
 
