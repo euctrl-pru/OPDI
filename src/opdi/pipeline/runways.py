@@ -32,6 +32,29 @@ from opdi.pipeline.flights import angle_between, bearing_deg, haversine_nm
 FT_PER_M = 3.28084
 FTMIN_PER_MPS = 196.850394
 KT_PER_MPS = 1.94384
+EARTH_RADIUS_NM = 3440.065
+
+
+def cross_track_nm(lat, lon, thr_lat, thr_lon, rwy_bearing):
+    """Perpendicular distance from a point to a runway's extended centreline.
+
+    The standard cross-track formula::
+
+        d_xt = asin( sin(d_13 / R) * sin(theta_13 - theta_12) ) * R
+
+    where 1 is the threshold, 2 the runway direction and 3 the aircraft. The
+    absolute value is returned because which side of the centreline the
+    aircraft sits on does not decide which runway it used.
+
+    This replaces a tie-break on the distance from each threshold to the
+    aerodrome reference point -- a constant of the airport, identical for every
+    flight, which therefore picked the same runway of a parallel pair every
+    time. That is where "a third of named landing runways are wrong" came from.
+    """
+    d13 = haversine_nm(thr_lat, thr_lon, lat, lon) / F.lit(EARTH_RADIUS_NM)
+    theta13 = F.radians(bearing_deg(thr_lat, thr_lon, lat, lon))
+    theta12 = F.radians(rwy_bearing)
+    return F.abs(F.asin(F.sin(d13) * F.sin(theta13 - theta12)) * F.lit(EARTH_RADIUS_NM))
 
 
 def runway_thresholds(storage) -> Optional[DataFrame]:
@@ -125,6 +148,8 @@ def detect_runway_movements(
     # apt_ident, so grouping on it adds no rows.
     agg = work.groupBy("track_id", "apt_ident", "role", "apt_lat", "apt_lon").agg(
         F.expr("percentile_approx(heading, 0.5)").alias("median_track"),
+        F.expr("percentile_approx(lat, 0.5)").alias("median_lat"),
+        F.expr("percentile_approx(lon, 0.5)").alias("median_lon"),
         F.min("event_time").alias("first_time"),
         F.max("event_time").alias("last_time"),
         F.count(F.lit(1)).alias("n_samples"),
@@ -141,16 +166,20 @@ def detect_runway_movements(
     ).filter(F.col("bearing_error") <= F.lit(config.runway_max_bearing_deg))
 
     # Nearest bearing wins. Parallel runways share one to within a degree, so
-    # cross-track distance to each centreline breaks the tie -- the same
+    # the aircraft's own offset from each centreline breaks the tie -- the same
     # discriminator traffic uses shapely for, in closed form.
     cand = cand.withColumn(
-        "thr_dist_nm",
-        haversine_nm(F.col("thr_lat"), F.col("thr_lon"), F.col("apt_lat"), F.col("apt_lon")),
+        "cross_track_nm",
+        cross_track_nm(
+            F.col("median_lat"), F.col("median_lon"),
+            F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing"),
+        ),
     )
     from pyspark.sql.window import Window
 
     best = Window.partitionBy("track_id", "role").orderBy(
-        F.col("bearing_error").asc(), F.col("thr_dist_nm").asc(), F.col("rwy_ident").asc()
+        F.col("cross_track_nm").asc(), F.col("bearing_error").asc(),
+        F.col("rwy_ident").asc(),
     )
     return (
         cand.withColumn("_r", F.row_number().over(best))

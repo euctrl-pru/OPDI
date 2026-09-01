@@ -168,3 +168,29 @@ def test_too_few_samples_do_not_name_a_runway(spark, thresholds):
 
 def test_missing_reference_table_returns_none(spark):
     assert runway_thresholds(StubStorage({})) is None
+
+
+def test_parallel_runways_are_separated_by_where_the_aircraft_actually_was(spark):
+    """Two parallel runways share a bearing to within a degree.
+
+    The geometry is exact: both runways point due north (bearing 0) and their
+    thresholds sit at the same latitude, 0.02 deg of longitude apart -- about
+    1.2 NM at this latitude. The aircraft flies due north directly over the
+    *eastern* one. Bearing error is identical for both, so only the aircraft's
+    own offset can separate them.
+    """
+    from opdi.pipeline.runways import cross_track_nm
+
+    west = cross_track_nm(
+        F.lit(50.0), F.lit(4.02),      # aircraft, over the eastern runway
+        F.lit(50.0), F.lit(4.00),      # western threshold
+        F.lit(0.0),
+    )
+    east = cross_track_nm(
+        F.lit(50.0), F.lit(4.02),
+        F.lit(50.0), F.lit(4.02),      # eastern threshold
+        F.lit(0.0),
+    )
+    row = spark.range(1).select(west.alias("w"), east.alias("e")).collect()[0]
+    assert row["e"] == pytest.approx(0.0, abs=1e-6)
+    assert row["w"] > 0.5
