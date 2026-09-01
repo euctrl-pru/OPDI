@@ -164,10 +164,15 @@ def _passes_gate(sv, config):
     return out.count() > 0
 
 
-def _track_over_a_runway(spark):
+def _track_over_a_runway(spark, field_elev_ft=FIELD_ELEV_FT):
     """A track sitting on the runway hexagon -- on the ground, so it clears
-    either gate regardless of which one is in force."""
-    return _sample_at(spark, height_above_field_ft=0.0, field_elev_ft=FIELD_ELEV_FT,
+    either gate regardless of which one is in force, *provided* the raw
+    pressure altitude that ``field_elev_ft`` produces (via ``_sample_at``,
+    with ``height_above_field_ft=0.0``) also clears the legacy FL20 arm.
+    ``FIELD_ELEV_FT`` (3,000 ft) does not -- it exists to demonstrate the
+    fix, not to survive the config it fixes -- so a legacy-config caller
+    must pass a low ``field_elev_ft`` (e.g. ``0.0``) explicitly."""
+    return _sample_at(spark, height_above_field_ft=0.0, field_elev_ft=field_elev_ft,
                        h3_cell=H3_CELL_RUNWAY)
 
 
@@ -203,3 +208,34 @@ def test_taxiway_and_stand_events_are_unchanged(spark):
     out = calculate_airport_events(_track_over_a_taxiway(spark), MONTH,
                                    StubStorage(spark), EventConfig())
     assert sorted({r["type"] for r in out.collect()}) == ["entry-taxiway", "exit-taxiway"]
+
+
+def test_a_legacy_run_still_emits_entry_and_exit_runway(spark):
+    """The runway family's retirement (the test above) is conditional on
+    ``config.emit_runway_milestones``, which ``EventConfig.legacy()`` turns
+    off. A run stamping ``events_v0.0.2`` has to reproduce the release it
+    names, and that release published ``entry-runway``/``exit-runway`` from
+    exactly this H3 layout match -- there was no runway family to retire
+    yet. If a future edit to the ``emit_runway_milestones`` gate ever made
+    the drop unconditional, this is the test that would catch it; nothing
+    else in this file or in ``test_events_labelling.py`` runs a runway-typed
+    layout row under ``EventConfig.legacy()`` any more (see the Task 4
+    report's "Fix round 1" for why ``test_events_labelling.py`` moved to a
+    taxiway fixture instead of using ``legacy()``).
+
+    Built on ``field_elev_ft=0.0``, not ``FIELD_ELEV_FT`` (3,000 ft): the
+    legacy config's gate is FL20 against *uncorrected* pressure altitude
+    (``airport_gate_above_field=False``), and 3,000 ft clears FL20's
+    2,000 ft ceiling -- the same reason the first test above needed a high
+    field to make the two gates disagree. A sea-level field puts the track
+    at pressure altitude 0 ft = FL0, unambiguously under FL20, so this test
+    is about the runway-retirement condition alone, not the gate.
+    """
+    out = calculate_airport_events(
+        _track_over_a_runway(spark, field_elev_ft=0.0), MONTH,
+        StubStorage(spark), EventConfig.legacy(),
+    )
+    types = {r["type"] for r in out.collect()}
+    assert {"entry-runway", "exit-runway"} <= types, (
+        f"expected entry-runway and exit-runway in {sorted(types)}"
+    )
