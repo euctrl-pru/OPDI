@@ -85,15 +85,19 @@ PERIOD_TRACKS = {
 #:
 #:    So once the segmentation default flips and ``osn_tracks`` is rebuilt, a
 #:    re-run of L00-L12 measures that fan-out rather than the rung, and the
-#:    ``L12 -> L13`` delta bundles two unrelated things: the version bump, and
-#:    the callsign resolution the bump switches on. An event-count change would
-#:    be attributed to a rung that only renamed a string.
+#:    ``L12 -> L13`` delta bundles multiple unrelated things: the version bump,
+#:    the callsign resolution the bump switches on, and six V4 behaviour flags
+#:    (emit_runway_milestones, emit_pru_tops, level_method, level_floors_above_field,
+#:    level_anchor, airport_gate_above_field) added when EventConfig's defaults moved
+#:    to events_v0.2.0. An event-count change would be attributed to a rung that
+#:    did multiple things at once.
 #:
 #:    **Read the deltas below L13 as valid for the tracks they were computed
 #:    over, not as reproducible against a rebuilt table.** Deliberately not
 #:    fixed by re-cutting the ladder: this is the flight-events V3 study's
 #:    published instrument, and changing its rungs would silently redefine
-#:    numbers that study already reports.
+#:    numbers that study already reports. A V4 ladder (a later task) will
+#:    replace this one with a properly attributed baseline.
 #:
 #:    There is no check that could catch the unsafe case automatically. It
 #:    would have to fail fast when the tracks were built by ``standard``, and
