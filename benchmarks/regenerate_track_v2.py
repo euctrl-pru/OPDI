@@ -18,17 +18,28 @@ re-run while editing this docstring marks nothing. Age is not staleness.
 ``--check`` needs no credentials and no cluster.
 
 **What V2 is, against V1.** V1 scored segmentations in a harness that read a
-track table someone else had built. V2 runs steps 01, 02, 02a and 03 for each
-arm. That is why :data:`STEPS` exists and V1 had no equivalent: in V1 the
-pipeline steps could not change a result because no result went through them,
-and in V2 every result does. The difference between the two studies' baselines
-is not noise to be reconciled -- it is the harness-versus-pipeline gap this
-study was written to measure.
+track table someone else had built. V2 runs steps 01, 02 and 02a for every
+arm, plus step 03 for two of the three (see the next paragraph). That is why
+:data:`STEPS` exists and V1 had no equivalent: in V1 the pipeline steps could
+not change a result because no result went through them, and in V2 every
+result does. The difference between the two studies' baselines is not noise to
+be reconciled -- it is the harness-versus-pipeline gap this study was written
+to measure.
 
-**Three arms, and the middle one is not optional.** ``standard`` is
-``airframe_only`` plus the callsign-change break. Running only the ends gives a
-total that cannot be split into the two changes that produced it, and the
-release note has to say which change bought what.
+Every arm is also scored twice -- airborne and gate-to-gate -- rather than
+once; see ``track_pipeline_v2.score_segmentation`` for the ``gate_*`` columns
+that adds to each row.
+
+**Three arms for segmentation, two for the flight list.** ``standard`` is
+``airframe_only`` plus the callsign-change break. Running only the ends of the
+*segmentation* comparison gives a total that cannot be split into the two
+changes that produced it, and the release note has to say which change bought
+what -- so all three run steps 01, 02 and 02a and are scored on clustering.
+Step 03 -- the expensive step -- and its ADEP/ADES score run only for
+``legacy`` and ``standard`` (``track_pipeline_v2.FLIGHT_LIST_METHODS``):
+``airframe_only`` is only ever the ablation's midpoint, and the downstream
+question ADEP/ADES answers -- "does shipping this change ADEP/ADES" -- needs
+the before and the after, not the midpoint.
 
 **One day per period, not three.** V1's ladder ran three days because it
 re-partitioned an existing table; here each arm materialises its own tracks and
@@ -186,8 +197,9 @@ def jobs() -> list:
                   "--out-name", f"pipeline_{period}.csv"],
             outputs=outputs,
             code_paths=SEG + STEPS + SCORE,
-            notes="Steps 01, 02, 02a and 03 per arm, scored against NM/APDF "
-                  f"ground truth on {day}.",
+            notes="Steps 01, 02 and 02a per arm (03 for legacy/standard only), "
+                  "scored airborne and gate-to-gate against NM/APDF ground "
+                  f"truth on {day}.",
         ))
 
     # --- does the id survive the change? ---------------------------------

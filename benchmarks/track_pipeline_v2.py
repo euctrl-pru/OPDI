@@ -12,11 +12,23 @@ This module runs the steps instead. For each method it executes
 
     step 02   TrackProcessor.process_month   -> osn_tracks
     step 02a  TrackCleaner.process_month     -> osn_tracks_clean
-    step 03   FlightListProcessor            -> opdi_flight_list
+    step 03   FlightListProcessor            -> opdi_flight_list  (two arms only)
 
-with ``config.segmentation.method`` set, then scores the result twice: against
-Network Manager ground truth as a clustering comparison, and on ADEP/ADES. The
-only thing that differs between methods is that one config field.
+with ``config.segmentation.method`` set, then scores the result: against
+Network Manager ground truth as a clustering comparison -- airborne and
+gate-to-gate both, see :data:`FLIGHT_LIST_METHODS`'s neighbour comment and
+``score_segmentation`` -- and, for the two arms in :data:`FLIGHT_LIST_METHODS`,
+on ADEP/ADES. The only thing that differs between methods is that one config
+field.
+
+**Step 03 runs for two of the three arms.** ``airframe_only`` is the
+segmentation ablation's midpoint: ``standard`` is ``airframe_only`` plus the
+callsign-change break, and the point of running the midpoint is to split that
+total into the two changes that produced it -- a question the *segmentation*
+score answers on its own. ADEP/ADES asks a different question ("does shipping
+this change ADEP/ADES") that only needs the before and the after, so
+``airframe_only`` gets segmentation scoring, cleaning, null-rates and extents,
+but not the flight list.
 
 **Nothing production is touched.** Every table name is redirected under
 ``research/tcv2/<method>/`` by patching ``StorageManager._s3_path``, and a
@@ -61,7 +73,7 @@ from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from track_continuity import extents_name  # noqa: E402
 from track_methods import BUCKET, BUCKET_QUOTA_GB, s3_client  # noqa: E402
-from track_score import score_arm, track_extents  # noqa: E402
+from track_score import score_arm_gated, track_extents  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
 
@@ -77,6 +89,11 @@ TABLES = ("osn_tracks", "osn_tracks_clean", "opdi_flight_list",
           "opdi_endpoint_candidates")
 
 RESEARCH_ROOT = "research/tcv2"
+
+#: Comment 7: ADEP/ADES for the before and the after only. `airframe_only` is
+#: the segmentation ablation's midpoint and has no downstream question of its
+#: own, so it skips step 03 -- the expensive step.
+FLIGHT_LIST_METHODS = ["legacy", "standard"]
 
 #: State vectors are step 02's input and do not depend on the segmentation, so
 #: they are ingested once and shared by every method rather than rebuilt per
@@ -328,13 +345,37 @@ def export_track_extents(spark, method, period, days, results_dir) -> dict:
 
 
 def score_segmentation(spark, method, period, days) -> dict:
-    """Clustering comparison of the pipeline's own cleaned tracks."""
+    """Clustering comparison of the pipeline's own cleaned tracks.
+
+    Comment 4: every arm is scored twice -- airborne (``[t_off, t_land]``) and
+    gate-to-gate (``t_off_block``/``t_in_block``) -- so the row also carries
+    the ``gate_*`` columns. The airborne interval never sees a sample at the
+    stand or on a taxiway, so it cannot say whether taxi-out and taxi-in
+    samples landed in the right track; the gate interval can, because it is a
+    superset. See ``track_score.score_arm_gated`` for what that superset can do
+    to the rate (it is not guaranteed to move in either direction) and
+    ``track_truth.overlap_join`` for the ``bounds`` argument that selects it.
+
+    ``load_flight_intervals`` is Task 11's version, which carries
+    ``t_off_block``/``t_in_block`` on every row; if a future ``track_truth.py``
+    ever dropped them this join would fail loudly rather than silently score
+    the gate interval as a second copy of the airborne one.
+
+    Unlike ``track_methods.py``'s V1 arms job, this call site has no
+    ``run_arm``-style scorer hook to bind against -- ``score_segmentation`` is
+    called directly, with ``assign``/``gt`` already in scope -- so there is no
+    arity trap to close over here; ``matched_gate`` is simply built next to
+    ``matched`` and handed to :func:`track_score.score_arm_gated` by name,
+    which is the same pattern ``ff38531`` wired for V1's ``_score_with_gate``.
+    """
     assign = read_cleaned(spark, method, days).select(
         "icao24", "event_time", "track_id")
     gt = track_truth.load_flight_intervals(spark, period["months"], days)
     extents = track_extents(assign)
     matched = track_truth.overlap_join(assign, gt)
-    return score_arm(matched, extents)
+    matched_gate = track_truth.overlap_join(
+        assign, gt, bounds=("t_off_block", "t_in_block"))
+    return score_arm_gated(matched, extents, matched_gate)
 
 
 def score_adep_ades(spark, method, period, days, k) -> dict:
@@ -342,6 +383,33 @@ def score_adep_ades(spark, method, period, days, k) -> dict:
     pred, ident = load_predictions(spark, table_for(method, "opdi_flight_list"))
     gt = adep_ades.load_ground_truth(spark, period["months"], days)
     return adep_ades.score(pred, ident, gt, k=k)
+
+
+def write_rows_csv(path: Path, rows: list) -> None:
+    """(Re)write *path* from *rows*, header = the union of every row's keys.
+
+    Comment 7's trap: ``airframe_only`` never runs :func:`score_adep_ades`, so
+    its row is missing every ADEP/ADES key that a ``FLIGHT_LIST_METHODS`` row
+    carries. A header taken from whichever row happens to run first is not
+    safe either way -- a flight-list-method row first means the ADEP/ADES
+    columns silently read as blank for every other row that lacks them (not
+    wrong, but only right by the accident of ``legacy`` being first in
+    practice), and an ``airframe_only``-first run crashes outright the moment
+    ``csv.DictWriter`` sees a row with keys its header never declared. Taking
+    the header from the union of every row collected so far -- recomputed and
+    the whole file rewritten after each arm -- makes the result independent of
+    ``--methods`` order. Rewriting a handful of rows after every arm is
+    negligible next to the tens of minutes the arm itself took, so there is no
+    cost to buying that independence back this way rather than pre-declaring
+    the columns statically -- which would silently stop matching this module's
+    scorers the day one of them adds or renames a field.
+    """
+    fieldnames = sorted({k for row in rows for k in row})
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def main() -> None:
@@ -390,7 +458,7 @@ def main() -> None:
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     out = args.results_dir / out_name
-    rows, writer, fh = [], None, out.open("w", newline="")
+    rows = []
 
     try:
         for method in args.methods:
@@ -451,17 +519,24 @@ def main() -> None:
                           f"{n} objects, {freed / 1e9:.2f} GB "
                           f"({bucket_free_gb(s3):.2f} GB now free)")
 
-                build_flight_list(spark, cfg, period, args.airports_hex_path)
-
                 row = {"method": method, "period": args.period,
                        "days": len(days)}
                 row.update(score_segmentation(spark, method, period, days))
-                row.update(score_adep_ades(spark, method, period, days, args.k))
+
+                # Comment 7: step 03 -- the expensive step -- and its ADEP/ADES
+                # score run only for the before and the after. `airframe_only`
+                # is the segmentation ablation's midpoint and has no
+                # downstream question of its own; its row simply has no
+                # ADEP/ADES keys, which is what write_rows_csv's union header
+                # is for.
+                if method in FLIGHT_LIST_METHODS:
+                    build_flight_list(spark, cfg, period, args.airports_hex_path)
+                    row.update(score_adep_ades(spark, method, period, days, args.k))
 
                 # Both of these read osn_tracks_clean, so both must run before
-                # the `finally` below deletes it -- and after build_flight_list,
-                # so a method that fails at step 03 leaves no half-summary
-                # claiming to describe a run that did not finish.
+                # the `finally` below deletes it -- and after the flight-list
+                # block above, so a method that fails at step 03 leaves no
+                # half-summary claiming to describe a run that did not finish.
                 row.update(export_track_extents(
                     spark, method, period, days, args.results_dir))
                 row.update(track_diagnostics.null_rates(
@@ -470,12 +545,10 @@ def main() -> None:
                 row["minutes"] = round(
                     (datetime.utcnow() - started).total_seconds() / 60.0, 1)
                 rows.append(row)
-
-                if writer is None:
-                    writer = csv.DictWriter(fh, fieldnames=sorted(row))
-                    writer.writeheader()
-                writer.writerow(row)
-                fh.flush()
+                # Rewritten whole, not appended -- see write_rows_csv for why
+                # a row-by-row appending writer is not safe once one arm's row
+                # can have keys another arm's row does not.
+                write_rows_csv(out, rows)
                 for k, v in row.items():
                     print(f"  {k:24} {v}")
             finally:
@@ -487,7 +560,6 @@ def main() -> None:
                     print(f"  -- deleted {n} objects ({freed / 1e9:.2f} GB) "
                           f"for {method}")
     finally:
-        fh.close()
         spark.stop()
         # The shared slice outlives the per-method loop by design -- both
         # methods read it -- so it is dropped here, after the last one.
@@ -524,7 +596,9 @@ def main() -> None:
                         "src/opdi/pipeline/segmentation/base.py",
                         "src/opdi/pipeline/segmentation/methods.py",
                         "src/opdi/config.py"],
-            notes=f"Real pipeline steps 02, 02a, 03 per method. days={days}.",
+            notes=f"Real pipeline steps 02, 02a per method, 03 for "
+                  f"{FLIGHT_LIST_METHODS} only. Scored airborne and "
+                  f"gate-to-gate. days={days}.",
         )
         print(f"\n-> {out}")
 

@@ -1,3 +1,4 @@
+import csv
 import sys
 from pathlib import Path
 
@@ -51,3 +52,61 @@ def test_the_default_arm_list_includes_the_ablation_midpoint():
     """Without airframe_only the study reports a total it cannot decompose."""
     src = Path(tp.__file__).read_text()
     assert 'default=["legacy", "airframe_only", "standard"]' in src
+
+
+def test_comment_7_the_flight_list_runs_for_two_arms_only():
+    """airframe_only is the ablation's midpoint and has no ADEP/ADES question."""
+    assert tp.FLIGHT_LIST_METHODS == ["legacy", "standard"]
+    assert "airframe_only" not in tp.FLIGHT_LIST_METHODS
+
+
+def test_build_flight_list_and_score_adep_ades_are_gated_on_flight_list_methods():
+    """Source-level guard: the two step-03 calls must sit behind the same `if`.
+
+    A cluster run is the only way to prove `airframe_only`'s row actually lacks
+    ADEP/ADES columns; short of that, asserting the gate exists in the source
+    is what catches a regression that un-guards one call but not the other.
+    """
+    src = Path(tp.__file__).read_text()
+    body = src.split("if method in FLIGHT_LIST_METHODS:", 1)[1]
+    body = body.split("row.update(export_track_extents(", 1)[0]
+    assert "build_flight_list(spark, cfg, period" in body
+    assert "score_adep_ades(spark, method, period, days, args.k)" in body
+
+
+def test_comment_4_score_segmentation_matches_the_gate_interval_too():
+    """The gate join must use `t_off_block`/`t_in_block`, not the airborne pair."""
+    src = Path(tp.__file__).read_text()
+    body = src.split("def score_segmentation(", 1)[1]
+    body = body.split("\n\n\n", 1)[0]
+    assert 'bounds=("t_off_block", "t_in_block")' in body
+    assert "score_arm_gated(matched, extents, matched_gate)" in body
+
+
+def test_write_rows_csv_headers_on_the_union_not_the_first_row(tmp_path):
+    """The one real trap in comment 7: a subset-first row order must not crash
+    or silently drop a later row's extra columns.
+
+    Two orders are exercised because each breaks a different naive
+    implementation: fieldnames taken from the first row (`sorted(row)`) either
+    crashes on the extra-keys row landing second, or -- taken from a
+    flight-list row first -- merely leaves the missing cells blank, which is
+    only right by the accident of argument order, not by construction.
+    """
+    airframe_only_row = {"method": "airframe_only", "clean_match_pct": 90.0}
+    legacy_row = {"method": "legacy", "clean_match_pct": 91.0, "coverage": 0.8}
+
+    for order, rows in [
+        ("flight-list-method first", [legacy_row, airframe_only_row]),
+        ("airframe_only first", [airframe_only_row, legacy_row]),
+    ]:
+        out = tmp_path / f"{order}.csv"
+        tp.write_rows_csv(out, rows)
+        with out.open() as fh:
+            read_rows = list(csv.DictReader(fh))
+        by_method = {r["method"]: r for r in read_rows}
+        assert by_method["legacy"]["coverage"] == "0.8", order
+        # airframe_only's row never computed `coverage` -- the union header
+        # must still declare the column, and DictReader reports the blank
+        # cell as an empty string rather than raising or omitting the key.
+        assert by_method["airframe_only"]["coverage"] == "", order
