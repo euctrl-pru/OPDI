@@ -7,13 +7,19 @@ specification can be tested against with trajectories whose geometry is known
 by construction.
 """
 
+import datetime as dt
+
 import pytest
 from pyspark.sql import functions as F
 
-from conftest import make_track
+from conftest import _EPOCH, make_track
 
 from opdi.config import EventConfig
-from opdi.pipeline.level_segments import level_segments
+from opdi.pipeline.level_segments import (
+    classify_level_offs,
+    level_segments,
+    level_segments_pru,
+)
 
 FT_PER_M = 3.28084
 FTMIN_PER_MPS = 196.850394
@@ -141,3 +147,107 @@ def test_distance_is_reported_when_the_track_carries_it(spark):
     assert len(segs) == 1
     assert segs[0].distance_nm is not None
     assert segs[0].distance_nm > 0
+
+
+# ---------------------------------------------------------------------------
+# The PRU arm: a rolling window rather than an anchored band
+# ---------------------------------------------------------------------------
+
+
+def _pru_segment_count(spark, roc_ftmin, samples=12, step_s=10):
+    """Number of PRU level segments in a steady climb at `roc_ftmin`.
+
+    The track starts at 10,000 ft and is sampled every `step_s` seconds, so the
+    interpolation grid lands exactly on the samples and the rolling window
+    spans one step. `vert_rate` is set too, and deliberately consistent with
+    the altitudes -- the PRU arm must not read it, and a test whose vertical
+    rate disagreed with its altitudes could not tell the two arms apart.
+    """
+    steps = [(10000 + roc_ftmin * step_s / 60.0 * i, roc_ftmin) for i in range(samples)]
+    return level_segments_pru(
+        _profile(spark, steps, step_s), EventConfig()
+    ).count()
+
+
+def _segment_frame(
+    spark, level_ft, field_elev_ft=0.0, distance_nm=10.0, duration_seconds=60.0
+):
+    """One level segment, 600 s into the flight, as `level_segments` returns it
+    plus the geometry the caller attaches."""
+    start = _EPOCH + dt.timedelta(seconds=600)
+    return spark.createDataFrame(
+        [(
+            "trk-1",
+            start,
+            start + dt.timedelta(seconds=duration_seconds),
+            float(duration_seconds),
+            float(level_ft),
+            None,
+        )],
+        schema=(
+            "track_id string, start_time timestamp, end_time timestamp, "
+            "duration_seconds double, level_ft double, distance_nm double"
+        ),
+    ).withColumn(
+        "elev_adep_ft", F.lit(float(field_elev_ft))
+    ).withColumn(
+        "elev_ades_ft", F.lit(float(field_elev_ft))
+    ).withColumn(
+        "dist_adep_nm", F.lit(float(distance_nm))
+    ).withColumn(
+        "dist_ades_nm", F.lit(float(distance_nm))
+    )
+
+
+def _classify(spark, segments, config):
+    """Classify `segments` against a top of climb an hour in and a top of
+    descent two hours in, so the segment is unambiguously in the climb."""
+    return classify_level_offs(
+        segments,
+        config,
+        toc_time=F.lit(_EPOCH + dt.timedelta(seconds=3600)).cast("timestamp"),
+        tod_time=F.lit(_EPOCH + dt.timedelta(seconds=7200)).cast("timestamp"),
+        toc_altitude_ft=F.lit(30000.0),
+        tod_altitude_ft=F.lit(30000.0),
+    )
+
+
+def _classified(spark, level_ft, field_elev_ft, config):
+    return _classify(spark, _segment_frame(spark, level_ft, field_elev_ft), config)
+
+
+def _classified_at_distance_nm(spark, distance_nm, config):
+    return _classify(
+        spark,
+        _segment_frame(spark, level_ft=10000, distance_nm=distance_nm),
+        config,
+    )
+
+
+def test_the_pru_window_height_is_50ft_for_a_10s_window(spark):
+    """A climb at 280 ft/min is level by PRU (under 300); one at 320 is not.
+
+    Both are sampled at 10 s, so the window is 50 ft: 280 ft/min climbs 46.7 ft
+    in the window and 320 climbs 53.3 ft.
+    """
+    assert _pru_segment_count(spark, roc_ftmin=280) == 1
+    assert _pru_segment_count(spark, roc_ftmin=320) == 0
+
+
+def test_the_climb_floor_is_measured_above_the_field(spark):
+    """A 2,900 ft level segment over a 1,416 ft field is 1,484 ft AGL -- below
+    the 3,000 ft floor, so it is not a climb level-off. Under the old
+    comparison against pressure altitude it was, at every high-elevation
+    aerodrome and nowhere else."""
+    segs = _classified(spark, level_ft=2900, field_elev_ft=1416, config=EventConfig())
+    assert segs.count() == 0
+    # The control: 4,500 ft over the same field is 3,084 ft AGL and is one.
+    assert _classified(
+        spark, level_ft=4500, field_elev_ft=1416, config=EventConfig()
+    ).count() == 1
+
+
+def test_segments_outside_the_200nm_radius_are_not_analysed(spark):
+    segs = _classified_at_distance_nm(spark, 250.0, EventConfig())
+    assert segs.count() == 0
+    assert _classified_at_distance_nm(spark, 150.0, EventConfig()).count() == 1
