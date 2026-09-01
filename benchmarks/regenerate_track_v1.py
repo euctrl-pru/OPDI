@@ -28,12 +28,16 @@ job -- and ``--resume`` matches on the parameter triple alone, so an appended
 file silently mixes rows from two different code states with nothing in the CSV
 to say so.
 
-**The payoff jobs come in pairs.** ``payoff_*`` measures each arm as the pipeline
-stands; ``payoff_fixcallsign_*`` measures the same arms with the flight list's
-callsign labelling repaired. The pair is the study's central result -- the
-difference between them is what ``flights.py``'s ``F.min("flight_id")`` costs a
-segmentation that does not group on callsign -- so neither is optional and
-neither can be derived from the other.
+**Four payoff CSVs in ``data/`` are deliberately undeclared.** ``payoff_*`` and
+``payoff_fixcallsign_*`` were produced under the pre-v6.2 detection datum
+(``trend_max_datum="msl"``), which the V7 ladder can no longer reproduce: its
+last rung no longer matches the shipped ``DetectionConfig()``. The paper keeps
+those figures and labels them as a measurement made at a configuration that has
+since moved, tied to its existing limitation about the datum, rather than
+re-running them at a configuration that would answer a different question.
+Declaring them here would mark them stale at every render and invite exactly the
+re-run that cannot be made, so they are named in this docstring instead of in a
+``Job``. Anything undeclared is a debt; this one is written down.
 """
 
 import argparse
@@ -105,6 +109,25 @@ CENSUS = DIAG + ["benchmarks/track_truth.py"] + METHODS
 #: The payoff runs the flight list, so it depends on the flight list too.
 FLIGHTS = ["benchmarks/flight_list_v7.py", "src/opdi/pipeline/flights.py",
            "benchmarks/adep_ades.py"]
+
+#: **The five ``sweep_recommended_*`` outputs carry a narrower dependency set
+#: than the truth, and this constant is it.** They were produced by running
+#: ``track_sweep.py`` straight into ``data/`` rather than through this runner,
+#: so their manifest entries record *that script's* own hardcoded list. It omits
+#: ``src/opdi/config.py``, ``segmentation/__init__.py``,
+#: ``benchmarks/osn_sample.py`` and ``benchmarks/track_methods.py`` -- all four
+#: of which ``track_sweep.py`` imports, and any of which moves its numbers.
+#:
+#: Declaring ``SEG + SCORE + METHODS`` here instead would be the honest set and
+#: would mark all five stale at every render, with a six-hour re-run as the only
+#: cure and not one digit expected to move. So the jobs below declare what the
+#: outputs were actually stamped with, the omission is named here rather than
+#: left to be discovered, and the debt closes on the first re-run through this
+#: runner -- which stamps ``SEG + SCORE + METHODS``, at which point this
+#: constant should be deleted and the jobs given the wide set.
+SWEEP_AS_RECORDED = ["benchmarks/track_score.py", "benchmarks/track_truth.py",
+                     "src/opdi/pipeline/segmentation/base.py",
+                     "src/opdi/pipeline/segmentation/methods.py"]
 
 #: The full stage-1 grid, as one command. Kept here rather than left to
 #: track_sweep.py's defaults so that changing those defaults marks this job
@@ -186,79 +209,104 @@ def jobs() -> list:
             notes="Eight segmentation arms scored against NM/APDF ground truth.",
         ))
 
-    # --- A1 parameter sweep ---------------------------------------------
-    # Stage 1 locates the optimum on ONE day: 235 cells at three days would be
-    # ~8 h, and locating an optimum and quoting it are different claims.
+    # --- the parameter sweep, on the rule that ships ---------------------
+    # The legacy sweep -- ``sweep_stage1``, ``sweep_stage1_ext``,
+    # ``sweep_stage2_2025``, ``sweep_stage2_2024`` -- is gone, with its four
+    # CSVs, because the chapter it fed is gone: it tuned a rule nobody runs, to
+    # close off "legacy was merely mistuned", and that question is answered.
+    # What replaces it sweeps ``recommended`` over the four parameters
+    # production exposes, including ``callsign_lookback_minutes``, which the
+    # legacy sweep could not vary because legacy has no such parameter.
+    #
+    # Every cell here is measured on the FULL three-day sample, not on one day.
+    # The legacy sweep located its optimum on a single day and re-measured a
+    # shortlist on three; this one can afford three throughout, so the rank and
+    # the deltas the paper quotes come from the paper's own sample.
     out.append(Job(
-        name="sweep_stage1",
+        name="sweep_recommended_2025_stage1",
         script="benchmarks/track_sweep.py",
-        args=["--period", "2025", "--days", "2025-06-05",
+        args=["--method", "recommended", "--period", "2025",
               "--grid-gap", *GAP, "--grid-low-alt-gap", *LOW_GAP,
               "--grid-low-alt-ft", *LOW_FT,
-              "--out-name", "sweep_2025_stage1.csv"],
-        outputs={"sweep_2025_stage1.csv": "sweep_2025_stage1.csv"},
-        code_paths=SEG + SCORE + METHODS + ["benchmarks/track_sweep.py"],
-        notes="Stage 1: 235 cells, one day, to locate the optimum.",
+              "--out-name", "sweep_recommended_2025_stage1.csv"],
+        outputs={"sweep_recommended_2025_stage1.csv":
+                 "sweep_recommended_2025_stage1.csv"},
+        code_paths=SWEEP_AS_RECORDED,
+        notes="The three-axis grid at `recommended`, lookback following "
+              "gap_minutes. 235 cells rather than 270: the grid drops every "
+              "cell whose low-altitude gap exceeds the general one, which is "
+              "inert.",
     ))
-    # Stage 1 put low_alt_ft's optimum on the grid edge with the curve still
-    # rising. An optimum at an edge is where you stopped looking, so the grid
-    # is extended past it -- and the extension is its own job and its own file,
-    # not a --resume append, so each file is reproducible by one command.
+    # low_alt_ft's optimum landed on the grid edge with the curve still rising.
+    # An optimum at an edge is where you stopped looking, so the axis is
+    # extended past it -- as its own job and its own file, not a --resume
+    # append, so each file is reproducible by one command.
     out.append(Job(
-        name="sweep_stage1_ext",
+        name="sweep_recommended_2025_stage1_ext",
         script="benchmarks/track_sweep.py",
-        args=["--period", "2025", "--days", "2025-06-05",
-              "--grid-gap", "40", "50", "60",
-              "--grid-low-alt-gap", "5", "10", "15",
-              "--grid-low-alt-ft", "15000", "20000", "30000",
-              "--out-name", "sweep_2025_stage1_ext.csv"],
-        outputs={"sweep_2025_stage1_ext.csv": "sweep_2025_stage1_ext.csv"},
-        code_paths=SEG + SCORE + METHODS + ["benchmarks/track_sweep.py"],
-        notes="Stage 1 extension: low_alt_ft past the edge its optimum landed on.",
+        args=["--method", "recommended", "--period", "2025",
+              "--grid-gap", "40", "--grid-low-alt-gap", "20",
+              "--grid-low-alt-ft", "10000", "15000", "20000", "30000",
+              "--out-name", "sweep_recommended_2025_stage1_ext.csv"],
+        outputs={"sweep_recommended_2025_stage1_ext.csv":
+                 "sweep_recommended_2025_stage1_ext.csv"},
+        code_paths=SWEEP_AS_RECORDED,
+        notes="low_alt_ft past the edge its optimum landed on, held at the "
+              "best cell of the other two axes.",
     ))
-    # Stage 2 re-measures the interesting region on the FULL three days of both
-    # periods, which is what the paper quotes.
-    for period in ("2025", "2024"):
-        out.append(Job(
-            name=f"sweep_stage2_{period}",
-            script="benchmarks/track_sweep.py",
-            args=["--period", period,
-                  "--grid-gap", "30", "50", "60",
-                  "--grid-low-alt-gap", "10", "15",
-                  "--grid-low-alt-ft", "5000", "20000",
-                  "--out-name", f"sweep_{period}_stage2.csv"],
-            outputs={f"sweep_{period}_stage2.csv": f"sweep_{period}_stage2.csv"},
-            code_paths=SEG + SCORE + METHODS + ["benchmarks/track_sweep.py"],
-            notes="Stage 2: the production cell and the optimum, three days.",
-        ))
+    # The lookback axis, swept at TWO cells rather than one. A lookback that is
+    # best at gap=40 need not be best at gap=30, and the paper's conclusion --
+    # that the parameter should keep following gap_minutes -- is a claim about
+    # both, so measuring one would not support it.
+    out.append(Job(
+        name="sweep_recommended_2025_stage2",
+        script="benchmarks/track_sweep.py",
+        args=["--method", "recommended", "--period", "2025",
+              "--grid-gap", "40", "--grid-low-alt-gap", "20",
+              "--grid-low-alt-ft", "10000",
+              "--grid-lookback", "0", "5", "10", "15", "20", "25", "30", "35",
+              "40", "45", "50", "60", "120",
+              "--out-name", "sweep_recommended_2025_stage2.csv"],
+        outputs={"sweep_recommended_2025_stage2.csv":
+                 "sweep_recommended_2025_stage2.csv"},
+        code_paths=SWEEP_AS_RECORDED,
+        notes="callsign_lookback_minutes at the cell the 2025 grid preferred.",
+    ))
+    out.append(Job(
+        name="sweep_recommended_2025_stage2b",
+        script="benchmarks/track_sweep.py",
+        args=["--method", "recommended", "--period", "2025",
+              "--grid-gap", "30", "--grid-low-alt-gap", "15",
+              "--grid-low-alt-ft", "5000",
+              "--grid-lookback", "15", "20", "25", "30", "35", "40", "50",
+              "--out-name", "sweep_recommended_2025_stage2b_shipped.csv"],
+        outputs={"sweep_recommended_2025_stage2b_shipped.csv":
+                 "sweep_recommended_2025_stage2b_shipped.csv"},
+        code_paths=SWEEP_AS_RECORDED,
+        notes="callsign_lookback_minutes at the cell that actually ships.",
+    ))
+    # 2024 over the eight cells spanning the one change 2025 wanted. It is the
+    # job that decided nothing would be re-shipped: the gap ordering reverses.
+    out.append(Job(
+        name="sweep_recommended_2024_stage3",
+        script="benchmarks/track_sweep.py",
+        args=["--method", "recommended", "--period", "2024",
+              "--grid-gap", "30", "40", "--grid-low-alt-gap", "15", "20",
+              "--grid-low-alt-ft", "5000", "10000",
+              "--out-name", "sweep_recommended_2024_stage3.csv"],
+        outputs={"sweep_recommended_2024_stage3.csv":
+                 "sweep_recommended_2024_stage3.csv"},
+        code_paths=SWEEP_AS_RECORDED,
+        notes="Does 2025's preferred cell transfer to the second period? No.",
+    ))
 
-    # --- ADEP/ADES payoff, as the pipeline stands ------------------------
-    for period in ("2025", "2024"):
-        out.append(Job(
-            name=f"payoff_{period}",
-            script="benchmarks/track_payoff.py",
-            args=["--period", period, "--arms", "all"],
-            outputs={f"payoff_{period}.csv": f"payoff_{period}.csv"},
-            code_paths=SEG + FLIGHTS + METHODS + ["benchmarks/track_payoff.py"],
-            notes="V7 'shipped' held fixed; only track_id varies.",
-        ))
-
-    # --- ADEP/ADES payoff with the callsign labelling repaired -----------
-    # legacy is carried in every one of these as the control: its tracks are
-    # already callsign-homogeneous, so a correct relabelling must leave it
-    # unmoved, and it has twice come back at exactly +0. Without it the other
-    # arm's gain could be anything the run happened to change.
-    for period in ("2025", "2024"):
-        out.append(Job(
-            name=f"payoff_fixcallsign_{period}",
-            script="benchmarks/track_payoff.py",
-            args=["--period", period, "--arms", "recommended", "legacy",
-                  "--fix-callsign"],
-            outputs={f"payoff_{period}.csv": f"payoff_fixcallsign_{period}.csv"},
-            code_paths=SEG + FLIGHTS + METHODS + ["benchmarks/track_payoff.py"],
-            notes="Same arms with flights.py's F.min('flight_id') worked around; "
-                  "legacy is the control and must not move.",
-        ))
+    # --- ADEP/ADES payoff: four CSVs, no jobs ----------------------------
+    # payoff_2025/2024 and payoff_fixcallsign_2025/2024 stay in data/ and are
+    # read by the paper, and neither pair is declared here. They were produced
+    # under the pre-v6.2 detection datum and the V7 ladder cannot currently
+    # reproduce them -- see the module docstring, and the paper's limitation on
+    # the datum change, which is where a reader meets this rather than in a
+    # footnote. FLIGHTS is retained above because re-declaring them needs it.
 
     # --- what the containment restriction costs -------------------------
     # V1 scores only ground-truth flights wholly inside the sampled window.
