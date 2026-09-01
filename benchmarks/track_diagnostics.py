@@ -72,7 +72,7 @@ from opdi.pipeline.segmentation import SegmentationParams  # noqa: E402
 from opdi.pipeline.segmentation.base import FT_PER_M  # noqa: E402
 
 __all__ = ["inside_window", "containment_census", "census_ground_truth",
-           "null_rates", "gap_boundary_nulls",
+           "null_rates", "gap_boundary_nulls", "pre_gap_stale_signature",
            "boundary_histogram"]
 
 #: Days added on each side of the sampled window when loading ground truth for
@@ -104,7 +104,30 @@ CONTAINMENT_FIELDS = [
 HIST_FIELDS = ["arm", "edge", "bin_lower_s", "bin_upper_s", "n"]
 TRAFFIC_FILL_FIELDS = [
     "period", "n_gaps", "n_null_either_side", "null_pct", "n_no_gap_turnarounds",
+    # The same gap count over the RAW table, before step 02a's masking. The
+    # clean and raw rates answer different questions -- "what does A3's
+    # predicate see on OPDI's data" versus "what would it see on the feed" --
+    # and the distance between them is the cleaning's contribution, which is
+    # the finding.
+    "raw_n_gaps", "raw_n_null_either_side", "raw_null_pct",
+    # The mechanism, measured on raw: the sample immediately before a silence
+    # is overwhelmingly either already NULL or an exact repeat of its
+    # predecessor -- a coverage fade loses fresh altitude messages before it
+    # loses messages altogether -- and ``mask_stale_broadcasts`` then masks
+    # the repeats. The all-other-samples baselines sit beside them so the
+    # concentration at the gap boundary is visible, not asserted.
+    "pregap_n", "pregap_repeat_pct", "pregap_null_pct",
+    "other_repeat_pct", "other_null_pct",
 ]
+
+#: Raw (pre-cleaning) counterpart of each period's track table, read only by
+#: ``run_traffic_fill``. Deliberately not part of ``track_methods.PERIODS``:
+#: the arms jobs must never read raw tracks, and a raw path sitting in the
+#: shared period config would be an invitation to.
+RAW_TRACKS = {
+    "2025": "s3a://eurocontrol/opdi/osn_tracks",
+    "2024": "s3a://eurocontrol/opdi/research/tracks",
+}
 
 #: A3 splits on ``traffic``'s own fixed 10-minute gap threshold, not on OPDI's
 #: configurable ``gap_minutes`` -- the two can differ, and this diagnostic
@@ -547,6 +570,71 @@ def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) 
     }
 
 
+def pre_gap_stale_signature(
+    sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES
+) -> dict:
+    """Is the sample before a silence a measurement, or the tail of a fade?
+
+    Run on the RAW table, before any masking, or it measures nothing: after
+    ``mask_stale_broadcasts`` the repeats this looks for are already NULL.
+
+    A *pre-gap* sample is the last one before a silence longer than
+    ``gap_minutes`` -- the sample a gap-split predicate reads on the near side.
+    For those and, as a baseline, for every other sample, two rates:
+
+    * ``*_repeat_pct`` -- altitude present and exactly equal to the previous
+      sample's. ADS-B sends position and velocity in separate message types,
+      so an unchanged consecutive value is a *repeat*, not a measurement;
+      this is the very signature ``mask_stale_broadcasts`` masks.
+    * ``*_null_pct`` -- altitude already NULL in the raw feed.
+
+    A coverage fade loses fresh altitude messages before it loses messages
+    altogether, so the two rates together should approach 100% at the gap
+    boundary while sitting far lower elsewhere. That concentration -- not the
+    baseline NULL rate -- is why the cleaned table's gap boundaries are almost
+    entirely blind to a rule that reads altitude across them.
+    """
+    w = Window.partitionBy("icao24").orderBy("event_time")
+    next_time = F.lead("event_time").over(w)
+    prev_alt = F.lag("baro_altitude_ft").over(w)
+
+    pre_gap = (
+        (next_time.cast("long") - F.col("event_time").cast("long")) / 60.0
+        > F.lit(gap_minutes)
+    )
+    repeats = (
+        F.col("baro_altitude_ft").isNotNull()
+        & prev_alt.isNotNull()
+        & (F.col("baro_altitude_ft") == prev_alt)
+    )
+
+    a = sv.select(
+        pre_gap.alias("pre_gap"),
+        repeats.alias("repeats"),
+        F.col("baro_altitude_ft").isNull().alias("own_null"),
+    )
+
+    def _rates(cond):
+        r = a.filter(cond).select(
+            F.count(F.lit(1)).alias("n"),
+            F.sum(F.when(F.col("repeats"), 1).otherwise(0)).alias("rep"),
+            F.sum(F.when(F.col("own_null"), 1).otherwise(0)).alias("nul"),
+        ).collect()[0]
+        n = r["n"] or 0
+        pct = lambda x: round(100.0 * (x or 0) / n, 2) if n else 0.0  # noqa: E731
+        return n, pct(r["rep"]), pct(r["nul"])
+
+    pregap_n, pregap_repeat_pct, pregap_null_pct = _rates(F.col("pre_gap"))
+    _, other_repeat_pct, other_null_pct = _rates(~F.col("pre_gap"))
+    return {
+        "pregap_n": pregap_n,
+        "pregap_repeat_pct": pregap_repeat_pct,
+        "pregap_null_pct": pregap_null_pct,
+        "other_repeat_pct": other_repeat_pct,
+        "other_null_pct": other_null_pct,
+    }
+
+
 def _write_csv(path: Path, fieldnames: list, rows: list) -> None:
     with path.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -675,14 +763,17 @@ def run_boundary_hist(spark, s3, args, period_cfg, days, out_path) -> dict:
 
 
 def run_traffic_fill(spark, args, period_cfg, days, out_path) -> dict:
-    """What A3's split predicate cannot see, over the period's raw cleaned track.
+    """What A3's split predicate cannot see, and whose masking made it so.
 
-    Reads the same cleaned track table the arms jobs read -- ``period_cfg
-    ["tracks"]``, filtered to the sampled days -- and nothing else: no ground
-    truth, no segmentation, no assignment table. ``gap_boundary_nulls`` uses
-    ``traffic``'s own fixed 10-minute threshold by default, not the pipeline's
-    configurable ``gap_minutes``, because this measures A3's behaviour
-    specifically.
+    Reads two track tables for the sampled days -- the cleaned table the arms
+    jobs read (``period_cfg["tracks"]``) and its raw counterpart
+    (``RAW_TRACKS``) -- and nothing else: no ground truth, no segmentation, no
+    assignment table. The clean row says what A3's predicate actually sees;
+    the raw columns say what it would have seen before step 02a, and the
+    stale-signature rates attribute the difference. ``gap_boundary_nulls``
+    uses ``traffic``'s own fixed 10-minute threshold by default, not the
+    pipeline's configurable ``gap_minutes``, because this measures A3's
+    behaviour specifically.
 
     ``osn_tracks_clean``/``tracks_clean`` store ``baro_altitude`` in metres --
     storage is SI, ``cleaning/native.py`` and ``segmentation/base.py`` both
@@ -698,16 +789,36 @@ def run_traffic_fill(spark, args, period_cfg, days, out_path) -> dict:
         F.to_date("event_time").isin(days)
     ).withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M).cache()
     n_sv = sv.count()
-    print(f"{n_sv:,} samples")
+    print(f"{n_sv:,} samples (clean)")
 
     row = gap_boundary_nulls(sv)
     sv.unpersist()
     row["period"] = args.period
 
+    # The raw table: same days, same conversion, same counting -- the only
+    # thing that differs is that step 02a has not masked anything yet. The
+    # comparison attributes the cleaned table's blindness: if raw were
+    # comparably high, it would be the feed; measured, it is not, and the
+    # stale-signature rates below say why. Raw tables are diagnostic-only
+    # reads (see RAW_TRACKS); a missing period fails loudly here rather than
+    # silently producing a clean-only row.
+    raw = spark.read.parquet(RAW_TRACKS[args.period]).filter(
+        F.to_date("event_time").isin(days)
+    ).withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M).cache()
+    n_raw = raw.count()
+    print(f"{n_raw:,} samples (raw)")
+
+    raw_gaps = gap_boundary_nulls(raw)
+    row["raw_n_gaps"] = raw_gaps["n_gaps"]
+    row["raw_n_null_either_side"] = raw_gaps["n_null_either_side"]
+    row["raw_null_pct"] = raw_gaps["null_pct"]
+    row.update(pre_gap_stale_signature(raw))
+    raw.unpersist()
+
     for k in TRAFFIC_FILL_FIELDS:
         print(f"  {k:22} {row[k]}")
     _write_csv(out_path, TRAFFIC_FILL_FIELDS, [row])
-    return {"samples": n_sv}
+    return {"samples": n_sv, "raw_samples": n_raw}
 
 
 def main() -> None:

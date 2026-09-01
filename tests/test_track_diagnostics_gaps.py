@@ -88,3 +88,38 @@ def test_two_short_turnarounds_across_a_real_flight_do_not_merge(spark):
     )
     out = gap_boundary_nulls(sv, gap_minutes=10.0)
     assert out["n_no_gap_turnarounds"] == 0
+
+
+def test_pre_gap_stale_signature_separates_boundary_from_baseline(spark):
+    """The mechanism test: repeats and NULLs concentrate at the gap boundary.
+
+    c1 fades into its silence -- the pre-gap sample repeats its predecessor's
+    altitude exactly, the stale-broadcast signature. c2's pre-gap sample is
+    already NULL in the raw feed. The ordinary mid-track samples do neither.
+    A wrong implementation that reads the sample AFTER the silence instead of
+    before it, or that forgets the icao24 partition, moves these counts.
+    """
+    from track_diagnostics import pre_gap_stale_signature
+
+    sv = spark.createDataFrame(
+        [
+            # c1: fresh, fresh, REPEAT (pre-gap), then silence, then fresh
+            ("c1", _ts("2025-06-05T10:00:00"), 30000.0, False),
+            ("c1", _ts("2025-06-05T10:01:00"), 30100.0, False),
+            ("c1", _ts("2025-06-05T10:02:00"), 30100.0, False),
+            ("c1", _ts("2025-06-05T10:30:00"), 31000.0, False),
+            # c2: fresh, NULL (pre-gap), silence, fresh
+            ("c2", _ts("2025-06-05T11:00:00"), 20000.0, False),
+            ("c2", _ts("2025-06-05T11:01:00"), None, False),
+            ("c2", _ts("2025-06-05T11:30:00"), 21000.0, False),
+        ],
+        "icao24 string, event_time timestamp, baro_altitude_ft double, "
+        "on_ground boolean",
+    )
+    out = pre_gap_stale_signature(sv, gap_minutes=10.0)
+    assert out["pregap_n"] == 2
+    assert out["pregap_repeat_pct"] == 50.0   # c1's repeat
+    assert out["pregap_null_pct"] == 50.0     # c2's NULL
+    # baseline: 5 other samples, none a repeat, none NULL
+    assert out["other_repeat_pct"] == 0.0
+    assert out["other_null_pct"] == 0.0
