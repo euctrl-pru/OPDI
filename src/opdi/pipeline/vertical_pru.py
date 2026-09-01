@@ -48,6 +48,21 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard
 
 FT_PER_M = 3.28084
 
+#: Everything :func:`attach_aerodrome_geometry` attaches, and therefore
+#: everything it drops first so that attaching twice -- or attaching after
+#: :func:`~opdi.pipeline.elevation.attach_field_elevation`, which shares four of
+#: these -- cannot leave two columns of the same name behind.
+ATTACHED_GEOMETRY_COLS = (
+    "adep",
+    "ades",
+    "adep_lat",
+    "adep_lon",
+    "elev_adep_ft",
+    "ades_lat",
+    "ades_lon",
+    "elev_ades_ft",
+)
+
 
 def attach_aerodrome_geometry(
     sdf: DataFrame, month: date, storage: "StorageManager"
@@ -66,9 +81,21 @@ def attach_aerodrome_geometry(
     test rather than passing it, because a segment that cannot be placed
     relative to an aerodrome is outside the methodology, not inside it by
     default.
+
+    **Idempotent, and safe after** :func:`~opdi.pipeline.elevation.attach_field_elevation`.
+    That function attaches ``adep``, ``ades`` and both elevations for the phase
+    family, so a frame arriving here may already carry four of the eight columns
+    this adds. Joining on top of them would produce duplicates and an
+    ``AMBIGUOUS_REFERENCE`` at the first reference -- in production, where the
+    two are wired in sequence, and not in any test that calls one of them alone.
+    They are dropped and reattached instead: both read the same two tables
+    through the same join, so the reattached values are the values that were
+    dropped.
     """
     if not storage.table_exists("opdi_flight_list"):
         return sdf
+
+    sdf = sdf.drop(*[c for c in ATTACHED_GEOMETRY_COLS if c in sdf.columns])
 
     start_ts, end_ts = get_start_end_of_month(month)
     fl = (

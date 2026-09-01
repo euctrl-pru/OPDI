@@ -27,6 +27,7 @@ from pyspark.sql import functions as F
 from conftest import _EPOCH, make_track
 
 from opdi.config import EventConfig
+from opdi.pipeline.elevation import attach_field_elevation
 from opdi.pipeline.vertical_pru import (
     attach_aerodrome_geometry,
     pru_top_events,
@@ -210,11 +211,9 @@ class StubStorage:
         return self._tables[name]
 
 
-def test_aerodrome_geometry_attaches_both_ends(spark):
-    """Both ends, and coordinates as well as elevation: the PRU radius is
-    measured from the departure aerodrome in climb and the arrival one in
-    descent, so one end is never enough."""
-    storage = StubStorage({
+def _airport_storage(spark):
+    """One flight, EHAM to LSZH, with both aerodromes in OurAirports."""
+    return StubStorage({
         "opdi_flight_list": spark.createDataFrame(
             [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH")],
             "id string, dof timestamp, adep string, ades string",
@@ -226,9 +225,19 @@ def test_aerodrome_geometry_attaches_both_ends(spark):
         ),
     })
 
-    row = attach_aerodrome_geometry(_climb(spark).drop(
-        "adep_lat", "adep_lon", "ades_lat", "ades_lon"
-    ), MONTH, storage).collect()[0]
+
+def _bare(spark):
+    """The climb with no geometry attached, as it reaches the family."""
+    return _climb(spark).drop("adep_lat", "adep_lon", "ades_lat", "ades_lon")
+
+
+def test_aerodrome_geometry_attaches_both_ends(spark):
+    """Both ends, and coordinates as well as elevation: the PRU radius is
+    measured from the departure aerodrome in climb and the arrival one in
+    descent, so one end is never enough."""
+    row = attach_aerodrome_geometry(
+        _bare(spark), MONTH, _airport_storage(spark)
+    ).collect()[0]
 
     assert row["adep"] == "EHAM"
     assert row["adep_lat"] == pytest.approx(52.309)
@@ -236,3 +245,29 @@ def test_aerodrome_geometry_attaches_both_ends(spark):
     assert row["ades"] == "LSZH"
     assert row["ades_lon"] == pytest.approx(8.548)
     assert row["elev_ades_ft"] == pytest.approx(1416.0)
+
+
+def test_the_geometry_join_survives_the_elevation_join(spark):
+    """``attach_field_elevation`` runs first in the pipeline and attaches four
+    of the same eight columns for the phase family. Joining on top of them
+    leaves two columns of each name and an ``AMBIGUOUS_REFERENCE`` at the first
+    reference -- in production, where the two are wired in sequence, and in no
+    test that calls either alone.
+    """
+    storage = _airport_storage(spark)
+
+    once = attach_field_elevation(_bare(spark), MONTH, storage)
+    twice = attach_aerodrome_geometry(once, MONTH, storage)
+
+    for name in ("adep", "ades", "elev_adep_ft", "elev_ades_ft", "adep_lat"):
+        assert twice.columns.count(name) == 1, name
+    # Reading a column is the assertion: an ambiguous reference raises here.
+    row = twice.select("adep", "elev_ades_ft", "ades_lon").collect()[0]
+    assert row["adep"] == "EHAM"
+    assert row["elev_ades_ft"] == pytest.approx(1416.0)
+    assert row["ades_lon"] == pytest.approx(8.548)
+
+    # And a third pass changes nothing: the function is idempotent, not merely
+    # tolerant of the one collision it was found with.
+    thrice = attach_aerodrome_geometry(twice, MONTH, storage)
+    assert thrice.columns == twice.columns

@@ -15,6 +15,7 @@ from pyspark.sql import functions as F
 from conftest import _EPOCH, make_track
 
 from opdi.config import EventConfig
+from opdi.pipeline import level_segments as level_segments_module
 from opdi.pipeline.level_segments import (
     classify_level_offs,
     level_segments,
@@ -235,15 +236,37 @@ def test_the_pru_window_height_is_50ft_for_a_10s_window(spark):
 
 
 def test_the_climb_floor_is_measured_above_the_field(spark):
-    """A 2,900 ft level segment over a 1,416 ft field is 1,484 ft AGL -- below
-    the 3,000 ft floor, so it is not a climb level-off. Under the old
-    comparison against pressure altitude it was, at every high-elevation
-    aerodrome and nowhere else."""
-    segs = _classified(spark, level_ft=2900, field_elev_ft=1416, config=EventConfig())
-    assert segs.count() == 0
-    # The control: 4,500 ft over the same field is 3,084 ft AGL and is one.
+    """The geometry has to sit in the gap between the two rules, or it pins
+    nothing.
+
+    A 3,500 ft level segment over Zurich's 1,416 ft field is 2,084 ft AGL. The
+    old rule compared 3,500 against the 3,000 ft floor and counted it; the new
+    one compares 2,084 and does not. 4,500 ft is 3,084 ft AGL and is a
+    level-off under either rule, so it is the control that says the classifier
+    still returns something.
+
+    An altitude below 3,000 ft would prove nothing at all -- both rules reject
+    it -- which is the trap this test was written into and out of.
+    """
+    assert _classified(
+        spark, level_ft=3500, field_elev_ft=1416, config=EventConfig()
+    ).count() == 0
     assert _classified(
         spark, level_ft=4500, field_elev_ft=1416, config=EventConfig()
+    ).count() == 1
+
+
+def test_the_old_floor_is_still_reachable_against_pressure_altitude(spark):
+    """The mirror of the case above, and the reason it discriminates.
+
+    ``level_floors_above_field=False`` is v0.1.0's comparison, kept reachable so
+    released data stays reproducible. The same 3,500 ft segment over the same
+    1,416 ft field *is* a climb level-off under it. If this test and the one
+    above ever agree, the flag has stopped doing anything.
+    """
+    legacy_floors = EventConfig(level_floors_above_field=False)
+    assert _classified(
+        spark, level_ft=3500, field_elev_ft=1416, config=legacy_floors
     ).count() == 1
 
 
@@ -251,3 +274,62 @@ def test_segments_outside_the_200nm_radius_are_not_analysed(spark):
     segs = _classified_at_distance_nm(spark, 250.0, EventConfig())
     assert segs.count() == 0
     assert _classified_at_distance_nm(spark, 150.0, EventConfig()).count() == 1
+
+
+def _pru_level_to_the_end(spark):
+    """A climb that levels off at 10,000 ft and is still level at the last
+    sample.
+
+    Twelve samples 10 s apart, t+0 to t+110. The climb steps 400 ft per sample
+    -- eight times the 50 ft window -- and reaches 10,000 ft at t+50, where it
+    stays. So the grid points from t+50 to t+100 each open a window that is
+    entirely inside the level part, and the one at t+110 opens a window with
+    nothing in it but itself.
+    """
+    steps = [(8000 + 400 * i, 2400) for i in range(6)] + [(10000, 0)] * 6
+    return level_segments_pru(_profile(spark, steps), EventConfig()).collect()
+
+
+def test_a_level_segment_cannot_outlast_the_track_that_carries_it(spark):
+    """A grid point whose window runs past the last sample is unmeasured, not
+    level, and that distinction is only visible here.
+
+    A truncated window spans nothing and so always looks flat. The final grid
+    point at t+110 is therefore level on the arithmetic, and a segment built
+    from it runs to t+120 -- ten seconds after the aircraft was last heard
+    from. Excluded, the segment ends at t+110 exactly, which is where the track
+    does.
+
+    Isolated, such a point makes a 10 s segment that the 20 s minimum discards,
+    which is why a phantom-segment test would pass with the guard deleted. It
+    is when the truncated point *extends a real segment* that the guard is
+    load-bearing, and every level-off that runs to the end of its track is that
+    case.
+    """
+    segs = _pru_level_to_the_end(spark)
+
+    assert len(segs) == 1
+    assert segs[0].duration_seconds == pytest.approx(60.0)
+    assert segs[0].end_time == _EPOCH + dt.timedelta(seconds=110)
+
+
+def test_the_interpolation_grid_is_bounded(spark, monkeypatch):
+    """The grid is one ``explode`` over one array, so a track spanning weeks
+    materialises the whole array in a single row before expanding it. The cap
+    is on grid points per partition, and it truncates the tail.
+
+    Driven with the cap at four points rather than a multi-day track, because
+    the property under test is that the cap is applied at all -- and a test that
+    needed 100,000 grid points to prove it would cost more than the bug.
+    """
+    monkeypatch.setattr(level_segments_module, "MAX_GRID_POINTS_PER_PARTITION", 4)
+
+    segs = level_segments_pru(
+        _profile(spark, [(10000, 0)] * 12), EventConfig()
+    ).collect()
+
+    # Four grid points, t+0 to t+30, so the analysed part ends one window later
+    # at t+40 -- not at t+110, where the track does.
+    assert len(segs) == 1
+    assert segs[0].end_time == _EPOCH + dt.timedelta(seconds=40)
+    assert segs[0].duration_seconds == pytest.approx(40.0)

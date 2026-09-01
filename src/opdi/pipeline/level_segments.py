@@ -59,6 +59,25 @@ FTMIN_PER_MPS = 196.850394
 #: been declared since v0.1.0 and read by nothing.
 DISTANCE_COLS = ("dist_adep_nm", "dist_ades_nm")
 
+#: Ceiling on the number of interpolation grid points :func:`level_segments_pru`
+#: builds for one partition.
+#:
+#: The grid is an ``explode`` over a single array, so its whole length is
+#: materialised in one row before it is expanded: the cost is not per grid point
+#: but per *partition*, and one pathological track pays it alone. At the default
+#: 10 s window this cap is 11.6 days of trajectory, which no real flight
+#: approaches -- but a track whose segmentation failed can span a month, and
+#: 260,000 points in one array is an executor OOM rather than a slow job.
+#:
+#: A partition longer than the cap is **truncated at the tail**: the grid stops
+#: at the cap and level segments in the remainder are not reported. The error is
+#: bounded -- reported segments stay correct, only coverage is lost -- and
+#: losing the tail of a track that is already a segmentation failure is the
+#: cheap direction to be wrong in. The real fix is to partition on ``segment_id``
+#: as well as ``track_id``, which ``partition_cols`` already accepts and which
+#: nothing currently passes; that is deferred.
+MAX_GRID_POINTS_PER_PARTITION = 100_000
+
 
 def _geometry_aggregations(sdf: DataFrame, time_col: str):
     """Aggregations carrying per-sample geometry out to the segment.
@@ -252,9 +271,12 @@ def level_segments_pru(
             F.explode(
                 F.sequence(
                     F.lit(0).cast("long"),
-                    F.floor(
-                        (F.col("_t1") - F.col("_t0")) / F.lit(window_s)
-                    ).cast("long"),
+                    F.least(
+                        F.floor(
+                            (F.col("_t1") - F.col("_t0")) / F.lit(window_s)
+                        ).cast("long"),
+                        F.lit(MAX_GRID_POINTS_PER_PARTITION - 1).cast("long"),
+                    ),
                 )
             ),
         )
