@@ -273,12 +273,34 @@ def clean_tracks(spark, cfg, period) -> None:
 
 
 def build_flight_list(spark, cfg, period, airports_hex_path) -> None:
-    """Step 03."""
+    """Step 03.
+
+    ``skip_if_processed=False`` for the same reason steps 02 and 02a pass it,
+    and this call was missing it. The processed-month log is a **local parquet
+    file** under ``OPDI_live/logs/``, so it is untouched by the per-method S3
+    cleanup in ``main``'s ``finally`` -- the marker outlives the table it
+    describes. Two ways that breaks a run, and this study hit the second:
+
+    * across methods, ``legacy`` records 2025-06 and ``standard`` then skips
+      its own flight list entirely;
+    * across runs, a month recorded by any earlier invocation -- including one
+      that later died -- makes every future run skip step 03 while its tables
+      have long since been deleted, so ``score_adep_ades`` reads a path that
+      does not exist and the run dies with ``PATH_NOT_FOUND``.
+
+    Progress tracking is right for the production pipeline, whose tables
+    persist. It is wrong here, where each arm's tables live and die inside one
+    method's iteration, so the skip is disabled rather than the log
+    redirected: there is no state worth resuming onto.
+    """
     from opdi.pipeline.flights import FlightListProcessor
 
     proc = FlightListProcessor(spark, cfg)
     proc.create_table_if_not_exists()
-    proc.process_date_range(period["month"], period["month"], airports_hex_path)
+    proc.process_date_range(
+        period["month"], period["month"], airports_hex_path,
+        skip_if_processed=False,
+    )
 
 
 def read_cleaned(spark, method, days):

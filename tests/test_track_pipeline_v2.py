@@ -110,3 +110,26 @@ def test_write_rows_csv_headers_on_the_union_not_the_first_row(tmp_path):
         # must still declare the column, and DictReader reports the blank
         # cell as an empty string rather than raising or omitting the key.
         assert by_method["airframe_only"]["coverage"] == "", order
+
+
+def test_every_pipeline_step_disables_the_processed_month_skip():
+    """All three steps must pass `skip_if_processed=False`.
+
+    The processed-month log is a local parquet under `OPDI_live/logs/`, outside
+    the per-method S3 cleanup, so a marker outlives the table it describes.
+    Steps 02 and 02a already opted out; step 03 did not, and the cost was a
+    whole `pipeline_2025` run: a marker left by an earlier, long-dead run made
+    `process_date_range` skip step 03, and `score_adep_ades` then died on
+    PATH_NOT_FOUND reading a flight list nothing had written.
+
+    Source-level because the failure needs a cluster and a stale log file to
+    reproduce, and neither belongs in a unit test. Asserting all three call
+    sites together is what stops the next step from being added without it.
+    """
+    src = Path(tp.__file__).read_text()
+    for fn in ("def build_tracks", "def clean_tracks", "def build_flight_list"):
+        body = src.split(fn, 1)[1].split("\ndef ", 1)[0]
+        assert "skip_if_processed=False" in body, (
+            f"{fn} does not disable the processed-month skip; a marker from an "
+            "earlier method or an earlier run will silently skip its work"
+        )
