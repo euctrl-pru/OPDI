@@ -43,7 +43,7 @@ def test_a_config_without_events_still_builds(processor, spark, tmp_path):
 
 
 def test_the_version_stamped_is_the_configured_one(processor):
-    assert processor(EventConfig()).events.events_version == "events_v0.1.0"
+    assert processor(EventConfig()).events.events_version == "events_v0.2.0"
     assert processor(EventConfig.legacy()).events.events_version == "events_v0.0.2"
 
 
@@ -59,7 +59,7 @@ def test_event_ids_are_reproducible_across_runs(processor, spark):
     event gets a different id every run and two runs of one month cannot be
     reconciled -- which matters because the write path appends."""
     proc = processor(EventConfig())
-    rows = [("trk-1", "take-off", "events_v0.1.0")]
+    rows = [("trk-1", "take-off", "events_v0.2.0")]
 
     assert _ids(spark, proc, rows) == _ids(spark, proc, rows)
 
@@ -70,9 +70,9 @@ def test_distinct_events_get_distinct_ids(processor, spark):
         spark,
         proc,
         [
-            ("trk-1", "take-off", "events_v0.1.0"),
-            ("trk-1", "landing", "events_v0.1.0"),
-            ("trk-2", "take-off", "events_v0.1.0"),
+            ("trk-1", "take-off", "events_v0.2.0"),
+            ("trk-1", "landing", "events_v0.2.0"),
+            ("trk-2", "take-off", "events_v0.2.0"),
         ],
     )
 
@@ -86,7 +86,7 @@ def test_the_version_participates_in_the_identity(processor, spark):
     ids = _ids(
         spark,
         proc,
-        [("trk-1", "take-off", "events_v0.0.2"), ("trk-1", "take-off", "events_v0.1.0")],
+        [("trk-1", "take-off", "events_v0.0.2"), ("trk-1", "take-off", "events_v0.2.0")],
     )
 
     assert ids[0] != ids[1]

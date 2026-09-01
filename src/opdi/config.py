@@ -1015,6 +1015,113 @@ class EventConfig:
     example value, and lower than the climb equivalent because an aircraft on
     final is legitimately close to level."""
 
+    # ----- Runway operations (A-CDM milestones) -------------------------
+    emit_runway_milestones: bool = True
+    """Emit the A-CDM runway family: line-up, take-off-roll, airborne,
+    landing, touchdown, runway-vacated, go-around and the two runway-crossing
+    types. Off under ``legacy()``, where the published ``take-off``/``landing``
+    pair and the undifferentiated ``entry-runway``/``exit-runway`` stand in."""
+
+    runway_airborne_height_ft: float = 15.0
+    """Height above field elevation at which the wheels are taken to have left
+    the runway. ``airborne`` and ``touchdown`` are the *interpolated* instants
+    the height crosses this, not the extreme of a detection window -- which is
+    what ``ATOT``/``ALDT`` were, and what gave ``ATOT`` a +19 s median bias.
+    Small rather than zero because barometric altitude at the field is noisy at
+    the foot level and a zero crossing would chatter."""
+
+    runway_roll_speed_kt: float = 50.0
+    """Groundspeed above which a departure is rolling rather than taxiing.
+    Between typical taxi speed (~20 kt) and rotation (~140 kt), so it separates
+    the two without being sensitive to either."""
+
+    runway_roll_min_seconds: float = 5.0
+    """How long the roll speed must persist before ``take-off-roll`` fires.
+    A single fast sample during a high-speed turn-off is not a take-off roll."""
+
+    runway_taxi_speed_kt: float = 40.0
+    """Ceiling on groundspeed for a traversal to be a taxiing crossing. An
+    aircraft crossing a runway on a taxi route never exceeds this; one using it
+    for departure or arrival always does."""
+
+    runway_crossing_max_seconds: float = 120.0
+    """Longest traversal still readable as a crossing. A departure occupies the
+    runway for longer, and a hold on the runway is not a crossing."""
+
+    runway_align_max_deg: float = 30.0
+    """Angular tolerance between the traversal's median track and the runway
+    bearing for the traversal to count as *aligned* -- i.e. a departure or an
+    arrival rather than a crossing. Wider than the 10 deg used to *name* a
+    runway, because this is a use classification and rotation swings the track."""
+
+    runway_cross_min_deg: float = 45.0
+    """Minimum angle from the runway bearing for a traversal to be a crossing.
+    The gap between this and ``runway_align_max_deg`` is deliberate: a traversal
+    between 30 and 45 degrees is classified as neither and the detector
+    abstains, because naming the wrong milestone corrupts a movement count
+    while naming none is an explicit null."""
+
+    goaround_trigger_height_ft: float = 500.0
+    """Height above field elevation an arrival must descend below for a
+    subsequent climb-away to be a go-around rather than a normal level-off."""
+
+    goaround_recovery_height_ft: float = 1500.0
+    """Height above field elevation the aircraft must regain, with no touchdown
+    in between, for the excursion to be published as ``go-around``."""
+
+    goaround_min_roc_ftmin: float = 500.0
+    """Rate of climb the recovery must reach. Distinguishes a climb-away from a
+    baulked descent that merely stopped descending."""
+
+    goaround_radius_nm: float = 10.0
+    """How close to the aerodrome the excursion must happen. Wider than the
+    runway itself, because a go-around is initiated on final."""
+
+    # ----- PRU vertical profile ----------------------------------------
+    emit_pru_tops: bool = True
+    """Emit ``top-of-climb-cco`` and ``top-of-descent-cdo`` -- the PRU tops --
+    *alongside* the published fuzzy ``top-of-climb``/``top-of-descent``, which
+    are unchanged. Both are published because no reference data records a top
+    of climb, so neither can be shown better than the other."""
+
+    level_method: str = "pru"
+    """Which level-segment arm runs: ``"icao"`` is the anchored-band algorithm
+    shipped in v0.1.0; ``"pru"`` is the rolling window of
+    ``level_window_seconds`` whose height follows Y/X = 300 ft/min."""
+
+    level_window_seconds: float = 10.0
+    """Temporal size of the PRU rolling window. PRU's own worked example uses
+    10 s, giving a 50 ft window. The trajectory is linearly interpolated onto
+    this grid, as PRU specifies, because a discrete track has no sample at
+    every required instant."""
+
+    level_floors_above_field: bool = True
+    """Whether ``level_min_altitude_climb_ft`` (3,000) and
+    ``level_min_altitude_descent_ft`` (1,800) are measured above **field
+    elevation** or above the 1013.25 hPa datum. PRU says AGL. The shipped
+    v0.1.0 code compared them against uncorrected pressure altitude, so at
+    Zurich (1,416 ft) the descent floor sat 1,416 ft too low and at Ibiza
+    (24 ft) it was effectively right -- a per-aerodrome bias with nothing in
+    the output to show it."""
+
+    level_anchor: str = "pru"
+    """Which tops anchor the level-off classification and its exclusion box:
+    ``"pru"`` (ToC-CCO/ToD-CDO) or ``"phase"`` (the fuzzy tops, v0.1.0's
+    behaviour)."""
+
+    # ----- Airport layout ----------------------------------------------
+    airport_gate_above_field: bool = True
+    """Gate layout matching on height above field elevation rather than on
+    ``airport_max_fl`` against uncorrected pressure altitude. The published
+    gate is FL20 against the 1013.25 datum, so on a low-pressure day, or at any
+    aerodrome high enough, the gate moves relative to the ground it is supposed
+    to be near. The same defect class ``phase_ground_above_field`` fixes for
+    the phase family."""
+
+    airport_max_height_agl_ft: float = 2000.0
+    """The gate's value when ``airport_gate_above_field`` is on. 2,000 ft is
+    FL20's intent expressed against the field."""
+
     # -- airport events ---------------------------------------------------
     airport_max_fl: int = 20
     """Only samples below this flight level are matched against airport layout
@@ -1063,12 +1170,35 @@ class EventConfig:
     track-based runway detection, start-of-movement -- are all closed-form and
     express natively as column and window expressions."""
 
-    events_version: str = "events_v0.1.0"
+    events_version: str = "events_v0.2.0"
     """Version stamped on events this configuration produces.
 
     A single string covered every event type before this, so a new detector
     added to the existing function would silently inherit ``events_v0.0.2`` and
     change what a published version means. Never mutate a released value."""
+
+    def __post_init__(self) -> None:
+        if self.level_method not in ("icao", "pru"):
+            raise ValueError(
+                f"level_method must be 'icao' or 'pru', got {self.level_method!r}. "
+                "An unknown arm would silently fall through to no level segments "
+                "at all, which reads as a coverage failure rather than a typo."
+            )
+        if self.level_anchor not in ("pru", "phase"):
+            raise ValueError(
+                f"level_anchor must be 'pru' or 'phase', got {self.level_anchor!r}."
+            )
+
+    def level_window_height_ft(self) -> float:
+        """PRU's window height, derived rather than stored.
+
+        PRU fixes the relationship Y/X = 300 ft/min between the window's
+        altitude and temporal dimensions. Storing both would let them drift,
+        and a window whose ratio is not 300 ft/min is not the PRU window under
+        a different parameterisation -- it is a different definition of level
+        flight wearing the same name.
+        """
+        return self.level_vertical_speed_limit_ftmin * self.level_window_seconds / 60.0
 
     @classmethod
     def legacy(cls) -> "EventConfig":
@@ -1094,6 +1224,12 @@ class EventConfig:
             enable_pandas_stage=False,
             # Rings did not exist at all.
             ring_radii_nm=(),
+            emit_runway_milestones=False,
+            emit_pru_tops=False,
+            level_method="icao",
+            level_floors_above_field=False,
+            level_anchor="phase",
+            airport_gate_above_field=False,
             events_version="events_v0.0.2",
         )
 

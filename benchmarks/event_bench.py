@@ -114,7 +114,18 @@ LADDER = [
     ("L10_runway", {"emit_runway_events": True}),
     ("L11_blocks", {"emit_block_events": True}),
     ("L12_level_offs", {"emit_level_offs": True}),
-    ("L13_shipped", {"events_version": "events_v0.1.0"}),
+    (
+        "L13_shipped",
+        {
+            "emit_runway_milestones": True,
+            "emit_pru_tops": True,
+            "level_method": "pru",
+            "level_floors_above_field": True,
+            "level_anchor": "pru",
+            "airport_gate_above_field": True,
+            "events_version": "events_v0.2.0",
+        },
+    ),
 ]
 
 

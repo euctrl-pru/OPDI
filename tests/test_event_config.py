@@ -100,7 +100,7 @@ def test_version_string_is_new_and_the_published_one_is_untouched():
     ``events_v0.0.2`` must remain reachable, because a legacy run has to stamp
     it for a re-processed month to match the release it reproduces.
     """
-    assert EventConfig().events_version == "events_v0.1.0"
+    assert EventConfig().events_version == "events_v0.2.0"
     assert EventConfig.legacy().events_version == "events_v0.0.2"
 
 
@@ -184,3 +184,39 @@ def test_cruise_speed_membership_is_left_at_openaps_values():
     assert e.phase_cruise_speed_kt == 600.0
     assert e.phase_cruise_speed_sigma_kt == 100.0
     assert EventConfig.legacy().phase_cruise_speed_kt == 600.0
+
+
+def test_v4_defaults_are_the_shipped_configuration():
+    c = EventConfig()
+    assert c.events_version == "events_v0.2.0"
+    assert c.emit_runway_milestones is True
+    assert c.emit_pru_tops is True
+    assert c.level_method == "pru"
+    assert c.level_floors_above_field is True
+    assert c.airport_gate_above_field is True
+
+
+def test_v4_behaviour_is_all_off_under_legacy():
+    c = EventConfig.legacy()
+    assert c.events_version == "events_v0.0.2"
+    assert c.emit_runway_milestones is False
+    assert c.emit_pru_tops is False
+    assert c.level_method == "icao"
+    assert c.level_floors_above_field is False
+    assert c.airport_gate_above_field is False
+
+
+def test_level_method_rejects_an_unknown_arm():
+    """Validation in __post_init__, not a silent default: an unknown arm would
+    fall through to no level segments at all, which reads as a coverage failure
+    rather than as the typo it is."""
+    with pytest.raises(ValueError, match="level_method"):
+        EventConfig(level_method="nonsense")
+
+
+def test_pru_window_height_follows_the_vertical_speed_limit():
+    """PRU fixes Y/X = 300 ft/min. The height is derived, never stored twice."""
+    c = EventConfig()
+    assert c.level_window_height_ft() == pytest.approx(
+        c.level_vertical_speed_limit_ftmin * c.level_window_seconds / 60.0
+    )
