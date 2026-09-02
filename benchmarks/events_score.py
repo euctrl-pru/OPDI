@@ -101,6 +101,27 @@ def score(aligned: DataFrame, group_cols=("milestone",)) -> DataFrame:
     return out
 
 
+#: Below this many detections a percentile is noise wearing a number's clothes.
+#: Taken from `oac.aggregate.MIN_N`, which uses the same floor for the same
+#: reason on the same aerodromes.
+MIN_DETECTED = 20
+
+
+def score_by_airport(aligned: DataFrame) -> DataFrame:
+    """Coverage, bias and spread per (aerodrome, milestone).
+
+    `score()` has taken `group_cols` since it was written and no caller has
+    ever passed anything but the default. This is that caller.
+
+    Thin cells are **marked, not dropped**: an aerodrome removed from the table
+    is indistinguishable from one that was never in the study, and the twenty
+    aerodromes here differ in size by a factor of twenty -- UGKO has 45
+    departures over the sample where EBBR has 843.
+    """
+    out = score(aligned, group_cols=("gt_airport", "milestone"))
+    return out.withColumn("reportable", F.col("n_detected") >= F.lit(MIN_DETECTED))
+
+
 def score_by_truth_resolution(aligned: DataFrame) -> DataFrame:
     """The same scores, split by whether the airport reports to the second.
 

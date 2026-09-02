@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 import pytest
 from pyspark.sql import functions as F
 
-from events_score import align, guard_not_all_zero, score, score_runways
+from events_score import align, guard_not_all_zero, score, score_by_airport, score_runways
 
 T0 = dt.datetime(2024, 6, 5, 10, 0, 0)
 DAY = dt.date(2024, 6, 5)
@@ -134,6 +134,49 @@ def test_a_table_of_zeros_is_refused(spark):
 
     with pytest.raises(SystemExit, match="identity-join"):
         guard_not_all_zero(score(align(truth, empty)))
+
+
+def _aligned_two_airports(spark):
+    """An already-aligned frame spanning two aerodromes, one row each, so the
+    only thing under test is that `score_by_airport` groups on `gt_airport` in
+    addition to `milestone` rather than pooling every aerodrome together."""
+    return spark.createDataFrame(
+        [("EBBR", "ATOT", 5.0), ("LSZH", "ATOT", -3.0)],
+        "gt_airport string, milestone string, error_s double",
+    )
+
+
+def _aligned_with_n(spark, airport, n_detected):
+    """An already-aligned frame for one aerodrome with exactly `n_detected`
+    rows, each carrying a non-null `error_s` -- so `n_detected` (rows with a
+    detection) and `n_truth` (all rows) are both `n_detected`, i.e. 100%
+    coverage at whatever sample size the test wants to probe the floor with."""
+    return spark.createDataFrame(
+        [(airport, "ATOT", float(i)) for i in range(n_detected)],
+        "gt_airport string, milestone string, error_s double",
+    )
+
+
+def test_per_airport_scores_split_by_aerodrome(spark):
+    out = score_by_airport(_aligned_two_airports(spark))
+    assert {r["gt_airport"] for r in out.collect()} == {"EBBR", "LSZH"}
+
+
+def test_a_cell_below_the_floor_is_marked_unreportable_not_dropped(spark):
+    """Dropping it would make a detector that failed at an aerodrome look like
+    an aerodrome that was never studied. The row stays; `reportable` is False
+    and the paper renders a dash."""
+    out = score_by_airport(_aligned_with_n(spark, airport="UGKO", n_detected=3))
+    row = [r for r in out.collect() if r["gt_airport"] == "UGKO"][0]
+    assert row["reportable"] is False
+    assert row["n_detected"] == 3
+
+
+def test_coverage_is_reported_even_where_percentiles_are_not(spark):
+    """Coverage is a ratio of counts and is meaningful at any n; a median of
+    three errors is not."""
+    out = score_by_airport(_aligned_with_n(spark, airport="UGKO", n_detected=3))
+    assert [r for r in out.collect() if r["gt_airport"] == "UGKO"][0]["coverage_pct"] is not None
 
 
 def test_the_scorer_and_the_event_table_agree_on_identity(spark):
