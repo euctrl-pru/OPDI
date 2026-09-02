@@ -1112,6 +1112,20 @@ class EventConfig:
     ``"pru"`` (ToC-CCO/ToD-CDO) or ``"phase"`` (the fuzzy tops, v0.1.0's
     behaviour)."""
 
+    level_radius_enforced: bool = True
+    """Whether ``level_analysis_radius_nm`` (200 NM) actually bounds the
+    level-off classification -- PRU's analysis bound, the climb measured within
+    the radius of departure and the descent within the radius of arrival.
+
+    ``False`` reproduces v0.1.0, which *declared* ``level_analysis_radius_nm``
+    and read it nowhere: every level segment was classified, at any distance.
+    The flag exists because the bound cannot otherwise be turned off. The
+    distance columns are attached by the same aerodrome join every other family
+    needs, so a detector that applies the radius "whenever the distances are
+    present" applies it always -- and the V4 baseline rung, which is meant to
+    *be* v0.1.0, would have silently enforced a bound v0.1.0 never had, and
+    excluded every segment whose aerodrome the flight list could not name."""
+
     # ----- Airport layout ----------------------------------------------
     airport_gate_above_field: bool = True
     """Gate layout matching on height above field elevation rather than on
@@ -1231,6 +1245,7 @@ class EventConfig:
             emit_pru_tops=False,
             level_method="icao",
             level_floors_above_field=False,
+            level_radius_enforced=False,
             level_anchor="phase",
             airport_gate_above_field=False,
             events_version="events_v0.0.2",

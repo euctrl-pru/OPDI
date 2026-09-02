@@ -122,10 +122,10 @@ def test_a_redirected_write_is_allowed_through(spark, pristine_storage):
 
 
 def test_the_v4_baseline_is_v0_1_0_and_nothing_else():
-    """Exactly the seven reconstructed fields differ from what ships.
+    """Exactly the eight reconstructed fields differ from what ships.
 
-    An eighth difference means the baseline is not v0.1.0. A seventh missing
-    one means a behaviour shipped with no rung measuring it.
+    A ninth difference means the baseline is not v0.1.0. An eighth missing one
+    means a behaviour shipped with no rung measuring it.
     """
     base = build_plan(ladder="v4")["V00_v3_shipped"]
     shipped = EventConfig()
@@ -136,7 +136,7 @@ def test_the_v4_baseline_is_v0_1_0_and_nothing_else():
     }
 
     assert differing == set(V4_BASE)
-    assert len(V4_BASE) == 7
+    assert len(V4_BASE) == 8
 
 
 def test_the_last_v4_rung_is_exactly_what_ships():
@@ -169,7 +169,7 @@ def test_the_no_op_exemption_is_by_name_not_by_position():
 
     # An accidental repeat elsewhere: V04 re-stating what V03 already set.
     accidental = dict(plan)
-    accidental["V04_level_floors_agl"] = accidental["V03_pru_level"]
+    accidental["V04_level_geometry"] = accidental["V03_pru_level"]
 
     with pytest.raises(AssertionError, match="identical"):
         verify_plan_v4(accidental)

@@ -436,9 +436,13 @@ def classify_level_offs(
     climb_floor = climb_floor_ref >= F.lit(config.level_min_altitude_climb_ft)
     descent_floor = descent_floor_ref >= F.lit(config.level_min_altitude_descent_ft)
 
-    # ``level_analysis_radius_nm`` has been declared since v0.1.0 and read by
-    # nothing. PRU measures the climb within 200 NM of departure and the
-    # descent within 200 NM of arrival, so each side tests its own distance.
+    # ``level_analysis_radius_nm`` was declared in v0.1.0 and read by nothing.
+    # PRU measures the climb within 200 NM of departure and the descent within
+    # 200 NM of arrival, so each side tests its own distance -- and
+    # ``level_radius_enforced`` says whether the bound applies at all, because
+    # "whenever the distance columns are present" is not a choice a caller can
+    # make: the aerodrome join that attaches them is needed by every other
+    # family anyway.
     within_climb_radius = _within_radius(segments, config, "dist_adep_nm")
     within_descent_radius = _within_radius(segments, config, "dist_ades_nm")
 
@@ -477,18 +481,25 @@ def _floor_reference(segments: DataFrame, config: "EventConfig", elevation_col: 
 def _within_radius(segments: DataFrame, config: "EventConfig", distance_col: str):
     """Whether a segment lies inside PRU's analysis radius.
 
-    A segment whose distance is NULL -- no aerodrome named for that end, or no
-    coordinates for it -- fails the test and is excluded. The PRU definition
-    needs the aerodrome, and a segment that cannot be placed relative to one is
-    outside the methodology rather than inside it by default.
+    Off under ``level_radius_enforced=False``, which is v0.1.0: the field was
+    declared and read by nothing, so every segment was classified at any
+    distance. The flag is what makes that reachable -- absence of the distance
+    column is *not* a way to ask for it, because the aerodrome join that
+    attaches the distances is needed by half the step regardless.
 
-    A caller that attached no distance at all is a different case: the column
-    is absent, the filter does not apply, and the caller gets the unrestricted
-    classification it asked for. That is the same contract
+    A segment whose distance is NULL -- no aerodrome named for that end, or no
+    coordinates for it -- fails the test and is excluded when the bound is on.
+    The PRU definition needs the aerodrome, and a segment that cannot be placed
+    relative to one is outside the methodology rather than inside it by
+    default.
+
+    A caller that attached no distance at all is a third case: the column is
+    absent, the filter cannot be evaluated, and the caller gets the
+    unrestricted classification. That is the same contract
     ``calculate_horizontal_segment_events`` gives the field elevations, and it
     is what keeps this function drivable from a test with no storage.
     """
-    if distance_col not in segments.columns:
+    if not config.level_radius_enforced or distance_col not in segments.columns:
         return F.lit(True)
     return F.col(distance_col) <= F.lit(config.level_analysis_radius_nm)
 

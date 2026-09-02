@@ -117,8 +117,8 @@ def flight_list_table(period: str) -> str:
 #:    ``L12 -> L13`` delta bundles multiple unrelated things: the version bump,
 #:    the callsign resolution the bump switches on, and six V4 behaviour flags
 #:    (emit_runway_milestones, emit_pru_tops, level_method, level_floors_above_field,
-#:    level_anchor, airport_gate_above_field) added when EventConfig's defaults moved
-#:    to events_v0.2.0. An event-count change would be attributed to a rung that
+#:    level_radius_enforced, level_anchor, airport_gate_above_field) added when
+#:    EventConfig's defaults moved to events_v0.2.0. An event-count change would be attributed to a rung that
 #:    did multiple things at once.
 #:
 #:    **Read the deltas below L13 as valid for the tracks they were computed
@@ -154,6 +154,7 @@ LADDER = [
             "emit_pru_tops": True,
             "level_method": "pru",
             "level_floors_above_field": True,
+            "level_radius_enforced": True,
             "level_anchor": "pru",
             "airport_gate_above_field": True,
             "events_version": "events_v0.2.0",
@@ -163,7 +164,7 @@ LADDER = [
 
 #: The v0.1.0 shipped configuration, reconstructed. `EventConfig()` moved to
 #: v0.2.0 when the A-CDM families landed, so the V3 baseline no longer has a
-#: constructor; these are exactly the six new behaviour fields at their off
+#: constructor; these are exactly the seven new behaviour fields at their off
 #: values plus the old version string. Every V4 rung is applied cumulatively on
 #: top of this, so V00 *is* what V3 shipped and V07 must equal `EventConfig()`
 #: field for field -- `verify_plan_v4` asserts both rather than trusting them.
@@ -172,6 +173,7 @@ V4_BASE = dict(
     emit_pru_tops=False,
     level_method="icao",
     level_floors_above_field=False,
+    level_radius_enforced=False,
     level_anchor="phase",
     airport_gate_above_field=False,
     events_version="events_v0.1.0",
@@ -186,6 +188,12 @@ V4_BASE = dict(
 #: baseline that is reproducible against a rebuilt track table, so it starts
 #: from the v0.1.0 configuration instead of the published v0.0.2 one.
 #:
+#: ``V04`` carries two fields, not one, and they are one idea: both bind the
+#: level classification to the flight's aerodrome geometry -- the floors to its
+#: elevation and the analysis window to its distance. Splitting them would give
+#: two rungs whose deltas are not separately interpretable, because a segment
+#: excluded by the radius is one the floor never got to judge.
+#:
 #: ``V01`` carries no config change because the cross-track tie-break is not
 #: configurable -- it is a bug fix, and a bug fix behind a flag is a bug you
 #: have promised to keep. Its effect is read off ``runway_2026.csv`` against
@@ -196,7 +204,8 @@ LADDER_V4 = [
     ("V01_runway_tiebreak", {}),
     ("V02_layout_agl", {"airport_gate_above_field": True}),
     ("V03_pru_level", {"level_method": "pru"}),
-    ("V04_level_floors_agl", {"level_floors_above_field": True}),
+    ("V04_level_geometry",
+     {"level_floors_above_field": True, "level_radius_enforced": True}),
     ("V05_pru_tops", {"emit_pru_tops": True, "level_anchor": "pru"}),
     ("V06_runway_milestones", {"emit_runway_milestones": True}),
     ("V07_shipped", {"events_version": "events_v0.2.0"}),

@@ -193,6 +193,7 @@ def test_v4_defaults_are_the_shipped_configuration():
     assert c.emit_pru_tops is True
     assert c.level_method == "pru"
     assert c.level_floors_above_field is True
+    assert c.level_radius_enforced is True
     assert c.airport_gate_above_field is True
 
 
@@ -203,6 +204,10 @@ def test_v4_behaviour_is_all_off_under_legacy():
     assert c.emit_pru_tops is False
     assert c.level_method == "icao"
     assert c.level_floors_above_field is False
+    # v0.1.0 declared `level_analysis_radius_nm` and read it nowhere. The
+    # distance columns arrive from a join half the step needs anyway, so
+    # without this flag the bound cannot be turned off at all.
+    assert c.level_radius_enforced is False
     assert c.airport_gate_above_field is False
 
 

@@ -276,6 +276,23 @@ def test_segments_outside_the_200nm_radius_are_not_analysed(spark):
     assert _classified_at_distance_nm(spark, 150.0, EventConfig()).count() == 1
 
 
+def test_the_radius_bound_is_off_under_the_v0_1_0_configuration(spark):
+    """v0.1.0 declared ``level_analysis_radius_nm`` and read it nowhere.
+
+    Absence of the distance columns is not a way to reproduce that: the
+    aerodrome join that attaches them is needed by the floors, the tops and the
+    runway family regardless, so a detector applying the bound "whenever the
+    distances are present" applies it always. Without the flag the V4 baseline
+    rung -- which is meant to *be* v0.1.0 -- enforces a bound v0.1.0 never had,
+    and the whole ladder's first column is about a configuration nobody ran.
+
+    The same 250 NM segment the test above excludes is therefore returned here.
+    If the two ever agree, the flag has stopped doing anything.
+    """
+    v0_1_0 = EventConfig(level_radius_enforced=False)
+    assert _classified_at_distance_nm(spark, 250.0, v0_1_0).count() == 1
+
+
 def _pru_level_to_the_end(spark):
     """A climb that levels off at 10,000 ft and is still level at the last
     sample.
