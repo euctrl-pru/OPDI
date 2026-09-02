@@ -55,6 +55,7 @@ what :func:`export_track_extents` is for.
 
 import argparse
 import csv
+import shutil
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -272,30 +273,49 @@ def clean_tracks(spark, cfg, period) -> None:
     cleaner.process_month(period["month"], skip_if_processed=False)
 
 
-def build_flight_list(spark, cfg, period, airports_hex_path) -> None:
-    """Step 03.
+def flight_list_log_dir(method: str) -> str:
+    """A private, per-method progress-log directory, emptied before use.
 
-    ``skip_if_processed=False`` for the same reason steps 02 and 02a pass it,
-    and this call was missing it. The processed-month log is a **local parquet
-    file** under ``OPDI_live/logs/``, so it is untouched by the per-method S3
-    cleanup in ``main``'s ``finally`` -- the marker outlives the table it
-    describes. Two ways that breaks a run, and this study hit the second:
+    ``FlightListProcessor`` records finished months in **local parquet files**
+    under ``log_dir`` (default ``OPDI_live/logs``). Those files sit outside the
+    per-method S3 cleanup in ``main``'s ``finally``, so a marker outlives every
+    table it describes, and the default directory is shared by every method and
+    every run. Three markers live there -- the flight list's, the overflights'
+    and the endpoint candidates' -- and this study broke on two of them:
 
-    * across methods, ``legacy`` records 2025-06 and ``standard`` then skips
-      its own flight list entirely;
-    * across runs, a month recorded by any earlier invocation -- including one
-      that later died -- makes every future run skip step 03 while its tables
-      have long since been deleted, so ``score_adep_ades`` reads a path that
-      does not exist and the run dies with ``PATH_NOT_FOUND``.
+    * a marker written by the study's first attempt, which then died, made a
+      later run skip step 03 while its tables had long since been deleted;
+    * ``legacy`` built its endpoint candidates and recorded the month, so
+      ``standard`` skipped building its own and read a path that did not exist.
 
-    Progress tracking is right for the production pipeline, whose tables
-    persist. It is wrong here, where each arm's tables live and die inside one
-    method's iteration, so the skip is disabled rather than the log
-    redirected: there is no state worth resuming onto.
+    Scoping the whole directory per method fixes all three at once, and it is
+    the only fix that reaches the candidate cache: ``build_endpoint_candidates``
+    is guarded by its own ``rebuild`` flag which ``skip_if_processed`` does not
+    control, and deliberately so -- its docstring notes that re-running the
+    flight list at different *thresholds* does not invalidate the candidates,
+    which is exactly right for a threshold sweep and exactly wrong here, where
+    what changes between arms is the tracks the candidates are derived from.
+
+    Emptied rather than merely separated because each arm's tables are deleted
+    at the end of its own iteration: there is never state worth resuming onto,
+    so a surviving marker can only ever lie.
+    """
+    log_dir = str(REPO / "OPDI_live" / "logs" / "tcv2" / method)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    return log_dir
+
+
+def build_flight_list(spark, cfg, period, airports_hex_path, method) -> None:
+    """Step 03, with its own progress log (see :func:`flight_list_log_dir`).
+
+    ``skip_if_processed=False`` as well, for the same reason steps 02 and 02a
+    pass it. With a per-method directory it is belt and braces rather than the
+    mechanism, and it stays: it is what a reader of this function sees first,
+    and the source-level test asserts all three steps carry it.
     """
     from opdi.pipeline.flights import FlightListProcessor
 
-    proc = FlightListProcessor(spark, cfg)
+    proc = FlightListProcessor(spark, cfg, log_dir=flight_list_log_dir(method))
     proc.create_table_if_not_exists()
     proc.process_date_range(
         period["month"], period["month"], airports_hex_path,
@@ -552,7 +572,8 @@ def main() -> None:
                 # ADEP/ADES keys, which is what write_rows_csv's union header
                 # is for.
                 if method in FLIGHT_LIST_METHODS:
-                    build_flight_list(spark, cfg, period, args.airports_hex_path)
+                    build_flight_list(
+                        spark, cfg, period, args.airports_hex_path, method)
                     row.update(score_adep_ades(spark, method, period, days, args.k))
 
                 # Both of these read osn_tracks_clean, so both must run before

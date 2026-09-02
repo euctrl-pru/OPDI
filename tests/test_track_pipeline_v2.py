@@ -70,7 +70,7 @@ def test_build_flight_list_and_score_adep_ades_are_gated_on_flight_list_methods(
     src = Path(tp.__file__).read_text()
     body = src.split("if method in FLIGHT_LIST_METHODS:", 1)[1]
     body = body.split("row.update(export_track_extents(", 1)[0]
-    assert "build_flight_list(spark, cfg, period" in body
+    assert "build_flight_list(" in body
     assert "score_adep_ades(spark, method, period, days, args.k)" in body
 
 
@@ -133,3 +133,43 @@ def test_every_pipeline_step_disables_the_processed_month_skip():
             f"{fn} does not disable the processed-month skip; a marker from an "
             "earlier method or an earlier run will silently skip its work"
         )
+
+
+def test_each_method_gets_a_private_emptied_progress_log(tmp_path, monkeypatch):
+    """Per-method log dirs, emptied on use — the only fix that reaches the
+    endpoint-candidate cache.
+
+    `build_endpoint_candidates` is guarded by its own `rebuild` flag, which
+    `skip_if_processed` deliberately does not control: re-running the flight
+    list at different thresholds genuinely should reuse the cache. Between
+    arms it must not, because the tracks the candidates derive from are what
+    changed. Scoping the whole directory is what covers all three markers.
+    """
+    seen = []
+    # Bind the real function BEFORE patching: `tp.shutil` is the same module
+    # object this patches, so a lambda closing over the module would call
+    # itself.
+    real_rmtree = tp.shutil.rmtree
+
+    def spy(path, **kw):
+        seen.append(path)
+        return real_rmtree(path, **kw)
+
+    monkeypatch.setattr(tp.shutil, "rmtree", spy)
+
+    a = tp.flight_list_log_dir("legacy")
+    b = tp.flight_list_log_dir("standard")
+    assert a != b, "two arms must not share a progress log"
+    assert "legacy" in a and "standard" in b
+    # emptied, not merely separated: a surviving marker can only ever lie,
+    # because the arm's tables are deleted at the end of its own iteration
+    assert seen == [a, b]
+
+
+def test_build_flight_list_passes_the_method_through():
+    """A per-method log dir is worthless if the method never reaches it."""
+    src = Path(tp.__file__).read_text()
+    sig = src.split("def build_flight_list(", 1)[1].split(")", 1)[0]
+    assert "method" in sig
+    body = src.split("def build_flight_list(", 1)[1].split("\ndef ", 1)[0]
+    assert "log_dir=flight_list_log_dir(method)" in body
