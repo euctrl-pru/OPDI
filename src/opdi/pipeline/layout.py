@@ -31,6 +31,7 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig
 from opdi.pipeline.elevation import attach_field_elevation, height_above_field_ft
 from opdi.pipeline.flights import resolve_flight_id
+from opdi.utils.datetime_helpers import get_start_end_of_month
 from opdi.utils.storage import StorageManager
 
 #: The events version every published dataset up to 2026-08 carries.
@@ -41,6 +42,54 @@ from opdi.utils.storage import StorageManager
 #: the two are asserted equal in ``tests/test_events_labelling.py`` so a rename
 #: cannot make the guard quietly stop firing.
 LEGACY_EVENTS_VERSION = "events_v0.0.2"
+
+
+def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:
+    """``id`` and ``apt``: the aerodromes each flight of *month* may be at.
+
+    The array is ``adep``, ``ades`` and the two proximity lists, with the empty
+    strings a missing aerodrome leaves removed -- because that is what the
+    layout join tests with ``array_contains``, and a flight whose ADES is
+    unknown must not match every aerodrome whose ``hexaero_apt_icao`` happens
+    to be blank.
+
+    Extracted from :func:`calculate_airport_events` rather than copied into the
+    runway family: the two must agree about which aerodromes a flight is
+    allowed to be at, or one crossing gets published by one family and dropped
+    by the other, and nothing in the output would say which rule each used.
+
+    No ``table_exists`` guard: the caller decides what a missing flight list
+    means -- fatal here, "skip the family" for the runway milestones -- and a
+    guard returning ``None`` would turn the first case into an
+    ``AttributeError`` several frames away from its cause.
+    """
+    start_ts, end_ts = get_start_end_of_month(month)
+    flight_list = (
+        storage.read_table("opdi_flight_list")
+        .filter(
+            (col("dof") >= to_timestamp(lit(start_ts)))
+            & (col("dof") < to_timestamp(lit(end_ts)))
+        )
+        .select("id", "adep", "ades", "adep_p", "ades_p")
+    )
+
+    for c in ["adep", "ades", "adep_p", "ades_p"]:
+        flight_list = flight_list.withColumn(
+            c, when(col(c).isNull(), lit("")).otherwise(col(c))
+        )
+
+    return (
+        flight_list.withColumn(
+            "apt",
+            F.concat(
+                F.array(col("adep"), col("ades")),
+                split(col("adep_p"), ", "),
+                split(col("ades_p"), ", "),
+            ),
+        )
+        .withColumn("apt", F.array_remove(col("apt"), ""))
+        .select("id", "apt")
+    )
 
 
 def calculate_airport_events(
@@ -62,34 +111,12 @@ def calculate_airport_events(
     Returns:
         DataFrame of airport entry/exit events.
     """
-    from opdi.utils.datetime_helpers import get_start_end_of_month
-
     config = config or EventConfig()
 
-    start_ts, end_ts = get_start_end_of_month(month)
-    start_lit = to_timestamp(lit(start_ts))
-    end_lit = to_timestamp(lit(end_ts))
-
-    flight_list = (
-        storage.read_table("opdi_flight_list")
-        .filter((col("dof") >= start_lit) & (col("dof") < end_lit))
-        .select("id", "adep", "ades", "adep_p", "ades_p")
-    )
-
-    # Build airport set per flight
-    for c in ["adep", "ades", "adep_p", "ades_p"]:
-        flight_list = flight_list.withColumn(
-            c, when(col(c).isNull(), lit("")).otherwise(col(c))
-        )
-
-    flight_list = flight_list.withColumn(
-        "apt",
-        F.concat(
-            F.array(col("adep"), col("ades")),
-            split(col("adep_p"), ", "),
-            split(col("ades_p"), ", "),
-        ),
-    ).withColumn("apt", F.array_remove(col("apt"), "")).select("id", "apt")
+    # Built by the shared helper, because the runway family needs the identical
+    # array and two constructions of it would be two definitions of "which
+    # aerodromes may this flight be at".
+    flight_list = flight_aerodrome_sets(month, storage)
 
     sv_f = sv.withColumnRenamed("callsign", "flight_id")
     sv_f = sv_f.fillna({"flight_id": ""})

@@ -817,8 +817,11 @@ class EventConfig:
     """Measure the ground membership against **height above field elevation**
     rather than raw pressure altitude.
 
-    Implemented by ``events.attach_field_elevation``, which attaches the field
-    elevation of **both** the track's ADEP and ADES; the membership takes the
+    The two elevations reach the detector from
+    ``FlightEventProcessor._with_aerodrome_geometry``, which attaches the field
+    elevation of **both** the track's ADEP and ADES once for the whole step
+    (the same join that carries the aerodrome positions the runway and PRU
+    families need); the membership takes the
     more permissive of the two. A track is only ever on the ground at one of
     its ends and cruise sits far above both, so this is correct without a
     per-sample distance deciding which end applies. A missing elevation
