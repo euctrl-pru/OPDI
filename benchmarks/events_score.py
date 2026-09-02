@@ -122,15 +122,34 @@ def score_by_airport(aligned: DataFrame) -> DataFrame:
     return out.withColumn("reportable", F.col("n_detected") >= F.lit(MIN_DETECTED))
 
 
-def score_by_truth_resolution(aligned: DataFrame) -> DataFrame:
+def score_by_truth_resolution(
+    aligned: DataFrame, group_cols=("milestone", "gt_subminute")
+) -> DataFrame:
     """The same scores, split by whether the airport reports to the second.
 
     Without this split the ATOT/ALDT error distribution mostly measures APDF's
     own quantisation: 64% of movement times land on a whole minute, so a
     perfect detector would still show a spread of +/-30 s against them. The
     sub-minute subset is the only place a seconds-level claim can be made.
+
+    ``group_cols`` defaults to the network-level split, so every existing
+    caller is unchanged. V4's annex passes
+    ``("gt_airport", "milestone", "gt_subminute")``: reporting resolution is a
+    property of the *aerodrome's* reporting system, not of the network, so
+    "64% land on a whole minute" is an average over aerodromes that are
+    individually at 0% or 100% -- and a reader who wants to know whether a
+    given aerodrome's error figure is dominated by quantisation cannot get
+    that from the pooled row. ``gt_subminute`` must stay in the grouping
+    whatever else is added, or this stops being the resolution split.
     """
-    return score(aligned, group_cols=("milestone", "gt_subminute"))
+    group_cols = tuple(group_cols)
+    if "gt_subminute" not in group_cols:
+        raise ValueError(
+            f"score_by_truth_resolution must group on 'gt_subminute'; got "
+            f"{group_cols}. Without it this is `score()` under another name, "
+            f"and the caller believes it is reading a resolution split."
+        )
+    return score(aligned, group_cols=group_cols)
 
 
 def score_runways(aligned: DataFrame) -> DataFrame:

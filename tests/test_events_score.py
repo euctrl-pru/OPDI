@@ -14,7 +14,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 import pytest
 from pyspark.sql import functions as F
 
-from events_score import align, guard_not_all_zero, score, score_by_airport, score_runways
+from events_score import (
+    align,
+    guard_not_all_zero,
+    score,
+    score_by_airport,
+    score_by_truth_resolution,
+    score_runways,
+)
 
 T0 = dt.datetime(2024, 6, 5, 10, 0, 0)
 DAY = dt.date(2024, 6, 5)
@@ -200,4 +207,63 @@ def test_the_scorer_and_the_event_table_agree_on_identity(spark):
         assert key in src, (
             f"detected_events must resolve {key!r}; align() joins on it and a "
             f"missing key fails only after the events have been computed"
+        )
+
+
+def _aligned_two_airports_two_resolutions(spark):
+    """An already-aligned frame where one aerodrome reports to the second and
+    the other does not -- which is the real shape: `gt_subminute` is a property
+    of the aerodrome's reporting system, so it is nearly constant within an
+    aerodrome and varies between them."""
+    return spark.createDataFrame(
+        [
+            ("EBBR", "ATOT", True, 5.0),
+            ("EBBR", "ATOT", True, -4.0),
+            ("EBBR", "ALDT", True, 2.0),
+            ("LSZH", "ATOT", False, 31.0),
+        ],
+        "gt_airport string, milestone string, gt_subminute boolean, error_s double",
+    )
+
+
+def test_truth_resolution_can_be_split_per_aerodrome(spark):
+    """Annex A needs to say *which* aerodromes report to the second. The
+    default grouping pools them, so the network figure is an average over
+    aerodromes that are individually at 0% or 100%."""
+    out = score_by_truth_resolution(
+        _aligned_two_airports_two_resolutions(spark),
+        group_cols=("gt_airport", "milestone", "gt_subminute"),
+    ).collect()
+
+    cells = {(r["gt_airport"], r["milestone"], r["gt_subminute"]): r for r in out}
+    assert set(cells) == {
+        ("EBBR", "ATOT", True),
+        ("EBBR", "ALDT", True),
+        ("LSZH", "ATOT", False),
+    }
+    assert cells[("EBBR", "ATOT", True)]["n_truth"] == 2
+    assert cells[("LSZH", "ATOT", False)]["n_truth"] == 1
+
+
+def test_the_default_grouping_is_what_it_always_was(spark):
+    """Existing callers -- V3's chain among them -- must see the network-level
+    split unchanged."""
+    out = score_by_truth_resolution(
+        _aligned_two_airports_two_resolutions(spark)
+    ).collect()
+
+    assert {(r["milestone"], r["gt_subminute"]) for r in out} == {
+        ("ATOT", True), ("ATOT", False), ("ALDT", True)
+    }
+    assert "gt_airport" not in out[0].asDict()
+
+
+def test_a_resolution_split_without_the_resolution_is_refused(spark):
+    """It would be `score()` under a name that promises something else, and
+    the caller would report quantisation-free figures that are nothing of the
+    kind."""
+    with pytest.raises(ValueError, match="gt_subminute"):
+        score_by_truth_resolution(
+            _aligned_two_airports_two_resolutions(spark),
+            group_cols=("gt_airport", "milestone"),
         )

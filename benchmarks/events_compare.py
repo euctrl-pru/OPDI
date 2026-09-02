@@ -261,9 +261,17 @@ def main() -> int:
     ]
     write_csv(per_airport, out / f"per_airport_{args.period}.csv")
 
+    # Per aerodrome as well as per milestone: whether the truth is readable to
+    # the second is a property of the aerodrome's reporting system, so the
+    # network-level "64% land on a whole minute" is an average over aerodromes
+    # that are individually at 0% or 100%. Annex A needs the per-aerodrome
+    # column to say whether a given aerodrome's error figure is dominated by
+    # quantisation; the pooled row cannot answer that for any of them.
     resolution = [
         {"period": args.period, "rung": args.rung, **r.asDict()}
-        for r in events_score.score_by_truth_resolution(ms_aligned).collect()
+        for r in events_score.score_by_truth_resolution(
+            ms_aligned, group_cols=("gt_airport", "milestone", "gt_subminute")
+        ).collect()
     ]
     write_csv(resolution, out / f"resolution_{args.period}.csv")
 
