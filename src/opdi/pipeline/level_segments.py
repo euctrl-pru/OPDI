@@ -284,11 +284,23 @@ def level_segments_pru(
         .select(*part, "_ts")
         .withColumn("_is_grid", F.lit(True))
     )
-    value_cols = ["_alt_ft"] + carried + elevations
-    for c in value_cols:
+    # The elevations are deliberately *not* in ``value_cols``. They are
+    # constant per partition -- a track has one departure field and one arrival
+    # field -- so interpolating them costs four window expressions each to
+    # rediscover a number that never changes. One ``first(ignorenulls)`` over
+    # the whole partition gives the identical answer.
+    value_cols = ["_alt_ft"] + carried
+    for c in value_cols + elevations:
         grid = grid.withColumn(c, F.lit(None).cast("double"))
 
     combined = grid.unionByName(real.withColumn("_is_grid", F.lit(False)))
+
+    if elevations:
+        constant = Window.partitionBy(*part)
+        for c in elevations:
+            combined = combined.withColumn(
+                c, F.first(F.col(c), ignorenulls=True).over(constant)
+            )
 
     # Real samples sort before the grid instant they coincide with, so a grid
     # point that lands on a sample interpolates from zero distance and takes

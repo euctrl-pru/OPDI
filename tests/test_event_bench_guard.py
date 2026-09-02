@@ -229,6 +229,50 @@ def test_only_the_2026_period_overrides_the_flight_list():
     assert flight_list_table("2024") == "opdi_flight_list"
 
 
+class _RecordingStorage:
+    """Records the table names asked for, and answers with one empty frame."""
+
+    def __init__(self, frame):
+        self._frame = frame
+        self.asked = []
+
+    def read_table(self, name):
+        self.asked.append(name)
+        return self._frame
+
+
+def test_the_scorer_resolves_the_periods_own_flight_list(spark):
+    """The pipeline side of the 2026 redirect was tested; the scoring side was
+    not, and it is the half that decides which flights *exist*.
+
+    `events_compare._identity` maps track_id to (icao24, callsign, day), and a
+    2026 run reading `opdi_flight_list` -- which holds three days of 2025 --
+    finds identity for no track at all and scores an empty intersection. That
+    reads as a detector that found nothing, not as a scorer pointed at the
+    wrong table.
+    """
+    import events_compare
+
+    fl = spark.createDataFrame(
+        [], "ID string, ICAO24 string, FLT_ID string, FIRST_SEEN timestamp"
+    )
+    tracks = spark.createDataFrame(
+        [], "track_id string, icao24 string, callsign string, event_time timestamp"
+    )
+
+    for period, expected in (("2026", "research/flight_list_2026"),
+                             ("2025", "opdi_flight_list")):
+        storage = _RecordingStorage(fl)
+        events_compare._identity(spark, storage, period, "osn_tracks_clean")
+        assert storage.asked == [expected], period
+
+    # 2024 has no flight list at all and derives identity from the tracks --
+    # the case a `.get` with a default could not express.
+    storage = _RecordingStorage(tracks)
+    events_compare._identity(spark, storage, "2024", "research/tracks_clean")
+    assert storage.asked == ["research/tracks_clean"]
+
+
 def test_the_2026_redirect_sends_the_flight_list_read_to_the_research_copy(
     spark, pristine_storage
 ):

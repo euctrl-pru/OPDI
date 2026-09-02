@@ -214,6 +214,7 @@ def calculate_level_off_events(
     config: Optional[EventConfig] = None,
     *,
     segments: Optional[DataFrame] = None,
+    tops: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
     """ICAO level-offs in climb (KPI17) and descent (KPI19).
 
@@ -229,7 +230,10 @@ def calculate_level_off_events(
       segments -- the anchored band (``icao``) or PRU's rolling window
       (``pru``). Passing ``segments`` reuses a frame the caller already built,
       which is how ``FlightEventProcessor`` avoids detecting the same segments
-      twice for this family and for the PRU tops.
+      twice for this family and for the PRU tops. ``tops`` does the same for
+      the PRU tops themselves, which are otherwise computed once here and once
+      in ``pru_top_events`` -- the same windowed pass over the month's state
+      vectors, twice per rung.
     * ``level_anchor`` selects the tops the classification hangs from:
       ``"phase"`` takes them from the horizontal detector's own output, so the
       two families cannot disagree about where cruise began (v0.1.0's
@@ -250,14 +254,15 @@ def calculate_level_off_events(
     )
 
     if config.level_anchor == "pru":
-        tops = pru_tops(sdf_input, segs, config).select(
+        pru = tops if tops is not None else pru_tops(sdf_input, segs, config)
+        anchors = pru.select(
             col("track_id").alias("_top_id"),
             col("toc_cco_time").alias("toc_time"),
             col("toc_cco_alt_ft").alias("toc_alt"),
             col("tod_cdo_time").alias("tod_time"),
             col("tod_cdo_alt_ft").alias("tod_alt"),
         )
-        segs = segs.join(tops, segs.track_id == col("_top_id"), "left").drop("_top_id")
+        segs = segs.join(anchors, segs.track_id == col("_top_id"), "left").drop("_top_id")
     else:
         phase_tops = horizontal_events.filter(
             col("type").isin("top-of-climb", "top-of-descent")
@@ -1183,13 +1188,20 @@ class FlightEventProcessor:
 
         # One aerodrome join for the whole step; see _with_aerodrome_geometry.
         #
-        # **Not cached, deliberately.** ``sdf_input`` is, and caching both
+        # **Not cached here, deliberately.** ``sdf_input`` is, and caching both
         # would hold two copies of the month's state vectors -- the second
         # differing only by eight broadcast-joined columns. Of the two, this is
         # the one worth rederiving: it is a broadcast join plus two haversines
         # over an already-cached frame, all narrow and shuffle-free, whereas
         # ``sdf_input`` is two window functions and rebuilding *it* per
         # consumer would cost a shuffle each time.
+        #
+        # ``_runway_traversal_family`` does cache its own copy, and that is not
+        # a contradiction of this: it caches the frame *after* the aerodrome
+        # array join, which it consumes twice in quick succession -- once for
+        # the traversals and once for the milestones -- and drops out of scope
+        # with the step. What is avoided here is holding the wide frame alive
+        # across every family in the step.
         geo = self._with_aerodrome_geometry(sdf_input, month)
 
         # The level segments are detected once and shared by the two families
@@ -1198,9 +1210,19 @@ class FlightEventProcessor:
         # twice would be the same work done twice and, worse, would let the
         # relocation and the classification disagree.
         segments = None
+        # The PRU tops, likewise: with ``level_anchor = "pru"`` the level-off
+        # classification and the published ``top-of-climb-cco`` pair hang from
+        # the same tops, and each was computing them independently -- one
+        # windowed pass over the month's state vectors, done twice per rung.
+        tops = None
         if calc_vertical and (self.events.emit_level_offs or self.events.emit_pru_tops):
             segments = LEVEL_ARMS[self.events.level_method](geo, self.events)
             segments.cache()
+            if self.events.emit_pru_tops or (
+                self.events.emit_level_offs and self.events.level_anchor == "pru"
+            ):
+                tops = pru_tops(geo, segments, self.events)
+                tops.cache()
 
         df_events = None
 
@@ -1226,11 +1248,11 @@ class FlightEventProcessor:
 
             if df_events is not None and self.events.emit_level_offs:
                 add(calculate_level_off_events(
-                    geo, df_events, self.events, segments=segments
+                    geo, df_events, self.events, segments=segments, tops=tops
                 ))
 
             if self.events.emit_pru_tops:
-                add(pru_top_events(geo, segments, self.events))
+                add(pru_top_events(geo, segments, self.events, tops=tops))
 
             # ATOT/ALDT are the extreme sample of a detection window; the A-CDM
             # family interpolates the same two instants and publishes them as

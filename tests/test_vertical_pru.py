@@ -247,6 +247,27 @@ def test_aerodrome_geometry_attaches_both_ends(spark):
     assert row["elev_ades_ft"] == pytest.approx(1416.0)
 
 
+def test_a_duplicated_flight_list_id_fails_loudly(spark):
+    """A left join hides a duplicate; it does not reject it.
+
+    Every state vector of the affected track would be multiplied by the number
+    of duplicate rows, and every event derived from it with them -- level
+    segments detected over a doubled trajectory, two of every runway milestone,
+    inflated counts in exactly the ladder the study reports. Nothing in the
+    output would say so, which is why this is an error and not a warning.
+    """
+    duplicated = StubStorage({
+        "opdi_flight_list": spark.createDataFrame(
+            [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH"),
+             ("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "EDDF")],
+            "id string, dof timestamp, adep string, ades string",
+        ),
+    })
+
+    with pytest.raises(ValueError, match="distinct ids"):
+        attach_aerodrome_geometry(_bare(spark), MONTH, duplicated)
+
+
 def test_the_geometry_join_survives_the_elevation_join(spark):
     """``attach_field_elevation`` runs first in the pipeline and attaches four
     of the same eight columns for the phase family. Joining on top of them

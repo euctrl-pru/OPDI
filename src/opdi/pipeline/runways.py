@@ -165,9 +165,18 @@ def detect_runway_movements(
         "bearing_error", angle_between(F.col("median_track"), F.col("rwy_bearing"))
     ).filter(F.col("bearing_error") <= F.lit(config.runway_max_bearing_deg))
 
-    # Nearest bearing wins. Parallel runways share one to within a degree, so
-    # the aircraft's own offset from each centreline breaks the tie -- the same
-    # discriminator traffic uses shapely for, in closed form.
+    # Cross-track distance decides; the bearing error only breaks its ties.
+    #
+    # The candidates have already been filtered to within
+    # ``runway_max_bearing_deg`` of the aircraft's own track, so every survivor
+    # is plausibly aligned and the question left is *which strip*. Parallel
+    # runways share a bearing to within a degree and sit hundreds of metres
+    # apart, so ordering on bearing first would let a fraction of a degree of
+    # heading noise pick the wrong one; the aircraft's offset from each
+    # centreline cannot be confused that way. Bearing error then separates the
+    # two *directions* of the chosen strip, which share a centreline exactly
+    # and so tie on cross-track. The same discriminator traffic uses shapely
+    # for, in closed form.
     cand = cand.withColumn(
         "cross_track_nm",
         cross_track_nm(

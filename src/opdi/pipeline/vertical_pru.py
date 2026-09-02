@@ -31,7 +31,7 @@ laptop against trajectories whose geometry is known by construction.
 """
 
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -106,6 +106,7 @@ def attach_aerodrome_geometry(
         )
         .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
     )
+    _assert_unique_flight_ids(fl, month)
 
     if storage.table_exists("oa_airports"):
         apt = storage.read_table("oa_airports").select(
@@ -131,6 +132,36 @@ def attach_aerodrome_geometry(
             )
 
     return sdf.join(F.broadcast(fl), sdf.track_id == col("_fl_id"), "left").drop("_fl_id")
+
+
+def _assert_unique_flight_ids(fl: DataFrame, month: date) -> None:
+    """Fail loudly if the month's flight list has a repeated ``id``.
+
+    This join is a *left* join onto the state vectors, so a duplicated flight
+    list id does not error: it multiplies every state vector of that track by
+    the number of rows carrying the id. Nothing downstream would say so. The
+    level segments would be detected over a trajectory sampled twice, the
+    runway traversals would emit two of every milestone, and the event counts
+    the ladder reports would be inflated for exactly the flights whose flight
+    list entry was ambiguous.
+
+    Cheap, and paid once per step: one aggregation over the month's flight
+    list, which is a few hundred thousand rows and is about to be broadcast
+    anyway. The alternative is a silent fan-out that only shows up as a
+    benchmark that will not reconcile.
+    """
+    n, distinct = fl.select(
+        F.count(col("_fl_id")), F.countDistinct(col("_fl_id"))
+    ).first()
+    if n != distinct:
+        raise ValueError(
+            f"the flight list for {month:%Y-%m} has {n} rows but only "
+            f"{distinct} distinct ids. This join is a left join onto the state "
+            f"vectors, so a repeated id does not fail -- it silently "
+            f"multiplies every sample of that track, and every event derived "
+            f"from it, by the number of duplicates. Deduplicate the flight "
+            f"list before running step 04."
+        )
 
 
 def aerodrome_distances(sdf: DataFrame) -> DataFrame:
@@ -296,6 +327,7 @@ def pru_top_events(
     segments: DataFrame,
     config: "EventConfig",
     *,
+    tops: Optional[DataFrame] = None,
     altitude_col: str = "baro_altitude_c",
     time_col: str = "event_time",
 ) -> DataFrame:
@@ -309,14 +341,21 @@ def pru_top_events(
 
     Returns an empty frame of the standard shape when ``emit_pru_tops`` is off,
     never ``None``, so that unioning the families never branches on nullity.
+
+    ``tops`` reuses a frame the caller already built. With ``level_anchor =
+    "pru"`` both this family and the level-off classification hang from the
+    same tops, and computing them twice is the same windowed pass over the
+    month's state vectors done twice -- and would let the two disagree if
+    anything about the computation were ever non-deterministic.
     """
     session = sdf.sparkSession
     if not config.emit_pru_tops:
         return session.createDataFrame([], MILESTONE_SCHEMA)
 
-    tops = pru_tops(
-        sdf, segments, config, altitude_col=altitude_col, time_col=time_col
-    )
+    if tops is None:
+        tops = pru_tops(
+            sdf, segments, config, altitude_col=altitude_col, time_col=time_col
+        )
 
     climb = tops.select(
         "track_id",
