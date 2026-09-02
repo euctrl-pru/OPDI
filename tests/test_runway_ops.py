@@ -50,7 +50,7 @@ def _mps(kt):
 # `_prepared` is the adapter, the same shape as `test_events_phase._measured`.
 # ---------------------------------------------------------------------------
 
-def _prepared(sdf, elev_adep_ft=0.0, elev_ades_ft=0.0):
+def _prepared(sdf, elev_adep_ft=0.0, elev_ades_ft=0.0, adep=None, ades=None):
     """Add what step 02 and the flight-list join add and TRACK_SCHEMA does not.
 
     ``baro_altitude_c`` is the rolling-mean repair step 02 writes and every
@@ -58,14 +58,22 @@ def _prepared(sdf, elev_adep_ft=0.0, elev_ades_ft=0.0):
     helpers attach; the two elevations are what ``attach_field_elevation``
     attaches. All default to a sea-level field so a test only has to state the
     geometry it cares about.
+
+    ``adep``/``ades`` are what ``attach_aerodrome_geometry`` adds and what lets
+    a height be measured against *one named* aerodrome. Omitted by default, so
+    a test that does not care about the two-field distinction gets the
+    permissive fallback and reads exactly as it did before this existed.
     """
-    return (
+    out = (
         sdf.withColumn("baro_altitude_c", F.col("baro_altitude"))
         .withColumn("cumulative_distance_nm", F.lit(0.0))
         .withColumn("cumulative_time_s", F.lit(0.0))
         .withColumn("elev_adep_ft", F.lit(elev_adep_ft))
         .withColumn("elev_ades_ft", F.lit(elev_ades_ft))
     )
+    if adep is not None or ades is not None:
+        out = out.withColumn("adep", F.lit(adep)).withColumn("ades", F.lit(ades))
+    return out
 
 
 _TRAVERSAL_SCHEMA = StructType(
@@ -144,8 +152,13 @@ def _crossing_traversal(spark):
     )
 
 
-def _departure_track(spark):
+def _departure_track(spark, elev_adep_ft=0.0, elev_ades_ft=0.0,
+                     adep=None, ades=None):
     """Hold, roll, rotate -- with each stage long enough to be distinguishable.
+
+    Altitudes are stated as height above the *departure* field and offset by
+    ``elev_adep_ft`` here, because that is what a barometric altimeter reads:
+    an aircraft holding at a 24 ft aerodrome broadcasts 24 ft, not 0.
 
     Twenty-five seconds at taxi speed put `line-up` strictly before the roll;
     the roll then holds above 50 kt for four sample intervals, so
@@ -156,21 +169,22 @@ def _departure_track(spark):
     and the test would be asserting on a detector that had abstained.
     """
     samples = [
-        {"t": i * 5, "velocity": _mps(15), "baro_altitude": 0.0,
+        {"t": i * 5, "velocity": _mps(15), "baro_altitude": _m(elev_adep_ft),
          "vert_rate": 0.0, "heading": 70.0}
         for i in range(5)
     ]
     samples += [
-        {"t": 25 + i * 5, "velocity": _mps(kt), "baro_altitude": 0.0,
+        {"t": 25 + i * 5, "velocity": _mps(kt), "baro_altitude": _m(elev_adep_ft),
          "vert_rate": 0.0, "heading": 70.0}
         for i, kt in enumerate([60, 90, 120, 150, 170])
     ]
     samples += [
-        {"t": 50 + i * 5, "velocity": _mps(180), "baro_altitude": _m(ft),
+        {"t": 50 + i * 5, "velocity": _mps(180), "baro_altitude": _m(elev_adep_ft + ft),
          "vert_rate": 12.0, "heading": 70.0}
         for i, ft in enumerate([100, 400, 800])
     ]
-    return _prepared(make_track(spark, samples))
+    return _prepared(make_track(spark, samples), elev_adep_ft, elev_ades_ft,
+                     adep, ades)
 
 
 def _taxi_track_with_one_fast_sample(spark):
@@ -216,51 +230,88 @@ def _dest(lat, lon, bearing, dist_nm):
     return math.degrees(p2), math.degrees(l2)
 
 
-#: (seconds, along-track NM from the threshold, height ft, groundspeed kt).
-#: Negative along-track is short of the threshold. The pair (-0.2, 60) ->
-#: (+0.1, 20) straddles the threshold plane two thirds of the way through, and
-#: (20 ft) -> (5 ft) straddles 15 ft one third of the way through -- both
-#: chosen so the interpolated answer is a number a reader can check by hand.
+#: (seconds, along-track NM from the threshold, height ft above the arrival
+#: field, groundspeed kt). Negative along-track is short of the threshold. The
+#: pair (-0.2, 60) -> (+0.1, 30) straddles the threshold plane two thirds of
+#: the way through (t = 36.67 s), and (30 ft) -> (5 ft) straddles 15 ft three
+#: fifths of the way through (t = 46 s) -- both chosen so the interpolated
+#: answer is a number a reader can check by hand.
+#:
+#: **Only the samples at or beyond the threshold are inside the runway
+#: polygon.** That is the shape a real traversal has, and it is why the T16
+#: crossing needs `ARRIVAL_LEAD_SECONDS`: the pair that straddles the plane has
+#: one endpoint outside the polygon by definition.
 _ARRIVAL = [
     (0, -1.5, 500.0, 140),
     (10, -1.0, 340.0, 138),
     (20, -0.5, 180.0, 136),
     (30, -0.2, 60.0, 134),
-    (40, 0.1, 20.0, 130),
+    (40, 0.1, 30.0, 130),
     (50, 0.4, 5.0, 110),
     (60, 0.7, 0.0, 80),
     (70, 0.9, 0.0, 50),
     (80, 1.1, 0.0, 25),
 ]
 
+#: The first and last sample of `_ARRIVAL` that a runway polygon covers, i.e.
+#: the entry and exit a real `runway_traversals` would derive. Named rather
+#: than written twice, because the hand-built traversal and the end-to-end one
+#: have to agree about it or the two tests are about different runways.
+_ARRIVAL_ENTRY_S, _ARRIVAL_EXIT_S = 40, 80
 
-def _arrival_track(spark):
-    """A landing on runway 07, laid out along its own centreline."""
-    samples = []
+
+def _arrival_samples(elev_ades_ft=0.0):
+    """The arrival profile as raw samples, on runway 07's own centreline.
+
+    Altitudes are offset by the arrival field's elevation, because that is what
+    a barometric altimeter reads: an aircraft on the deck at a 24 ft aerodrome
+    broadcasts 24 ft.
+    """
+    out = []
     for t, along_nm, height_ft, kt in _ARRIVAL:
         bearing = 70.0 if along_nm >= 0 else 250.0
         lat, lon = _dest(50.0, 4.0, bearing, abs(along_nm))
-        samples.append({
-            "t": t, "lat": lat, "lon": lon, "baro_altitude": _m(height_ft),
+        out.append({
+            "t": t, "lat": lat, "lon": lon,
+            "baro_altitude": _m(elev_ades_ft + height_ft),
             "velocity": _mps(kt), "vert_rate": -3.0, "heading": 70.0,
         })
-    return _prepared(make_track(spark, samples))
+    return out
+
+
+def _arrival_track(spark, elev_adep_ft=0.0, elev_ades_ft=0.0,
+                   adep=None, ades=None):
+    """A landing on runway 07, laid out along its own centreline."""
+    return _prepared(make_track(spark, _arrival_samples(elev_ades_ft)),
+                     elev_adep_ft, elev_ades_ft, adep, ades)
 
 
 def _arrival_traversal(spark):
+    """The traversal `runway_traversals` derives from `_arrival_track`.
+
+    Bounded by the runway polygon, so it starts at the first sample *at* the
+    threshold -- not 1.5 NM out on final. An earlier version of this fixture
+    declared the wider window, and `landing` passed on a traversal shape the
+    detector could never produce.
+    """
     return _traversal(
-        spark, "arrival", 0, 80,
-        max_gs_kt=140.0, align_deg=2.0,
-        entry_height_ft=500.0, exit_height_ft=0.0,
+        spark, "arrival", _ARRIVAL_ENTRY_S, _ARRIVAL_EXIT_S,
+        max_gs_kt=130.0, align_deg=2.0,
+        entry_height_ft=30.0, exit_height_ft=0.0,
     )
 
 
-def _approach_track(spark, low_point_ft):
+def _approach_track(spark, low_point_ft, elev_adep_ft=0.0, elev_ades_ft=0.0,
+                    adep="LSZH", ades="EBBR"):
     """A descent to ``low_point_ft`` at t=40 s, then a climb away.
 
     500 ft is crossed downward at t=25 and 1,500 ft upward at t=63.75, so the
     excursion window is unambiguous; whether it is a go-around then turns only
     on how low the aircraft got, which is the one thing each caller varies.
+
+    The profile is stated as height above the **arrival** field and offset by
+    ``elev_ades_ft``, because that is the field a go-around is measured
+    against: the aircraft is on final at its destination.
     """
     profile = [
         (0, 2000.0, -8.0), (10, 1200.0, -8.0), (20, 700.0, -8.0),
@@ -268,14 +319,15 @@ def _approach_track(spark, low_point_ft):
         (60, 1200.0, 10.0), (70, 2000.0, 10.0), (80, 2500.0, 10.0),
     ]
     sdf = _prepared(make_track(spark, [
-        {"t": t, "baro_altitude": _m(ft), "vert_rate": vr,
+        {"t": t, "baro_altitude": _m(elev_ades_ft + ft), "vert_rate": vr,
          "velocity": _mps(140), "lat": 50.0, "lon": 4.0}
         for t, ft, vr in profile
-    ]))
+    ]), elev_adep_ft, elev_ades_ft)
     return (
         sdf.withColumn("ades_lat", F.lit(50.0))
         .withColumn("ades_lon", F.lit(4.0))
-        .withColumn("ades", F.lit("EBBR"))
+        .withColumn("adep", F.lit(adep))
+        .withColumn("ades", F.lit(ades))
     )
 
 
@@ -542,6 +594,39 @@ def _thresholds(spark):
     )
 
 
+def _as_flown(sdf, positions=None, cells="cell-rwy", apt=("EBBR",)):
+    """What `_runway_traversal_family` adds before `runway_traversals` runs.
+
+    ``positions`` is one (lat, lon) per sample in time order and ``cells`` one
+    H3 identifier per sample -- or a single identifier for all of them. The
+    flight-list aerodrome array and the resolved callsign complete the frame.
+
+    Stated per sample rather than derived, because which samples a runway
+    polygon covers is the very thing `ARRIVAL_LEAD_SECONDS` exists for: a
+    fixture that puts the whole final approach inside the polygon tests a
+    traversal shape the detector cannot produce.
+    """
+    idx = F.row_number().over(Window.partitionBy("track_id").orderBy("event_time"))
+    out = sdf.withColumn("_i", idx)
+    if positions is not None:
+        lat_arr = F.array(*[F.lit(p[0]) for p in positions])
+        lon_arr = F.array(*[F.lit(p[1]) for p in positions])
+        out = (
+            out.withColumn("lat", F.element_at(lat_arr, F.col("_i")))
+            .withColumn("lon", F.element_at(lon_arr, F.col("_i")))
+        )
+    if isinstance(cells, str):
+        out = out.withColumn("h3_res_12", F.lit(cells))
+    else:
+        cell_arr = F.array(*[F.lit(c) for c in cells])
+        out = out.withColumn("h3_res_12", F.element_at(cell_arr, F.col("_i")))
+    return (
+        out.drop("_i")
+        .withColumn("apt", F.array(*[F.lit(a) for a in apt]))
+        .withColumn("flight_id", F.lit("TEST123"))
+    )
+
+
 def _departure_on_25(spark):
     """The same departure profile, rolling *down* the strip on runway 25.
 
@@ -550,19 +635,9 @@ def _departure_on_25(spark):
     centreline so cross-track distance cannot separate them either. Only the
     unfolded bearing error can.
     """
-    sdf = _departure_track(spark).withColumn("heading", F.lit(250.0))
-    positions = [_dest(50.0, 4.0, 70.0, 2.0 - 0.05 * i) for i in range(13)]
-    lat_arr = F.array(*[F.lit(p[0]) for p in positions])
-    lon_arr = F.array(*[F.lit(p[1]) for p in positions])
-    idx = F.row_number().over(Window.partitionBy("track_id").orderBy("event_time"))
-    sdf = sdf.withColumn("_i", idx)
-    return (
-        sdf.withColumn("lat", F.element_at(lat_arr, F.col("_i")))
-        .withColumn("lon", F.element_at(lon_arr, F.col("_i")))
-        .drop("_i")
-        .withColumn("h3_res_12", F.lit("cell-rwy"))
-        .withColumn("apt", F.array(F.lit("EBBR")))
-        .withColumn("flight_id", F.lit("TEST123"))
+    return _as_flown(
+        _departure_track(spark).withColumn("heading", F.lit(250.0)),
+        positions=[_dest(50.0, 4.0, 70.0, 2.0 - 0.05 * i) for i in range(13)],
     )
 
 
@@ -576,6 +651,162 @@ def test_runway_traversals_classifies_a_departure_and_names_its_direction(spark)
     assert out[0]["rwy_ident"] == "25"
     assert out[0]["apt_ident"] == "EBBR"
     assert out[0]["align_deg"] == pytest.approx(0.0, abs=0.5)
+
+
+def _arrival_on_07(spark, elev_adep_ft=0.0, elev_ades_ft=0.0,
+                   adep="EBBR", ades="EBBR"):
+    """The arrival profile with the H3 cells a real runway polygon gives it.
+
+    The polygon starts at the threshold, so the four samples short of it are
+    airborne cells and only the last five are runway cells. `runway_traversals`
+    therefore derives `entry_time` = 40 s, which is exactly the shape that
+    makes `landing` unreachable without the arrival lead.
+    """
+    return _as_flown(
+        _arrival_track(spark, elev_adep_ft, elev_ades_ft, adep, ades),
+        cells=["cell-air" if along < 0 else "cell-rwy"
+               for _, along, _, _ in _ARRIVAL],
+        apt=(adep, ades),
+    )
+
+
+def test_runway_traversals_derives_an_arrival_bounded_by_the_polygon(spark):
+    """The entry is the threshold, not the point 1.5 NM out on final."""
+    out = runway_traversals(
+        _arrival_on_07(spark), _layouts(spark), _thresholds(spark), EventConfig()
+    ).collect()
+
+    assert len(out) == 1
+    assert out[0]["class"] == "arrival"
+    assert out[0]["rwy_ident"] == "07"
+    assert (out[0]["entry_time"] - _EPOCH).total_seconds() == _ARRIVAL_ENTRY_S
+    assert (out[0]["exit_time"] - _EPOCH).total_seconds() == _ARRIVAL_EXIT_S
+
+
+def test_landing_fires_on_a_traversal_the_detector_actually_produces(spark):
+    """End to end: the polygon-bounded traversal, then T16 through the lead.
+
+    The straddling pair is (-0.2 NM at t=30, +0.1 NM at t=40) and the first of
+    those is *outside* the polygon. Without `ARRIVAL_LEAD_SECONDS` the sample
+    is not in the traversal's frame, the Schmitt trigger never sees a negative
+    along-track distance, and `landing` cannot fire at all -- which is what
+    production did while a hand-built traversal made the unit test pass.
+    """
+    sv = _arrival_on_07(spark)
+    traversals = runway_traversals(sv, _layouts(spark), _thresholds(spark),
+                                   EventConfig())
+    out = runway_milestones(sv, traversals, EventConfig())
+
+    landing = out.filter(F.col("type") == "landing").collect()
+    assert len(landing) == 1
+    assert (landing[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(
+        36.667, abs=0.1
+    )
+
+
+def test_runway_traversals_classifies_a_taxiing_crossing(spark):
+    """Perpendicular, slow, on the deck -- and not a movement."""
+    out = runway_traversals(
+        _as_flown(_crossing_track(spark)),
+        _layouts(spark), _thresholds(spark), EventConfig(),
+    ).collect()
+
+    assert len(out) == 1
+    assert out[0]["class"] == "crossing"
+
+
+def test_runway_traversals_abstains_in_the_band_between_the_two(spark):
+    """37 degrees off the centreline is neither aligned nor crossing.
+
+    An abstention leaves *no traversal at all*, so nothing downstream can
+    invent a milestone for it. Asserted end to end rather than on
+    `classify_traversal` alone, because the filter that drops the abstaining
+    row lives in `runway_traversals`.
+    """
+    oblique = _as_flown(
+        _crossing_track(spark).withColumn("heading", F.lit(107.0))
+    )
+    out = runway_traversals(oblique, _layouts(spark), _thresholds(spark),
+                            EventConfig())
+
+    assert out.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-aerodrome height references.
+#
+# Every fixture above sits at a sea-level field, which is exactly the blind
+# spot: with both elevations zero, "the height above the traversal's own
+# aerodrome" and "the height above the more permissive of the flight's two
+# fields" are the same number. These three state two *different* fields.
+# ---------------------------------------------------------------------------
+
+#: Ibiza and Zurich -- the pair `EventConfig.level_floors_above_field` names,
+#: reused so the whole codebase argues about one concrete altitude difference.
+_LOW_FIELD_FT = 24.0
+_HIGH_FIELD_FT = 1416.0
+
+
+def test_a_departure_from_the_lower_of_two_aerodromes_still_lifts_off(spark):
+    """A 24 ft origin, a 1,416 ft destination, and a departure at the origin.
+
+    Measured against the more permissive of the two fields -- the higher one,
+    which is what `least()` selects -- every sample of this roll has a height
+    around -1,400 ft. `classify_traversal` then finds no exit above 15 ft, sees
+    no arrival and no crossing either, and abstains: `line-up`, `take-off-roll`
+    and `airborne` are all silently absent for the whole flight.
+
+    Against the traversal's own aerodrome the roll is at 0 ft and the first
+    airborne sample at 100 ft, so 15 ft is crossed 15% of the way through the
+    5 s interval ending at t=50 -- t=45.75 s.
+    """
+    sv = _as_flown(
+        _departure_track(spark, elev_adep_ft=_LOW_FIELD_FT,
+                         elev_ades_ft=_HIGH_FIELD_FT, adep="EBBR", ades="LSZH"),
+        positions=[_dest(50.0, 4.0, 70.0, 0.05 * i) for i in range(13)],
+        apt=("EBBR", "LSZH"),
+    )
+    traversals = runway_traversals(sv, _layouts(spark), _thresholds(spark),
+                                   EventConfig())
+
+    rows = traversals.collect()
+    assert len(rows) == 1, "the departure was classified away by the wrong field"
+    assert rows[0]["class"] == "departure"
+
+    airborne = runway_milestones(sv, traversals, EventConfig()).filter(
+        F.col("type") == "airborne"
+    ).collect()
+    assert len(airborne) == 1
+    assert (airborne[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(
+        45.75, abs=0.01
+    )
+
+
+def test_an_arrival_at_the_lower_of_two_aerodromes_still_touches_down(spark):
+    """The symmetric case: a 1,416 ft origin and a 24 ft destination.
+
+    The permissive height is again about -1,400 ft throughout, so no sample
+    enters above 15 ft and the arrival is never classified -- no `landing`, no
+    `touchdown`, no `runway-vacated`. Against the arrival's own field the
+    profile is the ordinary one, and 15 ft is crossed three fifths of the way
+    between the 30 ft and 5 ft samples: t = 46 s.
+    """
+    sv = _arrival_on_07(spark, elev_adep_ft=_HIGH_FIELD_FT,
+                        elev_ades_ft=_LOW_FIELD_FT, adep="LSZH", ades="EBBR")
+    traversals = runway_traversals(sv, _layouts(spark), _thresholds(spark),
+                                   EventConfig())
+
+    rows = traversals.collect()
+    assert len(rows) == 1, "the arrival was classified away by the wrong field"
+    assert rows[0]["class"] == "arrival"
+
+    touchdown = runway_milestones(sv, traversals, EventConfig()).filter(
+        F.col("type") == "touchdown"
+    ).collect()
+    assert len(touchdown) == 1
+    assert (touchdown[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(
+        46.0, abs=0.01
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +826,25 @@ def test_an_excursion_that_reaches_the_deck_is_a_landing_not_a_go_around(spark):
     again; publishing that as a go-around would invent an abandoned approach."""
     out = go_arounds(_approach_track(spark, 0.0), EventConfig())
     assert out.count() == 0
+
+
+def test_a_go_around_at_a_destination_below_the_origin_still_fires(spark):
+    """A 1,416 ft origin and a 24 ft destination, abandoned at 200 ft AGL.
+
+    ``go-around`` is arrival-anchored by definition, so its heights belong to
+    the destination field. Measured against the permissive minimum -- the
+    origin's, here -- the whole excursion sits about 1,400 ft low: it never
+    reaches the 1,500 ft recovery height, so no excursion window is ever
+    formed, and had one been, the 200 ft low point would read as below the deck
+    and be discarded as a landing. Either way the go-around is suppressed at
+    exactly the aerodromes where an approach is most often abandoned.
+    """
+    track = _approach_track(spark, 200.0, elev_adep_ft=_HIGH_FIELD_FT,
+                            elev_ades_ft=_LOW_FIELD_FT)
+    out = go_arounds(track, EventConfig()).collect()
+
+    assert len(out) == 1
+    assert (out[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(40.0)
 
 
 def test_no_go_around_is_emitted_under_the_legacy_configuration(spark):

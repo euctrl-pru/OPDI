@@ -21,7 +21,14 @@ Each traversal is classified by three measurements over its own samples:
   the runway's bearing, folded to [0, 90] so a reciprocal landing counts as
   aligned;
 * **speed** -- the maximum groundspeed reached;
-* **height** -- the height above field elevation at entry and at exit.
+* **height** -- the height at entry and at exit above the field elevation of
+  **the traversal's own aerodrome**. Not above the more permissive of the
+  flight's two fields: that reading is right for asking whether a sample is
+  near enough to the ground to be matched against a layout, and wrong here,
+  where the answer is a threshold comparison that gets published. A departure
+  from the lower of a flight's two aerodromes has a negative height throughout
+  under the permissive reading, and the detector abstains on the whole
+  movement.
 
 giving ``departure``, ``arrival``, ``crossing`` -- or NULL, which means
 abstain. The classes cannot overlap: ``runway_align_max_deg`` (30) and
@@ -39,9 +46,15 @@ flight-level and ring crossings. This is the substantive improvement over
 paid for it with a +19 s median bias on departures. A bias that is always in
 the same direction is not noise a larger sample averages away.
 
+``landing`` needs one sample the traversal does not contain: the threshold is
+the near edge of the runway polygon, so the point short of it is outside the
+traversal by definition. The arrival sample window therefore reaches back
+:data:`ARRIVAL_LEAD_SECONDS` before entry, and only for that one crossing --
+entry, exit and every reported position stay bounded by the polygon.
+
 **This module reads no table.** ``layouts`` and ``thresholds`` arrive as
-DataFrames, and ``sv`` must already carry the flight list's aerodrome array and
-the two field elevations. The join to the flight list therefore happens once
+DataFrames, and ``sv`` must already carry the flight list's aerodrome array,
+its ``adep``/``ades`` idents and the two field elevations. The join to the flight list therefore happens once
 for every detector that needs it rather than once per family, and every
 function here is testable on a laptop with no storage layer at all.
 """
@@ -63,7 +76,10 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from opdi.config import EventConfig
 
 from opdi.pipeline.crossings import threshold_crossings
-from opdi.pipeline.elevation import height_above_field_ft
+from opdi.pipeline.elevation import (
+    height_above_aerodrome_ft,
+    height_above_elevation_ft,
+)
 from opdi.pipeline.flights import angle_between, bearing_deg, haversine_nm
 from opdi.pipeline.runways import cross_track_nm
 
@@ -104,6 +120,25 @@ THRESHOLD_PLANE_HYSTERESIS_NM = 0.05
 #: config surface is fixed this round; it is a tuning parameter and belongs
 #: there eventually.
 ROLL_MAX_GAP_SECONDS = 30.0
+
+#: How far back before a traversal's entry the *arrival* sample window reaches,
+#: in seconds.
+#:
+#: ``landing`` (T16) is the crossing of the threshold plane, and the threshold
+#: is the near edge of the runway polygon: the sample short of it is by
+#: definition **outside** the polygon and so outside the traversal. Confirming
+#: the crossing needs one, so the arrival window is extended backwards by this
+#: much -- the pre-threshold final-approach samples the T16 crossing needs, and
+#: nothing else. Without it the Schmitt trigger never sees a negative
+#: along-track distance and ``landing`` cannot fire at all in production.
+#:
+#: Sixty seconds is about 2.3 NM at 140 kt: comfortably more than any runway's
+#: displaced threshold or the gap between the polygon edge and the last
+#: approach sample, and far short of the previous traversal an aircraft could
+#: have made at the same aerodrome. Only :func:`_threshold_plane` reads the
+#: extended window; entry, exit and every reported position stay bounded by the
+#: polygon, because those are statements about occupancy.
+ARRIVAL_LEAD_SECONDS = 60.0
 
 #: Half-width of the dead band around the go-around trigger and recovery
 #: heights, in feet. Wider than ``AIRBORNE_HYSTERESIS_FT`` because it guards a
@@ -226,8 +261,11 @@ def runway_traversals(
 ) -> DataFrame:
     """One row per (track, runway, traversal), classified.
 
-    ``sv`` must already carry ``elev_adep_ft``/``elev_ades_ft`` (from
-    ``elevation.attach_field_elevation``) and ``apt`` -- the flight list's
+    ``sv`` must already carry ``adep``/``ades`` and
+    ``elev_adep_ft``/``elev_ades_ft`` (from
+    ``vertical_pru.attach_aerodrome_geometry``; the idents are what let a
+    height be measured against the traversal's *own* field) and ``apt`` -- the
+    flight list's
     aerodrome array, built exactly as ``calculate_airport_events`` builds it
     from ``adep``/``ades``/``adep_p``/``ades_p``. Both are attached once by the
     caller, so the join to the flight list and OurAirports happens a single
@@ -261,7 +299,15 @@ def runway_traversals(
         .cast("string"),
     )
 
-    work = work.withColumn("_h_ft", height_above_field_ft(work))
+    # Measured against **this traversal's own aerodrome**, not against the more
+    # permissive of the flight's two fields. The classification's height gates
+    # are thresholds that get reported, not a membership test: measured against
+    # the higher field, every movement at the lower one has a negative height,
+    # `classify_traversal` abstains, and the whole departure or arrival is
+    # silently absent. See `elevation.height_above_field_ft`'s warning.
+    work = work.withColumn(
+        "_h_ft", height_above_aerodrome_ft(work, F.col("hexaero_apt_icao"))
+    )
     work = work.withColumn("_gs_kt", F.col("velocity") * F.lit(KT_PER_MPS))
     work = work.withColumn("_alt_ft", F.col("baro_altitude_c") * F.lit(FT_PER_M))
     work = work.withColumn("_flight_id", _col_or_null(sv, "flight_id", "string"))
@@ -433,21 +479,45 @@ def _event(sdf: DataFrame, type_: str, time_col: str) -> DataFrame:
     )
 
 
-def _traversal_samples(sv: DataFrame, traversals: DataFrame) -> DataFrame:
+#: Columns carried across the traversal join so the height can be computed on
+#: the far side of it -- where the traversal's own ``apt_ident`` is known -- and
+#: dropped again immediately afterwards.
+_HEIGHT_INPUTS = ("adep", "ades", "elev_adep_ft", "elev_ades_ft")
+
+
+def _traversal_samples(
+    sv: DataFrame, traversals: DataFrame, lead_seconds: float = 0.0
+) -> DataFrame:
     """The state vectors belonging to each traversal, one row per pair.
 
     A range join rather than a second sessionisation: the traversal frame
     already says which interval each movement occupies, and re-deriving it here
     would let the two disagree about the very thing the classification was
     made on.
+
+    ``height_ft`` is computed **after** the join, not before it. Before the
+    join there is no ``apt_ident``, so the only height available is the
+    permissive two-field minimum -- which is the wrong reference for every
+    threshold the milestones are defined by. See
+    :func:`~opdi.pipeline.elevation.height_above_field_ft`.
+
+    ``lead_seconds`` extends the window backwards for ``arrival`` traversals
+    only, and the rows it admits are flagged ``_in_polygon = False``. One join
+    serves both readings: :func:`_threshold_plane` takes the extended frame
+    because the T16 crossing happens short of the threshold and therefore
+    outside the polygon, and everything else filters to ``_in_polygon``,
+    because entry, exit and the reported positions are statements about
+    occupancy. See :data:`ARRIVAL_LEAD_SECONDS`.
     """
+    carried = [c for c in _HEIGHT_INPUTS if c in sv.columns]
     s = sv.select(
         F.col("track_id").alias("_s_track"),
         F.col("event_time"),
         F.col("lat").cast("double").alias("lat"),
         F.col("lon").cast("double").alias("lon"),
         (F.col("baro_altitude_c") * F.lit(FT_PER_M)).alias("altitude_ft"),
-        height_above_field_ft(sv).alias("height_ft"),
+        F.col("baro_altitude_c"),
+        *[F.col(c) for c in carried],
         (F.col("velocity") * F.lit(KT_PER_MPS)).alias("gs_kt"),
         F.col("cumulative_distance_nm").cast("double").alias("cumulative_distance_nm"),
         F.col("cumulative_time_s").cast("double").alias("cumulative_time_s"),
@@ -467,13 +537,28 @@ def _traversal_samples(sv: DataFrame, traversals: DataFrame) -> DataFrame:
         _col_or_null(traversals, "osn_flight_id", "string").alias("osn_flight_id"),
         F.col("class").alias("traversal_class"),
     )
-    return t.join(
+    t = t.withColumn(
+        "_window_start",
+        F.when(
+            F.col("traversal_class") == F.lit("arrival"),
+            F.timestamp_seconds(
+                F.col("entry_time").cast("double") - F.lit(float(lead_seconds))
+            ),
+        ).otherwise(F.col("entry_time")),
+    )
+    joined = t.join(
         s,
         (F.col("_s_track") == t["track_id"])
-        & (F.col("event_time") >= t["entry_time"])
+        & (F.col("event_time") >= t["_window_start"])
         & (F.col("event_time") <= t["exit_time"]),
         "inner",
-    ).drop("_s_track")
+    ).drop("_s_track", "_window_start")
+    joined = joined.withColumn(
+        "_in_polygon", F.col("event_time") >= F.col("entry_time")
+    )
+    return joined.withColumn(
+        "height_ft", height_above_aerodrome_ft(joined, F.col("apt_ident"))
+    ).drop("baro_altitude_c", *carried)
 
 
 def _at_extreme(sdf: DataFrame, ascending: bool) -> DataFrame:
@@ -633,7 +718,8 @@ def runway_milestones(
     """The eight traversal-derived A-CDM milestones, as standard events.
 
     ``sv`` is the state vector frame carrying ``baro_altitude_c``, the two
-    field elevations, ``velocity`` and the cumulative measures; ``traversals``
+    aerodrome idents, the two field elevations, ``velocity`` and the cumulative
+    measures; ``traversals``
     is the output of :func:`runway_traversals`. Returns an *empty* frame of
     :data:`MILESTONE_SCHEMA` when the family is switched off, never ``None``.
 
@@ -644,11 +730,17 @@ def runway_milestones(
     if not config.emit_runway_milestones:
         return _empty_milestones(sv)
 
-    samples = _traversal_samples(sv, traversals)
+    # One join, two readings. The polygon-bounded frame is what "the aircraft
+    # was on the runway" means and is what every occupancy milestone reads; the
+    # extended one exists solely so the threshold-plane crossing has a sample
+    # short of the threshold to interpolate from. See ARRIVAL_LEAD_SECONDS.
+    samples = _traversal_samples(sv, traversals, lead_seconds=ARRIVAL_LEAD_SECONDS)
+    bounded = samples.filter(F.col("_in_polygon"))
 
-    dep = samples.filter(F.col("traversal_class") == "departure")
-    arr = samples.filter(F.col("traversal_class") == "arrival")
-    xing = samples.filter(F.col("traversal_class") == "crossing")
+    dep = bounded.filter(F.col("traversal_class") == "departure")
+    arr = bounded.filter(F.col("traversal_class") == "arrival")
+    xing = bounded.filter(F.col("traversal_class") == "crossing")
+    arr_approach = samples.filter(F.col("traversal_class") == "arrival")
 
     parts = [
         # A departure: lined up, rolling, then off the deck.
@@ -656,7 +748,7 @@ def runway_milestones(
         _event(_roll_start(dep, config), "take-off-roll", "event_time"),
         _event(_height_crossing(dep, config, "up"), "airborne", "event_time"),
         # An arrival: over the threshold, wheels down, off the strip.
-        _event(_threshold_plane(arr, config), "landing", "event_time"),
+        _event(_threshold_plane(arr_approach, config), "landing", "event_time"),
         _event(_height_crossing(arr, config, "down"), "touchdown", "event_time"),
         _event(_at_extreme(arr, False), "runway-vacated", "exit_time"),
         # A crossing is not a movement: it gets its two instants and nothing
@@ -698,7 +790,9 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
 
     ``sv`` must carry ``ades_lat``/``ades_lon`` -- the destination position from
     the flight list -- alongside the usual altitude, elevation and cumulative
-    columns.
+    columns. Heights here are measured against ``elev_ades_ft`` alone: the
+    detector is anchored at the destination by construction, so there is no
+    ambiguity to be permissive about.
     """
     if not config.emit_runway_milestones:
         return _empty_milestones(sv)
@@ -709,7 +803,14 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
         F.col("lat").cast("double").alias("lat"),
         F.col("lon").cast("double").alias("lon"),
         (F.col("baro_altitude_c") * F.lit(FT_PER_M)).alias("altitude_ft"),
-        height_above_field_ft(sv).alias("height_ft"),
+        # Arrival-anchored by definition -- the excursion is measured against
+        # the *destination*'s field, never against the more permissive minimum
+        # of the two. At a destination lower than the origin the permissive
+        # height is negative throughout, the excursion reads as having reached
+        # the deck, and the go-around is suppressed as a landing.
+        height_above_elevation_ft(
+            _col_or_null(sv, "elev_ades_ft", "double")
+        ).alias("height_ft"),
         (F.col("vert_rate") * F.lit(FTMIN_PER_MPS)).alias("roc_ft_min"),
         haversine_nm(
             F.col("lat"), F.col("lon"), F.col("ades_lat"), F.col("ades_lon")

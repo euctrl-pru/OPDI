@@ -73,7 +73,7 @@ def attach_field_elevation(
 
 
 def height_above_field_ft(sdf):
-    """Height above field elevation, in feet.
+    """Height above field elevation, in feet -- the *permissive* reading.
 
     ``baro_altitude_c`` is uncorrected pressure altitude in metres. The
     *smaller* of the two field-relative heights is taken, for the reason
@@ -84,6 +84,24 @@ def height_above_field_ft(sdf):
     decide which end applies -- which would mean joining aerodrome coordinates
     to every state vector.
 
+    .. warning::
+
+       **Only use this for a membership test that is allowed to be
+       permissive** -- "is this sample near enough to the ground to be matched
+       against an airport layout", "is this sample GND for the phase
+       classifier". It is *wrong* for anything that compares the height
+       against a threshold and reports the answer, because the two aerodromes
+       of one flight rarely share an elevation: measured against the higher
+       field, a movement at the lower one has a negative height everywhere and
+       a 15 ft threshold is never reached, while a movement at the higher one
+       reaches it only ``delta_elevation`` feet late. The first failure is
+       silent -- the detector abstains and publishes nothing -- and the second
+       is a systematic bias in one direction.
+
+       Threshold logic must name the aerodrome it is talking about and use
+       :func:`height_above_aerodrome_ft` (or, where the aerodrome is fixed by
+       the detector's own definition, :func:`height_above_elevation_ft`).
+
     NULL elevations coalesce to zero, which reproduces the behaviour of every
     caller that used a bare pressure altitude before this existed.
     """
@@ -92,3 +110,58 @@ def height_above_field_ft(sdf):
         alt_ft - F.coalesce(F.col("elev_adep_ft"), F.lit(0.0)),
         alt_ft - F.coalesce(F.col("elev_ades_ft"), F.lit(0.0)),
     )
+
+
+def height_above_elevation_ft(elevation):
+    """Height of ``baro_altitude_c`` above a *stated* field elevation, in feet.
+
+    ``elevation`` is a column: the caller has already decided which aerodrome
+    the height is measured against. A NULL elevation coalesces to zero, i.e.
+    back to a bare pressure altitude, rather than nulling the height and
+    removing the flight from the detector.
+    """
+    return F.col("baro_altitude_c") * F.lit(FT_PER_M) - F.coalesce(
+        elevation, F.lit(0.0)
+    )
+
+
+def field_elevation_ft(sdf, apt_ident):
+    """The elevation of the aerodrome ``apt_ident`` names, for this track.
+
+    The flight list gives each track exactly two aerodromes, so the lookup is a
+    two-armed ``when`` over columns already on the frame -- no third join, and
+    no per-sample distance to guess with.
+
+    ``apt_ident`` may name neither: the layout join also admits the *proximity*
+    aerodromes ``adep_p``/``ades_p``, for which no elevation was attached. The
+    fallback is then the higher of the two known fields, which is exactly the
+    elevation :func:`height_above_field_ft` implies -- the permissive reading,
+    kept as the fallback because an unknown field is precisely the case where
+    nothing better can be said.
+
+    Returns the permissive fallback for the whole frame when ``adep``/``ades``
+    are absent, so a caller that never joined the flight list keeps working.
+    """
+    fallback = F.greatest(
+        F.coalesce(F.col("elev_adep_ft"), F.lit(0.0)),
+        F.coalesce(F.col("elev_ades_ft"), F.lit(0.0)),
+    ) if "elev_adep_ft" in sdf.columns and "elev_ades_ft" in sdf.columns else F.lit(0.0)
+
+    if "adep" not in sdf.columns or "ades" not in sdf.columns:
+        return fallback
+    return (
+        F.when(apt_ident == F.col("adep"), F.coalesce(F.col("elev_adep_ft"), fallback))
+        .when(apt_ident == F.col("ades"), F.coalesce(F.col("elev_ades_ft"), fallback))
+        .otherwise(fallback)
+    )
+
+
+def height_above_aerodrome_ft(sdf, apt_ident):
+    """Height above the field elevation of the aerodrome ``apt_ident`` names.
+
+    The reference every runway threshold is measured against: a departure from
+    a 24 ft field and an arrival at a 1,416 ft one are both measured against
+    their own ground, so ``runway_airborne_height_ft`` means 15 ft AGL at both
+    rather than 15 ft above whichever of the two happens to be higher.
+    """
+    return height_above_elevation_ft(field_elevation_ft(sdf, apt_ident))

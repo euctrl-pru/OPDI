@@ -20,6 +20,11 @@ from conftest import make_track
 # runways under the same name.
 from test_runway_ops import _dest
 
+# The ladder's own reconstruction of the v0.1.0 configuration, imported rather
+# than restated: a test that hand-builds "v0.1.0" proves only that the hand-built
+# thing behaves, not that the rung the paper reports does.
+import event_bench
+
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.events import FlightEventProcessor
 
@@ -188,14 +193,14 @@ _DEPARTURE = [
 ]
 
 #: The same arrival profile ``test_runway_ops`` uses, at EDDF: it straddles the
-#: threshold plane between -0.2 and +0.1 NM and the 15 ft height between 20 and
+#: threshold plane between -0.2 and +0.1 NM and the 15 ft height between 30 and
 #: 5 ft, so ``landing`` (T16) and ``touchdown`` (T17) are both well defined.
 _ARRIVAL = [
     (-1.5, 500.0, 140.0),
     (-1.0, 340.0, 138.0),
     (-0.5, 180.0, 136.0),
     (-0.2, 60.0, 134.0),
-    (0.1, 20.0, 130.0),
+    (0.1, 30.0, 130.0),
     (0.4, 5.0, 110.0),
     (0.7, 0.0, 80.0),
     (0.9, 0.0, 50.0),
@@ -250,7 +255,18 @@ def _flight(spark):
         # The last two samples are on a stand: without an
         # ``entry-parking_position`` to anchor on there is no on-block, and the
         # block pair is half of what the flag renames.
-        cell = "cell-eddf-stand" if i >= len(_ARRIVAL) - 2 else "cell-eddf-rwy"
+        #
+        # Everything short of the threshold is airborne, **not** a runway cell.
+        # A runway polygon begins at the threshold, so the sample the T16
+        # crossing interpolates from is outside the traversal by construction
+        # and reaches the detector only through ``ARRIVAL_LEAD_SECONDS``. An
+        # earlier version of this fixture painted the whole final approach as
+        # runway cells, and ``landing`` passed here on a traversal shape
+        # ``runway_traversals`` cannot produce.
+        if i >= len(_ARRIVAL) - 2:
+            cell = "cell-eddf-stand"
+        else:
+            cell = "cell-eddf-rwy" if along >= 0 else "cell-air"
         add(510 + 10 * i, lat, lon, alt_ft, -590.0 if alt_ft > 0 else 0.0, kt,
             cell)
 
@@ -409,7 +425,7 @@ def test_the_v0_1_0_rung_is_reconstructible(spark, stub_storage):
     named after. Nothing else in the suite drives this configuration through
     the step.
     """
-    types = _types(_run(spark, stub_storage, EventConfig(emit_runway_milestones=False)))
+    types = _types(_run(spark, stub_storage, EventConfig(**event_bench.V4_BASE)))
 
     assert {"take-off", "landing", "ATOT", "ALDT", "AOBT", "AIBT"} <= types, (
         f"the v0.1.0 vocabulary is not reconstructible: {sorted(types)}"
