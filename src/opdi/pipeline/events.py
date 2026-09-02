@@ -752,17 +752,28 @@ def calculate_horizontal_segment_events(
     )
 
     df_events = df_events.dropDuplicates(["track_id", "type", "event_time"])
-    # Every top names the algorithm that produced it. The PRU pair stamps
-    # ``method: "pru"`` in ``vertical_pru``; this is the other half, so no
-    # published top is anonymous and a consumer never has to infer which
-    # definition of "top of climb" a row is an instance of.
-    df_events = df_events.withColumn(
-        "info",
-        when(
+
+    # Every top names the algorithm that produced it -- but only where there is
+    # another algorithm to be told apart from. The stamp exists because
+    # ``vertical_pru`` publishes a second pair of tops carrying
+    # ``method: "pru"``; with that family switched off there is one definition
+    # of "top of climb" in the table and nothing to disambiguate.
+    #
+    # Gated for a harder reason than tidiness. ``events_v0.0.2`` published
+    # ``info = ""`` on these rows, and ``EventConfig.legacy()`` exists so that
+    # re-processing a past month reproduces the release. An unconditional stamp
+    # would have made every legacy top differ from the row it is supposed to
+    # reproduce -- silently, because ``info`` is free-form and nothing compares
+    # it. ``emit_pru_tops`` is off under ``legacy()`` and on by default, so the
+    # gate is exactly the condition "is there a PRU pair to disambiguate from".
+    if config.emit_pru_tops:
+        info = when(
             col("type").isin("top-of-climb", "top-of-descent"),
             to_json(struct(lit("phase").alias("method"))),
-        ).otherwise(lit("")),
-    )
+        ).otherwise(lit(""))
+    else:
+        info = lit("")
+    df_events = df_events.withColumn("info", info)
 
     return df_events
 
@@ -1091,19 +1102,39 @@ class FlightEventProcessor:
         geo = attach_aerodrome_geometry(sdf, month, self.storage)
         return aerodrome_distances(geo)
 
-    def _runway_family(self, sv: DataFrame, month: date) -> Optional[DataFrame]:
-        """The A-CDM runway milestones and the go-arounds, as one frame.
+    def _with_flight_id(self, sv: DataFrame) -> DataFrame:
+        """The resolved callsign the runway family publishes as ``osn_flight_id``.
 
-        ``sv`` is the geometry-enriched state vector frame. Two things are
-        added here and nowhere else: the flight list's aerodrome array, built
-        by the shared :func:`~opdi.pipeline.layout.flight_aerodrome_sets` so it
-        is the identical array the layout family matches on, and the resolved
-        ``flight_id`` the milestones publish as ``osn_flight_id`` -- resolved
-        by the same helper step 03 uses, for the reason
-        ``calculate_airport_events`` documents at length.
+        Resolved by the same helper step 03 uses, for the reason
+        ``calculate_airport_events`` documents at length: a second copy of this
+        rule is how the production flight list and its benchmark came to
+        disagree about it. A frame with no callsign at all is returned
+        unchanged -- ``runway_ops`` reads the column through ``_col_or_null``
+        and leaves ``osn_flight_id`` null rather than losing the family.
+        """
+        if "flight_id" not in sv.columns:
+            if "callsign" not in sv.columns:
+                return sv
+            sv = sv.withColumnRenamed("callsign", "flight_id")
+        return resolve_flight_id(sv.fillna({"flight_id": ""}))
 
-        Returns ``None`` when a reference table the family cannot work without
+    def _runway_traversal_family(
+        self, sv: DataFrame, month: date
+    ) -> Optional[DataFrame]:
+        """The eight traversal-derived A-CDM milestones.
+
+        ``sv`` is the geometry-enriched frame with ``flight_id`` already
+        resolved. What is added here and nowhere else is the flight list's
+        aerodrome array, built by the shared
+        :func:`~opdi.pipeline.layout.flight_aerodrome_sets` so it is the
+        identical array the layout family matches on.
+
+        Returns ``None`` when a reference table this family cannot work without
         is absent, so the caller skips it rather than failing the step.
+        **``go_arounds`` is deliberately not here**: it needs none of these
+        tables, and routing it through this guard would make an approach
+        abandoned at 400 ft depend on a runway polygon the aircraft never
+        crossed -- exactly the dependency that detector exists to avoid.
         """
         if not (
             self.storage.table_exists("opdi_flight_list")
@@ -1114,11 +1145,6 @@ class FlightEventProcessor:
         if thresholds is None:
             return None
 
-        if "flight_id" not in sv.columns and "callsign" in sv.columns:
-            sv = sv.withColumnRenamed("callsign", "flight_id")
-        if "flight_id" in sv.columns:
-            sv = resolve_flight_id(sv.fillna({"flight_id": ""}))
-
         apt_sets = flight_aerodrome_sets(month, self.storage)
         sv = sv.join(
             F.broadcast(apt_sets), sv.track_id == apt_sets.id, "inner"
@@ -1127,11 +1153,7 @@ class FlightEventProcessor:
 
         layouts = self.storage.read_table("hexaero_airport_layouts")
         traversals = runway_traversals(sv, layouts, thresholds, self.events)
-        milestones = runway_milestones(sv, traversals, self.events)
-        # A go-around hangs from no traversal -- an approach abandoned at
-        # 400 ft never reached the strip -- so it is detected independently and
-        # unioned here rather than inside runway_milestones.
-        return milestones.unionByName(go_arounds(sv, self.events))
+        return runway_milestones(sv, traversals, self.events)
 
     def _etl_flight_events_and_measures(
         self,
@@ -1160,8 +1182,15 @@ class FlightEventProcessor:
         sdf_input.cache()
 
         # One aerodrome join for the whole step; see _with_aerodrome_geometry.
+        #
+        # **Not cached, deliberately.** ``sdf_input`` is, and caching both
+        # would hold two copies of the month's state vectors -- the second
+        # differing only by eight broadcast-joined columns. Of the two, this is
+        # the one worth rederiving: it is a broadcast join plus two haversines
+        # over an already-cached frame, all narrow and shuffle-free, whereas
+        # ``sdf_input`` is two window functions and rebuilding *it* per
+        # consumer would cost a shuffle each time.
         geo = self._with_aerodrome_geometry(sdf_input, month)
-        geo.cache()
 
         # The level segments are detected once and shared by the two families
         # that consume them -- the level-offs and the PRU tops, whose
@@ -1225,7 +1254,14 @@ class FlightEventProcessor:
 
             if self.events.emit_runway_milestones:
                 print(f"Calculating runway milestones for batch: {batch_id}")
-                add(self._runway_family(geo, month))
+                rwy_sv = self._with_flight_id(geo)
+                add(self._runway_traversal_family(rwy_sv, month))
+                # Independent of the traversals *and* of the layout table: a
+                # go-around may never touch a runway polygon, so it is gated on
+                # the destination geometry it actually reads and on nothing
+                # else.
+                if "ades_lat" in rwy_sv.columns:
+                    add(go_arounds(rwy_sv, self.events))
 
             if self.events.emit_block_events:
                 add(calculate_block_events(sdf_input, df_hexaero, self.events))

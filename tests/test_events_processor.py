@@ -161,24 +161,30 @@ _TRACK_SCHEMA = (
 )
 
 #: (seconds, along-track NM from the 07 threshold, altitude ft, ROC ft/min,
-#: groundspeed kt). The departure holds, rolls and rotates over the EBBR
-#: runway polygon; the last sample is above the 15 ft airborne threshold, which
-#: is what makes the traversal a *departure* rather than a crossing.
+#: groundspeed kt, H3 cell). The aircraft starts on a stand, holds on the
+#: runway, rolls and rotates; the last samples are above the 15 ft airborne
+#: threshold, which is what makes the traversal a *departure* rather than a
+#: crossing. The two 900/1,300 ft samples are there so the *published*
+#: ``ATOT`` detector has its four surviving samples -- it wants climbing
+#: samples under 1,500 ft above the field and within 5 NM -- because the
+#: v0.1.0 rung has to be reconstructible through this same fixture.
 _DEPARTURE = [
-    (0, -0.2, 0.0, 0.0, 5.0),
-    (10, -0.2, 0.0, 0.0, 5.0),
-    (20, -0.2, 0.0, 0.0, 5.0),
-    (30, -0.2, 0.0, 0.0, 5.0),
-    (40, -0.2, 0.0, 0.0, 5.0),
-    (50, -0.1, 0.0, 0.0, 60.0),
-    (60, 0.1, 0.0, 0.0, 100.0),
+    (0, -0.2, 0.0, 0.0, 5.0, "cell-ebbr-stand"),
+    (10, -0.2, 0.0, 0.0, 5.0, "cell-ebbr-stand"),
+    (20, -0.2, 0.0, 0.0, 5.0, "cell-ebbr-stand"),
+    (30, -0.2, 0.0, 0.0, 5.0, "cell-ebbr-rwy"),
+    (40, -0.2, 0.0, 0.0, 5.0, "cell-ebbr-rwy"),
+    (50, -0.1, 0.0, 0.0, 60.0, "cell-ebbr-rwy"),
+    (60, 0.1, 0.0, 0.0, 100.0, "cell-ebbr-rwy"),
     # Rotation: still on the deck, already showing a rate of climb. That is
     # what makes the sample CL rather than LVL, and it has to be, because the
     # legacy ``take-off`` arm fires on a GND -> CL adjacency and sits *after*
     # the level-segment arms in the same ``when`` chain -- an LVL sample here
     # would be published as ``level-start`` instead.
-    (70, 0.4, 0.0, 500.0, 140.0),
-    (80, 0.9, 500.0, 2000.0, 160.0),
+    (70, 0.4, 0.0, 500.0, 140.0, "cell-ebbr-rwy"),
+    (80, 0.9, 500.0, 2000.0, 160.0, "cell-ebbr-rwy"),
+    (90, 1.5, 900.0, 2000.0, 180.0, "cell-air"),
+    (100, 2.5, 1300.0, 2000.0, 200.0, "cell-air"),
 ]
 
 #: The same arrival profile ``test_runway_ops`` uses, at EDDF: it straddles the
@@ -219,30 +225,34 @@ def _flight(spark):
             "TEST123", "abc123", _RWY_BEARING, h3,
         ))
 
-    for t, along, alt_ft, roc, kt in _DEPARTURE:
+    for t, along, alt_ft, roc, kt, cell in _DEPARTURE:
         lat, lon = _along(_EBBR, along)
-        add(t, lat, lon, alt_ft, roc, kt, "cell-ebbr-rwy")
+        add(t, lat, lon, alt_ft, roc, kt, cell)
 
     # En route: nine climb samples, twenty-three at cruise, ten descending.
     # Cruise is under ``level_exclusion_box_seconds`` so the PRU tops are not
     # relocated -- the relocation has its own tests in test_vertical_pru.
     enroute = (
         [(alt, 2000.0, 300.0) for alt in range(2000, 20000, 2000)]
-        + [(35000, 0.0, 600.0)] * 23
+        + [(35000, 0.0, 600.0)] * 21
         + [(alt, -2000.0, 300.0) for alt in
            (33000, 29000, 25000, 21000, 17000, 13000, 9000, 7000, 6000, 5000)]
     )
-    start, end = _along(_EBBR, 0.9), _along(_EDDF, -1.5)
+    start, end = _along(_EBBR, 2.5), _along(_EDDF, -1.5)
     for i, (alt_ft, roc, kt) in enumerate(enroute):
         f = (i + 1) / (len(enroute) + 1)
         lat = start[0] + (end[0] - start[0]) * f
         lon = start[1] + (end[1] - start[1]) * f
-        add(90 + 10 * i, lat, lon, float(alt_ft), roc, kt, "cell-air")
+        add(110 + 10 * i, lat, lon, float(alt_ft), roc, kt, "cell-air")
 
     for i, (along, alt_ft, kt) in enumerate(_ARRIVAL):
         lat, lon = _along(_EDDF, along)
+        # The last two samples are on a stand: without an
+        # ``entry-parking_position`` to anchor on there is no on-block, and the
+        # block pair is half of what the flag renames.
+        cell = "cell-eddf-stand" if i >= len(_ARRIVAL) - 2 else "cell-eddf-rwy"
         add(510 + 10 * i, lat, lon, alt_ft, -590.0 if alt_ft > 0 else 0.0, kt,
-            "cell-eddf-rwy")
+            cell)
 
     return spark.createDataFrame(rows, _TRACK_SCHEMA)
 
@@ -288,7 +298,9 @@ def stub_storage(spark):
     )
     layouts = spark.createDataFrame(
         [("cell-ebbr-rwy", "EBBR", "osm-ebbr", "runway", "07/25"),
-         ("cell-eddf-rwy", "EDDF", "osm-eddf", "runway", "07/25")],
+         ("cell-eddf-rwy", "EDDF", "osm-eddf", "runway", "07/25"),
+         ("cell-ebbr-stand", "EBBR", "osm-ebbr-a1", "parking_position", "A1"),
+         ("cell-eddf-stand", "EDDF", "osm-eddf-b2", "parking_position", "B2")],
         "hexaero_h3_id string, hexaero_apt_icao string, hexaero_osm_id string, "
         "hexaero_aeroway string, hexaero_ref string",
     )
@@ -327,7 +339,12 @@ def _run(spark, stub_storage, events: EventConfig):
     Memoised on the version string: both fixtures are session-scoped, so one
     pass per configuration serves every assertion below.
     """
-    key = events.events_version
+    # Keyed on the whole configuration, not on the version string: three of
+    # the configurations exercised here stamp ``events_v0.2.0`` and differ only
+    # in their flags, and a version key would silently hand the second and
+    # third the first one's output -- a memo that makes every test agree by
+    # construction.
+    key = repr(events)
     if key not in _RUN_CACHE:
         config = OPDIConfig()
         config.events = events
@@ -381,6 +398,37 @@ def test_legacy_keeps_the_undifferentiated_runway_pair(spark, stub_storage):
     assert got & {"line-up", "airborne", "touchdown"} == set()
 
 
+def test_the_v0_1_0_rung_is_reconstructible(spark, stub_storage):
+    """The reason the gate is a flag and not the version string.
+
+    Task 10's ladder measures every V4 change against a baseline rung that
+    reconstructs v0.1.0 -- which stamped ``events_v0.2.0``'s predecessor and
+    *did* publish ``take-off``, ``landing``, ``ATOT``, ``ALDT``, ``AOBT`` and
+    ``AIBT``. A gate on the version string would have stripped them from the
+    rung named after them, and the baseline would no longer be the thing it is
+    named after. Nothing else in the suite drives this configuration through
+    the step.
+    """
+    types = _types(_run(spark, stub_storage, EventConfig(emit_runway_milestones=False)))
+
+    assert {"take-off", "landing", "ATOT", "ALDT", "AOBT", "AIBT"} <= types, (
+        f"the v0.1.0 vocabulary is not reconstructible: {sorted(types)}"
+    )
+    assert types & {"line-up", "airborne"} == set()
+
+
+def test_legacy_tops_carry_the_empty_info_of_their_release(spark, stub_storage):
+    """``info`` is free-form and nothing downstream compares it, so a stamp
+    added to it under a released version would change published data with no
+    error anywhere. ``events_v0.0.2`` published ``""`` on its tops."""
+    out = _run(spark, stub_storage, EventConfig.legacy()).filter(
+        F.col("type").isin("top-of-climb", "top-of-descent")
+    )
+
+    assert out.count() > 0
+    assert {r["info"] for r in out.collect()} == {""}
+
+
 def test_landing_carries_the_new_meaning_only_under_the_new_version(spark, stub_storage):
     """Same string, two definitions, distinguished by ``version`` -- which is
     what the version column is for, and which the breaking-changes chapter
@@ -411,6 +459,67 @@ def test_every_top_of_descent_records_it_too(spark, stub_storage):
         F.col("type").startswith("top-of-descent"))
     methods = {json.loads(r["info"])["method"] for r in out.collect()}
     assert methods == {"phase", "pru"}
+
+
+def test_a_go_around_does_not_depend_on_the_runway_reference_tables(spark, tmp_path):
+    """A go-around may never touch a runway polygon.
+
+    An approach abandoned at 200 ft is a go-around and the aircraft was never
+    over the strip, which is why ``go_arounds`` reads only the destination
+    position and the field elevations. Routing it through the guard that skips
+    the traversal family when a runway reference table is missing would put
+    back exactly the dependency the detector exists to avoid -- and it would
+    fail open: no go-arounds and no error.
+    """
+    profile = [(0, 2000.0, -1575.0), (10, 1200.0, -1575.0), (20, 700.0, -1575.0),
+               (30, 300.0, -787.0), (40, 200.0, 0.0), (50, 600.0, 1969.0),
+               (60, 1200.0, 1969.0), (70, 2000.0, 1969.0), (80, 2500.0, 1969.0)]
+    tracks = spark.createDataFrame(
+        [("trk-g", _EDDF[0], _EDDF[1], _T0 + dt.timedelta(seconds=t),
+          ft / 3.28084, 140 / 1.94384, roc / 196.850394,
+          "TEST456", "abc124", 70.0, "cell-air")
+         for t, ft, roc in profile],
+        _TRACK_SCHEMA,
+    )
+    # Layouts present, ``oa_runways`` absent: the traversal family cannot name
+    # a runway and skips, which must not take the go-around with it.
+    storage = _StubStorage(
+        {
+            "opdi_flight_list": spark.createDataFrame(
+                [("trk-g", dt.datetime(2024, 6, 1, 12, 0), "EBBR", "EDDF", None, None)],
+                "id string, dof timestamp, adep string, ades string, "
+                "adep_p string, ades_p string",
+            ),
+            "hexaero_airport_layouts": spark.createDataFrame(
+                [("cell-ebbr-rwy", "EBBR", "osm-ebbr", "runway", "07/25")],
+                "hexaero_h3_id string, hexaero_apt_icao string, "
+                "hexaero_osm_id string, hexaero_aeroway string, hexaero_ref string",
+            ),
+            "oa_airports": spark.createDataFrame(
+                [("EBBR", _EBBR[0], _EBBR[1], 0.0), ("EDDF", _EDDF[0], _EDDF[1], 0.0)],
+                "ident string, latitude_deg double, longitude_deg double, "
+                "elevation_ft double",
+            ),
+        },
+        tracks=tracks,
+    )
+
+    config = OPDIConfig()
+    config.events = EventConfig()
+    proc = FlightEventProcessor(spark, config, log_dir=str(tmp_path / "ga"))
+    proc.storage = storage
+    # Only the branch under test: the runway family and the go-arounds live in
+    # the hexaero branch, and a whole-step pass here would add three more
+    # families to the most expensive kind of test in the suite for nothing.
+    proc._etl_flight_events_and_measures(
+        tracks, batch_id="g_", month=MONTH,
+        calc_vertical=False, calc_horizontal=False, calc_seen=False,
+    )
+    types = {r["type"] for r in storage.written["opdi_flight_events"].collect()}
+    spark.catalog.clearCache()
+
+    assert "go-around" in types, f"expected a go-around in {sorted(types)}"
+    assert "line-up" not in types
 
 
 def test_the_block_events_are_one_detector_under_two_names(spark):

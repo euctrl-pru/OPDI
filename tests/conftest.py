@@ -63,6 +63,13 @@ def spark() -> SparkSession:
         .config("spark.sql.shuffle.partitions", "1")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.session.timeZone", "UTC")
+        # The suite now drives whole passes through step 04 -- a dozen families
+        # over one session -- and the local driver's default 1 GB heap runs out
+        # partway through. When it does, the JVM dies and every *later* test in
+        # the session fails with ConnectionRefusedError, pointing at code that
+        # has nothing to do with the cause. The data is still tiny; what needs
+        # the room is the accumulated plans, broadcasts and cached blocks.
+        .config("spark.driver.memory", "4g")
         .getOrCreate()
     )
     session.sparkContext.setLogLevel("ERROR")
