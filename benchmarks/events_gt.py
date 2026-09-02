@@ -155,6 +155,22 @@ def bridge_report(bridged: DataFrame) -> dict:
     }
 
 
+def _filter_study_airports(df: DataFrame, airports: str) -> DataFrame:
+    """Restrict to :data:`STUDY_AIRPORTS` when ``airports == "study"``; a
+    no-op otherwise. Shared by :func:`milestones` and :func:`ring_truth`, both
+    of which call it only after ``gt_airport`` has been derived -- filtering
+    on ``ADEP_ICAO``/``ADES_ICAO`` directly would have to duplicate the
+    DEP/ARR split ``gt_airport`` already resolves.
+    """
+    if airports == "study":
+        # .isin() only auto-unpacks list/set, not tuple (pyspark 4.1's
+        # classic Column.isin checks isinstance(cols[0], (list, set))) --
+        # passing the tuple directly makes it try to build a single literal
+        # out of it and fails with UNSUPPORTED_FEATURE.LITERAL_TYPE.
+        return df.filter(F.col("gt_airport").isin(list(STUDY_AIRPORTS)))
+    return df
+
+
 def milestones(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
     """One row per (flight, milestone), long form.
 
@@ -163,10 +179,9 @@ def milestones(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
     by roughly ten and looks like a catastrophic detector rather than a
     mismatched denominator.
 
-    ``airports="study"`` restricts to :data:`STUDY_AIRPORTS`, applied after
-    ``gt_airport`` is derived below -- filtering on ``ADEP_ICAO``/``ADES_ICAO``
-    directly would have to be duplicated for the DEP/ARR split that
-    ``gt_airport`` already resolves.
+    ``airports="study"`` restricts to :data:`STUDY_AIRPORTS` via
+    :func:`_filter_study_airports`, applied after ``gt_airport`` is derived
+    below.
     """
     b = bridged.filter(F.col("icao24").isNotNull())
     b = b.withColumn("day", F.to_date(F.from_utc_timestamp(F.col("MVT_TIME_UTC"), "UTC")))
@@ -195,9 +210,7 @@ def milestones(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
     out = parts[0]
     for p in parts[1:]:
         out = out.unionByName(p)
-    if airports == "study":
-        out = out.filter(F.col("gt_airport").isin(STUDY_AIRPORTS))
-    return out
+    return _filter_study_airports(out, airports)
 
 
 def ring_truth(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
@@ -209,8 +222,9 @@ def ring_truth(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
     comes too: it is a second EUROCONTROL derivation of the same crossing, and
     the spread between them is the floor on what agreement can mean.
 
-    ``airports="study"`` restricts to :data:`STUDY_AIRPORTS`, applied after
-    ``gt_airport`` is derived below, same as in :func:`milestones`.
+    ``airports="study"`` restricts to :data:`STUDY_AIRPORTS` via the same
+    :func:`_filter_study_airports` helper as :func:`milestones`, applied after
+    ``gt_airport`` is derived below.
     """
     b = bridged.filter(F.col("icao24").isNotNull()).filter(F.col("SRC_PHASE") == "ARR")
     b = b.withColumn("day", F.to_date(F.from_utc_timestamp(F.col("MVT_TIME_UTC"), "UTC")))
@@ -240,9 +254,7 @@ def ring_truth(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
             )
         )
     result = parts[0].unionByName(parts[1])
-    if airports == "study":
-        result = result.filter(F.col("gt_airport").isin(STUDY_AIRPORTS))
-    return result
+    return _filter_study_airports(result, airports)
 
 
 def build(spark: SparkSession, period: str, full: bool = True, airports: str = "all"):
@@ -271,6 +283,9 @@ def main() -> int:
     ap.add_argument(
         "--airports",
         choices=("study", "all"),
+        # Backward-compatible default: pre-V4 callers see unfiltered ground
+        # truth unchanged. The V4 regeneration entrypoint passes
+        # --airports study explicitly.
         default="all",
         help="Restrict ground truth to the twenty-aerodrome study set "
              "(STUDY_AIRPORTS) rather than every APDF airport.",
