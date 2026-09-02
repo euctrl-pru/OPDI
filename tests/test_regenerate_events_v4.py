@@ -52,7 +52,13 @@ def test_every_job_scores_the_same_population():
     """The bridge rate is the ceiling on coverage, so it has to be computed
     over the same aerodromes coverage is. A study-set ladder against an
     all-airports truth divides every coverage figure by the wrong denominator
-    and reads as a detector failure."""
+    and reads as a detector failure.
+
+    This pins the *flag*. That the flag reaches the bridge report at all is
+    pinned in ``test_events_gt_study_set.py`` -- it did not, at first: the
+    report was computed before the filter, so the staged JSON was network-wide
+    while everything it capped was not.
+    """
     for job in v4.jobs():
         args = _args(job)
         assert args[args.index("--airports") + 1] == "study", job.name

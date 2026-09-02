@@ -344,3 +344,21 @@ def test_the_shipped_mapping_drops_landing_from_the_scored_frame(spark):
     assert {r["milestone"] for r in got} == {"ALDT"}
     assert {r["icao24"] for r in got} == {"abc123", "def456"}
     assert {r["callsign"] for r in got} == {"BEL123", "DLH8"}
+
+
+def test_the_baseline_mapping_keeps_landing_on_the_same_frame(spark):
+    """The other half, against the same rows: under v0.1.0 `landing` *is*
+    ground contact, so dropping it there would delete the baseline rung's ALDT
+    evidence rather than protect it. One frame, both rungs, so the difference
+    is the configuration and nothing else."""
+    tracks = _event_rows(spark)
+    baseline = build_plan(ladder="v4")["V00_v3_shipped"]
+
+    got = detected_events(
+        spark, "v4_events_under_test", tracks=tracks, identity="tracks",
+        mapping=milestone_map(baseline),
+    ).collect()
+
+    landing = [r for r in got if r["det_type"] == "landing"]
+    assert len(landing) == 1
+    assert landing[0]["milestone"] == "ALDT"

@@ -139,9 +139,26 @@ def bridge(apdf: DataFrame, flights: DataFrame) -> DataFrame:
     return apdf.join(F.broadcast(fl), apdf.ID == F.col("_fl_id"), "left").drop("_fl_id")
 
 
-def bridge_report(bridged: DataFrame) -> dict:
-    """The gate. Everything downstream is capped by this."""
-    agg = bridged.agg(
+def gt_airport_col():
+    """The aerodrome a movement is scored at: its ADEP if it is a departure,
+    its ADES if it is an arrival.
+
+    One definition, used by both :func:`milestones` and :func:`bridge_report`,
+    so the ceiling and the coverage it caps can never be computed over
+    different populations. They were, once: the report was computed before any
+    airport filter existed, so ``--airports study`` narrowed the milestones and
+    left the bridge rate network-wide -- two numbers the paper reads together,
+    over different denominators, with nothing in either saying so.
+    """
+    return F.when(F.col("SRC_PHASE") == "DEP", F.col("ADEP_ICAO")).otherwise(
+        F.col("ADES_ICAO")
+    )
+
+
+def _reach(df: DataFrame) -> dict:
+    """Movements, how many reach ``icao24``, and the rate -- over whatever
+    population it is handed."""
+    agg = df.agg(
         F.count(F.lit(1)).alias("movements"),
         F.sum(F.when(F.col("ID").isNull(), 1).otherwise(0)).alias("null_id"),
         F.sum(F.when(F.col("icao24").isNotNull(), 1).otherwise(0)).alias("reached"),
@@ -153,6 +170,30 @@ def bridge_report(bridged: DataFrame) -> dict:
         "reach_pct": round(100.0 * agg["reached"] / n, 2) if n else 0.0,
         "null_apdf_id": agg["null_id"],
     }
+
+
+def bridge_report(bridged: DataFrame, airports: str = "all") -> dict:
+    """The gate. Everything downstream is capped by this.
+
+    **Scoped to the same aerodromes as the ground truth it caps.** With
+    ``airports="study"`` the reported rate is the study set's, and the
+    network-wide figures move into ``network`` -- kept because they are the
+    context that says whether the study set is representative, and cheap
+    because the frame is already cached.
+
+    The top-level keys stay the ones they always were, so a reader that knows
+    nothing about the scoping still reads the number that belongs with the
+    coverage figures. ``scope`` says which population that is.
+    """
+    network = _reach(bridged)
+    if airports != "study":
+        return dict(network, scope="all")
+    scoped = _reach(
+        _filter_study_airports(
+            bridged.withColumn("gt_airport", gt_airport_col()), "study"
+        )
+    )
+    return dict(scoped, scope="study", network=network)
 
 
 def _filter_study_airports(df: DataFrame, airports: str) -> DataFrame:
@@ -197,8 +238,7 @@ def milestones(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
                 "icao24", "callsign", "day", "gt_aobt", "gt_adep", "gt_ades",
                 F.lit(name).alias("milestone"),
                 F.col(column).alias("gt_time"),
-                F.when(F.col("SRC_PHASE") == "DEP", F.col("ADEP_ICAO"))
-                .otherwise(F.col("ADES_ICAO")).alias("gt_airport"),
+                gt_airport_col().alias("gt_airport"),
                 F.col("AP_C_RWY").alias("gt_runway"),
                 # Whether this airport reports to the second. 64% of
                 # MVT_TIME_UTC values land on a whole minute, so an unstratified
@@ -266,9 +306,14 @@ def build(spark: SparkSession, period: str, full: bool = True, airports: str = "
     flights = load_flights(spark, spec["month"])
     bridged = bridge(apdf, flights).cache()
 
-    report = bridge_report(bridged)
-    print(f"  bridge: {report['reached_icao24']:,} of {report['movements']:,} "
-          f"movements reach icao24 ({report['reach_pct']}%)")
+    report = bridge_report(bridged, airports)
+    print(f"  bridge ({report['scope']}): {report['reached_icao24']:,} of "
+          f"{report['movements']:,} movements reach icao24 "
+          f"({report['reach_pct']}%)")
+    if "network" in report:
+        net = report["network"]
+        print(f"  bridge (network, context only): {net['reached_icao24']:,} of "
+              f"{net['movements']:,} ({net['reach_pct']}%)")
 
     return (
         milestones(bridged, spec["days"], airports),
@@ -288,7 +333,9 @@ def main() -> int:
         # --airports study explicitly.
         default="all",
         help="Restrict ground truth to the twenty-aerodrome study set "
-             "(STUDY_AIRPORTS) rather than every APDF airport.",
+             "(STUDY_AIRPORTS) rather than every APDF airport. The bridge "
+             "report is scoped with it, because a ceiling computed over one "
+             "population cannot cap coverage computed over another.",
     )
     ap.add_argument("--results-dir", default=None)
     ap.add_argument("--executors", type=int, default=10)

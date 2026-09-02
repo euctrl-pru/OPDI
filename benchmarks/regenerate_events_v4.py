@@ -272,11 +272,15 @@ def jobs() -> list:
                 ["--period", period, "--airports", "study"],
                 {f"bridge_{period}.json": f"bridge_{period}.json"},
                 GT,
-                "the bridge match rate over the twenty study aerodromes. Runs "
-                "first and alone because it is the ceiling on every coverage "
-                "figure downstream: a milestone that cannot be reached is "
-                "indistinguishable from one that was missed unless this number "
-                "is known.",
+                "the bridge match rate, scoped to the twenty study "
+                "aerodromes -- `events_gt.bridge_report` applies the same "
+                "airport filter the milestones get, and carries the "
+                "network-wide figure alongside it under `network` as context. "
+                "Runs first and alone because it is the ceiling on every "
+                "coverage figure downstream: a milestone that cannot be "
+                "reached is indistinguishable from one that was missed unless "
+                "this number is known -- and a ceiling computed over a "
+                "different population than the coverage caps nothing.",
                 inputs=[T_REF],
             )
         )
@@ -318,7 +322,12 @@ def jobs() -> list:
                 "-- 64% land on a whole minute, so an unstratified error "
                 "distribution mostly measures the reference's quantisation. "
                 "Reads the event table the ladder already wrote; re-runs no "
-                "detector. It also computes the ring and inter-source-floor "
+                "detector. The runway table carries both the stable "
+                "milestone label (ATOT/ALDT either side of the vocabulary "
+                "change) and the `det_type` that produced it, so it can be "
+                "read against V3's runway_2025.csv column-to-column without "
+                "pretending the two rows came from the same detector. It also "
+                "computes the ring and inter-source-floor "
                 "tables, which V4 does not stage: V3 measured those and "
                 "nothing in V4 changes the ring detector.",
                 inputs=[T_FLIGHT_LIST, T_REF],

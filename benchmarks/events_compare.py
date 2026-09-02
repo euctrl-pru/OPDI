@@ -225,11 +225,22 @@ def main() -> int:
     write_csv(ring_rows, out / f"rings_{args.period}.csv")
 
     # -- runway identity against AP_C_RWY ------------------------------------
-    rwy_det = detected(spark, table, ident, runway_identity_types(cfg))
+    rwy_types = runway_identity_types(cfg)
+    rwy_det = detected(spark, table, ident, rwy_types)
     rwy_aligned = events_score.align(truth, rwy_det)
     rwy = events_score.score_runways(rwy_aligned)
+    # `milestone` is the stable label -- ATOT/ALDT on both sides of the
+    # vocabulary change, because `runway_identity_types` maps airborne -> ATOT
+    # and touchdown -> ALDT before the scoring ever sees a type. `det_type`
+    # records which detector produced it, so V4's runway_2026.csv can be read
+    # column-to-column against V3's runway_2025.csv *and* still say that the
+    # two rows came from different code. Without it the CSV cannot distinguish
+    # a v0.1.0 ATOT from an A-CDM airborne at all.
+    det_type_for = {milestone: type_ for type_, milestone in rwy_types.items()}
     rwy_rows = (
-        [{"period": args.period, "rung": args.rung, **r.asDict()} for r in rwy.collect()]
+        [{"period": args.period, "rung": args.rung,
+          "det_type": det_type_for.get(r["milestone"], ""), **r.asDict()}
+         for r in rwy.collect()]
         if rwy is not None else []
     )
     write_csv(rwy_rows, out / f"runway_{args.period}.csv")

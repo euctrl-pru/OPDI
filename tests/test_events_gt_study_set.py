@@ -18,7 +18,13 @@ import datetime as dt
 import pytest
 from pyspark.sql import functions as F
 
-from events_gt import PERIODS, STUDY_AIRPORTS, _filter_study_airports, milestones
+from events_gt import (
+    PERIODS,
+    STUDY_AIRPORTS,
+    _filter_study_airports,
+    bridge_report,
+    milestones,
+)
 
 
 def test_the_2026_period_covers_all_twenty_study_aerodromes():
@@ -94,3 +100,62 @@ def test_milestones_routes_through_the_study_airports_filter(spark):
 
     everything = milestones(bridged, days=None, airports="all")
     assert set(r.gt_airport for r in everything.collect()) == {"EBBR", "EHAM"}
+
+
+#: A ``bridged``-shaped frame: two departures, one at a study aerodrome and one
+#: not, plus an arrival into a study aerodrome that never reached ``icao24``.
+#: Enough to tell a scoped rate from a network-wide one, which two rows cannot.
+_BRIDGED = (
+    ("abc111", "TEST01 ", "id-1", "DEP", "EBBR", "LFPG"),
+    ("abc222", "TEST02 ", "id-2", "DEP", "EHAM", "LFPG"),
+    (None, None, "id-3", "ARR", "LFPG", "LSZH"),
+)
+_BRIDGED_SCHEMA = (
+    "icao24 string, callsign string, ID string, SRC_PHASE string, "
+    "ADEP_ICAO string, ADES_ICAO string"
+)
+
+
+def test_the_bridge_ceiling_is_computed_over_the_scoped_population(spark):
+    """The ceiling and the coverage it caps must share a denominator.
+
+    ``bridge_report`` used to run before any airport filter existed, so
+    ``--airports study`` narrowed the milestones and left the bridge rate
+    network-wide -- and the paper reads the two numbers together. Here EBBR and
+    LSZH are in the study set and EHAM is not, so a scoped report sees two
+    movements where the network sees three.
+    """
+    bridged = spark.createDataFrame(list(_BRIDGED), _BRIDGED_SCHEMA)
+
+    study = bridge_report(bridged, "study")
+
+    assert study["scope"] == "study"
+    # EBBR (reached) and the LSZH arrival (not reached); EHAM is filtered out.
+    assert study["movements"] == 2
+    assert study["reached_icao24"] == 1
+    assert study["reach_pct"] == 50.0
+    # ... and the network figure travels with it, as context rather than as
+    # the ceiling.
+    assert study["network"]["movements"] == 3
+    assert study["network"]["reached_icao24"] == 2
+
+
+def test_an_unscoped_report_is_what_it_always_was(spark):
+    """Pre-V4 callers see the same four keys over the same population."""
+    bridged = spark.createDataFrame(list(_BRIDGED), _BRIDGED_SCHEMA)
+
+    report = bridge_report(bridged)
+
+    assert report["scope"] == "all"
+    assert "network" not in report
+    assert (report["movements"], report["reached_icao24"]) == (3, 2)
+
+
+def test_the_report_splits_dep_and_arr_the_way_the_milestones_do(spark):
+    """An arrival is scored at its ADES, not its ADEP. Sharing
+    `gt_airport_col` is what stops the two from drifting: the LFPG->LSZH
+    arrival counts as LSZH here, and would count as LFPG (not in the study set)
+    under a naive ADEP filter."""
+    arrival_only = spark.createDataFrame([_BRIDGED[2]], _BRIDGED_SCHEMA)
+
+    assert bridge_report(arrival_only, "study")["movements"] == 1
