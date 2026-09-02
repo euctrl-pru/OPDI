@@ -62,7 +62,36 @@ PERIOD_TRACKS = {
         # cannot tell those apart.
         "identity": "tracks",
     },
+    "2026": {
+        # The V4 period. Its tracks were built by the A8 ``recommended``
+        # segmentation arm, so `track_id` is `{hash}_{offset}` with no
+        # `_{year}_{month}` suffix -- which is also how an A8 table is told
+        # apart from a legacy one.
+        "raw": "research/tracks_2026",
+        "clean": "research/tracks_clean_2026",
+        # Both 2026 tables already carry `h3_res_12` and `baro_altitude_c`
+        # (verified against the parquet schema before spending cluster time),
+        # so nothing has to be computed on read.
+        "index_on_read": [],
+        # Built by benchmarks/flight_list_2026.py. The production flight list
+        # covers 2025-06-05/06/07 only -- verified, 360,298 rows -- so a run
+        # that does not redirect finds no aerodrome for any 2026 track and
+        # reports every aerodrome-anchored family as empty.
+        "identity": "flight_list",
+        "flight_list": "research/flight_list_2026",
+    },
 }
+
+#: The logical table name step 04 and the scorers ask for when nothing
+#: overrides it. A period that carries its own ``flight_list`` key answers with
+#: that table instead -- see `redirect_event_tables` for the pipeline side and
+#: `detected_events` for the scoring side.
+DEFAULT_FLIGHT_LIST = "opdi_flight_list"
+
+
+def flight_list_table(period: str) -> str:
+    """Which flight list this period's aerodrome joins must read."""
+    return PERIOD_TRACKS[period].get("flight_list", DEFAULT_FLIGHT_LIST)
 
 #: The ladder. Each rung is (name, {field: value}) applied cumulatively on top
 #: of `EventConfig.legacy()`, so rung 0 is the published algorithm and the last
@@ -132,6 +161,54 @@ LADDER = [
     ),
 ]
 
+#: The v0.1.0 shipped configuration, reconstructed. `EventConfig()` moved to
+#: v0.2.0 when the A-CDM families landed, so the V3 baseline no longer has a
+#: constructor; these are exactly the six new behaviour fields at their off
+#: values plus the old version string. Every V4 rung is applied cumulatively on
+#: top of this, so V00 *is* what V3 shipped and V07 must equal `EventConfig()`
+#: field for field -- `verify_plan_v4` asserts both rather than trusting them.
+V4_BASE = dict(
+    emit_runway_milestones=False,
+    emit_pru_tops=False,
+    level_method="icao",
+    level_floors_above_field=False,
+    level_anchor="phase",
+    airport_gate_above_field=False,
+    events_version="events_v0.1.0",
+)
+
+#: The V4 ladder. Cumulative on top of :data:`V4_BASE`, one behaviour per rung.
+#:
+#: **Why not extend `LADDER`.** Its rungs inherit ``events_v0.0.2`` and
+#: therefore run with callsign resolution off; once the segmentation default
+#: flipped to A8 ``recommended`` a re-run of them measures airport-event fan-out
+#: rather than the rung (the warning on `LADDER` says why in full). V4 needs a
+#: baseline that is reproducible against a rebuilt track table, so it starts
+#: from the v0.1.0 configuration instead of the published v0.0.2 one.
+#:
+#: ``V01`` carries no config change because the cross-track tie-break is not
+#: configurable -- it is a bug fix, and a bug fix behind a flag is a bug you
+#: have promised to keep. Its effect is read off ``runway_2026.csv`` against
+#: V3's ``runway_2025.csv``, not off a rung, and the paper has to say so rather
+#: than letting a zero-delta rung imply the fix did nothing.
+LADDER_V4 = [
+    ("V00_v3_shipped", {}),
+    ("V01_runway_tiebreak", {}),
+    ("V02_layout_agl", {"airport_gate_above_field": True}),
+    ("V03_pru_level", {"level_method": "pru"}),
+    ("V04_level_floors_agl", {"level_floors_above_field": True}),
+    ("V05_pru_tops", {"emit_pru_tops": True, "level_anchor": "pru"}),
+    ("V06_runway_milestones", {"emit_runway_milestones": True}),
+    ("V07_shipped", {"events_version": "events_v0.2.0"}),
+]
+
+#: Rungs that are allowed to be config-identical to the rung before them,
+#: **by name**. A code-only rung has no configuration to differ in; a *new*
+#: accidental no-op has no entry here and still fails `verify_plan_v4`.
+V4_NOOP_EXEMPT = {"V01_runway_tiebreak"}
+
+LADDERS = {"v3": LADDER, "v4": LADDER_V4}
+
 
 def guard_writes(allowed_prefix: str = RESEARCH_PREFIX) -> None:
     """Refuse any write outside ``research/``.
@@ -168,7 +245,7 @@ def guard_writes(allowed_prefix: str = RESEARCH_PREFIX) -> None:
     StorageManager._events_guarded = True
 
 
-def redirect_event_tables(target: str) -> None:
+def redirect_event_tables(target: str, flight_list: str = None) -> None:
     """Send step 04's two output tables to a per-rung research location.
 
     Patches ``_s3_path`` rather than the table *name*, following
@@ -177,10 +254,26 @@ def redirect_event_tables(target: str) -> None:
     identifier. Also forces overwrite, because a re-run of one rung must
     replace its own output rather than append to it -- the same append trap the
     published tables have, in a place where it would quietly double a score.
+
+    ``flight_list`` redirects the *input* the aerodrome-anchored detectors read.
+    ``calculate_airport_events``, the runway-milestone family and the PRU tops
+    all ask ``storage.read_table`` for ``opdi_flight_list`` by its fixed name,
+    and the published table holds 2025 only -- so a 2026 run without this finds
+    no ADEP/ADES for any track and reports every aerodrome family as empty
+    rather than as broken. Done here rather than by threading a table name
+    through step 04 because the redirect is a property of the *benchmark run*,
+    not of the pipeline.
+
+    Only the two output tables are forced to overwrite. The flight list is read
+    and never written, and a redirect that also relaxed its write mode would be
+    a loaded gun pointed at whatever it happens to name.
     """
     from opdi.utils.storage import StorageManager
 
-    redirected = {"opdi_flight_events": target, "opdi_measurements": target + "_meas"}
+    outputs = {"opdi_flight_events": target, "opdi_measurements": target + "_meas"}
+    redirected = dict(outputs)
+    if flight_list and flight_list != DEFAULT_FLIGHT_LIST:
+        redirected[DEFAULT_FLIGHT_LIST] = flight_list
     orig_path = getattr(StorageManager, "_events_orig_path", StorageManager._s3_path)
     StorageManager._events_orig_path = orig_path
 
@@ -195,7 +288,7 @@ def redirect_event_tables(target: str) -> None:
         StorageManager._events_orig_write = orig_write
 
     def write_table(self, df, table_name, mode="append"):
-        if table_name in redirected:
+        if table_name in outputs:
             mode = "overwrite"
         return orig_write(self, df, table_name, mode)
 
@@ -272,12 +365,20 @@ def index_on_read(tables) -> None:
     StorageManager._events_h3_on_read = True
 
 
-def build_plan(only=None) -> dict:
-    """name -> EventConfig, cumulative from legacy()."""
-    plan, current = {}, EventConfig.legacy()
-    for name, delta in LADDER:
-        from dataclasses import replace
+def build_plan(only=None, ladder: str = "v3") -> dict:
+    """name -> EventConfig, cumulative from the ladder's own base.
 
+    ``v3`` starts from `EventConfig.legacy()` -- published ``events_v0.0.2``.
+    ``v4`` starts from :data:`V4_BASE`, the reconstructed v0.1.0 configuration,
+    because after the A-CDM families landed no constructor produces it.
+    """
+    from dataclasses import replace
+
+    if ladder not in LADDERS:
+        raise SystemExit(f"unknown ladder {ladder!r}: choose from {sorted(LADDERS)}")
+    current = EventConfig.legacy() if ladder == "v3" else EventConfig(**V4_BASE)
+    plan = {}
+    for name, delta in LADDERS[ladder]:
         current = replace(current, **delta) if delta else current
         plan[name] = current
     if only:
@@ -317,23 +418,132 @@ def verify_plan(plan: dict) -> None:
         assert plan[a] != plan[b], f"rungs {a} and {b} are identical -- one is a no-op"
 
 
+def verify_plan_v4(plan: dict) -> None:
+    """The V4 ladder's assertions, before anything expensive runs.
+
+    Three of the four are `verify_plan`'s, restated against a base that has no
+    constructor: the baseline has to be *exactly* the seven fields V4 changes,
+    or it is not v0.1.0 and the paper's "V3 shipped" column is about a
+    configuration nobody ran. The fourth guards the scoring map -- see
+    `milestone_map`.
+    """
+    names = list(plan)
+    shipped = EventConfig()
+    fields = list(EventConfig().__dataclass_fields__)
+
+    if names and names[0] == "V00_v3_shipped":
+        differing = {
+            f for f in fields if getattr(plan[names[0]], f) != getattr(shipped, f)
+        }
+        assert differing == set(V4_BASE), (
+            f"the V4 baseline must differ from the shipped configuration in "
+            f"exactly the {len(V4_BASE)} reconstructed v0.1.0 fields; it "
+            f"differs in {sorted(differing)}. Extra fields mean the baseline "
+            f"is not v0.1.0; missing ones mean a behaviour shipped without a "
+            f"rung measuring it."
+        )
+    if names and names[-1] == "V07_shipped":
+        differing = [
+            f for f in fields if getattr(plan[names[-1]], f) != getattr(shipped, f)
+        ]
+        assert not differing, (
+            f"the last rung must equal the shipped configuration; differs on "
+            f"{', '.join(differing)}"
+        )
+    for a, b in zip(names, names[1:]):
+        if b in V4_NOOP_EXEMPT:
+            continue
+        assert plan[a] != plan[b], f"rungs {a} and {b} are identical -- one is a no-op"
+
+    for name, cfg in plan.items():
+        if cfg.emit_runway_milestones:
+            assert "landing" not in milestone_map(cfg), (
+                f"{name} emits the A-CDM runway family, where `landing` is the "
+                f"ICAO T16 threshold-plane crossing -- an event APDF does not "
+                f"record. Scoring it against ALDT would report a touchdown "
+                f"error for a thing that is not a touchdown."
+            )
+
+
+#: Which verifier belongs to which ladder. Two functions rather than one with a
+#: branch: V3's is a published instrument and its assertions must not move.
+VERIFIERS = {"v3": verify_plan, "v4": verify_plan_v4}
+
+
 #: Which OPDI event type claims to be which APDF milestone. `take-off` and
 #: `landing` are the published fuzzy-phase pair; ATOT and ALDT are the new
 #: runway-anchored ones. Both are scored, separately, against the same truth --
 #: that comparison *is* the question the ladder exists to answer, and collapsing
 #: them would hide it.
 TYPE_TO_MILESTONE = {
-    "take-off": "ATOT",
-    "landing": "ALDT",
+    # The A-CDM vocabulary of events_v0.2.0.
+    "airborne": "ATOT",
+    "touchdown": "ALDT",
+    "off-block": "AOBT",
+    "on-block": "AIBT",
+    # V3's names, kept so the V00 baseline rung scores against the same truth.
     "ATOT": "ATOT",
     "ALDT": "ALDT",
     "AOBT": "AOBT",
     "AIBT": "AIBT",
+    "take-off": "ATOT",
+    "landing": "ALDT",
 }
+
+#: Event types that carry a runway designator, so their identity can be checked
+#: against ``AP_C_RWY``. The phase pair (``take-off``/``landing``) is *not*
+#: here: it names no runway, and letting it into the runway comparison would
+#: put nulls in the denominator of an exact-match rate.
+RUNWAY_IDENTITY_TYPES = {"ATOT": "ATOT", "ALDT": "ALDT",
+                         "airborne": "ATOT", "touchdown": "ALDT"}
+
+
+def milestone_map(config) -> dict:
+    """The type -> milestone map that is correct for *this* configuration.
+
+    One map cannot serve both vocabularies, because ``landing`` means two
+    different physical things depending on ``emit_runway_milestones``:
+
+    * **off** (v0.1.0 and earlier) -- the fuzzy phase transition into GND, i.e.
+      ground contact. That is what ALDT is, so it is scored.
+    * **on** (v0.2.0) -- ICAO T16, the instant the aircraft crosses the runway
+      threshold plane, tens of seconds and roughly a kilometre before the
+      wheels touch. ``touchdown`` is the ALDT of that vocabulary. APDF records
+      no threshold crossing at all, so a ``landing`` scored against ALDT would
+      report a large systematic "error" that is really a comparison between two
+      different events -- and it would land in the same table as the honest
+      figures, indistinguishable from them.
+
+    So the map is narrowed per rung rather than per period or per version
+    string: the ladder's own configuration is the only thing that knows which
+    vocabulary its output speaks. ``take-off`` is left in place because it is
+    simply not emitted when the milestones are on (``events.py`` gates the pair
+    on the same flag), so a ``take-off`` row appearing under v0.2.0 would be a
+    bug worth seeing scored rather than hidden.
+    """
+    mapping = dict(TYPE_TO_MILESTONE)
+    if getattr(config, "emit_runway_milestones", False):
+        mapping.pop("landing", None)
+    return mapping
+
+
+def runway_identity_types(config) -> dict:
+    """`RUNWAY_IDENTITY_TYPES` narrowed to the types this config emits.
+
+    Both vocabularies name a runway, under different type strings *and*
+    different ``info`` keys -- ``runway`` for v0.1.0's ATOT/ALDT, ``rwy_ident``
+    for the A-CDM family. Mixing the two into one comparison would align two
+    detections onto the same truth row and score whichever landed nearer.
+    """
+    acdm = getattr(config, "emit_runway_milestones", False)
+    keep = {"airborne", "touchdown"} if acdm else {"ATOT", "ALDT"}
+    return {t: m for t, m in RUNWAY_IDENTITY_TYPES.items() if t in keep}
 
 
 def detected_events(spark, table: str, storage=None, tracks=None,
-                    identity: str = "flight_list"):
+                    identity: str = "flight_list",
+                    flight_list: str = DEFAULT_FLIGHT_LIST,
+                    mapping: dict = None):
     """Reshape the written event table into what the scorer expects.
 
     The event table keys on ``flight_id``, which is the ``track_id``; the
@@ -350,29 +560,43 @@ def detected_events(spark, table: str, storage=None, tracks=None,
     ``callsign`` is trimmed because ADS-B pads to eight characters, and
     ``icao24`` lowered because the reference carries it uppercase; both are the
     same traps the ground-truth loader closes on its side.
+
+    ``mapping`` defaults to the whole of :data:`TYPE_TO_MILESTONE`; the ladder
+    passes `milestone_map(cfg)`, which is narrower for the A-CDM vocabulary.
+    ``flight_list`` names the table identity is resolved through, so an
+    out-of-sample period can point at its own -- see `flight_list_table`.
     """
     ev = spark.read.parquet(table) if table.startswith("s3a://") else spark.table(table)
+    # Two vocabularies, two keys for the same fact: v0.1.0's ATOT/ALDT write
+    # `runway`, the A-CDM family writes `rwy_ident` (runway_ops._info). Parsing
+    # only the first left every v0.2.0 runway designator NULL, which reads as
+    # "the detector named no runway" rather than as "the reader looked in the
+    # wrong field".
     info = F.from_json(
-        F.col("info"), "runway string, apt_icao string, crossing_seq int, direction string"
+        F.col("info"),
+        "runway string, rwy_ident string, apt_icao string, crossing_seq int, "
+        "direction string",
     )
-    mapping = F.create_map(*[F.lit(x) for kv in TYPE_TO_MILESTONE.items() for x in kv])
+    mapping = dict(mapping or TYPE_TO_MILESTONE)
+    milestone = F.create_map(*[F.lit(x) for kv in mapping.items() for x in kv])
     ev = ev.withColumn("_i", info).select(
         F.col("flight_id").alias("_track_id"),
         F.col("type").alias("det_type"),
-        mapping[F.col("type")].alias("milestone"),
+        milestone[F.col("type")].alias("milestone"),
         F.col("event_time"),
         F.col("latitude").alias("det_lat"),
         F.col("longitude").alias("det_lon"),
-        F.col("_i.runway").alias("det_runway"),
+        F.coalesce(F.col("_i.runway"), F.col("_i.rwy_ident")).alias("det_runway"),
     )
 
-    fl = storage.read_table("opdi_flight_list").select(
-        F.col("ID").alias("_fl_id"),
-        F.lower(F.col("ICAO24")).alias("icao24"),
-        F.trim(F.col("FLT_ID")).alias("callsign"),
-        F.to_date(F.col("FIRST_SEEN")).alias("day"),
-    )
-    if identity == "tracks":
+    if identity != "tracks":
+        fl = storage.read_table(flight_list).select(
+            F.col("ID").alias("_fl_id"),
+            F.lower(F.col("ICAO24")).alias("icao24"),
+            F.trim(F.col("FLT_ID")).alias("callsign"),
+            F.to_date(F.col("FIRST_SEEN")).alias("day"),
+        )
+    else:
         # The flight list is period-specific and only the 2025 one exists in
         # the production table, so an out-of-sample period would resolve no
         # identity at all and every rung would score zero. Identity does not
@@ -434,6 +658,19 @@ def write_csv(rows, path):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(events_gt.PERIODS), required=True)
+    ap.add_argument(
+        "--ladder", choices=sorted(LADDERS), default="v3",
+        help="which ladder to run: v3 is the published instrument from "
+             "events_v0.0.2 upwards; v4 starts from the reconstructed v0.1.0 "
+             "configuration. Default v3 so the V3 chain's arguments keep "
+             "meaning what they meant.",
+    )
+    ap.add_argument(
+        "--airports", choices=("study", "all"), default="all",
+        help="restrict the ground truth to events_gt.STUDY_AIRPORTS. The "
+             "denominator of every coverage figure, so it has to match the "
+             "bridge job's -- the V4 entrypoint passes 'study' to both.",
+    )
     ap.add_argument("--runs", nargs="*", default=None, help="ladder rung names")
     ap.add_argument("--results-dir", default=None)
     ap.add_argument("--out-name", default=None)
@@ -444,9 +681,9 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    plan = build_plan(args.runs)
-    verify_plan(plan)
-    print(f"plan verified: {len(plan)} rung(s) -- {', '.join(plan)}")
+    plan = build_plan(args.runs, ladder=args.ladder)
+    VERIFIERS[args.ladder](plan)
+    print(f"plan verified ({args.ladder}): {len(plan)} rung(s) -- {', '.join(plan)}")
     if args.dry_run:
         return 0
 
@@ -464,7 +701,7 @@ def main() -> int:
     index_on_read(PERIOD_TRACKS[args.period]["index_on_read"])
     guard_writes()
 
-    truth, rings, report = events_gt.build(spark, args.period)
+    truth, rings, report = events_gt.build(spark, args.period, airports=args.airports)
     truth.cache()
 
     # Fail before the expensive part, not an hour into it. The first run of
@@ -485,7 +722,7 @@ def main() -> int:
     for name, cfg in plan.items():
         print(f"\n=== {name} ===")
         target = f"research/events_{args.period}_{name}"
-        redirect_event_tables(target)
+        redirect_event_tables(target, flight_list=flight_list_table(args.period))
 
         config = OPDIConfig.for_environment("opensky")
         config.events = cfg
@@ -508,6 +745,10 @@ def main() -> int:
         detected = detected_events(
             spark, table, proc.storage, tracks,
             identity=PERIOD_TRACKS[args.period]["identity"],
+            flight_list=flight_list_table(args.period),
+            # Per rung, not per run: `landing` is ground contact under v0.1.0
+            # and a threshold crossing under v0.2.0. See `milestone_map`.
+            mapping=milestone_map(cfg),
         ).cache()
         types = [r.det_type for r in detected.select("det_type").distinct().collect()]
         rung_rows = []
