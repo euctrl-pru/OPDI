@@ -338,7 +338,7 @@ def read_cleaned(spark, method, days):
     )
 
 
-def export_track_extents(spark, method, period, days, results_dir) -> dict:
+def export_track_extents(spark, method, period: str, days, results_dir) -> dict:
     """One row per track -- ``track_id, icao24, t_start, t_end, n_points``.
 
     **This has to happen before the per-method cleanup, and that is the whole
@@ -580,8 +580,10 @@ def main() -> None:
                 # the `finally` below deletes it -- and after the flight-list
                 # block above, so a method that fails at step 03 leaves no
                 # half-summary claiming to describe a run that did not finish.
+                # args.period, not `period`: the latter is the PERIODS dict,
+                # and this argument reaches `extents_name` to build a filename.
                 row.update(export_track_extents(
-                    spark, method, period, days, args.results_dir))
+                    spark, method, args.period, days, args.results_dir))
                 row.update(track_diagnostics.null_rates(
                     read_cleaned(spark, method, days)))
 

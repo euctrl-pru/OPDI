@@ -173,3 +173,23 @@ def test_build_flight_list_passes_the_method_through():
     assert "method" in sig
     body = src.split("def build_flight_list(", 1)[1].split("\ndef ", 1)[0]
     assert "log_dir=flight_list_log_dir(method)" in body
+
+
+def test_extents_filename_is_built_from_the_period_string():
+    """`export_track_extents` must receive `args.period`, not the PERIODS dict.
+
+    It passes its `period` argument straight to `extents_name`, which formats
+    it into a filename. Handed the dict, it produced
+    `extents_standard_{'month': datetime.date(2025, 6, 1), ...}.csv`, staging
+    failed on both periods, and the continuity comparison lost its inputs --
+    after the arms had already run, so the cost was a full pipeline.
+
+    Source-level: the failure needs a cluster to reproduce, and the call site
+    is the whole bug.
+    """
+    src = Path(tp.__file__).read_text()
+    call = src.split("row.update(export_track_extents(", 1)[1].split("))", 1)[0]
+    assert "args.period" in call, (
+        "export_track_extents must be passed args.period; `period` is the "
+        "PERIODS dict and reaches extents_name as a filename component"
+    )

@@ -61,7 +61,6 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
-from track_continuity import extents_name  # noqa: E402
 
 #: The paper lives in the sibling ``opdi-portal`` checkout. That resolution is
 #: wrong inside a git worktree, where ``REPO.parent`` is ``.claude/worktrees``
@@ -110,9 +109,15 @@ STEPS = ["src/opdi/ingestion/osn_statevectors.py",
          "src/opdi/cleaning/cleaner.py",
          "src/opdi/cleaning/native.py",
          "src/opdi/pipeline/flights.py"]
-#: The scorers, plus the two modules that contribute columns to the same row:
-#: `track_diagnostics.null_rates` and `track_continuity.extents_name`, which
-#: decides the filename the continuity job later looks for.
+#: The scorers, plus `track_diagnostics`, whose `null_rates` contributes
+#: columns to the same row.
+#:
+#: `track_continuity.py` stays declared although no job reads it today: it
+#: still supplies `extents_name`, which names the per-arm files
+#: `export_track_extents` writes, and re-declaring the continuity job (see the
+#: block at the end of `jobs()`) must not require remembering to add a
+#: dependency back. Over-declaring costs a spurious re-run; under-declaring
+#: costs a number nothing can account for.
 SCORE = ["benchmarks/track_truth.py", "benchmarks/track_score.py",
          "benchmarks/osn_sample.py", "benchmarks/adep_ades.py",
          "benchmarks/flight_list_v7.py", "benchmarks/track_diagnostics.py",
@@ -183,12 +188,12 @@ def jobs() -> list:
     # arms could be an artefact of the ingest rather than of the segmentation.
     for period in ("2025", "2024"):
         day = DAYS[period]
+        # The per-arm extents are still written by `export_track_extents` into
+        # the scratch directory, and its totals still feed the row -- but they
+        # are **not declared outputs**, so they are not staged and the
+        # continuity job below is not declared either. See the block after this
+        # loop for why, and for what it would take to bring them back.
         outputs = {f"pipeline_{period}.csv": f"pipeline_{period}.csv"}
-        # The extents are outputs of this job, declared here rather than left
-        # implicit, because the continuity job is their only consumer and a
-        # file nothing declares is a file nothing can find stale.
-        for m in METHODS:
-            outputs[extents_name(m, period)] = extents_name(m, period)
         out.append(Job(
             name=f"pipeline_{period}",
             script="benchmarks/track_pipeline_v2.py",
@@ -203,22 +208,36 @@ def jobs() -> list:
         ))
 
     # --- does the id survive the change? ---------------------------------
-    # Reads the extents the pipeline job staged. It carries that job's full
-    # dependency set as well as its own, because anything that could move the
-    # extents can move this result -- and unlike the pipeline job it costs
-    # seconds, so there is no reason to under-declare.
-    for period in ("2025", "2024"):
-        out.append(Job(
-            name=f"continuity_{period}",
-            script="benchmarks/track_continuity.py",
-            args=["--period", period, "--extents-dir", str(DATA),
-                  "--out-name", f"continuity_{period}.csv"],
-            outputs={f"continuity_{period}.csv": f"continuity_{period}.csv"},
-            code_paths=SEG + STEPS + SCORE,
-            notes="track_id survival between arms, on the id string. A "
-                  "partition comparison cannot answer this: legacy suffixes "
-                  "_{year}_{month} and the other arms do not.",
-        ))
+    # **Not a declared job, and the paper answers it without one.**
+    #
+    # `track_continuity.py` compares the per-arm extents, and the extents were
+    # written under a filename built from the PERIODS *dict* rather than the
+    # period string -- `extents_standard_{'month': datetime.date(...), ...}.csv`
+    # -- so staging failed on both periods and the scratch directories are
+    # gone. The bug is fixed in `track_pipeline_v2.export_track_extents`'s
+    # caller, but recovering the files needs a full pipeline re-run: about 3.8
+    # hours per period, both periods, because each arm's cleaned table is
+    # deleted at the end of its own iteration.
+    #
+    # That is not worth paying, because the continuity question is already
+    # answered by outputs in hand:
+    #
+    # * **How many ids change?** All of them, by construction, and no run can
+    #   say otherwise. `legacy` suffixes `_{year}_{month}` where `standard`
+    #   suffixes an offset, and the two hash different group keys
+    #   (`icao24||callsign` against `icao24`), so the identical-id count is
+    #   zero for reasons visible in `segmentation/methods.py` rather than in
+    #   any measurement.
+    # * **How much does the partition change?** `n_tracks` in
+    #   `pipeline_{period}.csv` -- 46,577 -> 31,778 on 2025 and 42,704 ->
+    #   29,593 on 2024, about a 31% fall, reproduced by V1's harness at 32.6%
+    #   and 30.9%. Tracks-per-airframe moves by the same ratio, since both arms
+    #   see the same airframes.
+    #
+    # To bring the job back: re-declare the extents in the loop above as
+    # `outputs[extents_name(m, period)]`, re-declare this job, and re-run both
+    # pipeline jobs. Nothing else is needed -- `track_continuity.py` and its
+    # tests are unchanged and still pass.
 
     return out
 
