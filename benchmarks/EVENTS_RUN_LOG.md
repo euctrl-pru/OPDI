@@ -191,3 +191,15 @@ Worth noting what found it. Not the tests, and not the scored metrics -- the
 **extraction inventory**, which exists only because the report was challenged
 for containing no benchmarking. A count of rows per event type, which nothing
 had been reporting, was what made an impossible number visible.
+
+---
+
+## V4 decisions taken without review
+
+| # | Decision | Why |
+|---|---|---|
+| 24 | **The V4 period is 2026-06-05..07, not V3's 2025-06-05..07.** | UGKO (Kutaisi) has 868 APDF movements in `202606` and zero in `202506` -- `202606` is the only month whose extract covers all twenty study aerodromes at once. 2025 could not serve this study: a period that leaves one of the twenty airports absent from ground truth makes that absence look like a detection failure rather than what it is, a missing extract. |
+| 25 | **Retirement is evidence-driven: a type is retired only where reference data shows its replacement better.** | `take-off`/`ATOT` and the old `landing`/`ALDT` are superseded because the A-CDM family's interpolated crossings (`airborne`, `touchdown`) measure against APDF and the phase-transition/window-extreme proxies they replace do not. `top-of-climb`/`top-of-descent` keep *both* algorithms -- the fuzzy phase classifier and PRU's `-cco`/`-cdo` pair -- because no reference data records a top of climb at all, so nothing can adjudicate between them; publishing one and suppressing the other would be a preference dressed as a finding. |
+| 26 | **`landing` keeps its name and changes its meaning.** | Under `events_v0.0.2`/`v0.1.0` it was the fuzzy phase's descent-to-ground transition, scored against APDF ALDT. Under `events_v0.2.0` it is the interpolated crossing of the runway threshold plane, ICAO T16, and ALDT now belongs to `touchdown` (T17) instead. Same string, two meanings -- distinguished only by the `version` column and by `info.milestone == 'T16'`, which is present under the new meaning and absent under the old. This is the one change flagged as capable of corrupting an existing consumer silently, and it leads the paper's breaking-changes chapter for that reason. |
+| 27 | **`V01_runway_tiebreak` carries no config change.** | The cross-track tie-break for parallel runways (decision 9) is a bug fix, not something a flag should gate -- a bug fix behind a flag is a bug you have promised to keep. Its effect is therefore not read off a rung delta; it is read column-to-column off `runway_2026.csv` against V3's `runway_2025.csv` via `det_type`. `V01_runway_tiebreak` is the one rung listed in `V4_NOOP_EXEMPT` for exactly this reason -- a genuinely new accidental no-op rung has no entry there and still fails `verify_plan_v4`. |
+| 28 | **The study set is ranks 1-20 of the tier-A 2026 coverage ranking, so every V4 figure is an upper bound.** | `STUDY_AIRPORTS` is chosen by ADS-B reception quality over the same three days that are scored, not by traffic volume or representativeness. A detector limited by reception looks better here than anywhere else in the network, and the paper says so rather than presenting these numbers as typical. |
