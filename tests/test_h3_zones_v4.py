@@ -52,6 +52,59 @@ def test_h3_pyspark_geo_to_h3_is_broken_on_h3_v4(spark):
 
 
 # ---------------------------------------------------------------------------
+# The worker sys.path shadowing constraint that justifies why
+# h3_airport_zones._polyfill_geojson_udf (and every other UDF in that module)
+# is self-contained and never closes over an opdi.utils.h3_helpers symbol.
+# This is CASE (a): the failure reproduces under the local `spark` fixture
+# (master="local[1]") -- it is not a cluster-only concern. Regression-tested
+# directly rather than left as an unverified docstring claim.
+# ---------------------------------------------------------------------------
+
+
+def test_udf_closing_over_opdi_symbol_fails_on_worker_local_spark(spark):
+    """A Spark UDF whose closure references a symbol imported from
+    ``opdi.utils.h3_helpers`` fails on the worker, even under the local
+    ``spark`` fixture used by this whole suite (``master("local[1]")``).
+
+    Root cause: this worktree has a top-level ``opdi.py`` script (the CLI
+    entrypoint) that shadows the ``src/opdi`` package. The driver resolves
+    ``opdi`` correctly because pytest's ``pythonpath = ["src"]`` (see
+    pyproject.toml) prepends ``src/`` to *its* sys.path -- but a Spark
+    worker is a separate Python subprocess that does not inherit that
+    prepend (only PYSPARK_PYTHON is pinned; PYTHONPATH is not exported with
+    ``src/`` in it -- see conftest.py). cloudpickle pickles a UDF's
+    referenced globals *by reference* when they are (or resolve to) another
+    named function or an imported symbol, which requires the worker to
+    re-import that symbol's home module to reconstruct it. On this worker,
+    that re-import finds ``opdi.py`` first and fails.
+
+    This is why ``h3_airport_zones.py``'s UDFs (including
+    ``_polyfill_geojson_udf``) are all self-contained around the
+    third-party ``h3`` package only, instead of delegating to
+    ``h3_helpers.polyfill_geojson`` as ``h3_airspaces.py`` does driver-side.
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import IntegerType
+
+    from opdi.utils.h3_helpers import h3_distance as _opdi_h3_distance
+
+    @F.udf(returnType=IntegerType())
+    def _dist_udf(h1, h2):
+        return _opdi_h3_distance(h1, h2)
+
+    cell = h3.latlng_to_cell(50.9014, 4.4844, 9)
+    neighbor = next(iter(h3.grid_ring(cell, 1)))
+    df = spark.createDataFrame([(cell, neighbor)], ["h1", "h2"])
+
+    with pytest.raises(Exception) as excinfo:
+        df.withColumn("d", _dist_udf(F.col("h1"), F.col("h2"))).collect()
+
+    msg = str(excinfo.value)
+    assert "ModuleNotFoundError" in msg
+    assert "opdi" in msg and "not a package" in msg
+
+
+# ---------------------------------------------------------------------------
 # tracks.py: the H3-index column expression (formerly h3_pyspark.geo_to_h3)
 # ---------------------------------------------------------------------------
 

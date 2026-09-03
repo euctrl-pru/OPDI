@@ -85,25 +85,33 @@ def _polyfill_geojson_udf(geojson_str, resolution):
     below before calling h3 -- getting this backwards yields an empty or
     silently wrong cell set.
 
-    This is the same primitive as ``opdi.utils.h3_helpers.polyfill_geojson(...,
-    geo_json_conformant=True)`` (used by ``h3_airport_layouts`` and
-    ``h3_airspaces``), but reimplemented inline rather than imported or
-    delegated to a shared top-level helper: this function only ever runs
-    inside a Spark UDF, and this worktree has a top-level ``opdi.py`` script
-    that shadows the ``src/opdi`` package on a Spark worker's ``sys.path``
-    (workers don't inherit the driver's pytest ``pythonpath = ["src"]``
-    prepend). cloudpickle needs to pickle a UDF's referenced globals *by
-    reference* when they resolve to another named function or an imported
-    symbol, which forces the worker to re-import that function's home module
-    -- confirmed empirically: closing over ``opdi.utils.h3_helpers.polyfill_geojson``,
+    This is the same swap-then-polyfill primitive as
+    ``opdi.utils.h3_helpers.polyfill_geojson(..., geo_json_conformant=True)``
+    (used by ``h3_airspaces``) -- but reimplemented inline here rather than
+    imported, so this module ends up with a *third* independent copy of the
+    footgun swap (the second being ``h3_airport_layouts._polyfill_latlng``/
+    ``polygon_to_h3``, which is also standalone and does not call
+    ``h3_helpers`` either). This one cannot be consolidated: this function
+    only ever runs inside a Spark UDF, and this worktree has a top-level
+    ``opdi.py`` script that shadows the ``src/opdi`` package on a Spark
+    worker's ``sys.path`` (workers don't inherit the driver's pytest
+    ``pythonpath = ["src"]`` prepend, confirmed locally under the test
+    suite's ``local[1]`` fixture -- not merely a cluster-only concern).
+    cloudpickle needs to pickle a UDF's referenced globals *by reference*
+    when they resolve to another named function or an imported symbol,
+    which forces the worker to re-import that function's home module --
+    confirmed empirically: closing over ``opdi.utils.h3_helpers.polyfill_geojson``,
     or even over a second top-level function in *this* module, both fail on
     the worker with ``ModuleNotFoundError: No module named 'opdi...'; 'opdi'
-    is not a package``. Every other UDF in this module has the same
-    constraint and only ever touches the third-party ``h3`` package inline
-    for that reason -- this keeps the pattern rather than reintroducing the
-    failure. tests/test_h3_zones_v4.py checks this UDF's output against
-    ``h3_helpers.polyfill_geojson`` (called driver-side, where the import
-    works) to prove the two stay identical.
+    is not a package``. This is pinned by
+    tests/test_h3_zones_v4.py::test_udf_closing_over_opdi_symbol_fails_on_worker_local_spark,
+    a regression test that reproduces the failure directly rather than
+    leaving it as an unverified claim. Every other UDF in this module has
+    the same constraint and only ever touches the third-party ``h3``
+    package inline for that reason -- this keeps the pattern rather than
+    reintroducing the failure. tests/test_h3_zones_v4.py separately checks
+    this UDF's output against ``h3_helpers.polyfill_geojson`` (called
+    driver-side, where the import works) to prove the two stay identical.
     """
     if geojson_str is None or resolution is None:
         return None
