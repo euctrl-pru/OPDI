@@ -452,11 +452,32 @@ def score_arm_gated(matched: DataFrame, extents: DataFrame,
     counts flights with at least one sample inside ``[t_off, t_land]``;
     ``gate_n_flights`` counts flights with at least one sample inside the wider
     gate interval, which admits flights whose ADS-B never covered the airborne
-    leg at all -- a departure seen only on the taxiway, say. So
-    ``gate_n_flights >= n_flights``, and a reader setting
+    leg at all -- a departure seen only on the taxiway, say. A reader setting
     ``gate_clean_match_pct`` beside ``clean_match_pct`` without checking the
     counts would read a change of *denominator* as a taxi-attachment failure.
     Report both counts wherever both rates are reported.
+
+    **``gate_n_flights >= n_flights`` does not hold, and an earlier version of
+    this docstring claimed it did.** The gate *interval* is a superset of the
+    airborne one -- ``attach_gate_interval`` clamps it so -- but the *matching*
+    is not, because :func:`track_truth.overlap_join` assigns each sample to
+    exactly one flight and breaks ties toward the earliest ``t_off``. Widening
+    both ends makes consecutive legs of one airframe overlap, so a later leg
+    can lose every sample it had to the leg before it and vanish from the
+    gate-matched frame entirely. The reverse also happens, which is why the
+    difference is signed rather than one-way.
+
+    Measured, it is tiny and -- the diagnostic point -- **identical across every
+    arm of a period**: -3 of 29,160 flights on the V2 2025 run, +1 of 89,625 on
+    the V1 2025 arms, -1 of 87,071 on V1 2024, the same value for all eight
+    arms each time. Arm-independence is what identifies it as a property of the
+    ground-truth intervals and the assignment rule rather than of any
+    segmentation; a segmentation effect could not land on the same integer for
+    rules that disagree about 40 points of clean matching. It moves no rate
+    reported here by a meaningful amount, and it is stated rather than fixed
+    because the tie-break it comes from is deliberate: without it, a sample on
+    the boundary of two touching intervals would be counted twice and inflate
+    every merge statistic.
 
     **Not a drop-in ``run_arm`` scorer.** ``track_methods.run_arm`` calls
     ``score(matched, extents, assign)``, and the third parameter here is
