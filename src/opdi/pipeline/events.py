@@ -1157,6 +1157,17 @@ class FlightEventProcessor:
         sv.cache()
 
         grid = self.storage.read_table("h3_runway_zones")
+        # ``h3_runway_zones`` is universal -- every large/medium aerodrome in
+        # the network. ``runway_traversals`` broadcasts it and gates every join
+        # on ``array_contains(sv.apt, apt_icao)``, so only the aerodromes this
+        # batch actually names can ever match. Restrict the grid to those
+        # aerodromes here, before the broadcast, so the driver never collects
+        # the whole network's millions of res-12 cells: for the twenty-aerodrome
+        # study that is a few tens of thousands of cells, not the lot.
+        apt_present = sv.select(F.explode("apt").alias("_apt")).distinct()
+        grid = grid.join(
+            F.broadcast(apt_present), grid.apt_icao == apt_present._apt, "left_semi"
+        )
         traversals = runway_traversals(sv, grid, thresholds, self.events)
         return runway_milestones(sv, traversals, self.events)
 

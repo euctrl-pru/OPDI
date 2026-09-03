@@ -55,13 +55,24 @@ from opdi.utils.storage import StorageManager
 # ---------------------------------------------------------------------------
 
 #: How far back from each threshold, along the reciprocal bearing, the
-#: approach corridor extends -- roughly a short final.
-APPROACH_NM = 3.0
+#: approach corridor extends. Only long enough to give a descending arrival
+#: one final-approach sample clearly above ``runway_airborne_height_ft`` (the
+#: "high entry" the arrival classifier needs): at 1 NM on a 3-deg glideslope an
+#: aircraft is ~318 ft above the field, far above the 15 ft airborne height, so
+#: 1 NM suffices. It was 3 NM, which rasterised at res-12 across ~1,900 runway
+#: directions produced ~64M cells -- too large to build in memory or to
+#: broadcast-join. The corridor only has to keep the arrival's samples alive
+#: through the H3 prune; the precise along-track corridor test lives in
+#: ``runway_ops.runway_traversals``.
+APPROACH_NM = 1.0
 
 #: Half-width of the approach corridor at its far end (``APPROACH_NM`` out).
 #: The near end tapers down to the runway's own half-width, so the corridor
-#: is a trapezoid rather than a uniform-width strip.
-APPROACH_FAR_HALF_WIDTH_NM = 0.5
+#: is a trapezoid rather than a uniform-width strip. A short final tracks the
+#: centreline closely, so 0.15 NM is ample to keep the arrival's samples inside
+#: the prune; a wider fan only inflates the cell count (the corridor dominates
+#: the grid) without catching samples a real ILS approach ever reaches.
+APPROACH_FAR_HALF_WIDTH_NM = 0.15
 
 #: Runway width fallback when ``oa_runways.width_ft`` is null. 45 m, the same
 #: default ``h3_airport_layouts.DEFAULT_AEROWAY_WIDTHS["runway"]`` uses for a
