@@ -26,7 +26,6 @@ from pyspark.sql.types import (
     ArrayType,
 )
 import h3
-import h3_pyspark
 
 
 @udf(returnType=FloatType())
@@ -34,7 +33,7 @@ def _hex_lat_udf(h):
     if h is None:
         return None
     try:
-        return float(h3.h3_to_geo(h)[0])
+        return float(h3.cell_to_latlng(h)[0])
     except Exception:
         return None
 
@@ -44,7 +43,7 @@ def _hex_lon_udf(h):
     if h is None:
         return None
     try:
-        return float(h3.h3_to_geo(h)[1])
+        return float(h3.cell_to_latlng(h)[1])
     except Exception:
         return None
 
@@ -54,7 +53,7 @@ def _geo_to_h3_udf(lat, lon, res):
     if lat is None or lon is None or res is None:
         return None
     try:
-        return h3.geo_to_h3(float(lat), float(lon), int(res))
+        return h3.latlng_to_cell(float(lat), float(lon), int(res))
     except Exception:
         return None
 
@@ -64,7 +63,64 @@ def _h3_distance_udf(h1, h2):
     if h1 is None or h2 is None:
         return None
     try:
-        return int(h3.h3_distance(h1, h2))
+        return int(h3.grid_distance(h1, h2))
+    except Exception:
+        return None
+
+
+@udf(returnType=ArrayType(StringType()))
+def _polyfill_geojson_udf(geojson_str, resolution):
+    """H3 v4 replacement for ``h3_pyspark.polyfill(col, res, geo_json_conformant=True)``.
+
+    h3_pyspark's ``polyfill`` wraps h3 v3's ``h3.polyfill``, which no longer
+    exists on the installed h3 4.5.0 (AttributeError at task execution time --
+    see tests/test_h3_zones_v4.py::test_h3_pyspark_geo_to_h3_is_broken_on_h3_v4,
+    which pins the same failure mode for ``geo_to_h3``). The circle polygons
+    this generator builds (:func:`generate_circle_polygon`) are GeoJSON
+    strings in ``[lon, lat]`` order.
+
+    THE FOOTGUN: v3's ``polyfill(geojson, res, geo_json_conformant=True)``
+    consumed those ``[lng, lat]`` rings directly. v4's ``h3.LatLngPoly``
+    always takes ``[lat, lng]`` tuples, so every ring coordinate is swapped
+    below before calling h3 -- getting this backwards yields an empty or
+    silently wrong cell set.
+
+    This is the same primitive as ``opdi.utils.h3_helpers.polyfill_geojson(...,
+    geo_json_conformant=True)`` (used by ``h3_airport_layouts`` and
+    ``h3_airspaces``), but reimplemented inline rather than imported or
+    delegated to a shared top-level helper: this function only ever runs
+    inside a Spark UDF, and this worktree has a top-level ``opdi.py`` script
+    that shadows the ``src/opdi`` package on a Spark worker's ``sys.path``
+    (workers don't inherit the driver's pytest ``pythonpath = ["src"]``
+    prepend). cloudpickle needs to pickle a UDF's referenced globals *by
+    reference* when they resolve to another named function or an imported
+    symbol, which forces the worker to re-import that function's home module
+    -- confirmed empirically: closing over ``opdi.utils.h3_helpers.polyfill_geojson``,
+    or even over a second top-level function in *this* module, both fail on
+    the worker with ``ModuleNotFoundError: No module named 'opdi...'; 'opdi'
+    is not a package``. Every other UDF in this module has the same
+    constraint and only ever touches the third-party ``h3`` package inline
+    for that reason -- this keeps the pattern rather than reintroducing the
+    failure. tests/test_h3_zones_v4.py checks this UDF's output against
+    ``h3_helpers.polyfill_geojson`` (called driver-side, where the import
+    works) to prove the two stay identical.
+    """
+    if geojson_str is None or resolution is None:
+        return None
+    try:
+        geometry = json.loads(geojson_str)
+        geom_type = geometry["type"]
+        coordinates = geometry["coordinates"]
+        polygons = [coordinates] if geom_type == "Polygon" else coordinates
+
+        cells = set()
+        for rings in polygons:
+            outer, *holes = rings
+            outer_latlng = [(lat, lng) for lng, lat in outer]
+            holes_latlng = [[(lat, lng) for lng, lat in hole] for hole in holes]
+            shape = h3.LatLngPoly(outer_latlng, *holes_latlng)
+            cells.update(h3.polygon_to_cells(shape, int(resolution)))
+        return list(cells)
     except Exception:
         return None
 
@@ -370,14 +426,14 @@ class AirportDetectionZoneGenerator:
             )
             .withColumn(
                 "inner_circle_hex_ids",
-                h3_pyspark.polyfill(
-                    col("inner_circle_polygon"), col("max_resolution"), lit(True)
+                _polyfill_geojson_udf(
+                    col("inner_circle_polygon"), col("max_resolution")
                 ),
             )
             .withColumn(
                 "outer_circle_hex_ids",
-                h3_pyspark.polyfill(
-                    col("outer_circle_polygon"), col("max_resolution"), lit(True)
+                _polyfill_geojson_udf(
+                    col("outer_circle_polygon"), col("max_resolution")
                 ),
             )
             .withColumn(
@@ -466,7 +522,7 @@ class AirportDetectionZoneGenerator:
         df = df[~df.hex_id.isna()]
 
         # Get H3 coordinates for each hex
-        df["geo"] = df["hex_id"].apply(lambda h: h3.h3_to_geo(h))
+        df["geo"] = df["hex_id"].apply(lambda h: h3.cell_to_latlng(h))
         df["lat"] = df["geo"].apply(lambda g: g[0])
         df["lon"] = df["geo"].apply(lambda g: g[1])
         df = df.drop("geo", axis=1)
@@ -478,8 +534,8 @@ class AirportDetectionZoneGenerator:
 
         # Add center hex ID for each airport
         df["center_hex_id"] = df.apply(
-            lambda row: h3.geo_to_h3(
-                row["latitude_deg"], row["longitude_deg"], resolution=self.resolution
+            lambda row: h3.latlng_to_cell(
+                row["latitude_deg"], row["longitude_deg"], res=self.resolution
             ),
             axis=1,
         )
@@ -490,7 +546,7 @@ class AirportDetectionZoneGenerator:
         # Calculate H3 grid distance from center
         def calc_dist(h1, h2):
             try:
-                return h3.h3_distance(h1, h2)
+                return h3.grid_distance(h1, h2)
             except Exception:
                 return None
 

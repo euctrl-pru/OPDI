@@ -10,7 +10,6 @@ Ported from: OPDI-live/python/v2.0.0/00_create_h3_airspaces.py
 
 from typing import Dict, List, Optional, Tuple
 
-import h3
 import pandas as pd
 import shapely
 from pyspark.sql import SparkSession
@@ -25,6 +24,7 @@ from pyspark.sql.types import (
 )
 
 from opdi.config import OPDIConfig
+from opdi.utils.h3_helpers import compact_h3_set, get_h3_coords, polyfill_geojson
 from opdi.utils.storage import StorageManager
 
 # Default data source URLs from PRU Atlas
@@ -68,6 +68,18 @@ def fill_geometry(geometry_wkt: str, res: int = 7) -> list:
     """
     Convert a WKT geometry string to H3 hexagon sets (full polyfill).
 
+    Ported to h3 v4: ``h3.polyfill(geojson, res, geo_json_conformant=True)``
+    is gone. ``shapely.geometry.mapping(x)`` is GeoJSON-shaped, i.e. its
+    ring coordinates are ``[lng, lat]``, so this delegates to
+    ``h3_helpers.polyfill_geojson`` with ``geo_json_conformant=True`` -- the
+    same primitive already used by ``h3_airport_layouts`` (this is the third
+    module that needs it, so it is consolidated there rather than
+    reimplemented). This call is driver-side pandas, not a Spark UDF, so the
+    cross-module import is safe here (contrast with
+    ``h3_airport_zones._polyfill_geojson_udf``, which cannot import from
+    ``opdi.utils`` because it runs inside a pickled Spark UDF -- see that
+    function's docstring).
+
     Args:
         geometry_wkt: WKT representation of the geometry (may be MultiPolygon).
         res: H3 resolution.
@@ -76,7 +88,7 @@ def fill_geometry(geometry_wkt: str, res: int = 7) -> list:
         List of sets of H3 indices, one per sub-geometry.
     """
     return [
-        h3.polyfill(shapely.geometry.mapping(x), res, geo_json_conformant=True)
+        polyfill_geojson(shapely.geometry.mapping(x), res, geo_json_conformant=True)
         for x in shapely.wkt.loads(geometry_wkt).geoms
     ]
 
@@ -93,8 +105,8 @@ def fill_geometry_compact(geometry_wkt: str, res: int = 7) -> list:
         List of compacted sets of H3 indices.
     """
     return [
-        h3.compact(
-            h3.polyfill(shapely.geometry.mapping(x), res, geo_json_conformant=True)
+        compact_h3_set(
+            polyfill_geojson(shapely.geometry.mapping(x), res, geo_json_conformant=True)
         )
         for x in shapely.wkt.loads(geometry_wkt).geoms
     ]
@@ -111,9 +123,9 @@ def get_coords(h: str) -> Tuple[float, float]:
         Tuple of (latitude, longitude).
     """
     try:
-        return h3.h3_to_geo(h)
+        return get_h3_coords(h)
     except Exception:
-        print(f"Hex {h} did not result in coords using h3.h3_to_geo(hex)")
+        print(f"Hex {h} did not result in coords using h3.cell_to_latlng(hex)")
         return 0.0, 0.0
 
 

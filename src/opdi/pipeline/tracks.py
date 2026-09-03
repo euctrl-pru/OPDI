@@ -19,14 +19,33 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import (
     lit, lag, when, to_date, concat, avg, abs as f_abs, col,
     unix_timestamp, to_timestamp, substring, sha2, concat_ws,
-    year, month, sin, cos, radians, atan2, sqrt, sum as f_sum
+    year, month, sin, cos, radians, atan2, sqrt, sum as f_sum, udf
 )
-import h3_pyspark
+from pyspark.sql.types import StringType
+import h3
 
 from opdi.config import OPDIConfig
 from opdi.utils.datetime_helpers import get_start_end_of_month
 from opdi.utils.h3_helpers import h3_list_prep
 from opdi.utils.storage import StorageManager
+
+
+@udf(returnType=StringType())
+def _geo_to_h3_cell(lat, lon, resolution):
+    """H3 index for one (lat, lon, resolution) triple.
+
+    Replaces ``h3_pyspark.geo_to_h3``: h3_pyspark wraps h3 *v3* names
+    internally (``h3.geo_to_h3``), which no longer exist on the installed h3
+    4.5.0 -- calling it raises ``AttributeError`` at task execution time (see
+    tests/test_h3_zones_v4.py::test_h3_pyspark_geo_to_h3_is_broken_on_h3_v4).
+    This is a plain UDF mirroring what h3_pyspark itself did (it is
+    UDF-based too), just calling native ``h3.latlng_to_cell`` instead. Null
+    coordinates yield a null cell, matching h3_pyspark's ``handle_nulls``
+    contract.
+    """
+    if lat is None or lon is None or resolution is None:
+        return None
+    return h3.latlng_to_cell(float(lat), float(lon), int(resolution))
 
 
 class TrackProcessor:
@@ -244,7 +263,7 @@ class TrackProcessor:
             df = df.withColumn("h3_resolution", lit(h3_resolution))
             df = df.withColumn(
                 f"h3_res_{h3_resolution}",
-                h3_pyspark.geo_to_h3("lat", "lon", "h3_resolution"),
+                _geo_to_h3_cell("lat", "lon", "h3_resolution"),
             )
 
         # Drop temporary resolution column
