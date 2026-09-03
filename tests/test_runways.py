@@ -95,6 +95,43 @@ def test_bearings_come_from_the_threshold_positions(thresholds):
     assert by_ident["01"] == pytest.approx(10, abs=6)
 
 
+def test_extent_is_carried_per_direction_from_the_runway_dimensions(spark):
+    """Both directions of a strip share its length and half-width, converted to
+    nautical miles, because extent is a property of the physical runway that
+    the on-runway test needs in the units it works in."""
+    rwy = spark.createDataFrame(
+        [(1, 1, "EBBR", False, "07", 50.0, 4.0, "25", 50.02, 4.02, 12000.0, 148.0)],
+        "id int, airport_ref int, airport_ident string, closed boolean, "
+        "le_ident string, le_latitude_deg double, le_longitude_deg double, "
+        "he_ident string, he_latitude_deg double, he_longitude_deg double, "
+        "length_ft double, width_ft double",
+    )
+    got = {
+        r.rwy_ident: (r.rwy_length_nm, r.rwy_half_width_nm)
+        for r in runway_thresholds(StubStorage({"oa_runways": rwy})).collect()
+    }
+    for ident in ("07", "25"):
+        length_nm, half_width_nm = got[ident]
+        assert length_nm == pytest.approx(12000.0 / 6076.12, rel=1e-4)
+        assert half_width_nm == pytest.approx(148.0 / 2.0 / 6076.12, rel=1e-4)
+
+
+def test_extent_falls_back_to_documented_defaults_when_null(spark):
+    """A null ``length_ft``/``width_ft`` becomes a generic 8,000 ft length and
+    a 30 m half-width rather than a null that would drop every sample from the
+    on-runway test."""
+    rwy = spark.createDataFrame(
+        [(1, 1, "EBBR", False, "07", 50.0, 4.0, "25", 50.02, 4.02, None, None)],
+        "id int, airport_ref int, airport_ident string, closed boolean, "
+        "le_ident string, le_latitude_deg double, le_longitude_deg double, "
+        "he_ident string, he_latitude_deg double, he_longitude_deg double, "
+        "length_ft double, width_ft double",
+    )
+    row = runway_thresholds(StubStorage({"oa_runways": rwy})).collect()[0]
+    assert row.rwy_length_nm == pytest.approx(8000.0 / 6076.12, rel=1e-4)
+    assert row.rwy_half_width_nm == pytest.approx(30.0 / 1852.0, rel=1e-4)
+
+
 def test_a_departure_is_matched_to_the_runway_it_departed(spark, thresholds):
     got = detect_runway_movements(
         _movement(spark, heading=70), _ends(spark, "departure"), thresholds, EventConfig()

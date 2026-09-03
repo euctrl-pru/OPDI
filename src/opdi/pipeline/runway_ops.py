@@ -52,7 +52,7 @@ traversal by definition. The arrival sample window therefore reaches back
 :data:`ARRIVAL_LEAD_SECONDS` before entry, and only for that one crossing --
 entry, exit and every reported position stay bounded by the polygon.
 
-**This module reads no table.** ``layouts`` and ``thresholds`` arrive as
+**This module reads no table.** ``grid`` and ``thresholds`` arrive as
 DataFrames, and ``sv`` must already carry the flight list's aerodrome array,
 its ``adep``/``ades`` idents and the two field elevations. The join to the flight list therefore happens once
 for every detector that needs it rather than once per family, and every
@@ -149,7 +149,7 @@ GOAROUND_HYSTERESIS_FT = 50.0
 #: What a traversal is, for windowing purposes.
 #:
 #: ``apt_ident`` is in the key and has to be. ``trace_id`` restarts at 0 for
-#: every ``(track_id, hexaero_osm_id)``, so it carries no information across
+#: every ``(track_id, strip_id)``, so it carries no information across
 #: aerodromes -- and runway designators repeat: a flight departing 07 at its
 #: origin and crossing a runway also called 07 at its destination produced two
 #: traversals with an identical ``(track_id, "07", "0")``. Everything windowed
@@ -253,9 +253,25 @@ def _col_or_null(sdf: DataFrame, name: str, dtype: str):
     return F.col(name) if name in sdf.columns else F.lit(None).cast(dtype)
 
 
+def along_track_nm(lat, lon, thr_lat, thr_lon, rwy_bearing):
+    """Signed along-track distance from a runway threshold, in nautical miles.
+
+    Positive towards the far end of the runway, negative on the approach short
+    of the threshold. Two things read the sign: the geometric occupancy test,
+    which admits a sample only when its along-track distance lies between the
+    two thresholds; and ``landing`` (T16), which is the instant this distance
+    changes sign and so interpolates linearly across the threshold plane. It is
+    the companion of :func:`~opdi.pipeline.runways.cross_track_nm` -- one gives
+    distance *along* the centreline, the other distance *across* it.
+    """
+    d = haversine_nm(thr_lat, thr_lon, lat, lon)
+    brg = bearing_deg(thr_lat, thr_lon, lat, lon)
+    return d * F.cos(F.radians(brg - rwy_bearing))
+
+
 def runway_traversals(
     sv: DataFrame,
-    layouts: DataFrame,
+    grid: DataFrame,
     thresholds: DataFrame,
     config: "EventConfig",
 ) -> DataFrame:
@@ -265,26 +281,87 @@ def runway_traversals(
     ``elev_adep_ft``/``elev_ades_ft`` (from
     ``vertical_pru.attach_aerodrome_geometry``; the idents are what let a
     height be measured against the traversal's *own* field) and ``apt`` -- the
-    flight list's
-    aerodrome array, built exactly as ``calculate_airport_events`` builds it
-    from ``adep``/``ades``/``adep_p``/``ades_p``. Both are attached once by the
-    caller, so the join to the flight list and OurAirports happens a single
-    time for every detector that needs it rather than once per family.
+    flight list's aerodrome array, built exactly as ``calculate_airport_events``
+    builds it from ``adep``/``ades``/``adep_p``/``ades_p``. Both are attached
+    once by the caller, so the join to the flight list and OurAirports happens a
+    single time for every detector that needs it rather than once per family.
 
-    ``layouts`` is ``hexaero_airport_layouts``; only its ``runway`` rows are
-    read. ``thresholds`` is :func:`runways.runway_thresholds` -- one row per
-    runway *direction*, because that is the unit a movement is reported
-    against.
+    ``grid`` is ``h3_runway_zones`` -- one row per (res-12 cell, strip), tagged
+    ``zone`` ``"runway"`` or ``"approach"``. An equi-join on the cell prunes
+    ``sv`` to the neighbourhood of a runway at every covered aerodrome, which is
+    the coverage the retired ``hexaero_airport_layouts`` polygons never had:
+    a sample survives the prune when its cell is one the grid rasterised for a
+    strip of an aerodrome this flight names. ``thresholds`` is
+    :func:`runways.runway_thresholds` -- one row per runway *direction*, now
+    carrying ``rwy_length_nm``/``rwy_half_width_nm`` so the prune can be refined
+    to a genuine on-runway test rather than trusting cell membership alone.
     """
-    rwy_cells = layouts.filter(F.col("hexaero_aeroway") == "runway")
-    work = sv.join(
-        rwy_cells,
-        (sv.h3_res_12 == rwy_cells.hexaero_h3_id)
-        & F.array_contains(sv.apt, rwy_cells.hexaero_apt_icao),
+    # 1. Prune to the neighbourhood of a runway with an equi-join on the res-12
+    #    grid, restricted to aerodromes this flight actually names. Broadcast
+    #    because the grid is small next to a month of state vectors.
+    grid_cols = grid.select(
+        F.col("h3_id"),
+        F.col("apt_icao"),
+        F.col("strip_id"),
+        F.col("le_ident"),
+        F.col("he_ident"),
+        F.col("zone"),
+    )
+    near = sv.join(
+        F.broadcast(grid_cols),
+        (sv.h3_res_12 == grid_cols.h3_id)
+        & F.array_contains(sv.apt, grid_cols.apt_icao),
         "inner",
     )
 
-    ordered = Window.partitionBy("track_id", "hexaero_osm_id").orderBy("event_time")
+    # 2. Refine the cell prune to a geometric occupancy test. One direction of
+    #    the strip fixes the centreline, and whether a sample sits between the
+    #    two thresholds is the same question from either end -- the two
+    #    along-track distances sum to the length -- so the ``le`` threshold
+    #    alone decides membership. The two *directions* are weighed later, at
+    #    the traversal level, exactly as the old code weighed them.
+    memb = thresholds.select(
+        F.col("apt_ident").alias("_m_apt"),
+        F.col("rwy_ident").alias("_m_rwy"),
+        F.col("thr_lat").alias("_m_thr_lat"),
+        F.col("thr_lon").alias("_m_thr_lon"),
+        F.col("rwy_bearing").alias("_m_bearing"),
+        F.col("rwy_length_nm").alias("_m_length"),
+        F.col("rwy_half_width_nm").alias("_m_half_width"),
+    )
+    near = near.join(
+        F.broadcast(memb),
+        (F.col("apt_icao") == F.col("_m_apt")) & (F.col("le_ident") == F.col("_m_rwy")),
+        "inner",
+    )
+    near = near.withColumn(
+        "_along",
+        along_track_nm(
+            F.col("lat"), F.col("lon"),
+            F.col("_m_thr_lat"), F.col("_m_thr_lon"), F.col("_m_bearing"),
+        ),
+    ).withColumn(
+        "_cross",
+        cross_track_nm(
+            F.col("lat"), F.col("lon"),
+            F.col("_m_thr_lat"), F.col("_m_thr_lon"), F.col("_m_bearing"),
+        ),
+    )
+    # Only ``runway`` cells inside the strip's own extent are occupancy. The
+    # ``approach`` cells and anything off either end fall away here; the
+    # arrival window that needs the pre-threshold samples is rebuilt from ``sv``
+    # by time in ``_traversal_samples``. See ARRIVAL_LEAD_SECONDS.
+    work = near.filter(
+        (F.col("zone") == F.lit("runway"))
+        & (F.col("_along") >= F.lit(0.0))
+        & (F.col("_along") <= F.col("_m_length"))
+        & (F.col("_cross") <= F.col("_m_half_width"))
+    ).drop(
+        "_m_apt", "_m_rwy", "_m_thr_lat", "_m_thr_lon", "_m_bearing",
+        "_m_length", "_m_half_width", "_along", "_cross",
+    )
+
+    ordered = Window.partitionBy("track_id", "strip_id").orderBy("event_time")
     work = work.withColumn(
         "_gap",
         F.col("event_time").cast("long")
@@ -306,7 +383,7 @@ def runway_traversals(
     # `classify_traversal` abstains, and the whole departure or arrival is
     # silently absent. See `elevation.height_above_field_ft`'s warning.
     work = work.withColumn(
-        "_h_ft", height_above_aerodrome_ft(work, F.col("hexaero_apt_icao"))
+        "_h_ft", height_above_aerodrome_ft(work, F.col("apt_icao"))
     )
     work = work.withColumn("_gs_kt", F.col("velocity") * F.lit(KT_PER_MPS))
     work = work.withColumn("_alt_ft", F.col("baro_altitude_c") * F.lit(FT_PER_M))
@@ -317,9 +394,11 @@ def runway_traversals(
     # ``airport_events_ordered`` records. The callsign is aggregated rather than
     # grouped on for the reason ``calculate_airport_events`` documents at
     # length -- a track that broadcast two callsigns while occupying one runway
-    # would otherwise become two traversals and two movements.
+    # would otherwise become two traversals and two movements. ``le_ident`` and
+    # ``he_ident`` ride the grouping so both directions of the strip are
+    # available as candidates without a second join back to the grid.
     agg = work.groupBy(
-        "track_id", "hexaero_apt_icao", "hexaero_osm_id", "hexaero_ref", "trace_id"
+        "track_id", "apt_icao", "strip_id", "le_ident", "he_ident", "trace_id"
     ).agg(
         F.min("event_time").alias("entry_time"),
         F.max("event_time").alias("exit_time"),
@@ -341,12 +420,15 @@ def runway_traversals(
         (F.col("exit_time").cast("double") - F.col("entry_time").cast("double")),
     )
 
-    # ``hexaero_ref`` names a *strip* ("07L/25R") while a movement is reported
-    # against a *direction*, so both directions of every runway at the
-    # aerodrome are candidates and geometry picks one.
+    # A strip carries two directions and a movement is reported against one, so
+    # both directions of this strip are candidates and geometry picks one.
     cand = agg.join(
         F.broadcast(thresholds),
-        agg.hexaero_apt_icao == thresholds.apt_ident,
+        (F.col("apt_icao") == thresholds.apt_ident)
+        & (
+            (thresholds.rwy_ident == F.col("le_ident"))
+            | (thresholds.rwy_ident == F.col("he_ident"))
+        ),
         "inner",
     )
     # Folded to [0, 90] so a reciprocal counts as aligned. This is the
@@ -379,7 +461,7 @@ def runway_traversals(
     # bearing error was ever consulted.
     cand = cand.withColumn("_xt", F.round(F.col("cross_track_nm"), 3))
 
-    best = Window.partitionBy("track_id", "hexaero_osm_id", "trace_id").orderBy(
+    best = Window.partitionBy("track_id", "strip_id", "trace_id").orderBy(
         F.col("_xt").asc(),
         F.col("bearing_error_deg").asc(),
         F.col("rwy_ident").asc(),
@@ -401,7 +483,7 @@ def runway_traversals(
         F.col("rwy_bearing"),
         F.col("thr_lat"),
         F.col("thr_lon"),
-        F.col("hexaero_osm_id").alias("osm_id"),
+        F.col("strip_id"),
         F.col("trace_id"),
         F.col("entry_time"),
         F.col("exit_time"),
@@ -423,7 +505,6 @@ def runway_traversals(
         F.col("osn_flight_id"),
         F.col("class"),
     )
-
 
 # ---------------------------------------------------------------------------
 # Milestones

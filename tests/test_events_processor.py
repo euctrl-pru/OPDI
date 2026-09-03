@@ -335,10 +335,20 @@ def stub_storage(spark):
         "le_longitude_deg double, he_ident string, he_latitude_deg double, "
         "he_longitude_deg double, closed boolean",
     )
+    # The runway-traversal family now prunes on the res-12 runway grid rather
+    # than the hexaero polygons (which stay for ``calculate_airport_events``).
+    # One runway cell per aerodrome, tagged with the strip's two directions.
+    runway_grid = spark.createDataFrame(
+        [("cell-ebbr-rwy", "EBBR", "EBBR-07/25", "07", "25", "runway"),
+         ("cell-eddf-rwy", "EDDF", "EDDF-07/25", "07", "25", "runway")],
+        "h3_id string, apt_icao string, strip_id string, "
+        "le_ident string, he_ident string, zone string",
+    )
     return _StubStorage(
         {
             "opdi_flight_list": flight_list,
             "hexaero_airport_layouts": layouts,
+            "h3_runway_zones": runway_grid,
             "oa_airports": airports,
             "oa_runways": runways,
         },

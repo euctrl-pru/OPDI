@@ -1143,7 +1143,7 @@ class FlightEventProcessor:
         """
         if not (
             self.storage.table_exists("opdi_flight_list")
-            and self.storage.table_exists("hexaero_airport_layouts")
+            and self.storage.table_exists("h3_runway_zones")
         ):
             return None
         thresholds = runway_thresholds(self.storage)
@@ -1156,8 +1156,8 @@ class FlightEventProcessor:
         ).drop("id")
         sv.cache()
 
-        layouts = self.storage.read_table("hexaero_airport_layouts")
-        traversals = runway_traversals(sv, layouts, thresholds, self.events)
+        grid = self.storage.read_table("h3_runway_zones")
+        traversals = runway_traversals(sv, grid, thresholds, self.events)
         return runway_milestones(sv, traversals, self.events)
 
     def _etl_flight_events_and_measures(

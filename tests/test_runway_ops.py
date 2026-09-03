@@ -24,6 +24,8 @@ from conftest import _EPOCH, make_track
 
 from opdi.config import EventConfig
 from opdi.pipeline.runway_ops import (
+    MILESTONE_SCHEMA,
+    along_track_nm,
     classify_traversal,
     go_arounds,
     runway_milestones,
@@ -568,29 +570,39 @@ def test_milestone_info_names_the_runway_and_the_classification(spark):
 # Traversals, end to end
 # ---------------------------------------------------------------------------
 
-def _layouts(spark):
-    """One runway polygon cell, plus a taxiway cell that must not be read.
+def _grid(spark, apt="EBBR"):
+    """The ``h3_runway_zones`` rows for one strip: a runway cell and an
+    approach cell, both of strip ``07/25``.
 
     The H3 identifiers are opaque strings joined by equality, so no H3 library
-    is needed to state which samples fall inside which polygon.
+    is needed to state which cell a sample falls in. ``cell-rwy`` is the
+    occupancy cell (``zone = "runway"``); ``cell-air`` is the approach corridor
+    (``zone = "approach"``), which the geometry test keeps out of the traversal
+    but the arrival window still reaches through the state vectors.
     """
     return spark.createDataFrame(
         [
-            ("cell-rwy", "EBBR", "runway", "osm-1", "07/25"),
-            ("cell-twy", "EBBR", "taxiway", "osm-2", "B"),
+            ("cell-rwy", apt, apt + "-07/25", "07", "25", "runway"),
+            ("cell-air", apt, apt + "-07/25", "07", "25", "approach"),
         ],
-        "hexaero_h3_id string, hexaero_apt_icao string, hexaero_aeroway string, "
-        "hexaero_osm_id string, hexaero_ref string",
+        "h3_id string, apt_icao string, strip_id string, "
+        "le_ident string, he_ident string, zone string",
     )
 
 
-def _thresholds(spark):
-    """Both directions of one strip: 07 at (50, 4) and 25 two miles up it."""
+def _thresholds(spark, apt="EBBR"):
+    """Both directions of one strip: 07 at (50, 4) and 25 two miles up it.
+
+    The strip is 2 NM long and carries a generous half-width, so a sample on
+    the centreline anywhere between the two thresholds passes the geometric
+    on-runway test.
+    """
     lat25, lon25 = _dest(50.0, 4.0, 70.0, 2.0)
     return spark.createDataFrame(
-        [("EBBR", "07", 50.0, 4.0, 70.0), ("EBBR", "25", lat25, lon25, 250.0)],
+        [(apt, "07", 50.0, 4.0, 70.0, 2.0, 0.05),
+         (apt, "25", lat25, lon25, 250.0, 2.0, 0.05)],
         "apt_ident string, rwy_ident string, thr_lat double, thr_lon double, "
-        "rwy_bearing double",
+        "rwy_bearing double, rwy_length_nm double, rwy_half_width_nm double",
     )
 
 
@@ -643,7 +655,7 @@ def _departure_on_25(spark):
 
 def test_runway_traversals_classifies_a_departure_and_names_its_direction(spark):
     out = runway_traversals(
-        _departure_on_25(spark), _layouts(spark), _thresholds(spark), EventConfig()
+        _departure_on_25(spark), _grid(spark), _thresholds(spark), EventConfig()
     ).collect()
 
     assert len(out) == 1
@@ -673,7 +685,7 @@ def _arrival_on_07(spark, elev_adep_ft=0.0, elev_ades_ft=0.0,
 def test_runway_traversals_derives_an_arrival_bounded_by_the_polygon(spark):
     """The entry is the threshold, not the point 1.5 NM out on final."""
     out = runway_traversals(
-        _arrival_on_07(spark), _layouts(spark), _thresholds(spark), EventConfig()
+        _arrival_on_07(spark), _grid(spark), _thresholds(spark), EventConfig()
     ).collect()
 
     assert len(out) == 1
@@ -693,7 +705,7 @@ def test_landing_fires_on_a_traversal_the_detector_actually_produces(spark):
     production did while a hand-built traversal made the unit test pass.
     """
     sv = _arrival_on_07(spark)
-    traversals = runway_traversals(sv, _layouts(spark), _thresholds(spark),
+    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark),
                                    EventConfig())
     out = runway_milestones(sv, traversals, EventConfig())
 
@@ -708,7 +720,7 @@ def test_runway_traversals_classifies_a_taxiing_crossing(spark):
     """Perpendicular, slow, on the deck -- and not a movement."""
     out = runway_traversals(
         _as_flown(_crossing_track(spark)),
-        _layouts(spark), _thresholds(spark), EventConfig(),
+        _grid(spark), _thresholds(spark), EventConfig(),
     ).collect()
 
     assert len(out) == 1
@@ -726,7 +738,7 @@ def test_runway_traversals_abstains_in_the_band_between_the_two(spark):
     oblique = _as_flown(
         _crossing_track(spark).withColumn("heading", F.lit(107.0))
     )
-    out = runway_traversals(oblique, _layouts(spark), _thresholds(spark),
+    out = runway_traversals(oblique, _grid(spark), _thresholds(spark),
                             EventConfig())
 
     assert out.count() == 0
@@ -766,7 +778,7 @@ def test_a_departure_from_the_lower_of_two_aerodromes_still_lifts_off(spark):
         positions=[_dest(50.0, 4.0, 70.0, 0.05 * i) for i in range(13)],
         apt=("EBBR", "LSZH"),
     )
-    traversals = runway_traversals(sv, _layouts(spark), _thresholds(spark),
+    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark),
                                    EventConfig())
 
     rows = traversals.collect()
@@ -793,7 +805,7 @@ def test_an_arrival_at_the_lower_of_two_aerodromes_still_touches_down(spark):
     """
     sv = _arrival_on_07(spark, elev_adep_ft=_HIGH_FIELD_FT,
                         elev_ades_ft=_LOW_FIELD_FT, adep="LSZH", ades="EBBR")
-    traversals = runway_traversals(sv, _layouts(spark), _thresholds(spark),
+    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark),
                                    EventConfig())
 
     rows = traversals.collect()
@@ -850,3 +862,162 @@ def test_a_go_around_at_a_destination_below_the_origin_still_fires(spark):
 def test_no_go_around_is_emitted_under_the_legacy_configuration(spark):
     out = go_arounds(_approach_track(spark, 200.0), EventConfig.legacy())
     assert out.count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Grid + geometry, end to end.
+#
+# The detector now prunes on the ``h3_runway_zones`` grid and refines with the
+# along/cross geometry rather than trusting a hexaero polygon, so these state a
+# grid frame in place of the old layouts one. Field elevations are non-zero
+# where the point is to catch a height measured against the wrong aerodrome --
+# the flat 0 ft airports the first attempt used could never see it.
+# ---------------------------------------------------------------------------
+
+def test_along_track_nm_sign_and_magnitude(spark):
+    """Signed distance along runway 07 (threshold (50, 4), bearing 070).
+
+    A point 1 NM beyond the threshold on the runway bearing reads +1.0; 1 NM
+    short of it on the reciprocal reads -1.0; a point 1 NM abeam reads ~0. The
+    sign is what makes ``landing`` a zero crossing and the magnitude what the
+    on-runway test bounds against the runway length.
+    """
+    past = _dest(50.0, 4.0, 70.0, 1.0)
+    before = _dest(50.0, 4.0, 250.0, 1.0)
+    abeam = _dest(50.0, 4.0, 160.0, 1.0)
+    rows = spark.createDataFrame(
+        [("past", past[0], past[1]),
+         ("before", before[0], before[1]),
+         ("abeam", abeam[0], abeam[1])],
+        "kind string, lat double, lon double",
+    ).select(
+        F.col("kind"),
+        along_track_nm(
+            F.col("lat"), F.col("lon"), F.lit(50.0), F.lit(4.0), F.lit(70.0)
+        ).alias("along"),
+    )
+    got = {r["kind"]: r["along"] for r in rows.collect()}
+    assert got["past"] == pytest.approx(1.0, abs=0.01)
+    assert got["before"] == pytest.approx(-1.0, abs=0.01)
+    assert got["abeam"] == pytest.approx(0.0, abs=0.05)
+
+
+def test_departure_at_a_grid_airport_with_high_field_emits_airborne(spark):
+    """A departure from a 1,416 ft field (LSZH), pruned on the grid.
+
+    Coverage first: under hexaero this aerodrome had no runway polygon and the
+    whole departure -- ``line-up``, ``take-off-roll``, ``airborne`` -- was
+    silently absent. The grid covers it.
+
+    And the height reference second: the destination here is *higher* still
+    (2,000 ft), so measuring against the permissive two-field minimum -- which
+    subtracts the higher field, 2,000 ft -- puts every sample of the roll about
+    -580 ft, no sample crosses 15 ft upward, ``classify_traversal`` sees no
+    departure and abstains. Against the traversal's own 1,416 ft field the roll
+    is at 0 ft AGL and 15 ft is crossed 15 % of the way through the interval
+    ending at t=50, i.e. t=45.75 s. A detector that regressed to the permissive
+    minimum emits nothing at all and fails here.
+    """
+    sv = _as_flown(
+        _departure_track(spark, elev_adep_ft=1416.0, elev_ades_ft=2000.0,
+                         adep="LSZH", ades="LEMD"),
+        positions=[_dest(50.0, 4.0, 70.0, 0.05 * i) for i in range(13)],
+        apt=("LSZH", "LEMD"),
+    )
+    traversals = runway_traversals(
+        sv, _grid(spark, apt="LSZH"), _thresholds(spark, apt="LSZH"), EventConfig()
+    )
+    rows = traversals.collect()
+    assert len(rows) == 1, "the high-field departure was classified away"
+    assert rows[0]["class"] == "departure"
+
+    out = runway_milestones(sv, traversals, EventConfig())
+    seq = [r["type"] for r in
+           out.orderBy("event_time").filter(F.col("type") != "go-around").collect()]
+    assert seq == ["line-up", "take-off-roll", "airborne"]
+
+    airborne = out.filter(F.col("type") == "airborne").collect()
+    assert len(airborne) == 1
+    assert (airborne[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(
+        45.75, abs=0.01
+    )
+
+
+def test_arrival_from_final_approach_emits_touchdown(spark):
+    """A descending final approach, pruned on the grid, all the way to rollout.
+
+    The approach samples are ``approach``-zone cells short of the threshold,
+    descending through the field; the geometry test keeps them out of the
+    occupancy traversal, but the arrival window reaches back across them so the
+    threshold-plane crossing has a sample with a negative along-track distance
+    to interpolate from. All three arrival milestones fire, in order, and
+    ``touchdown`` -- which emitted for essentially no arrival under hexaero --
+    is among them. Remove the approach corridor (the arrival lead) and
+    ``landing`` disappears, breaking the sequence.
+    """
+    sv = _arrival_on_07(spark)
+    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark), EventConfig())
+    out = runway_milestones(sv, traversals, EventConfig())
+
+    seq = [r["type"] for r in out.orderBy("event_time").collect()]
+    assert seq == ["landing", "touchdown", "runway-vacated"]
+    assert out.filter(F.col("type") == "touchdown").count() == 1
+
+
+def test_a_crossing_emits_the_two_crossing_types_end_to_end(spark):
+    """A slow perpendicular taxi across the strip, pruned on the grid, yields a
+    crossing pair and nothing that could be counted as a movement."""
+    sv = _as_flown(_crossing_track(spark))
+    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark), EventConfig())
+    out = runway_milestones(sv, traversals, EventConfig())
+    assert sorted(r["type"] for r in out.collect()) == [
+        "runway-crossing-entry", "runway-crossing-vacated"
+    ]
+
+
+def test_an_oblique_traversal_emits_no_milestone(spark):
+    """37 degrees off the centreline is neither aligned nor a crossing, so the
+    traversal abstains and nothing downstream can invent a milestone for it."""
+    oblique = _as_flown(
+        _crossing_track(spark).withColumn("heading", F.lit(107.0))
+    )
+    traversals = runway_traversals(oblique, _grid(spark), _thresholds(spark),
+                                   EventConfig())
+    out = runway_milestones(oblique, traversals, EventConfig())
+    assert out.count() == 0
+
+
+def test_runway_milestones_is_an_empty_frame_when_the_grid_prunes_everything(spark):
+    """No grid cell matches, so no traversal forms and the family returns the
+    standard empty event frame rather than ``None`` or a differently shaped
+    one -- the contract a caller unioning families depends on."""
+    empty_grid = spark.createDataFrame(
+        [],
+        "h3_id string, apt_icao string, strip_id string, "
+        "le_ident string, he_ident string, zone string",
+    )
+    traversals = runway_traversals(
+        _departure_on_25(spark), empty_grid, _thresholds(spark), EventConfig()
+    )
+    assert traversals.count() == 0
+
+    out = runway_milestones(_departure_on_25(spark), traversals, EventConfig())
+    assert out.count() == 0
+    assert [f.name for f in out.schema.fields] == [
+        f.name for f in MILESTONE_SCHEMA.fields
+    ]
+
+
+def test_no_traversal_milestone_under_the_legacy_configuration_end_to_end(spark):
+    """Legacy switches the whole family off: an empty, standard-shaped frame,
+    whatever the grid says."""
+    out = runway_milestones(
+        _departure_on_25(spark),
+        runway_traversals(_departure_on_25(spark), _grid(spark), _thresholds(spark),
+                          EventConfig()),
+        EventConfig.legacy(),
+    )
+    assert out.count() == 0
+    assert [f.name for f in out.schema.fields] == [
+        f.name for f in MILESTONE_SCHEMA.fields
+    ]

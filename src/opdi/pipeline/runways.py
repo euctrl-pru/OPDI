@@ -34,6 +34,21 @@ FTMIN_PER_MPS = 196.850394
 KT_PER_MPS = 1.94384
 EARTH_RADIUS_NM = 3440.065
 
+#: Feet per nautical mile, used to turn ``oa_runways`` extents into the units
+#: the geometric on-runway test works in.
+FT_PER_NM = 6076.12
+#: Metres per nautical mile.
+M_PER_NM = 1852.0
+
+#: Runway extent fallbacks for the geometric occupancy test, in the rare rows
+#: where OurAirports leaves ``length_ft``/``width_ft`` null. A generic
+#: long-haul length (8,000 ft) and a generous half-width (30 m): both are only
+#: bounds on the on-runway membership test, so erring wide keeps a genuine
+#: on-runway sample rather than dropping it, and the grid prune has already
+#: bounded the sample to the neighbourhood of *this* strip.
+DEFAULT_RWY_LENGTH_FT = 8000.0
+DEFAULT_RWY_HALF_WIDTH_M = 30.0
+
 
 def cross_track_nm(lat, lon, thr_lat, thr_lon, rwy_bearing):
     """Perpendicular distance from a point to a runway's extended centreline.
@@ -63,6 +78,15 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
     A physical runway appears twice, once per direction, because that is the
     unit a movement is reported against -- APDF's ``AP_C_RWY`` names a
     direction, not a strip.
+
+    Each row also carries the strip's extent -- ``rwy_length_nm`` and
+    ``rwy_half_width_nm`` -- so the traversal detector can decide whether a
+    grid-pruned sample actually sits *on* the runway rather than merely near
+    it. Both directions of one strip share the same extent, since it is a
+    property of the physical runway, not of the direction. ``length_ft`` null
+    falls back to a generic 8,000 ft and ``width_ft`` null to a 30 m
+    half-width; both are deliberately generous bounds -- see
+    :data:`DEFAULT_RWY_LENGTH_FT`.
     """
     if not storage.table_exists("oa_runways"):
         return None
@@ -73,6 +97,25 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         & F.col("he_latitude_deg").isNotNull()
     )
 
+    def _extent(name):
+        # OurAirports always carries these; a hand-built ``oa_runways`` stub
+        # (some tests) may not. A missing column is a typed null, which the
+        # coalesce below then turns into the documented default -- so the
+        # extent is optional input, never a hard schema requirement.
+        return (
+            F.col(name).cast("double") if name in rwy.columns
+            else F.lit(None).cast("double")
+        )
+
+    length_nm = (
+        F.coalesce(_extent("length_ft"), F.lit(DEFAULT_RWY_LENGTH_FT))
+        / F.lit(FT_PER_NM)
+    ).alias("rwy_length_nm")
+    half_width_nm = F.coalesce(
+        _extent("width_ft") / F.lit(2.0) / F.lit(FT_PER_NM),
+        F.lit(DEFAULT_RWY_HALF_WIDTH_M / M_PER_NM),
+    ).alias("rwy_half_width_nm")
+
     le = rwy.select(
         F.col("airport_ident").alias("apt_ident"),
         F.col("le_ident").alias("rwy_ident"),
@@ -82,6 +125,8 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
             F.col("le_latitude_deg"), F.col("le_longitude_deg"),
             F.col("he_latitude_deg"), F.col("he_longitude_deg"),
         ).alias("rwy_bearing"),
+        length_nm,
+        half_width_nm,
     )
     he = rwy.select(
         F.col("airport_ident").alias("apt_ident"),
@@ -92,6 +137,8 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
             F.col("he_latitude_deg"), F.col("he_longitude_deg"),
             F.col("le_latitude_deg"), F.col("le_longitude_deg"),
         ).alias("rwy_bearing"),
+        length_nm,
+        half_width_nm,
     )
     return le.unionByName(he).filter(F.col("rwy_ident").isNotNull())
 
