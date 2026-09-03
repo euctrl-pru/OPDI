@@ -15,6 +15,7 @@ No.  Description                                 Module
 00c  Airspace boundaries (ANSP/FIR -> H3)        ``reference.h3_airspaces``
 00d  OurAirports reference data                  ``ingestion.ourairports``
 00e  OpenSky aircraft database                   ``ingestion.osn_aircraft_db``
+00f  Runway + approach H3 grid (oa_runways)      ``reference.h3_runway_grid``
 01   State vector ingestion (OpenSky S3)         ``ingestion.osn_statevectors``
 02   Track processing                            ``pipeline.tracks``
 02a  Trajectory cleaning                         ``cleaning.cleaner``
@@ -175,12 +176,31 @@ def _step_00e_aircraft_db(spark, config, **kwargs):
     acdb.ingest()
 
 
+def _step_00f_runway_grid(spark, config, **kwargs):
+    """Step 00f: Runway + approach H3 grid, from oa_runways.
+
+    Runs after 00d (needs the ingested ``oa_airports``/``oa_runways`` tables)
+    and after 00a-00c (the other H3 reference layers), matching the plan's
+    ordering. Geometry-only -- no network -- so it belongs at the end of the
+    reference block rather than blocking on anything but the OurAirports
+    ingest.
+    """
+    print("\n--- 00f: Runway + approach H3 grid (oa_runways) ---")
+    from opdi.reference.h3_runway_grid import RunwayGridGenerator
+
+    grid_gen = RunwayGridGenerator(spark, config)
+    grid_gen.create_table_if_not_exists()
+    success, failed = grid_gen.save_prepared_to_table()
+    print(f"  Processed {len(success)} airports, {len(failed)} failed.")
+
+
 REFERENCE_SUBSTEPS = {
     "00a": ("Airport H3 detection zones", _step_00a_airport_zones),
     "00b": ("Airport ground layouts", _step_00b_airport_layouts),
     "00c": ("Airspace boundaries", _step_00c_airspaces),
     "00d": ("OurAirports reference data", _step_00d_ourairports),
     "00e": ("OpenSky aircraft database", _step_00e_aircraft_db),
+    "00f": ("Runway + approach H3 grid", _step_00f_runway_grid),
 }
 
 
@@ -379,6 +399,7 @@ def run_pipeline(
     run_airspaces: bool = True,
     run_ourairports: bool = True,
     run_aircraft_db: bool = True,
+    run_runway_grid: bool = True,
     airports_hex_path: str = "data/airport_hex/zones_res7_processed.parquet",
     export_dir: str = "data/OPDI/v002",
     last_n_months: int = 4,
@@ -402,6 +423,7 @@ def run_pipeline(
         run_airspaces: Run step 00c — Airspace boundaries (ANSP/FIR -> H3).
         run_ourairports: Run step 00d — OurAirports reference data.
         run_aircraft_db: Run step 00e — OpenSky aircraft database.
+        run_runway_grid: Run step 00f — Runway + approach H3 grid (oa_runways).
         adep_mode: Detection algorithm for departures in step 03
             (``"trend"``, ``"endpoint"`` or ``"nearest"``). ``None`` uses the
             configured default.
@@ -446,6 +468,7 @@ def run_pipeline(
         "00c": run_airspaces,
         "00d": run_ourairports,
         "00e": run_aircraft_db,
+        "00f": run_runway_grid,
     }
     skip_all_ref = not any(run_reference.values())
 
