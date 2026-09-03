@@ -12,11 +12,23 @@ This module runs the steps instead. For each method it executes
 
     step 02   TrackProcessor.process_month   -> osn_tracks
     step 02a  TrackCleaner.process_month     -> osn_tracks_clean
-    step 03   FlightListProcessor            -> opdi_flight_list
+    step 03   FlightListProcessor            -> opdi_flight_list  (two arms only)
 
-with ``config.segmentation.method`` set, then scores the result twice: against
-Network Manager ground truth as a clustering comparison, and on ADEP/ADES. The
-only thing that differs between methods is that one config field.
+with ``config.segmentation.method`` set, then scores the result: against
+Network Manager ground truth as a clustering comparison -- airborne and
+gate-to-gate both, see :data:`FLIGHT_LIST_METHODS`'s neighbour comment and
+``score_segmentation`` -- and, for the two arms in :data:`FLIGHT_LIST_METHODS`,
+on ADEP/ADES. The only thing that differs between methods is that one config
+field.
+
+**Step 03 runs for two of the three arms.** ``airframe_only`` is the
+segmentation ablation's midpoint: ``standard`` is ``airframe_only`` plus the
+callsign-change break, and the point of running the midpoint is to split that
+total into the two changes that produced it -- a question the *segmentation*
+score answers on its own. ADEP/ADES asks a different question ("does shipping
+this change ADEP/ADES") that only needs the before and the after, so
+``airframe_only`` gets segmentation scoring, cleaning, null-rates and extents,
+but not the flight list.
 
 **Nothing production is touched.** Every table name is redirected under
 ``research/tcv2/<method>/`` by patching ``StorageManager._s3_path``, and a
@@ -26,17 +38,24 @@ two differ -- a lesson from v1, where guarding the name rejected legitimate
 redirected writes and caught a genuine production write only by luck.
 
 **One method at a time, and deleted after scoring.** A materialised track table
-is ~3.4 GB per day and its cleaned copy ~3.3 GB; the bucket has single-digit GB
-free and is shared with another project. Two methods resident at once does not
-fit, so this streams: build, score, delete, next.
+is ~3.4 GB per day and its cleaned copy ~3.3 GB, and the bucket is shared with
+another project. Streaming -- build, score, delete, next -- is what keeps the
+peak at one method's worth rather than three, and it is kept even now that the
+quota is known to be 200 GB rather than 100, because the peak is what a
+concurrent run of somebody else's job has to fit alongside.
+
+Because no two methods ever coexist on S3, anything the study needs to compare
+*across* methods has to be summarised to a file before the cleanup. That is
+what :func:`export_track_extents` is for.
 
     python benchmarks/track_pipeline_v2.py --period 2025 --days 2025-06-05 \\
-        --methods legacy standard \\
+        --methods legacy airframe_only standard \\
         --results-dir ../opdi-portal/papers/track-construction-v2/data
 """
 
 import argparse
 import csv
+import shutil
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -48,12 +67,14 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 import adep_ades  # noqa: E402
 import osn_sample  # noqa: E402
 import provenance  # noqa: E402
+import track_diagnostics  # noqa: E402
 import track_truth  # noqa: E402
 from flight_list_v7 import load_predictions  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
-from track_methods import BUCKET, s3_client  # noqa: E402
-from track_score import score_arm, track_extents  # noqa: E402
+from track_continuity import extents_name  # noqa: E402
+from track_methods import BUCKET, BUCKET_QUOTA_GB, s3_client  # noqa: E402
+from track_score import score_arm_gated, track_extents  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
 
@@ -69,6 +90,11 @@ TABLES = ("osn_tracks", "osn_tracks_clean", "opdi_flight_list",
           "opdi_endpoint_candidates")
 
 RESEARCH_ROOT = "research/tcv2"
+
+#: Comment 7: ADEP/ADES for the before and the after only. `airframe_only` is
+#: the segmentation ablation's midpoint and has no downstream question of its
+#: own, so it skips step 03 -- the expensive step.
+FLIGHT_LIST_METHODS = ["legacy", "standard"]
 
 #: State vectors are step 02's input and do not depend on the segmentation, so
 #: they are ingested once and shared by every method rather than rebuilt per
@@ -179,11 +205,20 @@ def delete_method(s3, method: str) -> tuple:
 
 
 def bucket_free_gb(s3) -> float:
+    """Quota minus measured usage.
+
+    The quota comes from ``track_methods.BUCKET_QUOTA_GB`` rather than a
+    literal here. It was a literal ``100.0``, and when the owner raised the
+    real quota to 200 GB that stale copy made a bucket holding 98.5 GB report
+    1.5 GB free -- so the run aborted at its free-space gate, before doing any
+    work, with a message that reads as a full bucket rather than as a constant
+    nobody updated twice. One definition, in the module that documents it.
+    """
     total = 0
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET):
         for o in page.get("Contents", []):
             total += o["Size"]
-    return 100.0 - total / 1e9
+    return BUCKET_QUOTA_GB - total / 1e9
 
 
 def sv_exists(s3, days) -> bool:
@@ -238,26 +273,151 @@ def clean_tracks(spark, cfg, period) -> None:
     cleaner.process_month(period["month"], skip_if_processed=False)
 
 
-def build_flight_list(spark, cfg, period, airports_hex_path) -> None:
-    """Step 03."""
+def flight_list_log_dir(method: str) -> str:
+    """A private, per-method progress-log directory, emptied before use.
+
+    ``FlightListProcessor`` records finished months in **local parquet files**
+    under ``log_dir`` (default ``OPDI_live/logs``). Those files sit outside the
+    per-method S3 cleanup in ``main``'s ``finally``, so a marker outlives every
+    table it describes, and the default directory is shared by every method and
+    every run. Three markers live there -- the flight list's, the overflights'
+    and the endpoint candidates' -- and this study broke on two of them:
+
+    * a marker written by the study's first attempt, which then died, made a
+      later run skip step 03 while its tables had long since been deleted;
+    * ``legacy`` built its endpoint candidates and recorded the month, so
+      ``standard`` skipped building its own and read a path that did not exist.
+
+    Scoping the whole directory per method fixes all three at once, and it is
+    the only fix that reaches the candidate cache: ``build_endpoint_candidates``
+    is guarded by its own ``rebuild`` flag which ``skip_if_processed`` does not
+    control, and deliberately so -- its docstring notes that re-running the
+    flight list at different *thresholds* does not invalidate the candidates,
+    which is exactly right for a threshold sweep and exactly wrong here, where
+    what changes between arms is the tracks the candidates are derived from.
+
+    Emptied rather than merely separated because each arm's tables are deleted
+    at the end of its own iteration: there is never state worth resuming onto,
+    so a surviving marker can only ever lie.
+    """
+    log_dir = str(REPO / "OPDI_live" / "logs" / "tcv2" / method)
+    shutil.rmtree(log_dir, ignore_errors=True)
+    return log_dir
+
+
+def build_flight_list(spark, cfg, period, airports_hex_path, method) -> None:
+    """Step 03, with its own progress log (see :func:`flight_list_log_dir`).
+
+    ``skip_if_processed=False`` as well, for the same reason steps 02 and 02a
+    pass it. With a per-method directory it is belt and braces rather than the
+    mechanism, and it stays: it is what a reader of this function sees first,
+    and the source-level test asserts all three steps carry it.
+    """
     from opdi.pipeline.flights import FlightListProcessor
 
-    proc = FlightListProcessor(spark, cfg)
+    proc = FlightListProcessor(spark, cfg, log_dir=flight_list_log_dir(method))
     proc.create_table_if_not_exists()
-    proc.process_date_range(period["month"], period["month"], airports_hex_path)
+    proc.process_date_range(
+        period["month"], period["month"], airports_hex_path,
+        skip_if_processed=False,
+    )
+
+
+def read_cleaned(spark, method, days):
+    """This method's ``osn_tracks_clean``, restricted to the sampled days.
+
+    One definition for the three things that read it -- the clustering score,
+    the extents export and the null-rate report -- so that all three describe
+    the same population. Filtering on ``to_date(event_time)`` rather than a
+    partition path because the table is not day-partitioned on disk; see
+    ``track_methods.PERIODS``.
+    """
+    return (
+        spark.read.parquet(f"s3a://{BUCKET}/opdi/{table_for(method, 'osn_tracks_clean')}")
+        .filter(F.to_date("event_time").isin(days))
+    )
+
+
+def export_track_extents(spark, method, period: str, days, results_dir) -> dict:
+    """One row per track -- ``track_id, icao24, t_start, t_end, n_points``.
+
+    **This has to happen before the per-method cleanup, and that is the whole
+    reason it exists.** The runner never lets two methods' tables coexist on
+    S3, so by the time ``standard`` has been built there is nothing of
+    ``legacy`` left to compare it against. This summary is small enough to keep
+    -- a few MB per arm against a few GB of table -- and it carries exactly
+    what a cross-arm comparison needs. Without it the continuity question could
+    not be answered at all without doubling the peak footprint.
+
+    ``F.min("icao24")`` is exact rather than arbitrary: every arm in this study
+    groups on ``icao24`` first, so a ``track_id`` belongs to one airframe by
+    construction and the aggregate has one value to choose from. If an arm ever
+    grouped otherwise this would silently start picking, which is why it is
+    said here.
+
+    Returns the totals for the caller's row, so the sample count in the CSV and
+    the denominator behind the null rates come from one pass rather than two
+    that could disagree.
+    """
+    ext = (
+        read_cleaned(spark, method, days)
+        .groupBy("track_id")
+        .agg(
+            F.min("icao24").alias("icao24"),
+            F.date_format(F.min("event_time"), "yyyy-MM-dd HH:mm:ss").alias("t_start"),
+            F.date_format(F.max("event_time"), "yyyy-MM-dd HH:mm:ss").alias("t_end"),
+            F.count(F.lit(1)).alias("n_points"),
+        )
+        .orderBy("track_id")
+    )
+    fields = ["track_id", "icao24", "t_start", "t_end", "n_points"]
+    rows = ext.collect()
+
+    results_dir.mkdir(parents=True, exist_ok=True)
+    out = results_dir / extents_name(method, period)
+    with out.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r[k] for k in fields})
+
+    n_samples = sum(r["n_points"] for r in rows)
+    print(f"  extents: {len(rows)} tracks, {n_samples} samples -> {out.name}")
+    return {"n_tracks_exported": len(rows), "n_samples": n_samples}
 
 
 def score_segmentation(spark, method, period, days) -> dict:
-    """Clustering comparison of the pipeline's own cleaned tracks."""
-    assign = (
-        spark.read.parquet(f"s3a://{BUCKET}/opdi/{table_for(method, 'osn_tracks_clean')}")
-        .select("icao24", "event_time", "track_id")
-        .filter(F.to_date("event_time").isin(days))
-    )
+    """Clustering comparison of the pipeline's own cleaned tracks.
+
+    Comment 4: every arm is scored twice -- airborne (``[t_off, t_land]``) and
+    gate-to-gate (``t_off_block``/``t_in_block``) -- so the row also carries
+    the ``gate_*`` columns. The airborne interval never sees a sample at the
+    stand or on a taxiway, so it cannot say whether taxi-out and taxi-in
+    samples landed in the right track; the gate interval can, because it is a
+    superset. See ``track_score.score_arm_gated`` for what that superset can do
+    to the rate (it is not guaranteed to move in either direction) and
+    ``track_truth.overlap_join`` for the ``bounds`` argument that selects it.
+
+    ``load_flight_intervals`` is Task 11's version, which carries
+    ``t_off_block``/``t_in_block`` on every row; if a future ``track_truth.py``
+    ever dropped them this join would fail loudly rather than silently score
+    the gate interval as a second copy of the airborne one.
+
+    Unlike ``track_methods.py``'s V1 arms job, this call site has no
+    ``run_arm``-style scorer hook to bind against -- ``score_segmentation`` is
+    called directly, with ``assign``/``gt`` already in scope -- so there is no
+    arity trap to close over here; ``matched_gate`` is simply built next to
+    ``matched`` and handed to :func:`track_score.score_arm_gated` by name,
+    which is the same pattern ``ff38531`` wired for V1's ``_score_with_gate``.
+    """
+    assign = read_cleaned(spark, method, days).select(
+        "icao24", "event_time", "track_id")
     gt = track_truth.load_flight_intervals(spark, period["months"], days)
     extents = track_extents(assign)
     matched = track_truth.overlap_join(assign, gt)
-    return score_arm(matched, extents)
+    matched_gate = track_truth.overlap_join(
+        assign, gt, bounds=("t_off_block", "t_in_block"))
+    return score_arm_gated(matched, extents, matched_gate)
 
 
 def score_adep_ades(spark, method, period, days, k) -> dict:
@@ -267,10 +427,43 @@ def score_adep_ades(spark, method, period, days, k) -> dict:
     return adep_ades.score(pred, ident, gt, k=k)
 
 
+def write_rows_csv(path: Path, rows: list) -> None:
+    """(Re)write *path* from *rows*, header = the union of every row's keys.
+
+    Comment 7's trap: ``airframe_only`` never runs :func:`score_adep_ades`, so
+    its row is missing every ADEP/ADES key that a ``FLIGHT_LIST_METHODS`` row
+    carries. A header taken from whichever row happens to run first is not
+    safe either way -- a flight-list-method row first means the ADEP/ADES
+    columns silently read as blank for every other row that lacks them (not
+    wrong, but only right by the accident of ``legacy`` being first in
+    practice), and an ``airframe_only``-first run crashes outright the moment
+    ``csv.DictWriter`` sees a row with keys its header never declared. Taking
+    the header from the union of every row collected so far -- recomputed and
+    the whole file rewritten after each arm -- makes the result independent of
+    ``--methods`` order. Rewriting a handful of rows after every arm is
+    negligible next to the tens of minutes the arm itself took, so there is no
+    cost to buying that independence back this way rather than pre-declaring
+    the columns statically -- which would silently stop matching this module's
+    scorers the day one of them adds or renames a field.
+    """
+    fieldnames = sorted({k for row in rows for k in row})
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(PERIODS), default="2025")
-    ap.add_argument("--methods", nargs="+", default=["legacy", "standard"])
+    ap.add_argument("--methods", nargs="+",
+                    default=["legacy", "airframe_only", "standard"],
+                    help="in ablation order. `standard` is `airframe_only` "
+                         "plus the callsign-change break, so running the "
+                         "middle arm is what splits the total gain into the "
+                         "two changes that produced it; drop it and the study "
+                         "reports a sum it cannot decompose")
     ap.add_argument("--days", nargs="+", default=None,
                     help="override the period's day list; one day is ~6.7 GB "
                          "of materialised tables, three is ~20 GB")
@@ -307,7 +500,7 @@ def main() -> None:
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     out = args.results_dir / out_name
-    rows, writer, fh = [], None, out.open("w", newline="")
+    rows = []
 
     try:
         for method in args.methods:
@@ -368,21 +561,39 @@ def main() -> None:
                           f"{n} objects, {freed / 1e9:.2f} GB "
                           f"({bucket_free_gb(s3):.2f} GB now free)")
 
-                build_flight_list(spark, cfg, period, args.airports_hex_path)
-
                 row = {"method": method, "period": args.period,
                        "days": len(days)}
                 row.update(score_segmentation(spark, method, period, days))
-                row.update(score_adep_ades(spark, method, period, days, args.k))
+
+                # Comment 7: step 03 -- the expensive step -- and its ADEP/ADES
+                # score run only for the before and the after. `airframe_only`
+                # is the segmentation ablation's midpoint and has no
+                # downstream question of its own; its row simply has no
+                # ADEP/ADES keys, which is what write_rows_csv's union header
+                # is for.
+                if method in FLIGHT_LIST_METHODS:
+                    build_flight_list(
+                        spark, cfg, period, args.airports_hex_path, method)
+                    row.update(score_adep_ades(spark, method, period, days, args.k))
+
+                # Both of these read osn_tracks_clean, so both must run before
+                # the `finally` below deletes it -- and after the flight-list
+                # block above, so a method that fails at step 03 leaves no
+                # half-summary claiming to describe a run that did not finish.
+                # args.period, not `period`: the latter is the PERIODS dict,
+                # and this argument reaches `extents_name` to build a filename.
+                row.update(export_track_extents(
+                    spark, method, args.period, days, args.results_dir))
+                row.update(track_diagnostics.null_rates(
+                    read_cleaned(spark, method, days)))
+
                 row["minutes"] = round(
                     (datetime.utcnow() - started).total_seconds() / 60.0, 1)
                 rows.append(row)
-
-                if writer is None:
-                    writer = csv.DictWriter(fh, fieldnames=sorted(row))
-                    writer.writeheader()
-                writer.writerow(row)
-                fh.flush()
+                # Rewritten whole, not appended -- see write_rows_csv for why
+                # a row-by-row appending writer is not safe once one arm's row
+                # can have keys another arm's row does not.
+                write_rows_csv(out, rows)
                 for k, v in row.items():
                     print(f"  {k:24} {v}")
             finally:
@@ -394,7 +605,6 @@ def main() -> None:
                     print(f"  -- deleted {n} objects ({freed / 1e9:.2f} GB) "
                           f"for {method}")
     finally:
-        fh.close()
         spark.stop()
         # The shared slice outlives the per-method loop by design -- both
         # methods read it -- so it is dropped here, after the last one.
@@ -411,15 +621,29 @@ def main() -> None:
             script="benchmarks/track_pipeline_v2.py", argv=sys.argv[1:],
             code_paths=["benchmarks/track_pipeline_v2.py",
                         "benchmarks/track_truth.py", "benchmarks/track_score.py",
-                        "benchmarks/adep_ades.py",
+                        "benchmarks/adep_ades.py", "benchmarks/osn_sample.py",
+                        "benchmarks/flight_list_v7.py",
+                        # null_rates lives here, and its output is in the row.
+                        "benchmarks/track_diagnostics.py",
+                        # extents_name lives here, so it decides the filename
+                        # the continuity job goes looking for.
+                        "benchmarks/track_continuity.py",
+                        "src/opdi/ingestion/osn_statevectors.py",
                         "src/opdi/pipeline/tracks.py",
                         "src/opdi/cleaning/cleaner.py",
                         "src/opdi/cleaning/native.py",
                         "src/opdi/pipeline/flights.py",
+                        # __init__ decides which implementation
+                        # `assign_track_id` resolves to, so it can change every
+                        # number here while base.py and methods.py stay
+                        # byte-identical.
+                        "src/opdi/pipeline/segmentation/__init__.py",
                         "src/opdi/pipeline/segmentation/base.py",
                         "src/opdi/pipeline/segmentation/methods.py",
                         "src/opdi/config.py"],
-            notes=f"Real pipeline steps 02, 02a, 03 per method. days={days}.",
+            notes=f"Real pipeline steps 02, 02a per method, 03 for "
+                  f"{FLIGHT_LIST_METHODS} only. Scored airborne and "
+                  f"gate-to-gate. days={days}.",
         )
         print(f"\n-> {out}")
 

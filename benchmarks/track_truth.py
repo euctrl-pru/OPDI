@@ -58,7 +58,10 @@ from pyspark.sql import functions as F
 REFERENCE_BASE = "s3a://eurocontrol/opdi/research/reference"
 #: overridable per call via the ``reference_base`` keyword -- see module docstring.
 
-__all__ = ["load_flight_intervals", "load_apdf_times", "overlap_join"]
+__all__ = [
+    "load_flight_intervals", "load_apdf_times", "overlap_join",
+    "gate_buffers", "attach_gate_interval",
+]
 
 
 def _sample_window(days: list):
@@ -188,6 +191,131 @@ def load_apdf_times(
         F.col("BLOCK_TIME_UTC").alias("aibt"),  # in-block; see `aobt` above
     )
     return dep, arr
+
+
+def gate_buffers(gt: DataFrame) -> tuple:
+    """Median taxi-out and taxi-in, in seconds, over the flights that measured them.
+
+    These are the fallback where APDF has no block time. Measured rather than
+    chosen: ``aobt`` covers ~100% of flights through NM's ``AOBT_3`` fallback,
+    but ``aibt`` is APDF-only and covers about half, so roughly half the
+    arrival intervals are modelled. Taking the modelled half's duration from
+    the measured half is the honest version of a buffer; picking ten minutes
+    because it sounds like a taxi is not.
+
+    Returns ``(b_dep_s, b_arr_s)``. A period with no measured flight on one
+    side falls back to zero there, degrading the gate interval to the airborne
+    one rather than inventing a duration.
+
+    **The median is the exact one, ``F.median``, not ``percentile_approx``.**
+    ``track_score`` uses ``percentile_approx`` throughout and this deliberately
+    does not, for two reasons. The aggregation here is a single scalar over a
+    column of whole seconds -- taxi durations span a few thousand distinct
+    values, not millions -- so the exact aggregate's value/count map is bounded
+    and the approximation buys nothing. And ``percentile_approx`` does not
+    interpolate: over two flights it returns the lower of the two taxi times
+    rather than their midpoint, which makes the quantity untestable at fixture
+    scale and, more to the point, not the median this docstring names. The
+    difference is invisible on a real sample and decisive on a small one.
+
+    **The ``dep_measured`` guard is what makes ``b_dep`` a measurement, and it
+    is not redundant with a NULL check.** ``aobt`` is never NULL on real data
+    -- 0 of 30,369 flights on 2025-06-05, because it falls back to NM's
+    ``AOBT_3`` -- so a NULL filter would exclude nothing. But 37% of those rows
+    have ``t_off`` *derived* as ``aobt + TAXI_TIME_3``, and for them
+    ``t_off - aobt`` is identically ``TAXI_TIME_3``. Without the guard the
+    "measured median taxi-out" would quietly become a restatement of NM's own
+    taxi model, fitted to itself. ``arr_measured`` guards the same way on the
+    arrival side, where ``aibt`` can exist without a measured ``aldt``.
+    ``tests/test_track_gate_interval.py`` carries a fixture row whose values
+    move the median if the guard is dropped.
+    """
+    row = gt.select(
+        F.median(
+            F.when(
+                F.col("dep_measured"),
+                F.unix_timestamp("t_off") - F.unix_timestamp("aobt"),
+            )
+        ).alias("b_dep"),
+        F.median(
+            F.when(
+                F.col("arr_measured"),
+                F.unix_timestamp("aibt") - F.unix_timestamp("t_land"),
+            )
+        ).alias("b_arr"),
+    ).collect()[0]
+    return (float(row["b_dep"] or 0.0), float(row["b_arr"] or 0.0))
+
+
+def attach_gate_interval(gt: DataFrame, b_dep_s: float, b_arr_s: float,
+                         window: tuple = None) -> DataFrame:
+    """Add the gate-to-gate interval beside the airborne one.
+
+    ``least``/``greatest`` are not defensive padding. APDF is operational data
+    and carries rows whose block time falls the wrong side of its own movement
+    time; without the clamp such a row yields a gate interval *narrower* than
+    the airborne interval, and gate matching would drop samples airborne
+    matching kept. The clamp makes the gate interval a guaranteed superset, so
+    the two metrics differ only by the samples the wider one adds.
+
+    ``gate_dep_measured``/``gate_arr_measured`` say whether the *block* time was
+    observed, which is not what ``dep_measured``/``arr_measured`` say: those are
+    about the movement times ATOT/ALDT. The two travel together because a gate
+    interval can be measured at one end and modelled at the other, and a
+    consumer cutting by aerodrome needs to know which.
+
+    **``gate_in_window`` exists because the sample window bounds the airborne
+    interval and cannot bound this one.** ``load_flight_intervals`` keeps only
+    flights whose ``[t_off, t_land]`` lies inside the sampled days, and the
+    gate interval is attached *after* that filter and reaches outside it by
+    construction: a flight can be in-window airborne and out-of-window at the
+    gate. Measured on 2025-06-05, 52 flights of 30,369 push back before the
+    window opens and 49 go in-block after it closes -- 0.33%. Their taxi
+    samples are clipped by the caller's own ``to_date(event_time).isin(days)``
+    filter, so their gate rates are computed over a truncated interval, and in
+    the *flattering* direction: fewer samples is fewer chances to fragment.
+
+    The column is exposed and **not** filtered on, deliberately. Filtering here
+    would change which flights the gate metrics cover without saying so;
+    exposing it lets the paper report the gate rate on the unaffected subset
+    and quantify what the remainder costs, which is what the containment census
+    in ``track_diagnostics.py`` does for the airborne window. ``window`` is the
+    ``(lo, hi)`` pair from :func:`_sample_window`; ``None`` means no window was
+    given and the column is ``True`` throughout, mirroring how
+    ``load_flight_intervals`` degrades ``in_window`` to ``F.lit(True)``.
+    """
+    in_window = (
+        F.lit(True)
+        if window is None
+        else (F.col("t_off_block") >= F.lit(window[0]).cast("timestamp"))
+        & (F.col("t_in_block") < F.lit(window[1]).cast("timestamp"))
+    )
+    return (
+        gt.withColumn("gate_dep_measured", F.col("aobt").isNotNull())
+        .withColumn("gate_arr_measured", F.col("aibt").isNotNull())
+        .withColumn(
+            "t_off_block",
+            F.least(
+                F.coalesce(
+                    F.col("aobt"),
+                    (F.unix_timestamp("t_off") - F.lit(b_dep_s)).cast("timestamp"),
+                ),
+                F.col("t_off"),
+            ),
+        )
+        .withColumn(
+            "t_in_block",
+            F.greatest(
+                F.coalesce(
+                    F.col("aibt"),
+                    (F.unix_timestamp("t_land") + F.lit(b_arr_s)).cast("timestamp"),
+                ),
+                F.col("t_land"),
+            ),
+        )
+        # Last, so it can read the two columns above.
+        .withColumn("gate_in_window", in_window)
+    )
 
 
 def load_flight_intervals(
@@ -369,7 +497,7 @@ def load_flight_intervals(
     )
     t_land = F.coalesce(F.col("aldt"), F.col("arvt"))
 
-    return (
+    flights = (
         j.withColumn("t_off", t_off)
         .withColumn("t_land", t_land)
         .withColumn(
@@ -448,18 +576,53 @@ def load_flight_intervals(
         .filter(F.col("t_off").isNotNull() & F.col("t_land").isNotNull())
         .filter(F.col("t_land") > F.col("t_off"))
         .filter(in_window)
-        .select("flight_key", "icao24", "callsign", "gt_adep", "gt_ades",
-                "t_off", "t_land", "aobt", "aibt", "t_source",
-                "dep_measured", "arr_measured", "day")
+    )
+
+    # The gate-to-gate interval, beside the airborne one -- see
+    # :func:`attach_gate_interval`. Attached *after* the filters, so the
+    # buffers are medians over the flights this call actually returns rather
+    # than over everything the month's files happened to contain.
+    #
+    # This costs one extra pass over ground truth: `gate_buffers` collects, so
+    # the plan above is evaluated once for the medians and once for whatever
+    # the caller does with the result. Ground truth is ~1M rows a month against
+    # billions of state vectors, and the alternative -- caching here and
+    # unpersisting somewhere the caller cannot see -- trades a cheap re-read
+    # for a lifetime this function does not own. Callers that read the frame
+    # more than once cache it themselves (see track_methods.main).
+    #
+    # **Nothing above this line moved.** `flight_key`, `t_source`, the filters
+    # and the airborne `t_off`/`t_land` are untouched, and the gate columns
+    # are added to the select rather than replacing anything, so every metric
+    # computed over `[t_off, t_land]` is bit-identical to what it was.
+    #
+    # `window` is handed on so `gate_in_window` can say which flights the gate
+    # interval carries outside the sampled days. It is a flag, not a filter --
+    # see attach_gate_interval.
+    b_dep_s, b_arr_s = gate_buffers(flights)
+    return attach_gate_interval(flights, b_dep_s, b_arr_s, window=window).select(
+        "flight_key", "icao24", "callsign", "gt_adep", "gt_ades",
+        "t_off", "t_land", "aobt", "aibt", "t_source",
+        "dep_measured", "arr_measured", "day",
+        "t_off_block", "t_in_block", "gate_dep_measured", "gate_arr_measured",
+        "gate_in_window",
     )
 
 
-def overlap_join(assign: DataFrame, gt: DataFrame) -> DataFrame:
+def overlap_join(assign: DataFrame, gt: DataFrame,
+                 bounds=("t_off", "t_land")) -> DataFrame:
     """Attach each state vector to the ground-truth flight whose interval holds it.
 
     Airframe plus containment -- no callsign. A sample landing in two touching
     intervals is assigned to the earlier one, so back-to-back legs cannot
     double-count the boundary sample and inflate every merge statistic.
+
+    ``bounds`` selects the interval. The default is the airborne
+    ``[t_off, t_land]``. Passing ``("t_off_block", "t_in_block")`` matches over
+    the gate-to-gate interval instead, which is what includes taxi-out, taxi-in
+    and stand samples. The emitted ``t_off``/``t_land`` are unchanged either
+    way: they are the airborne boundaries, and boundary error is defined against
+    them regardless of which interval decided membership.
 
     **The "pick the earlier interval" window partitions on the assignment row,
     not on ``(icao24, event_time)``.** That distinction is not cosmetic: raw OSN
@@ -481,18 +644,20 @@ def overlap_join(assign: DataFrame, gt: DataFrame) -> DataFrame:
     for arm A4. Naming the columns here means ground truth missing one of
     them fails fast at the join, which is what a benchmark harness should do.
     """
+    lo, hi = bounds
     assign = assign.withColumn("_a_row", F.monotonically_increasing_id())
     j = assign.alias("a").join(
         gt.alias("g"),
         (F.col("a.icao24") == F.col("g.icao24"))
-        & (F.col("a.event_time") >= F.col("g.t_off"))
-        & (F.col("a.event_time") <= F.col("g.t_land")),
+        & (F.col("a.event_time") >= F.col(f"g.{lo}"))
+        & (F.col("a.event_time") <= F.col(f"g.{hi}")),
         "inner",
     )
-    # Ordered on t_off alone: an exact tie there means two ground-truth flights
-    # claiming the identical take-off instant for one airframe, which cannot
-    # happen for physically distinct legs.
-    w = Window.partitionBy("a._a_row").orderBy(F.col("g.t_off").asc())
+    # Ordered on the interval's own lower bound alone: an exact tie there means
+    # two ground-truth flights claiming the identical take-off -- or, under the
+    # gate bounds, the identical off-block -- instant for one airframe, which
+    # cannot happen for physically distinct legs.
+    w = Window.partitionBy("a._a_row").orderBy(F.col(f"g.{lo}").asc())
     return (
         j.withColumn("_r", F.row_number().over(w))
         .filter(F.col("_r") == 1)

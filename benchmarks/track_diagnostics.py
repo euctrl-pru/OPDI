@@ -1,6 +1,6 @@
-"""Two diagnostics about V1's own method, rather than about a segmentation arm.
+"""Diagnostics about V1's own method, rather than about a segmentation arm.
 
-Both exist because a reviewer asked a question the study could only answer with
+Each exists because a reviewer asked a question the study could only answer with
 an argument, and an argument is not a measurement.
 
 **The containment census** (``--job containment``). V1 scores only ground-truth
@@ -19,9 +19,20 @@ the two mean different things: a spread is noise to tune against, two modes are
 two populations, one of which is probably a different failure wearing the same
 number.
 
+**The traffic-fill census** (``--job traffic-fill``). A3 runs ``traffic``'s
+``Flight.split()`` rule against a raw OSN frame, but the rule was designed
+against a filled one -- idiomatic ``traffic`` use bfills/ffills or interpolates
+before splitting. ``gap_boundary_nulls`` counts how often the predicate's own
+altitude comparison lands on a NULL, and separately counts "no-gap turnarounds"
+-- a continuous broadcast through a stand -- which is the failure mode no amount
+of filling could fix, because traffic's single gap-length threshold never sees
+a gap at all.
+
     python benchmarks/track_diagnostics.py --job containment --period 2025 \\
         --results-dir ../opdi-portal/papers/track-construction-v1/data
     python benchmarks/track_diagnostics.py --job boundary-hist --period 2025 \\
+        --results-dir ../opdi-portal/papers/track-construction-v1/data
+    python benchmarks/track_diagnostics.py --job traffic-fill --period 2025 \\
         --results-dir ../opdi-portal/papers/track-construction-v1/data
 
 The census reads only Network Manager/APDF reference parquet -- no state
@@ -30,7 +41,8 @@ deletes it again by *calling* ``track_methods.run_arm`` -- its streaming, its
 free-space gate and its scoped single-object delete, not a second copy of them
 -- passing its own scoring callable and a ``diag_``-prefixed arm directory, so
 that a concurrent ``track_methods`` run and this one can never delete each
-other's tables.
+other's tables. The traffic-fill census reads the same cleaned track table the
+arms jobs read, filtered to the period's sampled days, and writes nothing else.
 
 One Spark job at a time -- ``spark.driver.port`` is pinned, so a second
 concurrent job kills both.
@@ -51,15 +63,17 @@ import provenance  # noqa: E402
 import track_methods  # noqa: E402
 import track_truth  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
-from pyspark.sql import DataFrame, SparkSession  # noqa: E402
+from pyspark.sql import DataFrame, SparkSession, Window  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from track_score import boundary_offsets  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
 from opdi.pipeline.segmentation import SegmentationParams  # noqa: E402
+from opdi.pipeline.segmentation.base import FT_PER_M  # noqa: E402
 
 __all__ = ["inside_window", "containment_census", "census_ground_truth",
-           "boundary_histogram"]
+           "null_rates", "gap_boundary_nulls", "pre_gap_stale_signature",
+           "gate_interval_summary", "boundary_histogram"]
 
 #: Days added on each side of the sampled window when loading ground truth for
 #: the census. One is enough for any flight in this data: the longest ECAC leg
@@ -86,8 +100,52 @@ BIN_SECONDS = 30
 CONTAINMENT_FIELDS = [
     "period", "n_gt_flights", "n_wholly_inside", "n_clipped_start",
     "n_clipped_end", "pct_kept", "median_observed_fraction_clipped",
+    # The gate-to-gate interval, summarised per period so the paper reads these
+    # from a CSV instead of quoting a measurement made in conversation. Per-side
+    # coverage is the load-bearing pair: `aobt` has an NM fallback and sits near
+    # 100%, `aibt` is APDF-only with none. The buffers are the measured medians
+    # `gate_buffers` returns to callers and, until this row existed, nothing
+    # persisted. `gate_outside_window_pct` is the share of kept flights whose
+    # gate interval crosses the sampled window's edge -- their taxi samples are
+    # clipped by the day filter, in the flattering direction.
+    "gate_dep_measured_pct", "gate_arr_measured_pct",
+    "gate_b_dep_s", "gate_b_arr_s",
+    "gate_widen_dep_p50_s", "gate_widen_arr_p50_s",
+    "gate_outside_window_pct",
 ]
 HIST_FIELDS = ["arm", "edge", "bin_lower_s", "bin_upper_s", "n"]
+TRAFFIC_FILL_FIELDS = [
+    "period", "n_gaps", "n_null_either_side", "null_pct", "n_no_gap_turnarounds",
+    # The same gap count over the RAW table, before step 02a's masking. The
+    # clean and raw rates answer different questions -- "what does A3's
+    # predicate see on OPDI's data" versus "what would it see on the feed" --
+    # and the distance between them is the cleaning's contribution, which is
+    # the finding.
+    "raw_n_gaps", "raw_n_null_either_side", "raw_null_pct",
+    # The mechanism, measured on raw: the sample immediately before a silence
+    # is overwhelmingly either already NULL or an exact repeat of its
+    # predecessor -- a coverage fade loses fresh altitude messages before it
+    # loses messages altogether -- and ``mask_stale_broadcasts`` then masks
+    # the repeats. The all-other-samples baselines sit beside them so the
+    # concentration at the gap boundary is visible, not asserted.
+    "pregap_n", "pregap_repeat_pct", "pregap_null_pct",
+    "other_repeat_pct", "other_null_pct",
+]
+
+#: Raw (pre-cleaning) counterpart of each period's track table, read only by
+#: ``run_traffic_fill``. Deliberately not part of ``track_methods.PERIODS``:
+#: the arms jobs must never read raw tracks, and a raw path sitting in the
+#: shared period config would be an invitation to.
+RAW_TRACKS = {
+    "2025": "s3a://eurocontrol/opdi/osn_tracks",
+    "2024": "s3a://eurocontrol/opdi/research/tracks",
+}
+
+#: A3 splits on ``traffic``'s own fixed 10-minute gap threshold, not on OPDI's
+#: configurable ``gap_minutes`` -- the two can differ, and this diagnostic
+#: exists to explain *A3's* behaviour, so it must use A3's number rather than
+#: whatever the pipeline happens to be tuned to today.
+TRAFFIC_GAP_MINUTES = 10.0
 
 
 def inside_window(window_start, window_end):
@@ -380,6 +438,260 @@ def run_arm_histogram(spark, s3, arm_name, period, sv, gt, params, args):
     return rows
 
 
+#: Short names for the columns ``cleaning/native.py`` may mask to NULL. The
+#: report reads better as ``null_baro_pct`` than ``null_baro_altitude_pct``,
+#: and the mapping is stated once here rather than being guessed at each call.
+NULL_SHORT_NAMES = {"baro_altitude": "baro", "geo_altitude": "geo"}
+
+
+def null_rates(df: DataFrame, columns=None) -> dict:
+    """NULL share per cleaned column, as ``null_<short>_pct`` percentages.
+
+    Step 02a masks bad values to NULL and keeps the row -- the 2024-challenge
+    design, chosen so that "no data" and "interpolated data" stay
+    distinguishable -- so a cleaned table's null rate *is* the cleaning's
+    output volume, and it belongs beside the scores rather than in a separate
+    study. A segmentation change should barely move it: cleaning is
+    track-local, so a different partition of the same samples shifts it a
+    little, but an arm whose null rate jumps has changed what the cleaner sees,
+    and that is a finding rather than a rounding difference.
+
+    Delegates the counting to :func:`opdi.cleaning.native.null_rate_report` --
+    one Spark action over the columns that module declares it may mask -- so
+    that adding a maskable column there adds it here too, rather than leaving
+    this list quietly behind. Rates are converted to percentages, because every
+    other rate in this study's CSVs is a percentage and a lone fraction in the
+    same row is a units bug waiting to be read as one.
+
+    No sample count is returned: the caller has it from the extents export at
+    no extra scan, and recomputing it here would cost a second pass over the
+    table for a number that must then agree with one already in the row.
+    """
+    from opdi.cleaning.native import null_rate_report
+
+    rates = null_rate_report(df) if columns is None else null_rate_report(df, columns)
+    return {
+        f"null_{NULL_SHORT_NAMES.get(c, c)}_pct": 100.0 * v
+        for c, v in rates.items()
+    }
+
+
+def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) -> dict:
+    """How often A3's split predicate cannot see the altitude it needs, and the
+    failure mode that has nothing to do with NULLs at all.
+
+    ``traffic``'s ``Flight.split()`` cuts on a raw timestamp gap alone -- see
+    this module's docstring -- but the rule that decides whether to *keep*
+    A3's split or reclassify it (and every legacy-style low-altitude rule
+    ported alongside it) reads ``baro_altitude_ft`` on both sides of the
+    candidate gap. On a raw OSN frame that value is NULL about a fifth of the
+    time, and a comparison against NULL is not a decision -- it is the absence
+    of one. Counted here as **undecidable**: a candidate gap where the current
+    row's or the previous row's altitude is NULL.
+
+    Two counts, over one pass:
+
+    * ``n_gaps`` / ``n_null_either_side`` / ``null_pct`` -- of every candidate
+      gap (``icao24``-partitioned, time-ordered, more than ``gap_minutes``
+      since the previous sample), how many are undecidable because an
+      altitude either side is missing. This is the part a fill would help.
+    * ``n_no_gap_turnarounds`` -- a maximal run of ``on_ground = true``
+      samples, per ``icao24``, spanning more than ``gap_minutes`` start to
+      end with **no** internal gap above the threshold. This is an aircraft
+      broadcasting continuously through a stand: there is no gap for any
+      threshold to catch, on a raw frame or a filled one, so it is the part a
+      fill could never help. Legacy's second rule -- a shorter gap below
+      5,000 ft -- catches this shape; ``traffic``'s single 10-minute threshold
+      structurally cannot.
+
+    ``gap_minutes`` defaults to :data:`TRAFFIC_GAP_MINUTES` -- ``traffic``'s
+    own fixed threshold, not OPDI's configurable ``gap_minutes`` -- because
+    this diagnostic explains *A3's* behaviour specifically.
+    """
+    w = Window.partitionBy("icao24").orderBy("event_time")
+    prev_time = F.lag("event_time").over(w)
+    prev_alt = F.lag("baro_altitude_ft").over(w)
+    prev_on_ground = F.lag("on_ground").over(w)
+
+    gap_min = (F.col("event_time").cast("long") - prev_time.cast("long")) / 60.0
+    is_gap = gap_min > F.lit(gap_minutes)
+    null_either_side = F.col("baro_altitude_ft").isNull() | prev_alt.isNull()
+
+    annotated = sv.select(
+        "icao24", "event_time", "on_ground",
+        gap_min.alias("gap_min"),
+        is_gap.alias("is_gap"),
+        null_either_side.alias("null_either_side"),
+        prev_on_ground.alias("prev_on_ground"),
+    ).cache()
+
+    try:
+        counts = annotated.select(
+            F.sum(F.when(F.col("is_gap"), 1).otherwise(0)).alias("n_gaps"),
+            F.sum(
+                F.when(F.col("is_gap") & F.col("null_either_side"), 1).otherwise(0)
+            ).alias("n_null_either_side"),
+        ).collect()[0]
+        n_gaps = counts["n_gaps"] or 0
+        n_null = counts["n_null_either_side"] or 0
+
+        # A run of on_ground samples starts where the previous row (in the
+        # full, un-filtered time order) was not on_ground -- or was the first
+        # row of the icao24 partition. A cumulative sum of that indicator,
+        # over every row regardless of on_ground, gives every row in the same
+        # airborne-free stretch a shared id; rows outside any such stretch get
+        # an id too, but they are dropped below and never grouped on.
+        is_run_start = F.col("on_ground") & (
+            F.col("prev_on_ground").isNull() | (~F.col("prev_on_ground"))
+        )
+        run_id = F.sum(F.when(is_run_start, 1).otherwise(0)).over(
+            w.rowsBetween(Window.unboundedPreceding, 0)
+        )
+        runs = annotated.select(
+            "icao24", "event_time", "on_ground", "gap_min",
+            is_run_start.alias("is_run_start"),
+            run_id.alias("run_id"),
+        ).filter(F.col("on_ground"))
+
+        run_stats = runs.groupBy("icao24", "run_id").agg(
+            F.min("event_time").alias("run_start"),
+            F.max("event_time").alias("run_end"),
+            # Only gaps *within* the run count as internal: the run's first
+            # row's `gap_min` is the gap leading *into* the stretch, from
+            # whatever (on_ground or not) preceded it, not a gap inside it.
+            F.max(
+                F.when(~F.col("is_run_start"), F.col("gap_min"))
+            ).alias("max_internal_gap_min"),
+        )
+        span_min = (
+            F.col("run_end").cast("long") - F.col("run_start").cast("long")
+        ) / 60.0
+        no_gap_turnaround = (span_min > F.lit(gap_minutes)) & (
+            F.col("max_internal_gap_min").isNull()
+            | (F.col("max_internal_gap_min") <= F.lit(gap_minutes))
+        )
+        n_no_gap = run_stats.filter(no_gap_turnaround).count()
+    finally:
+        annotated.unpersist()
+
+    return {
+        "n_gaps": n_gaps,
+        "n_null_either_side": n_null,
+        "null_pct": round(100.0 * n_null / n_gaps, 2) if n_gaps else 0.0,
+        "n_no_gap_turnarounds": n_no_gap,
+    }
+
+
+def gate_interval_summary(gt: DataFrame) -> dict:
+    """Per-period facts about the gate-to-gate interval, from V1's own frame.
+
+    *gt* is ``load_flight_intervals``'s output -- the flights V1 scores --
+    which since Task 11 carries the block-time columns and flags this reads.
+    Everything here existed transiently before (``gate_buffers`` computes the
+    medians and returns them to a caller that uses and drops them); this
+    persists the numbers the paper needs, so "62% of arrivals carry a measured
+    in-block time" is a cell in a committed CSV rather than a figure someone
+    once printed.
+
+    Widening medians are ``t_off - t_off_block`` and ``t_in_block - t_land``:
+    how much of each flight the airborne interval never saw, per side. The
+    clamp in ``attach_gate_interval`` guarantees both are >= 0.
+    """
+    from track_truth import gate_buffers
+
+    b_dep, b_arr = gate_buffers(gt)
+    widen_dep = F.col("t_off").cast("long") - F.col("t_off_block").cast("long")
+    widen_arr = F.col("t_in_block").cast("long") - F.col("t_land").cast("long")
+
+    agg = gt.select(
+        F.count(F.lit(1)).alias("n"),
+        F.sum(F.when(F.col("gate_dep_measured"), 1).otherwise(0)).alias("dep_m"),
+        F.sum(F.when(F.col("gate_arr_measured"), 1).otherwise(0)).alias("arr_m"),
+        F.sum(F.when(~F.col("gate_in_window"), 1).otherwise(0)).alias("outside"),
+    ).collect()[0]
+    n = agg["n"] or 0
+    pct = lambda x: round(100.0 * (x or 0) / n, 2) if n else 0.0  # noqa: E731
+
+    p50 = gt.select(
+        widen_dep.alias("wd"), widen_arr.alias("wa")
+    ).approxQuantile(["wd", "wa"], [0.5], 0.001)
+
+    return {
+        "gate_dep_measured_pct": pct(agg["dep_m"]),
+        "gate_arr_measured_pct": pct(agg["arr_m"]),
+        "gate_b_dep_s": round(b_dep, 1),
+        "gate_b_arr_s": round(b_arr, 1),
+        "gate_widen_dep_p50_s": round(p50[0][0], 1) if p50 and p50[0] else None,
+        "gate_widen_arr_p50_s": round(p50[1][0], 1) if p50 and p50[1] else None,
+        "gate_outside_window_pct": pct(agg["outside"]),
+    }
+
+
+def pre_gap_stale_signature(
+    sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES
+) -> dict:
+    """Is the sample before a silence a measurement, or the tail of a fade?
+
+    Run on the RAW table, before any masking, or it measures nothing: after
+    ``mask_stale_broadcasts`` the repeats this looks for are already NULL.
+
+    A *pre-gap* sample is the last one before a silence longer than
+    ``gap_minutes`` -- the sample a gap-split predicate reads on the near side.
+    For those and, as a baseline, for every other sample, two rates:
+
+    * ``*_repeat_pct`` -- altitude present and exactly equal to the previous
+      sample's. ADS-B sends position and velocity in separate message types,
+      so an unchanged consecutive value is a *repeat*, not a measurement;
+      this is the very signature ``mask_stale_broadcasts`` masks.
+    * ``*_null_pct`` -- altitude already NULL in the raw feed.
+
+    A coverage fade loses fresh altitude messages before it loses messages
+    altogether, so the two rates together should approach 100% at the gap
+    boundary while sitting far lower elsewhere. That concentration -- not the
+    baseline NULL rate -- is why the cleaned table's gap boundaries are almost
+    entirely blind to a rule that reads altitude across them.
+    """
+    w = Window.partitionBy("icao24").orderBy("event_time")
+    next_time = F.lead("event_time").over(w)
+    prev_alt = F.lag("baro_altitude_ft").over(w)
+
+    pre_gap = (
+        (next_time.cast("long") - F.col("event_time").cast("long")) / 60.0
+        > F.lit(gap_minutes)
+    )
+    repeats = (
+        F.col("baro_altitude_ft").isNotNull()
+        & prev_alt.isNotNull()
+        & (F.col("baro_altitude_ft") == prev_alt)
+    )
+
+    a = sv.select(
+        pre_gap.alias("pre_gap"),
+        repeats.alias("repeats"),
+        F.col("baro_altitude_ft").isNull().alias("own_null"),
+    )
+
+    def _rates(cond):
+        r = a.filter(cond).select(
+            F.count(F.lit(1)).alias("n"),
+            F.sum(F.when(F.col("repeats"), 1).otherwise(0)).alias("rep"),
+            F.sum(F.when(F.col("own_null"), 1).otherwise(0)).alias("nul"),
+        ).collect()[0]
+        n = r["n"] or 0
+        pct = lambda x: round(100.0 * (x or 0) / n, 2) if n else 0.0  # noqa: E731
+        return n, pct(r["rep"]), pct(r["nul"])
+
+    pregap_n, pregap_repeat_pct, pregap_null_pct = _rates(F.col("pre_gap"))
+    _, other_repeat_pct, other_null_pct = _rates(~F.col("pre_gap"))
+    return {
+        "pregap_n": pregap_n,
+        "pregap_repeat_pct": pregap_repeat_pct,
+        "pregap_null_pct": pregap_null_pct,
+        "other_repeat_pct": other_repeat_pct,
+        "other_null_pct": other_null_pct,
+    }
+
+
 def _write_csv(path: Path, fieldnames: list, rows: list) -> None:
     with path.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fieldnames)
@@ -423,6 +735,9 @@ def run_containment(spark, args, period_cfg, days, out_path) -> dict:
     # day reaches into a month `months` does not load. It is printed below and
     # returned as its own input count either way.
     v1 = track_truth.load_flight_intervals(spark, period_cfg["months"], days)
+    # The gate-interval summary reads the same frame the cross-check needs, so
+    # it rides along here rather than paying a second load.
+    row.update(gate_interval_summary(v1))
     n_kept = v1.count()
     missed = v1.join(inside, "flight_key", "left_anti").count()
     inside.unpersist()
@@ -507,9 +822,71 @@ def run_boundary_hist(spark, s3, args, period_cfg, days, out_path) -> dict:
     return {"samples": n_sv, "gt_flights": n_gt}
 
 
+def run_traffic_fill(spark, args, period_cfg, days, out_path) -> dict:
+    """What A3's split predicate cannot see, and whose masking made it so.
+
+    Reads two track tables for the sampled days -- the cleaned table the arms
+    jobs read (``period_cfg["tracks"]``) and its raw counterpart
+    (``RAW_TRACKS``) -- and nothing else: no ground truth, no segmentation, no
+    assignment table. The clean row says what A3's predicate actually sees;
+    the raw columns say what it would have seen before step 02a, and the
+    stale-signature rates attribute the difference. ``gap_boundary_nulls``
+    uses ``traffic``'s own fixed 10-minute threshold by default, not the
+    pipeline's configurable ``gap_minutes``, because this measures A3's
+    behaviour specifically.
+
+    ``osn_tracks_clean``/``tracks_clean`` store ``baro_altitude`` in metres --
+    storage is SI, ``cleaning/native.py`` and ``segmentation/base.py`` both
+    convert only at the point of use -- but ``gap_boundary_nulls`` reads
+    ``baro_altitude_ft``, the aviation-unit name its own field names promise.
+    Converting here, once, at the point of use is that same rule; ``FT_PER_M``
+    is imported from ``segmentation/base.py`` rather than retyped, so the
+    pipeline's conversion and this one can never drift apart. No other column
+    ``gap_boundary_nulls`` reads (``icao24``, ``event_time``, ``on_ground``) is
+    unit-bearing, so this is the only conversion this job needs.
+    """
+    sv = spark.read.parquet(period_cfg["tracks"]).filter(
+        F.to_date("event_time").isin(days)
+    ).withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M).cache()
+    n_sv = sv.count()
+    print(f"{n_sv:,} samples (clean)")
+
+    row = gap_boundary_nulls(sv)
+    sv.unpersist()
+    row["period"] = args.period
+
+    # The raw table: same days, same conversion, same counting -- the only
+    # thing that differs is that step 02a has not masked anything yet. The
+    # comparison attributes the cleaned table's blindness: if raw were
+    # comparably high, it would be the feed; measured, it is not, and the
+    # stale-signature rates below say why. Raw tables are diagnostic-only
+    # reads (see RAW_TRACKS); a missing period fails loudly here rather than
+    # silently producing a clean-only row.
+    raw = spark.read.parquet(RAW_TRACKS[args.period]).filter(
+        F.to_date("event_time").isin(days)
+    ).withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M).cache()
+    n_raw = raw.count()
+    print(f"{n_raw:,} samples (raw)")
+
+    raw_gaps = gap_boundary_nulls(raw)
+    row["raw_n_gaps"] = raw_gaps["n_gaps"]
+    row["raw_n_null_either_side"] = raw_gaps["n_null_either_side"]
+    row["raw_null_pct"] = raw_gaps["null_pct"]
+    row.update(pre_gap_stale_signature(raw))
+    raw.unpersist()
+
+    for k in TRAFFIC_FILL_FIELDS:
+        print(f"  {k:22} {row[k]}")
+    _write_csv(out_path, TRAFFIC_FILL_FIELDS, [row])
+    return {"samples": n_sv, "raw_samples": n_raw}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--job", choices=["containment", "boundary-hist"], required=True)
+    ap.add_argument(
+        "--job", choices=["containment", "boundary-hist", "traffic-fill"],
+        required=True,
+    )
     ap.add_argument("--period", choices=sorted(track_methods.PERIODS), default="2025")
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--out-name", default=None,
@@ -547,6 +924,10 @@ def main() -> None:
         inputs = run_containment(spark, args, period_cfg, days, out_path)
         tables = []
         code = ["benchmarks/track_diagnostics.py", "benchmarks/track_truth.py"]
+    elif args.job == "traffic-fill":
+        inputs = run_traffic_fill(spark, args, period_cfg, days, out_path)
+        tables = [period_cfg["tracks"]]
+        code = ["benchmarks/track_diagnostics.py"]
     else:
         inputs = run_boundary_hist(spark, s3, args, period_cfg, days, out_path)
         tables = [period_cfg["tracks"]]

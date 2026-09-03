@@ -70,7 +70,11 @@ import provenance  # noqa: E402
 import track_truth  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
-from track_score import score_arm, track_extents  # noqa: E402
+from track_score import (  # noqa: E402
+    score_arm,
+    score_arm_gated,
+    track_extents,
+)
 
 from opdi.config import OPDIConfig  # noqa: E402
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
@@ -337,9 +341,9 @@ def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments,
     print(f"  -> {out} ({n_obj} objects, {n_bytes / 1e9:.3f} GB)")
 
     # The delete used to be on the success path only. Scoring is the part that
-    # can raise -- `vmeasure` collects the whole contingency table to the driver
-    # -- so the one failure mode that matters left the table behind on S3
-    # exactly when nothing was going to come back for it.
+    # can raise -- `homogeneity_completeness` collects the whole contingency
+    # table to the driver -- so the one failure mode that matters left the
+    # table behind on S3 exactly when nothing was going to come back for it.
     try:
         assign = spark.read.parquet(out)
         # Track extents come from the full assignment table, not from `matched`:
@@ -424,6 +428,28 @@ def main():
     # the CSV after the loop meant a crash on arm 8 discarded arms 1-7, whose
     # assignment tables had already been deleted: the work was not recoverable
     # without re-running the whole ladder on the cluster.
+    # Score every arm over BOTH intervals. `run_arm`'s default scorer measures
+    # only `[t_off, t_land]` -- airborne -- so every sample at the stand and on
+    # the taxiways matches no flight and leaves the metrics before they are
+    # computed. Nothing in a metric built that way says whether taxi-out was
+    # attached to the right track, which is the question this closure exists to
+    # answer.
+    #
+    # It has to be a closure rather than `score=score_arm_gated`: `run_arm`
+    # calls `score(matched, extents, assign)`, and `score_arm_gated`'s third
+    # parameter is `matched_gate`, not the raw assignment table. Same arity,
+    # different meaning -- so passing it directly binds the wrong frame. It
+    # would fail loudly (`assign` carries no `flight_key`) rather than report a
+    # wrong number, but loudly is not a reason to rely on it.
+    #
+    # `assign` is the unfiltered assignment table, handed over precisely so a
+    # scorer can re-match on a different interval without re-reading it from S3.
+    def _score_with_gate(matched, extents, assign):
+        matched_gate = track_truth.overlap_join(
+            assign, gt, bounds=("t_off_block", "t_in_block")
+        )
+        return score_arm_gated(matched, extents, matched_gate)
+
     rows = []
     fh = out.open("w", newline="")
     writer = None
@@ -432,7 +458,8 @@ def main():
             print(f"\n=== {arm} ({args.period}) ===")
             require_headroom(s3, f"arm {arm}")
             row, meta = run_arm(
-                spark, s3, arm, args.period, sv, gt, params, args.keep_assignments
+                spark, s3, arm, args.period, sv, gt, params,
+                args.keep_assignments, score=_score_with_gate,
             )
             row.update(meta)
             rows.append(row)

@@ -52,6 +52,7 @@ __all__ = [
     "gap_minutes",
     "altitude_ft",
     "speed_kt",
+    "lookback_minutes",
     "FT_PER_M",
     "KT_PER_MPS",
 ]
@@ -88,6 +89,16 @@ class SegmentationParams:
     gap_minutes: float = 30.0
     low_alt_gap_minutes: float = 15.0
     low_alt_ft: float = 5000.0
+    #: Bound on A8's callsign lookback, in minutes. ``None`` means "follow
+    #: ``gap_minutes``", which is what the rule did when the bound was written
+    #: and is therefore the only default that reproduces published behaviour.
+    #:
+    #: Separate from ``gap_minutes`` because the two answer different questions.
+    #: ``gap_minutes`` asks how long a reception hole must be before it is a new
+    #: flight. This asks how long a *callsign* stays valid for comparison across
+    #: blank samples. Nothing says one number is right for both; they were the
+    #: same number because one was to hand when the other was needed.
+    callsign_lookback_minutes: float | None = None
     # A5-A7 knobs; unused by the gap family.
     ground_dwell_minutes: float = 5.0
     turnaround_max_height_ft: float = 1000.0
@@ -98,9 +109,9 @@ class SegmentationParams:
     def from_config(cls, config) -> "SegmentationParams":
         """Build the engine's parameters from ``OPDIConfig``.
 
-        ``config.SegmentationConfig`` carries the same seven fields with the same
-        defaults, and this is the only thing that reads it. Without this method
-        the two were a coincidence rather than a link: someone setting
+        ``config.SegmentationConfig`` carries every field of ``SegmentationParams``
+        with the same defaults, and this is the only thing that reads it. Without
+        this method the two were a coincidence rather than a link: someone setting
         ``OPDIConfig().segmentation.low_alt_ft`` would have observed no effect and
         no error. ``tests/test_segmentation_base.py`` asserts the two default
         sets are identical field by field, so they cannot drift apart again.
@@ -207,3 +218,15 @@ def altitude_ft() -> Column:
 def speed_kt() -> Column:
     """Ground speed in knots, for comparison only."""
     return F.col(_SPD_KT)
+
+
+def lookback_minutes(p: "SegmentationParams") -> float:
+    """A8's lookback bound: the explicit value, or ``gap_minutes`` when unset.
+
+    ``is None`` rather than ``or``: ``0.0`` is a meaningful setting -- it
+    disables the callsign-change break, which is the grid's ``airframe_only``
+    corner -- and ``or`` would read it as unset.
+    """
+    if p.callsign_lookback_minutes is None:
+        return p.gap_minutes
+    return p.callsign_lookback_minutes

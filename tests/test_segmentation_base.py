@@ -164,7 +164,7 @@ def test_break_rule_requires_a_break_expression():
 def test_segmentation_config_and_params_agree_field_by_field():
     """``SegmentationConfig`` is the config-file surface for ``SegmentationParams``.
 
-    Two dataclasses, the same seven fields, the same seven defaults -- and before
+    Two dataclasses, every field the same, every default the same -- and before
     ``from_config`` existed, no link at all between them. ``SegmentationConfig``
     was read by nothing, so tuning ``OPDIConfig().segmentation.low_alt_ft``
     produced no effect and no error. This test is the link's guarantee: if either
