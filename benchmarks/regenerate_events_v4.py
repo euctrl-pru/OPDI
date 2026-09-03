@@ -43,6 +43,7 @@ is and still drives the V3 paper):
 import argparse
 import shutil
 import subprocess
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -52,7 +53,34 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
 
-PAPER = REPO.parent / "opdi-portal" / "papers" / "flight-events-v4"
+def _find_portal() -> Path:
+    """Locate the opdi-portal checkout that owns this paper.
+
+    ``REPO.parent / "opdi-portal"`` holds only when ``opdi`` and
+    ``opdi-portal`` are siblings in the workspace -- i.e. when this runs from
+    the primary checkout. Run from a git *worktree*, ``REPO`` is
+    ``.../opdi/.claude/worktrees/<name>`` and ``REPO.parent`` is the worktrees
+    directory, where no ``opdi-portal`` exists; the outputs would then stage to
+    a phantom path and the paper would render stale. So honour an explicit
+    ``OPDI_PORTAL_DIR`` first, then walk up until an ``opdi-portal`` sibling
+    appears.
+    """
+    env = os.environ.get("OPDI_PORTAL_DIR")
+    if env:
+        return Path(env)
+    # Walk up for an ``opdi-portal`` sibling, but skip any candidate that lives
+    # inside ``.claude/worktrees`` -- a prior buggy run may have *created* a
+    # phantom ``.../worktrees/opdi-portal`` there, and finding it would just
+    # reproduce the original misresolution. The real checkout is the sibling at
+    # the workspace root, outside any worktree.
+    for anc in REPO.parents:
+        cand = anc / "opdi-portal"
+        if cand.exists() and ".claude/worktrees" not in str(cand):
+            return cand
+    return REPO.parent / "opdi-portal"  # nothing found; original guess
+
+
+PAPER = _find_portal() / "papers" / "flight-events-v4"
 DATA = PAPER / "data"
 
 PERIODS = ("2026",)
