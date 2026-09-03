@@ -3,6 +3,11 @@ H3 hexagonal indexing utility functions for OPDI pipeline.
 
 Provides helper functions for working with H3 geospatial indices,
 including column name generation, coordinate extraction, and set operations.
+
+Ported to the h3 v4 API (installed version 4.5.0). Cell identity is
+version-independent -- v3 and v4 produce the same cell string for the same
+lat/lng/resolution -- so this port only changes *how* each result is computed,
+never the public names, signatures, or return types callers already rely on.
 """
 
 from typing import List, Set, Tuple
@@ -43,7 +48,7 @@ def get_h3_coords(h3_index: str) -> Tuple[float, float]:
         >>> lat, lon = get_h3_coords('871fb46655fffff')
         >>> print(f"Lat: {lat:.4f}, Lon: {lon:.4f}")
     """
-    lat, lon = h3.h3_to_geo(h3_index)
+    lat, lon = h3.cell_to_latlng(h3_index)
     return lat, lon
 
 
@@ -67,7 +72,7 @@ def compact_h3_set(h3_set: Set[str]) -> Set[str]:
         True
     """
     try:
-        return h3.compact(h3_set)
+        return set(h3.compact_cells(h3_set))
     except Exception:
         # If compaction fails, return original set
         return h3_set
@@ -92,7 +97,7 @@ def uncompact_h3_set(h3_set: Set[str], target_resolution: int) -> Set[str]:
         >>> len(uncompacted) > len(compacted)  # More hexagons at finer resolution
         True
     """
-    return h3.uncompact(h3_set, target_resolution)
+    return set(h3.uncompact_cells(h3_set, target_resolution))
 
 
 def h3_distance(h3_index1: str, h3_index2: str) -> int:
@@ -113,7 +118,7 @@ def h3_distance(h3_index1: str, h3_index2: str) -> int:
         >>> dist = h3_distance('871fb46655fffff', '871fb46656fffff')
         >>> print(f"Grid distance: {dist} hexagons")
     """
-    return h3.h3_distance(h3_index1, h3_index2)
+    return h3.grid_distance(h3_index1, h3_index2)
 
 
 def get_h3_resolution(h3_index: str) -> int:
@@ -131,7 +136,7 @@ def get_h3_resolution(h3_index: str) -> int:
         >>> print(f"Resolution: {res}")
         Resolution: 7
     """
-    return h3.h3_get_resolution(h3_index)
+    return h3.get_resolution(h3_index)
 
 
 def k_ring(h3_index: str, k: int) -> Set[str]:
@@ -151,7 +156,7 @@ def k_ring(h3_index: str, k: int) -> Set[str]:
         >>> len(neighbors)  # Center + 6 neighbors
         7
     """
-    return h3.k_ring(h3_index, k)
+    return set(h3.grid_disk(h3_index, k))
 
 
 def hex_ring(h3_index: str, k: int) -> Set[str]:
@@ -171,7 +176,7 @@ def hex_ring(h3_index: str, k: int) -> Set[str]:
         >>> len(ring)  # Just the 6 neighbors
         6
     """
-    return h3.hex_ring(h3_index, k)
+    return set(h3.grid_ring(h3_index, k))
 
 
 def h3_to_parent(h3_index: str, parent_resolution: int) -> str:
@@ -190,7 +195,7 @@ def h3_to_parent(h3_index: str, parent_resolution: int) -> str:
         >>> parent = h3_to_parent(child, 6)
         >>> print(f"Parent: {parent}")
     """
-    return h3.h3_to_parent(h3_index, parent_resolution)
+    return h3.cell_to_parent(h3_index, parent_resolution)
 
 
 def h3_to_children(h3_index: str, child_resolution: int) -> Set[str]:
@@ -210,7 +215,26 @@ def h3_to_children(h3_index: str, child_resolution: int) -> Set[str]:
         >>> print(f"Number of children: {len(children)}")
         Number of children: 7
     """
-    return h3.h3_to_children(h3_index, child_resolution)
+    return set(h3.cell_to_children(h3_index, child_resolution))
+
+
+def _ring_to_latlng(ring: List[List[float]], geo_json_conformant: bool) -> List[Tuple[float, float]]:
+    """
+    Convert one GeoJSON coordinate ring to the [lat, lng] tuples h3.LatLngPoly
+    expects.
+
+    THE FOOTGUN: v3's ``polyfill(..., geo_json_conformant=True)`` consumed
+    GeoJSON-ordered rings, i.e. ``[lng, lat]`` pairs. v4's ``h3.LatLngPoly``
+    always takes ``[lat, lng]`` tuples, regardless of the caller's input
+    convention. So when ``geo_json_conformant`` is True the two coordinates in
+    each pair must be swapped before handing them to h3; when False, the
+    caller already passed ``[lat, lng]`` and no swap is needed. Getting this
+    backwards yields an empty or silently wrong cell set -- see
+    tests/test_h3_helpers.py::test_polyfill_geojson_footgun_lat_lng_order.
+    """
+    if geo_json_conformant:
+        return [(coord[1], coord[0]) for coord in ring]
+    return [(coord[0], coord[1]) for coord in ring]
 
 
 def polyfill_geojson(geojson_geometry: dict, resolution: int, geo_json_conformant: bool = False) -> Set[str]:
@@ -234,7 +258,25 @@ def polyfill_geojson(geojson_geometry: dict, resolution: int, geo_json_conforman
         ... }
         >>> hexagons = polyfill_geojson(polygon, resolution=7, geo_json_conformant=True)
     """
-    return h3.polyfill_geojson(geojson_geometry, resolution, geo_json_conformant=geo_json_conformant)
+    geom_type = geojson_geometry["type"]
+    coordinates = geojson_geometry["coordinates"]
+
+    if geom_type == "Polygon":
+        polygons = [coordinates]
+    elif geom_type == "MultiPolygon":
+        polygons = coordinates
+    else:
+        raise ValueError(f"Unsupported geometry type for polyfill_geojson: {geom_type!r}")
+
+    cells: Set[str] = set()
+    for rings in polygons:
+        outer, *holes = rings
+        outer_latlng = _ring_to_latlng(outer, geo_json_conformant)
+        holes_latlng = [_ring_to_latlng(hole, geo_json_conformant) for hole in holes]
+        shape = h3.LatLngPoly(outer_latlng, *holes_latlng)
+        cells.update(h3.polygon_to_cells(shape, resolution))
+
+    return cells
 
 
 def is_valid_h3_index(h3_index: str) -> bool:
@@ -253,4 +295,4 @@ def is_valid_h3_index(h3_index: str) -> bool:
         >>> is_valid_h3_index('invalid')
         False
     """
-    return h3.h3_is_valid(h3_index)
+    return h3.is_valid_cell(h3_index)
