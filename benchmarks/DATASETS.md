@@ -232,6 +232,17 @@ All under `opdi/research/`, deliberately separate from the pipeline prefixes abo
 | `opdi/research/adep_ades/results/<tag>/` | 0.00 GB | `benchmarks/adep_ades.py` | Per-method coverage/accuracy, one row per method. `<tag>` is `<airport_set>_r<radius>_fl<max_fl>`. | v1–v3, 7 methods |
 | `opdi/research/adep_ades/cascade_diag/<tag>_<ladder>_vs_<control>/` | 0.00 GB | `--diagnose-cascade` | Per-rung attribution for M6: how many flights each rung answered, its accuracy on them, and the control's accuracy on the same flights. | v1–v3 |
 | `opdi/research/adep_ades/abstain_sweep/<airport_set>/` | 0.00 GB | `--sweep-abstain` | M7 coverage/accuracy over the endpoint distance x height grid (8 x 6 = 48 rows). | v1–v3 |
+| `opdi/research/tcv2/` | **transient — should read 0 GB at rest** | `benchmarks/track_pipeline_v2.py` | Redirected copies of the pipeline's own tables, one method at a time: `research/tcv2/<method>/{osn_tracks,osn_tracks_clean,opdi_flight_list,opdi_endpoint_candidates}` for `legacy`, `airframe_only` and `standard`, plus a state-vector slice at `research/tcv2/_shared/osn_statevectors_v2` shared by all three (segmentation runs after ingestion, so the three methods can share one ingest of the same bytes). This is what lets V2 score a segmentation through the real pipeline — steps 02, 02a and, for `legacy`/`standard`, 03 — instead of a harness reading an already-built table. | v2, 2025-06-05/07 and 2024-06-05/07 |
+
+**`research/tcv2/` is self-deleting; do not build on anything found under it.**
+`track_pipeline_v2.py` writes each method's three tables, scores them, and
+deletes that method's prefix in a `finally` block before starting the next
+method — `delete_method`, restricted by `delete_prefix` to write only under
+`opdi/research/tcv2/`. The shared state-vector slice is dropped the same way,
+once after the last method. Between runs this prefix should be empty; if it is
+not, either a run is in flight or a previous one crashed before its `finally`
+ran, and the safe response is to check for a running job before deleting
+anything, not to treat the contents as a dataset to keep.
 
 ::: warning
 **Do not prune `research/tracks/`.** An earlier revision of this file
