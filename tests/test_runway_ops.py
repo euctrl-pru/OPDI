@@ -667,12 +667,13 @@ def test_runway_traversals_classifies_a_departure_and_names_its_direction(spark)
 
 def _arrival_on_07(spark, elev_adep_ft=0.0, elev_ades_ft=0.0,
                    adep="EBBR", ades="EBBR"):
-    """The arrival profile with the H3 cells a real runway polygon gives it.
+    """The arrival profile with the H3 cells a real runway grid gives it.
 
-    The polygon starts at the threshold, so the four samples short of it are
-    airborne cells and only the last five are runway cells. `runway_traversals`
-    therefore derives `entry_time` = 40 s, which is exactly the shape that
-    makes `landing` unreachable without the arrival lead.
+    The samples short of the threshold are ``approach``-zone cells and the rest
+    are ``runway`` cells. `runway_traversals` now spans the approach corridor,
+    so it derives `entry_time` = 0 s (1.5 NM out on final, descending) and
+    `exit_time` = 80 s (the rollout) -- the descent is what lets an arrival be
+    classified even when the on-runway flare samples are sparse.
     """
     return _as_flown(
         _arrival_track(spark, elev_adep_ft, elev_ades_ft, adep, ades),
@@ -682,8 +683,11 @@ def _arrival_on_07(spark, elev_adep_ft=0.0, elev_ades_ft=0.0,
     )
 
 
-def test_runway_traversals_derives_an_arrival_bounded_by_the_polygon(spark):
-    """The entry is the threshold, not the point 1.5 NM out on final."""
+def test_runway_traversals_spans_the_approach_corridor_for_an_arrival(spark):
+    """The entry is the descent on final, not the threshold: the traversal
+    reaches back across the approach corridor so the classification sees a high
+    entry (on approach) and a low exit (after the flare). The exit is still the
+    last on-runway sample."""
     out = runway_traversals(
         _arrival_on_07(spark), _grid(spark), _thresholds(spark), EventConfig()
     ).collect()
@@ -691,8 +695,13 @@ def test_runway_traversals_derives_an_arrival_bounded_by_the_polygon(spark):
     assert len(out) == 1
     assert out[0]["class"] == "arrival"
     assert out[0]["rwy_ident"] == "07"
-    assert (out[0]["entry_time"] - _EPOCH).total_seconds() == _ARRIVAL_ENTRY_S
+    # t = 0 is the first approach sample, 1.5 NM out on final.
+    assert (out[0]["entry_time"] - _EPOCH).total_seconds() == _ARRIVAL[0][0]
     assert (out[0]["exit_time"] - _EPOCH).total_seconds() == _ARRIVAL_EXIT_S
+    # The entry is on approach (well above the airborne height) and the exit
+    # after touchdown (below it) -- the shape classify_traversal reads.
+    assert out[0]["entry_height_ft"] > 15.0
+    assert out[0]["exit_height_ft"] < 15.0
 
 
 def test_landing_fires_on_a_traversal_the_detector_actually_produces(spark):
@@ -947,10 +956,10 @@ def test_arrival_from_final_approach_emits_touchdown(spark):
     """A descending final approach, pruned on the grid, all the way to rollout.
 
     The approach samples are ``approach``-zone cells short of the threshold,
-    descending through the field; the geometry test keeps them out of the
-    occupancy traversal, but the arrival window reaches back across them so the
-    threshold-plane crossing has a sample with a negative along-track distance
-    to interpolate from. All three arrival milestones fire, in order, and
+    descending through the field; the traversal now spans them, so the
+    classification sees a high entry on final and the threshold-plane crossing
+    has a sample with a negative along-track distance to interpolate from.
+    All three arrival milestones fire, in order, and
     ``touchdown`` -- which emitted for essentially no arrival under hexaero --
     is among them. Remove the approach corridor (the arrival lead) and
     ``landing`` disappears, breaking the sequence.
@@ -959,6 +968,65 @@ def test_arrival_from_final_approach_emits_touchdown(spark):
     traversals = runway_traversals(sv, _grid(spark), _thresholds(spark), EventConfig())
     out = runway_milestones(sv, traversals, EventConfig())
 
+    seq = [r["type"] for r in out.orderBy("event_time").collect()]
+    assert seq == ["landing", "touchdown", "runway-vacated"]
+    assert out.filter(F.col("type") == "touchdown").count() == 1
+
+
+def _sparse_arrival_track(spark):
+    """An arrival whose surface samples are gone: a descending approach plus a
+    single low on-runway sample, and nothing else.
+
+    This is the scale risk. Cleaning nulls stale/duplicated surface broadcasts,
+    which is the documented reason the original runway family lost arrivals: an
+    aircraft with no on-runway sample above the airborne height has no flare
+    to classify against. Only the descending approach-corridor samples (all
+    above 15 ft) and one low on-runway sample (5 ft, just past the threshold)
+    survive here. A detector that classifies arrivals from on-runway occupancy
+    alone sees entry = exit = 5 ft, finds no arrival, and emits no touchdown.
+    """
+    prof = [
+        (0, -1.5, 500.0, 140),
+        (10, -1.0, 340.0, 138),
+        (20, -0.5, 180.0, 136),
+        (30, -0.2, 60.0, 134),
+        (40, -0.1, 30.0, 130),
+        (50, 0.2, 5.0, 110),
+    ]
+    samples = []
+    for t, along, height_ft, kt in prof:
+        bearing = 70.0 if along >= 0 else 250.0
+        lat, lon = _dest(50.0, 4.0, bearing, abs(along))
+        samples.append({
+            "t": t, "lat": lat, "lon": lon,
+            "baro_altitude": _m(height_ft),
+            "velocity": _mps(kt), "vert_rate": -3.0, "heading": 70.0,
+        })
+    cells = ["cell-air" if along < 0 else "cell-rwy" for _, along, _, _ in prof]
+    return _as_flown(_prepared(make_track(spark, samples)), cells=cells)
+
+
+def test_a_sparse_arrival_still_emits_touchdown_from_the_approach_corridor(spark):
+    """The scale-risk guard: an arrival with no on-runway flare sample above
+    15 ft must STILL emit landing -> touchdown -> runway-vacated, off the
+    descending approach corridor.
+
+    Against a detector that requires an on-runway sample above the airborne
+    height to classify an arrival, no traversal forms and this test emits
+    nothing -- it is the mutation the fix removes. With the approach corridor
+    driving formation, the descent supplies the high entry and the one low
+    on-runway sample the low exit, so the arrival classifies and all three
+    milestones fire.
+    """
+    sv = _sparse_arrival_track(spark)
+    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark), EventConfig())
+
+    rows = traversals.collect()
+    assert len(rows) == 1, "the sparse arrival formed no traversal"
+    assert rows[0]["class"] == "arrival"
+    assert rows[0]["rwy_ident"] == "07"
+
+    out = runway_milestones(sv, traversals, EventConfig())
     seq = [r["type"] for r in out.orderBy("event_time").collect()]
     assert seq == ["landing", "touchdown", "runway-vacated"]
     assert out.filter(F.col("type") == "touchdown").count() == 1

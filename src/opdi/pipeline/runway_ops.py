@@ -140,6 +140,18 @@ ROLL_MAX_GAP_SECONDS = 30.0
 #: polygon, because those are statements about occupancy.
 ARRIVAL_LEAD_SECONDS = 60.0
 
+#: The approach corridor's extent, mirrored from the ``h3_runway_zones`` grid
+#: (:data:`opdi.reference.h3_runway_grid.APPROACH_NM` /
+#: ``APPROACH_FAR_HALF_WIDTH_NM``). ``runway_traversals`` prunes on the grid
+#: cells first, so these only bound the *geometry* check that follows -- they
+#: reject a sample that shares an approach cell with this strip but sits outside
+#: the corridor (a wide shared cell, a parallel runway's final). Duplicated as
+#: literals rather than imported so this module keeps its no-reference-tables,
+#: laptop-testable contract; they are bounds, not a published threshold, so a
+#: small drift from the grid would only widen or narrow the reject margin.
+APPROACH_CORRIDOR_NM = 3.0
+APPROACH_CORRIDOR_HALF_WIDTH_NM = 0.5
+
 #: Half-width of the dead band around the go-around trigger and recovery
 #: heights, in feet. Wider than ``AIRBORNE_HYSTERESIS_FT`` because it guards a
 #: whole excursion rather than an instant: an aircraft levelling at 500 ft on a
@@ -149,7 +161,7 @@ GOAROUND_HYSTERESIS_FT = 50.0
 #: What a traversal is, for windowing purposes.
 #:
 #: ``apt_ident`` is in the key and has to be. ``trace_id`` restarts at 0 for
-#: every ``(track_id, strip_id)``, so it carries no information across
+#: every ``(track_id, strip_id, rwy_ident)``, so it carries no information across
 #: aerodromes -- and runway designators repeat: a flight departing 07 at its
 #: origin and crossing a runway also called 07 at its destination produced two
 #: traversals with an identical ``(track_id, "07", "0")``. Everything windowed
@@ -289,16 +301,32 @@ def runway_traversals(
     ``grid`` is ``h3_runway_zones`` -- one row per (res-12 cell, strip), tagged
     ``zone`` ``"runway"`` or ``"approach"``. An equi-join on the cell prunes
     ``sv`` to the neighbourhood of a runway at every covered aerodrome, which is
-    the coverage the retired ``hexaero_airport_layouts`` polygons never had:
-    a sample survives the prune when its cell is one the grid rasterised for a
-    strip of an aerodrome this flight names. ``thresholds`` is
-    :func:`runways.runway_thresholds` -- one row per runway *direction*, now
-    carrying ``rwy_length_nm``/``rwy_half_width_nm`` so the prune can be refined
-    to a genuine on-runway test rather than trusting cell membership alone.
+    the coverage the retired ``hexaero_airport_layouts`` polygons never had.
+    ``thresholds`` is :func:`runways.runway_thresholds` -- one row per runway
+    *direction*, carrying ``rwy_length_nm``/``rwy_half_width_nm``.
+
+    **A traversal is built per runway *direction*, and an arrival's samples span
+    its approach corridor, not just its runway occupancy.** Each cell that
+    survives the prune is matched against *both* directions of its strip, and a
+    sample joins a direction when it is either
+
+    * on that direction's runway -- ``zone == "runway"`` with along-track in
+      ``[0, length]`` and cross-track within the half-width (occupancy); or
+    * on that direction's *approach* -- ``zone == "approach"`` with a
+      **negative** along-track (short of that threshold) inside the corridor.
+
+    The negative-along-track gate is what keeps this from polluting departures
+    and crossings: a departing aircraft's own direction has no samples short of
+    its threshold, so it is still classified from runway occupancy exactly as
+    before; only the *landing* direction of a descending track picks up the
+    approach corridor. That corridor is the fix for the arrival gap -- a real
+    arrival whose surface samples are sparse or nulled by cleaning has no
+    on-runway flare sample above the airborne height, so a traversal built from
+    occupancy alone never satisfies ``classify_traversal``'s arrival test and no
+    ``touchdown`` is ever emitted. Reaching back across the descent gives the
+    classification a high entry (on final) and a low exit (after the flare),
+    which is the shape an arrival actually has.
     """
-    # 1. Prune to the neighbourhood of a runway with an equi-join on the res-12
-    #    grid, restricted to aerodromes this flight actually names. Broadcast
-    #    because the grid is small next to a month of state vectors.
     grid_cols = grid.select(
         F.col("h3_id"),
         F.col("apt_icao"),
@@ -314,54 +342,70 @@ def runway_traversals(
         "inner",
     )
 
-    # 2. Refine the cell prune to a geometric occupancy test. One direction of
-    #    the strip fixes the centreline, and whether a sample sits between the
-    #    two thresholds is the same question from either end -- the two
-    #    along-track distances sum to the length -- so the ``le`` threshold
-    #    alone decides membership. The two *directions* are weighed later, at
-    #    the traversal level, exactly as the old code weighed them.
-    memb = thresholds.select(
-        F.col("apt_ident").alias("_m_apt"),
-        F.col("rwy_ident").alias("_m_rwy"),
-        F.col("thr_lat").alias("_m_thr_lat"),
-        F.col("thr_lon").alias("_m_thr_lon"),
-        F.col("rwy_bearing").alias("_m_bearing"),
-        F.col("rwy_length_nm").alias("_m_length"),
-        F.col("rwy_half_width_nm").alias("_m_half_width"),
+    # Both directions of the strip, at the sample level: the along-track sign
+    # is direction-specific, and it is the sign that decides whether an
+    # approach sample belongs to a direction. ``le``/``he`` bound the join to
+    # this strip's two directions rather than every runway at the aerodrome.
+    dir_thr = thresholds.select(
+        F.col("apt_ident").alias("_t_apt"),
+        F.col("rwy_ident"),
+        F.col("thr_lat"),
+        F.col("thr_lon"),
+        F.col("rwy_bearing"),
+        F.col("rwy_length_nm"),
+        F.col("rwy_half_width_nm"),
     )
-    near = near.join(
-        F.broadcast(memb),
-        (F.col("apt_icao") == F.col("_m_apt")) & (F.col("le_ident") == F.col("_m_rwy")),
+    cand = near.join(
+        F.broadcast(dir_thr),
+        (F.col("apt_icao") == F.col("_t_apt"))
+        & (
+            (F.col("rwy_ident") == F.col("le_ident"))
+            | (F.col("rwy_ident") == F.col("he_ident"))
+        ),
         "inner",
-    )
-    near = near.withColumn(
+    ).drop("_t_apt")
+    cand = cand.withColumn(
         "_along",
         along_track_nm(
             F.col("lat"), F.col("lon"),
-            F.col("_m_thr_lat"), F.col("_m_thr_lon"), F.col("_m_bearing"),
+            F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing"),
         ),
     ).withColumn(
         "_cross",
         cross_track_nm(
             F.col("lat"), F.col("lon"),
-            F.col("_m_thr_lat"), F.col("_m_thr_lon"), F.col("_m_bearing"),
+            F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing"),
         ),
     )
-    # Only ``runway`` cells inside the strip's own extent are occupancy. The
-    # ``approach`` cells and anything off either end fall away here; the
-    # arrival window that needs the pre-threshold samples is rebuilt from ``sv``
-    # by time in ``_traversal_samples``. See ARRIVAL_LEAD_SECONDS.
-    work = near.filter(
+
+    # Occupancy is measured from the LANDING threshold (``0 <= along``), so a
+    # runway cell short of the threshold -- pre-threshold paved area, a
+    # displaced threshold -- is intentionally outside it. That is a known,
+    # small late bias on ``line-up``/``take-off-roll`` (the roll may begin a few
+    # metres behind the painted threshold), traded for a clean, published
+    # definition of "on the runway" that both directions and the arrival
+    # threshold-plane crossing agree on.
+    on_runway = (
         (F.col("zone") == F.lit("runway"))
         & (F.col("_along") >= F.lit(0.0))
-        & (F.col("_along") <= F.col("_m_length"))
-        & (F.col("_cross") <= F.col("_m_half_width"))
-    ).drop(
-        "_m_apt", "_m_rwy", "_m_thr_lat", "_m_thr_lon", "_m_bearing",
-        "_m_length", "_m_half_width", "_along", "_cross",
+        & (F.col("_along") <= F.col("rwy_length_nm"))
+        & (F.col("_cross") <= F.col("rwy_half_width_nm"))
     )
+    # The approach corridor, for the *landing* direction only: short of this
+    # threshold (negative along-track), inside the grid-rasterised corridor.
+    on_approach = (
+        (F.col("zone") == F.lit("approach"))
+        & (F.col("_along") < F.lit(0.0))
+        & (F.col("_along") >= -F.lit(APPROACH_CORRIDOR_NM))
+        & (F.col("_cross") <= F.lit(APPROACH_CORRIDOR_HALF_WIDTH_NM))
+    )
+    work = cand.filter(on_runway | on_approach).drop("_along", "_cross")
 
-    ordered = Window.partitionBy("track_id", "strip_id").orderBy("event_time")
+    # One direction is one candidate traversal, so the session -- and the trace
+    # id -- is per direction. An arrival's approach samples are contiguous in
+    # time with its runway samples, so they fall in one trace; the reciprocal
+    # direction sees only the runway occupancy and its own (empty here) approach.
+    ordered = Window.partitionBy("track_id", "strip_id", "rwy_ident").orderBy("event_time")
     work = work.withColumn(
         "_gap",
         F.col("event_time").cast("long")
@@ -391,14 +435,16 @@ def runway_traversals(
 
     # ``min_by``/``max_by``, never ``first``/``last``: the latter take partition
     # order, not time order, which is the correctness fix
-    # ``airport_events_ordered`` records. The callsign is aggregated rather than
-    # grouped on for the reason ``calculate_airport_events`` documents at
-    # length -- a track that broadcast two callsigns while occupying one runway
-    # would otherwise become two traversals and two movements. ``le_ident`` and
-    # ``he_ident`` ride the grouping so both directions of the strip are
-    # available as candidates without a second join back to the grid.
+    # ``airport_events_ordered`` records. For an arrival the earliest sample is
+    # now on final and the latest after the flare, so ``entry_height_ft`` is the
+    # height on approach and ``exit_height_ft`` the height after touchdown --
+    # the two readings ``classify_traversal`` needs, from the descent rather
+    # than from scarce on-runway samples. The callsign is aggregated rather than
+    # grouped on for the reason ``calculate_airport_events`` documents at length.
     agg = work.groupBy(
-        "track_id", "apt_icao", "strip_id", "le_ident", "he_ident", "trace_id"
+        "track_id", "apt_icao", "strip_id", "rwy_ident",
+        "thr_lat", "thr_lon", "rwy_bearing", "rwy_length_nm", "rwy_half_width_nm",
+        "le_ident", "he_ident", "trace_id",
     ).agg(
         F.min("event_time").alias("entry_time"),
         F.max("event_time").alias("exit_time"),
@@ -420,20 +466,9 @@ def runway_traversals(
         (F.col("exit_time").cast("double") - F.col("entry_time").cast("double")),
     )
 
-    # A strip carries two directions and a movement is reported against one, so
-    # both directions of this strip are candidates and geometry picks one.
-    cand = agg.join(
-        F.broadcast(thresholds),
-        (F.col("apt_icao") == thresholds.apt_ident)
-        & (
-            (thresholds.rwy_ident == F.col("le_ident"))
-            | (thresholds.rwy_ident == F.col("he_ident"))
-        ),
-        "inner",
-    )
     # Folded to [0, 90] so a reciprocal counts as aligned. This is the
     # *classification* angle and it is deliberately direction-blind.
-    cand = cand.withColumn(
+    cand2 = agg.withColumn(
         "align_deg",
         F.least(
             angle_between(F.col("median_track_deg"), F.col("rwy_bearing")),
@@ -443,11 +478,11 @@ def runway_traversals(
     # The *direction* angle, unfolded. It is a separate quantity from
     # ``align_deg`` and has to be: folded, the two ends of one strip score
     # identically, so nothing but the alphabet would choose between 07 and 25.
-    cand = cand.withColumn(
+    cand2 = cand2.withColumn(
         "bearing_error_deg",
         angle_between(F.col("median_track_deg"), F.col("rwy_bearing")),
     )
-    cand = cand.withColumn(
+    cand2 = cand2.withColumn(
         "cross_track_nm",
         cross_track_nm(
             F.col("entry_lat"), F.col("entry_lon"),
@@ -459,7 +494,16 @@ def runway_traversals(
     # two ends of one strip share a centreline and differ only in floating
     # point noise. Unrounded, that noise would decide the direction before the
     # bearing error was ever consulted.
-    cand = cand.withColumn("_xt", F.round(F.col("cross_track_nm"), 3))
+    cand2 = cand2.withColumn("_xt", F.round(F.col("cross_track_nm"), 3))
+    cand2 = cand2.withColumn("class", classify_traversal(
+        F.col("align_deg"), F.col("max_gs_kt"), F.col("entry_height_ft"),
+        F.col("exit_height_ft"), F.col("duration_seconds"), config,
+    ))
+    # Classify before the direction pick and drop the abstentions first, so a
+    # direction that classifies is never lost to a better-aligned one that
+    # abstains. Both directions of a genuine movement classify the same way;
+    # the pick then chooses between them by geometry.
+    cand2 = cand2.filter(F.col("class").isNotNull())
 
     best = Window.partitionBy("track_id", "strip_id", "trace_id").orderBy(
         F.col("_xt").asc(),
@@ -467,18 +511,14 @@ def runway_traversals(
         F.col("rwy_ident").asc(),
     )
     out = (
-        cand.withColumn("_r", F.row_number().over(best))
+        cand2.withColumn("_r", F.row_number().over(best))
         .filter(F.col("_r") == 1)
         .drop("_r", "_xt")
     )
-    out = out.withColumn("class", classify_traversal(
-        F.col("align_deg"), F.col("max_gs_kt"), F.col("entry_height_ft"),
-        F.col("exit_height_ft"), F.col("duration_seconds"), config,
-    )).filter(F.col("class").isNotNull())
 
     return out.select(
         F.col("track_id"),
-        F.col("apt_ident"),
+        F.col("apt_icao").alias("apt_ident"),
         F.col("rwy_ident"),
         F.col("rwy_bearing"),
         F.col("thr_lat"),
