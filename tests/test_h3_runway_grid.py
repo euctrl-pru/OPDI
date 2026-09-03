@@ -297,3 +297,36 @@ class TestRunwayGridGenerator:
         assert success == ["TEST"]
         assert failed == []
         assert storage.written == []  # nothing buildable -- not an error
+
+    def test_many_airports_write_once_not_once_per_airport(self, spark, tmp_path):
+        """The retired per-airport append was O(N) in airports -- each append
+        re-commits a growing S3 table, which stalled the 1,300-airport build to
+        minutes per airport. Two airports must now produce exactly ONE write,
+        carrying both, not one write each."""
+        airports = spark.createDataFrame(
+            [
+                ("TEST", THR_LAT, THR_LON, "large_airport"),
+                ("TES2", THR_LAT + 0.5, THR_LON + 0.5, "large_airport"),
+            ],
+            "ident string, latitude_deg double, longitude_deg double, type string",
+        )
+        runways = spark.createDataFrame(
+            [
+                (1, "TEST", "07", THR_LAT, THR_LON, 0.0, "25",
+                 FAR_LAT, FAR_LON, 180.0, 12000.0, WIDTH_FT),
+                (2, "TES2", "07", THR_LAT + 0.5, THR_LON + 0.5, 0.0, "25",
+                 FAR_LAT + 0.5, FAR_LON + 0.5, 180.0, 12000.0, WIDTH_FT),
+            ],
+            RUNWAY_ROW_SCHEMA,
+        )
+        storage = StubStorage({"oa_airports": airports, "oa_runways": runways})
+        gen = RunwayGridGenerator(spark, OPDIConfig(), log_dir=str(tmp_path), storage=storage)
+
+        success, failed = gen.save_prepared_to_table()
+
+        assert sorted(success) == ["TES2", "TEST"]
+        assert failed == []
+        assert len(storage.written) == 1           # ONE write for two airports
+        _, mode, sdf = storage.written[0]
+        assert mode == "overwrite"
+        assert set(sdf.toPandas()["apt_icao"]) == {"TEST", "TES2"}

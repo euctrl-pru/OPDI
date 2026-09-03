@@ -458,7 +458,12 @@ class RunwayGridGenerator:
             strip_id = _strip_id(row, apt_icao)
             try:
                 cells = _strip_cells(row, self.resolution)
-            except NullGeometryError as e:
+            except (NullGeometryError, h3.H3BaseException) as e:
+                # NullGeometryError: a threshold coordinate is missing.
+                # H3BaseException: polygon_to_cells rejected a degenerate strip
+                # (a zero-length or self-touching ring). Either way one bad
+                # runway must not lose the whole airport's other strips -- log
+                # and skip this strip, exactly as a null one.
                 print(f"  Skipping runway {apt_icao} {row.get('le_ident')}/"
                       f"{row.get('he_ident')} (strip {strip_id}): {e}")
                 continue
@@ -493,6 +498,7 @@ class RunwayGridGenerator:
         processed_success = self._load_processed_airports()
         processed_failed: List[str] = []
         processed_errors: List[str] = []
+        frames: List[pd.DataFrame] = []
 
         # First write of a fresh run establishes the table; a resumed run
         # (a success log already present) treats the table as already
@@ -524,12 +530,24 @@ class RunwayGridGenerator:
                 continue
 
             if not pdf.empty:
-                sdf = self.spark.createDataFrame(pdf.to_dict(orient="records"), RUNWAY_GRID_SCHEMA)
-                mode = "overwrite" if first_write else "append"
-                self.storage.write_table(sdf, self.table_name, mode=mode)
-                first_write = False
+                frames.append(pdf)
 
             self._mark_success(apt_icao, processed_success)
+
+        # One write per invocation, not one per airport. The per-airport append
+        # this replaced was O(N) in the number of airports -- each append
+        # re-commits a growing S3 table -- and stalled to minutes per airport
+        # past a few hundred. Accumulate every newly-built airport's rows and
+        # write them once: overwrite on a fresh run (no prior success log),
+        # append when resuming onto a table earlier airports already populated.
+        # createDataFrame is handed the concatenated pandas frame directly, not
+        # pdf.to_dict("records") -- materialising millions of Row dicts through
+        # Py4J was the second stall this path hit at 1,300-airport scale.
+        if frames:
+            big = pd.concat(frames, ignore_index=True)
+            sdf = self.spark.createDataFrame(big, RUNWAY_GRID_SCHEMA)
+            mode = "overwrite" if first_write else "append"
+            self.storage.write_table(sdf, self.table_name, mode=mode)
 
         return processed_success, processed_failed
 
