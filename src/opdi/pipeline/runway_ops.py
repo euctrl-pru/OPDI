@@ -335,8 +335,15 @@ def runway_traversals(
         F.col("he_ident"),
         F.col("zone"),
     )
+    # NOT broadcast. ``grid_cols`` is the network-wide h3_runway_zones (~7M
+    # res-12 cells); a run whose ``sv`` spans the whole network (the benchmark
+    # ladder, and production) leaves it near its full size even after the
+    # per-batch aerodrome pre-filter, and forcing that into the driver heap to
+    # broadcast OOM'd the driver JVM. Let Spark pick the strategy: it sort-merges
+    # the large grid, and auto-broadcasts only when a study-scoped ``sv`` has
+    # already shrunk it below the broadcast threshold.
     near = sv.join(
-        F.broadcast(grid_cols),
+        grid_cols,
         (sv.h3_res_12 == grid_cols.h3_id)
         & F.array_contains(sv.apt, grid_cols.apt_icao),
         "inner",
