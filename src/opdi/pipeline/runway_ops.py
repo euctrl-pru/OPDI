@@ -457,8 +457,25 @@ def runway_traversals(
         F.max("event_time").alias("exit_time"),
         F.max("_gs_kt").alias("max_gs_kt"),
         F.expr("percentile_approx(heading, 0.5)").alias("median_track_deg"),
-        F.min_by("_h_ft", "event_time").alias("entry_height_ft"),
-        F.max_by("_h_ft", "event_time").alias("exit_height_ft"),
+        # First and last height **among samples that have one**. Ordering on a
+        # bare ``event_time`` takes the earliest/latest sample's height
+        # outright -- but ADS-B surface position messages carry no barometric
+        # altitude, so a ground-roll or post-touchdown sample has NULL
+        # ``_h_ft``. When that null sample is the earliest (a departure's roll)
+        # or latest (an arrival's rollout), ``min_by``/``max_by`` on
+        # ``event_time`` return NULL, and ``classify_traversal``'s
+        # ``entry_height_ft < airborne_h`` is then NULL -> false: the whole
+        # movement is silently dropped. Masking the ordering key to the
+        # non-null rows takes the first/last height that actually exists.
+        # (This is why an upstream ``baro_altitude_c`` bound hid the bug:
+        # ``NULL < x`` is false, so it dropped exactly these ground samples and
+        # the endpoints became real-valued by accident.)
+        F.min_by(
+            "_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))
+        ).alias("entry_height_ft"),
+        F.max_by(
+            "_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))
+        ).alias("exit_height_ft"),
         F.min_by("lat", "event_time").alias("entry_lat"),
         F.min_by("lon", "event_time").alias("entry_lon"),
         F.max_by("lat", "event_time").alias("exit_lat"),

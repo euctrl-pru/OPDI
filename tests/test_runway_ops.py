@@ -665,6 +665,40 @@ def test_runway_traversals_classifies_a_departure_and_names_its_direction(spark)
     assert out[0]["align_deg"] == pytest.approx(0.0, abs=0.5)
 
 
+def test_a_departure_with_null_baro_on_its_ground_roll_still_classifies(spark):
+    """ADS-B surface position messages carry no barometric altitude, so the
+    first samples of a ground roll have a NULL height. ``entry_height_ft`` must
+    be the earliest height that *exists*, not the earliest sample outright --
+    otherwise a null-baro roll start makes ``entry_height_ft`` NULL,
+    ``classify_traversal``'s ``entry < airborne`` evaluates NULL -> false, and
+    the whole departure vanishes. That was the flight-events-v4 network-scale
+    coverage collapse (roll samples null at scale; an upstream altitude bound
+    had masked it locally because ``NULL < x`` dropped them).
+
+    Mutation check: revert ``entry_height_ft`` to ``min_by("_h_ft",
+    "event_time")`` and this drops to zero traversals.
+    """
+    dep = _departure_on_25(spark)
+    order = Window.partitionBy("track_id").orderBy("event_time")
+    dep = (
+        dep.withColumn("_i", F.row_number().over(order))
+        .withColumn(
+            "baro_altitude_c",
+            F.when(F.col("_i") <= 3, F.lit(None).cast("double")).otherwise(
+                F.col("baro_altitude_c")
+            ),
+        )
+        .drop("_i")
+    )
+    out = runway_traversals(
+        dep, _grid(spark), _thresholds(spark), EventConfig()
+    ).collect()
+
+    assert len(out) == 1, "the null-baro roll start must not drop the departure"
+    assert out[0]["class"] == "departure"
+    assert out[0]["entry_height_ft"] is not None
+
+
 def _arrival_on_07(spark, elev_adep_ft=0.0, elev_ades_ft=0.0,
                    adep="EBBR", ades="EBBR"):
     """The arrival profile with the H3 cells a real runway grid gives it.
