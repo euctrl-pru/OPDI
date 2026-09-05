@@ -147,12 +147,18 @@ MONTH = dt.date(2024, 6, 1)
 _T0 = dt.datetime(2024, 6, 1, 12, 0, 0)
 
 #: Types the A-CDM vocabulary retires. Under ``EventConfig()`` not one of them
-#: may appear: each is either superseded by a better-timed detector
-#: (``ATOT``/``ALDT`` by the interpolated ``airborne``/``touchdown``,
-#: ``take-off``/``landing`` likewise), renamed (``AOBT``/``AIBT`` ->
-#: ``off-block``/``on-block``), or split into the four runway-occupancy types
-#: (``entry-runway``/``exit-runway``).
-V4_RETIRED = {"take-off", "ATOT", "ALDT", "AOBT", "AIBT",
+#: may appear: each is either superseded by a better detector
+#: (``take-off``/``landing`` (ground contact) by the interpolated
+#: ``airborne``/``touchdown``, which the benchmark confirmed beat them),
+#: renamed (``AOBT``/``AIBT`` -> ``off-block``/``on-block``), or split into the
+#: runway-occupancy types (``entry-runway``/``exit-runway``).
+#:
+#: ``ATOT``/``ALDT`` are NOT here: the flight-events-v4 benchmark found the
+#: A-CDM ``airborne``/``touchdown`` coverage-limited (they anchor on ~0-15 ft
+#: on-runway samples, seen densely only near Switzerland: ~4%/7% network vs
+#: ATOT/ALDT ~92%/~100%), so ATOT/ALDT are RETAINED under v0.2.0 for coverage,
+#: published alongside the A-CDM family for its accuracy where reception allows.
+V4_RETIRED = {"take-off", "AOBT", "AIBT",
               "entry-runway", "exit-runway"}
 
 _RWY_BEARING = 70.0
@@ -400,6 +406,21 @@ def _types(out):
 def test_v4_emits_no_retired_type(spark, stub_storage):
     """The retirement, stated as the table a consumer would query."""
     assert _types(_run(spark, stub_storage, EventConfig())) & V4_RETIRED == set()
+
+
+def test_v4_keeps_atot_aldt_alongside_the_acdm_family(spark, stub_storage):
+    """The other half of the trade, after the benchmark.
+
+    The A-CDM ``airborne``/``touchdown`` were meant to retire ``ATOT``/``ALDT``,
+    but the flight-events-v4 benchmark found them coverage-limited: they anchor
+    on ~0-15 ft on-runway / near-threshold samples, seen densely only near
+    Switzerland (~4%/7% network vs ATOT/ALDT ~92%/~100%). So v0.2.0 keeps
+    ``ATOT``/``ALDT`` for coverage and publishes the A-CDM family alongside for
+    its interpolated-crossing accuracy where reception allows -- both in one
+    table, told apart by type string and version."""
+    types = _types(_run(spark, stub_storage, EventConfig()))
+    assert {"ATOT", "ALDT"} <= types, f"ATOT/ALDT must be retained under v0.2.0; got {sorted(types)}"
+    assert {"airborne", "touchdown"} <= types
 
 
 def test_v4_emits_the_a_cdm_runway_family(spark, stub_storage):

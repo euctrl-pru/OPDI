@@ -1265,11 +1265,21 @@ class FlightEventProcessor:
             if self.events.emit_pru_tops:
                 add(pru_top_events(geo, segments, self.events, tops=tops))
 
-            # ATOT/ALDT are the extreme sample of a detection window; the A-CDM
-            # family interpolates the same two instants and publishes them as
-            # airborne/touchdown. Exactly one of the two runs, so no
-            # configuration reports a lift-off twice.
-            if self.events.emit_runway_events and not self.events.emit_runway_milestones:
+            # ATOT/ALDT (detect_runway_movements) and the A-CDM airborne/
+            # touchdown answer the same two questions by different means, and
+            # v0.2.0 publishes BOTH -- distinguished by type string and version.
+            # This was originally an either/or (the A-CDM family was meant to
+            # retire ATOT/ALDT), but the flight-events-v4 benchmark found the
+            # A-CDM family coverage-limited: it anchors on ~0-15 ft on-runway /
+            # near-threshold samples, which need dense low-altitude receivers and
+            # so fire almost only around Switzerland (~4%/7% network vs ATOT/ALDT
+            # ~92%/~100%). ATOT/ALDT read the initial climb / final descent up to
+            # runway_max_height_ft, which ordinary receivers see everywhere, so
+            # they are the coverage choice and are retained. The A-CDM family
+            # stays for its interpolated-crossing accuracy where reception allows.
+            # Gated on emit_runway_events alone (True in v0.2.0, False in
+            # legacy()), so legacy still reproduces byte for byte.
+            if self.events.emit_runway_events:
                 add(calculate_runway_events(
                     sdf_input, month, self.storage, self.events
                 ))
