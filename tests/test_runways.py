@@ -95,6 +95,43 @@ def test_bearings_come_from_the_threshold_positions(thresholds):
     assert by_ident["01"] == pytest.approx(10, abs=6)
 
 
+def test_extent_is_carried_per_direction_from_the_runway_dimensions(spark):
+    """Both directions of a strip share its length and half-width, converted to
+    nautical miles, because extent is a property of the physical runway that
+    the on-runway test needs in the units it works in."""
+    rwy = spark.createDataFrame(
+        [(1, 1, "EBBR", False, "07", 50.0, 4.0, "25", 50.02, 4.02, 12000.0, 148.0)],
+        "id int, airport_ref int, airport_ident string, closed boolean, "
+        "le_ident string, le_latitude_deg double, le_longitude_deg double, "
+        "he_ident string, he_latitude_deg double, he_longitude_deg double, "
+        "length_ft double, width_ft double",
+    )
+    got = {
+        r.rwy_ident: (r.rwy_length_nm, r.rwy_half_width_nm)
+        for r in runway_thresholds(StubStorage({"oa_runways": rwy})).collect()
+    }
+    for ident in ("07", "25"):
+        length_nm, half_width_nm = got[ident]
+        assert length_nm == pytest.approx(12000.0 / 6076.12, rel=1e-4)
+        assert half_width_nm == pytest.approx(148.0 / 2.0 / 6076.12, rel=1e-4)
+
+
+def test_extent_falls_back_to_documented_defaults_when_null(spark):
+    """A null ``length_ft``/``width_ft`` becomes a generic 8,000 ft length and
+    a 30 m half-width rather than a null that would drop every sample from the
+    on-runway test."""
+    rwy = spark.createDataFrame(
+        [(1, 1, "EBBR", False, "07", 50.0, 4.0, "25", 50.02, 4.02, None, None)],
+        "id int, airport_ref int, airport_ident string, closed boolean, "
+        "le_ident string, le_latitude_deg double, le_longitude_deg double, "
+        "he_ident string, he_latitude_deg double, he_longitude_deg double, "
+        "length_ft double, width_ft double",
+    )
+    row = runway_thresholds(StubStorage({"oa_runways": rwy})).collect()[0]
+    assert row.rwy_length_nm == pytest.approx(8000.0 / 6076.12, rel=1e-4)
+    assert row.rwy_half_width_nm == pytest.approx(30.0 / 1852.0, rel=1e-4)
+
+
 def test_a_departure_is_matched_to_the_runway_it_departed(spark, thresholds):
     got = detect_runway_movements(
         _movement(spark, heading=70), _ends(spark, "departure"), thresholds, EventConfig()
@@ -168,3 +205,29 @@ def test_too_few_samples_do_not_name_a_runway(spark, thresholds):
 
 def test_missing_reference_table_returns_none(spark):
     assert runway_thresholds(StubStorage({})) is None
+
+
+def test_parallel_runways_are_separated_by_where_the_aircraft_actually_was(spark):
+    """Two parallel runways share a bearing to within a degree.
+
+    The geometry is exact: both runways point due north (bearing 0) and their
+    thresholds sit at the same latitude, 0.02 deg of longitude apart -- about
+    1.2 NM at this latitude. The aircraft flies due north directly over the
+    *eastern* one. Bearing error is identical for both, so only the aircraft's
+    own offset can separate them.
+    """
+    from opdi.pipeline.runways import cross_track_nm
+
+    west = cross_track_nm(
+        F.lit(50.0), F.lit(4.02),      # aircraft, over the eastern runway
+        F.lit(50.0), F.lit(4.00),      # western threshold
+        F.lit(0.0),
+    )
+    east = cross_track_nm(
+        F.lit(50.0), F.lit(4.02),
+        F.lit(50.0), F.lit(4.02),      # eastern threshold
+        F.lit(0.0),
+    )
+    row = spark.range(1).select(west.alias("w"), east.alias("e")).collect()[0]
+    assert row["e"] == pytest.approx(0.0, abs=1e-6)
+    assert row["w"] > 0.5

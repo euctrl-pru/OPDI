@@ -48,9 +48,23 @@ REFERENCE_BASE = os.environ.get(
 )
 
 PERIODS = {
+    # The V4 period. It is the only month whose APDF extract covers all twenty
+    # study aerodromes: UGKO (Kutaisi) has 868 movements here and *zero* in
+    # apdf_202506, which is why V4 does not reuse V3's period.
+    "2026": {"month": "202606", "days": ["2026-06-05", "2026-06-06", "2026-06-07"]},
     "2025": {"month": "202506", "days": ["2025-06-05", "2025-06-06", "2025-06-07"]},
     "2024": {"month": "202406", "days": ["2024-06-05", "2024-06-06", "2024-06-07"]},
 }
+
+#: The V4 study set: ranks 1-20 of the tier-A coverage ranking over these same
+#: three days (opensky-airport-coverage/data/ranking_tier_a_2026.csv). These are
+#: the aerodromes where ADS-B reception is *best*, so every figure in the V4
+#: paper is an upper bound on network-wide performance, not a typical case. The
+#: paper says so; this comment exists so the next reader of the code knows too.
+STUDY_AIRPORTS = (
+    "EBBR", "LSZH", "EICK", "EFHK", "LEIB", "EDDS", "LFLL", "LHBP", "LFPO", "LPFR",
+    "ESSA", "ENVA", "LOWW", "LKPR", "EDDP", "LPPT", "EGGD", "EGNT", "EGCC", "UGKO",
+)
 
 #: Milestones APDF can score, and how to recover each from the long form.
 #: SRC_PHASE is the discriminator: there is no ATOT column.
@@ -104,9 +118,12 @@ def load_flights(spark: SparkSession, month: str) -> DataFrame:
 def bridge(apdf: DataFrame, flights: DataFrame) -> DataFrame:
     """Attach ``icao24`` and the ICAO callsign to each APDF movement.
 
-    ``apdf.ID`` is ``IM_SAMAD_ID``, the internal key linking the two extracts.
-    It is the clean join -- not a fuzzy match on callsign and registration --
-    and it is ~97% populated on the APDF side.
+    The join key is ``ID`` on both sides. In PRISME this is ``IM_SAMAD_ID``,
+    the "SAM ID" -- the same identifier ``eurocontrol::apdf_tidy()`` renames to
+    ``ID`` at ``R/airport_operator_data_flow.R:118`` and that
+    ``eurocontrol::flights_tidy()`` returns under its own name. It is an exact
+    key, not a fuzzy match on callsign and registration, and it is ~97%
+    populated on the APDF side (measured: 2.83% null on apdf_202506).
     """
     fl = flights.select(
         F.col("ID").alias("_fl_id"),
@@ -122,9 +139,26 @@ def bridge(apdf: DataFrame, flights: DataFrame) -> DataFrame:
     return apdf.join(F.broadcast(fl), apdf.ID == F.col("_fl_id"), "left").drop("_fl_id")
 
 
-def bridge_report(bridged: DataFrame) -> dict:
-    """The gate. Everything downstream is capped by this."""
-    agg = bridged.agg(
+def gt_airport_col():
+    """The aerodrome a movement is scored at: its ADEP if it is a departure,
+    its ADES if it is an arrival.
+
+    One definition, used by both :func:`milestones` and :func:`bridge_report`,
+    so the ceiling and the coverage it caps can never be computed over
+    different populations. They were, once: the report was computed before any
+    airport filter existed, so ``--airports study`` narrowed the milestones and
+    left the bridge rate network-wide -- two numbers the paper reads together,
+    over different denominators, with nothing in either saying so.
+    """
+    return F.when(F.col("SRC_PHASE") == "DEP", F.col("ADEP_ICAO")).otherwise(
+        F.col("ADES_ICAO")
+    )
+
+
+def _reach(df: DataFrame) -> dict:
+    """Movements, how many reach ``icao24``, and the rate -- over whatever
+    population it is handed."""
+    agg = df.agg(
         F.count(F.lit(1)).alias("movements"),
         F.sum(F.when(F.col("ID").isNull(), 1).otherwise(0)).alias("null_id"),
         F.sum(F.when(F.col("icao24").isNotNull(), 1).otherwise(0)).alias("reached"),
@@ -138,13 +172,57 @@ def bridge_report(bridged: DataFrame) -> dict:
     }
 
 
-def milestones(bridged: DataFrame, days) -> DataFrame:
+def bridge_report(bridged: DataFrame, airports: str = "all") -> dict:
+    """The gate. Everything downstream is capped by this.
+
+    **Scoped to the same aerodromes as the ground truth it caps.** With
+    ``airports="study"`` the reported rate is the study set's, and the
+    network-wide figures move into ``network`` -- kept because they are the
+    context that says whether the study set is representative, and cheap
+    because the frame is already cached.
+
+    The top-level keys stay the ones they always were, so a reader that knows
+    nothing about the scoping still reads the number that belongs with the
+    coverage figures. ``scope`` says which population that is.
+    """
+    network = _reach(bridged)
+    if airports != "study":
+        return dict(network, scope="all")
+    scoped = _reach(
+        _filter_study_airports(
+            bridged.withColumn("gt_airport", gt_airport_col()), "study"
+        )
+    )
+    return dict(scoped, scope="study", network=network)
+
+
+def _filter_study_airports(df: DataFrame, airports: str) -> DataFrame:
+    """Restrict to :data:`STUDY_AIRPORTS` when ``airports == "study"``; a
+    no-op otherwise. Shared by :func:`milestones` and :func:`ring_truth`, both
+    of which call it only after ``gt_airport`` has been derived -- filtering
+    on ``ADEP_ICAO``/``ADES_ICAO`` directly would have to duplicate the
+    DEP/ARR split ``gt_airport`` already resolves.
+    """
+    if airports == "study":
+        # .isin() only auto-unpacks list/set, not tuple (pyspark 4.1's
+        # classic Column.isin checks isinstance(cols[0], (list, set))) --
+        # passing the tuple directly makes it try to build a single literal
+        # out of it and fails with UNSUPPORTED_FEATURE.LITERAL_TYPE.
+        return df.filter(F.col("gt_airport").isin(list(STUDY_AIRPORTS)))
+    return df
+
+
+def milestones(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
     """One row per (flight, milestone), long form.
 
     Restricting to the benchmark days is load-bearing: scoring three days of
     tracks against a whole month of ground truth divides every coverage figure
     by roughly ten and looks like a catastrophic detector rather than a
     mismatched denominator.
+
+    ``airports="study"`` restricts to :data:`STUDY_AIRPORTS` via
+    :func:`_filter_study_airports`, applied after ``gt_airport`` is derived
+    below.
     """
     b = bridged.filter(F.col("icao24").isNotNull())
     b = b.withColumn("day", F.to_date(F.from_utc_timestamp(F.col("MVT_TIME_UTC"), "UTC")))
@@ -160,8 +238,7 @@ def milestones(bridged: DataFrame, days) -> DataFrame:
                 "icao24", "callsign", "day", "gt_aobt", "gt_adep", "gt_ades",
                 F.lit(name).alias("milestone"),
                 F.col(column).alias("gt_time"),
-                F.when(F.col("SRC_PHASE") == "DEP", F.col("ADEP_ICAO"))
-                .otherwise(F.col("ADES_ICAO")).alias("gt_airport"),
+                gt_airport_col().alias("gt_airport"),
                 F.col("AP_C_RWY").alias("gt_runway"),
                 # Whether this airport reports to the second. 64% of
                 # MVT_TIME_UTC values land on a whole minute, so an unstratified
@@ -173,10 +250,10 @@ def milestones(bridged: DataFrame, days) -> DataFrame:
     out = parts[0]
     for p in parts[1:]:
         out = out.unionByName(p)
-    return out
+    return _filter_study_airports(out, airports)
 
 
-def ring_truth(bridged: DataFrame, days) -> DataFrame:
+def ring_truth(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
     """C40/C100 crossings -- the *precise* target.
 
     Only 1.7% of these land on a whole minute, against 64% of the movement
@@ -184,6 +261,10 @@ def ring_truth(bridged: DataFrame, days) -> DataFrame:
     ATOT/ALDT the coarse one. Where the re-extraction is present, ``_CTFM``
     comes too: it is a second EUROCONTROL derivation of the same crossing, and
     the spread between them is the floor on what agreement can mean.
+
+    ``airports="study"`` restricts to :data:`STUDY_AIRPORTS` via the same
+    :func:`_filter_study_airports` helper as :func:`milestones`, applied after
+    ``gt_airport`` is derived below.
     """
     b = bridged.filter(F.col("icao24").isNotNull()).filter(F.col("SRC_PHASE") == "ARR")
     b = b.withColumn("day", F.to_date(F.from_utc_timestamp(F.col("MVT_TIME_UTC"), "UTC")))
@@ -212,10 +293,11 @@ def ring_truth(bridged: DataFrame, days) -> DataFrame:
                 "icao24", "callsign", "day", "gt_aobt", "gt_adep", "gt_ades", *cols
             )
         )
-    return parts[0].unionByName(parts[1])
+    result = parts[0].unionByName(parts[1])
+    return _filter_study_airports(result, airports)
 
 
-def build(spark: SparkSession, period: str, full: bool = True):
+def build(spark: SparkSession, period: str, full: bool = True, airports: str = "all"):
     """Ground truth for one period, plus the bridge report."""
     assert_utc_session(spark)
     spec = PERIODS[period]
@@ -224,16 +306,37 @@ def build(spark: SparkSession, period: str, full: bool = True):
     flights = load_flights(spark, spec["month"])
     bridged = bridge(apdf, flights).cache()
 
-    report = bridge_report(bridged)
-    print(f"  bridge: {report['reached_icao24']:,} of {report['movements']:,} "
-          f"movements reach icao24 ({report['reach_pct']}%)")
+    report = bridge_report(bridged, airports)
+    print(f"  bridge ({report['scope']}): {report['reached_icao24']:,} of "
+          f"{report['movements']:,} movements reach icao24 "
+          f"({report['reach_pct']}%)")
+    if "network" in report:
+        net = report["network"]
+        print(f"  bridge (network, context only): {net['reached_icao24']:,} of "
+              f"{net['movements']:,} ({net['reach_pct']}%)")
 
-    return milestones(bridged, spec["days"]), ring_truth(bridged, spec["days"]), report
+    return (
+        milestones(bridged, spec["days"], airports),
+        ring_truth(bridged, spec["days"], airports),
+        report,
+    )
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(PERIODS), required=True)
+    ap.add_argument(
+        "--airports",
+        choices=("study", "all"),
+        # Backward-compatible default: pre-V4 callers see unfiltered ground
+        # truth unchanged. The V4 regeneration entrypoint passes
+        # --airports study explicitly.
+        default="all",
+        help="Restrict ground truth to the twenty-aerodrome study set "
+             "(STUDY_AIRPORTS) rather than every APDF airport. The bridge "
+             "report is scoped with it, because a ceiling computed over one "
+             "population cannot cap coverage computed over another.",
+    )
     ap.add_argument("--results-dir", default=None)
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4058)
@@ -255,7 +358,7 @@ def main() -> int:
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     spark.conf.set("spark.sql.shuffle.partitions", "96")
 
-    ms, rings, report = build(spark, args.period)
+    ms, rings, report = build(spark, args.period, airports=args.airports)
     print(f"  milestones: {ms.count():,}   ring crossings: {rings.count():,}")
 
     if args.results_dir:

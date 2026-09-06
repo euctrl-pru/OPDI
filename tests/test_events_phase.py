@@ -173,6 +173,18 @@ def test_crossing_events_emit_the_published_type_shape(spark):
 # D1 -- ground membership measured above field elevation
 # ---------------------------------------------------------------------------
 
+#: The phase family with the A-CDM runway milestones switched off.
+#:
+#: ``take-off`` is the *ground-contact* reading of the runway, and under the
+#: shipped ``EventConfig()`` it is retired: ``runway_ops`` publishes the same
+#: physical event as ``airborne``, interpolated to the 15 ft crossing, and
+#: emitting both would put two answers to one question in the table. These
+#: tests are about ground *membership* -- whether a sample at a 5,000 ft field
+#: can be classified GND at all -- so they need the arm on which that decision
+#: is visible, which is the v0.1.0 baseline rung rather than the default.
+GROUND_CONTACT = EventConfig(emit_runway_milestones=False)
+
+
 def _departure(spark, field_elev_ft, with_elevation=True):
     """A departure from a field at `field_elev_ft`: a run on the ground, then a
     climb. GND -> CL is what `take-off` looks for.
@@ -216,7 +228,7 @@ def test_a_high_elevation_departure_gets_no_takeoff_without_the_fix(spark):
 def test_the_same_departure_yields_a_takeoff_with_the_fix(spark):
     sdf = _departure(spark, 5000)
 
-    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
+    types = {r.type for r in calculate_horizontal_segment_events(sdf, GROUND_CONTACT).collect()}
 
     assert "take-off" in types
 
@@ -224,7 +236,7 @@ def test_the_same_departure_yields_a_takeoff_with_the_fix(spark):
 def test_a_sea_level_departure_is_unaffected(spark):
     """The fix must not change what already worked."""
     with_fix = {
-        r.type for r in calculate_horizontal_segment_events(_departure(spark, 0), EventConfig()).collect()
+        r.type for r in calculate_horizontal_segment_events(_departure(spark, 0), GROUND_CONTACT).collect()
     }
 
     assert "take-off" in with_fix
@@ -235,7 +247,7 @@ def test_a_missing_elevation_degrades_to_the_published_behaviour(spark):
     phases it had, not lose them."""
     sdf = _departure(spark, 0).withColumn("elev_adep_ft", F.lit(None).cast("double"))
 
-    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
+    types = {r.type for r in calculate_horizontal_segment_events(sdf, GROUND_CONTACT).collect()}
 
     assert "take-off" in types
 
@@ -247,6 +259,6 @@ def test_the_arrival_end_elevation_also_counts(spark):
         "elev_adep_ft", F.lit(None).cast("double")
     ).withColumn("elev_ades_ft", F.lit(5000.0))
 
-    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
+    types = {r.type for r in calculate_horizontal_segment_events(sdf, GROUND_CONTACT).collect()}
 
     assert "take-off" in types

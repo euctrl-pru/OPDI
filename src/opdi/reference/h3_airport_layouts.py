@@ -206,6 +206,27 @@ def convert_to_polygon(geometry, geom_type: str, width_m: float) -> List[Polygon
     return []
 
 
+def _polyfill_latlng(ring: List[Tuple[float, float]], resolution: int) -> Set[str]:
+    """
+    Fill a single [lat, lng] ring with H3 hexagons at the given resolution.
+
+    THE FOOTGUN: h3 v3's ``polyfill(geojson, res)`` consumed GeoJSON-ordered
+    ``[lng, lat]`` rings. v4's ``h3.LatLngPoly`` always takes ``[lat, lng]``
+    tuples, regardless of caller convention -- callers must swap GeoJSON/
+    shapely (lng, lat) coordinates to (lat, lng) *before* calling this. Wrong
+    order yields an empty or silently wrong cell set.
+
+    Args:
+        ring: Polygon exterior ring as a list of (lat, lng) tuples.
+        resolution: H3 resolution.
+
+    Returns:
+        Set of H3 index strings covering the polygon.
+    """
+    shape = h3.LatLngPoly(list(ring))
+    return set(h3.polygon_to_cells(shape, resolution))
+
+
 def polygon_to_h3(poly: Polygon, resolution: int) -> Set[str]:
     """
     Convert a Polygon to a set of H3 hexagon indices.
@@ -217,9 +238,10 @@ def polygon_to_h3(poly: Polygon, resolution: int) -> Set[str]:
     Returns:
         Set of H3 index strings covering the polygon.
     """
-    exterior_coords = [(lat, lon) for lon, lat in poly.exterior.coords]
-    geojson_polygon = {"type": "Polygon", "coordinates": [exterior_coords]}
-    return h3.polyfill(geojson_polygon, resolution)
+    # shapely exterior.coords are (lng, lat) -- swap to the [lat, lng] order
+    # h3.LatLngPoly requires.
+    exterior_latlng = [(lat, lon) for lon, lat in poly.exterior.coords]
+    return _polyfill_latlng(exterior_latlng, resolution)
 
 
 def clean_str(s) -> str:
@@ -285,9 +307,10 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12) -> pd.DataFrame:
     df = df.explode("hex_id")
     df = df[~df.hex_id.isna()]
 
-    # Add H3 coordinates
+    # Add H3 coordinates (cell_to_latlng returns (lat, lng), same order as
+    # the v3 h3_to_geo it replaces).
     df["hex_latitude"], df["hex_longitude"] = zip(
-        *df["hex_id"].apply(h3.h3_to_geo)
+        *df["hex_id"].apply(h3.cell_to_latlng)
     )
     df["hex_res"] = resolution
 

@@ -53,21 +53,33 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
 from opdi.pipeline.flights import bearing_deg, haversine_nm, resolve_flight_id
-from opdi.pipeline.level_segments import classify_level_offs, level_segments
+from opdi.pipeline.level_segments import LEVEL_ARMS, classify_level_offs
 from opdi.pipeline.ground import block_times, movement_window
+from opdi.pipeline.runway_ops import go_arounds, runway_milestones, runway_traversals
 from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
+from opdi.pipeline.vertical_pru import (
+    aerodrome_distances,
+    attach_aerodrome_geometry,
+    pru_top_events,
+    pru_tops,
+)
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.storage import StorageManager
 
-
-#: The events version every published dataset up to 2026-08 carries.
-#:
-#: Named here because this module has to *test* for it -- a run stamping a
-#: released string has to reproduce that release, so the one behaviour change
-#: below is skipped for it. ``EventConfig.legacy()`` sets it; the two are
-#: asserted equal in ``tests/test_events_labelling.py`` so a rename cannot make
-#: the guard quietly stop firing.
-LEGACY_EVENTS_VERSION = "events_v0.0.2"
+# ``calculate_airport_events`` (with its ``LEGACY_EVENTS_VERSION`` guard and
+# the ``height_above_field_ft`` helper it uses) moved to ``layout.py``
+# (Task 4): the gate it applies is now height above field elevation rather
+# than uncorrected pressure altitude, sharing the helpers ``elevation.py``
+# (Task 2) provides rather than owning a second copy of that arithmetic.
+# Imported here, rather than left only in ``layout.py``, so
+# ``FlightEventProcessor`` and this module's existing callers/tests keep
+# importing these names from ``opdi.pipeline.events``.
+from opdi.pipeline.layout import (  # noqa: E402
+    LEGACY_EVENTS_VERSION,
+    calculate_airport_events,
+    flight_aerodrome_sets,
+    height_above_field_ft,
+)
 
 
 # ======================================================================
@@ -200,36 +212,74 @@ def calculate_level_off_events(
     sdf_input: DataFrame,
     horizontal_events: DataFrame,
     config: Optional[EventConfig] = None,
+    *,
+    segments: Optional[DataFrame] = None,
+    tops: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
     """ICAO level-offs in climb (KPI17) and descent (KPI19).
-
-    Takes top-of-climb and top-of-descent from the horizontal detector's own
-    output rather than recomputing the phase classification, so the two
-    families cannot disagree about where cruise began.
 
     Emitted as a *separate* family from ``level-start``/``level-end``. Those
     come from the fuzzy phase classifier and answer "does this look like level
     flight"; ICAO asks a geometric question about a band anchored at the
     segment's own start. Both are published and they are not interchangeable --
     the paper has to say so.
+
+    Two configuration choices reach this function:
+
+    * ``level_method`` selects which arm of :data:`LEVEL_ARMS` detects the
+      segments -- the anchored band (``icao``) or PRU's rolling window
+      (``pru``). Passing ``segments`` reuses a frame the caller already built,
+      which is how ``FlightEventProcessor`` avoids detecting the same segments
+      twice for this family and for the PRU tops. ``tops`` does the same for
+      the PRU tops themselves, which are otherwise computed once here and once
+      in ``pru_top_events`` -- the same windowed pass over the month's state
+      vectors, twice per rung.
+    * ``level_anchor`` selects the tops the classification hangs from:
+      ``"phase"`` takes them from the horizontal detector's own output, so the
+      two families cannot disagree about where cruise began (v0.1.0's
+      behaviour); ``"pru"`` takes ToC-CCO and ToD-CDO, which is the anchor
+      PRU's own definition of a level-off is written against.
+
+    ``sdf_input`` should already carry ``elev_adep_ft``/``elev_ades_ft`` and
+    ``dist_adep_nm``/``dist_ades_nm`` -- the floors and the 200 NM radius bind
+    to those columns, and :func:`classify_level_offs` treats an *absent*
+    distance column as "filter not applicable", so an un-enriched frame gets
+    the unrestricted classification silently. The processor attaches them once
+    for the whole step.
     """
     config = config or EventConfig()
 
-    tops = horizontal_events.filter(col("type").isin("top-of-climb", "top-of-descent"))
-    toc = tops.filter(col("type") == "top-of-climb").select(
-        col("track_id").alias("_toc_id"),
-        col("event_time").alias("toc_time"),
-        col("altitude_ft").alias("toc_alt"),
-    )
-    tod = tops.filter(col("type") == "top-of-descent").select(
-        col("track_id").alias("_tod_id"),
-        col("event_time").alias("tod_time"),
-        col("altitude_ft").alias("tod_alt"),
+    segs = segments if segments is not None else LEVEL_ARMS[config.level_method](
+        sdf_input, config
     )
 
-    segs = level_segments(sdf_input, config)
-    segs = segs.join(toc, segs.track_id == col("_toc_id"), "left").drop("_toc_id")
-    segs = segs.join(tod, segs.track_id == col("_tod_id"), "left").drop("_tod_id")
+    if config.level_anchor == "pru":
+        pru = tops if tops is not None else pru_tops(sdf_input, segs, config)
+        anchors = pru.select(
+            col("track_id").alias("_top_id"),
+            col("toc_cco_time").alias("toc_time"),
+            col("toc_cco_alt_ft").alias("toc_alt"),
+            col("tod_cdo_time").alias("tod_time"),
+            col("tod_cdo_alt_ft").alias("tod_alt"),
+        )
+        segs = segs.join(anchors, segs.track_id == col("_top_id"), "left").drop("_top_id")
+    else:
+        phase_tops = horizontal_events.filter(
+            col("type").isin("top-of-climb", "top-of-descent")
+        )
+        toc = phase_tops.filter(col("type") == "top-of-climb").select(
+            col("track_id").alias("_toc_id"),
+            col("event_time").alias("toc_time"),
+            col("altitude_ft").alias("toc_alt"),
+        )
+        tod = phase_tops.filter(col("type") == "top-of-descent").select(
+            col("track_id").alias("_tod_id"),
+            col("event_time").alias("tod_time"),
+            col("altitude_ft").alias("tod_alt"),
+        )
+        segs = segs.join(toc, segs.track_id == col("_toc_id"), "left").drop("_toc_id")
+        segs = segs.join(tod, segs.track_id == col("_tod_id"), "left").drop("_tod_id")
+
     # A flight with no cruise has no climb or descent phase to attribute a
     # level-off to; ICAO's exclusion box is defined against the TOC altitude.
     segs = segs.filter(col("toc_time").isNotNull() & col("tod_time").isNotNull())
@@ -274,7 +324,14 @@ def calculate_block_events(
     airport_events: DataFrame,
     config: Optional[EventConfig] = None,
 ) -> Optional[DataFrame]:
-    """Off-block (T04, AOBT) and on-block (T21, AIBT).
+    """Off-block (T04) and on-block (T21).
+
+    Published as ``off-block``/``on-block`` under the A-CDM vocabulary and as
+    ``AOBT``/``AIBT`` without it. One detector, two names: the flag renames the
+    output, it does not change what was detected. Keyed on
+    ``emit_runway_milestones`` rather than on the version string so that the
+    V4 ladder's baseline rung, which reconstructs v0.1.0, keeps the names that
+    rung published.
 
     Anchored on the ``exit-parking_position``/``entry-parking_position`` events
     step 04 already emits from ``hexaero_airport_layouts``, so no OSM query is
@@ -297,13 +354,15 @@ def calculate_block_events(
         lit(None).cast("double").alias("cumulative_distance_nm"),
         lit(None).cast("long").alias("cumulative_time_s"),
     ]
+    off_type = "off-block" if config.emit_runway_milestones else "AOBT"
+    on_type = "on-block" if config.emit_runway_milestones else "AIBT"
     aobt = blocks.filter(col("aobt").isNotNull()).select(
-        col("track_id"), lit("AOBT").alias("type"), col("aobt").alias("event_time"),
+        col("track_id"), lit(off_type).alias("type"), col("aobt").alias("event_time"),
         *common,
         to_json(struct(col("stand_exit").alias("stand_exit"))).alias("info"),
     )
     aibt = blocks.filter(col("aibt").isNotNull()).select(
-        col("track_id"), lit("AIBT").alias("type"), col("aibt").alias("event_time"),
+        col("track_id"), lit(on_type).alias("type"), col("aibt").alias("event_time"),
         *common,
         to_json(struct(col("stand_entry").alias("stand_entry"))).alias("info"),
     )
@@ -324,6 +383,13 @@ def calculate_runway_events(
     one asks which runway the movement used and when it left or met it -- and a
     consumer needs to be able to tell them apart rather than find one silently
     replaced.
+
+    **Superseded when ``emit_runway_milestones`` is on.** These times are the
+    extreme *sample* of a detection window, which is what gave ``ATOT`` a +19 s
+    median bias; ``runway_ops`` answers the same question by interpolating the
+    15 ft crossing. The processor therefore calls this only when the A-CDM
+    family is off, so ``airborne``/``touchdown`` have exactly one source per
+    configuration.
     """
     config = config or EventConfig()
     thresholds = runway_thresholds(storage)
@@ -481,62 +547,6 @@ def calculate_ring_crossing_events(
             )
         ).alias("info"),
     )
-
-
-def attach_field_elevation(
-    sdf: DataFrame, month: date, storage: "StorageManager"
-) -> DataFrame:
-    """Attach the field elevation of each track's ADEP and ADES.
-
-    Ground membership has to be measured against the field, not the ellipsoid:
-    ``baro_altitude_c`` is uncorrected pressure altitude, so a fixed 200 ft
-    cut-off is unreachable at any aerodrome above ~200 ft AMSL, and every
-    ``take-off`` and ``landing`` event for those flights simply never existed.
-
-    **Both** ends are attached rather than one chosen per sample. A track is
-    only ever on the ground at one of its two aerodromes, and cruise sits far
-    above both, so taking the more permissive of the two memberships is correct
-    without needing a per-sample distance to decide which end applies -- which
-    would mean joining aerodrome coordinates to every state vector.
-
-    Columns are left NULL when the flight list names no aerodrome or
-    OurAirports has no elevation for it; the caller coalesces to zero, which is
-    exactly today's behaviour.
-    """
-    if not storage.table_exists("opdi_flight_list"):
-        return sdf
-
-    start_ts, end_ts = get_start_end_of_month(month)
-    fl = (
-        storage.read_table("opdi_flight_list")
-        .filter((col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts))))
-        .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
-    )
-
-    if storage.table_exists("oa_airports"):
-        elev = storage.read_table("oa_airports").select(
-            col("ident").alias("_ident"),
-            col("elevation_ft").cast("double").alias("_elev"),
-        )
-        fl = (
-            fl.join(F.broadcast(elev), fl.adep == col("_ident"), "left")
-            .withColumnRenamed("_elev", "elev_adep_ft")
-            .drop("_ident")
-        )
-        fl = (
-            fl.join(F.broadcast(elev), fl.ades == col("_ident"), "left")
-            .withColumnRenamed("_elev", "elev_ades_ft")
-            .drop("_ident")
-        )
-    else:
-        fl = fl.withColumn("elev_adep_ft", lit(None).cast("double")).withColumn(
-            "elev_ades_ft", lit(None).cast("double")
-        )
-
-    fl = fl.select("_fl_id", "elev_adep_ft", "elev_ades_ft")
-    return sdf.join(
-        F.broadcast(fl), sdf.track_id == col("_fl_id"), "left"
-    ).drop("_fl_id")
 
 
 def calculate_horizontal_segment_events(
@@ -699,8 +709,7 @@ def calculate_horizontal_segment_events(
     )
 
     # Create event type arrays
-    df = df.withColumn(
-        "milestone_types",
+    milestone_types = (
         F.when(
             col("event_time") == col("first_cr_time"),
             F.array(lit("level-start"), lit("top-of-climb")),
@@ -714,16 +723,28 @@ def calculate_horizontal_segment_events(
             (col("flight_phase").isin("CR", "LVL")) & (col("next_phase") != col("flight_phase")),
             F.array(lit("level-end")),
         )
-        .when(
+    )
+
+    # ``take-off`` and ``landing`` here are the *ground-contact* reading: the
+    # sample at which the phase changed. ``runway_ops`` publishes the same two
+    # physical events as ``airborne``/``touchdown``, interpolated to the 15 ft
+    # crossing, and its ``landing`` is a third thing again -- the threshold
+    # plane, ICAO T16. Emitting both families would put two answers to one
+    # question in the table, and ``airborne`` would have two sources.
+    #
+    # Gated on the flag rather than on the version string because the V4
+    # ladder's baseline rung reconstructs v0.1.0, which *did* publish this
+    # pair; a version gate would strip them from the rung named after them.
+    if not config.emit_runway_milestones:
+        milestone_types = milestone_types.when(
             (col("prev_phase") == "GND") & (col("next_phase") == "CL"),
             F.array(lit("take-off")),
-        )
-        .when(
+        ).when(
             (col("prev_phase") == "DE") & (col("flight_phase") == "GND"),
             F.array(lit("landing")),
         )
-        .otherwise(F.array()),
-    )
+
+    df = df.withColumn("milestone_types", milestone_types.otherwise(F.array()))
 
     # Explode to one row per event
     df_exploded = df.select("*", explode(col("milestone_types")).alias("type"))
@@ -736,7 +757,28 @@ def calculate_horizontal_segment_events(
     )
 
     df_events = df_events.dropDuplicates(["track_id", "type", "event_time"])
-    df_events = df_events.withColumn("info", lit(""))
+
+    # Every top names the algorithm that produced it -- but only where there is
+    # another algorithm to be told apart from. The stamp exists because
+    # ``vertical_pru`` publishes a second pair of tops carrying
+    # ``method: "pru"``; with that family switched off there is one definition
+    # of "top of climb" in the table and nothing to disambiguate.
+    #
+    # Gated for a harder reason than tidiness. ``events_v0.0.2`` published
+    # ``info = ""`` on these rows, and ``EventConfig.legacy()`` exists so that
+    # re-processing a past month reproduces the release. An unconditional stamp
+    # would have made every legacy top differ from the row it is supposed to
+    # reproduce -- silently, because ``info`` is free-form and nothing compares
+    # it. ``emit_pru_tops`` is off under ``legacy()`` and on by default, so the
+    # gate is exactly the condition "is there a PRU pair to disambiguate from".
+    if config.emit_pru_tops:
+        info = when(
+            col("type").isin("top-of-climb", "top-of-descent"),
+            to_json(struct(lit("phase").alias("method"))),
+        ).otherwise(lit(""))
+    else:
+        info = lit("")
+    df_events = df_events.withColumn("info", info)
 
     return df_events
 
@@ -806,7 +848,7 @@ def calculate_vertical_crossing_events(sdf_input: DataFrame) -> DataFrame:
         .withColumn("type", concat(lit("last-xing-fl"), col("crossing").cast("string")))
     )
 
-    all_crossings = first_crossings.union(last_crossings)
+    all_crossings = first_crossings.unionByName(last_crossings)
 
     df_events = all_crossings.select(
         "track_id", "type", "event_time", "lon", "lat",
@@ -855,7 +897,7 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
         .withColumn("type", lit("last_seen"))
     )
 
-    all_events = first_seen.union(last_seen)
+    all_events = first_seen.unionByName(last_seen)
 
     df_events = all_events.select(
         "track_id", "type", "event_time", "lon", "lat",
@@ -870,229 +912,11 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
     return df_events
 
 
-def calculate_airport_events(
-    sv: DataFrame, month: date, storage: "StorageManager",
-    config: Optional[EventConfig] = None,
-) -> DataFrame:
-    """
-    Detect airport infrastructure entry/exit events using H3 layout matching.
-
-    Matches low-altitude track points against airport layout H3 hexagons
-    (resolution 12) to detect when aircraft enter and exit runways,
-    taxiways, aprons, and other ground infrastructure.
-
-    Args:
-        sv: Input tracks DataFrame.
-        month: Month being processed (for flight list lookup).
-        storage: StorageManager instance.
-
-    Returns:
-        DataFrame of airport entry/exit events.
-    """
-    from opdi.utils.datetime_helpers import get_start_end_of_month
-
-    config = config or EventConfig()
-
-    start_ts, end_ts = get_start_end_of_month(month)
-    start_lit = to_timestamp(lit(start_ts))
-    end_lit = to_timestamp(lit(end_ts))
-
-    flight_list = (
-        storage.read_table("opdi_flight_list")
-        .filter((col("dof") >= start_lit) & (col("dof") < end_lit))
-        .select("id", "adep", "ades", "adep_p", "ades_p")
-    )
-
-    # Build airport set per flight
-    for c in ["adep", "ades", "adep_p", "ades_p"]:
-        flight_list = flight_list.withColumn(
-            c, when(col(c).isNull(), lit("")).otherwise(col(c))
-        )
-
-    flight_list = flight_list.withColumn(
-        "apt",
-        F.concat(
-            F.array(col("adep"), col("ades")),
-            split(col("adep_p"), ", "),
-            split(col("ades_p"), ", "),
-        ),
-    ).withColumn("apt", F.array_remove(col("apt"), "")).select("id", "apt")
-
-    sv_f = sv.withColumnRenamed("callsign", "flight_id")
-    sv_f = sv_f.fillna({"flight_id": ""})
-    # One callsign per track, before flight_id becomes a grouping key below.
-    #
-    # The groupBy that aggregates entry and exit times carries flight_id
-    # without aggregating it. That is sound only while a track holds one
-    # callsign, which legacy segmentation guarantees by construction -- the
-    # callsign is part of the track's group key -- and which a segmentation
-    # grouping on the airframe alone does not. Without this, a track that
-    # broadcast two callsigns while crossing one runway becomes two groups and
-    # emits two entry-runway events for one crossing, and the ``info`` JSON
-    # below publishes flight_id as ``osn_flight_id``, so the duplication
-    # reaches the milestone table rather than staying an internal artefact.
-    #
-    # Same helper as step 03, imported rather than copied: two copies of this
-    # rule is how the production flight list and its benchmark came to disagree
-    # about it in the first place.
-    #
-    # **Before the dropna, deliberately -- the vote is over the unfiltered
-    # frame.** ``resolve_flight_id`` documents that as its contract, and it is
-    # the contract because the population a mode is taken over *is* the rule: a
-    # different population is a different rule wearing the same name. Step 03
-    # votes over the whole month of the track table. If step 04 voted only over
-    # samples carrying position and barometric altitude, the two would diverge
-    # on exactly the tracks that matter -- ADS-B sends position and velocity in
-    # separate message types, so a velocity-only sample carries a callsign and
-    # no position, and step 02a's cleaning NULLs the baro_altitude_c it
-    # rejects. A track whose real callsign appears mostly in such samples would
-    # be named SAS123 in opdi_flight_list and "" in the same track's
-    # info.osn_flight_id, from one aircraft on one day. That is the divergence
-    # step 03 refactored away within itself; it must not reappear across steps.
-    #
-    # **Not applied when the run is reproducing a release.** ``events_v0.0.2``
-    # exists so that re-processing a past month reproduces it, and changing
-    # what a run publishes while it stamps an old version is the one thing a
-    # version string must prevent. Resolution would be a no-op on legacy tracks
-    # anyway -- they are callsign-homogeneous by construction -- with one
-    # exception it must not make: OpenSky pads callsigns to eight characters,
-    # so an aircraft that set none broadcasts spaces, which ``fillna`` keeps
-    # verbatim but ``dominant_flight_id`` trims and reads as blank. The
-    # released events carry the spaces. Hence the test is on the version stamp
-    # rather than on an argument about homogeneity.
-    if config.events_version != LEGACY_EVENTS_VERSION:
-        sv_f = resolve_flight_id(sv_f)
-    sv_f = sv_f.dropna(subset=["lat", "lon", "baro_altitude_c"])
-    sv_f = sv_f.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
-    sv_f = sv_f.withColumn("flight_level", col("altitude_ft") / 100)
-
-    columns = [
-        "track_id", "icao24", "flight_id", "event_time", "lat", "lon",
-        "altitude_ft", "flight_level", "heading", "vert_rate",
-        "h3_res_12", "cumulative_distance_nm", "cumulative_time_s",
-    ]
-    sv_f = sv_f.select(columns)
-
-    sv_low_alt = sv_f.filter(col("flight_level") <= config.airport_max_fl).cache()
-    sv_nearby_apt = sv_low_alt.join(flight_list, sv.track_id == flight_list.id, "inner")
-
-    apt_sdf = storage.read_table("hexaero_airport_layouts")
-
-    df_labelled = sv_nearby_apt.join(
-        apt_sdf,
-        (sv_nearby_apt.h3_res_12 == apt_sdf.hexaero_h3_id)
-        & F.array_contains(sv_nearby_apt.apt, apt_sdf.hexaero_apt_icao),
-        "inner",
-    )
-
-    # Detect separate traces (gap > 5 min = new trace)
-    window_spec = Window.partitionBy("track_id", "hexaero_osm_id").orderBy("event_time")
-    df_labelled = df_labelled.withColumn(
-        "time_diff",
-        col("event_time").cast("long") - lag(col("event_time").cast("long"), 1).over(window_spec),
-    )
-    df_labelled = df_labelled.withColumn(
-        "new_trace", when(col("time_diff") > config.airport_trace_gap_seconds, lit(1)).otherwise(lit(0))
-    )
-    df_labelled = df_labelled.withColumn(
-        "trace_id", f_sum(col("new_trace")).over(window_spec)
-    )
-    df_labelled = df_labelled.drop("time_diff", "new_trace")
-
-    # Aggregate entry/exit times.
-    #
-    # ``F.first``/``F.last`` inside a groupBy take *partition* order, not
-    # event_time order, so the reported entry position, altitude and cumulative
-    # measures were not guaranteed to be the values at the reported entry time
-    # -- a row could describe one instant and be stamped with another, with
-    # nothing to indicate it. ``min_by``/``max_by`` pick the value at the
-    # extreme of an explicit ordering column, which is what was meant.
-    if config.airport_events_ordered:
-        def at_entry(c):
-            return F.min_by(c, "event_time")
-
-        def at_exit(c):
-            return F.max_by(c, "event_time")
-    else:
-        at_entry, at_exit = F.first, F.last
-
-    result = df_labelled.groupBy(
-        "track_id", "icao24", "flight_id",
-        "hexaero_apt_icao", "hexaero_osm_id", "hexaero_aeroway", "hexaero_ref", "trace_id",
-    ).agg(
-        f_min("event_time").alias("entry_time"),
-        f_max("event_time").alias("exit_time"),
-        at_entry("lat").alias("entry_lat"),
-        at_exit("lat").alias("exit_lat"),
-        at_entry("lon").alias("entry_lon"),
-        at_exit("lon").alias("exit_lon"),
-        at_entry("altitude_ft").alias("entry_altitude_ft"),
-        at_exit("altitude_ft").alias("exit_altitude_ft"),
-        at_entry("cumulative_distance_nm").alias("entry_cumulative_distance_nm"),
-        at_exit("cumulative_distance_nm").alias("exit_cumulative_distance_nm"),
-        at_entry("cumulative_time_s").alias("entry_cumulative_time_s"),
-        at_exit("cumulative_time_s").alias("exit_cumulative_time_s"),
-    )
-
-    result = result.withColumn(
-        "time_in_use_seconds",
-        col("exit_time").cast("long") - col("entry_time").cast("long"),
-    )
-    result = result.filter(col("time_in_use_seconds") != 0)
-
-    result = (
-        result
-        .withColumnRenamed("hexaero_osm_id", "osm_id")
-        .withColumnRenamed("hexaero_aeroway", "osm_aeroway")
-        .withColumnRenamed("hexaero_ref", "osm_ref")
-        .withColumnRenamed("hexaero_apt_icao", "osm_airport")
-    )
-
-    result = result.withColumn("info", to_json(struct(
-        col("osm_id"), col("osm_aeroway"), col("osm_ref"), col("osm_airport"),
-        col("time_in_use_seconds").alias("opdi_time_in_use_s"),
-        col("icao24").alias("osn_icao24"),
-        col("flight_id").alias("osn_flight_id"),
-    )))
-
-    result = result.withColumn("entry_type", concat_ws("-", lit("entry"), col("osm_aeroway")))
-    result = result.withColumn("exit_type", concat_ws("-", lit("exit"), col("osm_aeroway")))
-    result.cache()
-
-    entry_events = result.select(
-        col("track_id"),
-        col("entry_time").alias("event_time"),
-        col("entry_lon").alias("lon"),
-        col("entry_lat").alias("lat"),
-        col("entry_altitude_ft").alias("altitude_ft"),
-        col("entry_cumulative_distance_nm").alias("cumulative_distance_nm"),
-        col("entry_cumulative_time_s").alias("cumulative_time_s"),
-        col("entry_type").alias("type"),
-        col("info"),
-    )
-    exit_events = result.select(
-        col("track_id"),
-        col("exit_time").alias("event_time"),
-        col("exit_lon").alias("lon"),
-        col("exit_lat").alias("lat"),
-        col("exit_altitude_ft").alias("altitude_ft"),
-        col("exit_cumulative_distance_nm").alias("cumulative_distance_nm"),
-        col("exit_cumulative_time_s").alias("cumulative_time_s"),
-        col("exit_type").alias("type"),
-        col("info"),
-    )
-
-    apt_events = entry_events.unionByName(exit_events)
-    apt_events = apt_events.select(
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s", "info",
-    )
-    apt_events = apt_events.dropDuplicates([
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s",
-    ])
-
-    return apt_events
+# ======================================================================
+# Airport layout events -- moved to layout.py (Task 4); see the import at
+# the top of this module for calculate_airport_events, height_above_field_ft
+# and LEGACY_EVENTS_VERSION.
+# ======================================================================
 
 
 # ======================================================================
@@ -1258,6 +1082,95 @@ class FlightEventProcessor:
             return concat(lit(batch_id + kind), monotonically_increasing_id().cast("string"))
         return concat(col("id_tmp"), lit(kind.rstrip("_")))
 
+    def _with_aerodrome_geometry(self, sdf: DataFrame, month: date) -> DataFrame:
+        """Attach the flight's own aerodromes, their positions and elevations,
+        and the per-sample distance to each -- once, for the whole step.
+
+        Every family that needs geometry reads it from here: the phase floors
+        (``elev_adep_ft``/``elev_ades_ft``), the runway traversals (the same two
+        plus ``apt``, added separately), ``go_arounds`` (``ades_lat``/
+        ``ades_lon``), and the level machinery (``dist_adep_nm``/
+        ``dist_ades_nm``). Attaching per family would mean four joins to the
+        same two tables and four opportunities for them to disagree about which
+        aerodrome a flight used.
+
+        The distances matter more than they look:
+        :func:`~opdi.pipeline.level_segments.classify_level_offs` treats an
+        *absent* distance column as "radius not applicable", so a frame that
+        never got them yields level-offs with the 200 NM bound silently
+        unenforced rather than an error.
+
+        Returns the frame unchanged when the flight list is missing --
+        ``attach_aerodrome_geometry``'s own contract -- so a run without it
+        degrades to the un-enriched behaviour instead of failing.
+        """
+        geo = attach_aerodrome_geometry(sdf, month, self.storage)
+        return aerodrome_distances(geo)
+
+    def _with_flight_id(self, sv: DataFrame) -> DataFrame:
+        """The resolved callsign the runway family publishes as ``osn_flight_id``.
+
+        Resolved by the same helper step 03 uses, for the reason
+        ``calculate_airport_events`` documents at length: a second copy of this
+        rule is how the production flight list and its benchmark came to
+        disagree about it. A frame with no callsign at all is returned
+        unchanged -- ``runway_ops`` reads the column through ``_col_or_null``
+        and leaves ``osn_flight_id`` null rather than losing the family.
+        """
+        if "flight_id" not in sv.columns:
+            if "callsign" not in sv.columns:
+                return sv
+            sv = sv.withColumnRenamed("callsign", "flight_id")
+        return resolve_flight_id(sv.fillna({"flight_id": ""}))
+
+    def _runway_traversal_family(
+        self, sv: DataFrame, month: date
+    ) -> Optional[DataFrame]:
+        """The eight traversal-derived A-CDM milestones.
+
+        ``sv`` is the geometry-enriched frame with ``flight_id`` already
+        resolved. What is added here and nowhere else is the flight list's
+        aerodrome array, built by the shared
+        :func:`~opdi.pipeline.layout.flight_aerodrome_sets` so it is the
+        identical array the layout family matches on.
+
+        Returns ``None`` when a reference table this family cannot work without
+        is absent, so the caller skips it rather than failing the step.
+        **``go_arounds`` is deliberately not here**: it needs none of these
+        tables, and routing it through this guard would make an approach
+        abandoned at 400 ft depend on a runway polygon the aircraft never
+        crossed -- exactly the dependency that detector exists to avoid.
+        """
+        if not (
+            self.storage.table_exists("opdi_flight_list")
+            and self.storage.table_exists("h3_runway_zones")
+        ):
+            return None
+        thresholds = runway_thresholds(self.storage)
+        if thresholds is None:
+            return None
+
+        apt_sets = flight_aerodrome_sets(month, self.storage)
+        sv = sv.join(
+            F.broadcast(apt_sets), sv.track_id == apt_sets.id, "inner"
+        ).drop("id")
+        sv.cache()
+
+        grid = self.storage.read_table("h3_runway_zones")
+        # ``h3_runway_zones`` is universal -- every large/medium aerodrome in
+        # the network. ``runway_traversals`` broadcasts it and gates every join
+        # on ``array_contains(sv.apt, apt_icao)``, so only the aerodromes this
+        # batch actually names can ever match. Restrict the grid to those
+        # aerodromes here, before the broadcast, so the driver never collects
+        # the whole network's millions of res-12 cells: for the twenty-aerodrome
+        # study that is a few tens of thousands of cells, not the lot.
+        apt_present = sv.select(F.explode("apt").alias("_apt")).distinct()
+        grid = grid.join(
+            F.broadcast(apt_present), grid.apt_icao == apt_present._apt, "left_semi"
+        )
+        traversals = runway_traversals(sv, grid, thresholds, self.events)
+        return runway_milestones(sv, traversals, self.events)
+
     def _etl_flight_events_and_measures(
         self,
         sdf_input: DataFrame,
@@ -1284,14 +1197,55 @@ class FlightEventProcessor:
         sdf_input = add_time_measure(sdf_input)
         sdf_input.cache()
 
+        # One aerodrome join for the whole step; see _with_aerodrome_geometry.
+        #
+        # **Not cached here, deliberately.** ``sdf_input`` is, and caching both
+        # would hold two copies of the month's state vectors -- the second
+        # differing only by eight broadcast-joined columns. Of the two, this is
+        # the one worth rederiving: it is a broadcast join plus two haversines
+        # over an already-cached frame, all narrow and shuffle-free, whereas
+        # ``sdf_input`` is two window functions and rebuilding *it* per
+        # consumer would cost a shuffle each time.
+        #
+        # ``_runway_traversal_family`` does cache its own copy, and that is not
+        # a contradiction of this: it caches the frame *after* the aerodrome
+        # array join, which it consumes twice in quick succession -- once for
+        # the traversals and once for the milestones -- and drops out of scope
+        # with the step. What is avoided here is holding the wide frame alive
+        # across every family in the step.
+        geo = self._with_aerodrome_geometry(sdf_input, month)
+
+        # The level segments are detected once and shared by the two families
+        # that consume them -- the level-offs and the PRU tops, whose
+        # relocation is defined against the very same segments. Detecting them
+        # twice would be the same work done twice and, worse, would let the
+        # relocation and the classification disagree.
+        segments = None
+        # The PRU tops, likewise: with ``level_anchor = "pru"`` the level-off
+        # classification and the published ``top-of-climb-cco`` pair hang from
+        # the same tops, and each was computing them independently -- one
+        # windowed pass over the month's state vectors, done twice per rung.
+        tops = None
+        if calc_vertical and (self.events.emit_level_offs or self.events.emit_pru_tops):
+            segments = LEVEL_ARMS[self.events.level_method](geo, self.events)
+            segments.cache()
+            if self.events.emit_pru_tops or (
+                self.events.emit_level_offs and self.events.level_anchor == "pru"
+            ):
+                tops = pru_tops(geo, segments, self.events)
+                tops.cache()
+
         df_events = None
+
+        def add(frame: Optional[DataFrame]) -> None:
+            nonlocal df_events
+            if frame is None:
+                return
+            df_events = frame if df_events is None else df_events.unionByName(frame)
 
         if calc_horizontal:
             print(f"Calculating horizontal events (phase) for batch: {batch_id}")
-            phase_input = sdf_input
-            if self.events.phase_ground_above_field:
-                phase_input = attach_field_elevation(sdf_input, month, self.storage)
-            df_events = calculate_horizontal_segment_events(phase_input, self.events)
+            add(calculate_horizontal_segment_events(geo, self.events))
 
         if calc_vertical:
             print(f"Calculating vertical events (FL crossings) for batch: {batch_id}")
@@ -1299,52 +1253,65 @@ class FlightEventProcessor:
             # literal old code runs, so a re-processed month reproduces
             # events_v0.0.2 exactly rather than approximately.
             if self.events.crossing_all_occurrences:
-                df_vertical = calculate_threshold_crossing_events(sdf_input, self.events)
+                add(calculate_threshold_crossing_events(sdf_input, self.events))
             else:
-                df_vertical = calculate_vertical_crossing_events(sdf_input)
-            df_events = df_vertical if df_events is None else df_events.unionByName(df_vertical)
+                add(calculate_vertical_crossing_events(sdf_input))
 
             if df_events is not None and self.events.emit_level_offs:
-                level_offs = calculate_level_off_events(
-                    sdf_input, df_events, self.events
-                )
-                if level_offs is not None:
-                    df_events = df_events.unionByName(level_offs)
+                add(calculate_level_off_events(
+                    geo, df_events, self.events, segments=segments, tops=tops
+                ))
 
-            runway_events = (
-                calculate_runway_events(sdf_input, month, self.storage, self.events)
-                if self.events.emit_runway_events else None
-            )
-            if runway_events is not None:
-                df_events = (
-                    runway_events if df_events is None
-                    else df_events.unionByName(runway_events)
-                )
+            if self.events.emit_pru_tops:
+                add(pru_top_events(geo, segments, self.events, tops=tops))
 
-            rings = calculate_ring_crossing_events(
+            # ATOT/ALDT (detect_runway_movements) and the A-CDM airborne/
+            # touchdown answer the same two questions by different means, and
+            # v0.2.0 publishes BOTH -- distinguished by type string and version.
+            # This was originally an either/or (the A-CDM family was meant to
+            # retire ATOT/ALDT), but the flight-events-v4 benchmark found the
+            # A-CDM family coverage-limited: it anchors on ~0-15 ft on-runway /
+            # near-threshold samples, which need dense low-altitude receivers and
+            # so fire almost only around Switzerland (~4%/7% network vs ATOT/ALDT
+            # ~92%/~100%). ATOT/ALDT read the initial climb / final descent up to
+            # runway_max_height_ft, which ordinary receivers see everywhere, so
+            # they are the coverage choice and are retained. The A-CDM family
+            # stays for its interpolated-crossing accuracy where reception allows.
+            # Gated on emit_runway_events alone (True in v0.2.0, False in
+            # legacy()), so legacy still reproduces byte for byte.
+            if self.events.emit_runway_events:
+                add(calculate_runway_events(
+                    sdf_input, month, self.storage, self.events
+                ))
+
+            add(calculate_ring_crossing_events(
                 sdf_input, month, self.storage, self.events
-            )
-            if rings is not None:
-                df_events = rings if df_events is None else df_events.unionByName(rings)
+            ))
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
             df_hexaero = calculate_airport_events(
                 sdf_input, month, self.storage, self.events
             )
-            df_events = df_hexaero if df_events is None else df_events.union(df_hexaero)
+            add(df_hexaero)
 
-            blocks = (
-                calculate_block_events(sdf_input, df_hexaero, self.events)
-                if self.events.emit_block_events else None
-            )
-            if blocks is not None:
-                df_events = df_events.unionByName(blocks)
+            if self.events.emit_runway_milestones:
+                print(f"Calculating runway milestones for batch: {batch_id}")
+                rwy_sv = self._with_flight_id(geo)
+                add(self._runway_traversal_family(rwy_sv, month))
+                # Independent of the traversals *and* of the layout table: a
+                # go-around may never touch a runway polygon, so it is gated on
+                # the destination geometry it actually reads and on nothing
+                # else.
+                if "ades_lat" in rwy_sv.columns:
+                    add(go_arounds(rwy_sv, self.events))
+
+            if self.events.emit_block_events:
+                add(calculate_block_events(sdf_input, df_hexaero, self.events))
 
         if calc_seen:
             print(f"Calculating first_seen/last_seen events for batch: {batch_id}")
-            df_seen = calculate_firstseen_lastseen_events(sdf_input)
-            df_events = df_seen if df_events is None else df_events.union(df_seen)
+            add(calculate_firstseen_lastseen_events(sdf_input))
 
         if df_events is None:
             return
@@ -1403,7 +1370,7 @@ class FlightEventProcessor:
             )
         )
 
-        df_measurements = df_dist.union(df_time)
+        df_measurements = df_dist.unionByName(df_time)
         df_measurements = df_measurements.repartition("type", "version").orderBy("type", "version")
         self.storage.write_table(df_measurements, "opdi_measurements", mode="append")
 

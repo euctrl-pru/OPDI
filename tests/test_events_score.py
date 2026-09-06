@@ -14,7 +14,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 import pytest
 from pyspark.sql import functions as F
 
-from events_score import align, guard_not_all_zero, score, score_runways
+from events_score import (
+    align,
+    guard_not_all_zero,
+    score,
+    score_by_airport,
+    score_by_truth_resolution,
+    score_runways,
+)
 
 T0 = dt.datetime(2024, 6, 5, 10, 0, 0)
 DAY = dt.date(2024, 6, 5)
@@ -136,6 +143,49 @@ def test_a_table_of_zeros_is_refused(spark):
         guard_not_all_zero(score(align(truth, empty)))
 
 
+def _aligned_two_airports(spark):
+    """An already-aligned frame spanning two aerodromes, one row each, so the
+    only thing under test is that `score_by_airport` groups on `gt_airport` in
+    addition to `milestone` rather than pooling every aerodrome together."""
+    return spark.createDataFrame(
+        [("EBBR", "ATOT", 5.0), ("LSZH", "ATOT", -3.0)],
+        "gt_airport string, milestone string, error_s double",
+    )
+
+
+def _aligned_with_n(spark, airport, n_detected):
+    """An already-aligned frame for one aerodrome with exactly `n_detected`
+    rows, each carrying a non-null `error_s` -- so `n_detected` (rows with a
+    detection) and `n_truth` (all rows) are both `n_detected`, i.e. 100%
+    coverage at whatever sample size the test wants to probe the floor with."""
+    return spark.createDataFrame(
+        [(airport, "ATOT", float(i)) for i in range(n_detected)],
+        "gt_airport string, milestone string, error_s double",
+    )
+
+
+def test_per_airport_scores_split_by_aerodrome(spark):
+    out = score_by_airport(_aligned_two_airports(spark))
+    assert {r["gt_airport"] for r in out.collect()} == {"EBBR", "LSZH"}
+
+
+def test_a_cell_below_the_floor_is_marked_unreportable_not_dropped(spark):
+    """Dropping it would make a detector that failed at an aerodrome look like
+    an aerodrome that was never studied. The row stays; `reportable` is False
+    and the paper renders a dash."""
+    out = score_by_airport(_aligned_with_n(spark, airport="UGKO", n_detected=3))
+    row = [r for r in out.collect() if r["gt_airport"] == "UGKO"][0]
+    assert row["reportable"] is False
+    assert row["n_detected"] == 3
+
+
+def test_coverage_is_reported_even_where_percentiles_are_not(spark):
+    """Coverage is a ratio of counts and is meaningful at any n; a median of
+    three errors is not."""
+    out = score_by_airport(_aligned_with_n(spark, airport="UGKO", n_detected=3))
+    assert [r for r in out.collect() if r["gt_airport"] == "UGKO"][0]["coverage_pct"] is not None
+
+
 def test_the_scorer_and_the_event_table_agree_on_identity(spark):
     """The integration gap that unit tests missed.
 
@@ -157,4 +207,63 @@ def test_the_scorer_and_the_event_table_agree_on_identity(spark):
         assert key in src, (
             f"detected_events must resolve {key!r}; align() joins on it and a "
             f"missing key fails only after the events have been computed"
+        )
+
+
+def _aligned_two_airports_two_resolutions(spark):
+    """An already-aligned frame where one aerodrome reports to the second and
+    the other does not -- which is the real shape: `gt_subminute` is a property
+    of the aerodrome's reporting system, so it is nearly constant within an
+    aerodrome and varies between them."""
+    return spark.createDataFrame(
+        [
+            ("EBBR", "ATOT", True, 5.0),
+            ("EBBR", "ATOT", True, -4.0),
+            ("EBBR", "ALDT", True, 2.0),
+            ("LSZH", "ATOT", False, 31.0),
+        ],
+        "gt_airport string, milestone string, gt_subminute boolean, error_s double",
+    )
+
+
+def test_truth_resolution_can_be_split_per_aerodrome(spark):
+    """Annex A needs to say *which* aerodromes report to the second. The
+    default grouping pools them, so the network figure is an average over
+    aerodromes that are individually at 0% or 100%."""
+    out = score_by_truth_resolution(
+        _aligned_two_airports_two_resolutions(spark),
+        group_cols=("gt_airport", "milestone", "gt_subminute"),
+    ).collect()
+
+    cells = {(r["gt_airport"], r["milestone"], r["gt_subminute"]): r for r in out}
+    assert set(cells) == {
+        ("EBBR", "ATOT", True),
+        ("EBBR", "ALDT", True),
+        ("LSZH", "ATOT", False),
+    }
+    assert cells[("EBBR", "ATOT", True)]["n_truth"] == 2
+    assert cells[("LSZH", "ATOT", False)]["n_truth"] == 1
+
+
+def test_the_default_grouping_is_what_it_always_was(spark):
+    """Existing callers -- V3's chain among them -- must see the network-level
+    split unchanged."""
+    out = score_by_truth_resolution(
+        _aligned_two_airports_two_resolutions(spark)
+    ).collect()
+
+    assert {(r["milestone"], r["gt_subminute"]) for r in out} == {
+        ("ATOT", True), ("ATOT", False), ("ALDT", True)
+    }
+    assert "gt_airport" not in out[0].asDict()
+
+
+def test_a_resolution_split_without_the_resolution_is_refused(spark):
+    """It would be `score()` under a name that promises something else, and
+    the caller would report quantisation-free figures that are nothing of the
+    kind."""
+    with pytest.raises(ValueError, match="gt_subminute"):
+        score_by_truth_resolution(
+            _aligned_two_airports_two_resolutions(spark),
+            group_cols=("gt_airport", "milestone"),
         )

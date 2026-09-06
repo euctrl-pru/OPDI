@@ -32,6 +32,44 @@ from opdi.pipeline.flights import angle_between, bearing_deg, haversine_nm
 FT_PER_M = 3.28084
 FTMIN_PER_MPS = 196.850394
 KT_PER_MPS = 1.94384
+EARTH_RADIUS_NM = 3440.065
+
+#: Feet per nautical mile, used to turn ``oa_runways`` extents into the units
+#: the geometric on-runway test works in.
+FT_PER_NM = 6076.12
+#: Metres per nautical mile.
+M_PER_NM = 1852.0
+
+#: Runway extent fallbacks for the geometric occupancy test, in the rare rows
+#: where OurAirports leaves ``length_ft``/``width_ft`` null. A generic
+#: long-haul length (8,000 ft) and a generous half-width (30 m): both are only
+#: bounds on the on-runway membership test, so erring wide keeps a genuine
+#: on-runway sample rather than dropping it, and the grid prune has already
+#: bounded the sample to the neighbourhood of *this* strip.
+DEFAULT_RWY_LENGTH_FT = 8000.0
+DEFAULT_RWY_HALF_WIDTH_M = 30.0
+
+
+def cross_track_nm(lat, lon, thr_lat, thr_lon, rwy_bearing):
+    """Perpendicular distance from a point to a runway's extended centreline.
+
+    The standard cross-track formula::
+
+        d_xt = asin( sin(d_13 / R) * sin(theta_13 - theta_12) ) * R
+
+    where 1 is the threshold, 2 the runway direction and 3 the aircraft. The
+    absolute value is returned because which side of the centreline the
+    aircraft sits on does not decide which runway it used.
+
+    This replaces a tie-break on the distance from each threshold to the
+    aerodrome reference point -- a constant of the airport, identical for every
+    flight, which therefore picked the same runway of a parallel pair every
+    time. That is where "a third of named landing runways are wrong" came from.
+    """
+    d13 = haversine_nm(thr_lat, thr_lon, lat, lon) / F.lit(EARTH_RADIUS_NM)
+    theta13 = F.radians(bearing_deg(thr_lat, thr_lon, lat, lon))
+    theta12 = F.radians(rwy_bearing)
+    return F.abs(F.asin(F.sin(d13) * F.sin(theta13 - theta12)) * F.lit(EARTH_RADIUS_NM))
 
 
 def runway_thresholds(storage) -> Optional[DataFrame]:
@@ -40,6 +78,15 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
     A physical runway appears twice, once per direction, because that is the
     unit a movement is reported against -- APDF's ``AP_C_RWY`` names a
     direction, not a strip.
+
+    Each row also carries the strip's extent -- ``rwy_length_nm`` and
+    ``rwy_half_width_nm`` -- so the traversal detector can decide whether a
+    grid-pruned sample actually sits *on* the runway rather than merely near
+    it. Both directions of one strip share the same extent, since it is a
+    property of the physical runway, not of the direction. ``length_ft`` null
+    falls back to a generic 8,000 ft and ``width_ft`` null to a 30 m
+    half-width; both are deliberately generous bounds -- see
+    :data:`DEFAULT_RWY_LENGTH_FT`.
     """
     if not storage.table_exists("oa_runways"):
         return None
@@ -50,6 +97,25 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         & F.col("he_latitude_deg").isNotNull()
     )
 
+    def _extent(name):
+        # OurAirports always carries these; a hand-built ``oa_runways`` stub
+        # (some tests) may not. A missing column is a typed null, which the
+        # coalesce below then turns into the documented default -- so the
+        # extent is optional input, never a hard schema requirement.
+        return (
+            F.col(name).cast("double") if name in rwy.columns
+            else F.lit(None).cast("double")
+        )
+
+    length_nm = (
+        F.coalesce(_extent("length_ft"), F.lit(DEFAULT_RWY_LENGTH_FT))
+        / F.lit(FT_PER_NM)
+    ).alias("rwy_length_nm")
+    half_width_nm = F.coalesce(
+        _extent("width_ft") / F.lit(2.0) / F.lit(FT_PER_NM),
+        F.lit(DEFAULT_RWY_HALF_WIDTH_M / M_PER_NM),
+    ).alias("rwy_half_width_nm")
+
     le = rwy.select(
         F.col("airport_ident").alias("apt_ident"),
         F.col("le_ident").alias("rwy_ident"),
@@ -59,6 +125,8 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
             F.col("le_latitude_deg"), F.col("le_longitude_deg"),
             F.col("he_latitude_deg"), F.col("he_longitude_deg"),
         ).alias("rwy_bearing"),
+        length_nm,
+        half_width_nm,
     )
     he = rwy.select(
         F.col("airport_ident").alias("apt_ident"),
@@ -69,6 +137,8 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
             F.col("he_latitude_deg"), F.col("he_longitude_deg"),
             F.col("le_latitude_deg"), F.col("le_longitude_deg"),
         ).alias("rwy_bearing"),
+        length_nm,
+        half_width_nm,
     )
     return le.unionByName(he).filter(F.col("rwy_ident").isNotNull())
 
@@ -125,6 +195,8 @@ def detect_runway_movements(
     # apt_ident, so grouping on it adds no rows.
     agg = work.groupBy("track_id", "apt_ident", "role", "apt_lat", "apt_lon").agg(
         F.expr("percentile_approx(heading, 0.5)").alias("median_track"),
+        F.expr("percentile_approx(lat, 0.5)").alias("median_lat"),
+        F.expr("percentile_approx(lon, 0.5)").alias("median_lon"),
         F.min("event_time").alias("first_time"),
         F.max("event_time").alias("last_time"),
         F.count(F.lit(1)).alias("n_samples"),
@@ -140,17 +212,30 @@ def detect_runway_movements(
         "bearing_error", angle_between(F.col("median_track"), F.col("rwy_bearing"))
     ).filter(F.col("bearing_error") <= F.lit(config.runway_max_bearing_deg))
 
-    # Nearest bearing wins. Parallel runways share one to within a degree, so
-    # cross-track distance to each centreline breaks the tie -- the same
-    # discriminator traffic uses shapely for, in closed form.
+    # Cross-track distance decides; the bearing error only breaks its ties.
+    #
+    # The candidates have already been filtered to within
+    # ``runway_max_bearing_deg`` of the aircraft's own track, so every survivor
+    # is plausibly aligned and the question left is *which strip*. Parallel
+    # runways share a bearing to within a degree and sit hundreds of metres
+    # apart, so ordering on bearing first would let a fraction of a degree of
+    # heading noise pick the wrong one; the aircraft's offset from each
+    # centreline cannot be confused that way. Bearing error then separates the
+    # two *directions* of the chosen strip, which share a centreline exactly
+    # and so tie on cross-track. The same discriminator traffic uses shapely
+    # for, in closed form.
     cand = cand.withColumn(
-        "thr_dist_nm",
-        haversine_nm(F.col("thr_lat"), F.col("thr_lon"), F.col("apt_lat"), F.col("apt_lon")),
+        "cross_track_nm",
+        cross_track_nm(
+            F.col("median_lat"), F.col("median_lon"),
+            F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing"),
+        ),
     )
     from pyspark.sql.window import Window
 
     best = Window.partitionBy("track_id", "role").orderBy(
-        F.col("bearing_error").asc(), F.col("thr_dist_nm").asc(), F.col("rwy_ident").asc()
+        F.col("cross_track_nm").asc(), F.col("bearing_error").asc(),
+        F.col("rwy_ident").asc(),
     )
     return (
         cand.withColumn("_r", F.row_number().over(best))

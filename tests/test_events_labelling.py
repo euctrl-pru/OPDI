@@ -6,11 +6,18 @@ segmentation guarantees by construction, because callsign is part of the
 track's group key, and which the ``standard`` segmentation does not, because it
 groups on the airframe alone.
 
-The consequence is not internal: line 1003 publishes ``flight_id`` as
-``osn_flight_id`` inside the event's ``info`` JSON, so one aircraft crossing one
-runway once becomes two ``entry-runway`` milestones in the table OPDI actually
-ships. Both look entirely plausible in isolation, which is why this needs a test
-rather than an inspection.
+The consequence is not internal: ``calculate_airport_events`` publishes
+``flight_id`` as ``osn_flight_id`` inside the event's ``info`` JSON, so one
+aircraft crossing one taxiway once becomes two ``entry-taxiway`` milestones in
+the table OPDI actually ships. Both look entirely plausible in isolation, which
+is why this needs a test rather than an inspection.
+
+The fixture below matches a taxiway rather than a runway hexagon deliberately:
+Task 4 makes ``calculate_airport_events`` drop ``hexaero_aeroway == "runway"``
+rows whenever ``config.emit_runway_milestones`` is on (the default), since the
+runway family (``runway_ops.py``) now publishes that physical event under a
+different vocabulary. This file is about the callsign-grouping invariant, not
+about which aeroway type carries it, so it uses a type the drop does not touch.
 """
 
 import datetime as dt
@@ -84,14 +91,14 @@ class _StubStorage:
 
 @pytest.fixture
 def storage(spark):
-    """One flight bound for EKCH, and one EKCH runway hexagon."""
+    """One flight bound for EKCH, and one EKCH taxiway hexagon."""
     flight_list = spark.createDataFrame(
         [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EKCH", "EDDF", None, None)],
         "id string, dof timestamp, adep string, ades string, "
         "adep_p string, ades_p string",
     )
     layouts = spark.createDataFrame(
-        [(H3_CELL, "EKCH", "osm-1", "runway", "04L")],
+        [(H3_CELL, "EKCH", "osm-1", "taxiway", "04L")],
         "hexaero_h3_id string, hexaero_apt_icao string, hexaero_osm_id string, "
         "hexaero_aeroway string, hexaero_ref string",
     )
@@ -102,7 +109,7 @@ def storage(spark):
 
 
 def _crossing(spark, samples):
-    """One track rolling along one runway, broadcasting *samples* in order.
+    """One track rolling along one taxiway, broadcasting *samples* in order.
 
     A sample is a callsign, or a ``(callsign, positional)`` pair. Positional
     samples sit in the same H3 cell, one second apart, on the ground -- so the
@@ -149,16 +156,16 @@ def _published_callsigns(rows):
     return {json.loads(r["info"])["osn_flight_id"] for r in rows}
 
 
-def test_one_runway_crossing_is_one_event_not_one_per_callsign(spark, storage):
+def test_one_taxiway_crossing_is_one_event_not_one_per_callsign(spark, storage):
     """The defect end to end, in the milestone rows the step actually returns.
 
-    Five samples, one runway, one crossing. Three of them carry SAS123 and two
+    Five samples, one taxiway, one crossing. Three of them carry SAS123 and two
     are blank -- and each sub-group spans more than a second, so each survives
     the zero-duration filter and becomes its own entry/exit pair. Unresolved
     this returns four milestones for one crossing; resolved it returns two.
     """
     rows = _events(spark, storage, ["SAS123", "SAS123", "SAS123", "", ""])
-    assert sorted(r["type"] for r in rows) == ["entry-runway", "exit-runway"], (
+    assert sorted(r["type"] for r in rows) == ["entry-taxiway", "exit-taxiway"], (
         f"expected one entry/exit pair, got {[r['type'] for r in rows]}"
     )
     assert _published_callsigns(rows) == {"SAS123"}
@@ -175,7 +182,7 @@ def test_a_single_callsign_track_is_untouched(spark, storage):
     """Every track produced by legacy segmentation looks like this. The fix has
     to be a no-op on them or it is a regression wearing a fix's clothes."""
     rows = _events(spark, storage, ["SAS123"] * 4)
-    assert sorted(r["type"] for r in rows) == ["entry-runway", "exit-runway"]
+    assert sorted(r["type"] for r in rows) == ["entry-taxiway", "exit-taxiway"]
     assert _published_callsigns(rows) == {"SAS123"}
 
 
@@ -183,7 +190,7 @@ def test_a_track_that_never_broadcast_a_callsign_stays_in_the_events(spark, stor
     """It is unlabelled, not absent. An inner join in the resolution would drop
     the crossing entirely, which is a worse bug than the one being fixed."""
     rows = _events(spark, storage, ["", "", ""])
-    assert sorted(r["type"] for r in rows) == ["entry-runway", "exit-runway"]
+    assert sorted(r["type"] for r in rows) == ["entry-taxiway", "exit-taxiway"]
     assert _published_callsigns(rows) == {""}
 
 
@@ -212,7 +219,7 @@ def test_the_vote_counts_samples_the_dropna_would_later_remove(spark, storage):
         ("AAA111", True),
         ("AAA111", True),
     ])
-    assert sorted(r["type"] for r in rows) == ["entry-runway", "exit-runway"]
+    assert sorted(r["type"] for r in rows) == ["entry-taxiway", "exit-taxiway"]
     assert _published_callsigns(rows) == {"SAS123"}
 
 
