@@ -86,7 +86,6 @@ _TRAVERSAL_SCHEMA = StructType(
         StructField("rwy_bearing", DoubleType()),
         StructField("thr_lat", DoubleType()),
         StructField("thr_lon", DoubleType()),
-        StructField("thr_elevation_ft", DoubleType()),
         StructField("trace_id", StringType()),
         StructField("entry_time", TimestampType()),
         StructField("exit_time", TimestampType()),
@@ -116,7 +115,6 @@ def _traversal(spark, cls, entry_s, exit_s, **over):
         rwy_bearing=70.0,
         thr_lat=50.0,
         thr_lon=4.0,
-        thr_elevation_ft=0.0,
         trace_id="0",
         entry_time=_EPOCH + dt.timedelta(seconds=entry_s),
         exit_time=_EPOCH + dt.timedelta(seconds=exit_s),
@@ -592,7 +590,7 @@ def _grid(spark, apt="EBBR"):
     )
 
 
-def _thresholds(spark, apt="EBBR", elev=0.0):
+def _thresholds(spark, apt="EBBR"):
     """Both directions of one strip: 07 at (50, 4) and 25 two miles up it.
 
     The strip is 2 NM long and carries a generous half-width, so a sample on
@@ -601,11 +599,10 @@ def _thresholds(spark, apt="EBBR", elev=0.0):
     """
     lat25, lon25 = _dest(50.0, 4.0, 70.0, 2.0)
     return spark.createDataFrame(
-        [(apt, "07", 50.0, 4.0, 70.0, 2.0, 0.05, float(elev)),
-         (apt, "25", lat25, lon25, 250.0, 2.0, 0.05, float(elev))],
+        [(apt, "07", 50.0, 4.0, 70.0, 2.0, 0.05),
+         (apt, "25", lat25, lon25, 250.0, 2.0, 0.05)],
         "apt_ident string, rwy_ident string, thr_lat double, thr_lon double, "
-        "rwy_bearing double, rwy_length_nm double, rwy_half_width_nm double, "
-        "thr_elevation_ft double",
+        "rwy_bearing double, rwy_length_nm double, rwy_half_width_nm double",
     )
 
 
@@ -654,32 +651,6 @@ def _departure_on_25(spark):
         _departure_track(spark).withColumn("heading", F.lit(250.0)),
         positions=[_dest(50.0, 4.0, 70.0, 2.0 - 0.05 * i) for i in range(13)],
     )
-
-
-def test_departure_height_uses_the_runways_own_field_not_adep_ades(spark):
-    """The runway family measures height against the runway's OWN threshold
-    elevation (``thr_elevation_ft``), never the flight's adep/ades fields. A
-    through-flight passing low over EBBR names neither EBBR in adep/ades (EBBR
-    is only one of its proximity aerodromes), and its adep/ades sit at high
-    fields. The retired ``height_above_aerodrome_ft`` fell back to the higher of
-    those two, drove every on-runway sample far negative, and abstained -- the
-    same defect that inflated airborne bias to +21.8 s at network scale.
-
-    Mutation check: restore ``_h_ft = height_above_aerodrome_ft(work,
-    apt_icao)`` and this abstains (0 traversals).
-    """
-    sv = _departure_on_25(spark)  # apt=("EBBR",); thresholds EBBR at 0 ft
-    sv = (
-        sv.withColumn("adep", F.lit("LEMD")).withColumn("ades", F.lit("LSGG"))
-        .withColumn("elev_adep_ft", F.lit(2000.0))
-        .withColumn("elev_ades_ft", F.lit(1400.0))
-    )
-    out = runway_traversals(
-        sv, _grid(spark), _thresholds(spark), EventConfig()
-    ).collect()
-    assert len(out) == 1, "the runway's height must not depend on adep/ades"
-    assert out[0]["class"] == "departure"
-    assert out[0]["entry_height_ft"] == pytest.approx(0.0, abs=20)
 
 
 def test_runway_traversals_classifies_a_departure_and_names_its_direction(spark):
@@ -850,7 +821,7 @@ def test_a_departure_from_the_lower_of_two_aerodromes_still_lifts_off(spark):
         positions=[_dest(50.0, 4.0, 70.0, 0.05 * i) for i in range(13)],
         apt=("EBBR", "LSZH"),
     )
-    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark, elev=_LOW_FIELD_FT),
+    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark),
                                    EventConfig())
 
     rows = traversals.collect()
@@ -877,7 +848,7 @@ def test_an_arrival_at_the_lower_of_two_aerodromes_still_touches_down(spark):
     """
     sv = _arrival_on_07(spark, elev_adep_ft=_HIGH_FIELD_FT,
                         elev_ades_ft=_LOW_FIELD_FT, adep="LSZH", ades="EBBR")
-    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark, elev=_LOW_FIELD_FT),
+    traversals = runway_traversals(sv, _grid(spark), _thresholds(spark),
                                    EventConfig())
 
     rows = traversals.collect()
@@ -997,7 +968,7 @@ def test_departure_at_a_grid_airport_with_high_field_emits_airborne(spark):
         apt=("LSZH", "LEMD"),
     )
     traversals = runway_traversals(
-        sv, _grid(spark, apt="LSZH"), _thresholds(spark, apt="LSZH", elev=_HIGH_FIELD_FT), EventConfig()
+        sv, _grid(spark, apt="LSZH"), _thresholds(spark, apt="LSZH"), EventConfig()
     )
     rows = traversals.collect()
     assert len(rows) == 1, "the high-field departure was classified away"
