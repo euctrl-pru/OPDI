@@ -76,10 +76,7 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from opdi.config import EventConfig
 
 from opdi.pipeline.crossings import threshold_crossings
-from opdi.pipeline.elevation import (
-    height_above_aerodrome_ft,
-    height_above_elevation_ft,
-)
+from opdi.pipeline.elevation import height_above_elevation_ft
 from opdi.pipeline.flights import angle_between, bearing_deg, haversine_nm
 from opdi.pipeline.runways import cross_track_nm
 
@@ -361,6 +358,7 @@ def runway_traversals(
         F.col("rwy_bearing"),
         F.col("rwy_length_nm"),
         F.col("rwy_half_width_nm"),
+        F.col("thr_elevation_ft"),
     )
     cand = near.join(
         F.broadcast(dir_thr),
@@ -434,7 +432,15 @@ def runway_traversals(
     # `classify_traversal` abstains, and the whole departure or arrival is
     # silently absent. See `elevation.height_above_field_ft`'s warning.
     work = work.withColumn(
-        "_h_ft", height_above_aerodrome_ft(work, F.col("apt_icao"))
+        # Height above the runway's OWN threshold elevation (carried on
+        # ``thresholds``), not the more-permissive height over the flight's
+        # adep/ades. A through-flight's adep/ades name neither this aerodrome,
+        # which sent ``height_above_aerodrome_ft`` to the fallback (the higher
+        # of the two fields) and biased the 15 ft crossing late; the threshold
+        # elevation is the field this runway's samples are actually above.
+        "_h_ft",
+        F.col("baro_altitude_c") * F.lit(FT_PER_M)
+        - F.coalesce(F.col("thr_elevation_ft"), F.lit(0.0)),
     )
     work = work.withColumn("_gs_kt", F.col("velocity") * F.lit(KT_PER_MPS))
     work = work.withColumn("_alt_ft", F.col("baro_altitude_c") * F.lit(FT_PER_M))
@@ -451,7 +457,7 @@ def runway_traversals(
     agg = work.groupBy(
         "track_id", "apt_icao", "strip_id", "rwy_ident",
         "thr_lat", "thr_lon", "rwy_bearing", "rwy_length_nm", "rwy_half_width_nm",
-        "le_ident", "he_ident", "trace_id",
+        "thr_elevation_ft", "le_ident", "he_ident", "trace_id",
     ).agg(
         F.min("event_time").alias("entry_time"),
         F.max("event_time").alias("exit_time"),
@@ -547,6 +553,7 @@ def runway_traversals(
         F.col("rwy_bearing"),
         F.col("thr_lat"),
         F.col("thr_lon"),
+        F.col("thr_elevation_ft"),
         F.col("strip_id"),
         F.col("trace_id"),
         F.col("entry_time"),
@@ -674,6 +681,7 @@ def _traversal_samples(
         F.col("rwy_bearing"),
         F.col("thr_lat"),
         F.col("thr_lon"),
+        F.col("thr_elevation_ft"),
         F.col("trace_id"),
         F.col("entry_time"),
         F.col("exit_time"),
@@ -702,7 +710,12 @@ def _traversal_samples(
         "_in_polygon", F.col("event_time") >= F.col("entry_time")
     )
     return joined.withColumn(
-        "height_ft", height_above_aerodrome_ft(joined, F.col("apt_ident"))
+        # Same threshold-elevation datum the traversal classified on, so the
+        # interpolated 15 ft airborne/touchdown crossing is above the runway's
+        # own field rather than the flight's higher aerodrome.
+        "height_ft",
+        F.col("baro_altitude_c") * F.lit(FT_PER_M)
+        - F.coalesce(F.col("thr_elevation_ft"), F.lit(0.0)),
     ).drop("baro_altitude_c", *carried)
 
 

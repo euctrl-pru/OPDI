@@ -97,6 +97,27 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         & F.col("he_latitude_deg").isNotNull()
     )
 
+    # Threshold elevation, for the runway family's height-above-field. Prefer
+    # the runway end's own elevation, fall back to the other end, then to the
+    # aerodrome field elevation. oa_runways carries le/he_elevation_ft but it is
+    # null for ~72% of runways network-wide, so the oa_airports fallback is what
+    # keeps the height defined away from the best-surveyed airports. Measuring
+    # against the runway's *own* aerodrome (apt_ident) rather than the flight's
+    # adep/ades is deliberate: the traversal is physically on this runway, so
+    # this is the field the 15 ft airborne/touchdown crossing is above -- and it
+    # does not depend on ADEP/ADES resolution, which for through-flights names
+    # neither this aerodrome.
+    if storage.table_exists("oa_airports"):
+        _apt_elev = storage.read_table("oa_airports").select(
+            F.col("ident").alias("_ae_ident"),
+            F.col("elevation_ft").cast("double").alias("_apt_elev_ft"),
+        )
+        rwy = rwy.join(
+            F.broadcast(_apt_elev), rwy.airport_ident == _apt_elev._ae_ident, "left"
+        ).drop("_ae_ident")
+    else:
+        rwy = rwy.withColumn("_apt_elev_ft", F.lit(None).cast("double"))
+
     def _extent(name):
         # OurAirports always carries these; a hand-built ``oa_runways`` stub
         # (some tests) may not. A missing column is a typed null, which the
@@ -116,6 +137,15 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         F.lit(DEFAULT_RWY_HALF_WIDTH_M / M_PER_NM),
     ).alias("rwy_half_width_nm")
 
+    le_elev = F.coalesce(
+        _extent("le_elevation_ft"), _extent("he_elevation_ft"),
+        F.col("_apt_elev_ft"),
+    ).alias("thr_elevation_ft")
+    he_elev = F.coalesce(
+        _extent("he_elevation_ft"), _extent("le_elevation_ft"),
+        F.col("_apt_elev_ft"),
+    ).alias("thr_elevation_ft")
+
     le = rwy.select(
         F.col("airport_ident").alias("apt_ident"),
         F.col("le_ident").alias("rwy_ident"),
@@ -127,6 +157,7 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         ).alias("rwy_bearing"),
         length_nm,
         half_width_nm,
+        le_elev,
     )
     he = rwy.select(
         F.col("airport_ident").alias("apt_ident"),
@@ -139,6 +170,7 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         ).alias("rwy_bearing"),
         length_nm,
         half_width_nm,
+        he_elev,
     )
     return le.unionByName(he).filter(F.col("rwy_ident").isNotNull())
 
