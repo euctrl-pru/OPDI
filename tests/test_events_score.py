@@ -17,6 +17,7 @@ from pyspark.sql import functions as F
 from events_score import (
     align,
     align_by_detector,
+    align_by_priority,
     guard_not_all_zero,
     score,
     score_by_airport,
@@ -331,3 +332,40 @@ def test_the_split_scores_each_detector_on_the_same_denominator(spark):
     # not the +4 airborne would have contributed under pooling.
     assert rows["ATOT"]["bias_s"] == pytest.approx(20.0)
     assert rows["airborne"]["bias_s"] == pytest.approx(4.0)
+
+
+def test_priority_takes_the_preferred_detector_even_when_it_is_further(spark):
+    """The shippable rule, and the thing that separates it from the oracle.
+
+    `align` keeps whichever detection is nearest the reference, which cannot be
+    implemented without the reference. A priority rule takes the preferred
+    detector's answer whether or not it is the closer one -- here ATOT at +30 s
+    over airborne at +4 s -- and that is precisely why its bias is worse than
+    the pooled figure and reproducible where the pooled figure is not.
+    """
+    truth = _truth(spark, [("abc123", "TEST1", "ATOT", T0, "07", True)])
+    det = _detected_with_type(spark, [
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
+    ])
+    legacy = score(align_by_priority(truth, det, ["ATOT", "airborne"])).collect()[0]
+    acdm = score(align_by_priority(truth, det, ["airborne", "ATOT"])).collect()[0]
+    assert legacy["bias_s"] == pytest.approx(30.0)
+    assert acdm["bias_s"] == pytest.approx(4.0)
+    # Coverage cannot depend on the order: the movement is answered either way.
+    assert legacy["coverage_pct"] == acdm["coverage_pct"] == 100.0
+
+
+def test_priority_falls_back_when_the_preferred_detector_is_silent(spark):
+    """Fallback is the whole point: the pair covers more than either alone."""
+    truth = _truth(spark, [
+        ("abc123", "TEST1", "ATOT", T0, "07", True),
+        ("def456", "TEST2", "ATOT", T0, "07", True),
+    ])
+    det = _detected_with_type(spark, [
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+        # TEST2 answered only by the fallback.
+        ("def456", "TEST2", "ATOT", T0 + dt.timedelta(seconds=6), "airborne"),
+    ])
+    got = score(align_by_priority(truth, det, ["ATOT", "airborne"])).collect()[0]
+    assert got["n_detected"] == 2 and got["coverage_pct"] == pytest.approx(100.0)

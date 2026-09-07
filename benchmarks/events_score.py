@@ -125,6 +125,58 @@ def align_by_detector(truth: DataFrame, detected: DataFrame) -> DataFrame:
     )
 
 
+def align_by_priority(truth: DataFrame, detected: DataFrame,
+                      priority: "list[str]") -> DataFrame:
+    """:func:`align`, resolving ties by a **fixed detector preference**.
+
+    :func:`align` keeps whichever detection is nearest the reference. That is
+    the right way to ask what the pair is *capable* of, but it is not a rule
+    anybody can ship: choosing the nearest requires already knowing the answer.
+    It is an oracle, and its bias is a lower bound no published table can
+    reproduce.
+
+    A shippable rule is a *priority*: take the preferred detector's answer when
+    it has one, fall back to the next otherwise. Coverage is identical to the
+    oracle's -- a movement is answered if any detector answered it, whatever the
+    order -- but the bias is not, because each movement now carries the bias of
+    whichever detector actually supplied it rather than of whichever happened to
+    be luckier.
+
+    ``priority`` is detector names best-first. A detector absent from the list
+    sorts after every named one, so an unlisted detector is a last resort rather
+    than being dropped.
+    """
+    cols = ["icao24", "callsign", "day", "milestone"]
+    d = detected.select(
+        *[F.col(c) for c in cols],
+        F.col("det_type"),
+        F.col("event_time").alias("det_time"),
+        *[F.col(c) for c in ("det_runway", "det_lat", "det_lon")
+          if c in detected.columns],
+    )
+    rank = F.lit(len(priority))
+    for i, name in enumerate(priority):
+        rank = F.when(F.col("det_type") == F.lit(name), F.lit(i)).otherwise(rank)
+    d = d.withColumn("_pref", rank)
+
+    j = truth.join(d, cols, "left")
+    j = j.withColumn(
+        "error_s",
+        F.col("det_time").cast("double") - F.col("gt_time").cast("double"),
+    )
+    # Preference first, and only then nearest *within* the chosen detector --
+    # so a second answer from the preferred detector still beats a closer one
+    # from the fallback, which is what makes this a rule and not the oracle.
+    chosen = Window.partitionBy(*cols).orderBy(
+        F.col("_pref").asc_nulls_last(), F.abs(F.col("error_s")).asc_nulls_last()
+    )
+    return (
+        j.withColumn("_r", F.row_number().over(chosen))
+        .filter(F.col("_r") == 1)
+        .drop("_r")
+    )
+
+
 def score(aligned: DataFrame, group_cols=("milestone",)) -> DataFrame:
     """Coverage, bias and spread per milestone."""
     err = F.col("error_s")
