@@ -162,7 +162,19 @@ def calculate_airport_events(
     # rather than on an argument about homogeneity.
     if config.events_version != LEGACY_EVENTS_VERSION:
         sv_f = resolve_flight_id(sv_f)
-    sv_f = sv_f.dropna(subset=["lat", "lon", "baro_altitude_c"])
+    # Position is required; altitude is not, when the message says the aircraft
+    # is on the ground. Dropping every null ``baro_altitude_c`` here deleted the
+    # surface samples before the gate below ever saw them -- a surface position
+    # report carries no altitude at all, so this one line discarded 99.9% of the
+    # state vectors inside a stand polygon at EBBR and is why ``off-block`` and
+    # ``on-block`` answered ~1% of movements at every aerodrome but one.
+    # ``altitude_ft`` and ``flight_level`` are then null for those rows, which is
+    # the honest reading: the aircraft's altitude at the stand is unknown, not
+    # zero, and the events built from them carry that null through.
+    keep_altitude = col("baro_altitude_c").isNotNull()
+    if config.airport_admit_on_ground and "on_ground" in sv_f.columns:
+        keep_altitude = keep_altitude | col("on_ground")
+    sv_f = sv_f.dropna(subset=["lat", "lon"]).filter(keep_altitude)
     sv_f = sv_f.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
     sv_f = sv_f.withColumn("flight_level", col("altitude_ft") / 100)
 
@@ -176,6 +188,16 @@ def calculate_airport_events(
         gate = height_above_field_ft(sv_f) <= F.lit(config.airport_max_height_agl_ft)
     else:
         gate = col("flight_level") <= lit(config.airport_max_fl)
+    # A surface position message carries no altitude -- neither barometric nor
+    # geometric -- so the gate above is NULL for it, and `NULL <= x` is dropped
+    # by a filter. That silently discarded the samples this family is *for*:
+    # at EBBR 99.9% of the state vectors inside a stand polygon have a null
+    # altitude, and the gate passed 57 aircraft out of 2,013. `on_ground` is
+    # the message's own statement that the aircraft is on the surface, so it
+    # answers the gate's question -- "is this near the ground, or merely over
+    # the airport" -- without going through an altitude that is not there.
+    if config.airport_admit_on_ground and "on_ground" in sv_f.columns:
+        gate = col("on_ground") | gate
     sv_f = sv_f.filter(gate)
 
     columns = [

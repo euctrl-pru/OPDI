@@ -1139,6 +1139,27 @@ class EventConfig:
     """The gate's value when ``airport_gate_above_field`` is on. 2,000 ft is
     FL20's intent expressed against the field."""
 
+    airport_admit_on_ground: bool = True
+    """Admit a sample the ADS-B surface message says is on the ground, whatever
+    its altitude says.
+
+    The altitude gate exists to stop a cruising overflight matching an airport
+    polygon it merely passes over. It cannot do that job for a surface message,
+    because a surface position report carries **no altitude at all** -- neither
+    barometric nor geometric -- so ``height_above_field_ft`` is NULL and
+    ``NULL <= 2000`` is NULL, which a filter drops. The gate therefore discarded
+    exactly the samples the layout family exists to match: measured at EBBR,
+    99.9% of the state vectors inside a stand polygon carry a null altitude, and
+    the gate admitted 57 of 2,013 aircraft.
+
+    ``on_ground`` is the message's own assertion that the aircraft is on the
+    surface, true for 99.9% of those samples, so it answers the gate's question
+    directly rather than inferring it from a missing number. An airborne sample
+    is still gated on height as before.
+
+    Off under ``legacy()``: the published ``entry-``/``exit-`` layout events
+    were produced with the altitude-only gate and have to keep reproducing."""
+
     # -- airport events ---------------------------------------------------
     airport_max_fl: int = 20
     """Only samples below this flight level are matched against airport layout
@@ -1248,6 +1269,7 @@ class EventConfig:
             level_radius_enforced=False,
             level_anchor="phase",
             airport_gate_above_field=False,
+            airport_admit_on_ground=False,
             events_version="events_v0.0.2",
         )
 
