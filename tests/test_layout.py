@@ -239,3 +239,63 @@ def test_a_legacy_run_still_emits_entry_and_exit_runway(spark):
     assert {"entry-runway", "exit-runway"} <= types, (
         f"expected entry-runway and exit-runway in {sorted(types)}"
     )
+
+
+_GROUND_SCHEMA = (
+    "track_id string, icao24 string, callsign string, event_time timestamp, "
+    "lat double, lon double, baro_altitude_c double, heading double, "
+    "vert_rate double, h3_res_12 string, cumulative_distance_nm double, "
+    "cumulative_time_s double, on_ground boolean"
+)
+
+
+def _surface_samples(spark, on_ground=True, h3_cell=H3_CELL_TAXIWAY):
+    """An aircraft on the surface, as ADS-B actually reports one.
+
+    ``baro_altitude_c`` is NULL because a surface position message carries no
+    altitude -- neither barometric nor geometric; measured at EBBR, 99.9% of
+    the state vectors inside a stand polygon look exactly like this. What the
+    message does carry is ``on_ground``.
+    """
+    rows = [
+        (
+            "trk-1", "abc123", "SAS123",
+            dt.datetime(2024, 6, 1, 12, 0, i * 10),
+            55.618, 12.656, None, 90.0, 0.0,
+            h3_cell, float(i) * 0.01, float(i * 10), on_ground,
+        )
+        for i in range(2)
+    ]
+    return spark.createDataFrame(rows, _GROUND_SCHEMA)
+
+
+def test_a_surface_sample_with_no_altitude_is_not_gated_away(spark):
+    """The defect this flag fixes.
+
+    The gate asks "is this near the ground, or merely passing over the
+    airport". For a surface message it cannot answer through altitude, because
+    there is none: `height_above_field_ft` is NULL, `NULL <= 2000` is NULL, and
+    a filter drops the row. The layout family therefore discarded precisely the
+    samples it exists to match -- 57 of 2,013 aircraft admitted at EBBR.
+
+    Mutation check: drop the `on_ground` disjunct from `layout.py`'s gate and
+    this returns 0.
+    """
+    sv = _surface_samples(spark)
+    assert _passes_gate(sv, EventConfig()) is True
+
+
+def test_the_ground_flag_does_not_admit_an_airborne_sample(spark):
+    """The gate still does its original job. `on_ground` false and no usable
+    altitude is not evidence of being on the surface, so it stays out: the
+    disjunct admits the message's own assertion, not every null."""
+    sv = _surface_samples(spark, on_ground=False)
+    assert _passes_gate(sv, EventConfig()) is False
+
+
+def test_legacy_keeps_the_altitude_only_gate(spark):
+    """`legacy()` reproduces published `entry-`/`exit-` layout events, which
+    were produced with the altitude-only gate. A surface sample it dropped then
+    must stay dropped now."""
+    sv = _surface_samples(spark)
+    assert _passes_gate(sv, EventConfig.legacy()) is False
