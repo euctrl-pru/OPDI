@@ -16,6 +16,8 @@ from pyspark.sql import functions as F
 
 from events_score import (
     align,
+    align_by_detector,
+    align_by_priority,
     guard_not_all_zero,
     score,
     score_by_airport,
@@ -267,3 +269,103 @@ def test_a_resolution_split_without_the_resolution_is_refused(spark):
             _aligned_two_airports_two_resolutions(spark),
             group_cols=("gt_airport", "milestone"),
         )
+
+
+def _detected_with_type(spark, rows):
+    """rows: (icao24, callsign, milestone, event_time, det_type)"""
+    return spark.createDataFrame(
+        [(i, c, DAY, m, t, d) for i, c, m, t, d in rows],
+        "icao24 string, callsign string, day date, milestone string, "
+        "event_time timestamp, det_type string",
+    )
+
+
+def test_pooling_keeps_only_the_nearest_detector(spark):
+    """`align` answers "what did OPDI publish for this movement".
+
+    Two detectors answer one milestone -- which is what events_v0.2.0 does,
+    publishing ATOT beside airborne -- and only the nearer survives. That makes
+    the pooled bias a best-of-both figure, and it is why the pooled table cannot
+    be read as either detector's accuracy: the losing row is gone before
+    `score` sees it.
+    """
+    truth = _truth(spark, [("abc123", "TEST1", "ATOT", T0, "07", True)])
+    det = _detected_with_type(spark, [
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
+    ])
+    got = score(align(truth, det)).collect()
+    assert len(got) == 1
+    assert got[0]["n_truth"] == 1 and got[0]["n_detected"] == 1
+    assert got[0]["bias_s"] == pytest.approx(4.0)   # the nearer one, not +30
+
+
+def test_the_split_scores_each_detector_on_the_same_denominator(spark):
+    """`align_by_detector` answers "how did this detector do".
+
+    Both detectors keep their own nearest detection, and both are charged the
+    same reference movement -- so a detector that answered nothing is scored at
+    0% rather than vanishing from the table, which is what makes the two rows
+    comparable down a column.
+    """
+    truth = _truth(spark, [
+        ("abc123", "TEST1", "ATOT", T0, "07", True),
+        ("def456", "TEST2", "ATOT", T0, "07", True),
+    ])
+    det = _detected_with_type(spark, [
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
+        # TEST2 is answered by ATOT only; airborne must still be charged it.
+        ("def456", "TEST2", "ATOT", T0 + dt.timedelta(seconds=20), "ATOT"),
+    ])
+    rows = {r["det_type"]: r for r in score(
+        align_by_detector(truth, det), group_cols=("milestone", "det_type")
+    ).collect()}
+    assert set(rows) == {"ATOT", "airborne"}
+    assert rows["ATOT"]["n_truth"] == 2 and rows["ATOT"]["n_detected"] == 2
+    # Same denominator, so airborne's miss on TEST2 is visible as coverage.
+    assert rows["airborne"]["n_truth"] == 2 and rows["airborne"]["n_detected"] == 1
+    assert rows["airborne"]["coverage_pct"] == pytest.approx(50.0)
+    # Each detector keeps its OWN nearest, not the pooled winner.
+    # percentile_approx picks a value from the data, not the midpoint, so the
+    # median of {20, 30} is 20 -- the point is that it is ATOT's own pair and
+    # not the +4 airborne would have contributed under pooling.
+    assert rows["ATOT"]["bias_s"] == pytest.approx(20.0)
+    assert rows["airborne"]["bias_s"] == pytest.approx(4.0)
+
+
+def test_priority_takes_the_preferred_detector_even_when_it_is_further(spark):
+    """The shippable rule, and the thing that separates it from the oracle.
+
+    `align` keeps whichever detection is nearest the reference, which cannot be
+    implemented without the reference. A priority rule takes the preferred
+    detector's answer whether or not it is the closer one -- here ATOT at +30 s
+    over airborne at +4 s -- and that is precisely why its bias is worse than
+    the pooled figure and reproducible where the pooled figure is not.
+    """
+    truth = _truth(spark, [("abc123", "TEST1", "ATOT", T0, "07", True)])
+    det = _detected_with_type(spark, [
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
+    ])
+    legacy = score(align_by_priority(truth, det, ["ATOT", "airborne"])).collect()[0]
+    acdm = score(align_by_priority(truth, det, ["airborne", "ATOT"])).collect()[0]
+    assert legacy["bias_s"] == pytest.approx(30.0)
+    assert acdm["bias_s"] == pytest.approx(4.0)
+    # Coverage cannot depend on the order: the movement is answered either way.
+    assert legacy["coverage_pct"] == acdm["coverage_pct"] == 100.0
+
+
+def test_priority_falls_back_when_the_preferred_detector_is_silent(spark):
+    """Fallback is the whole point: the pair covers more than either alone."""
+    truth = _truth(spark, [
+        ("abc123", "TEST1", "ATOT", T0, "07", True),
+        ("def456", "TEST2", "ATOT", T0, "07", True),
+    ])
+    det = _detected_with_type(spark, [
+        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+        # TEST2 answered only by the fallback.
+        ("def456", "TEST2", "ATOT", T0 + dt.timedelta(seconds=6), "airborne"),
+    ])
+    got = score(align_by_priority(truth, det, ["ATOT", "airborne"])).collect()[0]
+    assert got["n_detected"] == 2 and got["coverage_pct"] == pytest.approx(100.0)
