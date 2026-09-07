@@ -115,11 +115,20 @@ def flight_list_table(period: str) -> str:
 #:    So once the segmentation default flips and ``osn_tracks`` is rebuilt, a
 #:    re-run of L00-L12 measures that fan-out rather than the rung, and the
 #:    ``L12 -> L13`` delta bundles multiple unrelated things: the version bump,
-#:    the callsign resolution the bump switches on, and six V4 behaviour flags
+#:    the callsign resolution the bump switches on, and eight V4 behaviour flags
 #:    (emit_runway_milestones, emit_pru_tops, level_method, level_floors_above_field,
-#:    level_radius_enforced, level_anchor, airport_gate_above_field) added when
+#:    level_radius_enforced, level_anchor, airport_gate_above_field,
+#:    airport_admit_on_ground) added when
 #:    EventConfig's defaults moved to events_v0.2.0. An event-count change would be attributed to a rung that
 #:    did multiple things at once.
+#:
+#:    ``L13_shipped`` is not a single-behaviour rung; it is the catch-all that
+#:    keeps the top of this ladder equal to whatever ``EventConfig()`` currently
+#:    is, which ``verify_plan`` asserts. It therefore **moves every time a new
+#:    behaviour ships**, and its delta is not comparable across publications.
+#:    Anything added to ``EventConfig`` with a non-default shipped value has to
+#:    be listed here or the guard goes red -- which is the guard working, not a
+#:    test to relax.
 #:
 #:    **Read the deltas below L13 as valid for the tracks they were computed
 #:    over, not as reproducible against a rebuilt table.** Deliberately not
@@ -157,6 +166,11 @@ LADDER = [
             "level_radius_enforced": True,
             "level_anchor": "pru",
             "airport_gate_above_field": True,
+            # Shipped with the layout on_ground fix. Surface position messages
+            # carry no altitude at all, so without this the layout gate drops
+            # 99.9% of in-stand samples at EBBR and the block-time family reads
+            # as reception-bound when it is gate-bound.
+            "airport_admit_on_ground": True,
             "events_version": "events_v0.2.0",
         },
     ),
