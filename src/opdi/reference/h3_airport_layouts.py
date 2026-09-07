@@ -254,6 +254,16 @@ def clean_str(s) -> str:
     Returns:
         Cleaned string with values converted to meters.
     """
+    # A missing tag arrives as NaN from the Overpass path (osmnx fills
+    # ragged tag columns with NaN) and as Python `None` from the PBF path
+    # (`obj.tags.get(k)` on a tag the feature lacks). `str(None)` is the
+    # literal "None", which the numeric regex below reduces to an empty
+    # string and `astype(float)` cannot parse -- unlike `str(nan)`, "nan",
+    # which numpy does parse. Normalising both to "nan" here keeps the two
+    # sources equivalent for the numeric columns (`hexaero_length`,
+    # `hexaero_width`) that route through this function.
+    if pd.isna(s):
+        return "nan"
     try:
         s = str(s)
         if "ft" in s:
@@ -267,13 +277,17 @@ def clean_str(s) -> str:
         return s
 
 
-def hexagonify_airport(apt_icao: str, resolution: int = 12) -> pd.DataFrame:
+def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.DataFrame:
     """
     Process a single airport: fetch OSM data, create polygons, convert to H3.
 
     Args:
         apt_icao: ICAO airport code.
         resolution: H3 resolution (default: 12 for ~307m hexagons).
+        source: When given a ``PbfLayoutSource``, step 00b reads its features
+            from a local OSM extract instead of the public Overpass API. When
+            ``None`` (the default), the Overpass path (``retrieve_osm_data``)
+            is used unchanged, so the two can be compared on the same airport.
 
     Returns:
         DataFrame with H3 hexagons for the airport's infrastructure.
@@ -282,7 +296,17 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12) -> pd.DataFrame:
         hexaero_ref, hexaero_surface, hexaero_width, hexaero_osm_id,
         hexaero_type.
     """
-    df = retrieve_osm_data(apt_icao).reset_index()
+    # `source` is a PbfLayoutSource when step 00b is running off a local
+    # extract. `retrieve_osm_data` -- the Overpass path -- stays reachable and
+    # unchanged, so the two can be compared on the same airport.
+    raw = source.features_for(apt_icao) if source is not None else retrieve_osm_data(apt_icao)
+    if raw is None or len(raw) == 0:
+        raise ValueError(f"No data returned for {apt_icao}")
+    # The Overpass frame carries `element`/`id` in its index, so
+    # `reset_index()` must promote them to columns. The PBF frame already has
+    # them as columns; a plain `reset_index()` there would add a spurious
+    # `index` column instead of leaving them alone.
+    df = raw.reset_index(drop=source is not None)
     df["apt_icao"] = apt_icao
     df["geom_type"] = df["geometry"].apply(lambda geom: geom.geom_type)
 
@@ -370,6 +394,7 @@ class AirportLayoutGenerator:
         resolution: Optional[int] = None,
         log_dir: str = "OPDI_live/logs",
         storage=None,
+        pbf_path: Optional[str] = None,
     ):
         self.spark = spark
         self.config = config
@@ -380,6 +405,11 @@ class AirportLayoutGenerator:
         self.project = config.project.project_name
         self.resolution = resolution or config.h3.airport_layout_resolution
         self.log_dir = log_dir
+
+        # When set, step 00b reads this local extract instead of the public
+        # Overpass API. See docs/industrialization-plan.md §3.
+        self.pbf_path = pbf_path
+        self._pbf_source = None
 
         self._success_log = os.path.join(log_dir, "00_hexaero_layout_progress_success.parquet")
         self._failed_log = os.path.join(log_dir, "00_hexaero_layout_progress_failed.parquet")
@@ -458,7 +488,13 @@ class AirportLayoutGenerator:
             DataFrame with H3 layout data, or None on failure.
         """
         try:
-            df = hexagonify_airport(apt_icao, resolution=self.resolution)
+            if self.pbf_path and self._pbf_source is None:
+                from opdi.reference.pbf_source import PbfLayoutSource
+
+                self._pbf_source = PbfLayoutSource(self.pbf_path, self.storage)
+            df = hexagonify_airport(
+                apt_icao, resolution=self.resolution, source=self._pbf_source
+            )
             # `hexagonify_airport` can return duplicate column labels. pandas
             # raises InvalidIndexError when such frames are concatenated, and
             # `createDataFrame` warns "columns are not unique, some columns will

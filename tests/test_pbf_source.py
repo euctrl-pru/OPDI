@@ -660,6 +660,40 @@ class _OverlappingStorage:
         return self._t[name]
 
 
+@needs_luxembourg
+def test_hexagonify_uses_the_pbf_source_when_given_one(spark):
+    """The seam. `hexagonify_airport` is unchanged apart from where its
+    features come from: same widths, same polygon conversion, same H3, same
+    twelve columns."""
+    from opdi.reference.h3_airport_layouts import HEXAERO_SCHEMA, hexagonify_airport
+
+    src = PbfLayoutSource(PBF, _Storage(spark))
+    df = hexagonify_airport("ELLX", resolution=12, source=src)
+
+    assert len(df) > 0
+    assert list(df.columns) == [f.name for f in HEXAERO_SCHEMA.fields]
+    assert set(df["hexaero_apt_icao"]) == {"ELLX"}
+    assert (df["hexaero_res"] == 12).all()
+    assert "parking_position" in set(df["hexaero_aeroway"])
+
+    # The subtle failure mode: `reset_index(drop=...)` backwards silently
+    # nulls these two columns rather than raising. A column-list match alone
+    # would not catch it -- an all-null column still has the right name.
+    assert df["hexaero_osm_id"].notna().all(), "hexaero_osm_id is null on the PBF path"
+    assert df["hexaero_type"].notna().all(), "hexaero_type is null on the PBF path"
+    assert df["hexaero_osm_id"].map(type).eq(int).all(), "hexaero_osm_id is not int"
+    assert df["hexaero_type"].isin(["node", "way", "area", "relation"]).all(), (
+        "hexaero_type is not a valid OSM element type"
+    )
+
+    # First end-to-end run of the full pipeline (read -> assign -> widths ->
+    # polygon conversion -> H3) -- a family silently lost between
+    # `features_for` and the H3 output would not show up in any earlier task.
+    counts = df.groupby("hexaero_aeroway").size()
+    print(f"ELLX per-family H3 cell counts:\n{counts}")
+    assert len(counts) > 1, "only one aeroway family reached the H3 output"
+
+
 def test_a_feature_in_overlapping_boxes_goes_to_the_nearer_aerodrome_only(
     tmp_path, spark
 ):

@@ -55,7 +55,7 @@ def test_process_airport_writes_nothing(spark, monkeypatch, tmp_path):
     """The regression that cost a published table. A per-airport builder must
     not decide the fate of a table shared by every other airport."""
     import opdi.reference.h3_airport_layouts as mod
-    monkeypatch.setattr(mod, "hexagonify_airport", lambda a, resolution=12: _fake_layout(a))
+    monkeypatch.setattr(mod, "hexagonify_airport", lambda a, resolution=12, source=None: _fake_layout(a))
     storage = StubStorage(None)
     gen = AirportLayoutGenerator(spark, OPDIConfig(), log_dir=str(tmp_path), storage=storage)
 
@@ -69,7 +69,7 @@ def test_many_airports_are_written_once_and_together(spark, monkeypatch, tmp_pat
     """Three airports, one write, all three in it -- not three overwrites
     leaving the last."""
     import opdi.reference.h3_airport_layouts as mod
-    monkeypatch.setattr(mod, "hexagonify_airport", lambda a, resolution=12: _fake_layout(a))
+    monkeypatch.setattr(mod, "hexagonify_airport", lambda a, resolution=12, source=None: _fake_layout(a))
     storage = StubStorage(None)
     gen = AirportLayoutGenerator(spark, OPDIConfig(), log_dir=str(tmp_path), storage=storage)
     # `fetch_airport_list` downloads the OurAirports CSV; stub it so the test
