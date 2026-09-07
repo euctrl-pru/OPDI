@@ -12,6 +12,7 @@ Reading a Geofabrik extract removes both services. The file is read once, all
 ``aeroway`` features are kept, and each is assigned to an aerodrome from
 reference data we already hold. See ``docs/industrialization-plan.md`` §3.
 """
+from collections import Counter
 from typing import List, Optional
 
 import geopandas as gpd
@@ -46,14 +47,30 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
     come out of the same iteration. Left alone, an apron or stand mapped as a
     closed way would be kept twice: once correctly as a Polygon (from the
     Area) and once as a LineString (from the Way) that `convert_to_polygon`
-    would buffer into a thin sliver in the wrong shape. Way areas carry
-    `orig_id() == way_id`; relation areas carry `orig_id() == relation_id`
-    encoded as `2*id(+1)` internally, which is why `orig_id()` -- not `id` --
-    is the right join key back to the way. Whenever an Area's orig_id matches
-    a Way's id, the Way is dropped and the Area kept. Open ways (taxiway and
-    runway centrelines) have no Area counterpart and are unaffected.
+    would buffer into a thin sliver in the wrong shape. A way-derived Area's
+    `orig_id()` gives back that way's id, which is why `orig_id()` -- not
+    `id` -- is the right join key back to the way. Whenever a *way-derived*
+    Area's orig_id matches a Way's id, the Way is dropped and the Area kept.
+
+    Only way-derived areas may shadow a way this way. pyosmium documents
+    `orig_id()` as "not necessarily unique... way or relation which have an
+    overlapping id space": way ids and relation ids are separate namespaces,
+    so a relation-derived area's `orig_id()` can coincide with the id of a
+    completely unrelated way. `from_way()` distinguishes the two cases, and
+    only areas where it is true contribute to the drop set -- a relation-
+    derived area never had an original way to shadow. Open ways (taxiway and
+    runway centrelines) have no Area counterpart at all and are unaffected
+    either way.
     """
     rows: List[dict] = []
+    # orig_ids of areas assembled from a *way* (not a relation) -- see the
+    # docstring above for why only these may suppress a duplicate Way row.
+    way_derived_area_ids: set = set()
+    # Per-tag count of features whose geometry could not be built (e.g. a
+    # way referencing a node outside the extract). Reported at the end so a
+    # systematic failure across a whole aeroway family is visible rather
+    # than silently swallowed by the `except` below.
+    build_failures: Counter = Counter()
 
     # `with_areas()` makes osmium assemble multipolygon relations and closed
     # ways into areas, which is how OSM encodes an apron. Without it those
@@ -64,12 +81,15 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
         .with_filter(osmium.filter.KeyFilter("aeroway"))
     )
     for obj in fp:
-        if obj.tags.get("aeroway") not in AEROWAY_TAGS:
+        tag = obj.tags.get("aeroway")
+        if tag not in AEROWAY_TAGS:
             continue
         try:
             if isinstance(obj, osmium.osm.Area):
                 geom = shapely_wkb.loads(_WKB.create_multipolygon(obj), hex=True)
                 element, oid = "area", obj.orig_id()
+                if obj.from_way():
+                    way_derived_area_ids.add(oid)
             elif isinstance(obj, osmium.osm.Way):
                 geom = shapely_wkb.loads(_WKB.create_linestring(obj), hex=True)
                 element, oid = "way", obj.id
@@ -82,12 +102,23 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
             # A feature whose nodes are outside the extract cannot be built.
             # Skipping it is right: it is geometry we do not have, and the
             # alternative is a partial shape that would rasterise to cells in
-            # the wrong place.
+            # the wrong place. Counted below so the skip is visible.
+            build_failures[tag] += 1
             continue
         if geom is None or geom.is_empty:
             continue
         rows.append({"element": element, "id": int(oid), "geometry": geom,
                      **_tags_of(obj)})
+
+    if build_failures:
+        total = sum(build_failures.values())
+        breakdown = ", ".join(
+            f"{t}: {c}" for t, c in sorted(build_failures.items())
+        )
+        print(
+            f"read_aeroway_features: skipped {total} feature(s) in {pbf_path} "
+            f"whose geometry could not be built ({breakdown})"
+        )
 
     if not rows:
         raise ValueError(f"no aeroway features found in {pbf_path}")
@@ -95,11 +126,12 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
     df = pd.DataFrame(rows)
 
     # Drop the Way half of any (Area, Way) pair that shares an orig_id -- see
-    # the docstring. Only ways whose id collides with an area's orig_id are
-    # affected; open ways (taxiway/runway centrelines) have no area and
-    # survive untouched.
-    area_ids = set(df.loc[df["element"] == "area", "id"])
-    is_duplicate_way = (df["element"] == "way") & df["id"].isin(area_ids)
+    # the docstring. Only ways whose id collides with a *way-derived* area's
+    # orig_id are affected; open ways (taxiway/runway centrelines) and ways
+    # that merely share a numeric id with an unrelated relation survive.
+    is_duplicate_way = (df["element"] == "way") & df["id"].isin(
+        way_derived_area_ids
+    )
     df = df[~is_duplicate_way]
 
     return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
