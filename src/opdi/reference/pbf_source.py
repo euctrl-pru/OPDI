@@ -12,6 +12,7 @@ Reading a Geofabrik extract removes both services. The file is read once, all
 ``aeroway`` features are kept, and each is assigned to an aerodrome from
 reference data we already hold. See ``docs/industrialization-plan.md`` §3.
 """
+import re
 import warnings
 from collections import Counter
 from typing import List, Optional
@@ -32,6 +33,28 @@ _WKB = osmium.geom.WKBFactory()
 
 def _tags_of(obj) -> dict:
     return {k: obj.tags.get(k) for k in _TAGS}
+
+
+def _split_icao_codes(raw: Optional[str]) -> List[str]:
+    """OSM's semicolon convention for an ``icao`` field shared by more than
+    one use -- Sion is tagged ``icao='LSGS;LSMS'``, civil and military
+    sharing one field. A comma is accepted too, for the same convention seen
+    written that way elsewhere. Splitting (rather than upper-casing the whole
+    string as a single key) matters twice over: neither code would otherwise
+    ever match a lookup for ``LSGS`` or ``LSMS`` alone, and the polygon would
+    still silently claim every feature inside it regardless -- containment
+    does not care what the icao string says -- so both real airports would
+    end up with nothing, and because the aerodrome is not *unassigned*, the
+    box fallback would never even be tried for either of them.
+    """
+    if not raw:
+        return []
+    seen: List[str] = []
+    for part in re.split(r"[;,]", raw):
+        code = part.strip().upper()
+        if code and code not in seen:
+            seen.append(code)
+    return seen
 
 
 def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
@@ -162,7 +185,7 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     """
     rows: List[dict] = []
     way_ids_ok: set = set()
-    candidate_way_ids: dict = {}  # way id -> icao, for failed-assembly detection
+    candidate_way_ids: dict = {}  # way id -> [icao, ...], for failed-assembly detection
     build_failures: Counter = Counter()
 
     fp = (
@@ -173,29 +196,34 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     for obj in fp:
         if obj.tags.get("aeroway") != "aerodrome":
             continue
-        icao = (obj.tags.get("icao") or "").strip().upper()
-        if not icao:
+        codes = _split_icao_codes(obj.tags.get("icao"))
+        if not codes:
             continue
         if isinstance(obj, osmium.osm.Area):
             try:
                 geom = shapely_wkb.loads(_WKB.create_multipolygon(obj), hex=True)
             except Exception:
-                build_failures[icao] += 1
+                for code in codes:
+                    build_failures[code] += 1
                 continue
             if geom is None or geom.is_empty:
                 continue
             oid = obj.orig_id()
             if obj.from_way():
                 way_ids_ok.add(oid)
-            rows.append({"icao": icao, "name": obj.tags.get("name"),
-                         "element": "area", "id": int(oid), "geometry": geom})
+            # A multi-value icao tag (Sion: 'LSGS;LSMS') gets one row per
+            # code, all sharing this same geometry -- see
+            # `_split_icao_codes`. Almost always a single-element list.
+            for code in codes:
+                rows.append({"icao": code, "name": obj.tags.get("name"),
+                             "element": "area", "id": int(oid), "geometry": geom})
         elif isinstance(obj, osmium.osm.Way):
             # The raw closed way behind an assembled Area, or -- if
             # assembly failed -- the only trace of this aerodrome's
             # boundary. Recorded, not appended: matched against
             # `way_ids_ok` after the loop rather than turned into a row
             # directly, so it is never double-counted alongside its Area.
-            candidate_way_ids[obj.id] = icao
+            candidate_way_ids[obj.id] = codes
         elif isinstance(obj, osmium.osm.Node):
             # A bare node has no area. Not a failure -- the fallback box
             # handles it -- so it is neither counted nor rowed here.
@@ -203,9 +231,10 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
         else:
             continue
 
-    for way_id, icao in candidate_way_ids.items():
+    for way_id, codes in candidate_way_ids.items():
         if way_id not in way_ids_ok:
-            build_failures[icao] += 1
+            for code in codes:
+                build_failures[code] += 1
 
     if build_failures:
         total = sum(build_failures.values())
@@ -338,6 +367,10 @@ class PbfLayoutSource:
         self._features: Optional[gpd.GeoDataFrame] = None
         self._aerodromes: Optional[gpd.GeoDataFrame] = None
         self._assigned_icao: Optional[pd.Series] = None
+        # icaos whose own polygon actually covered >=1 feature -- see
+        # `_compute_assignment`. Distinct from "has a polygon at all":
+        # EFIT has one, but it encloses none of EFIT's aeroway features.
+        self._polygon_covered_icaos: set = set()
         self._read_count = 0
 
     def _load(self) -> gpd.GeoDataFrame:
@@ -354,9 +387,7 @@ class PbfLayoutSource:
 
         # --- Pass 1: containment in the aerodrome's own polygon -------------
         aerodromes = self._aerodromes
-        polygon_icaos: set = set()
         if aerodromes is not None and len(aerodromes):
-            polygon_icaos = set(aerodromes["icao"])
             rep_points = gpd.GeoDataFrame(
                 geometry=feats.geometry.representative_point(),
                 index=feats.index, crs=feats.crs,
@@ -380,9 +411,20 @@ class PbfLayoutSource:
                 joined = joined[~joined.index.duplicated(keep="first")]
                 assigned.loc[joined.index] = joined["icao"].to_numpy()
 
-        # --- Pass 2: runway-extent box, only for aerodromes with no polygon,
-        # only for features pass 1 left unassigned. -------------------------
-        box_only = self._boxes[~self._boxes["ident"].isin(polygon_icaos)]
+        # icaos whose own polygon actually covered >=1 feature -- not just
+        # icaos that merely *have* a polygon. A polygon can be geometrically
+        # real but enclose nothing of the airport it names (EFIT: every one
+        # of its aeroway features sits ~3 km outside the drawn boundary).
+        # Treating "has a polygon" as reason enough to skip the box pass left
+        # such an aerodrome with nothing at all, permanently -- worse off
+        # than an aerodrome with no polygon, which at least reaches the box.
+        polygon_covered_icaos = set(assigned.dropna().unique())
+        self._polygon_covered_icaos = polygon_covered_icaos
+
+        # --- Pass 2: runway-extent box, for aerodromes with no polygon OR
+        # whose polygon covered nothing, only for features pass 1 left
+        # unassigned. ---------------------------------------------------
+        box_only = self._boxes[~self._boxes["ident"].isin(polygon_covered_icaos)]
         unassigned = assigned.isna()
         if unassigned.any() and len(box_only):
             sub = feats.loc[unassigned]
@@ -425,16 +467,21 @@ class PbfLayoutSource:
         return gpd.GeoDataFrame(out, geometry="geometry", crs=self._features.crs)
 
     def assignment_report(self) -> pd.DataFrame:
-        """Per aerodrome in scope: which method assigned it, and how many
-        features it received. Not a seam contract -- this is what Task 6
-        reads before committing to a full build."""
+        """Per aerodrome in scope: which method actually produced its
+        features, and how many it received. Not a seam contract -- this is
+        what Task 6 reads before committing to a full build.
+
+        "polygon" means the aerodrome's own boundary covered >=1 feature.
+        An aerodrome whose polygon exists but is empty (EFIT) is reported as
+        "bbox" -- that is genuinely where its features (if any) came from --
+        not "polygon", which would credit a boundary that did no work.
+        """
         self._load()
-        polygon_icaos = set(self._aerodromes["icao"]) if len(self._aerodromes) else set()
         counts = self._assigned_icao.value_counts()
         rows = []
         for _, b in self._boxes.iterrows():
             ident = b["ident"]
-            if ident in polygon_icaos:
+            if ident in self._polygon_covered_icaos:
                 method = "polygon"
             elif pd.notna(b.get("lat_min")):
                 method = "bbox"

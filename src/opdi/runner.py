@@ -142,7 +142,12 @@ def _step_00b_airport_layouts(spark, config, **kwargs):
     print("\n--- 00b: Airport ground layouts (OSM -> H3) ---")
     from opdi.reference.h3_airport_layouts import AirportLayoutGenerator
 
-    layout_gen = AirportLayoutGenerator(spark, config)
+    # A local extract when one is configured; the public Overpass API
+    # otherwise. The extract is strongly preferred: Overpass rate-limits hard
+    # enough that a 1,353-aerodrome build cannot complete against it.
+    layout_gen = AirportLayoutGenerator(
+        spark, config, pbf_path=kwargs.get("pbf_path") or os.environ.get("OPDI_OSM_PBF")
+    )
     layout_gen.create_table_if_not_exists()
     success, failed = layout_gen.process_all()
     print(f"  Processed {len(success)} airports, {len(failed)} failed.")

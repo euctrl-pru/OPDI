@@ -325,6 +325,70 @@ def test_aerodrome_polygons_are_read_with_their_icao_code():
     assert row.geometry.area > 0
 
 
+def test_multi_value_icao_tag_is_split_into_one_row_per_code(tmp_path):
+    """OSM's semicolon convention for a field shared by civil and military
+    use -- Sion is tagged `icao='LSGS;LSMS'`. Upper-casing the whole string
+    without splitting it means neither 'LSGS' nor 'LSMS' alone ever matches,
+    and it is worse than simply missing: containment does not care what the
+    icao string says, so the polygon still claims every feature inside it --
+    those features become invisible to both real airports, and because the
+    aerodrome is not *unassigned*, the box fallback is never even tried.
+    """
+    pbf = _write_osm(
+        tmp_path,
+        "multi_icao.osm",
+        """
+  <node id="1" lat="49.000" lon="6.000"/>
+  <node id="2" lat="49.000" lon="6.001"/>
+  <node id="3" lat="49.001" lon="6.001"/>
+  <node id="4" lat="49.001" lon="6.000"/>
+  <way id="60">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <nd ref="1"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="LSGS;LSMS"/>
+  </way>""",
+    )
+    ad = read_aerodromes(pbf)
+    assert set(ad["icao"]) == {"LSGS", "LSMS"}, (
+        "a semicolon-joined icao tag must yield one row per code, not one "
+        "row keyed by the whole unsplit string"
+    )
+    assert len(ad) == 2, "both codes must share the geometry, not merge into one row"
+    lsgs = ad[ad["icao"] == "LSGS"].iloc[0]
+    lsms = ad[ad["icao"] == "LSMS"].iloc[0]
+    assert lsgs.geometry.equals(lsms.geometry)
+
+
+def test_multi_value_icao_tag_accepts_comma_and_strips_whitespace(tmp_path):
+    """The same convention has been seen written with a comma and stray
+    spaces in the wild; both are cheap to accept alongside the semicolon
+    Sion actually uses."""
+    pbf = _write_osm(
+        tmp_path,
+        "multi_icao_comma.osm",
+        """
+  <node id="1" lat="50.000" lon="7.000"/>
+  <node id="2" lat="50.000" lon="7.001"/>
+  <node id="3" lat="50.001" lon="7.001"/>
+  <node id="4" lat="50.001" lon="7.000"/>
+  <way id="61">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <nd ref="1"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v=" EDXX , EDYY "/>
+  </way>""",
+    )
+    ad = read_aerodromes(pbf)
+    assert set(ad["icao"]) == {"EDXX", "EDYY"}
+
+
 @needs_luxembourg
 def test_features_are_assigned_by_containment_in_the_aerodrome_polygon(spark):
     """The whole point of the change: a feature belongs to the airport whose
@@ -487,6 +551,84 @@ def test_the_polygon_path_wins_where_both_are_available(tmp_path, spark):
         "the stand sits outside CCCC's boundary but inside the box the "
         "runway extent would have drawn -- the box must not be consulted "
         "for an aerodrome that already has a polygon"
+    )
+
+
+class _EmptyPolygonStorage:
+    """ZZZZ's registry runway coordinates (~52.0300N, 9.0300E) are ~3.3 km
+    from where its OSM aerodrome polygon is drawn (~52.0005N, 9.0005E) --
+    the EFIT shape: a real icao-tagged boundary that simply does not
+    contain any of the airport's mapped aeroway features."""
+
+    def __init__(self, spark):
+        self._t = {
+            "oa_airports": spark.createDataFrame(
+                [("ZZZZ", 52.0300, 9.0300, "medium_airport")],
+                "ident string, latitude_deg double, longitude_deg double, type string",
+            ),
+            "oa_runways": spark.createDataFrame(
+                [("ZZZZ", 52.0290, 9.0290, 52.0310, 9.0310)],
+                "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
+                "he_latitude_deg double, he_longitude_deg double",
+            ),
+        }
+
+    def table_exists(self, name):
+        return name in self._t
+
+    def read_table(self, name):
+        return self._t[name]
+
+
+def test_an_aerodrome_whose_polygon_contains_no_features_falls_back_to_its_bbox(
+    tmp_path, spark
+):
+    """EFIT: an icao-tagged aerodrome polygon exists in the extract, but
+    every one of the airport's aeroway features sits outside it -- about
+    3 km away in the real case. Before this fix, "has a polygon" alone was
+    enough to exclude an aerodrome from the box pass, so an empty polygon
+    meant the aerodrome got nothing at all, permanently -- worse than an
+    aerodrome with no polygon, which at least reaches the box. The fix:
+    only a polygon that actually covered >=1 feature excludes its
+    aerodrome from the box pass.
+    """
+    pbf = _write_osm(
+        tmp_path,
+        "empty_polygon.osm",
+        """
+  <node id="1" lat="52.0000" lon="9.0000"/>
+  <node id="2" lat="52.0000" lon="9.0010"/>
+  <node id="3" lat="52.0010" lon="9.0010"/>
+  <node id="4" lat="52.0010" lon="9.0000"/>
+  <way id="70">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <nd ref="1"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="ZZZZ"/>
+  </way>
+  <node id="5" lat="52.0290" lon="9.0290"/>
+  <node id="6" lat="52.0310" lon="9.0310"/>
+  <way id="71">
+    <nd ref="5"/>
+    <nd ref="6"/>
+    <tag k="aeroway" v="runway"/>
+  </way>""",
+    )
+    src = PbfLayoutSource(pbf, _EmptyPolygonStorage(spark))
+    zzzz = src.features_for("ZZZZ")
+    assert len(zzzz) == 1 and (zzzz["aeroway"] == "runway").all(), (
+        "ZZZZ has an aerodrome polygon, but the polygon encloses none of "
+        "its aeroway features -- the runway must still be recovered "
+        "through the box fallback rather than being permanently lost"
+    )
+    report = src.assignment_report().set_index("icao")
+    assert report.loc["ZZZZ", "method"] == "bbox", (
+        "the polygon produced nothing, so ZZZZ's actual features came "
+        "from the box pass -- the report should say so, not credit the "
+        "empty polygon with work it did not do"
     )
 
 
