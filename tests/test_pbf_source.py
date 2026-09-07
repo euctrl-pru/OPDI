@@ -488,6 +488,135 @@ def test_the_polygon_path_wins_where_both_are_available(tmp_path, spark):
     )
 
 
+class _EmptyStorage:
+    """No airports in scope. These tests exercise only the polygon-overlap
+    tie-break, which is resolved entirely within pass 1 (the sjoin) and never
+    consults `airport_boxes` -- an aerodrome absent from `oa_airports`
+    entirely can still win a polygon assignment."""
+
+    def __init__(self, spark):
+        self._t = {
+            "oa_airports": spark.createDataFrame(
+                [], "ident string, latitude_deg double, longitude_deg double, type string",
+            ),
+            "oa_runways": spark.createDataFrame(
+                [], "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
+                "he_latitude_deg double, he_longitude_deg double",
+            ),
+        }
+
+    def table_exists(self, name):
+        return name in self._t
+
+    def read_table(self, name):
+        return self._t[name]
+
+
+def test_an_overlapping_feature_is_assigned_to_the_smaller_polygon(tmp_path, spark):
+    """Two aerodrome polygons can genuinely overlap in OSM. A feature whose
+    representative point lands inside both must go to the smaller one -- the
+    more specific boundary -- not to whichever happens to come first for some
+    unrelated reason. SMAL is wholly inside LRGE, and the stand sits in the
+    middle of SMAL, so it is inside both."""
+    pbf = _write_osm(
+        tmp_path,
+        "overlap_area.osm",
+        """
+  <node id="1" lat="50.0000" lon="9.0000"/>
+  <node id="2" lat="50.0000" lon="9.0100"/>
+  <node id="3" lat="50.0100" lon="9.0100"/>
+  <node id="4" lat="50.0100" lon="9.0000"/>
+  <way id="40">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <nd ref="1"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="LRGE"/>
+  </way>
+  <node id="5" lat="50.0040" lon="9.0040"/>
+  <node id="6" lat="50.0040" lon="9.0060"/>
+  <node id="7" lat="50.0060" lon="9.0060"/>
+  <node id="8" lat="50.0060" lon="9.0040"/>
+  <way id="41">
+    <nd ref="5"/>
+    <nd ref="6"/>
+    <nd ref="7"/>
+    <nd ref="8"/>
+    <nd ref="5"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="SMAL"/>
+  </way>
+  <node id="9" lat="50.0050" lon="9.0050">
+    <tag k="aeroway" v="parking_position"/>
+    <tag k="ref" v="OVERLAP"/>
+  </node>""",
+    )
+    src = PbfLayoutSource(pbf, _EmptyStorage(spark))
+    large = src.features_for("LRGE")
+    small = src.features_for("SMAL")
+    assert "OVERLAP" not in set(large["ref"]), (
+        "the stand is inside both polygons but must not go to the larger, "
+        "less specific one"
+    )
+    assert "OVERLAP" in set(small["ref"]), (
+        "the smaller, more specific polygon must claim an overlapping feature"
+    )
+
+
+def test_equal_area_overlap_is_assigned_to_the_alphabetically_first_icao(
+    tmp_path, spark
+):
+    """Two equal-area polygons leave the area sort with nothing to decide, so
+    the tie-break has to be a deterministic rule, not accident of file or
+    join order. BBBB's way is written before AAAA's in the fixture, so a
+    passing test cannot be explained by file order alone -- only the
+    icao-ascending tie-break explains AAAA winning."""
+    pbf = _write_osm(
+        tmp_path,
+        "overlap_tie.osm",
+        """
+  <node id="10" lat="51.0000" lon="10.0000"/>
+  <node id="11" lat="51.0000" lon="10.0020"/>
+  <node id="12" lat="51.0020" lon="10.0020"/>
+  <node id="13" lat="51.0020" lon="10.0000"/>
+  <way id="50">
+    <nd ref="10"/>
+    <nd ref="11"/>
+    <nd ref="12"/>
+    <nd ref="13"/>
+    <nd ref="10"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="BBBB"/>
+  </way>
+  <node id="14" lat="51.0010" lon="10.0010"/>
+  <node id="15" lat="51.0010" lon="10.0030"/>
+  <node id="16" lat="51.0030" lon="10.0030"/>
+  <node id="17" lat="51.0030" lon="10.0010"/>
+  <way id="51">
+    <nd ref="14"/>
+    <nd ref="15"/>
+    <nd ref="16"/>
+    <nd ref="17"/>
+    <nd ref="14"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="AAAA"/>
+  </way>
+  <node id="18" lat="51.0015" lon="10.0015">
+    <tag k="aeroway" v="parking_position"/>
+    <tag k="ref" v="TIE"/>
+  </node>""",
+    )
+    src = PbfLayoutSource(pbf, _EmptyStorage(spark))
+    aaaa = src.features_for("AAAA")
+    bbbb = src.features_for("BBBB")
+    assert "TIE" in set(aaaa["ref"]), (
+        "equal-area overlap must go to the alphabetically first icao"
+    )
+    assert "TIE" not in set(bbbb["ref"])
+
+
 @needs_luxembourg
 def test_the_source_reads_the_extract_once(spark):
     """1,353 airports must not mean 1,353 passes over a 30 GB file."""
