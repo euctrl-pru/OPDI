@@ -11,7 +11,7 @@ Pipeline stages
 No.  Description                                 Module
 ===  ==========================================  ================================
 00a  Airport H3 detection zones                  ``reference.h3_airport_zones``
-00b  Airport ground layouts (OSM -> H3)          ``reference.h3_airport_layouts``
+00b  Airport layouts (local OSM extract -> H3)   ``reference.h3_airport_layouts``
 00c  Airspace boundaries (ANSP/FIR -> H3)        ``reference.h3_airspaces``
 00d  OurAirports reference data                  ``ingestion.ourairports``
 00e  OpenSky aircraft database                   ``ingestion.osn_aircraft_db``
@@ -54,6 +54,7 @@ Or from the command line::
 import os
 import time
 from datetime import date
+from pathlib import Path
 from typing import Optional
 
 from opdi.config import OPDIConfig
@@ -137,20 +138,98 @@ def _step_00a_airport_zones(spark, config, **kwargs):
           f"(rings to {max_radius:g} NM).")
 
 
+#: Prefix marking an extract already reduced to aeroway geometry by
+#: :func:`opdi.reference.pbf_filter.filter_aeroway_pbf`.
+_AEROWAY_EXTRACT_PREFIX = "aeroway-"
+
+
+def _fmt_size(n: int) -> str:
+    """Byte count in the largest unit that keeps it readable.
+
+    The filtered extracts span five orders of magnitude -- 41 KB for Luxembourg
+    against 34.9 GB for the raw Europe file -- so a fixed unit prints either
+    ``0.0 MB`` or an unreadable row of digits.
+    """
+    for limit, unit in ((1073741824, "GB"), (1048576, "MB"), (1024, "KB")):
+        if n >= limit:
+            return f"{n / limit:.1f} {unit}"
+    return f"{n} B"
+
+
+def _prepare_layout_extract(pbf_path: str) -> str:
+    """Return an aeroway-only extract for *pbf_path*, filtering it if needed.
+
+    Building airport areas from a raw continental extract requires osmium to
+    hold node locations for the **whole file**, which exceeds a 16 GB container
+    on ``europe-latest`` and is killed by the OOM reaper. Filtering first
+    removes the problem rather than working around it: the aeroway subset of
+    Europe is ~16 MB against 34.9 GB, so the default in-memory index is ample
+    and a full read takes about a second instead of six minutes.
+
+    Idempotent. The filtered file is written beside its source as
+    ``aeroway-<name>`` and reused unless the source is newer, so repeating
+    step 00b costs nothing. A path already carrying the prefix is returned
+    untouched.
+    """
+    src = Path(pbf_path)
+    if not src.exists():
+        raise FileNotFoundError(
+            f"OSM extract not found: {src}. Set h3.airport_layout_pbf_path or "
+            f"OPDI_OSM_PBF to a Geofabrik .osm.pbf, or unset both to fall back "
+            f"to the Overpass API."
+        )
+    if src.name.startswith(_AEROWAY_EXTRACT_PREFIX):
+        return str(src)
+
+    dst = src.with_name(_AEROWAY_EXTRACT_PREFIX + src.name)
+    if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+        print(f"  Using cached aeroway extract {dst.name} "
+              f"({_fmt_size(dst.stat().st_size)}).")
+        return str(dst)
+
+    from opdi.reference.pbf_filter import filter_aeroway_pbf
+
+    print(f"  Filtering {src.name} ({_fmt_size(src.stat().st_size)}) "
+          f"to aeroway geometry -> {dst.name} ...")
+    stats = filter_aeroway_pbf(str(src), str(dst))
+    print(f"  Filtered in {stats['seconds']:.0f} s: "
+          f"{_fmt_size(stats['bytes_in'])} -> {_fmt_size(stats['bytes_out'])} "
+          f"({stats['nodes']:,} nodes, {stats['ways']:,} ways, "
+          f"{stats['relations']:,} relations).")
+    return str(dst)
+
+
 def _step_00b_airport_layouts(spark, config, **kwargs):
     """Step 00b: Airport ground layouts (OSM -> H3)."""
     print("\n--- 00b: Airport ground layouts (OSM -> H3) ---")
     from opdi.reference.h3_airport_layouts import AirportLayoutGenerator
 
-    # A local extract when one is configured; the public Overpass API
-    # otherwise. The extract is strongly preferred: Overpass rate-limits hard
-    # enough that a 1,353-aerodrome build cannot complete against it.
-    layout_gen = AirportLayoutGenerator(
-        spark, config, pbf_path=kwargs.get("pbf_path") or os.environ.get("OPDI_OSM_PBF")
+    # A local extract when one is configured, the public Overpass API
+    # otherwise. The extract is strongly preferred and is what the published
+    # table is built from: Overpass resolves the airport *name* through
+    # Nominatim first, so a name that does not resolve yields no data rather
+    # than an error, and at ~1,350 aerodromes the public endpoint refuses.
+    pbf_path = (
+        kwargs.get("pbf_path")
+        or os.environ.get("OPDI_OSM_PBF")
+        or config.h3.airport_layout_pbf_path
     )
+    if pbf_path:
+        pbf_path = _prepare_layout_extract(pbf_path)
+        print(f"  Source: local OSM extract {pbf_path}")
+    else:
+        print("  Source: public Overpass API (no extract configured). This "
+              "cannot build the full network -- see readme.md, step 00b.")
+
+    layout_gen = AirportLayoutGenerator(spark, config, pbf_path=pbf_path)
     layout_gen.create_table_if_not_exists()
     success, failed = layout_gen.process_all()
     print(f"  Processed {len(success)} airports, {len(failed)} failed.")
+    if failed:
+        # Expected, and not an error: aerodromes outside the extract's
+        # geographic coverage, and aerodromes OSM has not mapped. Printed so
+        # the count is never mistaken for a silent failure.
+        print(f"  Not built (no geometry in this extract): {len(failed)}")
 
 
 def _step_00c_airspaces(spark, config, **kwargs):

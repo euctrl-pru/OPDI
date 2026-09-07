@@ -16,8 +16,17 @@ Before processing flight data, several reference datasets must be prepared.
    arrivals.
 
 **Airport ground layouts** (:mod:`opdi.reference.h3_airport_layouts`)
-   Build H3 representations of runways, taxiways, and aprons at resolution 12
-   (~307 m) using OpenStreetMap data retrieved via ``osmnx``.
+   Build H3 representations of runways, taxiways, aprons, stands, hangars,
+   thresholds and de-icing pads at resolution 12 (~307 m) from a **local
+   OpenStreetMap extract**, configured through ``h3.airport_layout_pbf_path``
+   or ``OPDI_OSM_PBF``. The extract is reduced to aeroway geometry once by
+   :func:`opdi.reference.pbf_filter.filter_aeroway_pbf` and the result cached
+   beside it. Features are assigned to the aerodrome whose OSM boundary
+   (``aeroway=aerodrome``, matched on its ``icao`` tag) contains them, falling
+   back to a runway-extent bounding box where OSM maps the aerodrome as a bare
+   node. With no extract configured the step falls back to the ``osmnx`` /
+   Overpass path, which works for a single airport but cannot build the
+   network. See ``readme.md``, step 00b.
 
 **Airspace boundaries** (:mod:`opdi.reference.h3_airspaces`)
    Encode FIR / UIR / TMA airspace polygons into H3 hexagons for efficient

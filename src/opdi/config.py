@@ -195,6 +195,27 @@ class H3Config:
     airport_layout_resolution: int = 12
     """H3 resolution for airport ground layouts (~307 m hexagons)."""
 
+    airport_layout_pbf_path: Optional[str] = None
+    """Local OSM ``.pbf`` extract that step 00b reads airport geometry from.
+
+    When set, step 00b builds the layout grid from this file. When ``None`` it
+    falls back to the public Overpass API, which is kept working but is not a
+    viable way to build the network: Overpass resolves the airport *name*
+    through Nominatim first, so a name that does not resolve returns no data
+    rather than an error, and at ~1,350 aerodromes the public endpoint refuses
+    outright. Every aerodrome OPDI published before 2026-09-07 came from that
+    path, and five of twenty came back silently empty.
+
+    The environment variable ``OPDI_OSM_PBF`` overrides this, so an operator can
+    point a run at a different extract without editing configuration.
+
+    A raw Geofabrik extract works, but a **filtered** one is strongly preferred
+    -- see :func:`opdi.reference.pbf_filter.filter_aeroway_pbf`. Building areas
+    from a full continental extract needs node locations for the whole file and
+    exceeds a 16 GB container; the filtered file is ~16 MB against 34.9 GB and
+    is read in about a second rather than six minutes.
+    """
+
     track_resolutions: List[int] = field(default_factory=lambda: [7, 12])
     """H3 resolutions for track encoding."""
 
