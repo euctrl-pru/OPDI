@@ -115,7 +115,50 @@ proving the empties were throttling and not absent data. Plan for it:
   invocation, commit `11b069c`); `h3_airport_layouts.process_all` still has it
   and must get the same treatment before a 1,353-airport run.
 
-### 3.4 Refresh cadence
+### 3.4 Making the query smaller
+
+The Overpass payload is already minimal in one sense -- `retrieve_osm_data`
+passes `tags={"aeroway": AEROWAY_TAGS}`, so the seven aeroway types are filtered
+**server-side** and only matching features come back. The waste is not in what
+is returned; it is in how the area is specified.
+
+`features_from_place(f"{icao} Airport", ...)` resolves the name through
+**Nominatim** first, then sends Overpass a `poly:` filter of the resulting place
+polygon. Each airport therefore costs two rate-limited services and an expensive
+spatial predicate, and it inherits a failure mode that is silent: a name that
+does not resolve yields *no data* rather than an error. Five of twenty airports
+returned empty in this campaign -- EDDP, LPPT, EGNT, EGCC, UGKO -- and LPPT
+demonstrably has stands, so at least some of those empties are this.
+
+**Proposal: query a bounding box built from `oa_runways`.** Both thresholds of
+every runway are already in that table, and runways bound an airport's long
+axis, so their extent plus a margin (~1.5 km covers aprons, stands and
+taxiways) is a sound envelope. That removes the geocode entirely: one service
+instead of two, a trivial predicate instead of a polygon, and a deterministic
+area that does not depend on a name matching.
+
+Two things it needs to be correct:
+
+* **An over-capture guard.** The risk is the opposite of loss: a box can catch a
+  neighbouring airfield, and `hexagonify_airport` stamps `apt_icao` on whatever
+  comes back, which would mislabel those features. Drop any feature whose
+  nearest `oa_airports` aerodrome is not the one being built.
+* **Response caching** (`ox.settings.use_cache`), because this build will be
+  re-run -- one crash in this campaign lost twenty airports of Overpass work.
+
+**Not yet verified, and it must be before anyone relies on it.** The A/B --
+same airport, place-based versus bbox, comparing feature sets and wall time --
+was attempted on EICK and could not be completed: `overpass-api.de` had already
+stopped answering us, and both mirrors then timed out too, one of them inside
+osmnx's own rate-limit status call. Run the comparison on three or four
+aerodromes of different sizes (a hub, a mid-size, a small field) and confirm the
+returned feature sets match before switching the generator over.
+
+**The endpoint exhaustion is itself the argument for §3.2's recommendation.** A
+local Geofabrik extract removes the rate limit, the geocode and the mirrors from
+the problem at once, and makes the A/B above cheap to run.
+
+### 3.5 Refresh cadence
 
 OSM is a live map: stands are added, renamed and re-drawn. Runways move rarely;
 aprons and stands change often. Suggest **quarterly** rebuilds, with the
