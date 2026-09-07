@@ -12,6 +12,7 @@ Reading a Geofabrik extract removes both services. The file is read once, all
 ``aeroway`` features are kept, and each is assigned to an aerodrome from
 reference data we already hold. See ``docs/industrialization-plan.md`` §3.
 """
+import warnings
 from collections import Counter
 from typing import List, Optional
 
@@ -135,3 +136,312 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
     df = df[~is_duplicate_way]
 
     return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+
+
+def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
+    """OSM's own aerodrome boundary polygons, keyed by ICAO code.
+
+    ``aeroway=aerodrome`` is OSM's tag for the airport boundary itself -- the
+    same polygon Overpass used to fetch by first geocoding the airport's
+    *name* through Nominatim. Reading it here from the extract keys it on the
+    ``icao`` tag instead, which is exact where the geocode step was a name
+    lookup that failed silently for five of twenty airports during the
+    flight-events-v4 campaign.
+
+    Returns ``icao``, ``name``, ``element``, ``id``, ``geometry`` -- one row
+    per aerodrome feature whose geometry could be assembled as a polygon.
+    Bare nodes carry no area and are excluded here; ``PbfLayoutSource`` falls
+    back to the runway-extent box for those.
+
+    Reuses both traps solved in ``read_aeroway_features``: geometry-build
+    failures are counted rather than swallowed, and ``with_areas()`` emits
+    the assembled ``Area`` *and* the original closed ``Way`` for the same
+    boundary -- only the Area is kept, and a way whose id never turns up
+    among the *way-derived* areas' ``orig_id()`` is counted as a failed
+    assembly rather than silently dropped.
+    """
+    rows: List[dict] = []
+    way_ids_ok: set = set()
+    candidate_way_ids: dict = {}  # way id -> icao, for failed-assembly detection
+    build_failures: Counter = Counter()
+
+    fp = (
+        osmium.FileProcessor(pbf_path)
+        .with_areas()
+        .with_filter(osmium.filter.KeyFilter("aeroway"))
+    )
+    for obj in fp:
+        if obj.tags.get("aeroway") != "aerodrome":
+            continue
+        icao = (obj.tags.get("icao") or "").strip().upper()
+        if not icao:
+            continue
+        if isinstance(obj, osmium.osm.Area):
+            try:
+                geom = shapely_wkb.loads(_WKB.create_multipolygon(obj), hex=True)
+            except Exception:
+                build_failures[icao] += 1
+                continue
+            if geom is None or geom.is_empty:
+                continue
+            oid = obj.orig_id()
+            if obj.from_way():
+                way_ids_ok.add(oid)
+            rows.append({"icao": icao, "name": obj.tags.get("name"),
+                         "element": "area", "id": int(oid), "geometry": geom})
+        elif isinstance(obj, osmium.osm.Way):
+            # The raw closed way behind an assembled Area, or -- if
+            # assembly failed -- the only trace of this aerodrome's
+            # boundary. Recorded, not appended: matched against
+            # `way_ids_ok` after the loop rather than turned into a row
+            # directly, so it is never double-counted alongside its Area.
+            candidate_way_ids[obj.id] = icao
+        elif isinstance(obj, osmium.osm.Node):
+            # A bare node has no area. Not a failure -- the fallback box
+            # handles it -- so it is neither counted nor rowed here.
+            continue
+        else:
+            continue
+
+    for way_id, icao in candidate_way_ids.items():
+        if way_id not in way_ids_ok:
+            build_failures[icao] += 1
+
+    if build_failures:
+        total = sum(build_failures.values())
+        breakdown = ", ".join(f"{k}: {c}" for k, c in sorted(build_failures.items()))
+        print(
+            f"read_aerodromes: {total} aerodrome(s) in {pbf_path} whose "
+            f"boundary could not be assembled as a polygon ({breakdown})"
+        )
+
+    if not rows:
+        return gpd.GeoDataFrame(
+            columns=["icao", "name", "element", "id", "geometry"],
+            geometry="geometry", crs="EPSG:4326",
+        )
+
+    df = pd.DataFrame(rows)
+    return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+
+
+import math
+
+from pyspark.sql import functions as F
+
+#: Margin around the runway extent, in kilometres. Aprons, stands and hangars
+#: sit off the runway axis; 1.5 km covers them at the largest aerodromes without
+#: reaching a neighbouring field at typical separations.
+BOX_MARGIN_KM = 1.5
+
+#: Fallback half-size when an aerodrome has no usable runway coordinates, so it
+#: still gets a box rather than being dropped.
+FALLBACK_HALF_KM = 3.0
+
+_KM_PER_DEG_LAT = 111.0
+
+
+def _deg_lon(km: float, lat: float) -> float:
+    return km / (_KM_PER_DEG_LAT * max(0.05, math.cos(math.radians(lat))))
+
+
+def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
+    """One bounding box per aerodrome, from its runway extent.
+
+    Overpass derived the search area from a geocoded place polygon. That is the
+    step being removed, so the area has to come from reference data instead:
+    ``oa_runways`` holds both thresholds of every runway, and a runway bounds
+    the airport's long axis.
+    """
+    airport_types = airport_types or ["large_airport", "medium_airport"]
+    apt = (
+        storage.read_table("oa_airports")
+        .filter(F.col("type").isin(airport_types))
+        .select("ident", "latitude_deg", "longitude_deg")
+        .toPandas()
+        .rename(columns={"latitude_deg": "apt_lat", "longitude_deg": "apt_lon"})
+    )
+    rwy = (
+        storage.read_table("oa_runways")
+        .select("airport_ident", "le_latitude_deg", "le_longitude_deg",
+                "he_latitude_deg", "he_longitude_deg")
+        .toPandas()
+    )
+    lat = pd.concat([rwy["le_latitude_deg"], rwy["he_latitude_deg"]])
+    lon = pd.concat([rwy["le_longitude_deg"], rwy["he_longitude_deg"]])
+    ident = pd.concat([rwy["airport_ident"], rwy["airport_ident"]])
+    ext = (
+        pd.DataFrame({"ident": ident, "lat": lat, "lon": lon})
+        .dropna()
+        .groupby("ident")
+        .agg(lat_min=("lat", "min"), lat_max=("lat", "max"),
+             lon_min=("lon", "min"), lon_max=("lon", "max"))
+        .reset_index()
+    )
+    out = apt.merge(ext, on="ident", how="left")
+
+    have = out["lat_min"].notna()
+    m_lat = BOX_MARGIN_KM / _KM_PER_DEG_LAT
+    out.loc[have, "lat_min"] -= m_lat
+    out.loc[have, "lat_max"] += m_lat
+    out.loc[have, "lon_min"] -= [
+        _deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]
+    ]
+    out.loc[have, "lon_max"] += [
+        _deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]
+    ]
+
+    # No runway coordinates: a square around the aerodrome point, so it is
+    # still built rather than silently absent from the table.
+    miss = ~have
+    f_lat = FALLBACK_HALF_KM / _KM_PER_DEG_LAT
+    out.loc[miss, "lat_min"] = out.loc[miss, "apt_lat"] - f_lat
+    out.loc[miss, "lat_max"] = out.loc[miss, "apt_lat"] + f_lat
+    out.loc[miss, "lon_min"] = out.loc[miss, "apt_lon"] - [
+        _deg_lon(FALLBACK_HALF_KM, v) for v in out.loc[miss, "apt_lat"]
+    ]
+    out.loc[miss, "lon_max"] = out.loc[miss, "apt_lon"] + [
+        _deg_lon(FALLBACK_HALF_KM, v) for v in out.loc[miss, "apt_lat"]
+    ]
+    return out
+
+
+#: Columns the seam contract requires. `hexagonify_airport` renames
+#: `id -> hexaero_osm_id` and `element -> hexaero_type`; nothing downstream
+#: tolerates the join artefacts `geopandas.sjoin` or the helper columns below
+#: add, so every return path -- including the empty ones -- is restricted to
+#: exactly this list before it leaves the class.
+_OUTPUT_COLUMNS = ["element", "id", "geometry", "aeroway", "width", "ref",
+                    "surface", "length"]
+
+
+class PbfLayoutSource:
+    """Per-airport aeroway features, served from one pass over the extract.
+
+    The extract is read on first use and held in memory. Europe's aeroway
+    features are a small fraction of the file -- tens of megabytes as
+    geometry -- so this is affordable, and the alternative (a pass per airport)
+    would be 1,353 passes over 30 GB.
+
+    Assignment is containment in the aerodrome's own OSM boundary polygon
+    (``read_aerodromes``), computed once for every feature in a single spatial
+    join. An aerodrome with no polygon in the extract -- most commonly because
+    it is mapped as a bare node, which encloses nothing -- falls back to the
+    runway-extent box with the nearest-aerodrome guard, applied only to
+    features the polygon pass left unassigned so the box's looser boundary
+    never overrides a real one.
+    """
+
+    def __init__(self, pbf_path: str, storage, airport_types=None):
+        self.pbf_path = pbf_path
+        self._boxes = airport_boxes(storage, airport_types)
+        self._features: Optional[gpd.GeoDataFrame] = None
+        self._aerodromes: Optional[gpd.GeoDataFrame] = None
+        self._assigned_icao: Optional[pd.Series] = None
+        self._read_count = 0
+
+    def _load(self) -> gpd.GeoDataFrame:
+        if self._features is None:
+            self._features = read_aeroway_features(self.pbf_path)
+            self._aerodromes = read_aerodromes(self.pbf_path)
+            self._read_count += 1
+            self._assigned_icao = self._compute_assignment()
+        return self._features
+
+    def _compute_assignment(self) -> pd.Series:
+        feats = self._features
+        assigned = pd.Series(pd.NA, index=feats.index, dtype=object)
+
+        # --- Pass 1: containment in the aerodrome's own polygon -------------
+        aerodromes = self._aerodromes
+        polygon_icaos: set = set()
+        if aerodromes is not None and len(aerodromes):
+            polygon_icaos = set(aerodromes["icao"])
+            rep_points = gpd.GeoDataFrame(
+                geometry=feats.geometry.representative_point(),
+                index=feats.index, crs=feats.crs,
+            )
+            ad = aerodromes[["icao", "geometry"]].copy()
+            # Area in degrees^2 is not a physical area, but it is a valid
+            # relative ordering for picking the smaller of two overlapping
+            # boundaries -- projecting to a metric CRS would not change which
+            # one is smaller. The warning geopandas raises for this is
+            # expected and would otherwise fire on every full build.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                ad["_area"] = ad.geometry.area
+            joined = gpd.sjoin(rep_points, ad, predicate="within", how="inner")
+            if len(joined):
+                # A point landing in more than one polygon (airports do
+                # overlap in OSM) goes to the smallest-area polygon, ties
+                # broken by icao ascending -- the smaller boundary is the
+                # more specific one.
+                joined = joined.sort_values(["_area", "icao"])
+                joined = joined[~joined.index.duplicated(keep="first")]
+                assigned.loc[joined.index] = joined["icao"].to_numpy()
+
+        # --- Pass 2: runway-extent box, only for aerodromes with no polygon,
+        # only for features pass 1 left unassigned. -------------------------
+        box_only = self._boxes[~self._boxes["ident"].isin(polygon_icaos)]
+        unassigned = assigned.isna()
+        if unassigned.any() and len(box_only):
+            sub = feats.loc[unassigned]
+            reps = sub.geometry.representative_point()
+            lat = reps.y
+            lon = reps.x
+            b = self._boxes  # nearest-guard compares against every box, not
+                              # just the box-only ones, so a polygon aerodrome
+                              # whose own boundary missed the point still
+                              # keeps a closer neighbour's box from claiming it
+            for _, r in box_only.iterrows():
+                inside = lat.between(r.lat_min, r.lat_max) & lon.between(
+                    r.lon_min, r.lon_max
+                )
+                if not inside.any():
+                    continue
+                idx = lat.index[inside]
+                d_this = (lat.loc[idx] - r.apt_lat) ** 2 + (
+                    (lon.loc[idx] - r.apt_lon) * math.cos(math.radians(r.apt_lat))
+                ) ** 2
+                nearest = pd.Series(True, index=idx)
+                for _, o in b[b["ident"] != r.ident].iterrows():
+                    d_other = (lat.loc[idx] - o.apt_lat) ** 2 + (
+                        (lon.loc[idx] - o.apt_lon)
+                        * math.cos(math.radians(o.apt_lat))
+                    ) ** 2
+                    nearest &= d_this <= d_other
+                claim = idx[nearest.to_numpy()]
+                # Never steal a feature pass 1 already gave to a polygon.
+                claim = claim[assigned.loc[claim].isna()]
+                assigned.loc[claim] = r.ident
+
+        return assigned
+
+    def features_for(self, apt_icao: str) -> gpd.GeoDataFrame:
+        """Features assigned to *apt_icao*, by polygon containment or --
+        where the aerodrome has no polygon -- the runway-extent box."""
+        self._load()
+        out = self._features.loc[self._assigned_icao == apt_icao, _OUTPUT_COLUMNS]
+        return gpd.GeoDataFrame(out, geometry="geometry", crs=self._features.crs)
+
+    def assignment_report(self) -> pd.DataFrame:
+        """Per aerodrome in scope: which method assigned it, and how many
+        features it received. Not a seam contract -- this is what Task 6
+        reads before committing to a full build."""
+        self._load()
+        polygon_icaos = set(self._aerodromes["icao"]) if len(self._aerodromes) else set()
+        counts = self._assigned_icao.value_counts()
+        rows = []
+        for _, b in self._boxes.iterrows():
+            ident = b["ident"]
+            if ident in polygon_icaos:
+                method = "polygon"
+            elif pd.notna(b.get("lat_min")):
+                method = "bbox"
+            else:
+                method = "none"
+            rows.append({
+                "icao": ident, "method": method,
+                "n_features": int(counts.get(ident, 0)),
+            })
+        return pd.DataFrame(rows)

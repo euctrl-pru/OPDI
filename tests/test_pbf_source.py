@@ -13,6 +13,8 @@ import pytest
 pytest.importorskip("osmium")
 
 from opdi.reference.pbf_source import read_aeroway_features
+from opdi.reference.h3_airport_layouts import AEROWAY_TAGS
+AEROWAY_TAGS_SET = set(AEROWAY_TAGS)
 
 PBF = "/home/jupyter/work/osm/luxembourg-latest.osm.pbf"
 
@@ -264,3 +266,294 @@ def test_node_mapped_parking_position_becomes_a_point(tmp_path):
     assert row["aeroway"] == "parking_position"
     assert row["geometry"].geom_type == "Point"
     assert (row["geometry"].x, row["geometry"].y) == (6.0, 49.0)
+
+
+# --- Aerodrome assignment ---------------------------------------------------
+
+from opdi.reference.pbf_source import PbfLayoutSource, airport_boxes, read_aerodromes
+
+
+class _Storage:
+    """`oa_airports` and `oa_runways` as the generator reads them."""
+
+    def __init__(self, spark):
+        self._t = {
+            "oa_airports": spark.createDataFrame(
+                [("ELLX", 49.6233, 6.2044, "large_airport"),
+                 ("EBBR", 50.9014, 4.4844, "large_airport")],
+                "ident string, latitude_deg double, longitude_deg double, type string",
+            ),
+            "oa_runways": spark.createDataFrame(
+                [("ELLX", 49.6266, 6.1867, 49.6200, 6.2247),
+                 ("EBBR", 50.9010, 4.4700, 50.9060, 4.5000)],
+                "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
+                "he_latitude_deg double, he_longitude_deg double",
+            ),
+        }
+
+    def table_exists(self, name):
+        return name in self._t
+
+    def read_table(self, name):
+        return self._t[name]
+
+
+def test_a_box_is_built_from_the_runway_extent(spark):
+    """Runways bound an airport's long axis, so their extent plus a margin
+    encloses the aprons, stands and taxiways that sit between them. The margin
+    is what makes it an envelope rather than a line."""
+    boxes = airport_boxes(_Storage(spark)).set_index("ident")
+    ellx = boxes.loc["ELLX"]
+    assert ellx.lat_min < 49.6200 and ellx.lat_max > 49.6266
+    assert ellx.lon_min < 6.1867 and ellx.lon_max > 6.2247
+
+
+@needs_luxembourg
+def test_aerodrome_polygons_are_read_with_their_icao_code():
+    """ELLX is mapped as a closed way tagged `aeroway=aerodrome`, `icao=ELLX`.
+
+    This is the polygon Overpass used to fetch by geocoding the airport's name.
+    Reading it from the extract makes the key exact rather than a name lookup,
+    which is the failure that returned nothing for five of twenty airports.
+    """
+    ad = read_aerodromes(PBF)
+    assert "ELLX" in set(ad["icao"])
+    row = ad[ad["icao"] == "ELLX"].iloc[0]
+    assert row.geometry.geom_type in ("Polygon", "MultiPolygon")
+    assert row.geometry.area > 0
+
+
+@needs_luxembourg
+def test_features_are_assigned_by_containment_in_the_aerodrome_polygon(spark):
+    """The whole point of the change: a feature belongs to the airport whose
+    boundary encloses it, not to the airport whose rectangle it happens to
+    fall in."""
+    src = PbfLayoutSource(PBF, _Storage(spark))
+    ellx = src.features_for("ELLX")
+    assert len(ellx) > 0
+    assert set(ellx["aeroway"]) <= AEROWAY_TAGS_SET
+    # Every returned feature really is inside the polygon it was assigned to.
+    poly = read_aerodromes(PBF).set_index("icao").loc["ELLX"].geometry
+    assert ellx.geometry.representative_point().within(poly).all()
+
+
+@needs_luxembourg
+def test_an_aerodrome_absent_from_the_extract_returns_nothing(spark):
+    src = PbfLayoutSource(PBF, _Storage(spark))
+    assert len(src.features_for("EBBR")) == 0
+
+
+class _NodeAndPolygonStorage:
+    """AAAA gets a real runway-extent box; BBBB does too, but the two are
+    ~222 km apart so their boxes cannot overlap. The nearest-aerodrome guard
+    is exercised separately (`_OverlappingStorage`); this fixture isolates
+    just the polygon-vs-node split."""
+
+    def __init__(self, spark):
+        self._t = {
+            "oa_airports": spark.createDataFrame(
+                [("AAAA", 49.0000, 6.0000, "large_airport"),
+                 ("BBBB", 51.0000, 8.0000, "large_airport")],
+                "ident string, latitude_deg double, longitude_deg double, type string",
+            ),
+            "oa_runways": spark.createDataFrame(
+                [("AAAA", 48.9990, 5.9990, 49.0010, 6.0010),
+                 ("BBBB", 50.9990, 7.9990, 51.0010, 8.0010)],
+                "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
+                "he_latitude_deg double, he_longitude_deg double",
+            ),
+        }
+
+    def table_exists(self, name):
+        return name in self._t
+
+    def read_table(self, name):
+        return self._t[name]
+
+
+def test_an_aerodrome_with_only_a_node_falls_back_to_its_bbox(tmp_path, spark):
+    """486 of the extract's icao-tagged aerodrome features are bare nodes, and
+    a node encloses nothing. Those aerodromes must still get a grid, by the
+    runway-extent box -- otherwise switching to polygons would silently drop
+    every airport OSM has not drawn a boundary for.
+
+    The fixture is synthetic so the two paths can be exercised side by side:
+    one aerodrome mapped as a polygon (AAAA), one as a bare node (BBBB), each
+    with a stand.
+    """
+    pbf = _write_osm(
+        tmp_path,
+        "node_fallback.osm",
+        """
+  <node id="1" lat="49.0000" lon="6.0000"/>
+  <node id="2" lat="49.0000" lon="6.0020"/>
+  <node id="3" lat="49.0020" lon="6.0020"/>
+  <node id="4" lat="49.0020" lon="6.0000"/>
+  <way id="10">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <nd ref="1"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="AAAA"/>
+  </way>
+  <node id="5" lat="49.0010" lon="6.0010">
+    <tag k="aeroway" v="parking_position"/>
+    <tag k="ref" v="A1"/>
+  </node>
+  <node id="6" lat="51.0000" lon="8.0000">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="BBBB"/>
+  </node>
+  <node id="7" lat="51.0002" lon="8.0002">
+    <tag k="aeroway" v="parking_position"/>
+    <tag k="ref" v="B1"/>
+  </node>""",
+    )
+    src = PbfLayoutSource(pbf, _NodeAndPolygonStorage(spark))
+    aaaa = src.features_for("AAAA")
+    bbbb = src.features_for("BBBB")
+    assert len(aaaa) == 1 and (aaaa["ref"] == "A1").all(), (
+        "AAAA has a real aerodrome polygon and must be assigned by containment"
+    )
+    assert len(bbbb) == 1 and (bbbb["ref"] == "B1").all(), (
+        "BBBB's aerodrome is mapped as a bare node -- it has no area, so the "
+        "stand must still reach it through the runway-extent box fallback"
+    )
+    report = src.assignment_report().set_index("icao")
+    assert report.loc["AAAA", "method"] == "polygon"
+    assert report.loc["BBBB", "method"] == "bbox"
+
+
+class _PolygonAndBoxStorage:
+    def __init__(self, spark):
+        self._t = {
+            "oa_airports": spark.createDataFrame(
+                [("CCCC", 51.0005, 8.0005, "large_airport")],
+                "ident string, latitude_deg double, longitude_deg double, type string",
+            ),
+            "oa_runways": spark.createDataFrame(
+                [("CCCC", 50.9950, 7.9950, 51.0050, 8.0050)],
+                "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
+                "he_latitude_deg double, he_longitude_deg double",
+            ),
+        }
+
+    def table_exists(self, name):
+        return name in self._t
+
+    def read_table(self, name):
+        return self._t[name]
+
+
+def test_the_polygon_path_wins_where_both_are_available(tmp_path, spark):
+    """An aerodrome with a polygon must NOT also pick up features its box would
+    have caught but its boundary excludes. Otherwise the fallback quietly
+    re-imposes the weakness the polygon was adopted to remove."""
+    pbf = _write_osm(
+        tmp_path,
+        "polygon_wins.osm",
+        """
+  <node id="1" lat="51.0000" lon="8.0000"/>
+  <node id="2" lat="51.0000" lon="8.0010"/>
+  <node id="3" lat="51.0010" lon="8.0010"/>
+  <node id="4" lat="51.0010" lon="8.0000"/>
+  <way id="30">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <nd ref="1"/>
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="CCCC"/>
+  </way>
+  <node id="5" lat="51.0005" lon="8.0005">
+    <tag k="aeroway" v="parking_position"/>
+    <tag k="ref" v="INSIDE"/>
+  </node>
+  <node id="6" lat="51.0030" lon="8.0030">
+    <tag k="aeroway" v="parking_position"/>
+    <tag k="ref" v="OUTSIDE"/>
+  </node>""",
+    )
+    src = PbfLayoutSource(pbf, _PolygonAndBoxStorage(spark))
+    cccc = src.features_for("CCCC")
+    refs = set(cccc["ref"])
+    assert "INSIDE" in refs, "the stand inside the polygon must be assigned"
+    assert "OUTSIDE" not in refs, (
+        "the stand sits outside CCCC's boundary but inside the box the "
+        "runway extent would have drawn -- the box must not be consulted "
+        "for an aerodrome that already has a polygon"
+    )
+
+
+@needs_luxembourg
+def test_the_source_reads_the_extract_once(spark):
+    """1,353 airports must not mean 1,353 passes over a 30 GB file."""
+    src = PbfLayoutSource(PBF, _Storage(spark))
+    src.features_for("ELLX")
+    before = src._read_count
+    src.features_for("ELLX")
+    src.features_for("EBBR")
+    assert src._read_count == before, "the extract was re-read"
+
+
+class _OverlappingStorage:
+    """Two aerodromes close enough that their boxes genuinely overlap.
+
+    AAAA at 49.0000N and BBBB at 49.0080N are ~0.89 km apart. With
+    ``BOX_MARGIN_KM = 1.5`` each box extends roughly 1.5 km beyond its own
+    short runway, so the two boxes cover a shared band from about 48.9945N to
+    49.0145N -- unlike ELLX/EBBR (~200 km apart, from Belgium), this is close
+    enough that the box test alone cannot distinguish them.
+    """
+
+    def __init__(self, spark):
+        self._t = {
+            "oa_airports": spark.createDataFrame(
+                [("AAAA", 49.0000, 6.0000, "medium_airport"),
+                 ("BBBB", 49.0080, 6.0000, "medium_airport")],
+                "ident string, latitude_deg double, longitude_deg double, type string",
+            ),
+            "oa_runways": spark.createDataFrame(
+                [("AAAA", 49.0000, 6.0000, 49.0010, 6.0010),
+                 ("BBBB", 49.0080, 6.0000, 49.0090, 6.0010)],
+                "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
+                "he_latitude_deg double, he_longitude_deg double",
+            ),
+        }
+
+    def table_exists(self, name):
+        return name in self._t
+
+    def read_table(self, name):
+        return self._t[name]
+
+
+def test_a_feature_in_overlapping_boxes_goes_to_the_nearer_aerodrome_only(
+    tmp_path, spark
+):
+    """The overlap case the ELLX/EBBR test cannot exercise, because nothing in
+    the Luxembourg extract is anywhere near Belgium. Here the two aerodromes
+    are ~0.89 km apart, so their boxes genuinely overlap (see
+    `_OverlappingStorage`), and a single taxiway node sits at 49.0020N --
+    inside *both* boxes, ~0.22 km from AAAA and ~0.67 km from BBBB. The box
+    filter alone would return it from both `features_for` calls; only the
+    nearest-aerodrome guard keeps it out of BBBB's result."""
+    pbf = _write_osm(
+        tmp_path,
+        "overlap.osm",
+        """
+  <node id="1" lat="49.0020" lon="6.0005">
+    <tag k="aeroway" v="taxiway"/>
+  </node>""",
+    )
+    src = PbfLayoutSource(pbf, _OverlappingStorage(spark))
+    aaaa = src.features_for("AAAA")
+    bbbb = src.features_for("BBBB")
+    assert len(aaaa) == 1, "the feature is nearer to AAAA and must be assigned to it"
+    assert len(bbbb) == 0, (
+        "the feature is inside BBBB's box too, but it is farther from BBBB "
+        "than from AAAA -- the nearest-aerodrome guard must exclude it"
+    )
