@@ -369,10 +369,14 @@ class AirportLayoutGenerator:
         config: OPDIConfig,
         resolution: Optional[int] = None,
         log_dir: str = "OPDI_live/logs",
+        storage=None,
     ):
         self.spark = spark
         self.config = config
-        self.storage = StorageManager(spark, config)
+        # Injectable so the write behaviour can be asserted without a cluster;
+        # `h3_runway_grid.RunwayGridGenerator` takes the same parameter for the
+        # same reason.
+        self.storage = storage if storage is not None else StorageManager(spark, config)
         self.project = config.project.project_name
         self.resolution = resolution or config.h3.airport_layout_resolution
         self.log_dir = log_dir
@@ -438,7 +442,14 @@ class AirportLayoutGenerator:
 
     def process_airport(self, apt_icao: str) -> Optional[pd.DataFrame]:
         """
-        Process a single airport and write results to Iceberg.
+        Build the H3 layout rows for one airport. **Writes nothing.**
+
+        This used to write ``hexaero_airport_layouts`` itself, with
+        ``mode="overwrite"`` -- so calling it in a loop left the table holding
+        only the last airport, and calling it once destroyed the table. The
+        write belongs to :meth:`process_all`, which knows how many airports it
+        is about to produce; a per-airport function cannot know that and must
+        not decide it.
 
         Args:
             apt_icao: ICAO airport code.
@@ -448,9 +459,11 @@ class AirportLayoutGenerator:
         """
         try:
             df = hexagonify_airport(apt_icao, resolution=self.resolution)
-            sdf = self.spark.createDataFrame(df.to_dict(orient="records"), HEXAERO_SCHEMA)
-            sdf = sdf.repartition("hexaero_apt_icao").orderBy("hexaero_apt_icao")
-            self.storage.write_table(sdf, "hexaero_airport_layouts", mode="overwrite")
+            # `hexagonify_airport` can return duplicate column labels. pandas
+            # raises InvalidIndexError when such frames are concatenated, and
+            # `createDataFrame` warns "columns are not unique, some columns will
+            # be omitted" -- it drops them silently. Keep the first of each.
+            df = df.loc[:, ~pd.Index(df.columns).duplicated()]
             return df
         except Exception as e:
             print(f"Failed to process {apt_icao}. Error: {e}")
@@ -481,6 +494,11 @@ class AirportLayoutGenerator:
         processed_success = self._load_processed_airports()
         processed_failed = []
         processed_errors = []
+        frames = []
+        # A resumed run (the success log already names airports) must not
+        # overwrite what those airports wrote; a fresh one must not append to a
+        # stale table.
+        first_write = not processed_success
 
         for apt_icao in airports_df.ident.to_list():
             print(f"Processing {apt_icao}...")
@@ -494,12 +512,32 @@ class AirportLayoutGenerator:
                 continue
 
             result = self.process_airport(apt_icao)
-            if result is not None:
+            if result is not None and len(result):
+                frames.append(result)
                 self._mark_success(apt_icao, processed_success)
             else:
                 self._mark_failed(
                     apt_icao, "See logs", processed_failed, processed_errors
                 )
+
+        # One write for the whole run, not one per airport. The per-airport
+        # write this replaced was ``mode="overwrite"`` on the shared table, so
+        # each airport erased the one before it and a completed 1,353-airport
+        # run would have published exactly one airport. Even as an append it
+        # would be O(N) in airports -- the same stall the runway-grid generator
+        # hit at 422 of 1,353 (see `h3_runway_grid.process_all`).
+        #
+        # `overwrite` only on a fresh run: a resumed one appends to the table
+        # the earlier airports are already in, which is what the success log
+        # means.
+        if frames:
+            big = pd.concat(frames, ignore_index=True)
+            sdf = self.spark.createDataFrame(big, HEXAERO_SCHEMA)
+            sdf = sdf.repartition("hexaero_apt_icao").orderBy("hexaero_apt_icao")
+            self.storage.write_table(
+                sdf, "hexaero_airport_layouts",
+                mode="overwrite" if first_write else "append",
+            )
 
         return processed_success, processed_failed
 
