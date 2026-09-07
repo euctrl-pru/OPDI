@@ -8,6 +8,8 @@ multipolygon relations, missing width tags), and a hand-built fixture would
 encode this author's assumptions about that rather than the reality.
 """
 import os
+
+import pandas as pd
 import pytest
 
 pytest.importorskip("osmium")
@@ -671,14 +673,20 @@ def test_hexagonify_uses_the_pbf_source_when_given_one(spark):
     df = hexagonify_airport("ELLX", resolution=12, source=src)
 
     assert len(df) > 0
+    # On the PBF path `element`/`id` are already real columns (never in the
+    # index -- see `PbfLayoutSource.features_for`'s `_OUTPUT_COLUMNS`), so
+    # `reset_index(drop=True)` here is a no-op on them either way; this
+    # column-list check pins the *other* direction of the flag mistake --
+    # `drop=False` would leave a spurious `index` column from promoting the
+    # default RangeIndex -- not the drop-destroys-the-data direction, which
+    # only the Overpass branch can exhibit (see the test directly below).
     assert list(df.columns) == [f.name for f in HEXAERO_SCHEMA.fields]
     assert set(df["hexaero_apt_icao"]) == {"ELLX"}
     assert (df["hexaero_res"] == 12).all()
     assert "parking_position" in set(df["hexaero_aeroway"])
 
-    # The subtle failure mode: `reset_index(drop=...)` backwards silently
-    # nulls these two columns rather than raising. A column-list match alone
-    # would not catch it -- an all-null column still has the right name.
+    # Not a pin of the reset_index flag on this branch (see above) -- just
+    # the ordinary "the seam produced usable identity columns" check.
     assert df["hexaero_osm_id"].notna().all(), "hexaero_osm_id is null on the PBF path"
     assert df["hexaero_type"].notna().all(), "hexaero_type is null on the PBF path"
     assert df["hexaero_osm_id"].map(type).eq(int).all(), "hexaero_osm_id is not int"
@@ -692,6 +700,55 @@ def test_hexagonify_uses_the_pbf_source_when_given_one(spark):
     counts = df.groupby("hexaero_aeroway").size()
     print(f"ELLX per-family H3 cell counts:\n{counts}")
     assert len(counts) > 1, "only one aeroway family reached the H3 output"
+
+
+def _fake_overpass_gdf():
+    """Shaped exactly like `retrieve_osm_data`'s return: `element` and `id`
+    live in a `MultiIndex` (osmnx's own `.set_index(["element", "id"])` in
+    `osmnx/features.py`), not as columns. This is the frame
+    `reset_index(drop=source is not None)` must NOT drop on -- dropping would
+    silently discard the index and leave `hexaero_osm_id`/`hexaero_type`
+    null, which nothing downstream checks. Calling the real Overpass endpoint
+    to get this shape is not an option: it has refused this host.
+    """
+    import geopandas as gpd
+    from shapely.geometry import LineString, Point
+
+    index = pd.MultiIndex.from_tuples(
+        [("way", 111), ("node", 222)], names=["element", "id"]
+    )
+    data = {
+        "geometry": [
+            LineString([(6.20, 49.62), (6.21, 49.63)]),
+            Point(6.22, 49.64),
+        ],
+        "aeroway": ["taxiway", "parking_position"],
+        "width": [None, None],
+        "ref": [None, "A1"],
+        "surface": ["asphalt", None],
+        "length": [None, None],
+    }
+    return gpd.GeoDataFrame(data, index=index, geometry="geometry", crs="EPSG:4326")
+
+
+def test_hexagonify_pins_reset_index_on_the_overpass_branch(monkeypatch):
+    """The branch that actually matters for the `reset_index(drop=...)`
+    flag: on the Overpass path, `element`/`id` arrive in the index, so
+    `drop=True` there would destroy them. `source=None` routes through
+    `retrieve_osm_data`, monkeypatched here to the fake above so no HTTP call
+    is made.
+    """
+    import opdi.reference.h3_airport_layouts as mod
+
+    monkeypatch.setattr(mod, "retrieve_osm_data", lambda icao: _fake_overpass_gdf())
+
+    df = mod.hexagonify_airport("EBBR", resolution=12, source=None)
+
+    assert list(df.columns) == [f.name for f in mod.HEXAERO_SCHEMA.fields]
+    assert df["hexaero_osm_id"].notna().all(), "hexaero_osm_id is null on the Overpass path"
+    assert df["hexaero_type"].notna().all(), "hexaero_type is null on the Overpass path"
+    assert set(df["hexaero_osm_id"]) == {111, 222}
+    assert set(df["hexaero_type"]) == {"way", "node"}
 
 
 def test_a_feature_in_overlapping_boxes_goes_to_the_nearer_aerodrome_only(

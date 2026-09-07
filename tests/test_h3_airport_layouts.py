@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from opdi.config import OPDIConfig
-from opdi.reference.h3_airport_layouts import AirportLayoutGenerator
+from opdi.reference.h3_airport_layouts import AirportLayoutGenerator, clean_str
 
 
 class StubStorage:
@@ -88,3 +88,61 @@ def test_many_airports_are_written_once_and_together(spark, monkeypatch, tmp_pat
     assert table == "hexaero_airport_layouts"
     assert mode == "overwrite"
     assert n_rows == 6, "every airport's rows must be in the single write"
+
+
+# --- clean_str -- shared by both the Overpass and PBF paths -----------------
+#
+# `clean_str` had no test at all before this task, and this task changed it:
+# a missing tag arrives as NaN from Overpass (osmnx fills ragged tag columns
+# with NaN) and as Python `None` from the PBF path (`obj.tags.get(k)` on a
+# tag the feature lacks). Pre-patch, `str(None) == "None"` survived the
+# numeric regex as an unparseable string and broke `hexaero_length` on the
+# PBF path with `ValueError: could not convert string to float: 'None'`.
+# `str(nan) == "nan"`, by contrast, already round-tripped through
+# `astype(float)` correctly (numpy parses "nan"), via the pre-patch
+# `except Exception: return s` branch. These tests pin both the fixed case
+# and the case that must not move, so a future edit to this shared function
+# cannot silently reintroduce the bug or regress the Overpass path Task 5's
+# baseline comparison depends on.
+
+
+def test_clean_str_passes_through_a_plain_numeric_string():
+    assert clean_str("45") == 45.0
+
+
+def test_clean_str_converts_feet_to_meters():
+    # "50ft" -> 50 * 0.3048 = 15.24, returned as the string of the float
+    # (the "ft"/"mi" branches `return str(result)`, unlike the plain-numeric
+    # branch above which returns the float itself).
+    assert clean_str("50ft") == str(50 * 0.3048)
+
+
+def test_clean_str_converts_miles_to_meters():
+    assert clean_str("2mi") == str(2 * 1609.34)
+
+
+def test_clean_str_of_nan_matches_the_pre_patch_value():
+    """Pre-patch, `clean_str(float("nan"))` fell through to
+    `except Exception: return s` with `s` already reassigned to `str(nan)` ==
+    "nan" -- `float(re.sub(...))` on the digit-stripped empty string raised,
+    and the handler returned the stringified input as-is. This must not move:
+    Task 5 compares an Overpass baseline against a PBF build, and any drift
+    here would corrupt that comparison by measuring this fix rather than the
+    change of source.
+    """
+    assert clean_str(float("nan")) == "nan"
+
+
+def test_clean_str_of_none_no_longer_yields_the_unparseable_literal():
+    """The bug this task fixed: pre-patch this returned the string "None"
+    (from `str(None)`), which `astype(float)` cannot parse. Only the PBF path
+    can produce `None` here (`obj.tags.get(k)` on an absent tag); Overpass's
+    missing values are always NaN, covered by the test above.
+    """
+    result = clean_str(None)
+    assert result != "None"
+    assert result == "nan"
+
+
+def test_clean_str_of_an_unparseable_string_returns_it_unchanged():
+    assert clean_str("not-a-number") == "not-a-number"
