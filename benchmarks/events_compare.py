@@ -261,6 +261,24 @@ def main() -> int:
     ]
     write_csv(per_airport, out / f"per_airport_{args.period}.csv")
 
+    # The same table split by detector. `per_airport_*.csv` pools the detectors
+    # that answer one milestone -- under v0.2.0 `ATOT` beside `airborne` --
+    # keeping whichever detection is nearest the reference, so it reports what
+    # OPDI published for a movement and not how either detector did on its own.
+    # Both questions are worth answering and they are different questions, so
+    # both tables are written rather than one being made to stand for the
+    # other. `n_truth` is identical across a milestone's detectors by
+    # construction (see `align_by_detector`), which is what makes the rows
+    # comparable down a column.
+    per_airport_det = [
+        {"period": args.period, "rung": args.rung, **r.asDict()}
+        for r in events_score.score(
+            events_score.align_by_detector(truth, ms_det),
+            group_cols=("gt_airport", "milestone", "det_type"),
+        ).collect()
+    ]
+    write_csv(per_airport_det, out / f"per_airport_by_detector_{args.period}.csv")
+
     # Per aerodrome as well as per milestone: whether the truth is readable to
     # the second is a property of the aerodrome's reporting system, so the
     # network-level "64% land on a whole minute" is an average over aerodromes
