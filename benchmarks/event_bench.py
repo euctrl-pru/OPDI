@@ -323,20 +323,26 @@ def redirect_event_tables(target: str, flight_list: str = None) -> None:
     StorageManager.write_table = write_table
 
 
-def redirect_tracks(period: str) -> None:
+def redirect_tracks(period: str, clean_table: str = None) -> None:
     """Point the track reads at the period's own tables.
 
     Patches ``_s3_path`` rather than the table name, as
     ``redirect_event_tables`` does and for the same reason: ``table_ref``
     registers a temp view named after the table, and ``research/tracks_clean``
     is not a legal SQL identifier.
+
+    ``clean_table``, if given, overrides ``PERIOD_TRACKS[period]["clean"]`` --
+    for pointing the cleaned-track read at a different copy (e.g. one rebuilt
+    with a cleaning fix) without touching the raw-track mapping or any other
+    period's tables.
     """
     spec = PERIOD_TRACKS[period]
-    if spec["raw"] == "osn_tracks" and spec["clean"] == "osn_tracks_clean":
+    clean = clean_table or spec["clean"]
+    if spec["raw"] == "osn_tracks" and clean == "osn_tracks_clean":
         return
     from opdi.utils.storage import StorageManager
 
-    mapping = {"osn_tracks": spec["raw"], "osn_tracks_clean": spec["clean"]}
+    mapping = {"osn_tracks": spec["raw"], "osn_tracks_clean": clean}
     orig = getattr(StorageManager, "_events_track_path", None)
     if orig is None:
         orig = StorageManager._s3_path
@@ -702,6 +708,12 @@ def main() -> int:
     ap.add_argument("--runs", nargs="*", default=None, help="ladder rung names")
     ap.add_argument("--results-dir", default=None)
     ap.add_argument("--out-name", default=None)
+    ap.add_argument(
+        "--clean-table", default=None,
+        help="override PERIOD_TRACKS[period]['clean'] -- read the cleaned "
+             "tracks from a different table, e.g. a copy rebuilt with a "
+             "cleaning fix, without touching the period's usual mapping.",
+    )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4059)
     ap.add_argument("--cores", type=int, default=4)
@@ -725,7 +737,7 @@ def main() -> int:
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     spark.conf.set("spark.sql.shuffle.partitions", "96")
-    redirect_tracks(args.period)
+    redirect_tracks(args.period, clean_table=args.clean_table)
     index_on_read(PERIOD_TRACKS[args.period]["index_on_read"])
     guard_writes()
 

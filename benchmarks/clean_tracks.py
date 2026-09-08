@@ -133,6 +133,11 @@ def redirect(source: str, target: str) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(PERIODS), default="2025")
+    ap.add_argument("--target", default=None,
+                    help="override PERIODS[period]['target'] -- write the "
+                         "cleaned tracks to a different table, e.g. a "
+                         "research copy, without touching the period's usual "
+                         "output. Source and log path are unaffected.")
     ap.add_argument("--results-dir", default=None,
                     help="unused; accepted so the chain can call this like a job")
     ap.add_argument("--executors", type=int, default=10)
@@ -143,7 +148,9 @@ def main() -> None:
 
     sys.stdout.reconfigure(line_buffering=True)
     load_dotenv()
-    period = PERIODS[args.period]
+    period = dict(PERIODS[args.period])
+    if args.target:
+        period["target"] = args.target
 
     import provenance as pv
 
