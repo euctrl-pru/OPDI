@@ -439,10 +439,18 @@ def test_stationary_aircraft_still_masked_with_static_last_pos_update(spark):
     assert lat[2] is None
 
 
-def test_discriminator_off_by_default_reproduces_todays_masking(spark):
-    """The new field must default to off, so a caller who never heard of it
-    gets exactly today's behaviour: a stationary aircraft's repeated position
-    is masked even though it genuinely did not move."""
+def test_a_stationary_aircraft_keeps_its_position_by_default(spark):
+    """The default must keep a parked aircraft's position.
+
+    Measured at EBBR on 2026-06-05: of 70,573 state vectors inside its stand
+    cells, 100% carried a position in the raw tracks and only 39% still did
+    after cleaning. 720 tracks were in those cells, were in the flight list and
+    had EBBR named in it, and they produced **one** ``exit-parking_position``
+    event -- against LSZH's 2,220 from 1,075 such tracks, with both aerodromes
+    at ~100% ground detection in the coverage ranking. This rule, not
+    reception, was the sixty-fold difference, so the default flipped on
+    2026-09-08.
+    """
     df = make_track(
         spark,
         [
@@ -451,8 +459,28 @@ def test_discriminator_off_by_default_reproduces_todays_masking(spark):
             {"t": 10, "lat": 50.00, "lon": 4.00, "last_pos_update": 10},
         ],
     )
-    assert CleaningConfig().stale_position_uses_last_pos_update is False
+    assert CleaningConfig().stale_position_uses_last_pos_update is True
     out = mask_stale_broadcasts(df, CleaningConfig())
+    # Every sample was re-measured, so every position survives: an advancing
+    # last_pos_update with an unchanged value is evidence of a stationary
+    # aircraft, not of a carried-forward repeat.
+    assert column_values(out, "lat") == [pytest.approx(50.00)] * 3
+
+
+def test_the_pre_2026_09_08_masking_is_still_reachable(spark):
+    """Switching the discriminator off must recover the old rule exactly, so a
+    dataset cleaned before the default flipped can still be reproduced."""
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "lat": 50.00, "lon": 4.00, "last_pos_update": 0},
+            {"t": 5, "lat": 50.00, "lon": 4.00, "last_pos_update": 5},
+            {"t": 10, "lat": 50.00, "lon": 4.00, "last_pos_update": 10},
+        ],
+    )
+    out = mask_stale_broadcasts(
+        df, CleaningConfig(stale_position_uses_last_pos_update=False)
+    )
     lat = column_values(out, "lat")
     assert lat[0] == pytest.approx(50.00)
     assert lat[1] is None

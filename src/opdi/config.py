@@ -360,15 +360,25 @@ class CleaningConfig:
     """ADS-B transmits position and velocity in separate message types, so
     identical consecutive values mean *repeated*, not *measured*."""
 
-    stale_position_uses_last_pos_update: bool = False
+    stale_position_uses_last_pos_update: bool = True
     """Discriminate a repeated position from a genuinely stationary one using
     ``last_pos_update`` instead of lat/lon value-equality.
 
-    **Off by default -- this changes cleaned positions for every published
-    track and has no ``legacy()`` preset to fall back to** (cleaning fed
-    nothing downstream before 2026-08, so there is no prior released dataset
-    to reproduce; the default *is* the reproduction path). Leave this off
-    to keep exactly today's masking.
+    **On by default since 2026-09-08.** It changes cleaned positions for every
+    published track and there is no ``legacy()`` preset to fall back to, so a
+    dataset cleaned before that date will not reproduce byte for byte -- set
+    this to ``False`` to recover exactly the old masking.
+
+    The measurement that decided it, at EBBR on 2026-06-05: of 70,573 state
+    vectors falling inside EBBR stand cells, **100% carry a position in the raw
+    tracks and only 39% still carry one after cleaning** -- 42,998 destroyed in
+    one day at one aerodrome. 720 tracks that day were in EBBR stand cells,
+    were in the flight list, and had EBBR named in it; they produced **one**
+    ``exit-parking_position`` event. LSZH, whose aircraft happen to jitter
+    enough between samples to survive the equality rule, produced 2,220 from
+    1,075 such tracks. Both aerodromes sit at ~100% ground detection in the
+    coverage ranking, so the sixty-fold spread in block-time coverage was this
+    rule, not reception.
 
     A parked aircraft's lat/lon really are byte-identical across samples, so
     the plain equality rule below reads it as a stale repeat and NULLs it --
