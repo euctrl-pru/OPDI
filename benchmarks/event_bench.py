@@ -171,6 +171,11 @@ LADDER = [
             # 99.9% of in-stand samples at EBBR and the block-time family reads
             # as reception-bound when it is gate-bound.
             "airport_admit_on_ground": True,
+            # `velocity` is frequently absent or NULLed (including by
+            # cleaning's own stale-broadcast mask) on exactly the samples the
+            # block-time family reads. Off under `legacy()`; must be re-armed
+            # here or the shipped configuration stops matching `EventConfig()`.
+            "ground_speed_derive_from_position": True,
             "events_version": "events_v0.2.0",
         },
     ),

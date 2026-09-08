@@ -1002,6 +1002,29 @@ class EventConfig:
     The sustained part is what separates a push from a jitter in the speed
     field, which at 5 s sampling is not rare."""
 
+    ground_speed_derive_from_position: bool = True
+    """Fill missing/NULLed ``velocity`` with a position-derived groundspeed
+    when detecting ground movement.
+
+    ``velocity`` is frequently absent on surface samples, and stage 3 of
+    cleaning (``mask_stale_broadcasts``) NULLs it further whenever it repeats
+    -- exactly the case a stationary-then-pushing aircraft produces. Ported
+    from traffic's ``StartMoving``
+    (``traffic/src/traffic/algorithms/ground/movement.py:37-46``), which does
+    not trust the broadcast velocity at all: it derives groundspeed from
+    consecutive positions and median-filters it over 3 samples before
+    thresholding. ``movement_window`` does the same in native Spark --
+    haversine between consecutive samples over the time delta, no UDF -- but
+    only to *fill a gap*: ``coalesce(velocity_kt, derived_kt)`` keeps
+    today's behaviour wherever ``velocity`` exists and adds signal only where
+    it is missing. That is the conservative choice; replacing ``velocity``
+    outright was considered and rejected as a larger, unmeasured change.
+
+    Off under ``legacy()``: ``events_v0.0.2`` has no block events at all
+    (``emit_block_events=False``), so this has no effect there, but the flag
+    exists so a legacy run's ground-movement signal -- read by nothing today,
+    but a public function -- stays byte-identical too."""
+
     # -- runway identification and ATOT/ALDT (T08 / T17) ------------------
     runway_max_dist_nm: float = 5.0
     """Only samples this close to the aerodrome are considered. traffic's
@@ -1307,6 +1330,7 @@ class EventConfig:
             emit_runway_events=False,
             emit_block_events=False,
             emit_level_offs=False,
+            ground_speed_derive_from_position=False,
             phase_require_complete_rules=False,
             crossing_all_occurrences=False,
             crossing_interpolate=False,
