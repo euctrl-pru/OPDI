@@ -389,3 +389,91 @@ def test_genuinely_repeated_position_is_still_masked(spark):
     assert lat[0] == pytest.approx(50.00)   # first: kept, no predecessor
     assert lat[1] is None                   # second: identical repeat, masked
     assert lat[2] == pytest.approx(50.01)   # third: moved again, kept
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 -- last_pos_update discriminator (stationary vs. stale)
+# ---------------------------------------------------------------------------
+
+def test_stationary_aircraft_survives_with_advancing_last_pos_update(spark):
+    """A parked aircraft's lat/lon really are identical across samples. With
+    the discriminator on, an *advancing* ``last_pos_update`` says each sample
+    was genuinely re-measured, so the position must survive -- not be read as
+    a stale repeat, which would erase the only evidence the aircraft is on a
+    stand.
+    """
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "lat": 50.00, "lon": 4.00, "last_pos_update": 0},
+            {"t": 5, "lat": 50.00, "lon": 4.00, "last_pos_update": 5},
+            {"t": 10, "lat": 50.00, "lon": 4.00, "last_pos_update": 10},
+            {"t": 15, "lat": 50.00, "lon": 4.00, "last_pos_update": 15},
+        ],
+    )
+    cfg = CleaningConfig(stale_position_uses_last_pos_update=True)
+    out = mask_stale_broadcasts(df, cfg)
+    lat = column_values(out, "lat")
+    lon = column_values(out, "lon")
+    assert lat == [pytest.approx(50.00)] * 4
+    assert lon == [pytest.approx(4.00)] * 4
+
+
+def test_stationary_aircraft_still_masked_with_static_last_pos_update(spark):
+    """Converse of the above: identical lat/lon *and* a ``last_pos_update``
+    that does not advance is a true repeat -- no new position report at all --
+    and must still be masked, even with the discriminator on."""
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "lat": 50.00, "lon": 4.00, "last_pos_update": 0},
+            {"t": 5, "lat": 50.00, "lon": 4.00, "last_pos_update": 0},
+            {"t": 10, "lat": 50.00, "lon": 4.00, "last_pos_update": 0},
+        ],
+    )
+    cfg = CleaningConfig(stale_position_uses_last_pos_update=True)
+    out = mask_stale_broadcasts(df, cfg)
+    lat = column_values(out, "lat")
+    assert lat[0] == pytest.approx(50.00)  # first: kept, no predecessor
+    assert lat[1] is None                  # static last_pos_update: masked
+    assert lat[2] is None
+
+
+def test_discriminator_off_by_default_reproduces_todays_masking(spark):
+    """The new field must default to off, so a caller who never heard of it
+    gets exactly today's behaviour: a stationary aircraft's repeated position
+    is masked even though it genuinely did not move."""
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "lat": 50.00, "lon": 4.00, "last_pos_update": 0},
+            {"t": 5, "lat": 50.00, "lon": 4.00, "last_pos_update": 5},
+            {"t": 10, "lat": 50.00, "lon": 4.00, "last_pos_update": 10},
+        ],
+    )
+    assert CleaningConfig().stale_position_uses_last_pos_update is False
+    out = mask_stale_broadcasts(df, CleaningConfig())
+    lat = column_values(out, "lat")
+    assert lat[0] == pytest.approx(50.00)
+    assert lat[1] is None
+    assert lat[2] is None
+
+
+def test_null_last_pos_update_falls_back_to_value_equality(spark):
+    """Rows lacking ``last_pos_update`` must behave exactly as today, even
+    with the discriminator switched on -- the fallback the field's docstring
+    promises."""
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "lat": 50.00, "lon": 4.00, "last_pos_update": None},
+            {"t": 5, "lat": 50.00, "lon": 4.00, "last_pos_update": None},
+            {"t": 10, "lat": 50.01, "lon": 4.01, "last_pos_update": None},
+        ],
+    )
+    cfg = CleaningConfig(stale_position_uses_last_pos_update=True)
+    out = mask_stale_broadcasts(df, cfg)
+    lat = column_values(out, "lat")
+    assert lat[0] == pytest.approx(50.00)
+    assert lat[1] is None
+    assert lat[2] == pytest.approx(50.01)

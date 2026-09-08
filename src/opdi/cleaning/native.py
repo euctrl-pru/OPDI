@@ -182,6 +182,16 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
 
     All "changed" flags are derived from the *original* values before any
     masking is applied, so the rules cannot cascade into each other.
+
+    **A parked aircraft is genuinely stationary**, so plain value-equality
+    cannot tell "repeated" from "re-measured, unchanged" apart -- and reading
+    it as a repeat destroys the one signal that proves the aircraft is on a
+    stand. When :attr:`~opdi.config.CleaningConfig.stale_position_uses_last_pos_update`
+    is set, the lat/lon rule instead asks whether ``last_pos_update`` -- ADS-B's
+    own record of when the position was last re-measured -- has advanced,
+    regardless of whether the value itself moved. It is off by default: see
+    that field's docstring for why, and why the velocity/heading/vert_rate
+    rule is deliberately left untouched either way.
     """
     if not cfg.stale_enabled:
         return df
@@ -208,7 +218,27 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
         prev = F.lag(F.col(name)).over(w)
         return F.col(name).isNotNull() & (prev.isNull() | (F.col(name) != prev))
 
-    lat_or_lon = changed("lat") | changed("lon")
+    def position_changed() -> Column:
+        """``changed("lat") | changed("lon")``, or the ``last_pos_update``
+        discriminator when the config asks for it and the row carries one.
+
+        A NULL ``last_pos_update`` -- data lacking the field entirely, or a
+        row where it just wasn't populated -- falls back to plain
+        value-equality, so behaviour is unchanged wherever the discriminator
+        has nothing to say.
+        """
+        value_changed = changed("lat") | changed("lon")
+        if not cfg.stale_position_uses_last_pos_update:
+            return value_changed
+        if "last_pos_update" not in df.columns:
+            return value_changed
+
+        lpu = F.col("last_pos_update")
+        prev_lpu = F.lag(lpu).over(w)
+        advanced = prev_lpu.isNull() | (lpu != prev_lpu)
+        return F.when(lpu.isNotNull(), advanced).otherwise(value_changed)
+
+    lat_or_lon = position_changed()
     position = lat_or_lon | changed("baro_altitude")
     speed = changed("vert_rate") | changed("heading") | changed("velocity")
 

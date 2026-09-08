@@ -360,6 +360,39 @@ class CleaningConfig:
     """ADS-B transmits position and velocity in separate message types, so
     identical consecutive values mean *repeated*, not *measured*."""
 
+    stale_position_uses_last_pos_update: bool = False
+    """Discriminate a repeated position from a genuinely stationary one using
+    ``last_pos_update`` instead of lat/lon value-equality.
+
+    **Off by default -- this changes cleaned positions for every published
+    track and has no ``legacy()`` preset to fall back to** (cleaning fed
+    nothing downstream before 2026-08, so there is no prior released dataset
+    to reproduce; the default *is* the reproduction path). Leave this off
+    to keep exactly today's masking.
+
+    A parked aircraft's lat/lon really are byte-identical across samples, so
+    the plain equality rule below reads it as a stale repeat and NULLs it --
+    destroying the only evidence (a stable position) that the aircraft is on
+    a stand, which starves ``h3_res_12`` and the block-time family
+    (``ground.py``) of the signal they need. ``last_pos_update``
+    (``osn_statevectors.py``'s ``lastPosUpdate``) is ADS-B's own record of
+    when the position was last re-measured, independent of whether the value
+    changed: an *advancing* ``last_pos_update`` with unchanged lat/lon means
+    the aircraft was re-measured and found not to have moved -- real
+    information, not staleness.
+
+    When on: a position is treated as fresh whenever ``last_pos_update`` has
+    advanced since the previous sample, regardless of whether lat/lon
+    changed. Rows where ``last_pos_update`` is NULL fall back to the
+    existing value-equality rule unchanged, so data lacking the field behaves
+    exactly as it does today.
+
+    Deliberately **not** extended to the ``vert_rate``/``heading``/
+    ``velocity`` rule: ``last_pos_update`` is a *position* timestamp, and
+    using it to justify keeping a stale velocity reading is not obviously
+    correct -- ``last_contact`` would be the more defensible signal there,
+    but that is a separate, unmeasured change and out of scope here."""
+
     # -- Stage 4: derivative spike filter --------------------------------
     spike_enabled: bool = True
 
