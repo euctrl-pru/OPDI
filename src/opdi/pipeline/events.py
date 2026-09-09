@@ -82,6 +82,33 @@ from opdi.pipeline.layout import (  # noqa: E402
 )
 
 
+#: Columns step 04 reads from the track table. Named rather than inlined
+#: because a detector that *feature-gates* on a column -- ``if "x" in
+#: sdf.columns`` -- turns an omission here into a **silent no-op** rather than
+#: an error, and this list is the only place that contract is visible.
+#:
+#: ``on_ground`` is the case that proved it. ``calculate_airport_events``
+#: enables ``airport_admit_on_ground`` only when the column is present; it was
+#: not in this projection, so the flag merged to admit surface samples never
+#: ran in production and the gate silently fell back to
+#: ``baro_altitude_c.isNotNull()``. ADS-B surface position messages carry no
+#: altitude at all, so that kept only the ~0.3% of in-stand samples with a
+#: barometric reading -- and block-time coverage then tracked *barometric
+#: availability* rather than reception, which is why LSZH (12.8% of in-stand
+#: samples with ground altitude) reached 64% while EBBR (0.1%) reached 1.18%
+#: with both at ~100% ground detection. Measured on 2026-06-05, everything else
+#: held constant: adding the column moved ``exit-parking_position`` from 1,489
+#: to 45,364 network-wide and EBBR from 1 to 1,947.
+#:
+#: Before removing a column here, check whether any detector names it in a
+#: ``in ... .columns`` guard. ``tests/test_events_processor.py`` pins this.
+TRACK_COLUMNS = [
+    "track_id", "lat", "lon", "event_time", "baro_altitude_c",
+    "velocity", "vert_rate", "callsign", "icao24", "heading", "h3_res_12",
+    "on_ground",
+]
+
+
 # ======================================================================
 # Fuzzy membership functions for flight phase classification
 # ======================================================================
@@ -1408,10 +1435,7 @@ class FlightEventProcessor:
 
         sdf_input = (
             self._get_data_within_timeframe(source, month)
-            .select(
-                "track_id", "lat", "lon", "event_time", "baro_altitude_c",
-                "velocity", "vert_rate", "callsign", "icao24", "heading", "h3_res_12",
-            )
+            .select(*TRACK_COLUMNS)
             .cache()
         )
 

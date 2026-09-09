@@ -590,3 +590,39 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
 
     assert v4 == {"off-block", "on-block"}
     assert legacy == {"AOBT", "AIBT"}
+
+
+def test_the_track_projection_carries_every_column_a_detector_feature_gates_on():
+    """Step 04 must not project away a column a detector tests for by name.
+
+    ``calculate_airport_events`` enables ``airport_admit_on_ground`` only when
+    ``"on_ground" in sv_f.columns``. That guard exists so the family degrades
+    on data lacking the field rather than erroring -- but it also means a
+    projection that drops the column turns the whole feature into a **silent
+    no-op**, with the gate falling back to ``baro_altitude_c.isNotNull()``.
+
+    That is what happened. ``on_ground`` was absent from ``process_month``'s
+    select, so the fix merged to admit surface samples never ran in production.
+    Measured on 2026-06-05 with everything else held constant -- same tracks,
+    same layout table, same V07_shipped config -- adding the one column moved
+    ``exit-parking_position`` from **1,489 to 45,364** events network-wide, and
+    EBBR from **1 to 1,947**.
+
+    Surface position messages carry no altitude at all, so without ``on_ground``
+    the gate keeps only the ~0.3% of in-stand samples that happen to carry a
+    barometric reading. Coverage then tracks barometric availability rather
+    than reception, which is why LSZH (12.8% of in-stand samples with ground
+    altitude) reached 64% block-time coverage while EBBR (0.1%) reached 1.18%,
+    despite both sitting at ~100% ground detection in the coverage ranking.
+
+    Pinning the column list rather than the behaviour because the behavioural
+    test already existed and passed: ``test_layout.py`` hands ``on_ground``
+    straight to the function, so it proves the gate works while saying nothing
+    about whether the caller supplies it.
+    """
+    from opdi.pipeline.events import TRACK_COLUMNS
+
+    assert "on_ground" in TRACK_COLUMNS, (
+        "process_month's projection dropped on_ground; airport_admit_on_ground "
+        "is silently inert without it"
+    )
