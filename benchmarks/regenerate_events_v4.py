@@ -290,7 +290,7 @@ def stages() -> list:
     ]
 
 
-def jobs() -> list:
+def jobs(reuse_rungs=(), reuse_newer_than=None) -> list:
     out = []
     for period in PERIODS:
         out.append(
@@ -318,7 +318,10 @@ def jobs() -> list:
                 f"ladder_{period}",
                 "benchmarks/event_bench.py",
                 ["--period", period, "--ladder", "v4", "--airports", "study",
-                 "--out-name", f"ladder_{period}.csv", "--executors", "12"],
+                 "--out-name", f"ladder_{period}.csv", "--executors", "12"]
+                + (["--reuse-table", *reuse_rungs,
+                    "--reuse-newer-than", reuse_newer_than]
+                   if reuse_rungs else []),
                 {f"ladder_{period}.csv": f"ladder_{period}.csv",
                  f"inventory_{period}.csv": f"inventory_{period}.csv"},
                 DETECT,
@@ -374,12 +377,32 @@ def main() -> int:
                          "On by default nowhere: unlike V6's stages, this one "
                          "builds a table no production run ever writes, so a "
                          "chain without it is not reproducible.")
+    ap.add_argument(
+        "--reuse-rungs", nargs="*", default=[], metavar="RUNG",
+        help=(
+            "Score these ladder rungs from the event tables already on S3 "
+            "rather than recomputing them, for resuming a ladder that died "
+            "partway. The rung scores live only in the driver's memory until "
+            "the final CSV write, so a crash on the last rung loses all eight "
+            "sets of numbers while leaving seven completed tables intact. "
+            "Requires --reuse-newer-than, and lands in the provenance manifest "
+            "as part of argv, so the paper can show which rungs were reused."
+        ),
+    )
+    ap.add_argument(
+        "--reuse-newer-than", default=None, metavar="ISO8601",
+        help="A reused rung table is accepted only if written after this instant.",
+    )
     ap.add_argument("--rebuild-stage", nargs="*", default=[],
                     help="force these stages to rebuild their table rather "
                          "than record it")
     args = ap.parse_args()
 
-    todo = ([] if args.skip_stages else stages()) + jobs()
+    if args.reuse_rungs and not args.reuse_newer_than:
+        raise SystemExit("--reuse-rungs requires --reuse-newer-than")
+    todo = ([] if args.skip_stages else stages()) + jobs(
+        reuse_rungs=args.reuse_rungs, reuse_newer_than=args.reuse_newer_than
+    )
     if args.only:
         names = {j.name for j in todo}
         unknown = [n for n in args.only if n not in names]

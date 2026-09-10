@@ -22,6 +22,7 @@ carried along inside a net gain.
 """
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -689,6 +690,44 @@ def write_csv(rows, path):
     print(f"  wrote {path}")
 
 
+def osn_sample_driver_default() -> str:
+    """The driver heap default, read from the one place that documents it.
+
+    Imported lazily because argparse builds its defaults before ``main`` does
+    its heavyweight imports, and ``osn_sample`` pulls in Spark.
+    """
+    import osn_sample
+
+    return osn_sample.RESEARCH_DRIVER_MEMORY
+
+
+def newest_object_mtime(prefix: str):
+    """Last-modified of the newest object under ``opdi/<prefix>/``, or None.
+
+    Used to prove a reused table belongs to the run being resumed. Parquet
+    carries no write timestamp of its own that Spark exposes cheaply, and a
+    row count cannot tell a fresh table from a stale one of the same shape --
+    the object mtimes can.
+    """
+    import boto3
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url="https://s3.opensky-network.org",
+        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    )
+    newest = None
+    pages = s3.get_paginator("list_objects_v2").paginate(
+        Bucket="eurocontrol", Prefix=f"opdi/{prefix.rstrip('/')}/"
+    )
+    for page in pages:
+        for obj in page.get("Contents", []):
+            if newest is None or obj["LastModified"] > newest:
+                newest = obj["LastModified"]
+    return newest
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(events_gt.PERIODS), required=True)
@@ -717,13 +756,61 @@ def main() -> int:
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4059)
     ap.add_argument("--cores", type=int, default=4)
-    ap.add_argument("--driver-memory", default="8g")
+    ap.add_argument(
+        "--driver-memory",
+        default=osn_sample_driver_default(),
+        help=(
+            "Driver heap. Applies to distributed runs too -- it did not before, "
+            "so a distributed run took the environment's 10 GB whatever was asked."
+        ),
+    )
+    ap.add_argument(
+        "--reuse-table",
+        nargs="*",
+        default=[],
+        metavar="RUNG",
+        help=(
+            "Score these rungs from the event table already on S3 instead of "
+            "recomputing them. For resuming a ladder that died partway: the "
+            "scores live only in the driver's memory until the final CSV "
+            "write, so a crash loses every rung's numbers while leaving every "
+            "completed rung's table intact. Requires --reuse-newer-than."
+        ),
+    )
+    ap.add_argument(
+        "--reuse-newer-than",
+        default=None,
+        metavar="ISO8601",
+        help=(
+            "A reused table is accepted only if its newest object postdates "
+            "this instant. Mandatory with --reuse-table, and not paranoia: "
+            "research/events_2026_V07_shipped still held a table from an "
+            "earlier, pre-fix run at the moment the ladder died, and reusing "
+            "it would have published those numbers as this run's result."
+        ),
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     plan = build_plan(args.runs, ladder=args.ladder)
     VERIFIERS[args.ladder](plan)
     print(f"plan verified ({args.ladder}): {len(plan)} rung(s) -- {', '.join(plan)}")
+    reuse = set(args.reuse_table)
+    unknown = reuse - set(plan)
+    if unknown:
+        raise SystemExit(
+            f"--reuse-table names rungs that are not in this plan: {sorted(unknown)}"
+        )
+    if reuse and not args.reuse_newer_than:
+        raise SystemExit("--reuse-table requires --reuse-newer-than")
+    reuse_cutoff = None
+    if args.reuse_newer_than:
+        import datetime as _dt
+
+        reuse_cutoff = _dt.datetime.fromisoformat(args.reuse_newer_than)
+        if reuse_cutoff.tzinfo is None:
+            reuse_cutoff = reuse_cutoff.replace(tzinfo=_dt.timezone.utc)
+
     if args.dry_run:
         return 0
 
@@ -733,6 +820,7 @@ def main() -> int:
     load_dotenv()
     osn_sample.UI_PORT = args.ui_port
     osn_sample.RESEARCH_EXECUTORS = args.executors
+    osn_sample.RESEARCH_DRIVER_MEMORY = args.driver_memory
     spark = build_spark(args.cores, args.driver_memory, distributed=True)
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.session.timeZone", "UTC")
@@ -773,9 +861,26 @@ def main() -> int:
         # it as this rung's result. That happened: L00_legacy scored the
         # previous run's contaminated output and looked entirely plausible.
         log_dir = f"logs/events_{args.period}_{name}"
-        shutil.rmtree(log_dir, ignore_errors=True)
         proc = FlightEventProcessor(spark, config, log_dir=log_dir)
-        proc.process_month(month, skip_if_processed=False)
+        if name in reuse:
+            # Deliberate, named-on-the-command-line reuse. The failure mode the
+            # comment above describes is *silent* reuse; this one is announced,
+            # and the timestamp gate makes a stale table an error rather than a
+            # plausible-looking result.
+            newest = newest_object_mtime(f"research/events_{args.period}_{name}")
+            if newest is None:
+                raise SystemExit(f"{name}: --reuse-table but no table at {target}")
+            if newest < reuse_cutoff:
+                raise SystemExit(
+                    f"{name}: table at {target} was last written {newest:%Y-%m-%d %H:%M:%S %Z}, "
+                    f"which predates --reuse-newer-than "
+                    f"{reuse_cutoff:%Y-%m-%d %H:%M:%S %Z}. That is a table from "
+                    f"an earlier run, not this one. Recompute the rung."
+                )
+            print(f"  reusing existing {target} (written {newest:%Y-%m-%d %H:%M:%S %Z})")
+        else:
+            shutil.rmtree(log_dir, ignore_errors=True)
+            proc.process_month(month, skip_if_processed=False)
 
         table = f"s3a://eurocontrol/opdi/{target}"
         inventory.extend(extraction_counts(spark, table, name))
