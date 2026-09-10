@@ -861,6 +861,15 @@ def main() -> int:
         # it as this rung's result. That happened: L00_legacy scored the
         # previous run's contaminated output and looked entirely plausible.
         log_dir = f"logs/events_{args.period}_{name}"
+        if name not in reuse:
+            # Before the processor is constructed, never after. The constructor
+            # creates this directory, and `process_month` writes its per-family
+            # progress markers into it as its final act. Clearing it after
+            # construction leaves the processor holding paths beneath a
+            # directory that no longer exists, so the run dies on the last line
+            # of its last family -- with every event table already written and
+            # nothing to show for it. That cost two hours of V07 compute.
+            shutil.rmtree(log_dir, ignore_errors=True)
         proc = FlightEventProcessor(spark, config, log_dir=log_dir)
         if name in reuse:
             # Deliberate, named-on-the-command-line reuse. The failure mode the
@@ -879,7 +888,6 @@ def main() -> int:
                 )
             print(f"  reusing existing {target} (written {newest:%Y-%m-%d %H:%M:%S %Z})")
         else:
-            shutil.rmtree(log_dir, ignore_errors=True)
             proc.process_month(month, skip_if_processed=False)
 
         table = f"s3a://eurocontrol/opdi/{target}"
