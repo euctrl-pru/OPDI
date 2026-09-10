@@ -342,7 +342,21 @@ def jobs(reuse_rungs=(), reuse_newer_than=None) -> list:
                 "benchmarks/events_compare.py",
                 ["--period", period, "--ladder", "v4", "--rung", SHIPPED_RUNG,
                  "--airports", "study", "--executors", "12"],
+                # Every CSV `events_compare.py` writes, not the subset the
+                # paper happened to need first. An output this job produces but
+                # does not declare is not copied into the paper's data/ -- so
+                # the paper keeps whatever copy was there, and `--check`
+                # reports the job "ok" because staleness is computed only over
+                # declared outputs. That is how per_airport_by_detector,
+                # pooling_rules and rings came to be read from a manual run
+                # made at 39093a1, three commits before the on_ground fix,
+                # while the tables beside them were current.
                 {f"per_airport_{period}.csv": f"per_airport_{period}.csv",
+                 f"per_airport_by_detector_{period}.csv":
+                     f"per_airport_by_detector_{period}.csv",
+                 f"pooling_rules_{period}.csv": f"pooling_rules_{period}.csv",
+                 f"rings_{period}.csv": f"rings_{period}.csv",
+                 f"floor_{period}.csv": f"floor_{period}.csv",
                  f"runway_{period}.csv": f"runway_{period}.csv",
                  f"resolution_{period}.csv": f"resolution_{period}.csv"},
                 SCORE + ["benchmarks/events_compare.py", "benchmarks/event_bench.py"],
