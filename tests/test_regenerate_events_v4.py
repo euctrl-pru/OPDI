@@ -83,13 +83,33 @@ def test_the_ladder_depends_on_the_flight_list_the_stage_builds():
     assert v4.T_TRACKS_CLEAN in stage.inputs
 
 
-def test_the_chain_produces_exactly_the_papers_six_tables():
+def test_the_chain_declares_every_table_the_paper_reads():
+    """The declared set must be everything the scripts write, not a subset.
+
+    `regenerate` copies only *declared* outputs into the paper's data/, and
+    computes staleness only over declared outputs. An output a job produces but
+    does not declare is therefore written to the staging directory, dropped,
+    and invisible to `--check` -- while the paper goes on reading whatever
+    stale copy is already sitting in data/. That is not hypothetical: this set
+    once held six names against the seven `events_compare.py` writes, and the
+    paper's per-airport-by-detector, pooling-rules and ring figures were being
+    read from a manual run made three commits before the on_ground fix, with
+    every job reporting `ok`.
+
+    `floor_2026.csv` is deliberately absent. The inter-source floor needs the
+    _CTFM columns of the full APDF extract and apdf_full_202606 has never been
+    extracted, so the floor comes back empty and `write_csv` writes no file at
+    all -- declaring it fails the job outright.
+    """
     staged = {name for job in v4.jobs() for name in job.outputs.values()}
 
     assert staged == {
         "bridge_2026.json", "ladder_2026.csv", "inventory_2026.csv",
-        "per_airport_2026.csv", "runway_2026.csv", "resolution_2026.csv",
+        "per_airport_2026.csv", "per_airport_by_detector_2026.csv",
+        "pooling_rules_2026.csv", "rings_2026.csv",
+        "runway_2026.csv", "resolution_2026.csv",
     }
+    assert "floor_2026.csv" not in staged
 
 
 def test_a_missing_output_is_stale_rather_than_assumed_current(tmp_path, monkeypatch):
