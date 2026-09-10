@@ -356,7 +356,14 @@ def jobs(reuse_rungs=(), reuse_newer_than=None) -> list:
                      f"per_airport_by_detector_{period}.csv",
                  f"pooling_rules_{period}.csv": f"pooling_rules_{period}.csv",
                  f"rings_{period}.csv": f"rings_{period}.csv",
-                 f"floor_{period}.csv": f"floor_{period}.csv",
+                 # `floor_{period}.csv` is deliberately NOT declared. The
+                 # inter-source floor needs the _CTFM columns of the *full*
+                 # APDF extract, and apdf_full_202606 has never been
+                 # extracted -- so the floor comes back empty for 2026 and
+                 # `write_csv` writes no file at all. Declaring it fails the
+                 # job with "expected floor_2026.csv but the job did not
+                 # produce it", which is the correct behaviour and the reason
+                 # this comment exists rather than a silent omission.
                  f"runway_{period}.csv": f"runway_{period}.csv",
                  f"resolution_{period}.csv": f"resolution_{period}.csv"},
                 SCORE + ["benchmarks/events_compare.py", "benchmarks/event_bench.py"],
