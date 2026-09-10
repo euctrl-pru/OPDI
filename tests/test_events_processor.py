@@ -626,3 +626,41 @@ def test_the_track_projection_carries_every_column_a_detector_feature_gates_on()
         "process_month's projection dropped on_ground; airport_admit_on_ground "
         "is silently inert without it"
     )
+
+
+def test_the_log_directory_is_created_by_the_constructor_and_written_at_the_end(
+    spark, tmp_path
+):
+    """`log_dir` is created on construction and written to as the last act of a run.
+
+    Both halves matter together, and the pairing is what makes the *ordering*
+    of any reset load-bearing. A caller that clears `log_dir` to force a
+    recompute must do it **before** constructing the processor: doing it after
+    does not reset anything, it removes the directory the live processor is
+    still holding paths into, and the run then dies marking progress -- after
+    every event table has already been written.
+
+    That is not a hypothetical. `event_bench`'s `--reuse-table` support cleared
+    the directory one line too late on its first outing, and a rung died on the
+    final line of its final family with two hours of compute already spent and
+    no scores to show for it.
+    """
+    import datetime as dt
+    import shutil
+
+    log_dir = tmp_path / "events_log"
+    config = OPDIConfig()
+    config.events = EventConfig()
+    proc = FlightEventProcessor(spark, config, log_dir=str(log_dir))
+
+    assert log_dir.is_dir(), "the constructor must create its own log directory"
+
+    month = dt.date(2026, 6, 1)
+    proc._mark_processed("horizontal", month)
+    assert month in proc._load_processed("horizontal")
+
+    # The failure mode itself: the directory removed after construction, which
+    # is precisely what a mis-ordered reset does.
+    shutil.rmtree(log_dir)
+    with pytest.raises(OSError):
+        proc._mark_processed("vertical", month)
