@@ -144,6 +144,21 @@ class BreakRule:
     break_expr: Callable[["SegmentationParams"], Column]
     group_cols: List[str] = field(default_factory=lambda: ["icao24", "callsign"])
     month_suffix: bool = True
+    id_from_start_time: bool = False
+    """Key ``track_id`` on the track's first sample instead of a running count.
+
+    The running count (``_offset``) numbers breaks from the start of whatever
+    frame the engine was handed, which makes the id a property of the *batch*
+    rather than of the track. Two consequences, both live before this existed:
+    an airframe's first track is ``_0`` in every batch, so batches collide; and
+    the same physical track is numbered differently depending on how much
+    history happened to be loaded beside it.
+
+    ``legacy`` keeps the running count -- it reproduces released data byte for
+    byte and its ``_{year}_{month}`` suffix already disambiguates across the
+    month boundaries production batched on. Arms without that suffix need this
+    instead, or they have no disambiguator at all.
+    """
 
     def __post_init__(self):
         if not callable(self.break_expr):
@@ -182,13 +197,29 @@ def assign_track_id(
     running = w.rowsBetween(Window.unboundedPreceding, 0)
     out = out.withColumn("_offset", F.sum("_brk").over(running))
 
-    parts = [F.col(_GRP), F.lit("_"), F.col("_offset")]
-    if rule.month_suffix:
-        parts += [
-            F.lit("_"), F.year(_TS).cast("string"),
-            F.lit("_"), F.month(_TS).cast("string"),
-        ]
-    out = out.withColumn("track_id", F.concat(*parts))
+    if rule.id_from_start_time:
+        # The track's own first sample, which no amount of surrounding data can
+        # change. ``_offset`` still delimits the track -- it is the partition
+        # key here, not the label -- so the segmentation is untouched and only
+        # the naming differs.
+        #
+        # Seconds, not milliseconds: ADS-B state vectors arrive at ~1 Hz and
+        # ``event_time`` is stored to the second, so sub-second precision would
+        # be noise in the id. Two tracks of one airframe cannot share a start
+        # second -- they would have to be the same track.
+        start = F.min(_TS).over(Window.partitionBy(_GRP, "_offset"))
+        out = out.withColumn(
+            "track_id",
+            F.concat(F.col(_GRP), F.lit("_"), F.unix_timestamp(start).cast("string")),
+        )
+    else:
+        parts = [F.col(_GRP), F.lit("_"), F.col("_offset")]
+        if rule.month_suffix:
+            parts += [
+                F.lit("_"), F.year(_TS).cast("string"),
+                F.lit("_"), F.month(_TS).cast("string"),
+            ]
+        out = out.withColumn("track_id", F.concat(*parts))
 
     return out.drop(*_TEMP_COLS)
 

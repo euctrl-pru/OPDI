@@ -473,6 +473,12 @@ def recommended() -> BreakRule:
         group_cols=["icao24"],
         break_expr=expr,
         month_suffix=False,
+        # Dropping the month suffix left this arm with no disambiguator across
+        # batches, and production batches (month today, day under the day-by-day
+        # runner). Keying on the track's own start restores uniqueness without
+        # reintroducing a suffix that encodes how the data happened to be
+        # sliced.
+        id_from_start_time=True,
     )
 
 
