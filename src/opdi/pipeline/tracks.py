@@ -10,7 +10,7 @@ Transforms raw state vectors into structured flight tracks with:
 """
 
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import List, Optional
 import pandas as pd
 
@@ -19,7 +19,8 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import (
     lit, lag, when, to_date, concat, avg, abs as f_abs, col,
     unix_timestamp, to_timestamp, substring, sha2, concat_ws,
-    year, month, sin, cos, radians, atan2, sqrt, sum as f_sum, udf
+    year, month, sin, cos, radians, atan2, sqrt, sum as f_sum, udf,
+    min as f_min,
 )
 from pyspark.sql.types import StringType
 import h3
@@ -46,6 +47,42 @@ def _geo_to_h3_cell(lat, lon, resolution):
     if lat is None or lon is None or resolution is None:
         return None
     return h3.latlng_to_cell(float(lat), float(lon), int(resolution))
+
+
+def keep_tracks_starting_in(df, claim_start, claim_end):
+    """Keep whole tracks whose first sample falls in ``[claim_start, claim_end)``.
+
+    The rule that makes day-by-day processing a partition rather than an
+    overlap. A batch reads well past the day it is processing, so that a flight
+    departing at 22:50 is complete rather than truncated at midnight; this then
+    discards the tracks that reading wide dragged in. A track started
+    yesterday is dropped *whole* -- keeping its tail would both duplicate
+    samples yesterday already processed and invent a flight that never
+    departed.
+
+    Half-open at both ends, so midnight belongs to the day that begins. Two
+    adjacent days therefore claim every track exactly once between them: no
+    track is processed twice, and none falls between them.
+
+    The filter is on the track's first sample, computed over the whole track,
+    not on the row -- which is why a kept track keeps every sample it has,
+    including the ones after ``claim_end``.
+
+    Args:
+        df: State vectors that already carry ``track_id``.
+        claim_start: First instant of the day, inclusive.
+        claim_end: First instant of the next day, exclusive.
+    """
+    # Materialised, not inlined: Spark rejects a window function inside a
+    # WHERE clause, and the obvious one-liner fails with a message that names
+    # the clause rather than the cause.
+    tmp = "_track_first_sample"
+    out = df.withColumn(
+        tmp, f_min("event_time").over(Window.partitionBy("track_id"))
+    )
+    return out.filter(
+        (col(tmp) >= lit(claim_start)) & (col(tmp) < lit(claim_end))
+    ).drop(tmp)
 
 
 class TrackProcessor:
@@ -397,7 +434,11 @@ class TrackProcessor:
         return df
 
     def process_month(
-        self, month: date, skip_if_processed: bool = True, window: tuple = None
+        self,
+        month: date,
+        skip_if_processed: bool = True,
+        window: tuple = None,
+        claim: tuple = None,
     ) -> None:
         """
         Process tracks for a single month.
@@ -459,6 +500,16 @@ class TrackProcessor:
         # Step 1: Add track ID
         df_month = self._add_track_id(df_month)
 
+        # Step 1b: keep only the tracks this batch owns.
+        #
+        # Day-by-day processing reads well past the day it is processing, so a
+        # flight departing at 22:50 is complete rather than cut off at
+        # midnight. That same wide read drags in tracks belonging to the
+        # neighbouring days, and this is where they go back. Without it the
+        # overlap would double-process every track that spans a boundary.
+        if claim is not None:
+            df_month = keep_tracks_starting_in(df_month, claim[0], claim[1])
+
         # Step 2: Add H3 encoding
         df_month = self._add_h3_encoding(df_month)
 
@@ -472,14 +523,28 @@ class TrackProcessor:
         df_month = self._add_clean_altitude(df_month, col_name="geo_altitude")
         df_month = self._add_clean_altitude(df_month, col_name="baro_altitude")
 
-        # Prepare for write: add partition column and repartition
-        df_month = df_month.withColumn("event_time_day", to_date(col("event_time")))
-        df_month = df_month.repartition("event_time_day").orderBy("event_time_day")
+        # Prepare for write.
+        #
+        # ``dof`` is the day the *track* starts, not the day each sample falls
+        # in, so a track that crosses midnight stays in one partition and the
+        # day that owns it can read it back whole. Partitioning on the sample's
+        # own date would scatter a single flight across two days and make
+        # "give me the tracks day D processed" unanswerable.
+        #
+        # This replaces a column that was built and immediately dropped: it
+        # only ever influenced file layout, and only under Iceberg.
+        df_month = df_month.withColumn(
+            "dof",
+            to_date(f_min("event_time").over(Window.partitionBy("track_id"))),
+        )
+        df_month = df_month.repartition("dof").orderBy("dof")
 
-        # Drop partition column (Iceberg will handle it)
-        df_month = df_month.drop("event_time_day")
-
-        self.storage.write_table(df_month, "osn_tracks", mode="append")
+        # Overwrite, not append, and safe because it is partitioned: only the
+        # days present are replaced, so re-running a day stops duplicating it
+        # while a run over fresh days behaves exactly as append did.
+        self.storage.write_table(
+            df_month, "osn_tracks", mode="overwrite", partition_by=["dof"]
+        )
 
         # Clean up memory
         df_month.unpersist(blocking=True)
@@ -490,6 +555,64 @@ class TrackProcessor:
 
         print(
             f"Month {month.strftime('%Y-%m')} processing complete. ({datetime.now()})"
+        )
+
+    #: Hours read before the day, so a track overlapping midnight can be told
+    #: from one that genuinely starts just after it. Only has to exceed the gap
+    #: threshold (30 min): a break is a local condition, so three hours of
+    #: silence in front of a sample already proves it starts a track.
+    DEFAULT_LOOKBACK_HOURS = 3
+
+    #: Hours read after the day, so a track starting inside it is complete.
+    #:
+    #: This is the direction that loses data when it is too small, and 24 is a
+    #: starting value rather than a measured one. A track is not a flight: with
+    #: a 30-minute gap rule and no callsign change, a continuously received
+    #: airframe can chain several rotations into one track. Measure the
+    #: duration distribution on real data and raise this above the observed
+    #: maximum; ``process_day`` warns when a track reaches the edge, so
+    #: truncation is at least never silent.
+    DEFAULT_LOOKAHEAD_HOURS = 24
+
+    def process_day(
+        self,
+        day: date,
+        skip_if_processed: bool = True,
+        lookback_hours: int = None,
+        lookahead_hours: int = None,
+    ) -> None:
+        """Process the tracks that *start* on ``day``, whole.
+
+        Reads ``[day - lookback, day+1 + lookahead)`` and keeps the tracks whose
+        first sample falls inside ``day``. Every track has exactly one first
+        sample and so exactly one owning day, which is what makes a sequence of
+        days a partition of the data rather than an overlapping sweep: no state
+        vector is processed twice, and none is skipped.
+
+        A track running past midnight is processed by the day it *started*,
+        in full -- that is what the lookahead is for.
+        """
+        lookback = self.DEFAULT_LOOKBACK_HOURS if lookback_hours is None else lookback_hours
+        lookahead = (
+            self.DEFAULT_LOOKAHEAD_HOURS if lookahead_hours is None else lookahead_hours
+        )
+
+        claim_start = datetime(day.year, day.month, day.day)
+        claim_end = claim_start + timedelta(days=1)
+        read_start = claim_start - timedelta(hours=lookback)
+        read_end = claim_end + timedelta(hours=lookahead)
+
+        fmt = "%Y-%m-%d %H:%M:%S"
+        print(
+            f"Processing tracks starting on {day} "
+            f"(reading {read_start:{fmt}} .. {read_end:{fmt}})"
+        )
+
+        self.process_month(
+            month=day,
+            skip_if_processed=skip_if_processed,
+            window=(read_start.strftime(fmt), read_end.strftime(fmt)),
+            claim=(claim_start, claim_end),
         )
 
     def process_date_range(
