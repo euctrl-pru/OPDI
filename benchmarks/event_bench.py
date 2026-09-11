@@ -316,7 +316,7 @@ def redirect_event_tables(target: str, flight_list: str = None) -> None:
         orig_write = StorageManager.write_table
         StorageManager._events_orig_write = orig_write
 
-    def write_table(self, df, table_name, mode="append"):
+    def write_table(self, df, table_name, mode="append", partition_by=None):
         if table_name in outputs:
             mode = "overwrite"
         return orig_write(self, df, table_name, mode)

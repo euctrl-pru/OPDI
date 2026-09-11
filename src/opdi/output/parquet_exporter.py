@@ -283,6 +283,12 @@ class ParquetExporter:
         """
 
         df = self.spark.sql(sql).withColumn("version", lit(version))
+        # `dof` is the internal partition key, not part of the published
+        # schema. `SELECT *` above picks up partition columns automatically
+        # -- Spark appends them to the schema on read -- so without this
+        # drop a new column would appear in released files the moment the
+        # table was partitioned, with nothing in the export to show why.
+        df = df.drop("dof")
         df = df.withColumn("id", F.xxhash64("id"))
         df = df.withColumn("flight_id", F.xxhash64('flight_id'))
         pdf = self.safe_to_pandas(df)
@@ -352,6 +358,8 @@ class ParquetExporter:
             self.spark.sql(sql)
             .withColumnRenamed("milestone_id", "event_id")
             .withColumn("version", lit(version))
+            # Internal partition key; see the note in the events export.
+            .drop("dof")
         )
 
         df = df.withColumn("id", F.xxhash64("id"))

@@ -1739,7 +1739,7 @@ class FlightListProcessor:
         abstention_height_ft: Optional[float] = None,
         sched_penalty_nm: Optional[float] = None,
         table_name: str = "opdi_flight_list",
-        write_mode: str = "append",
+        write_mode: str = "overwrite",
     ) -> None:
         """
         Process Departures/Arrivals/Internal flights for a month.
@@ -1840,13 +1840,28 @@ class FlightListProcessor:
 
         flight_table = self._add_osn_aircraft_db_data(flight_table)
 
-        # Prepare and write
-        flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
-        flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
-        flight_table = flight_table.drop("DOF_day")
-        # append by default, because the production run accumulates month by
-        # month; a comparison run wants one table per variant and overwrite.
-        self.storage.write_table(flight_table, table_name, mode=write_mode)
+        # Prepare and write.
+        #
+        # ``DOF`` is ``to_date(first_seen)`` -- the day the track starts -- so
+        # it is already the key a day-at-a-time run needs, and the helper
+        # column this used to build and immediately drop was only ever a file
+        # layout hint that vanished before the write.
+        #
+        # The default mode is ``overwrite`` *because* the write is partitioned:
+        # only the days present in this frame are replaced, so a production run
+        # accumulating month by month behaves exactly as ``append`` did, while
+        # re-processing a month stops duplicating it. Unpartitioned, this same
+        # mode would delete the whole table -- the partitioning is what makes
+        # the default safe, and the two must not be separated.
+        #
+        # ``process_overflights`` appends into the same partitions afterwards
+        # and must keep doing so: ``process_date_range`` runs every month's DAI
+        # pass before any overflight pass, so overwriting here cannot destroy
+        # overflight rows, but overwriting *there* would destroy these.
+        flight_table = flight_table.repartition("DOF").orderBy("DOF")
+        self.storage.write_table(
+            flight_table, table_name, mode=write_mode, partition_by=["DOF"]
+        )
 
         self._mark_month_processed(month, self._dai_log)
         print(f"DAI processing complete for {month}.")
@@ -1871,10 +1886,13 @@ class FlightListProcessor:
         flight_table = self._fetch_overflights(month)
         flight_table = self._add_osn_aircraft_db_data(flight_table)
 
-        flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
-        flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
-        flight_table = flight_table.drop("DOF_day")
-        self.storage.write_table(flight_table, "opdi_flight_list", mode="append")
+        flight_table = flight_table.repartition("DOF").orderBy("DOF")
+        # Append, never overwrite: this lands in partitions ``process_dai``
+        # has already filled for the same days, and replacing them here would
+        # delete every departure and arrival it just wrote.
+        self.storage.write_table(
+            flight_table, "opdi_flight_list", mode="append", partition_by=["DOF"]
+        )
 
         self._mark_month_processed(month, self._overflight_log)
         print(f"Overflight processing complete for {month}.")

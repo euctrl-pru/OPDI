@@ -301,7 +301,7 @@ class _StubStorage:
     def read_table(self, name):
         return self._tables[name]
 
-    def write_table(self, df, name, mode="append"):
+    def write_table(self, df, name, mode="append", partition_by=None):
         self.written[name] = df
 
 
@@ -664,3 +664,53 @@ def test_the_log_directory_is_created_by_the_constructor_and_written_at_the_end(
     shutil.rmtree(log_dir)
     with pytest.raises(OSError):
         proc._mark_processed("vertical", month)
+
+
+# --- the per-day partition key ------------------------------------------
+
+
+def test_events_and_measurements_carry_the_track_s_start_day(spark, stub_storage):
+    """`dof` is the day the *track* starts, not the day the event happens.
+
+    A departure at 22:50 produces events after midnight. Keying those on their
+    own date would split one flight's events across two partitions, so a day's
+    run would write into its neighbour's day and could not be re-run in
+    isolation. Keyed on the track, a day owns every row its tracks produce.
+    """
+    import json
+
+    out = _run(spark, stub_storage, EventConfig())
+    events = stub_storage.written["opdi_flight_events"]
+    measurements = stub_storage.written["opdi_measurements"]
+
+    assert "dof" in events.columns
+    assert "dof" in measurements.columns
+
+    # The fixture's single track starts on 2024-06-01; every row must say so,
+    # including any event whose own timestamp has run past midnight.
+    days = {str(r["dof"]) for r in events.select("dof").distinct().collect()}
+    assert days == {"2024-06-01"}, days
+
+    mdays = {str(r["dof"]) for r in measurements.select("dof").distinct().collect()}
+    assert mdays == {"2024-06-01"}, mdays
+
+
+def test_a_measurement_inherits_the_day_from_its_parent_event(spark, stub_storage):
+    """opdi_measurements has no instant of its own -- its schema was id,
+    milestone_id, type, value, version. The day has to come from the event the
+    measurement hangs off, which is why it is joined rather than derived."""
+    from pyspark.sql import functions as SF
+
+    out = _run(spark, stub_storage, EventConfig())
+    events = stub_storage.written["opdi_flight_events"].select(
+        SF.col("id").alias("_ev_id"), SF.col("dof").alias("_ev_dof")
+    )
+    measurements = stub_storage.written["opdi_measurements"].select(
+        SF.col("milestone_id").alias("_ms_id"), SF.col("dof").alias("_ms_dof")
+    )
+
+    joined = measurements.join(
+        events, SF.col("_ms_id") == SF.col("_ev_id"), "inner"
+    )
+    assert joined.count() > 0, "no measurement joined its event; the test proves nothing"
+    assert joined.filter(SF.col("_ms_dof") != SF.col("_ev_dof")).count() == 0
