@@ -391,3 +391,37 @@ def test_a_non_day_step_is_rejected_by_the_day_dispatcher():
 
     with pytest.raises(ValueError, match="not a per-day step"):
         run_day_step(None, None, "01", date(2026, 6, 1), {})
+
+
+# --- reference data is built once, not once per day -------------------------
+
+def test_the_reference_check_is_complete_not_merely_non_empty():
+    """A *partial* reference set means an earlier build died midway, and
+    finishing it is what should happen. Only a complete set may be reused."""
+    from opdi.weekrun import REQUIRED_REFERENCE_TABLES, preflight
+
+    partial = _Storage(set(REQUIRED_REFERENCE_TABLES) - {"h3_runway_zones"})
+    assert preflight(partial) == ["h3_runway_zones"]
+    assert preflight(_Storage(REQUIRED_REFERENCE_TABLES)) == []
+
+
+def test_the_state_file_is_scoped_to_its_window():
+    """Which is why reference reuse cannot rely on it: day 2 gets a different
+    file and so has no record that day 1 built anything."""
+    from opdi.weekrun import run_week  # noqa: F401  (documents the coupling)
+    import inspect
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_week)
+    assert "weekrun_{start_date.isoformat()}_{days}d.json" in src
+
+
+def test_the_first_unit_comparison_uses_a_step_day_pair():
+    """`todo` holds (step, day) pairs. Comparing the bare step name to
+    `todo[0]` is always False, which silently disabled the preflight."""
+    import inspect
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_week)
+    assert "(step, day) == todo[0]" in src
+    assert "and step == todo[0]" not in src
