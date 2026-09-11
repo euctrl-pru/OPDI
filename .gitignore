@@ -57,3 +57,7 @@ mc
 .ipynb_checkpoints/
 **/.ipynb_checkpoints/
 .claude/worktrees/
+
+# osmnx response cache. Regenerable, machine-local, and swept into a commit
+# by `git add -A` once already.
+cache/
