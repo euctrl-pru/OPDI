@@ -608,29 +608,38 @@ def run_week(
             },
         )
         try:
-            if not skip_preflight and step == todo[0]:
+            # `(step, day)`, not `step`: todo holds pairs since the run
+            # became day-by-day, and comparing the bare name to a pair is
+            # always False -- which made this whole block dead code.
+            if not skip_preflight and (step, day) == todo[0]:
                 storage = StorageManager(spark, config)
                 if building_reference:
-                    # The reference tables are this run's *output*, so their
-                    # absence is expected. What matters instead is that the
-                    # prefix is empty: merging a rebuild into a previous
-                    # attempt's leftovers yields a table whose rows came from
-                    # two builds and which nothing can date.
-                    present = [
-                        t for t in REQUIRED_REFERENCE_TABLES
-                        if storage.table_exists(t)
-                    ]
-                    if present and not allow_existing:
+                    # Reference tables already in the warehouse are reused, not
+                    # rebuilt.
+                    #
+                    # A campaign runs one day at a time, and the state file is
+                    # per-window -- so day 2 starts with no record that day 1
+                    # built the reference data. Rebuilding it each day would
+                    # repeat hours of geometry for an unchanged result, and
+                    # before this the aircraft database was appended rather
+                    # than replaced, so seven days left seven stacked copies.
+                    #
+                    # Completeness is the test, not emptiness: a *partial* set
+                    # means an earlier build died midway, and finishing it is
+                    # exactly what should happen.
+                    missing = preflight(storage)
+                    if not missing and not force:
                         print(
-                            f"Refusing to build into {warehouse}: it already "
-                            f"holds {', '.join(present)}.\n"
-                            "A fresh build must start from an empty prefix, or "
-                            "its output mixes two builds. Delete them, choose "
-                            "another --warehouse, or pass --allow-existing if "
-                            "overwriting is intended."
+                            f"  reference   : already built in {warehouse}; "
+                            "reusing it (pass --force to rebuild)"
                         )
-                        return 1
-                    print(f"  preflight   : {warehouse} is clear")
+                        state.mark(step, 0.0)
+                        continue
+                    if missing:
+                        print(
+                            f"  reference   : building {len(missing)} missing "
+                            f"table(s): {', '.join(missing)}"
+                        )
                 else:
                     missing = preflight(storage)
                     if missing:

@@ -257,7 +257,12 @@ def _step_00e_aircraft_db(spark, config, **kwargs):
     from opdi.ingestion.osn_aircraft_db import AircraftDatabaseIngestion
 
     acdb = AircraftDatabaseIngestion(spark, config)
-    acdb.ingest()
+    # Overwrite, not the default append. The file is a full snapshot of every
+    # airframe OpenSky knows, not a delta, so appending a second run stacks a
+    # complete duplicate copy on the first -- 601,270 rows becomes 1,202,540
+    # and every join through icao24 silently doubles its matches. Nothing
+    # errors; the table simply weighs each aircraft twice.
+    acdb.ingest(mode="overwrite")
 
 
 def _step_00f_runway_grid(spark, config, **kwargs):
