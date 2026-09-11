@@ -48,7 +48,18 @@ from adep_ades import (
     airport_locations, label_ground_truth, load_ground_truth, score, AIRPORTS,
 )
 from abstained_vertical import bearing_deg, angle_between, TRACKS
-from trend_sweep import CACHE, haversine_nm
+# The paired cache, not v6's `research/trend_votes`.
+#
+# This job needs `up_60` / `dn_60` / `dist_60`, and the paired cache carries
+# the whole flight-level family alongside the above-field one -- so it holds a
+# superset of what v6's cache did.
+#
+# It used to import v6's cache while v6.2's registry declared the paired one as
+# its input. The declaration and the behaviour disagreed, and nothing noticed
+# until v6's cache was deleted from the bucket and this job died on
+# PATH_NOT_FOUND. A declared dependency that is not the real one is worse than
+# an undeclared one, because it reads as verified.
+from trend_sweep_agl import CACHE, haversine_nm
 
 #: The shipped trend configuration, which this is trying to improve on.
 FL_CAP, MARGIN, RADIUS_NM, PENALTY_NM = 60, 2, 20.0, 10.0

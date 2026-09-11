@@ -127,6 +127,14 @@ DATUM_ARM_CEILING_FT = msl_equivalent_height_ft(60)
 #: about the shipped value.
 GRID_HEIGHT_CAPS = (3000, 4000, 6000, 6100, 8000, 10000)
 
+#: Vote margins walked through `process_dai`.
+#:
+#: Includes 0 because that is what `DetectionConfig` ships. The grid previously
+#: fixed the margin at 2, so the shipped value was validated by nothing at all
+#: -- and main's configuration was not a cell this grid had ever run, which
+#: makes a parity check against it impossible rather than merely failing.
+GRID_MARGINS = (0, 2, 4)
+
 
 def trend_ceiling_kwargs(row: dict) -> dict:
     """Config keywords for the altitude cut a sweep row selects.
@@ -277,7 +285,9 @@ def main() -> None:
                     help="trend ceilings to walk through process_dai, in feet "
                          "above field elevation")
     ap.add_argument("--grid-radius", nargs="+", type=float, default=[20.0, 30.0])
-    ap.add_argument("--grid-margin", nargs="+", type=int, default=[2])
+    ap.add_argument("--grid-margin", nargs="+", type=int,
+                    default=list(GRID_MARGINS),
+                    help="vote margins to walk through process_dai")
     ap.add_argument("--grid-penalty", type=float, default=10.0)
     ap.add_argument("--trend-rank-by", default="haversine",
                     choices=["haversine", "ring"],

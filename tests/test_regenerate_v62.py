@@ -273,20 +273,35 @@ def test_the_path_walk_carries_the_datum_rung():
         assert "path2_flcap" not in args, job.name
 
 
-def test_the_grid_runs_match_the_declared_ceilings():
-    """The run labels and the --grid-height list are two spellings of the same
-    grid. If they drift, the job asks for cells it never names and scores
-    cells it never ran."""
+def test_the_grid_runs_match_the_declared_grid():
+    """The run labels and the --grid-* lists are two spellings of one grid.
+    If they drift, the job asks for cells it never names and scores cells it
+    never ran."""
     jobs = {j.name: j for j in regenerate_v62.jobs()}
     args = _args(jobs["trend_grid_2025"])
-    declared = []
-    for a in args[args.index("--grid-height") + 1:]:
-        if a.startswith("--"):   # the next flag ends this list
-            break
-        declared.append(a)
-    assert sorted(map(int, declared)) == sorted(flight_list_v62.GRID_HEIGHT_CAPS)
+
+    def values_after(flag):
+        out = []
+        for a in args[args.index(flag) + 1:]:
+            if a.startswith("--"):   # the next flag ends this list
+                break
+            out.append(a)
+        return out
+
+    assert sorted(map(int, values_after("--grid-height"))) == \
+        sorted(flight_list_v62.GRID_HEIGHT_CAPS)
+    assert sorted(map(int, values_after("--grid-margin"))) == \
+        sorted(flight_list_v62.GRID_MARGINS)
     for cap in flight_list_v62.GRID_HEIGHT_CAPS:
         assert any(a.startswith(f"grid_h{cap}_") for a in args), cap
+
+    # Every cell named, not merely every value mentioned somewhere: the count
+    # is what catches a run list that dropped a dimension.
+    expected = (len(flight_list_v62.GRID_HEIGHT_CAPS) * 2
+                * len(flight_list_v62.GRID_MARGINS))
+    named = [a for a in args if a.startswith("grid_h")]
+    assert len(named) == expected, f"{len(named)} runs named, expected {expected}"
+    assert len(set(named)) == len(named), "duplicate run names"
 
 
 def test_the_grid_brackets_the_shipped_ceiling():
@@ -352,3 +367,35 @@ def test_arm_c_consumes_what_arm_a_produces():
     assert "per_airport_datum_2025.csv" in produced
     consumed = " ".join(_args(jobs["elevation_bands_2025"]))
     assert "per_airport_datum_2025.csv" in consumed
+
+def test_no_job_reads_a_cache_it_did_not_declare():
+    """A declared input that is not the real one reads as verified and is not.
+
+    `trend_bearing.py` imported v6's `research/trend_votes` while this registry
+    declared the paired `trend_votes_agl` as its input. Nothing noticed until
+    v6's cache was deleted from the bucket and the job died on PATH_NOT_FOUND
+    -- so the provenance had been wrong for the whole study without a symptom.
+
+    This checks the coupling in the direction that can be checked statically:
+    a job declaring a vote cache must run a script that imports its cache from
+    the module owning that cache.
+    """
+    import re
+    repo = Path(__file__).resolve().parent.parent
+    owner = {
+        "research/trend_votes_agl": "trend_sweep_agl",
+        "research/trend_votes": "trend_sweep",
+    }
+    for job in regenerate_v62.jobs():
+        declared = [i for i in job.inputs if "trend_votes" in i]
+        if not declared:
+            continue
+        src = (repo / job.script).read_text()
+        imports_cache = re.search(r"from (\w+) import [^\n]*\bCACHE\b", src)
+        if not imports_cache:
+            continue          # the job names its cache on the command line
+        want = owner["research/trend_votes_agl" if "_agl" in declared[0]
+                     else "research/trend_votes"]
+        assert imports_cache.group(1) == want, (
+            f"{job.name} declares {declared[0]} but {job.script} imports "
+            f"CACHE from {imports_cache.group(1)}")

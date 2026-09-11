@@ -233,3 +233,118 @@ and is reported as the weaker thing it is.
 Nothing deliberately skipped. `height_pipeline_2025` is not carried over from
 v6.1 as a separate job because `trend_grid_2025` subsumes it — see the 6,000
 against 6,100 note above.
+
+## Diagram rendering without a browser
+
+The four methodology diagrams are HTML-only: `mermaid()` emits its fence only
+under `knitr::is_html_output()`, because rasterising mermaid needs a headless
+Chromium that does not start here. A spike asked whether one source could serve
+both formats using only what is installed.
+
+| Path | Result |
+|---|---|
+| `DiagrammeR` viz.js via `V8`, then `rsvg` | **fails** — this DiagrammeR build ships no `viz.js` at all (0 candidates found) |
+| `igraph` drawn to a PDF device | **works** — valid 1-page PDF |
+| `grid` boxes and arrows | **works** — valid 1-page PDF |
+
+No Chromium process was spawned: every `chrome-headless` entry on the host
+remained 3, 11 or 12 days old.
+
+**So it is feasible, and the recommended path is `grid`.** An R chunk that
+draws with `grid` renders through whatever device Quarto has selected, so the
+same source produces a figure in HTML *and* PDF with no browser and no
+pre-rendered image to keep in step.
+
+`igraph` also works but fights the content: these are flowcharts with
+multi-line box labels, a decision diamond and yes/no edge labels, and igraph's
+strengths are graph layout rather than annotated boxes.
+
+**Practical shape:** all four diagrams are vertical chains with a single
+branch, so one helper that lays out a chain of labelled boxes serves all four
+rather than four hand-placed drawings. That is what makes the approach
+affordable; without it, hand-laying four flowcharts in `grid` would not be
+worth the gain over the existing step tables.
+
+## The pipeline is not bit-reproducible at the margin
+
+Re-running the campaign against main's package reproduced every figure exactly
+**except** the `recommended` row of `mode_comparison_v6.csv`, where 5 arrivals
+of 95,116 moved from correct to wrong -- score 62,147 to 62,132.
+
+It is not a difference between main and the branch. The evidence:
+
+* the recorded configuration is identical in both rows (6,000 ft, 30 NM,
+  margin 0, `field`, `haversine`);
+* every other run -- `legacy`, `trend`, `endpoint`, `nearest`, `combined` --
+  reproduces cell for cell, and a behavioural change in shared code would not
+  spare five of six runs;
+* the movements pair up between **adjacent aerodromes**: EDDF loses one and
+  EDFE gains one, and Frankfurt and Egelsbach are about 10 km apart. LICB,
+  LIMC and LIMJ move the same way.
+
+That is a **tie in the ranking broken differently between runs**. Two candidate
+aerodromes at the same effective distance -- after the scheduled-service
+penalty -- leave the winner to whatever order Spark happened to produce.
+
+`recommended` is the only trend run at the full 30 NM radius, so it admits the
+most candidates and meets the most near-ties. The narrower runs do not show it.
+
+**What this bounds.** Every pipeline figure in the report carries roughly
+±5 flights of run-to-run noise, or about 0.005% of the sample. That is far
+below any effect the report argues from -- the datum's band result is +109 --
+but it means these numbers should not be quoted to the last digit as though
+they were exact, and a difference of a handful of flights between two
+configurations is not a difference at all.
+
+### The datum rung is inside the noise
+
+Two independent runs of the tuning ladder put the datum rung at **+11** and
+**+8**, against run-to-run noise of roughly ±15 score points (5 flights moving
+between correct and wrong costs 15 at *k* = 2).
+
+So the rung is **not measurably different from zero**, and the report says that
+rather than quoting a figure to the unit.
+
+This is not a weakness in the argument; it is what @sec-dilution predicts.
+Seventy per cent of arrivals are at aerodromes below 500 ft, where the two
+datums are the same test by construction, so an aggregate over the whole
+sample cannot see a change that only acts on the rest. The case for the datum
+rests on the band breakdown -- +109 correct in the 1,500-3,000 ft band,
+surviving both the leave-one-out and drop-the-busiest controls -- and on the
+argument that a cut should mean the same thing at every aerodrome.
+
+The ladder's other rungs are far larger than the noise and unaffected: the
+penalty is +825, the ceiling +791, and the ceiling step still flips sign
+between ranking rules (+791 under exact distance, -1,642 under ring).
+
+### What the regeneration moved, and why
+
+Eighteen of the twenty-seven figures reproduced **exactly**, including all four
+sweeps, the datum arms, the elevation bands and the original twelve cells of
+the pipeline grid. What moved, and the reason in each case:
+
+| File | Moved | Cause |
+|---|---|---|
+| `trend_grid_v6.csv` | 12 -> 36 rows | the grid was widened on purpose; the original 12 cells reproduce exactly |
+| `input_drift.csv` | all 8 rows | it reports table identities, and the vote caches were rebuilt today |
+| `mode_comparison_v6.csv` | the `recommended` row | tie-breaking noise, ~5 flights |
+| `per_airport_v6.csv`, `per_airport_path_v6.csv` | 34 and 44 cells | the same, seen per aerodrome |
+| `pipeline_path*.csv` | a few points a rung | the same |
+| `bearing_whole_sample_v6.csv` | 1 flight | the same |
+| `vertical_measure_v6.csv` | 14th decimal | floating-point summation order across partitions |
+| `trend_bearing_v6.csv` | **materially** | it now reads the cache its manifest declares |
+
+Only the last is a real change rather than noise, and it is a consequence of
+this branch: `trend_bearing` used to read v6's `research/trend_votes` while the
+registry declared the paired cache. Repointing it moved every figure in that
+section -- `adep_correct` by +737, and the veto variants by far more.
+
+**The section's conclusion is unchanged.** Ranked against the baseline, the
+picture is identical in both runs: reranking by alignment is catastrophic,
+every veto variant scores far below the baseline, and the tie-break variants
+give a modest gain peaking at 2 NM. The large deltas fall on the variants that
+were already hopeless, which went from catastrophically bad to merely very bad.
+
+The old numbers cannot be recovered for comparison -- v6's cache has been
+deleted from the bucket -- but they were the untrustworthy ones: they came from
+a table the manifest never declared.
