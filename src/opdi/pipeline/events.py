@@ -1454,7 +1454,20 @@ class FlightEventProcessor:
             df_measurements, "opdi_measurements", mode=write_mode, partition_by=["dof"]
         )
 
-    def process_month(self, month: date, skip_if_processed: bool = True) -> None:
+    def process_day(self, day: date, skip_if_processed: bool = True) -> None:
+        """Extract events for the tracks that started on ``day``.
+
+        The tracks were claimed by their start day in step 02, so this reads
+        that day's partition and gets whole trajectories -- including the part
+        of a late departure that runs past midnight. Selecting by
+        ``event_time`` instead would hand the detectors a flight with no
+        take-off and another with no landing.
+        """
+        self.process_month(day, skip_if_processed=skip_if_processed, day=day)
+
+    def process_month(
+        self, month: date, skip_if_processed: bool = True, day: date = None
+    ) -> None:
         """
         Process all flight events for a single month.
 
@@ -1464,10 +1477,11 @@ class FlightEventProcessor:
         """
         print(f"Processing flight events for month: {month}")
 
-        calc_horizontal = month not in self._load_processed("horizontal")
-        calc_vertical = month not in self._load_processed("vertical")
-        calc_hexaero = month not in self._load_processed("hexaero")
-        calc_seen = month not in self._load_processed("seen")
+        _batch = day if day is not None else month
+        calc_horizontal = _batch not in self._load_processed("horizontal")
+        calc_vertical = _batch not in self._load_processed("vertical")
+        calc_hexaero = _batch not in self._load_processed("hexaero")
+        calc_seen = _batch not in self._load_processed("seen")
 
         if not any([calc_horizontal, calc_vertical, calc_hexaero, calc_seen]):
             if skip_if_processed:
@@ -1487,7 +1501,7 @@ class FlightEventProcessor:
         print(f"Reading tracks from: {source}")
 
         sdf_input = (
-            self._get_data_within_timeframe(source, month)
+            self._get_data_within_timeframe(source, month, day=day)
             .select(*TRACK_COLUMNS)
             .cache()
         )
@@ -1505,14 +1519,18 @@ class FlightEventProcessor:
         )
 
         # Update progress logs
+        # Key on the batch. A day-at-a-time run logging its month would mark
+        # every day of it done after processing one, and the rest of the week
+        # would be skipped without a word.
+        batch = day if day is not None else month
         if calc_horizontal:
-            self._mark_processed("horizontal", month)
+            self._mark_processed("horizontal", batch)
         if calc_vertical:
-            self._mark_processed("vertical", month)
+            self._mark_processed("vertical", batch)
         if calc_hexaero:
-            self._mark_processed("hexaero", month)
+            self._mark_processed("hexaero", batch)
         if calc_seen:
-            self._mark_processed("seen", month)
+            self._mark_processed("seen", batch)
 
         self.spark.catalog.clearCache()
 

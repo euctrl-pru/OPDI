@@ -326,3 +326,68 @@ def test_a_real_extract_passes(monkeypatch, tmp_path):
     pbf = tmp_path / "aeroway.osm.pbf"
     pbf.write_bytes(b"not really a pbf, but it exists")
     assert preflight_fresh_build(_Cfg(str(pbf))) == []
+
+
+# --- the day loop -----------------------------------------------------------
+
+def test_the_window_and_day_steps_together_are_the_week_steps():
+    """No step may fall between the two lists, or it silently never runs."""
+    from opdi.weekrun import DAY_STEPS, WEEK_STEPS as W, WINDOW_STEPS
+
+    assert set(WINDOW_STEPS) | set(DAY_STEPS) == set(W)
+    assert set(WINDOW_STEPS).isdisjoint(DAY_STEPS)
+
+
+def test_segmentation_onwards_runs_per_day_and_ingestion_does_not():
+    """Ingestion is by calendar date and has no track semantics; everything
+    after it works on tracks, which belong to a day."""
+    from opdi.weekrun import DAY_STEPS, WINDOW_STEPS
+
+    assert WINDOW_STEPS == ("00", "01")
+    assert DAY_STEPS == ("02", "02a", "03", "04")
+
+
+def test_days_in_is_inclusive_of_both_ends():
+    from opdi.weekrun import days_in
+
+    got = days_in(date(2026, 6, 1), date(2026, 6, 7))
+    assert len(got) == 7
+    assert got[0] == date(2026, 6, 1)
+    assert got[-1] == date(2026, 6, 7)
+
+
+def test_a_day_step_records_completion_per_day():
+    """A bare step name would mark all seven days done after the first, and the
+    rest of the week would be skipped in silence on resume."""
+    from opdi.weekrun import day_state_key
+
+    a = day_state_key("02", date(2026, 6, 1))
+    b = day_state_key("02", date(2026, 6, 2))
+    assert a != b
+    assert a == "02@2026-06-01"
+
+
+def test_a_week_of_four_day_steps_is_thirty_units():
+    """Two window steps plus four per day across seven days. Stated as a number
+    so a change to either list is visible rather than inferred."""
+    from opdi.weekrun import DAY_STEPS, WINDOW_STEPS, days_in
+
+    days = days_in(date(2026, 6, 1), date(2026, 6, 7))
+    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 30
+
+
+def test_ingestion_reaches_past_the_window():
+    """The last day is segmented over data running into the day after it, so
+    ingestion must already have that tail or every late departure on the final
+    day is truncated."""
+    from opdi.weekrun import INGEST_LOOKAHEAD_DAYS
+
+    assert INGEST_LOOKAHEAD_DAYS >= 1
+
+
+def test_a_non_day_step_is_rejected_by_the_day_dispatcher():
+    """Calling a window step per day would re-ingest the week seven times."""
+    from opdi.weekrun import run_day_step
+
+    with pytest.raises(ValueError, match="not a per-day step"):
+        run_day_step(None, None, "01", date(2026, 6, 1), {})

@@ -539,8 +539,16 @@ class FlightListProcessor:
         """
         from opdi.utils.batching import filter_batch
 
+        # The batch day is held on the processor rather than threaded through.
+        # Six private methods read tracks, at different depths; passing a
+        # parameter to each would leave five places where forgetting it
+        # silently reverts that read to a whole month -- producing a
+        # month-wide flight list that looks like a completed day. Only
+        # `process_day` sets it, and only for the duration of its own call.
+        day = day if day is not None else getattr(self, "_batch_day", None)
+
         df = self.storage.read_table(table_name)
-        if day is not None:
+        if day is not None and "dof" in df.columns:
             df = filter_batch(df, day=day)
         else:
             df = filter_batch(df, month=month, time_col=time_col)
@@ -1731,6 +1739,45 @@ class FlightListProcessor:
             F.coalesce(col("adep_source"), lit("undetermined")).alias("adep_source"),
             F.coalesce(col("ades_source"), lit("undetermined")).alias("ades_source"),
         )
+
+    #: Set only by :meth:`process_day`, and only while it runs. Read by
+    #: :meth:`_get_data_within_timeframe` as the default batch selector.
+    _batch_day = None
+
+    def process_day(
+        self,
+        day: date,
+        airports_hex_path: Optional[str] = None,
+        skip_if_processed: bool = True,
+        adep_mode: Optional[str] = None,
+        ades_mode: Optional[str] = None,
+    ) -> None:
+        """Build the flight list for the tracks that started on ``day``.
+
+        Runs the departures/arrivals pass and then the overflights pass, in
+        that order -- the same order ``process_date_range`` uses and for the
+        same reason: the first replaces the day's partition, the second adds
+        to it. Reversed, the overflights would be deleted by the pass that
+        follows them.
+
+        The two passes need no day argument of their own: they read through
+        ``_get_data_within_timeframe``, which picks the batch day up from the
+        processor. ``finally`` clears it, because a day left set would turn a
+        later month-scoped call on this same processor into a one-day read
+        that reports itself as a month.
+        """
+        self._batch_day = day
+        try:
+            self.process_dai(
+                month=day,
+                airports_hex_path=airports_hex_path,
+                skip_if_processed=skip_if_processed,
+                adep_mode=adep_mode,
+                ades_mode=ades_mode,
+            )
+            self.process_overflights(day, skip_if_processed)
+        finally:
+            self._batch_day = None
 
     def process_dai(
         self,

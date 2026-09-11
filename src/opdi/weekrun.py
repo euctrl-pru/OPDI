@@ -59,6 +59,28 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #: exist, which ``preflight`` checks.
 WEEK_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04")
 
+#: Steps that run once for the whole window, not per day.
+#:
+#: 00 builds reference tables, which have no notion of a day. 01 ingests state
+#: vectors by calendar date and has no track semantics at all -- and it must
+#: cover the whole window *plus* the lookahead before any day is segmented,
+#: because day D reads into D+1 to finish the flights that start on D. Running
+#: ingestion per day would have each day depend on the next day's ingest, which
+#: is an ordering knot with nothing to gain.
+WINDOW_STEPS: Tuple[str, ...] = ("00", "01")
+
+#: Steps that run once per day, on the tracks that day owns.
+DAY_STEPS: Tuple[str, ...] = ("02", "02a", "03", "04")
+
+#: Extra days of state vectors to ingest past the window.
+#:
+#: The last day of the window is segmented over data running into the day
+#: after it, so that a flight departing at 22:50 is complete. Without this the
+#: final day would be segmented against an empty tail and every late departure
+#: in it would be truncated -- which the truncation check would report, loudly,
+#: but only after the run had spent the time.
+INGEST_LOOKAHEAD_DAYS = 2
+
 #: Where a run writes when the caller names nothing else.
 #:
 #: A separate prefix from the published ``s3a://eurocontrol/opdi``. Everything
@@ -343,6 +365,55 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
     return missing
 
 
+def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
+    """Run one pipeline step for the tracks that started on ``day``.
+
+    Each processor has a ``process_day`` that reads the day's own tracks --
+    whole, including the part of a late departure that runs past midnight --
+    rather than a slice of a month. They are called directly rather than
+    through ``runner.STEPS`` because those entry points take a date *range*
+    and would quietly widen a day back into a month.
+    """
+    if step == "02":
+        from opdi.pipeline.tracks import TrackProcessor
+
+        TrackProcessor(spark, config).process_day(day, skip_if_processed=False)
+    elif step == "02a":
+        from opdi.cleaning.cleaner import TrackCleaner
+
+        TrackCleaner(spark, config).process_day(day, skip_if_processed=False)
+    elif step == "03":
+        from opdi.pipeline.flights import FlightListProcessor
+
+        FlightListProcessor(spark, config).process_day(
+            day,
+            airports_hex_path=kwargs.get("airports_hex_path"),
+            skip_if_processed=False,
+        )
+    elif step == "04":
+        from opdi.pipeline.events import FlightEventProcessor
+
+        FlightEventProcessor(spark, config).process_day(day, skip_if_processed=False)
+    else:
+        raise ValueError(
+            f"{step!r} is not a per-day step; expected one of {DAY_STEPS}."
+        )
+
+
+def day_state_key(step: str, day: date) -> str:
+    """How a per-day step records completion.
+
+    Namespaced by day, because the same step runs once per day and a bare step
+    name would mark all seven done after the first.
+    """
+    return f"{step}@{day.isoformat()}"
+
+
+def days_in(start: date, end: date) -> List[date]:
+    """Every day from ``start`` to ``end`` inclusive."""
+    return [start + timedelta(days=n) for n in range((end - start).days + 1)]
+
+
 def _describe_memory(limit_bytes: Optional[int], used_bytes: int) -> str:
     if limit_bytes is None:
         return "container memory: unconstrained"
@@ -428,8 +499,23 @@ def run_week(
     if not state.run_id:
         state.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    todo = plan_steps(steps, state, force=force)
-    done = [s for s in steps if s not in todo]
+    all_days = days_in(start_date, end_date)
+
+    # A unit of work is a (step, day) pair for the per-day steps and a bare
+    # step for the window-wide ones, so resuming lands on the day that failed
+    # rather than restarting the week.
+    units: List[Tuple[str, Optional[date]]] = []
+    for step in steps:
+        if step in DAY_STEPS:
+            units.extend((step, d) for d in all_days)
+        else:
+            units.append((step, None))
+
+    def _key(step, day):
+        return day_state_key(step, day) if day is not None else step
+
+    todo = [u for u in units if force or _key(*u) not in state.completed]
+    done = [u for u in units if u not in todo]
 
     config = OPDIConfig.for_environment(env)
     # Before anything reads it. StorageManager resolves every table name
@@ -450,8 +536,9 @@ def run_week(
     print(f"  window      : {start_date} .. {end_date}  ({days} days)")
     print(f"  steps       : {' '.join(steps)}")
     if done:
-        print(f"  already done: {' '.join(done)}  (from {state_path})")
-    print(f"  to run      : {' '.join(todo) if todo else '(nothing)'}")
+        print(f"  already done: {len(done)} unit(s)  (from {state_path})")
+    print(f"  to run      : {len(todo)} unit(s) over {len(all_days)} day(s)")
+    print(f"  day steps   : {' '.join(s for s in steps if s in DAY_STEPS)}")
     print(f"  {_describe_memory(limit_bytes, used_bytes)}")
     if heap != (driver_memory or config.spark.driver_memory):
         print(
@@ -464,7 +551,7 @@ def run_week(
     print(f"  state file  : {state_path}")
     print("=" * 72)
 
-    building_reference = "00" in todo
+    building_reference = ("00", None) in todo
     if building_reference and not skip_preflight:
         problems = preflight_fresh_build(config)
         if problems:
@@ -501,8 +588,9 @@ def run_week(
     )
 
     overall = time.time()
-    for step in todo:
-        print(f"\n{'-' * 72}\n>>> step {step}  ({start_date} .. {end_date})\n{'-' * 72}")
+    for step, day in todo:
+        scope = f"day {day}" if day is not None else f"{start_date} .. {end_date}"
+        print(f"\n{'-' * 72}\n>>> step {step}  ({scope})\n{'-' * 72}")
         step_start = time.time()
         # A session per step. The driver's retained UI state grows with every
         # stage and SQL execution it has ever seen, and this run may span
@@ -555,14 +643,21 @@ def run_week(
                         return 1
                     print("  preflight   : all reference tables readable")
 
-            fn = STEPS[step]
-            if step in UNDATED_STEPS:
-                fn(spark, config, **kwargs)
+            if day is not None:
+                run_day_step(spark, config, step, day, kwargs)
             else:
-                fn(spark, config, start_date, end_date, **kwargs)
+                fn = STEPS[step]
+                if step in UNDATED_STEPS:
+                    fn(spark, config, **kwargs)
+                else:
+                    # Ingestion has to cover the lookahead as well as the
+                    # window: day D is segmented over data running into D+1,
+                    # so the last day's tail must already be on disk.
+                    ingest_end = end_date + timedelta(days=INGEST_LOOKAHEAD_DAYS)
+                    fn(spark, config, start_date, ingest_end, **kwargs)
         except Exception as exc:  # noqa: BLE001 - reported, then surfaced
             elapsed = time.time() - step_start
-            print(f"\nStep {step} FAILED after {elapsed:.1f}s: {exc}")
+            print(f"\nStep {step} ({scope}) FAILED after {elapsed:.1f}s: {exc}")
             import traceback
 
             traceback.print_exc()
@@ -575,8 +670,8 @@ def run_week(
             spark.stop()
 
         elapsed = time.time() - step_start
-        state.mark(step, elapsed)
-        print(f"<<< step {step} done in {elapsed:.1f}s")
+        state.mark(_key(step, day), elapsed)
+        print(f"<<< step {step} {scope} done in {elapsed:.1f}s")
 
     print(f"\nAll requested steps complete in {time.time() - overall:.1f}s.")
     print(f"State: {state_path}")

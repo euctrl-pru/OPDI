@@ -66,40 +66,71 @@ class TrackCleaner:
 
     # -- processing ------------------------------------------------------
 
-    def process_month(
-        self, month: date, skip_if_processed: bool = True, report: bool = True
+    def process_day(
+        self, day: date, skip_if_processed: bool = True, report: bool = True
     ) -> None:
-        """Clean one month of tracks.
+        """Clean the tracks that started on ``day``, whole.
+
+        The tracks were already claimed by their start day when step 02 wrote
+        them, so there is no window to re-derive here -- this reads the day's
+        partition and cleans exactly what it holds.
+        """
+        self.process_month(
+            month=day, skip_if_processed=skip_if_processed, report=report, day=day
+        )
+
+    def process_month(
+        self,
+        month: date,
+        skip_if_processed: bool = True,
+        report: bool = True,
+        day: date = None,
+    ) -> None:
+        """Clean one batch of tracks -- a month, or a single day.
 
         Args:
             month: Any date within the month to process.
-            skip_if_processed: Skip months already in the log.
+            skip_if_processed: Skip batches already in the log.
             report: Print per-column NULL rates after cleaning. This is the
                 measurement the pipeline verification asserts against; it costs
-                one extra Spark action per month.
+                one extra Spark action per batch.
+            day: Clean the tracks that *started* this day, whole, instead of a
+                month. Selects on ``dof`` rather than on ``event_time``,
+                because a track running past midnight belongs to the day it
+                departed and must be cleaned in one piece -- cleaning half a
+                trajectory would compute its derivative spikes and cumulative
+                distances against a truncated series.
         """
         if not self.cleaning.enabled:
             print("Cleaning is disabled in config. Skipping step 02a.")
             return
 
-        if skip_if_processed and month in self._load_processed_months():
-            print(f"Month {month.strftime('%Y-%m')} already cleaned. Skipping.")
+        batch = day if day is not None else month
+        if skip_if_processed and batch in self._load_processed_months():
+            label = batch.strftime("%Y-%m-%d" if day is not None else "%Y-%m")
+            print(f"Batch {label} already cleaned. Skipping.")
             return
 
-        print(f"Cleaning tracks for {month.strftime('%Y-%m')}... ({datetime.now()})")
+        label = batch.strftime("%Y-%m-%d" if day is not None else "%Y-%m")
+        print(f"Cleaning tracks for {label}... ({datetime.now()})")
 
-        start_time, end_time = get_start_end_of_month(month)
-        start_str = datetime.utcfromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-        end_str = datetime.utcfromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S")
+        from opdi.utils.batching import filter_batch
 
-        source = self.storage.table_ref(SOURCE_TABLE)
-        df = self.spark.sql(
-            f"""
-            SELECT * FROM {source}
-            WHERE (event_time >= TIMESTAMP('{start_str}'))
-              AND (event_time < TIMESTAMP('{end_str}'));
-            """
-        )
+        if day is not None:
+            df = filter_batch(self.storage.read_table(SOURCE_TABLE), day=day)
+        else:
+            start_time, end_time = get_start_end_of_month(month)
+            start_str = datetime.utcfromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
+            end_str = datetime.utcfromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S")
+
+            source = self.storage.table_ref(SOURCE_TABLE)
+            df = self.spark.sql(
+                f"""
+                SELECT * FROM {source}
+                WHERE (event_time >= TIMESTAMP('{start_str}'))
+                  AND (event_time < TIMESTAMP('{end_str}'));
+                """
+            )
 
         cleaned = clean_tracks(df, self.cleaning)
 
@@ -109,13 +140,21 @@ class TrackCleaner:
             cleaned = apply_pandas_stages(cleaned, self.cleaning)
 
         cleaned = cleaned.repartition("track_id")
-        # Append, because the daily pipeline adds a month this table does not
-        # have. Exactly wrong for a *rebuild* of a month already present, which
-        # is why `benchmarks/clean_tracks.py` forces the first write of a
-        # rebuild to overwrite -- see that module, and EVENTS_RUN_LOG.md
-        # decision 15 for why replacing one month in place is not available
-        # without a layout change.
-        self.storage.write_table(cleaned, TARGET_TABLE, mode="append")
+        if day is not None:
+            # The layout change EVENTS_RUN_LOG decision 15 said was needed
+            # before a batch could be replaced in place now exists: `dof`
+            # carries through from osn_tracks, so overwrite replaces this day
+            # and leaves every other day alone. Re-cleaning a day is therefore
+            # idempotent rather than duplicating it.
+            self.storage.write_table(
+                cleaned, TARGET_TABLE, mode="overwrite", partition_by=["dof"]
+            )
+        else:
+            # Append, because the monthly pipeline adds a month this table does
+            # not have. Exactly wrong for a *rebuild* of a month already
+            # present, which is why `benchmarks/clean_tracks.py` forces the
+            # first write of a rebuild to overwrite.
+            self.storage.write_table(cleaned, TARGET_TABLE, mode="append")
 
         if report:
             rates = null_rate_report(self.storage.read_table(TARGET_TABLE))
@@ -125,7 +164,10 @@ class TrackCleaner:
 
         cleaned.unpersist(blocking=True)
         self.spark.catalog.clearCache()
-        self._mark_month_processed(month)
+        # The batch, not the month: a day-at-a-time run that logged its month
+        # would mark all 30 days done after cleaning one of them, and the rest
+        # of the week would be skipped in silence.
+        self._mark_month_processed(batch)
 
         print(f"Month {month.strftime('%Y-%m')} cleaning complete. ({datetime.now()})")
 
