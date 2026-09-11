@@ -211,6 +211,24 @@ class AirportDetectionZoneGenerator:
     """
 
     # European bounding box with offset for edge airports
+    #: Airport types that get detection zones.
+    #:
+    #: Measured against the released ``h3_airport_detection_zones``: it holds
+    #: large and medium aerodromes and nothing else. The filter here was a
+    #: bounding box alone, and inside that box OurAirports lists 13,973
+    #: aerodromes -- 6,782 small, 3,820 heliports, 1,952 *closed* -- against
+    #: 1,357 large or medium.
+    #:
+    #: Rebuilding without this therefore did two things at once. It changed the
+    #: ADEP/ADES candidate set by a factor of ten, silently, against the set
+    #: every detection study tuned on; and at H3 resolution 7 with rings out to
+    #: 110 NM it generated enough cells to OOM every executor in the namespace.
+    #:
+    #: ``h3_runway_grid`` and ``h3_airport_layouts`` already build for exactly
+    #: these two. Three reference tables keyed to different airport sets would
+    #: join to each other with gaps nothing reports.
+    AIRPORT_TYPES = ("large_airport", "medium_airport")
+
     BBOX_OFFSET = 3  # degrees
     LAT_MIN = 26.74617
     LAT_MAX = 70.25976
@@ -272,6 +290,9 @@ class AirportDetectionZoneGenerator:
             list(range(0, 45, 5))          # 0-40 NM, 5 NM steps
             + list(range(50, 120, 10))     # 50-110 NM, 10 NM steps
         )
+        #: Overridable, so widening the set stays possible -- but as a decision
+        #: someone makes rather than the default nobody chose.
+        self.airport_types = self.AIRPORT_TYPES
         self._result_df: Optional[pd.DataFrame] = None
         self._result_sdf: Optional[DataFrame] = None
 
@@ -301,15 +322,17 @@ class AirportDetectionZoneGenerator:
 
         df_apt = pd.read_csv(airports_url)
 
-        # European bounding box filter
+        # Type and European bounding box filter. Both paths must agree, or
+        # which source the zones came from changes what is in them.
         offset = self.BBOX_OFFSET
+        f_type = df_apt["type"].isin(list(self.airport_types))
         f_lat = df_apt.latitude_deg.between(
             self.LAT_MIN - offset, self.LAT_MAX + offset
         )
         f_lon = df_apt.longitude_deg.between(
             self.LON_MIN - offset, self.LON_MAX + offset
         )
-        df_apt = df_apt[f_lat & f_lon]
+        df_apt = df_apt[f_type & f_lat & f_lon]
 
         # Ensure column types
         df_apt.columns = df_apt.columns.astype(str)
@@ -332,7 +355,8 @@ class AirportDetectionZoneGenerator:
         """
         offset = self.BBOX_OFFSET
         df = airports_df.filter(
-            (col("latitude_deg").cast("double") >= self.LAT_MIN - offset)
+            col("type").isin(list(self.airport_types))
+            & (col("latitude_deg").cast("double") >= self.LAT_MIN - offset)
             & (col("latitude_deg").cast("double") <= self.LAT_MAX + offset)
             & (col("longitude_deg").cast("double") >= self.LON_MIN - offset)
             & (col("longitude_deg").cast("double") <= self.LON_MAX + offset)
