@@ -20,7 +20,7 @@ from pyspark.sql.functions import (
     lit, lag, when, to_date, concat, avg, abs as f_abs, col,
     unix_timestamp, to_timestamp, substring, sha2, concat_ws,
     year, month, sin, cos, radians, atan2, sqrt, sum as f_sum, udf,
-    min as f_min,
+    min as f_min, max as f_max, expr,
 )
 from pyspark.sql.types import StringType
 import h3
@@ -83,6 +83,26 @@ def keep_tracks_starting_in(df, claim_start, claim_end):
     return out.filter(
         (col(tmp) >= lit(claim_start)) & (col(tmp) < lit(claim_end))
     ).drop(tmp)
+
+
+def tracks_touching_window_end(df, read_end, margin_seconds=60):
+    """Tracks whose last sample sits within ``margin_seconds`` of ``read_end``.
+
+    A track still transmitting when the read window closes was probably cut off
+    by the window rather than by landing, so its tail was never processed and
+    never will be -- the next day will not claim it, because it did not start
+    there. This is the one way day-by-day processing can lose data, and it is
+    invisible in the output: the track is present, plausible, and simply stops.
+
+    Counting them is how the lookahead gets checked against reality instead of
+    being trusted. A healthy run returns zero; a non-zero count means
+    ``lookahead_hours`` is too short for this traffic.
+    """
+    per_track = df.groupBy("track_id").agg(
+        f_max("event_time").alias("_track_last_sample")
+    )
+    cutoff = lit(read_end) - expr(f"INTERVAL {int(margin_seconds)} SECONDS")
+    return per_track.filter(col("_track_last_sample") >= cutoff)
 
 
 class TrackProcessor:
@@ -614,6 +634,26 @@ class TrackProcessor:
             window=(read_start.strftime(fmt), read_end.strftime(fmt)),
             claim=(claim_start, claim_end),
         )
+
+        # Check the lookahead against what actually happened, rather than
+        # trusting it. A track still transmitting when the read window closed
+        # was cut off by the window, not by landing -- and nothing downstream
+        # can tell, because the track is present and simply stops. Tomorrow
+        # will not pick it up either: it did not start tomorrow.
+        written = self.storage.read_table("osn_tracks").filter(
+            col("dof") == lit(day)
+        )
+        n_truncated = tracks_touching_window_end(written, read_end).count()
+        if n_truncated:
+            print(
+                f"  WARNING: {n_truncated} track(s) starting on {day} were "
+                f"still transmitting at the end of the read window "
+                f"({read_end:{fmt}}). Their tails are missing and no other "
+                f"day will claim them. Re-run this day with a larger "
+                f"lookahead_hours (currently {lookahead})."
+            )
+        else:
+            print(f"  lookahead of {lookahead}h covered every track starting on {day}")
 
     def process_date_range(
         self, start_month: date, end_month: date, skip_if_processed: bool = True

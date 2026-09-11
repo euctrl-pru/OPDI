@@ -95,3 +95,37 @@ def test_two_adjacent_days_partition_the_tracks_between_them(spark):
 
     assert {r["track_id"] for r in today.collect()} == {"today_a"}
     assert {r["track_id"] for r in tomorrow.collect()} == {"tomorrow"}
+
+
+# --- the lookahead, checked against reality ---------------------------------
+
+def test_a_track_still_transmitting_at_the_window_edge_is_reported(spark):
+    """The only way this scheme loses data, made visible.
+
+    A track cut off by the read window is present, plausible, and simply
+    stops -- and tomorrow will not pick it up, because it did not start
+    tomorrow. Nothing downstream can tell. So the run counts them instead of
+    trusting that the lookahead was long enough.
+    """
+    from opdi.pipeline.tracks import tracks_touching_window_end
+
+    read_end = _at(6 * HOUR)
+    samples = [
+        {"t": 0, "track_id": "landed"},
+        {"t": HOUR, "track_id": "landed"},
+        {"t": 0, "track_id": "cut_off"},
+        {"t": 6 * HOUR - 10, "track_id": "cut_off"},   # still going at the edge
+    ]
+    sv = make_track(spark, samples)
+
+    flagged = {r["track_id"] for r in tracks_touching_window_end(sv, read_end).collect()}
+    assert flagged == {"cut_off"}
+
+
+def test_a_run_whose_lookahead_was_enough_reports_nothing(spark):
+    """A healthy run must be quiet, or the warning becomes noise people learn
+    to ignore."""
+    from opdi.pipeline.tracks import tracks_touching_window_end
+
+    sv = make_track(spark, [{"t": 0, "track_id": "a"}, {"t": HOUR, "track_id": "a"}])
+    assert tracks_touching_window_end(sv, _at(6 * HOUR)).count() == 0
