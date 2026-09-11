@@ -1,5 +1,59 @@
 # Industrialising AOBT / AIBT / ATOT / ALDT at network scale
 
+> **Status as of 2026-09-11 — most of this plan is done, and much of it is
+> obsolete.** The document below is kept as written on 2026-09-07 because it
+> records why each decision was made. Read this header first; several sections
+> describe a build that no longer exists.
+>
+> **What changed.** The layout build moved off the public Overpass API to
+> **pyosmium reading a local OSM extract** (PR #8). That did not just swap a
+> data source -- it removed the constraint the plan was organised around.
+> Overpass throttling, Nominatim geocoding, retry-with-backoff, per-airport
+> persistence and "do not parallelise against the public endpoint" are all
+> moot: there is no network call per airport. The 1,036-aerodrome build takes
+> ~6 minutes.
+>
+> | Section | Status |
+> |---|---|
+> | §3.2 Overpass constraint, retries, per-airport persistence | **Obsolete** — no per-airport network call |
+> | §3.2 "Consider a Geofabrik extract … the recommended end state" | **Done** — this is what shipped |
+> | §3.3a Duplicate columns silently dropped | **Done** |
+> | §3.3b Per-airport Spark append is O(N) | **Done** — one bulk write per invocation |
+> | §3.4 Replace the Nominatim geocode with a bbox | **Done, and superseded** — primary assignment is containment in OSM's own `aeroway=aerodrome` polygon; the bbox is the fallback |
+> | §3.4 Over-capture guard | **Done**, and still needed |
+> | §3.4 A/B not yet verified | **Done** — `benchmarks/compare_layout_sources.py`; 74 of 75 cell-sets match the Overpass baseline exactly |
+> | §5.1 Merge the `on_ground` layout fix | **Done** |
+> | §5.3 Backfill large+medium in bbox | **Done** — 1,036 aerodromes, 2,900,230 rows |
+> | §5.4 Publish, keeping the previous build | **Done** — `publish_layouts.py`, backup retained |
+> | §4 Never broadcast the network-wide grid | **Done** |
+> | §4 Pre-filter the grid to the batch's aerodromes | **Done 2026-09-11** — `pipeline/layout.py`, semi-join before the `h3_res_12` join |
+> | §5.5 Re-run the V4 benchmark for AOBT/AIBT | **Partial** — the 9.10 → 90.13% gain is credited to the `on_ground` fix; the scale-out's own contribution is not separately measured, so the two remain confounded |
+> | §5.6 Block-time pooling rule | **Open** — still no second block detector |
+> | §6 Record the layout vintage on an event | **Open** — see below |
+> | §3.5 Quarterly rebuild cadence | **Open** — nothing schedules it |
+>
+> **§1 is wrong now.** It says AOBT/AIBT are pinned to twenty aerodromes with
+> stand polygons. The published table covers **1,036**, with 291,892
+> `parking_position` cells. The "20 airports" was never a code constant -- it
+> was simply what had been run.
+>
+> **On §6 (layout vintage).** `run_week.py` addresses this structurally rather
+> than by adding a column: a run builds its reference tables into its own
+> warehouse prefix alongside its data, so the prefix *is* the vintage and every
+> event is traceable to the geometry built beside it. That does not help data
+> already published from a shared prefix, so a `hexaero_build_utc` column is
+> still worth adding -- deliberately not done here, because the published table
+> lacks it and code that required it would fail to read what is already out
+> there.
+>
+> **Two defects found while checking this plan, both now fixed:**
+> `REFERENCE_SUBSTEPS` iterated in id order, so 00a and 00b ran before 00d
+> created `oa_airports` -- invisible on an established warehouse, fatal on a
+> from-scratch build; and `AirportLayoutGenerator.fetch_airport_list` still
+> downloaded the public OurAirports CSV, reinstating the network dependency the
+> extract removed and risking a loop list from a different snapshot than the
+> geometry.
+
 **Status:** written 2026-09-07, from the flight-events-v4 campaign. Every number
 below is measured on that campaign's sample (2026-06-05..07, twenty aerodromes)
 or on the reference tables themselves; none is an estimate unless it says so.

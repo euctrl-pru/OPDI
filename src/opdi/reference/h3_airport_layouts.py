@@ -21,6 +21,7 @@ from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.ops import transform
 
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.types import (
     DoubleType,
     IntegerType,
@@ -435,16 +436,30 @@ class AirportLayoutGenerator:
 
     def fetch_airport_list(
         self,
-        airports_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
+        airports_url: Optional[str] = None,
         airport_types: Optional[List[str]] = None,
     ) -> pd.DataFrame:
-        """
-        Fetch and filter the list of airports to process.
+        """Large+medium airports within the OPDI bbox, from ``oa_airports``.
 
-        Args:
-            airports_url: URL to OurAirports airports CSV.
-            airport_types: Airport types to include
-                (default: large_airport, medium_airport).
+        Reads the already-ingested table (step 00d) rather than downloading the
+        public OurAirports CSV. Three reasons, in increasing order of how much
+        they cost when ignored:
+
+        * The CSV is **not reachable from the OSN cluster**, so this step could
+          not be run there at all -- the same constraint ``h3_runway_grid`` and
+          ``_step_00a_airport_zones`` already work around.
+        * This step is otherwise network-free since the move to a local PBF
+          extract. A single ``read_csv`` reinstated the dependency the extract
+          existed to remove.
+        * Worst: the boxes this build assigns features to come from
+          ``oa_airports`` (``pbf_source.airport_boxes``). Taking the *loop
+          list* from a live CSV and the *geometry* from the table meant the two
+          could be different snapshots -- an airport in the loop but absent
+          from the boxes silently produced no geometry, which is indis-
+          tinguishable from an airport OSM does not map.
+
+        ``airports_url`` is retained and honoured so an explicit override still
+        works, but it is no longer the default path.
 
         Returns:
             DataFrame with columns: ident, latitude_deg, longitude_deg,
@@ -453,19 +468,39 @@ class AirportLayoutGenerator:
         if airport_types is None:
             airport_types = ["large_airport", "medium_airport"]
 
-        airports_df = pd.read_csv(airports_url)
-        airports_df = airports_df[airports_df["type"].isin(airport_types)][
-            ["ident", "latitude_deg", "longitude_deg", "elevation_ft", "type"]
-        ]
-
         offset = self.BBOX_OFFSET
-        f_lat = airports_df.latitude_deg.between(
-            self.LAT_MIN - offset, self.LAT_MAX + offset
-        )
-        f_lon = airports_df.longitude_deg.between(
-            self.LON_MIN - offset, self.LON_MAX + offset
-        )
-        airports_df = airports_df[f_lat & f_lon]
+        cols = ["ident", "latitude_deg", "longitude_deg", "elevation_ft", "type"]
+
+        if airports_url is not None:
+            airports_df = pd.read_csv(airports_url)
+            airports_df = airports_df[airports_df["type"].isin(airport_types)][cols]
+            f_lat = airports_df.latitude_deg.between(
+                self.LAT_MIN - offset, self.LAT_MAX + offset
+            )
+            f_lon = airports_df.longitude_deg.between(
+                self.LON_MIN - offset, self.LON_MAX + offset
+            )
+            airports_df = airports_df[f_lat & f_lon]
+        else:
+            if not self.storage.table_exists("oa_airports"):
+                raise RuntimeError(
+                    "oa_airports does not exist, so the airport list cannot be "
+                    "built. Run step 00d (OurAirports ingestion) first -- it is "
+                    "ordered before this step in REFERENCE_SUBSTEPS for exactly "
+                    "this reason. To override with the public CSV, pass "
+                    "airports_url explicitly."
+                )
+            apt = self.storage.read_table("oa_airports").select(*cols)
+            apt = apt.filter(
+                F.col("type").isin(airport_types)
+                & F.col("latitude_deg").between(
+                    self.LAT_MIN - offset, self.LAT_MAX + offset
+                )
+                & F.col("longitude_deg").between(
+                    self.LON_MIN - offset, self.LON_MAX + offset
+                )
+            )
+            airports_df = apt.toPandas()
 
         print(f"There are {len(airports_df)} airports to process (within OPDI bbox)...")
         return airports_df

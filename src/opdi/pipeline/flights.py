@@ -495,7 +495,11 @@ class FlightListProcessor:
     # ------------------------------------------------------------------
 
     def _get_data_within_timeframe(
-        self, table_name: str, month: date, time_col: str = "event_time"
+        self,
+        table_name: str,
+        month: date,
+        time_col: str = "event_time",
+        day: date = None,
     ) -> DataFrame:
         """Retrieve records from a table within a monthly timeframe.
 
@@ -533,12 +537,21 @@ class FlightListProcessor:
         partitions, and an aggregate in front of it would scan the whole table
         once per month processed.
         """
-        start_ts, end_ts = get_start_end_of_month(month)
-        start_lit = to_timestamp(lit(start_ts))
-        end_lit = to_timestamp(lit(end_ts))
+        from opdi.utils.batching import filter_batch
+
+        # The batch day is held on the processor rather than threaded through.
+        # Six private methods read tracks, at different depths; passing a
+        # parameter to each would leave five places where forgetting it
+        # silently reverts that read to a whole month -- producing a
+        # month-wide flight list that looks like a completed day. Only
+        # `process_day` sets it, and only for the duration of its own call.
+        day = day if day is not None else getattr(self, "_batch_day", None)
 
         df = self.storage.read_table(table_name)
-        df = df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
+        if day is not None and "dof" in df.columns:
+            df = filter_batch(df, day=day)
+        else:
+            df = filter_batch(df, month=month, time_col=time_col)
 
         if table_name != self.tracks_table:
             return df
@@ -1727,6 +1740,45 @@ class FlightListProcessor:
             F.coalesce(col("ades_source"), lit("undetermined")).alias("ades_source"),
         )
 
+    #: Set only by :meth:`process_day`, and only while it runs. Read by
+    #: :meth:`_get_data_within_timeframe` as the default batch selector.
+    _batch_day = None
+
+    def process_day(
+        self,
+        day: date,
+        airports_hex_path: Optional[str] = None,
+        skip_if_processed: bool = True,
+        adep_mode: Optional[str] = None,
+        ades_mode: Optional[str] = None,
+    ) -> None:
+        """Build the flight list for the tracks that started on ``day``.
+
+        Runs the departures/arrivals pass and then the overflights pass, in
+        that order -- the same order ``process_date_range`` uses and for the
+        same reason: the first replaces the day's partition, the second adds
+        to it. Reversed, the overflights would be deleted by the pass that
+        follows them.
+
+        The two passes need no day argument of their own: they read through
+        ``_get_data_within_timeframe``, which picks the batch day up from the
+        processor. ``finally`` clears it, because a day left set would turn a
+        later month-scoped call on this same processor into a one-day read
+        that reports itself as a month.
+        """
+        self._batch_day = day
+        try:
+            self.process_dai(
+                month=day,
+                airports_hex_path=airports_hex_path,
+                skip_if_processed=skip_if_processed,
+                adep_mode=adep_mode,
+                ades_mode=ades_mode,
+            )
+            self.process_overflights(day, skip_if_processed)
+        finally:
+            self._batch_day = None
+
     def process_dai(
         self,
         month: date,
@@ -1739,7 +1791,7 @@ class FlightListProcessor:
         abstention_height_ft: Optional[float] = None,
         sched_penalty_nm: Optional[float] = None,
         table_name: str = "opdi_flight_list",
-        write_mode: str = "append",
+        write_mode: str = "overwrite",
     ) -> None:
         """
         Process Departures/Arrivals/Internal flights for a month.
@@ -1840,13 +1892,28 @@ class FlightListProcessor:
 
         flight_table = self._add_osn_aircraft_db_data(flight_table)
 
-        # Prepare and write
-        flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
-        flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
-        flight_table = flight_table.drop("DOF_day")
-        # append by default, because the production run accumulates month by
-        # month; a comparison run wants one table per variant and overwrite.
-        self.storage.write_table(flight_table, table_name, mode=write_mode)
+        # Prepare and write.
+        #
+        # ``DOF`` is ``to_date(first_seen)`` -- the day the track starts -- so
+        # it is already the key a day-at-a-time run needs, and the helper
+        # column this used to build and immediately drop was only ever a file
+        # layout hint that vanished before the write.
+        #
+        # The default mode is ``overwrite`` *because* the write is partitioned:
+        # only the days present in this frame are replaced, so a production run
+        # accumulating month by month behaves exactly as ``append`` did, while
+        # re-processing a month stops duplicating it. Unpartitioned, this same
+        # mode would delete the whole table -- the partitioning is what makes
+        # the default safe, and the two must not be separated.
+        #
+        # ``process_overflights`` appends into the same partitions afterwards
+        # and must keep doing so: ``process_date_range`` runs every month's DAI
+        # pass before any overflight pass, so overwriting here cannot destroy
+        # overflight rows, but overwriting *there* would destroy these.
+        flight_table = flight_table.repartition("DOF").orderBy("DOF")
+        self.storage.write_table(
+            flight_table, table_name, mode=write_mode, partition_by=["DOF"]
+        )
 
         self._mark_month_processed(month, self._dai_log)
         print(f"DAI processing complete for {month}.")
@@ -1871,10 +1938,13 @@ class FlightListProcessor:
         flight_table = self._fetch_overflights(month)
         flight_table = self._add_osn_aircraft_db_data(flight_table)
 
-        flight_table = flight_table.withColumn("DOF_day", to_date(col("DOF")))
-        flight_table = flight_table.repartition("DOF_day").orderBy("DOF_day")
-        flight_table = flight_table.drop("DOF_day")
-        self.storage.write_table(flight_table, "opdi_flight_list", mode="append")
+        flight_table = flight_table.repartition("DOF").orderBy("DOF")
+        # Append, never overwrite: this lands in partitions ``process_dai``
+        # has already filled for the same days, and replacing them here would
+        # delete every departure and arrival it just wrote.
+        self.storage.write_table(
+            flight_table, "opdi_flight_list", mode="append", partition_by=["DOF"]
+        )
 
         self._mark_month_processed(month, self._overflight_log)
         print(f"Overflight processing complete for {month}.")

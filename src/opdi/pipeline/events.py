@@ -1065,14 +1065,25 @@ class FlightEventProcessor:
             pd.DataFrame({"months": processed}).to_parquet(self._log_paths[key])
 
     def _get_data_within_timeframe(
-        self, table_name: str, month: date, time_col: str = "event_time"
+        self,
+        table_name: str,
+        month: date,
+        time_col: str = "event_time",
+        day: date = None,
     ) -> DataFrame:
-        """Retrieve records within a monthly timeframe."""
-        start_ts, end_ts = get_start_end_of_month(month)
-        start_lit = to_timestamp(lit(start_ts))
-        end_lit = to_timestamp(lit(end_ts))
+        """Retrieve the records for one batch.
+
+        ``day`` selects the tracks that *started* that day, whole; ``month``
+        keeps the original time-window behaviour. See
+        ``opdi.utils.batching.filter_batch`` for why a day cannot be expressed
+        as a narrow month.
+        """
+        from opdi.utils.batching import filter_batch
+
         df = self.storage.read_table(table_name)
-        return df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
+        if day is not None:
+            return filter_batch(df, day=day)
+        return filter_batch(df, month=month, time_col=time_col)
 
     def _event_id(self, batch_id: str):
         """Identifier for an event row.
@@ -1354,6 +1365,36 @@ class FlightEventProcessor:
             col("cumulative_time_s"),
         )
 
+        # The day each track starts, taken from the tracks themselves.
+        #
+        # This is the partition key for the events and measurements written
+        # below, and it is deliberately *not* the event's own date: a track
+        # that departs at 22:50 produces events after midnight, and splitting
+        # one flight's events across two partitions would mean a day's run
+        # wrote into a neighbour's day and could not be re-run in isolation.
+        # Keyed this way, a day owns every row its tracks produce, whenever
+        # they happened.
+        #
+        # Derived from ``sdf_input`` rather than joined from the flight list:
+        # the state vectors are already here, every track in them has a first
+        # sample by construction, and it avoids both a join against a large
+        # table and the question of what to do with a track the flight list
+        # has no row for.
+        track_day = sdf_input.groupBy("track_id").agg(
+            F.to_date(F.min("event_time")).alias("dof")
+        )
+        df_events = df_events.join(track_day, on="track_id", how="left")
+
+        # Whether this call is rebuilding the whole day or topping up one
+        # family. ``process_month`` computes only the families whose progress
+        # log says they are outstanding, so a partial call carries a subset of
+        # the event types -- and overwriting the day's partition with that
+        # subset would delete the families that were already there. A full
+        # rebuild can safely replace the partition; a partial one must add to
+        # it.
+        full_rebuild = all([calc_vertical, calc_horizontal, calc_hexaero, calc_seen])
+        write_mode = "overwrite" if full_rebuild else "append"
+
         # Write milestones (flight events)
         df_milestones = df_events.select(
             col("id_tmp").alias("id"),
@@ -1366,9 +1407,12 @@ class FlightEventProcessor:
             col("source"),
             col("version"),
             col("info"),
+            col("dof"),
         )
-        df_milestones = df_milestones.repartition("type", "version").orderBy("type", "version")
-        self.storage.write_table(df_milestones, "opdi_flight_events", mode="append")
+        df_milestones = df_milestones.repartition("dof").orderBy("type", "version")
+        self.storage.write_table(
+            df_milestones, "opdi_flight_events", mode=write_mode, partition_by=["dof"]
+        )
 
         # Write measurements (distance + time)
         df_dist = (
@@ -1381,6 +1425,7 @@ class FlightEventProcessor:
                 col("type"),
                 col("cumulative_distance_nm").alias("value"),
                 col("version"),
+                col("dof"),
             )
         )
 
@@ -1394,14 +1439,35 @@ class FlightEventProcessor:
                 col("type"),
                 col("cumulative_time_s").alias("value"),
                 col("version"),
+                col("dof"),
             )
         )
 
         df_measurements = df_dist.unionByName(df_time)
-        df_measurements = df_measurements.repartition("type", "version").orderBy("type", "version")
-        self.storage.write_table(df_measurements, "opdi_measurements", mode="append")
+        df_measurements = df_measurements.repartition("dof").orderBy("type", "version")
+        # ``opdi_measurements`` had no time column at all -- its schema was
+        # id, milestone_id, type, value, version -- so it could not be
+        # partitioned by anything temporal. ``dof`` comes from the parent
+        # event's track rather than from the measurement, which has no instant
+        # of its own to speak of.
+        self.storage.write_table(
+            df_measurements, "opdi_measurements", mode=write_mode, partition_by=["dof"]
+        )
 
-    def process_month(self, month: date, skip_if_processed: bool = True) -> None:
+    def process_day(self, day: date, skip_if_processed: bool = True) -> None:
+        """Extract events for the tracks that started on ``day``.
+
+        The tracks were claimed by their start day in step 02, so this reads
+        that day's partition and gets whole trajectories -- including the part
+        of a late departure that runs past midnight. Selecting by
+        ``event_time`` instead would hand the detectors a flight with no
+        take-off and another with no landing.
+        """
+        self.process_month(day, skip_if_processed=skip_if_processed, day=day)
+
+    def process_month(
+        self, month: date, skip_if_processed: bool = True, day: date = None
+    ) -> None:
         """
         Process all flight events for a single month.
 
@@ -1411,10 +1477,11 @@ class FlightEventProcessor:
         """
         print(f"Processing flight events for month: {month}")
 
-        calc_horizontal = month not in self._load_processed("horizontal")
-        calc_vertical = month not in self._load_processed("vertical")
-        calc_hexaero = month not in self._load_processed("hexaero")
-        calc_seen = month not in self._load_processed("seen")
+        _batch = day if day is not None else month
+        calc_horizontal = _batch not in self._load_processed("horizontal")
+        calc_vertical = _batch not in self._load_processed("vertical")
+        calc_hexaero = _batch not in self._load_processed("hexaero")
+        calc_seen = _batch not in self._load_processed("seen")
 
         if not any([calc_horizontal, calc_vertical, calc_hexaero, calc_seen]):
             if skip_if_processed:
@@ -1434,7 +1501,7 @@ class FlightEventProcessor:
         print(f"Reading tracks from: {source}")
 
         sdf_input = (
-            self._get_data_within_timeframe(source, month)
+            self._get_data_within_timeframe(source, month, day=day)
             .select(*TRACK_COLUMNS)
             .cache()
         )
@@ -1452,14 +1519,18 @@ class FlightEventProcessor:
         )
 
         # Update progress logs
+        # Key on the batch. A day-at-a-time run logging its month would mark
+        # every day of it done after processing one, and the rest of the week
+        # would be skipped without a word.
+        batch = day if day is not None else month
         if calc_horizontal:
-            self._mark_processed("horizontal", month)
+            self._mark_processed("horizontal", batch)
         if calc_vertical:
-            self._mark_processed("vertical", month)
+            self._mark_processed("vertical", batch)
         if calc_hexaero:
-            self._mark_processed("hexaero", month)
+            self._mark_processed("hexaero", batch)
         if calc_seen:
-            self._mark_processed("seen", month)
+            self._mark_processed("seen", batch)
 
         self.spark.catalog.clearCache()
 

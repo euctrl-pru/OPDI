@@ -6,6 +6,8 @@ mode (dev, live) tables are managed via the catalog. In S3 mode (opensky)
 tables are stored as parquet directories on S3.
 """
 
+from typing import Optional, Sequence
+
 from pyspark.sql import SparkSession, DataFrame
 from opdi.config import OPDIConfig
 
@@ -50,7 +52,13 @@ class StorageManager:
 
     WRITE_MODES = ("append", "overwrite", "insert_overwrite")
 
-    def write_table(self, df: DataFrame, table_name: str, mode: str) -> None:
+    def write_table(
+        self,
+        df: DataFrame,
+        table_name: str,
+        mode: str,
+        partition_by: Optional[Sequence[str]] = None,
+    ) -> None:
         """
         Write *df* to *table_name*.
 
@@ -59,6 +67,11 @@ class StorageManager:
             table_name: Bare table name (no project prefix).
             mode: ``"append"`` | ``"overwrite"`` | ``"insert_overwrite"``
                   (the last one maps to Hive-style insertInto).
+            partition_by: Columns to partition the written table by. When set
+                **and** ``mode`` is ``"overwrite"``, only the partitions present
+                in *df* are replaced; everything else in the table is left
+                alone. That is what makes publishing one day at a time possible
+                -- see the note below.
 
         ``mode`` is **required and has no default**. It used to default to
         ``"append"``, which meant a caller that had not thought about
@@ -80,6 +93,15 @@ class StorageManager:
            be a partition, which is a layout change to published data, or a
            read-filter-rewrite of the whole table. See
            ``benchmarks/EVENTS_RUN_LOG.md`` decision 15.
+
+           ``partition_by`` is the way out of that, and it is why this argument
+           exists: with the day as a partition column, ``mode="overwrite"``
+           replaces only the days *df* contains. Spark's default is the
+           opposite -- ``static`` partition overwrite deletes the whole table
+           before writing -- so the writer sets ``partitionOverwriteMode`` to
+           ``dynamic`` explicitly rather than relying on a session setting that
+           some other caller may not have made. Scoped to this write, so it
+           cannot change the behaviour of anything else in the session.
         """
         if mode not in self.WRITE_MODES:
             # Previously an unrecognised mode fell through every branch in the
@@ -90,15 +112,40 @@ class StorageManager:
                 f"expected one of {', '.join(self.WRITE_MODES)}."
             )
 
+        if partition_by:
+            # Checked before the write, not discovered by it. Spark's
+            # partitionBy on an absent column raises deep inside the job with a
+            # message that names the analysis plan rather than the mistake, and
+            # a caller who typo'd a column would otherwise be one silent
+            # unpartitioned write away from having the next overwrite delete
+            # every day at once.
+            missing = [c for c in partition_by if c not in df.columns]
+            if missing:
+                raise ValueError(
+                    f"partition column(s) {missing} not in the DataFrame for "
+                    f"table {table_name!r}; it has {df.columns}."
+                )
+
         if self.use_s3:
             s3_mode = "overwrite" if mode in ("overwrite", "insert_overwrite") else "append"
-            df.write.mode(s3_mode).parquet(self._s3_path(table_name))
+            writer = df.write.mode(s3_mode)
+            if partition_by:
+                writer = writer.partitionBy(*partition_by).option(
+                    "partitionOverwriteMode", "dynamic"
+                )
+            writer.parquet(self._s3_path(table_name))
         else:
             qualified = f"`{self.project}`.`{table_name}`"
             if mode == "append":
                 df.writeTo(qualified).append()
             elif mode == "overwrite":
-                df.writeTo(qualified).overwrite()
+                # overwritePartitions replaces only the partitions the frame
+                # touches; plain overwrite replaces the table. The Iceberg
+                # equivalent of the dynamic mode set above.
+                if partition_by:
+                    df.writeTo(qualified).overwritePartitions()
+                else:
+                    df.writeTo(qualified).overwrite()
             else:
                 df.write.mode("overwrite").insertInto(f"{self.project}.{table_name}")
 
