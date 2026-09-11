@@ -11,4 +11,9 @@ RUN apt-get update && \
         h3-pyspark \
         h3pandas
 
+# Driver-side only: step 00b reads a local .osm.pbf extract instead of the
+# public Overpass API, which rate-limits hard enough to make a 1,353-airport
+# build impossible. Executors never import this.
+RUN pip install --no-cache-dir osmium
+
 USER 185

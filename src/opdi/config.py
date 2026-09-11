@@ -195,6 +195,27 @@ class H3Config:
     airport_layout_resolution: int = 12
     """H3 resolution for airport ground layouts (~307 m hexagons)."""
 
+    airport_layout_pbf_path: Optional[str] = None
+    """Local OSM ``.pbf`` extract that step 00b reads airport geometry from.
+
+    When set, step 00b builds the layout grid from this file. When ``None`` it
+    falls back to the public Overpass API, which is kept working but is not a
+    viable way to build the network: Overpass resolves the airport *name*
+    through Nominatim first, so a name that does not resolve returns no data
+    rather than an error, and at ~1,350 aerodromes the public endpoint refuses
+    outright. Every aerodrome OPDI published before 2026-09-07 came from that
+    path, and five of twenty came back silently empty.
+
+    The environment variable ``OPDI_OSM_PBF`` overrides this, so an operator can
+    point a run at a different extract without editing configuration.
+
+    A raw Geofabrik extract works, but a **filtered** one is strongly preferred
+    -- see :func:`opdi.reference.pbf_filter.filter_aeroway_pbf`. Building areas
+    from a full continental extract needs node locations for the whole file and
+    exceeds a 16 GB container; the filtered file is ~16 MB against 34.9 GB and
+    is read in about a second rather than six minutes.
+    """
+
     track_resolutions: List[int] = field(default_factory=lambda: [7, 12])
     """H3 resolutions for track encoding."""
 
@@ -338,6 +359,49 @@ class CleaningConfig:
     stale_enabled: bool = True
     """ADS-B transmits position and velocity in separate message types, so
     identical consecutive values mean *repeated*, not *measured*."""
+
+    stale_position_uses_last_pos_update: bool = True
+    """Discriminate a repeated position from a genuinely stationary one using
+    ``last_pos_update`` instead of lat/lon value-equality.
+
+    **On by default since 2026-09-08.** It changes cleaned positions for every
+    published track and there is no ``legacy()`` preset to fall back to, so a
+    dataset cleaned before that date will not reproduce byte for byte -- set
+    this to ``False`` to recover exactly the old masking.
+
+    The measurement that decided it, at EBBR on 2026-06-05: of 70,573 state
+    vectors falling inside EBBR stand cells, **100% carry a position in the raw
+    tracks and only 39% still carry one after cleaning** -- 42,998 destroyed in
+    one day at one aerodrome. 720 tracks that day were in EBBR stand cells,
+    were in the flight list, and had EBBR named in it; they produced **one**
+    ``exit-parking_position`` event. LSZH, whose aircraft happen to jitter
+    enough between samples to survive the equality rule, produced 2,220 from
+    1,075 such tracks. Both aerodromes sit at ~100% ground detection in the
+    coverage ranking, so the sixty-fold spread in block-time coverage was this
+    rule, not reception.
+
+    A parked aircraft's lat/lon really are byte-identical across samples, so
+    the plain equality rule below reads it as a stale repeat and NULLs it --
+    destroying the only evidence (a stable position) that the aircraft is on
+    a stand, which starves ``h3_res_12`` and the block-time family
+    (``ground.py``) of the signal they need. ``last_pos_update``
+    (``osn_statevectors.py``'s ``lastPosUpdate``) is ADS-B's own record of
+    when the position was last re-measured, independent of whether the value
+    changed: an *advancing* ``last_pos_update`` with unchanged lat/lon means
+    the aircraft was re-measured and found not to have moved -- real
+    information, not staleness.
+
+    When on: a position is treated as fresh whenever ``last_pos_update`` has
+    advanced since the previous sample, regardless of whether lat/lon
+    changed. Rows where ``last_pos_update`` is NULL fall back to the
+    existing value-equality rule unchanged, so data lacking the field behaves
+    exactly as it does today.
+
+    Deliberately **not** extended to the ``vert_rate``/``heading``/
+    ``velocity`` rule: ``last_pos_update`` is a *position* timestamp, and
+    using it to justify keeping a stale velocity reading is not obviously
+    correct -- ``last_contact`` would be the more defensible signal there,
+    but that is a separate, unmeasured change and out of scope here."""
 
     # -- Stage 4: derivative spike filter --------------------------------
     spike_enabled: bool = True
@@ -948,6 +1012,29 @@ class EventConfig:
     The sustained part is what separates a push from a jitter in the speed
     field, which at 5 s sampling is not rare."""
 
+    ground_speed_derive_from_position: bool = True
+    """Fill missing/NULLed ``velocity`` with a position-derived groundspeed
+    when detecting ground movement.
+
+    ``velocity`` is frequently absent on surface samples, and stage 3 of
+    cleaning (``mask_stale_broadcasts``) NULLs it further whenever it repeats
+    -- exactly the case a stationary-then-pushing aircraft produces. Ported
+    from traffic's ``StartMoving``
+    (``traffic/src/traffic/algorithms/ground/movement.py:37-46``), which does
+    not trust the broadcast velocity at all: it derives groundspeed from
+    consecutive positions and median-filters it over 3 samples before
+    thresholding. ``movement_window`` does the same in native Spark --
+    haversine between consecutive samples over the time delta, no UDF -- but
+    only to *fill a gap*: ``coalesce(velocity_kt, derived_kt)`` keeps
+    today's behaviour wherever ``velocity`` exists and adds signal only where
+    it is missing. That is the conservative choice; replacing ``velocity``
+    outright was considered and rejected as a larger, unmeasured change.
+
+    Off under ``legacy()``: ``events_v0.0.2`` has no block events at all
+    (``emit_block_events=False``), so this has no effect there, but the flag
+    exists so a legacy run's ground-movement signal -- read by nothing today,
+    but a public function -- stays byte-identical too."""
+
     # -- runway identification and ATOT/ALDT (T08 / T17) ------------------
     runway_max_dist_nm: float = 5.0
     """Only samples this close to the aerodrome are considered. traffic's
@@ -1253,6 +1340,7 @@ class EventConfig:
             emit_runway_events=False,
             emit_block_events=False,
             emit_level_offs=False,
+            ground_speed_derive_from_position=False,
             phase_require_complete_rules=False,
             crossing_all_occurrences=False,
             crossing_interpolate=False,

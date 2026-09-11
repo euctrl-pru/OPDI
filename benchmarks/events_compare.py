@@ -156,6 +156,13 @@ def main() -> int:
              "the ladder run this compares.",
     )
     ap.add_argument("--results-dir", required=True)
+    ap.add_argument(
+        "--clean-table", default=None,
+        help="override PERIOD_TRACKS[period]['clean'] -- read the cleaned "
+             "tracks from a different table, e.g. a copy rebuilt with a "
+             "cleaning fix, without touching the period's usual mapping. "
+             "Match whatever --clean-table the event_bench run used.",
+    )
     ap.add_argument("--executors", type=int, default=6)
     ap.add_argument("--ui-port", type=int, default=4065)
     ap.add_argument("--cores", type=int, default=4)
@@ -173,7 +180,7 @@ def main() -> int:
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     spark.conf.set("spark.sql.shuffle.partitions", "96")
 
-    redirect_tracks(args.period)
+    redirect_tracks(args.period, clean_table=args.clean_table)
     index_on_read(PERIOD_TRACKS[args.period]["index_on_read"])
 
     from opdi.config import OPDIConfig

@@ -290,7 +290,7 @@ def stages() -> list:
     ]
 
 
-def jobs() -> list:
+def jobs(reuse_rungs=(), reuse_newer_than=None) -> list:
     out = []
     for period in PERIODS:
         out.append(
@@ -318,7 +318,10 @@ def jobs() -> list:
                 f"ladder_{period}",
                 "benchmarks/event_bench.py",
                 ["--period", period, "--ladder", "v4", "--airports", "study",
-                 "--out-name", f"ladder_{period}.csv", "--executors", "12"],
+                 "--out-name", f"ladder_{period}.csv", "--executors", "12"]
+                + (["--reuse-table", *reuse_rungs,
+                    "--reuse-newer-than", reuse_newer_than]
+                   if reuse_rungs else []),
                 {f"ladder_{period}.csv": f"ladder_{period}.csv",
                  f"inventory_{period}.csv": f"inventory_{period}.csv"},
                 DETECT,
@@ -339,7 +342,28 @@ def jobs() -> list:
                 "benchmarks/events_compare.py",
                 ["--period", period, "--ladder", "v4", "--rung", SHIPPED_RUNG,
                  "--airports", "study", "--executors", "12"],
+                # Every CSV `events_compare.py` writes, not the subset the
+                # paper happened to need first. An output this job produces but
+                # does not declare is not copied into the paper's data/ -- so
+                # the paper keeps whatever copy was there, and `--check`
+                # reports the job "ok" because staleness is computed only over
+                # declared outputs. That is how per_airport_by_detector,
+                # pooling_rules and rings came to be read from a manual run
+                # made at 39093a1, three commits before the on_ground fix,
+                # while the tables beside them were current.
                 {f"per_airport_{period}.csv": f"per_airport_{period}.csv",
+                 f"per_airport_by_detector_{period}.csv":
+                     f"per_airport_by_detector_{period}.csv",
+                 f"pooling_rules_{period}.csv": f"pooling_rules_{period}.csv",
+                 f"rings_{period}.csv": f"rings_{period}.csv",
+                 # `floor_{period}.csv` is deliberately NOT declared. The
+                 # inter-source floor needs the _CTFM columns of the *full*
+                 # APDF extract, and apdf_full_202606 has never been
+                 # extracted -- so the floor comes back empty for 2026 and
+                 # `write_csv` writes no file at all. Declaring it fails the
+                 # job with "expected floor_2026.csv but the job did not
+                 # produce it", which is the correct behaviour and the reason
+                 # this comment exists rather than a silent omission.
                  f"runway_{period}.csv": f"runway_{period}.csv",
                  f"resolution_{period}.csv": f"resolution_{period}.csv"},
                 SCORE + ["benchmarks/events_compare.py", "benchmarks/event_bench.py"],
@@ -374,12 +398,32 @@ def main() -> int:
                          "On by default nowhere: unlike V6's stages, this one "
                          "builds a table no production run ever writes, so a "
                          "chain without it is not reproducible.")
+    ap.add_argument(
+        "--reuse-rungs", nargs="*", default=[], metavar="RUNG",
+        help=(
+            "Score these ladder rungs from the event tables already on S3 "
+            "rather than recomputing them, for resuming a ladder that died "
+            "partway. The rung scores live only in the driver's memory until "
+            "the final CSV write, so a crash on the last rung loses all eight "
+            "sets of numbers while leaving seven completed tables intact. "
+            "Requires --reuse-newer-than, and lands in the provenance manifest "
+            "as part of argv, so the paper can show which rungs were reused."
+        ),
+    )
+    ap.add_argument(
+        "--reuse-newer-than", default=None, metavar="ISO8601",
+        help="A reused rung table is accepted only if written after this instant.",
+    )
     ap.add_argument("--rebuild-stage", nargs="*", default=[],
                     help="force these stages to rebuild their table rather "
                          "than record it")
     args = ap.parse_args()
 
-    todo = ([] if args.skip_stages else stages()) + jobs()
+    if args.reuse_rungs and not args.reuse_newer_than:
+        raise SystemExit("--reuse-rungs requires --reuse-newer-than")
+    todo = ([] if args.skip_stages else stages()) + jobs(
+        reuse_rungs=args.reuse_rungs, reuse_newer_than=args.reuse_newer_than
+    )
     if args.only:
         names = {j.name for j in todo}
         unknown = [n for n in args.only if n not in names]

@@ -590,3 +590,77 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
 
     assert v4 == {"off-block", "on-block"}
     assert legacy == {"AOBT", "AIBT"}
+
+
+def test_the_track_projection_carries_every_column_a_detector_feature_gates_on():
+    """Step 04 must not project away a column a detector tests for by name.
+
+    ``calculate_airport_events`` enables ``airport_admit_on_ground`` only when
+    ``"on_ground" in sv_f.columns``. That guard exists so the family degrades
+    on data lacking the field rather than erroring -- but it also means a
+    projection that drops the column turns the whole feature into a **silent
+    no-op**, with the gate falling back to ``baro_altitude_c.isNotNull()``.
+
+    That is what happened. ``on_ground`` was absent from ``process_month``'s
+    select, so the fix merged to admit surface samples never ran in production.
+    Measured on 2026-06-05 with everything else held constant -- same tracks,
+    same layout table, same V07_shipped config -- adding the one column moved
+    ``exit-parking_position`` from **1,489 to 45,364** events network-wide, and
+    EBBR from **1 to 1,947**.
+
+    Surface position messages carry no altitude at all, so without ``on_ground``
+    the gate keeps only the ~0.3% of in-stand samples that happen to carry a
+    barometric reading. Coverage then tracks barometric availability rather
+    than reception, which is why LSZH (12.8% of in-stand samples with ground
+    altitude) reached 64% block-time coverage while EBBR (0.1%) reached 1.18%,
+    despite both sitting at ~100% ground detection in the coverage ranking.
+
+    Pinning the column list rather than the behaviour because the behavioural
+    test already existed and passed: ``test_layout.py`` hands ``on_ground``
+    straight to the function, so it proves the gate works while saying nothing
+    about whether the caller supplies it.
+    """
+    from opdi.pipeline.events import TRACK_COLUMNS
+
+    assert "on_ground" in TRACK_COLUMNS, (
+        "process_month's projection dropped on_ground; airport_admit_on_ground "
+        "is silently inert without it"
+    )
+
+
+def test_the_log_directory_is_created_by_the_constructor_and_written_at_the_end(
+    spark, tmp_path
+):
+    """`log_dir` is created on construction and written to as the last act of a run.
+
+    Both halves matter together, and the pairing is what makes the *ordering*
+    of any reset load-bearing. A caller that clears `log_dir` to force a
+    recompute must do it **before** constructing the processor: doing it after
+    does not reset anything, it removes the directory the live processor is
+    still holding paths into, and the run then dies marking progress -- after
+    every event table has already been written.
+
+    That is not a hypothetical. `event_bench`'s `--reuse-table` support cleared
+    the directory one line too late on its first outing, and a rung died on the
+    final line of its final family with two hours of compute already spent and
+    no scores to show for it.
+    """
+    import datetime as dt
+    import shutil
+
+    log_dir = tmp_path / "events_log"
+    config = OPDIConfig()
+    config.events = EventConfig()
+    proc = FlightEventProcessor(spark, config, log_dir=str(log_dir))
+
+    assert log_dir.is_dir(), "the constructor must create its own log directory"
+
+    month = dt.date(2026, 6, 1)
+    proc._mark_processed("horizontal", month)
+    assert month in proc._load_processed("horizontal")
+
+    # The failure mode itself: the directory removed after construction, which
+    # is precisely what a mis-ordered reset does.
+    shutil.rmtree(log_dir)
+    with pytest.raises(OSError):
+        proc._mark_processed("vertical", month)

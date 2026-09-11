@@ -88,6 +88,23 @@ def load_dotenv() -> None:
 #: 2 CPU / 14 GiB. Going past that makes pods pend forever rather than fail.
 RESEARCH_EXECUTORS = 4
 
+#: Driver heap for distributed research runs, as a Spark memory string.
+#:
+#: This pod is capped at 16 GB (cgroup ``memory.max``) and that cap is shared
+#: with everything else running in it -- long-lived agent sessions routinely
+#: hold 8 GB. The ``opensky`` environment asks for a 10 GB driver, which is
+#: more headroom than the container can ever offer: the JVM is entitled to
+#: grow past what is free, so it expands until the kernel kills it rather than
+#: until Java notices. That is not a Java OOM with a stack trace; it is a
+#: SIGKILL with no crash dump, and it took a 15-hour eight-rung ladder run with
+#: it at 07:28 on 2026-09-10, on the final rung, after seven had succeeded.
+#:
+#: 6 GB leaves room for the JVM's own off-heap overhead inside whatever the
+#: other tenants have left. Raise it only after checking what is actually free
+#: (``memory.current`` against ``memory.max``), never on the assumption that
+#: the pod's nominal size is available.
+RESEARCH_DRIVER_MEMORY = "6g"
+
 
 def build_spark(cores: int, driver_memory: str, distributed: bool = True):
     """Spark session. Distributed on the OSN K8s cluster by default.
@@ -113,6 +130,10 @@ def _build_spark_k8s():
     cfg.spark.s3_access_key = _os.environ["AWS_ACCESS_KEY_ID"]
     cfg.spark.s3_secret_key = _os.environ["AWS_SECRET_ACCESS_KEY"]
     cfg.spark.executor_instances = str(RESEARCH_EXECUTORS)
+    # The `--driver-memory` flag was previously read only by the local-mode
+    # branch, so every distributed run silently used the environment's 10 GB
+    # regardless of what the caller asked for. Honour it here too.
+    cfg.spark.driver_memory = RESEARCH_DRIVER_MEMORY
     cfg.spark.k8s_driver_port = str(DRIVER_PORT)
     cfg.spark.k8s_driver_block_manager_port = str(DRIVER_BLOCK_MANAGER_PORT)
     return SparkSessionManager.create_session(
@@ -138,6 +159,20 @@ def _build_spark_k8s():
             "spark.hadoop.fs.s3a.connection.maximum": "256",
             "spark.hadoop.fs.s3a.attempts.maximum": "10",
             "spark.hadoop.fs.s3a.retry.limit": "10",
+            # -- Bound the driver's own bookkeeping -------------------------
+            # A ladder run keeps one SparkContext alive across every rung. The
+            # V4 run reached stage 2102 in a single context, and the driver
+            # retains UI state for each stage it has ever run: that state is
+            # the difference between a driver that idles at 2 GB and one that
+            # creeps to 7.3 GB over fifteen hours. The defaults (1000 stages,
+            # 100k tasks) are sized for a cluster with a dedicated driver host,
+            # not for a driver sharing a 16 GB pod. Nothing here reads the
+            # retained history -- the run's outputs are the CSVs -- so capping
+            # it costs only the depth of the Spark UI's scroll-back.
+            "spark.ui.retainedStages": "200",
+            "spark.ui.retainedJobs": "100",
+            "spark.ui.retainedTasks": "20000",
+            "spark.sql.ui.retainedExecutions": "200",
         },
     )
 

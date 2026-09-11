@@ -84,10 +84,11 @@ run_pipeline(env="live", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
 | Step | Script origin | Module | Description |
 |------|--------------|--------|-------------|
 | 00a | `00_create_h3_airport_detection_areas.py` | `reference.h3_airport_zones` | Airport H3 detection zones (0-40 NM rings) |
-| 00b | `00_create_h3_airport_layouts.py` | `reference.h3_airport_layouts` | Airport ground layouts from OSM (res 12) |
+| 00b | `00_create_h3_airport_layouts.py` | `reference.h3_airport_layouts` | Airport ground layouts from a local OSM extract (res 12) — see [below](#step-00b-airport-ground-layouts) |
 | 00c | `00_create_h3_airspaces.py` | `reference.h3_airspaces` | ANSP / FIR / country boundaries (res 7) |
 | 00d | `00_etl_ourairports.py` | `ingestion.ourairports` | OurAirports reference data (6 datasets) |
 | 00e | `00_osn_aircraft_db.py` | `ingestion.osn_aircraft_db` | OpenSky aircraft database |
+| 00f | — | `reference.h3_runway_grid` | Runway + approach H3 grid from `oa_runways` |
 | 01 | `01_osn_statevectors_etl.py` | `ingestion.osn_statevectors` | State vector ingestion from OpenSky S3 |
 | 02 | `02_osn_tracks_etl.py` | `pipeline.tracks` | Track creation (SHA256 IDs, H3, distance, alt cleaning) |
 | 03 | `03_opdi_flight_list_v2.py` | `pipeline.flights` | Flight list (DAI + overflights, aircraft enrichment) |
@@ -96,6 +97,72 @@ run_pipeline(env="live", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
 | 06 | `06_cleanup.py` | `output.csv_exporter` | Deduplication + CSV.gz export |
 | 07 | `07_get_stats.py` | `monitoring.basic_stats` | Table row counts |
 | 08 | `08_get_advanced_stats.py` | `monitoring.advanced_stats` | Data quality report + Plotly visualization |
+
+### Step 00b: airport ground layouts
+
+Step 00b builds `hexaero_airport_layouts` — the H3 res-12 grid of runways,
+taxiways, aprons, stands, hangars, thresholds and de-icing pads that the
+airport-surface events (`off-block`, `on-block`, the runway family) are matched
+against. It reads a **local OpenStreetMap extract**.
+
+**Point it at an extract.** Either configure it:
+
+```python
+config.h3.airport_layout_pbf_path = "/path/to/europe-latest.osm.pbf"
+```
+
+or set the environment variable, which takes precedence:
+
+```bash
+export OPDI_OSM_PBF=/path/to/europe-latest.osm.pbf
+opdi run --step 00b --env opensky
+```
+
+Extracts come from [Geofabrik](https://download.geofabrik.de/). `europe-latest.osm.pbf`
+is ~35 GB.
+
+**The extract is filtered automatically, once.** A raw continental extract
+cannot be used directly: assembling multipolygon areas requires OSM node
+locations for the *whole* file, which exceeds a 16 GB container and is killed
+by the OOM reaper. Step 00b therefore reduces the extract to aeroway geometry
+plus the nodes and relation members it references, writing `aeroway-<name>`
+beside the source:
+
+```
+Filtering europe-latest.osm.pbf (32.5 GB) to aeroway geometry -> aeroway-europe-latest.osm.pbf ...
+Filtered in 1174 s: 32.5 GB -> 15.4 MB (1,698,326 nodes, 181,742 ways, 1,153 relations)
+```
+
+That file is reused on later runs unless the source is newer, so only the first
+run pays for it. It is ~2,000× smaller and is read in about a second instead of
+six minutes, which is what makes a network-wide build practical. Passing an
+`aeroway-`-prefixed path skips the step. `opdi.reference.pbf_filter.filter_aeroway_pbf`
+does the work and can be called directly.
+
+**How aerodromes are identified.** Each feature is assigned to the aerodrome
+whose own OSM boundary (`aeroway=aerodrome`, matched on its `icao` tag)
+contains it. Where OSM maps an aerodrome as a bare node — it has no area, so it
+can contain nothing — the step falls back to a bounding box derived from the
+runway extent in `oa_runways`. On the 2026-09-07 build, 937 aerodromes were
+assigned by polygon and 97 by that fallback.
+
+**What it produces.** The 2026-09-07 build covered **1,036 aerodromes and
+2,900,230 rows** in about ten minutes. Aerodromes are not built when they lie
+outside the extract's geographic coverage (`europe-latest` reaches roughly
+lon −31…46, lat 33…79, so North Africa, the Middle East, the Canaries and
+eastern Russia need additional regions), or when OSM has no aeroway geometry
+for them. Both are reported in the step's output rather than passing silently.
+
+**The Overpass fallback.** With no extract configured, the step falls back to
+the public Overpass API, which is kept working for single-airport use but
+cannot build the network: it resolves the airport *name* through Nominatim
+first, so a name that does not resolve returns no data rather than an error,
+and at ~1,350 aerodromes the public endpoint refuses outright. Every aerodrome
+published before 2026-09-07 came from that path.
+
+**Publishing.** `publish_layouts.py` copies a gated build over the published
+table, refusing to run if the source fails its checks and re-reading the
+result afterwards rather than trusting the write.
 
 ## OpenSky Network environment
 

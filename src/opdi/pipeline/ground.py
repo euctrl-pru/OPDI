@@ -23,14 +23,43 @@ finding to report, not something to tune away.
 
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from pyspark.sql import DataFrame
+from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+
+from opdi.pipeline.flights import haversine_nm
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard
     from opdi.config import EventConfig
 
 KT_PER_MPS = 1.94384
+
+
+def _derived_groundspeed_kt(ordered: Window, time_col: str) -> Column:
+    """Position-derived groundspeed in knots, 3-sample median filtered.
+
+    Ported from traffic's ``StartMoving``, which does not trust the broadcast
+    ``velocity`` field at all: ``resampled.cumulative_distance().filter(
+    compute_gs=3).query("compute_gs > threshold")``
+    (``traffic/src/traffic/algorithms/ground/movement.py:37-46``). Native
+    Spark equivalent -- no UDF: haversine between consecutive samples over the
+    time delta, then a centred 3-sample rolling median (``filter(compute_gs=3)``
+    is itself a rolling median filter), because position-derived speed is
+    spiky and traffic filters it for exactly that reason before thresholding.
+    """
+    prev_lat = F.lag(F.col("lat")).over(ordered)
+    prev_lon = F.lag(F.col("lon")).over(ordered)
+    prev_t = F.lag(F.col(time_col)).over(ordered)
+
+    dt_s = F.col(time_col).cast("double") - prev_t.cast("double")
+    dist_nm = haversine_nm(prev_lat, prev_lon, F.col("lat"), F.col("lon"))
+    raw_kt = F.when(dt_s > 0, dist_nm / (dt_s / 3600.0))
+
+    # `F.median` cannot be windowed with an explicit frame in this Spark
+    # version ([INVALID_WINDOW_SPEC_FOR_AGGREGATION_FUNC]); `percentile_approx`
+    # at 0.5 is Spark's windowable median and, over a 3-row frame, exact for
+    # any practical purpose (default accuracy 10000 >> 3 samples).
+    return F.percentile_approx(raw_kt, 0.5).over(ordered.rowsBetween(-1, 1))
 
 
 def movement_window(
@@ -48,6 +77,15 @@ def movement_window(
     ordered = Window.partitionBy(*partition_cols).orderBy(time_col)
 
     gs_kt = F.col("velocity") * KT_PER_MPS
+    if config.ground_speed_derive_from_position and "lat" in sdf.columns and "lon" in sdf.columns:
+        # Fill the gap, don't replace: keeps today's behaviour wherever
+        # `velocity` exists and adds signal only where it is missing -- see
+        # EventConfig.ground_speed_derive_from_position. Guarded on column
+        # presence, not just NULL values: a caller that never carried lat/lon
+        # at all (some tests, and any minimal projection) must get exactly
+        # today's velocity-only behaviour rather than an unresolved-column
+        # analysis error.
+        gs_kt = F.coalesce(gs_kt, _derived_groundspeed_kt(ordered, time_col))
     work = sdf.withColumn("_moving", gs_kt > F.lit(config.ground_speed_threshold_kt))
 
     # Sessionise runs of movement, then keep runs long enough to be a push
