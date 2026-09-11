@@ -456,3 +456,48 @@ def test_a_table_that_exists_but_is_empty_counts_as_missing():
 def test_a_populated_set_is_still_complete():
     """The empty check must not make every run rebuild everything."""
     assert preflight(_Storage(REQUIRED_REFERENCE_TABLES)) == []
+
+
+# --- reference substeps are skipped individually ----------------------------
+
+def test_a_built_substep_is_skipped_while_a_missing_one_runs():
+    """Step 00 was all-or-nothing: once the set was incomplete it ran, and
+    every substep ran with it -- so a build that died on the runway grid
+    re-downloaded OurAirports on the way back to it."""
+    from opdi.weekrun import reference_substeps_to_run
+
+    # Exactly the state a killed build left: OurAirports and the aircraft DB
+    # are fine, layouts and the runway grid never finished.
+    storage = _Storage({"oa_airports", "oa_runways", "osn_aircraft_db"})
+    todo = reference_substeps_to_run(storage)
+
+    assert todo["00d"] is False        # OurAirports: built
+    assert todo["00e"] is False        # aircraft DB: built
+    assert todo["00b"] is True         # layouts: missing
+    assert todo["00f"] is True         # runway grid: missing
+    assert todo["00a"] is True         # zones: missing
+
+
+def test_force_rebuilds_every_substep():
+    from opdi.weekrun import reference_substeps_to_run
+
+    storage = _Storage({"oa_airports", "oa_runways", "osn_aircraft_db"})
+    assert all(reference_substeps_to_run(storage, force=True).values())
+
+
+def test_every_substep_declares_what_it_produces():
+    """A substep with no declared output would be skipped forever, because an
+    empty requirement list is trivially satisfied."""
+    from opdi.weekrun import REFERENCE_OUTPUTS
+
+    assert set(REFERENCE_OUTPUTS) == {"00a", "00b", "00c", "00d", "00e", "00f"}
+    assert all(tables for tables in REFERENCE_OUTPUTS.values())
+
+
+def test_the_declared_outputs_cover_the_required_reference_tables():
+    """Anything preflight demands must be produced by some substep, or the run
+    reports a missing table that nothing is able to build."""
+    from opdi.weekrun import REFERENCE_OUTPUTS, REQUIRED_REFERENCE_TABLES
+
+    produced = {t for tables in REFERENCE_OUTPUTS.values() for t in tables}
+    assert set(REQUIRED_REFERENCE_TABLES) <= produced

@@ -72,6 +72,43 @@ WINDOW_STEPS: Tuple[str, ...] = ("00", "01")
 #: Steps that run once per day, on the tracks that day owns.
 DAY_STEPS: Tuple[str, ...] = ("02", "02a", "03", "04")
 
+#: What each reference substep produces.
+#:
+#: Step 00 is all-or-nothing without this: once the set is incomplete it runs,
+#: and every substep runs with it -- so a build that died on the runway grid
+#: re-downloads and rewrites OurAirports on the way back to it. Harmless, since
+#: those writes replace rather than append, but it is minutes of work for an
+#: unchanged result and it obscures which table the run is actually there to
+#: build.
+#:
+#: 00c is listed for completeness. Its output is read by nothing today, so
+#: skipping it changes no result either way.
+REFERENCE_OUTPUTS = {
+    "00a": ("h3_airport_detection_zones",),
+    "00b": ("hexaero_airport_layouts",),
+    "00c": ("opdi_h3_airspace_ref",),
+    "00d": ("oa_airports", "oa_runways"),
+    "00e": ("osn_aircraft_db",),
+    "00f": ("h3_runway_zones",),
+}
+
+
+def reference_substeps_to_run(storage, force: bool = False) -> Dict[str, bool]:
+    """Which reference substeps still have work to do.
+
+    A substep is skipped when everything it produces is present *and
+    non-empty*; see :func:`preflight` for why emptiness counts as absent. The
+    check is per substep rather than per step, so a build that died partway
+    resumes at the table it died on instead of starting again from OurAirports.
+    """
+    if force:
+        return {k: True for k in REFERENCE_OUTPUTS}
+    return {
+        substep: bool(preflight(storage, tables))
+        for substep, tables in REFERENCE_OUTPUTS.items()
+    }
+
+
 #: Extra days of state vectors to ingest past the window.
 #:
 #: The last day of the window is segmented over data running into the day
@@ -592,10 +629,9 @@ def run_week(
         airports_hex_raw_path="data/airport_hex/zones_res7.parquet",
         export_dir="data/OPDI/v002",
         last_n_months=4,
-        # Every substep on. Step 00 is only in `todo` when the caller asked
-        # for it, and asking for it means asking for the reference tables to
-        # be rebuilt into this warehouse rather than inherited.
-        run_reference={k: True for k in ("00a", "00b", "00c", "00d", "00e", "00f")},
+        # Filled in below, once a session exists to inspect the warehouse
+        # with. Substeps whose output is already built are skipped.
+        run_reference={k: True for k in REFERENCE_OUTPUTS},
         adep_mode=None,
         ades_mode=None,
     )
@@ -653,6 +689,18 @@ def run_week(
                             f"  reference   : building {len(missing)} missing "
                             f"table(s): {', '.join(missing)}"
                         )
+                        # Narrow step 00 to the substeps with work left. The
+                        # set is incomplete, but that is no reason to
+                        # re-download OurAirports on the way to the runway
+                        # grid.
+                        todo_subs = reference_substeps_to_run(storage, force=force)
+                        kwargs["run_reference"] = todo_subs
+                        skipped = [k for k, v in sorted(todo_subs.items()) if not v]
+                        if skipped:
+                            print(
+                                f"  reference   : skipping {', '.join(skipped)} "
+                                "(already built)"
+                            )
                 else:
                     missing = preflight(storage)
                     if missing:
