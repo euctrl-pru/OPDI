@@ -495,7 +495,11 @@ class FlightListProcessor:
     # ------------------------------------------------------------------
 
     def _get_data_within_timeframe(
-        self, table_name: str, month: date, time_col: str = "event_time"
+        self,
+        table_name: str,
+        month: date,
+        time_col: str = "event_time",
+        day: date = None,
     ) -> DataFrame:
         """Retrieve records from a table within a monthly timeframe.
 
@@ -533,12 +537,13 @@ class FlightListProcessor:
         partitions, and an aggregate in front of it would scan the whole table
         once per month processed.
         """
-        start_ts, end_ts = get_start_end_of_month(month)
-        start_lit = to_timestamp(lit(start_ts))
-        end_lit = to_timestamp(lit(end_ts))
+        from opdi.utils.batching import filter_batch
 
         df = self.storage.read_table(table_name)
-        df = df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
+        if day is not None:
+            df = filter_batch(df, day=day)
+        else:
+            df = filter_batch(df, month=month, time_col=time_col)
 
         if table_name != self.tracks_table:
             return df

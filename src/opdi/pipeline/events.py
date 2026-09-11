@@ -1065,14 +1065,25 @@ class FlightEventProcessor:
             pd.DataFrame({"months": processed}).to_parquet(self._log_paths[key])
 
     def _get_data_within_timeframe(
-        self, table_name: str, month: date, time_col: str = "event_time"
+        self,
+        table_name: str,
+        month: date,
+        time_col: str = "event_time",
+        day: date = None,
     ) -> DataFrame:
-        """Retrieve records within a monthly timeframe."""
-        start_ts, end_ts = get_start_end_of_month(month)
-        start_lit = to_timestamp(lit(start_ts))
-        end_lit = to_timestamp(lit(end_ts))
+        """Retrieve the records for one batch.
+
+        ``day`` selects the tracks that *started* that day, whole; ``month``
+        keeps the original time-window behaviour. See
+        ``opdi.utils.batching.filter_batch`` for why a day cannot be expressed
+        as a narrow month.
+        """
+        from opdi.utils.batching import filter_batch
+
         df = self.storage.read_table(table_name)
-        return df.filter((col(time_col) >= start_lit) & (col(time_col) < end_lit))
+        if day is not None:
+            return filter_batch(df, day=day)
+        return filter_batch(df, month=month, time_col=time_col)
 
     def _event_id(self, batch_id: str):
         """Identifier for an event row.
