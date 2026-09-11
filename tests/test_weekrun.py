@@ -425,3 +425,34 @@ def test_the_first_unit_comparison_uses_a_step_day_pair():
     src = inspect.getsource(weekrun.run_week)
     assert "(step, day) == todo[0]" in src
     assert "and step == todo[0]" not in src
+
+
+def test_a_table_that_exists_but_is_empty_counts_as_missing():
+    """A Spark stage whose executors all die still commits: a zero-row part
+    file and a _SUCCESS marker. Observed on a from-scratch build, where 00a
+    lost eight executors to OOM and left the zones table at 0 rows.
+
+    Readability alone would call that complete, skip the rebuild, and run the
+    pipeline against an empty detection grid -- no ADEP or ADES for any flight,
+    and nothing reporting why.
+    """
+    class _EmptyOne(_Storage):
+        def read_table(self, name):
+            df = super().read_table(name)
+            if name == "h3_airport_detection_zones":
+                class _Empty:
+                    def limit(self, n):
+                        return self
+
+                    def count(self):
+                        return 0
+                return _Empty()
+            return df
+
+    storage = _EmptyOne(REQUIRED_REFERENCE_TABLES)
+    assert preflight(storage) == ["h3_airport_detection_zones"]
+
+
+def test_a_populated_set_is_still_complete():
+    """The empty check must not make every run rebuild everything."""
+    assert preflight(_Storage(REQUIRED_REFERENCE_TABLES)) == []

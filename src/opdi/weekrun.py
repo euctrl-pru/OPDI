@@ -359,7 +359,20 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
     missing: List[str] = []
     for name in tables:
         try:
-            storage.read_table(name).limit(1).count()
+            if storage.read_table(name).limit(1).count() == 0:
+                # Present but empty counts as missing, and the distinction is
+                # not academic. A Spark stage whose executors all die can still
+                # commit: it writes a zero-row part file and a _SUCCESS marker,
+                # so the table exists, reads cleanly, and contains nothing.
+                # Observed exactly this on a from-scratch build -- step 00a
+                # lost eight executors to OOM and left
+                # h3_airport_detection_zones at 0 rows with _SUCCESS beside it.
+                #
+                # Testing readability alone would then call the reference set
+                # complete, skip the rebuild, and run the whole pipeline
+                # against an empty detection grid -- producing no ADEP or ADES
+                # for any flight, with nothing anywhere reporting why.
+                missing.append(name)
         except Exception:
             missing.append(name)
     return missing
