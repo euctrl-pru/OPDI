@@ -278,13 +278,28 @@ def _step_00f_runway_grid(spark, config, **kwargs):
     print(f"  Processed {len(success)} airports, {len(failed)} failed.")
 
 
+#: Reference substeps in **dependency order, which is not id order**.
+#:
+#: 00d ingests OurAirports and is what creates ``oa_airports`` and
+#: ``oa_runways``; 00a, 00b and 00f all read one of those. Iterating this dict
+#: in id order therefore ran 00a and 00b against a warehouse where the table
+#: they need did not exist yet. On an established warehouse that was invisible
+#: -- the tables were there from a previous run, so any order worked -- but on
+#: a from-scratch build into an empty prefix, 00a fell back to downloading the
+#: public OurAirports CSV, which is unreachable from the OSN cluster and, when
+#: it is reachable, is a *different snapshot* from the one the rest of the
+#: pipeline reads.
+#:
+#: The ids are left alone because they are the operator-facing names
+#: (``--no-airport-zones`` and friends, and the labels in the run log). Only
+#: the execution order changed.
 REFERENCE_SUBSTEPS = {
-    "00a": ("Airport H3 detection zones", _step_00a_airport_zones),
-    "00b": ("Airport ground layouts", _step_00b_airport_layouts),
-    "00c": ("Airspace boundaries", _step_00c_airspaces),
     "00d": ("OurAirports reference data", _step_00d_ourairports),
     "00e": ("OpenSky aircraft database", _step_00e_aircraft_db),
+    "00a": ("Airport H3 detection zones", _step_00a_airport_zones),
+    "00b": ("Airport ground layouts", _step_00b_airport_layouts),
     "00f": ("Runway + approach H3 grid", _step_00f_runway_grid),
+    "00c": ("Airspace boundaries", _step_00c_airspaces),
 }
 
 

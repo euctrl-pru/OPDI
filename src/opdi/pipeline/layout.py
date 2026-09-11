@@ -212,6 +212,39 @@ def calculate_airport_events(
 
     apt_sdf = storage.read_table("hexaero_airport_layouts")
 
+    # Restrict the layout grid to the aerodromes this month's flights name,
+    # before joining on the H3 cell.
+    #
+    # This changes no result. The join below already requires
+    # ``array_contains(apt, hexaero_apt_icao)``, so a reference row for an
+    # aerodrome no flight names cannot survive it. The semi-join only moves
+    # that elimination earlier, so the unmatched remainder is dropped before
+    # the shuffle on ``h3_res_12`` rather than carried through it.
+    #
+    # Taken from ``flight_list`` rather than from ``sv_nearby_apt``: the
+    # aerodrome set lives on the flight list, which is already filtered to the
+    # month, and reading it from the joined frame would recompute that join
+    # just to learn something the smaller side already knows.
+    #
+    # **How much this saves depends on the batch, and it is not uniform.** The
+    # 2026-09-07 PBF rebuild took this table from 15 aerodromes to 1,036 and
+    # from ~140k rows to 2,900,230. A study-scoped run touching twenty
+    # aerodromes now discards ~98% of it before the shuffle. A network-wide
+    # month touches most of Europe's large and medium fields, so it discards
+    # little -- the pruning is real there but modest, and the reason to keep
+    # it is that the cost is one broadcast of a few thousand short strings
+    # either way.
+    #
+    # Broadcasting *this* side is safe precisely because it is small.
+    # Broadcasting the grid is not: doing that to the comparable
+    # ``h3_runway_zones`` OOM'd the driver JVM outright (see runway_ops.py).
+    batch_apts = flight_list.select(F.explode("apt").alias("_batch_apt")).distinct()
+    apt_sdf = apt_sdf.join(
+        F.broadcast(batch_apts),
+        apt_sdf.hexaero_apt_icao == batch_apts._batch_apt,
+        "left_semi",
+    )
+
     df_labelled = sv_nearby_apt.join(
         apt_sdf,
         (sv_nearby_apt.h3_res_12 == apt_sdf.hexaero_h3_id)

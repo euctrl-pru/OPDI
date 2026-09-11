@@ -4,12 +4,16 @@ H3 runway + approach-corridor grid, from ``oa_runways``.
 Universal runway coverage: rasterises *every* large+medium airport's runway
 rectangle and approach corridor to H3 resolution-12 cells, purely from
 OurAirports' ``oa_runways`` positions. This is the pruning grid the runway
-detector (``pipeline/runway_ops.py``, task 5 of this plan) joins state-vector
-samples against, replacing the curated 20-airport ``hexaero_airport_layouts``
-dependency for that family -- ``hexaero_airport_layouts`` needs an OSM fetch
-per airport and was only ever built for 5 of the 20 study airports; this is
-geometry-only, no network, and covers all ~1,353 large+medium airports in the
-OPDI bbox in one pass.
+detector (``pipeline/runway_ops.py``) joins state-vector samples against. It
+is independent of ``hexaero_airport_layouts`` for that family: this grid is
+geometry-only, needs no OSM data at all, and covers all ~1,353 large+medium
+airports in the OPDI bbox in one pass.
+
+(Historical note: this independence mattered more when
+``hexaero_airport_layouts`` was an Overpass fetch per airport built for only a
+handful of aerodromes. Since the move to a local PBF extract it covers 1,036
+aerodromes and costs minutes, so the two are now complementary rather than one
+working around the other.)
 
 Two zones per physical runway ("strip"):
 
@@ -329,15 +333,20 @@ class RunwayGridGenerator:
     failed progress logs so a run is resumable, and a
     ``create_table_if_not_exists``/entry-point pair a runner step calls.
 
-    Unlike ``AirportLayoutGenerator.process_airport`` -- which writes with
-    ``mode="overwrite"`` on every single airport, which in S3 mode replaces
-    the *entire* table's contents with just that one airport's rows each
-    time -- this generator writes the FIRST successful airport of a run with
+    This generator writes the FIRST successful airport of a run with
     ``overwrite`` (establishing a clean table) and every airport after that
-    with ``append``, so a full run's table genuinely accumulates every
-    airport rather than ending up with only the last one's rows. On a
-    resumed run (a success log already on disk) even the first write is an
-    ``append``, since the table from the earlier run is assumed still there.
+    with ``append``, so a full run's table genuinely accumulates every airport
+    rather than ending up with only the last one's rows. On a resumed run (a
+    success log already on disk) even the first write is an ``append``, since
+    the table from the earlier run is assumed still there.
+
+    ``AirportLayoutGenerator`` once wrote ``mode="overwrite"`` per airport --
+    which in S3 mode replaced the entire table with that one airport's rows on
+    every iteration -- and this docstring existed to contrast with it. That was
+    fixed; it now accumulates and performs a single bulk write per invocation.
+    The contrast is recorded rather than removed because the failure is easy to
+    reintroduce and silent when it happens: the table is present, readable, and
+    holds one airport.
 
     Args:
         spark: Active SparkSession.
