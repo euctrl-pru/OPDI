@@ -33,7 +33,11 @@ classifiers = [
 
 dependencies = [
     "pyspark>=3.5.1",
-    "h3>=3.7.0",
+    # v4 specifically: the code calls polygon_to_cells, LatLngPoly,
+    # latlng_to_cell, grid_distance and cell_to_latlng, none of which exist in
+    # v3. Left open at >=3.7.0, the driver resolved 4.5.0 while the executor
+    # image pinned <4, and the two ran different APIs for weeks.
+    "h3>=4,<5",
     "h3-pyspark>=1.0.0",
     "shapely>=2.0.0",
     "pyproj>=3.4.0",

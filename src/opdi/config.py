@@ -1544,7 +1544,13 @@ class OPDIConfig:
                     spark_packages="org.apache.spark:spark-hadoop-cloud_2.13:4.1.1",
                     k8s_master="k8s://https://192.168.60.102:6443",
                     k8s_namespace="eurocontrol",
-                    k8s_container_image="docker.io/quintengs/opdi-spark:v4.1.1-5",
+                    # -6 is the first image built with h3 v4. -5 and earlier
+                    # carry h3 3.7.7, on which every h3 call this codebase
+                    # makes raises AttributeError -- which the UDFs turned into
+                    # NULL, and NULL turned into an empty
+                    # h3_airport_detection_zones that still committed
+                    # _SUCCESS. Do not point this back at an older tag.
+                    k8s_container_image="docker.io/quintengs/opdi-spark:v4.1.1-6",
                     k8s_executor_memory_limit="14g",
                     # Match executor_cores. The namespace ResourceQuota counts
                     # limits.cpu, not requests.cpu, so a limit above the actual
