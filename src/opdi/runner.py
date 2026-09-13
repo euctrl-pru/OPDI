@@ -100,10 +100,17 @@ def _step_00a_airport_zones(spark, config, **kwargs):
         if storage.table_exists("oa_airports")
         else None
     )
-    zones = zone_gen.generate(airports_df=airports_df)
-    zone_gen.save_to_parquet(
-        kwargs.get("airports_hex_raw_path", "data/airport_hex/zones_res7.parquet")
-    )
+    zone_gen.generate(airports_df=airports_df)
+    # The local raw parquet is deliberately not written here.
+    #
+    # Writing it means collecting the whole result to the driver -- 584 million
+    # cell strings for a network build -- and the driver was SIGKILLed by its
+    # container every time. `_load_airports_hex` in step 03 reads the
+    # `h3_airport_detection_zones` *table* and only falls back to a local file
+    # if the table is absent, so the table is what production actually uses and
+    # this file was a fallback that cost a driver to produce.
+    #
+    # `zone_gen.result_df` still collects on demand for anyone who wants it.
     # Generated out to the full ring reach, not clipped to the detection
     # radius. The table carries min_c_radius_nm/max_c_radius_nm, so each
     # consumer narrows it at read time: the flight list keeps its 30 NM, and

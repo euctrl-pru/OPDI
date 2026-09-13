@@ -75,3 +75,48 @@ def test_the_ring_build_is_spread_widely_enough_to_fit_in_an_executor():
         f"{per_task:.0f} rows per task; one row can hold 1.6 MB of cells and "
         "each polyfills two circles"
     )
+
+
+def test_generate_does_not_collect_to_the_driver():
+    """`generate()` used to end with `toPandas()`, pulling 584 million cell
+    strings into driver memory -- the driver was SIGKILLed (exit 137) every
+    run. It went unnoticed while the polyfill was broken, because collecting
+    21,712 empty arrays is free."""
+    import inspect
+
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator as G
+
+    import ast
+
+    tree = ast.parse(inspect.getsource(G.generate).lstrip())
+    calls = [
+        n.func.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    ]
+    # The word appears in the comment explaining why it is gone; what matters
+    # is that nothing *calls* it.
+    assert "toPandas" not in calls, "generate() must not collect"
+    assert "_result_df" not in [
+        t.attr for n in ast.walk(tree) if isinstance(n, ast.Assign)
+        for t in n.targets if isinstance(t, ast.Attribute)
+    ], "generate() must not populate the pandas result"
+
+
+def test_pandas_is_available_but_only_on_request():
+    """The fallback paths still work; they just have to ask, and the property
+    says what asking costs."""
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator as G
+
+    assert isinstance(G.result_df, property)
+    assert "driver memory" in (G.result_df.__doc__ or "")
+
+
+def test_step_00a_does_not_write_the_local_raw_parquet():
+    """Writing it forces the collect this whole change exists to avoid. Step 03
+    reads the table and only falls back to a local file."""
+    import inspect
+
+    from opdi import runner
+
+    src = inspect.getsource(runner._step_00a_airport_zones)
+    assert "save_to_parquet" not in src

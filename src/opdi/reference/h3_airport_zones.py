@@ -555,10 +555,40 @@ class AirportDetectionZoneGenerator:
         sdf.cache()
         self._result_sdf = sdf
 
-        result = sdf.toPandas()
-        self._result_df = result
-        print(f"Generated {len(result)} airport-ring combinations.")
-        return result
+        # Deliberately NOT collected.
+        #
+        # This used to end `self._result_df = sdf.toPandas()`, which pulls
+        # every row to the driver -- and a row here holds an *array* of cells,
+        # up to 98,250 of them for the outermost ring. Across 1,357 aerodromes
+        # that is 584 million cell strings in driver pandas, and the driver was
+        # SIGKILLed by the container (exit 137) every time.
+        #
+        # It went unnoticed because the collect was free while it was broken:
+        # under the old h3 v3 executors the polyfill returned NULL, so
+        # toPandas() brought back 21,712 empty arrays. The moment the cells
+        # were real, so was the memory.
+        #
+        # Anything that genuinely needs pandas asks for it through
+        # `result_df`, which collects on demand and says what that costs.
+        print("Generated airport-ring combinations (Spark; not collected).")
+        return sdf
+
+    @property
+    def result_df(self) -> pd.DataFrame:
+        """The generated zones as pandas, collected on first access.
+
+        **This pulls the whole result into driver memory** -- 584 million cell
+        strings for a full network build, which is enough to have the driver
+        killed by its container. Prefer ``_result_sdf`` and the ``_spark``
+        variants; this exists for the local-file and legacy pandas paths, which
+        are fallbacks rather than what production reads.
+        """
+        if self._result_df is None:
+            if self._result_sdf is None:
+                raise RuntimeError("Call generate() before collecting.")
+            print("Collecting zones to the driver -- this is large.")
+            self._result_df = self._result_sdf.toPandas()
+        return self._result_df
 
     def save_to_parquet(self, output_path: str) -> None:
         """
@@ -570,11 +600,8 @@ class AirportDetectionZoneGenerator:
         Raises:
             RuntimeError: If generate() has not been called first.
         """
-        if self._result_df is None:
-            raise RuntimeError("Call generate() before saving.")
-
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        self._result_df.to_parquet(output_path)
+        self.result_df.to_parquet(output_path)
         print(f"Saved detection zones to {output_path}")
 
     def prepare_for_flight_list(
