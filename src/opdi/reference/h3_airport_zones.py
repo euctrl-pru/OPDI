@@ -278,6 +278,22 @@ class AirportDetectionZoneGenerator:
     #: join to each other with gaps nothing reports.
     AIRPORT_TYPES = ("large_airport", "medium_airport")
 
+    #: Partitions to spread the ring polyfill across.
+    #:
+    #: The cross join is only 21,712 rows (16 rings x 1,357 aerodromes), so
+    #: Spark's default parallelism gives it 8 or 9 tasks -- and row count is a
+    #: terrible proxy for cost here. Each row carries an *array* of cells, and
+    #: the outermost ring is 98,250 of them, about 1.6 MB of strings in a
+    #: single row. Each row polyfills two circles (inner and outer, to make an
+    #: annulus), so ~2,400 rows in a task is roughly 7.7 GB -- and with two
+    #: cores per executor, two such tasks against a 14 GB limit. Measured: all
+    #: executors OOMKilled with exit 137.
+    #:
+    #: 2,000 partitions puts ~11 rows in a task, tens of megabytes rather than
+    #: gigabytes. It costs more, shorter tasks, which is the right trade when
+    #: the alternative is losing every executor.
+    ZONE_BUILD_PARTITIONS = 2000
+
     BBOX_OFFSET = 3  # degrees
     LAT_MIN = 26.74617
     LAT_MAX = 70.25976
@@ -484,6 +500,12 @@ class AirportDetectionZoneGenerator:
         airports_m = airports_df.withColumn("m_col", lit(1)).join(
             ring_config, on="m_col", how="left"
         )
+
+        # Spread the work before the polyfill, not after. Spark sizes tasks by
+        # row count, and these rows are wildly uneven in cost -- see
+        # ZONE_BUILD_PARTITIONS. Repartitioning here is what keeps a task's
+        # share of the 584 million cells inside the executor's memory.
+        airports_m = airports_m.repartition(self.ZONE_BUILD_PARTITIONS)
 
         print(f"Generating H3 zones at resolution {self.resolution}...")
         sdf = (

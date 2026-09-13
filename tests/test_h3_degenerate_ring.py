@@ -57,3 +57,21 @@ def test_every_configured_radius_can_be_polyfilled():
     for nm in radii:
         cells = _cells(nm)
         assert cells is not None, f"radius {nm} NM returned NULL"
+
+
+def test_the_ring_build_is_spread_widely_enough_to_fit_in_an_executor():
+    """Row count is a bad proxy for cost when a row holds 98,250 cells.
+
+    The cross join is 21,712 rows, which Spark's default parallelism splits
+    into 8 or 9 tasks -- roughly 7.7 GB of cell strings each, against a 14 GB
+    executor running two of them at once. Measured: every executor OOMKilled
+    with exit 137.
+    """
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator as G
+
+    rows = 16 * 1357
+    per_task = rows / G.ZONE_BUILD_PARTITIONS
+    assert per_task < 25, (
+        f"{per_task:.0f} rows per task; one row can hold 1.6 MB of cells and "
+        "each polyfills two circles"
+    )
