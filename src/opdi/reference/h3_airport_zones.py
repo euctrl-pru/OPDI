@@ -148,6 +148,22 @@ def _polyfill_geojson_udf(geojson_str, resolution):
         cells = set()
         for rings in polygons:
             outer, *holes = rings
+
+            # A ring of one distinct point is not a polygon.
+            #
+            # `radii_nm` starts at 0, and `generate_circle_polygon` at radius 0
+            # returns the same coordinate `num_points` times. h3 v3 answered
+            # that with an empty set, which is why it never surfaced and why
+            # the published table was built without trouble. v4 raises
+            # H3FailedError instead, so the innermost ring of the first airport
+            # killed the stage.
+            #
+            # Empty is the right answer, not an error: a zero-radius circle
+            # encloses no area, so it contains no cells. The annulus it bounds
+            # is emitted by the next radius up, which is why the published
+            # table's smallest `max_c_radius_nm` is 5 and nothing is lost here.
+            if len({(round(x, 12), round(y, 12)) for x, y in outer}) < 3:
+                continue
             outer_latlng = [(lat, lng) for lng, lat in outer]
             holes_latlng = [[(lat, lng) for lng, lat in hole] for hole in holes]
             shape = h3.LatLngPoly(outer_latlng, *holes_latlng)
