@@ -141,8 +141,22 @@ def _step_00a_airport_zones(spark, config, **kwargs):
             airport_types=airport_types,
             airports_df=airports_df,
         )
-    print(f"  Generated {len(zones)} zone-ring records -> table {table_name} "
+    # Count what was actually written, not what was about to be.
+    #
+    # This printed len(zones) -- the pre-explode ring count, 21,712 -- which
+    # says nothing about whether the table has rows in it. That mattered: this
+    # table committed *empty*, with a _SUCCESS marker, through several runs,
+    # and the log line said "Generated 21712" every time. Reading the table
+    # back costs one count and makes the log evidence rather than narration.
+    written = storage.read_table(table_name).count()
+    print(f"  Wrote {written:,} zone rows -> table {table_name} "
           f"(rings to {max_radius:g} NM).")
+    if written == 0:
+        raise RuntimeError(
+            f"{table_name} was written with 0 rows. A zone table with no cells "
+            "silently yields no ADEP or ADES for any flight, so this is a "
+            "failure rather than a result."
+        )
 
 
 #: Prefix marking an extract already reduced to aeroway geometry by

@@ -120,3 +120,22 @@ def test_step_00a_does_not_write_the_local_raw_parquet():
 
     src = inspect.getsource(runner._step_00a_airport_zones)
     assert "save_to_parquet" not in src
+
+
+def test_step_00a_refuses_to_report_an_empty_zone_table_as_success():
+    """The table committed empty, with _SUCCESS, through several runs while the
+    log cheerfully printed "Generated 21712" -- the pre-explode ring count,
+    which is the same whether the polyfill produced cells or NULLs."""
+    import inspect
+
+    from opdi import runner
+
+    import ast
+
+    src = inspect.getsource(runner._step_00a_airport_zones)
+    tree = ast.parse(src.lstrip())
+    # The name appears in the comment explaining its removal; what matters is
+    # that nothing evaluates it.
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "zones" not in names, "still evaluates the pre-explode ring count"
+    assert "written == 0" in src, "an empty zone table must fail, not pass"
