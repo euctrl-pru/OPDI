@@ -69,3 +69,23 @@ def test_no_udf_swallows_an_attribute_error(udf_name):
     assert "except AttributeError" in src, (
         f"{udf_name} must re-raise an h3 API mismatch rather than nulling it"
     )
+
+
+def test_the_project_and_the_image_ask_for_the_same_h3_major():
+    """They were allowed to diverge, and did: pyproject said >=3.7.0 so the
+    driver took 4.5.0, while the image pinned <4 and took 3.7.7."""
+    import re
+
+    proj = (ROOT / "pyproject.toml").read_text()
+    dockerfile = (ROOT / "docker" / "Dockerfile").read_text()
+
+    assert re.search(r'"h3>=4', proj), "pyproject must require h3 v4"
+    assert re.search(r'"h3>=4', dockerfile), "the image must require h3 v4"
+
+
+def test_the_executor_image_tag_is_not_a_pre_v4_build():
+    """v4.1.1-5 and earlier carry h3 3.7.7. Pointing back at one of them
+    reinstates a silently empty detection grid."""
+    cfg = (ROOT / "src" / "opdi" / "config.py").read_text()
+    assert "opdi-spark:v4.1.1-5" not in cfg
+    assert "opdi-spark:v4.1.1-6" in cfg
