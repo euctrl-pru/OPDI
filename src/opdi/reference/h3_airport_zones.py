@@ -54,8 +54,17 @@ def _geo_to_h3_udf(lat, lon, res):
         return None
     try:
         return h3.latlng_to_cell(float(lat), float(lon), int(res))
-    except Exception:
-        return None
+    except AttributeError as exc:
+        raise RuntimeError(
+            # Inline, not a shared helper: a UDF that references a
+            # module-level function forces the worker to import ``opdi``,
+            # which it cannot do -- the same constraint that keeps ``h3``
+            # imported inline here.
+            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
+            "point config.spark.k8s_container_image at the new tag."
+            .format("latlng_to_cell", type(exc).__name__, exc)
+        ) from exc
 
 
 @udf(returnType=IntegerType())
@@ -64,7 +73,22 @@ def _h3_distance_udf(h1, h2):
         return None
     try:
         return int(h3.grid_distance(h1, h2))
+    except AttributeError as exc:
+        raise RuntimeError(
+            # Inline, not a shared helper: a UDF that references a
+            # module-level function forces the worker to import ``opdi``,
+            # which it cannot do -- the same constraint that keeps ``h3``
+            # imported inline here.
+            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
+            "point config.spark.k8s_container_image at the new tag."
+            .format("grid_distance", type(exc).__name__, exc)
+        ) from exc
     except Exception:
+        # Genuinely unreachable pairs: h3 refuses a grid distance across
+        # certain base-cell boundaries. That is a property of the geometry,
+        # not of the install, and NULL is the right answer -- the caller
+        # filters it out.
         return None
 
 
@@ -129,8 +153,17 @@ def _polyfill_geojson_udf(geojson_str, resolution):
             shape = h3.LatLngPoly(outer_latlng, *holes_latlng)
             cells.update(h3.polygon_to_cells(shape, int(resolution)))
         return list(cells)
-    except Exception:
-        return None
+    except AttributeError as exc:
+        raise RuntimeError(
+            # Inline, not a shared helper: a UDF that references a
+            # module-level function forces the worker to import ``opdi``,
+            # which it cannot do -- the same constraint that keeps ``h3``
+            # imported inline here.
+            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
+            "point config.spark.k8s_container_image at the new tag."
+            .format("polygon_to_cells/LatLngPoly", type(exc).__name__, exc)
+        ) from exc
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
