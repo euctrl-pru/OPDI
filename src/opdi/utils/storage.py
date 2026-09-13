@@ -128,12 +128,38 @@ class StorageManager:
 
         if self.use_s3:
             s3_mode = "overwrite" if mode in ("overwrite", "insert_overwrite") else "append"
+            path = self._s3_path(table_name)
+
+            if partition_by and s3_mode == "overwrite":
+                # Replace the partitions by deleting them, then appending.
+                #
+                # Spark's own `partitionOverwriteMode=dynamic` is the obvious
+                # way to do this and does not work here: the S3A **magic
+                # committer**, which this cluster uses so that writes to S3 are
+                # correct without a rename, refuses it outright --
+                #
+                #   java.io.IOException: PathOutputCommitter does not support
+                #   dynamicPartitionOverwrite: MagicCommitter{...}
+                #
+                # It is not a configuration to relax. The magic committer
+                # cannot express "replace these prefixes atomically", so Spark
+                # declines rather than writing something half-replaced.
+                #
+                # Deleting the prefixes ourselves and appending is what dynamic
+                # overwrite does internally, minus the atomicity. The window
+                # matters and is stated rather than hidden: a crash between the
+                # delete and the write leaves that day absent. That is
+                # recoverable -- the day is simply re-run, and the runner's
+                # state file will not have marked it done -- whereas the
+                # alternative, appending without deleting, silently doubles the
+                # day and nothing reports it.
+                self._delete_partitions(df, path, partition_by)
+                s3_mode = "append"
+
             writer = df.write.mode(s3_mode)
             if partition_by:
-                writer = writer.partitionBy(*partition_by).option(
-                    "partitionOverwriteMode", "dynamic"
-                )
-            writer.parquet(self._s3_path(table_name))
+                writer = writer.partitionBy(*partition_by)
+            writer.parquet(path)
         else:
             qualified = f"`{self.project}`.`{table_name}`"
             if mode == "append":
@@ -148,6 +174,28 @@ class StorageManager:
                     df.writeTo(qualified).overwrite()
             else:
                 df.write.mode("overwrite").insertInto(f"{self.project}.{table_name}")
+
+    def _delete_partitions(self, df: DataFrame, path: str, partition_by) -> None:
+        """Remove the Hive-style partition directories *df* is about to write.
+
+        Only the partitions present in *df* are touched; every other day in the
+        table is left alone. The values come from the frame itself, so a day
+        that produced no rows is not deleted -- which is correct: there is
+        nothing to replace it with, and removing it would turn "this run wrote
+        nothing" into "this day no longer exists".
+        """
+        values = df.select(*partition_by).distinct().collect()
+        if not values:
+            return
+
+        jvm = self.spark._jvm
+        hconf = self.spark._jsc.hadoopConfiguration()
+        for row in values:
+            parts = "/".join(f"{c}={row[c]}" for c in partition_by)
+            target = jvm.org.apache.hadoop.fs.Path(f"{path}/{parts}")
+            fs = target.getFileSystem(hconf)
+            if fs.exists(target):
+                fs.delete(target, True)
 
     def create_table(self, sql: str) -> None:
         """Run DDL (CREATE TABLE). No-op in S3 mode."""

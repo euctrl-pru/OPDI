@@ -134,3 +134,51 @@ def test_mode_is_still_required_after_the_signature_change():
     params = inspect.signature(StorageManager.write_table).parameters
     assert params["mode"].default is inspect.Parameter.empty
     assert params["partition_by"].default is None
+
+
+def test_partitioned_overwrite_does_not_rely_on_dynamic_partition_overwrite():
+    """The outcome tests above pass either way, which is how this slipped out.
+
+    A local filesystem supports Spark's `partitionOverwriteMode=dynamic`, so
+    every test here was green while the real cluster failed on it:
+
+        java.io.IOException: PathOutputCommitter does not support
+        dynamicPartitionOverwrite: MagicCommitter{...}
+
+    The S3A magic committer -- which is what makes writes to S3 correct without
+    a rename -- cannot express "replace these prefixes", so Spark refuses
+    rather than writing something half-replaced. This pins the mechanism, since
+    behaviour alone cannot distinguish the two.
+    """
+    import ast
+    import inspect
+
+    from opdi.utils.storage import StorageManager
+
+    tree = ast.parse(inspect.getsource(StorageManager.write_table).lstrip())
+    literals = {
+        n.value for n in ast.walk(tree)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+    assert "partitionOverwriteMode" not in literals, (
+        "the magic committer rejects it; delete the partitions and append"
+    )
+
+
+def test_only_the_partitions_being_written_are_deleted(spark, tmp_path):
+    """The delete is driven by the frame's own values. A day absent from the
+    frame must survive -- otherwise 'this run wrote nothing' would silently
+    become 'this day no longer exists'."""
+    storage, _ = _s3_like_storage(spark, tmp_path)
+    storage.write_table(
+        spark.createDataFrame(
+            [(1, "2026-06-01"), (2, "2026-06-02")], "v int, dof string"
+        ),
+        "t", mode="overwrite", partition_by=["dof"],
+    )
+    storage.write_table(
+        spark.createDataFrame([(99, "2026-06-02")], "v int, dof string"),
+        "t", mode="overwrite", partition_by=["dof"],
+    )
+
+    assert _rows(spark, tmp_path, "t") == {(1, "2026-06-01"), (99, "2026-06-02")}
