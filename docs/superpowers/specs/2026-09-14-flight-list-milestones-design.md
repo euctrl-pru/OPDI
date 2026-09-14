@@ -106,8 +106,8 @@ distinction is the `role` already carried in the ring event.
 
 ## What this does not do
 
-* **`level-start` exceeds `level-end` by 25,369 events a day.** Investigated;
-  see below. Cause identified, fix not included in this change.
+* Nothing further. The level-segment defect found during this design is fixed
+  here; see below.
 
 ## Verification
 
@@ -121,6 +121,19 @@ A day already processed is reprocessed and compared:
   exactly;
 * `RWY_DEP` matches `info.runway` of the same flight's `ATOT` event for every
   row where both exist.
+
+For the level-segment fix specifically, on the same reprocessed day:
+
+* **`level-start` and `level-end` counts are equal**, per flight and in total.
+  They were 129,426 and 104,057; they should agree afterwards.
+* the added ends are the one-sample segments the appendix predicts: every
+  newly-emitted `level-end` shares its `event_time` and `flight_id` with an
+  existing `level-start`.
+* no `level-start` is lost -- the count may only rise, never fall, since the
+  change adds a label and removes none.
+* the difference is reported in the run log rather than left to be noticed:
+  the count of coincident start/end samples is the size of the defect, and is
+  worth recording once.
 
 
 ## Appendix: why `level-start` exceeds `level-end`
@@ -151,10 +164,28 @@ The evidence fits: only 22% of unmatched starts fall within ten minutes of
 `last_seen`, so the great majority are mid-flight, which is where single-sample
 level segments occur.
 
-The fix is to emit both labels where a sample is both, which the array form
-already allows. It is not included here because it changes the level-segment
-counts every published figure rests on, and deserves its own change with its
-own before-and-after.
+### The fix
+
+The chain exists in that shape because it had four things to say and only one
+slot to say them in. Dropping the fuzzy tops removes two of the four, and what
+remains is two independent questions rather than a precedence order:
+
+```
+is_level_start = start_of_segment OR t == first_cr_time
+is_level_end   = (phase in CR,LVL AND next_phase != phase) OR t == last_cr_time
+
+types = array_compact(array(
+    when(is_level_start, "level-start"),
+    when(is_level_end,   "level-end"),
+))
+```
+
+A sample that is both now emits both. The defect is removed structurally rather
+than special-cased: there is no longer a precedence for a one-sample segment to
+fall foul of.
+
+This is a behaviour change to a published family, and every level-segment
+figure rests on it, so it is measured rather than asserted -- see Verification.
 
 **Confidence:** high on the mechanism, from the code and that distribution.
 Not directly measured -- confirming it needs the phase column from
