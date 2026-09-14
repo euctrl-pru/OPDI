@@ -371,7 +371,17 @@ class StateVectorIngestion:
         # Drop partition column (will be added automatically by Iceberg)
         df_cleaned = df_partitioned.drop("event_time_day")
 
-        self.storage.write_table(df_cleaned, "osn_statevectors_v2", mode="append")
+        # Overwrite, not append.
+        #
+        # Raw state vectors are the one table in the pipeline that is purely
+        # derived from an upstream archive: anything lost here is re-fetched,
+        # so there is no reason to accumulate them. Appending a month meant
+        # carrying ~220 GB of intermediate that nothing reads after step 02.
+        #
+        # With ingestion running a day at a time, each day replaces the last
+        # and the table holds only the window currently being segmented --
+        # about 15 GB rather than 220.
+        self.storage.write_table(df_cleaned, "osn_statevectors_v2", mode="overwrite")
 
         # The row count is deliberately not printed here.
         #

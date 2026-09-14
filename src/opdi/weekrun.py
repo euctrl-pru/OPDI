@@ -67,10 +67,10 @@ WEEK_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04")
 #: because day D reads into D+1 to finish the flights that start on D. Running
 #: ingestion per day would have each day depend on the next day's ingest, which
 #: is an ordering knot with nothing to gain.
-WINDOW_STEPS: Tuple[str, ...] = ("00", "01")
+WINDOW_STEPS: Tuple[str, ...] = ("00",)
 
 #: Steps that run once per day, on the tracks that day owns.
-DAY_STEPS: Tuple[str, ...] = ("02", "02a", "03", "04")
+DAY_STEPS: Tuple[str, ...] = ("01", "02", "02a", "03", "04")
 
 #: What each reference substep produces.
 #:
@@ -424,7 +424,25 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     through ``runner.STEPS`` because those entry points take a date *range*
     and would quietly widen a day back into a month.
     """
-    if step == "02":
+    if step == "01":
+        from opdi.ingestion.osn_statevectors import StateVectorIngestion
+
+        # Ingest the days the *segmentation* of this day will read, not just
+        # the day itself. Step 02 reads [D - lookback, D+1 + lookahead), which
+        # spans the previous calendar day and the next, so the ingest covers
+        # D-1 .. D+2 (end-exclusive).
+        #
+        # Each day's ingest replaces the last, because the table is overwritten
+        # -- so what is on disk is always exactly the window being processed.
+        start = day - timedelta(days=1)
+        end = day + timedelta(days=2)
+        print(f"  ingesting {start} .. {end} (the window day {day} segments over)")
+        sv = StateVectorIngestion(spark, config)
+        if config.project.project_name == "opensky":
+            sv.ingest_from_s3(start_date=start, end_date=end)
+        else:
+            sv.ingest(start_date=start, end_date=end)
+    elif step == "02":
         from opdi.pipeline.tracks import TrackProcessor
 
         TrackProcessor(spark, config).process_day(day, skip_if_processed=False)

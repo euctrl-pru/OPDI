@@ -338,13 +338,41 @@ def test_the_window_and_day_steps_together_are_the_week_steps():
     assert set(WINDOW_STEPS).isdisjoint(DAY_STEPS)
 
 
-def test_segmentation_onwards_runs_per_day_and_ingestion_does_not():
-    """Ingestion is by calendar date and has no track semantics; everything
-    after it works on tracks, which belong to a day."""
+def test_everything_except_reference_data_runs_per_day():
+    """Only step 00 is window-wide; it builds tables with no notion of a day.
+
+    Ingestion joined the per-day steps so that raw state vectors -- the one
+    table that is purely re-fetchable from upstream -- can be overwritten each
+    day instead of accumulating. A month of them was ~220 GB of intermediate
+    that nothing reads after step 02.
+    """
     from opdi.weekrun import DAY_STEPS, WINDOW_STEPS
 
-    assert WINDOW_STEPS == ("00", "01")
-    assert DAY_STEPS == ("02", "02a", "03", "04")
+    assert WINDOW_STEPS == ("00",)
+    assert DAY_STEPS == ("01", "02", "02a", "03", "04")
+
+
+def test_a_day_ingests_the_window_its_segmentation_will_read():
+    """Day D is segmented over [D - lookback, D+1 + lookahead), which touches
+    the previous calendar day and the next. Ingesting only D would leave the
+    segmentation reading data that is not there -- and the truncation check
+    would then report every late departure as cut off."""
+    import inspect
+
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_day_step)
+    assert "day - timedelta(days=1)" in src
+    assert "day + timedelta(days=2)" in src
+
+
+def test_statevectors_are_replaced_not_accumulated():
+    import inspect
+
+    from opdi.ingestion import osn_statevectors
+
+    src = inspect.getsource(osn_statevectors)
+    assert 'write_table(df_cleaned, "osn_statevectors_v2", mode="overwrite")' in src
 
 
 def test_days_in_is_inclusive_of_both_ends():
@@ -367,13 +395,13 @@ def test_a_day_step_records_completion_per_day():
     assert a == "02@2026-06-01"
 
 
-def test_a_week_of_four_day_steps_is_thirty_units():
-    """Two window steps plus four per day across seven days. Stated as a number
+def test_a_week_is_thirty_six_units():
+    """One window step plus five per day across seven days. Stated as a number
     so a change to either list is visible rather than inferred."""
     from opdi.weekrun import DAY_STEPS, WINDOW_STEPS, days_in
 
     days = days_in(date(2026, 6, 1), date(2026, 6, 7))
-    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 30
+    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 36
 
 
 def test_ingestion_reaches_past_the_window():
@@ -386,11 +414,13 @@ def test_ingestion_reaches_past_the_window():
 
 
 def test_a_non_day_step_is_rejected_by_the_day_dispatcher():
-    """Calling a window step per day would re-ingest the week seven times."""
+    """Calling a window step per day would rebuild reference data every day."""
     from opdi.weekrun import run_day_step
 
+    # "00" builds reference tables for the whole campaign; running it per day
+    # would rebuild them thirty times.
     with pytest.raises(ValueError, match="not a per-day step"):
-        run_day_step(None, None, "01", date(2026, 6, 1), {})
+        run_day_step(None, None, "00", date(2026, 6, 1), {})
 
 
 # --- reference data is built once, not once per day -------------------------
