@@ -301,7 +301,7 @@ class _StubStorage:
     def read_table(self, name):
         return self._tables[name]
 
-    def write_table(self, df, name, mode="append", partition_by=None):
+    def write_table(self, df, name, mode="append", partition_by=None, partition_values=None):
         self.written[name] = df
 
 

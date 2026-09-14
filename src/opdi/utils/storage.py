@@ -6,7 +6,7 @@ mode (dev, live) tables are managed via the catalog. In S3 mode (opensky)
 tables are stored as parquet directories on S3.
 """
 
-from typing import Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from pyspark.sql import SparkSession, DataFrame
 from opdi.config import OPDIConfig
@@ -58,6 +58,7 @@ class StorageManager:
         table_name: str,
         mode: str,
         partition_by: Optional[Sequence[str]] = None,
+        partition_values: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
         """
         Write *df* to *table_name*.
@@ -153,9 +154,10 @@ class StorageManager:
                 # state file will not have marked it done -- whereas the
                 # alternative, appending without deleting, silently doubles the
                 # day and nothing reports it.
-                self._delete_partitions(df, path, partition_by)
+                persisted = self._delete_partitions(
+                    df, path, partition_by, partition_values
+                )
                 s3_mode = "append"
-                persisted = True
             else:
                 persisted = False
 
@@ -182,7 +184,7 @@ class StorageManager:
             else:
                 df.write.mode("overwrite").insertInto(f"{self.project}.{table_name}")
 
-    def _delete_partitions(self, df: DataFrame, path: str, partition_by) -> None:
+    def _delete_partitions(self, df: DataFrame, path: str, partition_by, values=None) -> bool:
         """Remove the Hive-style partition directories *df* is about to write.
 
         Only the partitions present in *df* are touched; every other day in the
@@ -191,6 +193,18 @@ class StorageManager:
         nothing to replace it with, and removing it would turn "this run wrote
         nothing" into "this day no longer exists".
         """
+        if values is not None:
+            # The caller knew, so nothing has to be computed to find out.
+            #
+            # Probing the frame for its partition values evaluates it, and the
+            # write then evaluates it again. Persisting instead of probing only
+            # trades one cost for another: measured, it bought 4% on step 04
+            # and cost 8% on step 02a, whose output is 3.7 GB and cheap to
+            # recompute. Every day-scoped write already knows its day, so the
+            # honest fix is to pass it rather than to rediscover it.
+            self._delete_partition_paths(path, partition_by, values)
+            return False
+
         # Persisted first, because this collect evaluates the frame.
         #
         # Asking which partitions a frame will write means computing the frame.
@@ -207,8 +221,13 @@ class StorageManager:
         df.persist(StorageLevel.MEMORY_AND_DISK)
         values = df.select(*partition_by).distinct().collect()
         if not values:
-            return
+            return True
 
+        self._delete_partition_paths(path, partition_by, values)
+        return True
+
+    def _delete_partition_paths(self, path, partition_by, values) -> None:
+        """Remove one Hive-style directory per partition value."""
         jvm = self.spark._jvm
         hconf = self.spark._jsc.hadoopConfiguration()
         for row in values:

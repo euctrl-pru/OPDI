@@ -147,7 +147,10 @@ class TrackCleaner:
             # and leaves every other day alone. Re-cleaning a day is therefore
             # idempotent rather than duplicating it.
             self.storage.write_table(
-                cleaned, TARGET_TABLE, mode="overwrite", partition_by=["dof"]
+                cleaned, TARGET_TABLE, mode="overwrite", partition_by=["dof"],
+                # Known, so the partition does not have to be rediscovered by
+                # evaluating the frame a second time.
+                partition_values=[{"dof": day}],
             )
         else:
             # Append, because the monthly pipeline adds a month this table does
