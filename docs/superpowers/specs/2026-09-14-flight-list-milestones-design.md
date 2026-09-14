@@ -242,3 +242,30 @@ Network-wide, across 1,036 aerodromes with layouts, blocks and stands reach
 about a third of flights. `STND_DEP` tracks `AOBT` almost exactly (32.8%
 against 31.6%) because both come from the same parking-position detection --
 so a flight with a block time nearly always has a stand, and vice versa.
+
+At a single well-observed aerodrome the picture is very different. EBBR, same
+day:
+
+| Column | EBBR | Network |
+|---|---|---|
+| `ALDT` | 99.1% | 71.6% |
+| `AIBT` | 96.2% | 35.1% |
+| `STND_ARR` | 96.2% | 35.1% |
+| `STND_DEP` | 72.3% | 32.8% |
+| `AOBT` | 67.4% | 31.6% |
+| `ATOT` | 55.4% | 49.5% |
+
+The arrival side is effectively complete: 96% of arrivals get both a block time
+and a stand. Whatever the 0.1% in the industrialisation plan measured, it is
+not what the code does now.
+
+**Two caveats on that table, neither resolved.** The denominators are 534
+departure legs and 318 arrival legs, but EBBR operates on the order of 230 of
+each per day. The arrival count is plausible and the departure count is not, so
+ADEP appears to be assigned to EBBR for legs that did not depart there. Every
+departure percentage above is therefore a floor. And `ATOT` (55.4%) falls
+*below* `AOBT` (67.4%) on that same denominator, which is backwards -- a
+take-off happens fast, in the open, with good reception, while a stand is the
+hardest place on the airfield to observe. Both are open questions, not
+findings, and neither blocks this work: the enrichment step reports whatever
+the events carry.
