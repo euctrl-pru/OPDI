@@ -641,3 +641,38 @@ def test_the_name_no_longer_claims_a_week():
     assert hasattr(periodrun, "run_period")
     assert hasattr(periodrun, "PERIOD_STEPS")
     assert not hasattr(periodrun, "run_week")
+
+
+def test_every_statevector_write_partitions_by_day():
+    """There are two write sites, and only one being fixed is what broke the
+    month run.
+
+    `_write_batch` serves the local-file path; `ingest_from_s3` serves the
+    opensky cluster. Partitioning only the first left the second a plain
+    overwrite, so a per-day ingest wiped the whole table on every call and only
+    the last day survived. Day D's segmentation then read a window that was
+    two-thirds absent and wrote an empty osn_tracks, whose schema could not be
+    inferred downstream.
+    """
+    import ast
+    import inspect
+
+    from opdi.ingestion import osn_statevectors
+
+    tree = ast.parse(inspect.getsource(osn_statevectors))
+    writes = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "attr", "") == "write_table"
+        and any(
+            isinstance(a, ast.Constant) and a.value == "osn_statevectors_v2"
+            for a in n.args
+        )
+    ]
+    assert len(writes) >= 2, "expected both write sites to still exist"
+    for w in writes:
+        kw = {k.arg for k in w.keywords}
+        assert "partition_by" in kw, (
+            "a statevector write without partition_by overwrites the whole "
+            "table, discarding every other day in the ingest window"
+        )
