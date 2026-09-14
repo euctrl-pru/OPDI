@@ -425,6 +425,26 @@ def _step_04_extract_events(spark, config, start_date, end_date, **kwargs):
     processor.process_date_range(start_date, end_date)
 
 
+def _step_04b_enrich_flight_list(spark, config, start_date, end_date, **kwargs):
+    """Step 04b: fold the milestones back into the flight list.
+
+    Numbered 04b rather than 05 because 05 is the published parquet export and
+    renumbering it would break every operator's muscle memory for no gain.
+    """
+    print("\n" + "=" * 70)
+    print(f"STEP 04b - Flight list milestones ({start_date} to {end_date})")
+    print("=" * 70)
+
+    from opdi.pipeline.flight_list_step import enrich_day
+    from opdi.utils.storage import StorageManager
+
+    storage = StorageManager(spark, config)
+    written = enrich_day(storage, config.events, start_date, end_date)
+    if written is None:
+        return
+    print(f"Flight list enriched: {written:,} rows.")
+
+
 def _step_05_export_parquet(spark, config, start_date, end_date, **kwargs):
     """Step 05: Export OPDI tables to parquet files."""
     print("\n" + "=" * 70)
@@ -507,6 +527,7 @@ STEPS = {
     "02a": _step_02a_clean_tracks,
     "03": _step_03_generate_flight_list,
     "04": _step_04_extract_events,
+    "04b": _step_04b_enrich_flight_list,
     "05": _step_05_export_parquet,
     "06": _step_06_cleanup,
     "07": _step_07_basic_stats,

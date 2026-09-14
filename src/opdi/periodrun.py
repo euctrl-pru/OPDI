@@ -57,7 +57,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #: ``runner.REFERENCE_SUBSTEPS``. Skipping 00 is still possible
 #: (``--steps 01 02 02a 03 04``), and then the reference tables must already
 #: exist, which ``preflight`` checks.
-PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04")
+PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04", "04b")
 
 #: Steps that run once for the whole window, not per day.
 #:
@@ -70,7 +70,7 @@ PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04")
 WINDOW_STEPS: Tuple[str, ...] = ("00",)
 
 #: Steps that run once per day, on the tracks that day owns.
-DAY_STEPS: Tuple[str, ...] = ("01", "02", "02a", "03", "04")
+DAY_STEPS: Tuple[str, ...] = ("01", "02", "02a", "03", "04", "04b")
 
 #: What each reference substep produces.
 #:
@@ -484,6 +484,16 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         from opdi.pipeline.events import FlightEventProcessor
 
         FlightEventProcessor(spark, config).process_day(day, skip_if_processed=False)
+    elif step == "04b":
+        from opdi.pipeline.flight_list_step import enrich_day
+        from opdi.utils.storage import StorageManager
+
+        # One day at a time, and only the day this unit owns: the enrichment
+        # replaces the flight list partition it reads, so a wider window would
+        # rewrite days this unit was not asked for.
+        written = enrich_day(StorageManager(spark, config), config.events, day, day)
+        if written is not None:
+            print(f"  flight list enriched: {written:,} rows")
     else:
         raise ValueError(
             f"{step!r} is not a per-day step; expected one of {DAY_STEPS}."
