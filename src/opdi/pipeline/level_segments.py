@@ -307,15 +307,34 @@ def level_segments_pru(
     # that sample's value exactly rather than a rounding of it.
     order = Window.partitionBy(*part).orderBy("_ts", F.col("_is_grid").cast("int"))
     back = order.rowsBetween(Window.unboundedPreceding, Window.currentRow)
-    fwd = order.rowsBetween(Window.currentRow, Window.unboundedFollowing)
+
+    # The forward look-ahead is asked of the reversed ordering, not of a
+    # forward-shrinking frame.
+    #
+    # ``first(..., ignorenulls=True)`` over ``rowsBetween(currentRow,
+    # unboundedFollowing)`` gives Spark a frame that shrinks as the row
+    # advances, and it answers each row by scanning to the end of the
+    # partition -- quadratic in partition length, applied twice per value
+    # column. The identical fix in ``cleaning/native._next_valid`` took step
+    # 02a from 100 minutes to 8.8.
+    #
+    # Both ordering keys are reversed, so the order is exactly inverted rather
+    # than merely re-sorted. "First at or after this row, reading forwards" and
+    # "last at or before this row, reading backwards" then select the same row,
+    # ties included -- which matters here, because the ordering deliberately
+    # places a real sample before the grid instant it coincides with.
+    order_rev = Window.partitionBy(*part).orderBy(
+        F.col("_ts").desc(), F.col("_is_grid").cast("int").desc()
+    )
+    fwd = order_rev.rowsBetween(Window.unboundedPreceding, Window.currentRow)
 
     for c in value_cols:
         known = F.when(F.col(c).isNotNull(), F.col("_ts"))
         combined = (
             combined.withColumn(f"{c}__pt", F.last(known, True).over(back))
             .withColumn(f"{c}__pv", F.last(F.col(c), True).over(back))
-            .withColumn(f"{c}__nt", F.first(known, True).over(fwd))
-            .withColumn(f"{c}__nv", F.first(F.col(c), True).over(fwd))
+            .withColumn(f"{c}__nt", F.last(known, True).over(fwd))
+            .withColumn(f"{c}__nv", F.last(F.col(c), True).over(fwd))
         )
     for c in value_cols:
         pt, pv = F.col(f"{c}__pt"), F.col(f"{c}__pv")

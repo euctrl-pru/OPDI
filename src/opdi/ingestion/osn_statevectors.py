@@ -373,7 +373,20 @@ class StateVectorIngestion:
 
         self.storage.write_table(df_cleaned, "osn_statevectors_v2", mode="append")
 
-        print(f"Written {df_cleaned.count()} records to osn_statevectors_v2")
+        # The row count is deliberately not printed here.
+        #
+        # `df_cleaned.count()` after the write is a second action on the same
+        # plan, so the whole ingestion -- the S3 read and every transform --
+        # ran twice, to produce a number for a log line. Nothing cached it in
+        # between.
+        #
+        # A diagnostic that costs as much as the step it describes has to be
+        # asked for. `OPDI_REPORT_INGEST_ROWS=1` restores it.
+        if os.environ.get("OPDI_REPORT_INGEST_ROWS"):
+            print(f"Written {df_cleaned.count()} records to osn_statevectors_v2")
+        else:
+            print("Written statevectors to osn_statevectors_v2 "
+                  "(set OPDI_REPORT_INGEST_ROWS=1 for a row count)")
 
     def cleanup_local_files(self, file_names: List[str]) -> None:
         """
