@@ -1478,10 +1478,22 @@ class FlightEventProcessor:
         print(f"Processing flight events for month: {month}")
 
         _batch = day if day is not None else month
-        calc_horizontal = _batch not in self._load_processed("horizontal")
-        calc_vertical = _batch not in self._load_processed("vertical")
-        calc_hexaero = _batch not in self._load_processed("hexaero")
-        calc_seen = _batch not in self._load_processed("seen")
+
+        # ``skip_if_processed=False`` means recompute, not merely "do not return
+        # early".
+        #
+        # These four flags are what decide whether each family is computed at
+        # all. Reading them from the progress log unconditionally meant a
+        # caller asking for a rebuild got a step that ran, wrote nothing and
+        # reported success: the runner's --force re-ran the unit, every flag
+        # came back False, and step 04 "finished" in 35 seconds having computed
+        # nothing. A force that does not force is worse than no force, because
+        # the timing looks like a result.
+        _redo = not skip_if_processed
+        calc_horizontal = _redo or _batch not in self._load_processed("horizontal")
+        calc_vertical = _redo or _batch not in self._load_processed("vertical")
+        calc_hexaero = _redo or _batch not in self._load_processed("hexaero")
+        calc_seen = _redo or _batch not in self._load_processed("seen")
 
         if not any([calc_horizontal, calc_vertical, calc_hexaero, calc_seen]):
             if skip_if_processed:
