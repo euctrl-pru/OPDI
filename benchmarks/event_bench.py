@@ -188,6 +188,17 @@ LADDER = [
 #: values plus the old version string. Every V4 rung is applied cumulatively on
 #: top of this, so V00 *is* what V3 shipped and V07 must equal `EventConfig()`
 #: field for field -- `verify_plan_v4` asserts both rather than trusting them.
+#: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
+#: v0.3.0 when the duplicate milestones were merged, so v0.2.0 -- which
+#: published ``ATOT`` beside ``airborne`` and ``ALDT`` beside ``touchdown``,
+#: ``off-block``/``on-block`` under their A-CDM names, and both arms of the
+#: tops -- no longer has a constructor. Anything that needs to measure the
+#: merge against what preceded it starts here.
+V020_BASE = dict(
+    merge_duplicate_milestones=False,
+    events_version="events_v0.2.0",
+)
+
 V4_BASE = dict(
     emit_runway_milestones=False,
     emit_pru_tops=False,

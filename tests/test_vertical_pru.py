@@ -184,8 +184,8 @@ def test_the_events_name_the_algorithm_that_produced_them(spark):
                             EventConfig())
     by_type = {r["type"]: r for r in events.collect()}
 
-    assert set(by_type) == {"top-of-climb-cco", "top-of-descent-cdo"}
-    info = json.loads(by_type["top-of-climb-cco"]["info"])
+    assert set(by_type) == {"top-of-climb", "top-of-descent"}
+    info = json.loads(by_type["top-of-climb"]["info"])
     assert info["method"] == "pru"
     assert info["relocated"] is True
     assert info["analysis_radius_nm"] == pytest.approx(200.0)

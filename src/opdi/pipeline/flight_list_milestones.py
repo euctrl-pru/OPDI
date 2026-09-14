@@ -59,7 +59,11 @@ _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 
 #: Columns this step adds, in the order it adds them.
 ADDED_COLUMNS = (
-    ["ATOT", "ALDT", "AOBT", "AIBT", "RWY_DEP", "RWY_ARR", "STND_DEP", "STND_ARR"]
+    [
+        "ATOT", "ALDT", "AOBT", "AIBT",
+        "RWY_DEP", "RWY_DEP_BEARING_DEG", "RWY_ARR", "RWY_ARR_BEARING_DEG",
+        "STND_DEP", "STND_ARR",
+    ]
     + [f"C{nm}_ARR" for nm in FLIGHT_LIST_RING_RADII_NM]
     + [f"C{nm}_DEP" for nm in FLIGHT_LIST_RING_RADII_NM]
 )
@@ -86,6 +90,17 @@ def _runway() -> Column:
     won for that flight without this module having to know which.
     """
     return F.coalesce(_info("runway"), _info("rwy_ident"))
+
+
+def _runway_bearing() -> Column:
+    """The runway centreline's true bearing, in degrees.
+
+    A property of the pavement, derived from the threshold geometry -- not the
+    aircraft's heading over it. Null is ordinary: the runway may not have been
+    named, and any event written before the key existed carries no value for
+    it, which reads the same way.
+    """
+    return _info("runway_bearing_deg").cast("double")
 
 
 def _first(cond: Column, value: Column) -> Column:
@@ -203,7 +218,9 @@ def enrich_flight_list(
         # other ATOT on the same track: same predicate, same extreme, so the
         # pair cannot disagree.
         _first(is_(_ATOT), _runway()).alias("RWY_DEP"),
+        _first(is_(_ATOT), _runway_bearing()).alias("RWY_DEP_BEARING_DEG"),
         _last(is_(_ALDT), _runway()).alias("RWY_ARR"),
+        _last(is_(_ALDT), _runway_bearing()).alias("RWY_ARR_BEARING_DEG"),
         _first(is_(_STAND_EXIT), _info("osm_ref")).alias("STND_DEP"),
         _last(is_(_STAND_ENTRY), _info("osm_ref")).alias("STND_ARR"),
         *[ring(nm, arrival=True).alias(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM],

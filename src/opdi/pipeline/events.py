@@ -468,6 +468,10 @@ def calculate_runway_events(
         to_json(
             struct(
                 col("rwy_ident").alias("runway"),
+                # Same quantity, same key as the A-CDM arm writes: under the
+                # merge both arms publish the same ``type``, so a consumer must
+                # not have to know which produced a row to read its runway.
+                col("rwy_bearing").cast("double").alias("runway_bearing_deg"),
                 col("apt_ident").alias("apt_icao"),
                 col("role").alias("role"),
                 col("bearing_error").alias("bearing_error_deg"),
@@ -486,6 +490,73 @@ def calculate_runway_events(
             )
         ).alias("info"),
     )
+
+
+#: The types the merge reconciles. Each is produced by two detectors answering
+#: the same operational question, and each row carries ``info.method`` naming
+#: the arm that produced it.
+MERGED_TYPES = ("ATOT", "ALDT")
+
+#: Which arm wins where both fired. A-CDM is the interpolated crossing of
+#: ``runway_airborne_height_ft`` above field elevation; legacy is the extreme
+#: *sample* of a detection window, which carries a measured +19 s median bias
+#: on departures. Lower sorts first.
+_METHOD_RANK = {"acdm": 0, "legacy": 1}
+
+
+def merge_milestone_duplicates(
+    df_events: DataFrame, config: Optional[EventConfig] = None
+) -> DataFrame:
+    """Collapse the two arms of ``ATOT``/``ALDT`` to one event per flight.
+
+    ``events_v0.2.0`` published two events for one purpose: ``ATOT`` beside
+    ``airborne``, ``ALDT`` beside ``touchdown``. Which to trust depended on the
+    aerodrome, so every consumer had to encode that judgement itself. Under
+    ``merge_duplicate_milestones`` both arms emit the same ``type`` and this
+    keeps one row per ``(track_id, type)``::
+
+        ATOT = coalesce(A-CDM airborne,  legacy ATOT)
+        ALDT = coalesce(A-CDM touchdown, legacy ALDT)
+
+    A-CDM wins on accuracy where it exists; legacy fills the rest, which is
+    most of them -- the A-CDM family needs surface reception and reaches
+    roughly 4-7% of the network against legacy's ~90%.
+
+    **This is a coalesce, so coverage can only rise.** A flight with a legacy
+    ``ATOT`` and no A-CDM one keeps the legacy row unchanged; a flight with
+    both loses the legacy row, not the milestone.
+
+    Only the merged types are touched. Every other row passes through
+    untouched, including those with no ``method`` at all -- a type with one
+    source has nothing to disambiguate and is not this function's business.
+    """
+    config = config or EventConfig()
+    if not config.merge_duplicate_milestones:
+        return df_events
+
+    merged = col("type").isin(*MERGED_TYPES)
+    rank = F.coalesce(
+        F.create_map(
+            *[x for k, v in _METHOD_RANK.items() for x in (lit(k), lit(v))]
+        )[F.get_json_object(col("info"), "$.method")],
+        # An unrecognised or absent method sorts last: it is neither arm, so it
+        # may fill a gap but must never displace one that is.
+        lit(len(_METHOD_RANK)),
+    )
+    # ``event_time`` breaks a tie within one arm so the choice is deterministic
+    # across runs -- two rows of the same method for one flight would otherwise
+    # be resolved by partition order, which is the non-determinism this table
+    # has already been bitten by once.
+    best = Window.partitionBy("track_id", "type").orderBy(
+        rank.asc(), col("event_time").asc()
+    )
+    kept = (
+        df_events.filter(merged)
+        .withColumn("_rank", F.row_number().over(best))
+        .filter(col("_rank") == 1)
+        .drop("_rank")
+    )
+    return df_events.filter(~merged | col("type").isNull()).unionByName(kept)
 
 
 def calculate_ring_crossing_events(
@@ -1414,6 +1485,11 @@ class FlightEventProcessor:
 
         if df_events is None:
             return
+
+        # One variable per purpose, before anything is stamped or keyed: the
+        # event id hashes the type, so merging after it would leave two ids
+        # for one milestone.
+        df_events = merge_milestone_duplicates(df_events, self.events)
 
         df_events.cache()
         df_events = df_events.withColumn("source", lit("OSN"))

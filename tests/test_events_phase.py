@@ -118,7 +118,13 @@ def test_a_rule_with_a_missing_input_does_not_win(spark):
 
 
 def test_a_complete_rule_still_wins(spark):
-    """The guard must not suppress phases where every input is present."""
+    """The guard must not suppress phases where every input is present.
+
+    Asserted on ``level-start`` rather than on a top: the shipped
+    configuration publishes the PRU tops from ``vertical_pru`` and this
+    function no longer emits the fuzzy pair at all. The phase it finds is what
+    is under test, and a cruise phase is what produces a level segment.
+    """
     samples = [
         {"t": i * 5, "baro_altitude": _m(35000), "vert_rate": 0.0,
          "velocity": 600 / KT_PER_MPS}
@@ -128,7 +134,11 @@ def test_a_complete_rule_still_wins(spark):
 
     types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
 
-    assert "top-of-climb" in types
+    assert "level-start" in types
+    assert "top-of-climb" not in types, (
+        "the fuzzy tops belong to vertical_pru now; two definitions of a top of "
+        "climb in one table is what this release removes"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -262,3 +272,61 @@ def test_the_arrival_end_elevation_also_counts(spark):
     types = {r.type for r in calculate_horizontal_segment_events(sdf, GROUND_CONTACT).collect()}
 
     assert "take-off" in types
+
+
+# ---------------------------------------------------------------------------
+# The level-segment defect
+
+
+def _level_types(spark, labels, config):
+    out = calculate_horizontal_segment_events(_measured(_labelled(spark, labels)), config)
+    return [r.type for r in out.orderBy("event_time", "type").collect()]
+
+
+def test_a_one_sample_level_segment_emits_both_a_start_and_an_end(spark):
+    """The defect, and the fix, in one trajectory.
+
+    The middle sample is the only ``LVL`` one, so it is simultaneously the
+    start and the end of a level segment. The published chain was
+    first-match-wins with four things to say in one slot: this sample matched
+    the "level-start" branch and could never reach the "level-end" one, so it
+    emitted a start and no end. Measured over 2026-06-01 that cost 28,855
+    unmatched starts across 17,356 of 44,461 flights.
+    """
+    labels = ["CL", "CL", "LVL", "DE", "DE"]
+
+    got = _level_types(spark, labels, EventConfig())
+
+    assert got.count("level-start") == got.count("level-end") == 1
+
+
+def test_the_published_chain_still_loses_that_end(spark):
+    """The fix is a behaviour change to a published family, so the old
+    behaviour is pinned rather than assumed -- otherwise nothing distinguishes
+    "fixed" from "never broken"."""
+    labels = ["CL", "CL", "LVL", "DE", "DE"]
+
+    got = _level_types(spark, labels, EventConfig(emit_runway_milestones=False))
+
+    assert got.count("level-start") == 1
+    assert got.count("level-end") == 0
+
+
+def test_a_multi_sample_level_segment_is_unchanged_by_the_fix(spark):
+    """The fix adds a label to one sample; it must not double-count the
+    ordinary case, where the start and the end are different samples."""
+    labels = ["CL", "CL", "LVL", "LVL", "LVL", "DE", "DE"]
+
+    got = _level_types(spark, labels, EventConfig())
+
+    assert got.count("level-start") == got.count("level-end") == 1
+
+
+def test_starts_and_ends_balance_across_several_segments(spark):
+    """The property the run log checks network-wide, at the scale of one
+    track: every start has an end."""
+    labels = ["CL", "LVL", "CL", "CL", "LVL", "LVL", "CL", "LVL", "DE"]
+
+    got = _level_types(spark, labels, EventConfig())
+
+    assert got.count("level-start") == got.count("level-end")

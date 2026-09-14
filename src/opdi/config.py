@@ -1177,8 +1177,16 @@ class EventConfig:
     runway itself, because a go-around is initiated on final."""
 
     # ----- one variable per purpose (v0.3.0) ----------------------------
-    merge_duplicate_milestones: bool = True
+    merge_duplicate_milestones: Optional[bool] = None
     """Publish one event type per operational question rather than two.
+
+    **Defaults to following ``emit_runway_milestones``.** Left as ``None`` it
+    resolves in ``__post_init__`` to whatever that flag says, because the merge
+    has nothing to do when the A-CDM family is off -- it exists to reconcile
+    that family with the legacy one. This keeps ``EventConfig()`` fully merged
+    and ``EventConfig(emit_runway_milestones=False)`` coherent without either
+    caller naming both flags. Setting it ``True`` while the A-CDM family is off
+    is contradictory and raises rather than being quietly ignored.
 
     ``events_v0.2.0`` ships two events for one purpose. ``ATOT`` and
     ``airborne`` both name the take-off instant; ``ALDT`` and ``touchdown``
@@ -1351,13 +1359,18 @@ class EventConfig:
     change what a published version means. Never mutate a released value."""
 
     def __post_init__(self) -> None:
-        if self.merge_duplicate_milestones and not self.emit_runway_milestones:
+        if self.merge_duplicate_milestones is None:
+            object.__setattr__(
+                self, "merge_duplicate_milestones", self.emit_runway_milestones
+            )
+        elif self.merge_duplicate_milestones and not self.emit_runway_milestones:
             raise ValueError(
-                "merge_duplicate_milestones requires emit_runway_milestones. "
+                "merge_duplicate_milestones=True requires emit_runway_milestones. "
                 "The merge exists to reconcile the A-CDM family with the legacy "
                 "one; with A-CDM off there is nothing to merge, and the fuzzy "
                 "take-off/landing pair would be published beside a vocabulary "
-                "that has no place for it."
+                "that has no place for it. Leave it unset to follow "
+                "emit_runway_milestones."
             )
         if self.level_method not in ("icao", "pru"):
             raise ValueError(

@@ -7,6 +7,8 @@ threshold cannot be read in the wrong unit, and that ``legacy()`` still
 reproduces what was published.
 """
 
+import typing
+
 import pytest
 
 from opdi.config import EventConfig, OPDIConfig
@@ -32,7 +34,16 @@ def test_every_measurement_carries_its_unit(field_name, field):
     metres, feet, flight levels and feet per minute in one function, and the
     conversion factors were repeated rather than shared.
     """
-    if field.type in (bool, str, "bool", "str"):
+    # ``Optional[bool]`` is still a decision, not a measurement -- the flag
+    # that follows another flag when left unset is spelled that way -- so the
+    # Optional is unwrapped before the rule is applied rather than exempted
+    # from it.
+    declared = field.type
+    if typing.get_origin(declared) is typing.Union:
+        declared = next(
+            (a for a in typing.get_args(declared) if a is not type(None)), declared
+        )
+    if declared in (bool, str, "bool", "str"):
         return
     # Two numeric exceptions, both carrying their unit in the name already:
     # a set of flight levels and a flight level ceiling.
@@ -100,7 +111,7 @@ def test_version_string_is_new_and_the_published_one_is_untouched():
     ``events_v0.0.2`` must remain reachable, because a legacy run has to stamp
     it for a re-processed month to match the release it reproduces.
     """
-    assert EventConfig().events_version == "events_v0.2.0"
+    assert EventConfig().events_version == "events_v0.3.0"
     assert EventConfig.legacy().events_version == "events_v0.0.2"
 
 
@@ -142,8 +153,14 @@ def test_unimplemented_behaviour_ships_inert():
 def test_the_rings_are_the_ones_icao_defines():
     """40 NM is ICAO's ASMA cylinder for KPI08 and the KPI05 reference area;
     100 NM is the documented variant for aerodromes whose holding lies outside
-    it."""
-    assert tuple(EventConfig().ring_radii_nm) == (40.0, 100.0)
+    it. The other four exist because the flight list publishes a
+    ``C{NM}_ARR``/``C{NM}_DEP`` column for each, which makes the set a
+    contract rather than a tuning parameter.
+
+    Not every 10 NM: twelve radii would grow the event table by roughly 30% --
+    1.77M to about 2.3M rows a day -- to carry six columns nobody reads.
+    """
+    assert tuple(EventConfig().ring_radii_nm) == (40.0, 50.0, 60.0, 100.0, 110.0, 120.0)
     assert EventConfig().ring_hysteresis_nm > 0
     # A legacy run emits no ring event at all -- they did not exist.
     assert tuple(EventConfig.legacy().ring_radii_nm) == ()
@@ -188,7 +205,7 @@ def test_cruise_speed_membership_is_left_at_openaps_values():
 
 def test_v4_defaults_are_the_shipped_configuration():
     c = EventConfig()
-    assert c.events_version == "events_v0.2.0"
+    assert c.events_version == "events_v0.3.0"
     assert c.emit_runway_milestones is True
     assert c.emit_pru_tops is True
     assert c.level_method == "pru"
@@ -225,3 +242,23 @@ def test_pru_window_height_follows_the_vertical_speed_limit():
     assert c.level_window_height_ft() == pytest.approx(
         c.level_vertical_speed_limit_ftmin * c.level_window_seconds / 60.0
     )
+
+
+def test_the_merge_follows_the_acdm_family_unless_told_otherwise():
+    """Left unset it is not an independent switch.
+
+    The merge exists only to reconcile the A-CDM family with the legacy one, so
+    ``EventConfig(emit_runway_milestones=False)`` must stay coherent without the
+    caller naming a second flag. Every reconstruction of an older configuration
+    in the benchmark ladders does exactly that.
+    """
+    assert EventConfig().merge_duplicate_milestones is True
+    assert EventConfig(emit_runway_milestones=False).merge_duplicate_milestones is False
+    assert EventConfig.legacy().merge_duplicate_milestones is False
+
+
+def test_merging_without_the_acdm_family_is_refused():
+    """Silently ignoring the contradiction would publish the fuzzy
+    take-off/landing pair beside a vocabulary that has no place for it."""
+    with pytest.raises(ValueError, match="merge_duplicate_milestones"):
+        EventConfig(merge_duplicate_milestones=True, emit_runway_milestones=False)

@@ -620,6 +620,14 @@ def _info(milestone: Optional[str], method: Optional[str] = None):
         # ``rwy_ident`` is kept beside it as the name this family shipped with.
         F.col("rwy_ident").alias("runway"),
         F.col("rwy_ident").alias("rwy_ident"),
+        # The centreline's TRUE bearing, from the threshold geometry -- a
+        # property of the pavement, identical for every movement on it. Not a
+        # heading: a heading is magnetic and wind-corrected, so two aircraft
+        # using this runway in the same minute report different ones. The
+        # designator fixes the direction only to the nearest ten degrees, and
+        # is null whenever the runway could not be named, so this is what makes
+        # "which way was the runway used" answerable.
+        F.col("rwy_bearing").cast("double").alias("runway_bearing_deg"),
         F.col("apt_ident").alias("apt_icao"),
         F.col("traversal_class").alias("traversal_class"),
         F.col("align_deg").alias("align_deg"),

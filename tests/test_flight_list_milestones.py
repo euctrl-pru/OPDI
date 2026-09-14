@@ -56,9 +56,10 @@ def _full_set(track_id="trk-1", adep="EBBR", ades="EHAM"):
     """One flight with every event the flight list reads."""
     rows = [
         _event(track_id, "AOBT", 0, stand_exit=str(_t(0))),
-        _event(track_id, "ATOT", 600, runway="25R", apt_icao=adep, role="departure"),
-        _event(track_id, "ALDT", 3600, rwy_ident="06", apt_icao=ades,
-               traversal_class="arrival", milestone="T17"),
+        _event(track_id, "ATOT", 600, runway="25R", runway_bearing_deg=247.4,
+               apt_icao=adep, role="departure"),
+        _event(track_id, "ALDT", 3600, rwy_ident="06", runway_bearing_deg=58.1,
+               apt_icao=ades, traversal_class="arrival", milestone="T17"),
         _event(track_id, "AIBT", 4200, stand_entry=str(_t(4200))),
         _event(track_id, "exit-parking_position", -60, osm_ref="A12",
                osm_aeroway="parking_position", osm_airport=adep),
@@ -84,6 +85,8 @@ def test_every_column_populated_for_a_complete_flight(spark):
     assert row["RWY_DEP"] == "25R"
     # Read through the A-CDM spelling of the same field.
     assert row["RWY_ARR"] == "06"
+    assert row["RWY_DEP_BEARING_DEG"] == pytest.approx(247.4)
+    assert row["RWY_ARR_BEARING_DEG"] == pytest.approx(58.1)
     assert row["STND_DEP"] == "A12"
     assert row["STND_ARR"] == "D45"
     for i, nm in enumerate(FLIGHT_LIST_RING_RADII_NM):
@@ -131,7 +134,9 @@ def test_ring_columns_are_all_nullable_timestamps(spark):
     out = enrich_flight_list(_flights(spark), _events(spark, _full_set()), EventConfig())
     types = dict(out.dtypes)
     for name in ADDED_COLUMNS:
-        if name.startswith("RWY_") or name.startswith("STND_"):
+        if name.endswith("_BEARING_DEG"):
+            assert types[name] == "double", name
+        elif name.startswith("RWY_") or name.startswith("STND_"):
             assert types[name] == "string", name
         else:
             assert types[name] == "timestamp", name
@@ -140,10 +145,10 @@ def test_ring_columns_are_all_nullable_timestamps(spark):
 
 def test_duplicate_milestones_resolve_earliest_for_departure_latest_for_arrival(spark):
     rows = [
-        _event("trk-1", "ATOT", 600, runway="25R"),
-        _event("trk-1", "ATOT", 9000, runway="07L"),
-        _event("trk-1", "ALDT", 3600, runway="06"),
-        _event("trk-1", "ALDT", 9600, runway="24"),
+        _event("trk-1", "ATOT", 600, runway="25R", runway_bearing_deg=247.4),
+        _event("trk-1", "ATOT", 9000, runway="07L", runway_bearing_deg=67.4),
+        _event("trk-1", "ALDT", 3600, runway="06", runway_bearing_deg=58.1),
+        _event("trk-1", "ALDT", 9600, runway="24", runway_bearing_deg=236.0),
         _event("trk-1", "AOBT", 0),
         _event("trk-1", "AOBT", 8000),
         _event("trk-1", "AIBT", 4200),
@@ -160,6 +165,7 @@ def test_duplicate_milestones_resolve_earliest_for_departure_latest_for_arrival(
     # The runway travels with the event the time came from, not with some other
     # event of the same type.
     assert (row["RWY_DEP"], row["RWY_ARR"]) == ("25R", "24")
+    assert (row["RWY_DEP_BEARING_DEG"], row["RWY_ARR_BEARING_DEG"]) == (247.4, 236.0)
     assert (row["STND_DEP"], row["STND_ARR"]) == ("A12", "E07")
 
 
@@ -233,6 +239,20 @@ def test_a_missing_info_field_is_null_not_an_error(spark):
     row = _row(enrich_flight_list(_flights(spark), _events(spark, rows), EventConfig()))
     assert row["ATOT"] == _t(600)
     assert row["RWY_DEP"] is None
+
+
+def test_runway_bearing_is_null_when_the_key_predates_the_column(spark):
+    """An event written before ``runway_bearing_deg`` existed carries no such
+    key. That is the common case for anything already published, and it must
+    read as an ordinary null rather than fail the whole enrichment."""
+    rows = [
+        _event("trk-1", "ATOT", 600, runway="25R", apt_icao="EBBR"),
+        _event("trk-1", "ALDT", 3600, runway="06", apt_icao="EHAM"),
+    ]
+    row = _row(enrich_flight_list(_flights(spark), _events(spark, rows), EventConfig()))
+    assert (row["RWY_DEP"], row["RWY_ARR"]) == ("25R", "06")
+    assert row["RWY_DEP_BEARING_DEG"] is None
+    assert row["RWY_ARR_BEARING_DEG"] is None
 
 
 def test_enriching_twice_is_refused(spark):
