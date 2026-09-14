@@ -11,16 +11,16 @@ nothing to pass to get them and no flag here that would change them.
 Usage::
 
     # See the plan without touching the cluster
-    .venv310/bin/python run_week.py --start 2026-06-01 --dry-run
+    .venv310/bin/python run_period.py --start 2026-06-01 --dry-run
 
     # Run it
-    .venv310/bin/python run_week.py --start 2026-06-01
+    .venv310/bin/python run_period.py --start 2026-06-01
 
     # Resume after a failure -- same command, finished steps are skipped
-    .venv310/bin/python run_week.py --start 2026-06-01
+    .venv310/bin/python run_period.py --start 2026-06-01
 
     # Just one step
-    .venv310/bin/python run_week.py --start 2026-06-01 --steps 04
+    .venv310/bin/python run_period.py --start 2026-06-01 --steps 04
 
 Everything is written under ``--warehouse`` (default
 ``s3a://eurocontrol/opdi-prod``), **including the reference tables**: step 00
@@ -44,11 +44,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from opdi.weekrun import (  # noqa: E402
+from opdi.periodrun import (  # noqa: E402
     DEFAULT_WAREHOUSE,
     OPTIONAL_STEPS,
-    WEEK_STEPS,
-    run_week,
+    PERIOD_STEPS,
+    run_period,
 )
 
 
@@ -73,12 +73,12 @@ def main(argv=None) -> int:
     p.add_argument("--env", default="opensky",
                    choices=["dev", "live", "local", "opensky"],
                    help="Environment (default: opensky).")
-    p.add_argument("--steps", nargs="+", default=list(WEEK_STEPS),
-                   help=f"Steps to run, in order (default: {' '.join(WEEK_STEPS)}). "
+    p.add_argument("--steps", nargs="+", default=list(PERIOD_STEPS),
+                   help=f"Steps to run, in order (default: {' '.join(PERIOD_STEPS)}). "
                         f"Also available: {' '.join(OPTIONAL_STEPS)}.")
     p.add_argument("--state-path", type=Path, default=None,
                    help="Where completion is recorded "
-                        "(default: logs/weekrun_{start}_{days}d.json).")
+                        "(default: logs/periodrun_{start}_{days}d.json).")
     p.add_argument("--force", action="store_true",
                    help="Re-run steps already recorded as complete.")
     p.add_argument("--driver-memory", default=None,
@@ -101,7 +101,7 @@ def main(argv=None) -> int:
                    help="Print the plan and exit without creating a session.")
     args = p.parse_args(argv)
 
-    return run_week(
+    return run_period(
         env=args.env,
         start=args.start,
         days=args.days,
