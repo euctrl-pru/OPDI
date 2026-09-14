@@ -531,3 +531,42 @@ def test_the_declared_outputs_cover_the_required_reference_tables():
 
     produced = {t for tables in REFERENCE_OUTPUTS.values() for t in tables}
     assert set(REQUIRED_REFERENCE_TABLES) <= produced
+
+
+def test_a_day_is_carried_through_before_the_next_day_starts():
+    """Day-major, not step-major.
+
+    Iterating steps on the outside runs every day's ingest, then every day's
+    segmentation. That was survivable while state vectors accumulated; it is
+    not now they are overwritten per day, because day 1's raw data is replaced
+    by day 2's ingest long before step 02 reaches day 1. Segmentation then
+    reads a window belonging to a later day and the output is quietly wrong
+    rather than missing.
+    """
+    from opdi.weekrun import DAY_STEPS, WEEK_STEPS, days_in
+
+    days = days_in(date(2026, 6, 1), date(2026, 6, 3))
+    units = [(s, None) for s in WEEK_STEPS if s not in DAY_STEPS]
+    for d in days:
+        units.extend((s, d) for s in WEEK_STEPS if s in DAY_STEPS)
+
+    day_units = [u for u in units if u[1] is not None]
+    # Every unit of day N precedes every unit of day N+1.
+    seen = [u[1] for u in day_units]
+    assert seen == sorted(seen), "days must not interleave"
+    # And within a day the steps keep their declared order.
+    first_day = [s for s, d in day_units if d == days[0]]
+    assert first_day == [s for s in WEEK_STEPS if s in DAY_STEPS]
+
+
+def test_the_runner_builds_units_day_major():
+    """Pins the implementation, since the failure is invisible in the output:
+    the wrong ordering produces plausible events computed from another day's
+    state vectors."""
+    import inspect
+
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_week)
+    assert "for d in all_days:" in src
+    assert "for step in steps:\n        if step in DAY_STEPS:" not in src

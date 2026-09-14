@@ -614,12 +614,26 @@ def run_week(
     # A unit of work is a (step, day) pair for the per-day steps and a bare
     # step for the window-wide ones, so resuming lands on the day that failed
     # rather than restarting the week.
+    # Day-major, not step-major: a day is carried all the way through before
+    # the next day starts.
+    #
+    # Iterating steps on the outside runs every day's ingest, then every day's
+    # segmentation, and so on. That was survivable while state vectors
+    # accumulated. It is not survivable now they are overwritten per day: day
+    # 1's raw data is replaced by day 2's ingest long before step 02 reaches
+    # day 1, so segmentation reads a window belonging to some later day and
+    # the output is quietly wrong rather than missing.
+    #
+    # Observed: `<<< step 01 day 2026-06-01` followed immediately by
+    # `>>> step 01 day 2026-06-02`.
+    #
+    # Day-major also means a failure costs one day rather than a phase, and a
+    # half-finished campaign holds whole days rather than every day's tracks
+    # and no day's events.
     units: List[Tuple[str, Optional[date]]] = []
-    for step in steps:
-        if step in DAY_STEPS:
-            units.extend((step, d) for d in all_days)
-        else:
-            units.append((step, None))
+    units.extend((step, None) for step in steps if step not in DAY_STEPS)
+    for d in all_days:
+        units.extend((step, d) for step in steps if step in DAY_STEPS)
 
     def _key(step, day):
         return day_state_key(step, day) if day is not None else step
