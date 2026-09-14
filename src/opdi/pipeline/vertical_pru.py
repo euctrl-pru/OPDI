@@ -357,9 +357,17 @@ def pru_top_events(
             sdf, segments, config, altitude_col=altitude_col, time_col=time_col
         )
 
+    # Under the merge the PRU arm is the only top published, so it takes the
+    # plain names; the fuzzy arm is dropped in
+    # ``calculate_horizontal_segment_events``. Without the merge both arms run
+    # and this one wears the suffix that tells them apart.
+    _merged = config.merge_duplicate_milestones
+    toc_type = "top-of-climb" if _merged else "top-of-climb-cco"
+    tod_type = "top-of-descent" if _merged else "top-of-descent-cdo"
+
     climb = tops.select(
         "track_id",
-        lit("top-of-climb-cco").alias("type"),
+        lit(toc_type).alias("type"),
         col("toc_cco_time").alias("event_time"),
         col("toc_cco_alt_ft").alias("altitude_ft"),
         col("toc_d200_time").alias("_d200_time"),
@@ -368,7 +376,7 @@ def pru_top_events(
     )
     descent = tops.select(
         "track_id",
-        lit("top-of-descent-cdo").alias("type"),
+        lit(tod_type).alias("type"),
         col("tod_cdo_time").alias("event_time"),
         col("tod_cdo_alt_ft").alias("altitude_ft"),
         col("tod_a200_time").alias("_d200_time"),

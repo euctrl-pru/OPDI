@@ -381,8 +381,12 @@ def calculate_block_events(
         lit(None).cast("double").alias("cumulative_distance_nm"),
         lit(None).cast("long").alias("cumulative_time_s"),
     ]
-    off_type = "off-block" if config.emit_runway_milestones else "AOBT"
-    on_type = "on-block" if config.emit_runway_milestones else "AIBT"
+    # ``AOBT``/``AIBT`` under the merge and under legacy; ``off-block``/
+    # ``on-block`` only in v0.2.0, which published the A-CDM vocabulary
+    # without merging it. One detector, one name per configuration.
+    _acdm_names = config.emit_runway_milestones and not config.merge_duplicate_milestones
+    off_type = "off-block" if _acdm_names else "AOBT"
+    on_type = "on-block" if _acdm_names else "AIBT"
     aobt = blocks.filter(col("aobt").isNotNull()).select(
         col("track_id"), lit(off_type).alias("type"), col("aobt").alias("event_time"),
         *common,
@@ -468,6 +472,17 @@ def calculate_runway_events(
                 col("role").alias("role"),
                 col("bearing_error").alias("bearing_error_deg"),
                 col("n_samples").alias("n_samples"),
+                # Which arm produced this instant. Under
+                # ``merge_duplicate_milestones`` these rows share the ``ATOT``/
+                # ``ALDT`` type with the A-CDM family, and the two have
+                # different biases -- legacy reports the extreme *sample* of a
+                # detection window (+19 s median on departures), A-CDM the
+                # interpolated 15 ft crossing. NULL where there is no second
+                # arm to be told apart from.
+                (
+                    lit("legacy") if config.merge_duplicate_milestones
+                    else lit(None).cast("string")
+                ).alias("method"),
             )
         ).alias("info"),
     )
@@ -736,21 +751,60 @@ def calculate_horizontal_segment_events(
     )
 
     # Create event type arrays
-    milestone_types = (
-        F.when(
-            col("event_time") == col("first_cr_time"),
-            F.array(lit("level-start"), lit("top-of-climb")),
+    is_level_start = start_of_segment | (col("event_time") == col("first_cr_time"))
+    is_level_end = (
+        (col("flight_phase").isin("CR", "LVL"))
+        & (col("next_phase") != col("flight_phase"))
+    ) | (col("event_time") == col("last_cr_time"))
+
+    if config.merge_duplicate_milestones:
+        # Two independent questions, asked independently.
+        #
+        # The chain this replaces was first-match-wins, and it had four things
+        # to say in one slot. A sample that is both the start and the end of a
+        # level segment -- a segment one sample long -- matched the
+        # "level-start" branch and could never reach the "level-end" one, so it
+        # emitted a start and no end. Measured on 2026-06-01: 129,426 starts
+        # against 104,057 ends, 28,855 of them unmatched across 17,356 of
+        # 44,461 flights. Only 22% of the unmatched starts fell within ten
+        # minutes of ``last_seen``, so the great majority were mid-flight --
+        # which is exactly where one-sample level segments occur.
+        #
+        # It is not a boundary artefact: ``prev_phase``/``next_phase`` default
+        # to the *string* "None", so a track beginning or ending in level
+        # flight is labelled correctly at both ends.
+        #
+        # Dropping the fuzzy tops removes two of the four things, and what is
+        # left are two independent predicates rather than a precedence order.
+        # A sample that is both now emits both, structurally -- there is no
+        # longer a precedence for a one-sample segment to fall foul of.
+        milestone_types = F.filter(
+            F.array(
+                F.when(is_level_start, lit("level-start")),
+                F.when(is_level_end, lit("level-end")),
+            ),
+            lambda x: x.isNotNull(),
         )
-        .when(
-            col("event_time") == col("last_cr_time"),
-            F.array(lit("level-end"), lit("top-of-descent")),
+    else:
+        # v0.2.0 and earlier, reproduced exactly: first-match-wins, fuzzy tops
+        # carried in the same slot. Kept because it is what those versions
+        # published, defect and all.
+        milestone_types = (
+            F.when(
+                col("event_time") == col("first_cr_time"),
+                F.array(lit("level-start"), lit("top-of-climb")),
+            )
+            .when(
+                col("event_time") == col("last_cr_time"),
+                F.array(lit("level-end"), lit("top-of-descent")),
+            )
+            .when(start_of_segment, F.array(lit("level-start")))
+            .when(
+                (col("flight_phase").isin("CR", "LVL"))
+                & (col("next_phase") != col("flight_phase")),
+                F.array(lit("level-end")),
+            )
         )
-        .when(start_of_segment, F.array(lit("level-start")))
-        .when(
-            (col("flight_phase").isin("CR", "LVL")) & (col("next_phase") != col("flight_phase")),
-            F.array(lit("level-end")),
-        )
-    )
 
     # ``take-off`` and ``landing`` here are the *ground-contact* reading: the
     # sample at which the phase changed. ``runway_ops`` publishes the same two
@@ -763,6 +817,10 @@ def calculate_horizontal_segment_events(
     # ladder's baseline rung reconstructs v0.1.0, which *did* publish this
     # pair; a version gate would strip them from the rung named after them.
     if not config.emit_runway_milestones:
+        # Only reachable on the legacy arm: ``emit_runway_milestones`` off
+        # implies ``merge_duplicate_milestones`` off, since the merge exists to
+        # reconcile the A-CDM family with this one. The chain is still a
+        # when-chain here, so ``.when`` composes.
         milestone_types = milestone_types.when(
             (col("prev_phase") == "GND") & (col("next_phase") == "CL"),
             F.array(lit("take-off")),
@@ -771,7 +829,9 @@ def calculate_horizontal_segment_events(
             F.array(lit("landing")),
         )
 
-    df = df.withColumn("milestone_types", milestone_types.otherwise(F.array()))
+    if not config.merge_duplicate_milestones:
+        milestone_types = milestone_types.otherwise(F.array())
+    df = df.withColumn("milestone_types", milestone_types)
 
     # Explode to one row per event
     df_exploded = df.select("*", explode(col("milestone_types")).alias("type"))

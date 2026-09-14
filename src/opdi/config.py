@@ -965,12 +965,21 @@ class EventConfig:
     so an uninterpolated comparison would measure our snapping rather than the
     algorithm."""
 
-    ring_radii_nm: tuple = (40.0, 100.0)
+    ring_radii_nm: tuple = (40.0, 50.0, 60.0, 100.0, 110.0, 120.0)
     """Distance rings around an aerodrome at which crossings are detected.
     40 NM is ICAO's ASMA cylinder for KPI08 and the reference area for KPI05;
     100 NM is the documented variant for aerodromes whose holding sits outside
-    40 NM. ``h3_airport_detection_zones`` already reaches 110 NM, so both are
-    available without regenerating reference data.
+    40 NM. The remaining four exist because the flight list publishes a
+    ``C{NM}_ARR``/``C{NM}_DEP`` column for each, giving a coarse descent and
+    climb profile without a join to the event table.
+
+    **Only these six, not every 10 NM.** Twelve radii would grow the event
+    table by roughly 30% -- 1.77M to about 2.3M rows a day -- to carry six
+    columns nobody reads.
+
+    The 110 NM extent of ``h3_airport_detection_zones`` does not cap this:
+    crossings are computed from a haversine distance to the aerodrome's own
+    coordinates, not from the zone grid, so 120 NM is reachable.
 
     Wired by ``events.calculate_ring_crossing_events``, which builds the
     distance frame from the flight's **own** ADEP and ADES rather than from the
@@ -1167,12 +1176,51 @@ class EventConfig:
     """How close to the aerodrome the excursion must happen. Wider than the
     runway itself, because a go-around is initiated on final."""
 
+    # ----- one variable per purpose (v0.3.0) ----------------------------
+    merge_duplicate_milestones: bool = True
+    """Publish one event type per operational question rather than two.
+
+    ``events_v0.2.0`` ships two events for one purpose. ``ATOT`` and
+    ``airborne`` both name the take-off instant; ``ALDT`` and ``touchdown``
+    both name the landing. Which to prefer depends on the aerodrome, so every
+    consumer had to encode that judgement itself. Under this flag the pair is
+    merged at source::
+
+        ATOT = coalesce(A-CDM airborne,  legacy ATOT)
+        ALDT = coalesce(A-CDM touchdown, legacy ALDT)
+
+    A-CDM wins where it exists because it is the better instant -- the
+    interpolated crossing of ``runway_airborne_height_ft`` above field
+    elevation, against legacy's extreme *sample* of a detection window, which
+    carries a measured +19 s median bias. Legacy fills the rest, which is most
+    of them: the A-CDM family needs surface reception and reaches roughly 4-7%
+    of the network against legacy's ~90%.
+
+    ``info.method`` records which arm produced each value -- ``"acdm"`` or
+    ``"legacy"`` -- **in the event table only**. That is not decoration. The
+    merged column is a mixture of two estimators with different biases and the
+    mixing ratio varies by aerodrome, so an aggregate over it carries an
+    aerodrome-dependent bias invisible in the column itself. The method travels
+    with the event so the mixture stays recoverable.
+
+    The same flag renames ``off-block``/``on-block`` to ``AOBT``/``AIBT`` (one
+    detector, one name) and gives the PRU tops the plain ``top-of-climb`` /
+    ``top-of-descent`` strings, the fuzzy arm having been dropped.
+
+    Off under ``legacy()`` and under any reconstruction of v0.2.0, both of
+    which must keep reproducing what they published."""
+
     # ----- PRU vertical profile ----------------------------------------
     emit_pru_tops: bool = True
-    """Emit ``top-of-climb-cco`` and ``top-of-descent-cdo`` -- the PRU tops --
-    *alongside* the published fuzzy ``top-of-climb``/``top-of-descent``, which
-    are unchanged. Both are published because no reference data records a top
-    of climb, so neither can be shown better than the other."""
+    """Emit the PRU tops -- the D200/A200 pair, relocated out of the exclusion
+    box. Under ``merge_duplicate_milestones`` these take the plain
+    ``top-of-climb``/``top-of-descent`` names and are the only tops published;
+    otherwise they are ``top-of-climb-cco``/``top-of-descent-cdo`` published
+    alongside the fuzzy pair.
+
+    The PRU arm is both the better-defined and the better-covered one: 55,819
+    against 32,604 a day for the climb, 55,810 against 32,541 for the
+    descent."""
 
     level_method: str = "pru"
     """Which level-segment arm runs: ``"icao"`` is the anchored-band algorithm
@@ -1295,7 +1343,7 @@ class EventConfig:
     track-based runway detection, start-of-movement -- are all closed-form and
     express natively as column and window expressions."""
 
-    events_version: str = "events_v0.2.0"
+    events_version: str = "events_v0.3.0"
     """Version stamped on events this configuration produces.
 
     A single string covered every event type before this, so a new detector
@@ -1303,6 +1351,14 @@ class EventConfig:
     change what a published version means. Never mutate a released value."""
 
     def __post_init__(self) -> None:
+        if self.merge_duplicate_milestones and not self.emit_runway_milestones:
+            raise ValueError(
+                "merge_duplicate_milestones requires emit_runway_milestones. "
+                "The merge exists to reconcile the A-CDM family with the legacy "
+                "one; with A-CDM off there is nothing to merge, and the fuzzy "
+                "take-off/landing pair would be published beside a vocabulary "
+                "that has no place for it."
+            )
         if self.level_method not in ("icao", "pru"):
             raise ValueError(
                 f"level_method must be 'icao' or 'pru', got {self.level_method!r}. "
@@ -1351,6 +1407,7 @@ class EventConfig:
             # Rings did not exist at all.
             ring_radii_nm=(),
             emit_runway_milestones=False,
+            merge_duplicate_milestones=False,
             emit_pru_tops=False,
             level_method="icao",
             level_floors_above_field=False,

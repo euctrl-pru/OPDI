@@ -89,7 +89,9 @@ renumbering it would break every operator's muscle memory for no gain.
 |---|---|
 | `ATOT`, `ALDT`, `AOBT`, `AIBT` | merged events, joined on `flight_id` |
 | `RWY_DEP` | `info.runway` of the `ATOT` event |
+| `RWY_DEP_BEARING_DEG` | `info.runway_bearing_deg` of the `ATOT` event |
 | `RWY_ARR` | `info.runway` of the `ALDT` event |
+| `RWY_ARR_BEARING_DEG` | `info.runway_bearing_deg` of the `ALDT` event |
 | `STND_DEP` | `info.osm_ref` of `exit-parking_position` |
 | `STND_ARR` | `info.osm_ref` of `entry-parking_position` |
 | `C{40,50,60,100,110,120}_ARR` | inbound crossing of that ring |
@@ -97,6 +99,35 @@ renumbering it would break every operator's muscle memory for no gain.
 
 Additive only. Existing columns keep their names, types and meanings, so
 current consumers are unaffected.
+
+### The runway's direction, not just its name
+
+`ATOT` and `ALDT` carry `info.runway_bearing_deg` beside `info.runway`, and
+the flight list publishes it as `RWY_DEP_BEARING_DEG` / `RWY_ARR_BEARING_DEG`.
+
+**Bearing, not heading.** The quantity is the runway centreline's *true*
+bearing, computed from its two threshold coordinates -- a property of the
+pavement, identical for every movement on it. A heading is what the aircraft
+flies: magnetic, and wind-corrected, so two aircraft departing the same runway
+in the same minute report different ones. The runway's own direction is the
+thing that makes the column answer "which way was this runway used".
+
+It is not redundant with `RWY_DEP`. The designator already names the direction
+to the nearest ten degrees -- `07` and `25` are the two ends of one strip -- so
+in the common case the bearing merely sharpens it. It earns its place in three
+cases the designator cannot cover:
+
+* the designator is null because the runway could not be named, while the
+  traversal's geometry still fixes the direction used;
+* magnetic drift has moved the pavement's true bearing away from the number
+  painted on it, which is why aerodromes renumber runways;
+* a consumer computing wind components, track angles or alignment statistics
+  needs a number, and parsing `07L` into 70 degrees is both lossy and wrong.
+
+The value comes from `runway_thresholds()`, which already derives a bearing per
+*direction* rather than per strip, so no new geometry is introduced -- the
+column publishes a quantity both detector arms already compute and then threw
+away.
 
 ### Arrival and departure rings
 
