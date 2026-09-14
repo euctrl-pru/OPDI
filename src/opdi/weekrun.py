@@ -426,22 +426,44 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     """
     if step == "01":
         from opdi.ingestion.osn_statevectors import StateVectorIngestion
+        from opdi.utils.storage import StorageManager
 
-        # Ingest the days the *segmentation* of this day will read, not just
-        # the day itself. Step 02 reads [D - lookback, D+1 + lookahead), which
-        # spans the previous calendar day and the next, so the ingest covers
-        # D-1 .. D+2 (end-exclusive).
+        # A sliding window, not a fresh fetch.
         #
-        # Each day's ingest replaces the last, because the table is overwritten
-        # -- so what is on disk is always exactly the window being processed.
-        start = day - timedelta(days=1)
-        end = day + timedelta(days=2)
-        print(f"  ingesting {start} .. {end} (the window day {day} segments over)")
+        # Day D is segmented over [D - lookback, D+1 + lookahead), which spans
+        # D-1, D and D+1. Consecutive days therefore overlap by two thirds: if
+        # each day re-fetched its whole window, every calendar day would be
+        # pulled from the archive three times.
+        #
+        # So fetch only the days not already on disk, and drop only the days
+        # the window has moved past. Across a campaign each calendar day is
+        # fetched once and deleted once, and the table holds three days rather
+        # than the whole month.
+        needed = [day - timedelta(days=1), day, day + timedelta(days=1)]
+        storage = StorageManager(spark, config)
+        present = set(storage.list_partitions("osn_statevectors_v2", "event_time_day"))
+
+        missing = [d for d in needed if d.isoformat() not in present]
+        stale = sorted(present - {d.isoformat() for d in needed})
+
+        print(f"  window {needed[0]} .. {needed[-1]}: "
+              f"{len(needed) - len(missing)} already present, "
+              f"{len(missing)} to fetch, {len(stale)} to drop")
+
         sv = StateVectorIngestion(spark, config)
-        if config.project.project_name == "opensky":
-            sv.ingest_from_s3(start_date=start, end_date=end)
-        else:
-            sv.ingest(start_date=start, end_date=end)
+        for d in missing:
+            print(f"    fetching {d}")
+            if config.project.project_name == "opensky":
+                sv.ingest_from_s3(start_date=d, end_date=d + timedelta(days=1))
+            else:
+                sv.ingest(start_date=d, end_date=d + timedelta(days=1))
+
+        if stale:
+            # After fetching, never before: a crash between the two would
+            # otherwise leave the window short and the next run would have no
+            # way to tell that from a day the archive genuinely lacks.
+            n = storage.drop_partitions("osn_statevectors_v2", "event_time_day", stale)
+            print(f"    dropped {n} day(s) the window has passed: {', '.join(stale)}")
     elif step == "02":
         from opdi.pipeline.tracks import TrackProcessor
 

@@ -352,27 +352,35 @@ def test_everything_except_reference_data_runs_per_day():
     assert DAY_STEPS == ("01", "02", "02a", "03", "04")
 
 
-def test_a_day_ingests_the_window_its_segmentation_will_read():
+def test_a_day_has_the_window_its_segmentation_will_read():
     """Day D is segmented over [D - lookback, D+1 + lookahead), which touches
-    the previous calendar day and the next. Ingesting only D would leave the
-    segmentation reading data that is not there -- and the truncation check
-    would then report every late departure as cut off."""
+    the previous calendar day and the next. If those are absent the
+    segmentation reads data that is not there, and the truncation check then
+    reports every late departure as cut off."""
     import inspect
 
     from opdi import weekrun
 
     src = inspect.getsource(weekrun.run_day_step)
     assert "day - timedelta(days=1)" in src
-    assert "day + timedelta(days=2)" in src
+    assert "day + timedelta(days=1)" in src
 
 
-def test_statevectors_are_replaced_not_accumulated():
+def test_statevectors_are_written_one_day_per_partition():
+    """Per-day partitions are what let a single day be replaced or dropped
+    without touching its neighbours -- the whole basis of the sliding window.
+
+    The partition column used to be dropped before the write, on the grounds
+    that Iceberg re-adds it. True under Iceberg; false in the opensky
+    environment, where the table is plain parquet on S3.
+    """
     import inspect
 
     from opdi.ingestion import osn_statevectors
 
     src = inspect.getsource(osn_statevectors)
-    assert 'write_table(df_cleaned, "osn_statevectors_v2", mode="overwrite")' in src
+    assert 'partition_by=["event_time_day"]' in src
+    assert 'df_partitioned.drop("event_time_day")' not in src
 
 
 def test_days_in_is_inclusive_of_both_ends():
@@ -570,3 +578,41 @@ def test_the_runner_builds_units_day_major():
     src = inspect.getsource(weekrun.run_week)
     assert "for d in all_days:" in src
     assert "for step in steps:\n        if step in DAY_STEPS:" not in src
+
+
+# --- the ingest window slides rather than refetching ------------------------
+
+def test_consecutive_days_overlap_by_two_of_three():
+    """Why the sliding window exists at all.
+
+    Day D is segmented over [D - lookback, D+1 + lookahead), spanning D-1, D
+    and D+1. Day D+1 spans D, D+1, D+2. Refetching the whole window each day
+    would pull every calendar day from the archive three times.
+    """
+    from datetime import timedelta
+
+    d = date(2026, 6, 10)
+    win = lambda x: {x - timedelta(days=1), x, x + timedelta(days=1)}
+    assert len(win(d) & win(d + timedelta(days=1))) == 2
+
+
+def test_the_ingest_fetches_only_what_is_missing_and_drops_only_what_passed():
+    import inspect
+
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_day_step)
+    assert "list_partitions" in src, "must know what is already on disk"
+    assert "d.isoformat() not in present" in src, "fetch only the missing days"
+    assert "drop_partitions" in src, "drop only the days the window passed"
+
+
+def test_stale_days_are_dropped_after_fetching_not_before():
+    """A crash between the two would otherwise leave the window short, and the
+    next run could not tell that from a day the archive genuinely lacks."""
+    import inspect
+
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_day_step)
+    assert src.index("for d in missing:") < src.index("drop_partitions")

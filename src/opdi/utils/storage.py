@@ -237,6 +237,37 @@ class StorageManager:
             if fs.exists(target):
                 fs.delete(target, True)
 
+    def list_partitions(self, table_name: str, column: str) -> list:
+        """The partition values currently present, as strings.
+
+        Reads the directory names rather than the data: a Hive-style layout
+        encodes the value in the path, so this costs one listing and no scan.
+        Returns an empty list when the table does not exist yet, which is the
+        normal state on the first day of a campaign.
+        """
+        if not self.use_s3:
+            raise NotImplementedError("partition listing is S3-mode only")
+        jvm = self.spark._jvm
+        hconf = self.spark._jsc.hadoopConfiguration()
+        root = jvm.org.apache.hadoop.fs.Path(self._s3_path(table_name))
+        fs = root.getFileSystem(hconf)
+        if not fs.exists(root):
+            return []
+        out = []
+        for st in fs.listStatus(root):
+            name = st.getPath().getName()
+            if st.isDirectory() and name.startswith(f"{column}="):
+                out.append(name.split("=", 1)[1])
+        return sorted(out)
+
+    def drop_partitions(self, table_name: str, column: str, values) -> int:
+        """Delete specific partitions. Returns how many were removed."""
+        if not values:
+            return 0
+        path = self._s3_path(table_name)
+        self._delete_partition_paths(path, [column], [{column: v} for v in values])
+        return len(values)
+
     def create_table(self, sql: str) -> None:
         """Run DDL (CREATE TABLE). No-op in S3 mode."""
         if not self.use_s3:

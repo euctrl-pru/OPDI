@@ -368,20 +368,27 @@ class StateVectorIngestion:
             "event_time_day"
         )
 
-        # Drop partition column (will be added automatically by Iceberg)
-        df_cleaned = df_partitioned.drop("event_time_day")
-
-        # Overwrite, not append.
+# Partitioned by day, and the partition column is kept.
         #
-        # Raw state vectors are the one table in the pipeline that is purely
-        # derived from an upstream archive: anything lost here is re-fetched,
-        # so there is no reason to accumulate them. Appending a month meant
-        # carrying ~220 GB of intermediate that nothing reads after step 02.
+        # It used to be dropped here on the grounds that Iceberg would add it
+        # back, which is true under Iceberg and false in the opensky
+        # environment, where the table is plain parquet on S3. Keeping it is
+        # what lets a single day be replaced, listed, or dropped without
+        # touching its neighbours.
         #
-        # With ingestion running a day at a time, each day replaces the last
-        # and the table holds only the window currently being segmented --
-        # about 15 GB rather than 220.
-        self.storage.write_table(df_cleaned, "osn_statevectors_v2", mode="overwrite")
+        # That matters because ingestion runs a day at a time over a window
+        # that overlaps its neighbours': day D needs D-1, D and D+1. Without
+        # per-day partitions the only options are to keep everything (~220 GB
+        # for a month) or to refetch the overlap every day (three times the
+        # network). With them, each calendar day is fetched once and dropped
+        # when the window has moved past it.
+        days = [r[0] for r in
+                df_partitioned.select("event_time_day").distinct().collect()]
+        self.storage.write_table(
+            df_partitioned, "osn_statevectors_v2", mode="overwrite",
+            partition_by=["event_time_day"],
+            partition_values=[{"event_time_day": d} for d in days],
+        )
 
         # The row count is deliberately not printed here.
         #
