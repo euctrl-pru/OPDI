@@ -485,6 +485,16 @@ def _session_extras() -> Dict[str, str]:
     }
     eventlog = os.environ.get("OPDI_EVENTLOG_DIR")
     if eventlog:
+        # Spark refuses to start if the event-log directory does not exist --
+        # "FileNotFoundException: File ... does not exist" from
+        # SparkContext init, before a single step runs. For a local path there
+        # is no reason to make the operator create it by hand; for a remote one
+        # we leave it alone, because creating a bucket prefix is not ours to
+        # guess at.
+        if eventlog.startswith("file://"):
+            Path(eventlog[len("file://"):]).mkdir(parents=True, exist_ok=True)
+        elif "://" not in eventlog:
+            Path(eventlog).mkdir(parents=True, exist_ok=True)
         extras.update({
             "spark.eventLog.enabled": "true",
             "spark.eventLog.dir": eventlog,
