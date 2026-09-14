@@ -1214,6 +1214,7 @@ class FlightEventProcessor:
         sdf_input: DataFrame,
         batch_id: str,
         month: date,
+        day: date = None,
         calc_vertical: bool = True,
         calc_horizontal: bool = True,
         calc_hexaero: bool = True,
@@ -1393,6 +1394,8 @@ class FlightEventProcessor:
         # rebuild can safely replace the partition; a partial one must add to
         # it.
         full_rebuild = all([calc_vertical, calc_horizontal, calc_hexaero, calc_seen])
+        # A day-scoped batch writes exactly one partition, and it is the day.
+        _partition_values = [{"dof": day}] if day is not None else None
         write_mode = "overwrite" if full_rebuild else "append"
 
         # Write milestones (flight events)
@@ -1411,7 +1414,10 @@ class FlightEventProcessor:
         )
         df_milestones = df_milestones.repartition("dof").orderBy("type", "version")
         self.storage.write_table(
-            df_milestones, "opdi_flight_events", mode=write_mode, partition_by=["dof"]
+            df_milestones, "opdi_flight_events", mode=write_mode, partition_by=["dof"],
+            # Known when a single day is being processed; None falls back to
+            # probing, which a month-scoped run still needs.
+            partition_values=_partition_values,
         )
 
         # Write measurements (distance + time)
@@ -1451,7 +1457,10 @@ class FlightEventProcessor:
         # event's track rather than from the measurement, which has no instant
         # of its own to speak of.
         self.storage.write_table(
-            df_measurements, "opdi_measurements", mode=write_mode, partition_by=["dof"]
+            df_measurements, "opdi_measurements", mode=write_mode, partition_by=["dof"],
+            # Known when a single day is being processed; None falls back to
+            # probing, which a month-scoped run still needs.
+            partition_values=_partition_values,
         )
 
     def process_day(self, day: date, skip_if_processed: bool = True) -> None:
@@ -1478,10 +1487,22 @@ class FlightEventProcessor:
         print(f"Processing flight events for month: {month}")
 
         _batch = day if day is not None else month
-        calc_horizontal = _batch not in self._load_processed("horizontal")
-        calc_vertical = _batch not in self._load_processed("vertical")
-        calc_hexaero = _batch not in self._load_processed("hexaero")
-        calc_seen = _batch not in self._load_processed("seen")
+
+        # ``skip_if_processed=False`` means recompute, not merely "do not return
+        # early".
+        #
+        # These four flags are what decide whether each family is computed at
+        # all. Reading them from the progress log unconditionally meant a
+        # caller asking for a rebuild got a step that ran, wrote nothing and
+        # reported success: the runner's --force re-ran the unit, every flag
+        # came back False, and step 04 "finished" in 35 seconds having computed
+        # nothing. A force that does not force is worse than no force, because
+        # the timing looks like a result.
+        _redo = not skip_if_processed
+        calc_horizontal = _redo or _batch not in self._load_processed("horizontal")
+        calc_vertical = _redo or _batch not in self._load_processed("vertical")
+        calc_hexaero = _redo or _batch not in self._load_processed("hexaero")
+        calc_seen = _redo or _batch not in self._load_processed("seen")
 
         if not any([calc_horizontal, calc_vertical, calc_hexaero, calc_seen]):
             if skip_if_processed:
@@ -1512,6 +1533,7 @@ class FlightEventProcessor:
             sdf_input,
             batch_id=batch_id,
             month=month,
+            day=day,
             calc_vertical=calc_vertical,
             calc_horizontal=calc_horizontal,
             calc_hexaero=calc_hexaero,

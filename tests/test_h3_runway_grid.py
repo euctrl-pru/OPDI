@@ -193,7 +193,7 @@ class StubStorage:
     def read_table(self, name):
         return self._tables[name]
 
-    def write_table(self, df, table_name, mode, partition_by=None):
+    def write_table(self, df, table_name, mode, partition_by=None, partition_values=None):
         self.written.append((table_name, mode, df))
 
     def create_table(self, sql):

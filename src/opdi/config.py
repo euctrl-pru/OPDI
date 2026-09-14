@@ -1537,7 +1537,18 @@ class OPDIConfig:
                     executor_memory="12g",
                     executor_memory_overhead="2g",
                     executor_cores="2",
-                    executor_instances="4",
+                    # 13 x 2 cores = 26 of the namespace's 30 CPU quota.
+                    #
+                    # Was 4, so a run used 8 CPU -- about a quarter of what the
+                    # quota allows -- while one day of cleaning took 2h50m and
+                    # events 2h17m. The ceiling is 13 rather than 15 because
+                    # memory binds first: 13 x 14g limit is 182Gi against a
+                    # 192Gi quota, leaving room for the driver.
+                    #
+                    # This changes how many machines do the work, not what they
+                    # compute. Row order in the output may differ; the values
+                    # do not.
+                    executor_instances="13",
                     enable_hive=False,
                     enable_iceberg=False,
                     s3_endpoint="https://s3.opensky-network.org",

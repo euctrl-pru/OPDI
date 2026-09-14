@@ -102,10 +102,42 @@ def _prev_valid(value: Column, target: Column, window: Window) -> Column:
     )
 
 
-def _next_valid(value: Column, target: Column, window: Window) -> Column:
-    """Value of *target* at the next row where *value* is non-NULL."""
-    return F.first(F.when(value.isNotNull(), target), ignorenulls=True).over(
-        window.rowsBetween(1, Window.unboundedFollowing)
+def _track_window_desc() -> Window:
+    """The track window, newest first. Used only by :func:`_next_valid`."""
+    return Window.partitionBy("track_id").orderBy(F.col(_T).desc())
+
+
+def _next_valid(value: Column, target: Column) -> Column:
+    """Value of *target* at the next row where *value* is non-NULL.
+
+    Written as a **growing** frame over the reversed ordering rather than the
+    obvious shrinking frame over the natural one, because the obvious form is
+    quadratic.
+
+    ``first(..., ignorenulls=True)`` over ``rowsBetween(1, unboundedFollowing)``
+    gives Spark a frame that shrinks as the row advances, and it answers each
+    row by scanning forward to the end of the partition -- O(n^2) per track.
+    ``last(..., ignorenulls=True)`` over ``rowsBetween(unboundedPreceding, -1)``
+    on the reversed ordering asks the same question of a frame that *grows*,
+    which Spark maintains incrementally in O(n).
+
+    Measured on one partition, identical output both ways:
+
+        rows    shrinking   reversed-growing
+        8,000       1.34s              0.14s
+        32,000     15.23s              0.12s
+
+    This was 94% of step 02a: one stage, 200 tasks, 94 minutes, while a
+    neighbouring stage moved the same 9 GB of shuffle in 14 seconds.
+
+    The reversal is exact, not an approximation. "Nearest following row with a
+    non-NULL value" and "nearest preceding row with a non-NULL value, read
+    backwards" are the same row. Ties would be the one way they could differ,
+    and there are none: ``drop_duplicate_statevectors`` runs first and makes
+    ``event_time`` unique within a track, so the ordering is total.
+    """
+    return F.last(F.when(value.isNotNull(), target), ignorenulls=True).over(
+        _track_window_desc().rowsBetween(Window.unboundedPreceding, -1)
     )
 
 
@@ -379,9 +411,9 @@ def _mask_spikes_one_column(
     )
 
     # Votes travel backwards along the chain of *valid* points.
-    df = df.withColumn("_d_f1_next", _next_valid(value, F.col("_d_f1"), w))
-    df = df.withColumn("_d_f2_next", _next_valid(value, F.col("_d_f2"), w))
-    df = df.withColumn("_d_f2_next2", _next_valid(value, F.col("_d_f2_next"), w))
+    df = df.withColumn("_d_f1_next", _next_valid(value, F.col("_d_f1")))
+    df = df.withColumn("_d_f2_next", _next_valid(value, F.col("_d_f2")))
+    df = df.withColumn("_d_f2_next2", _next_valid(value, F.col("_d_f2_next")))
 
     votes_d1 = F.col("_d_f1") + F.coalesce(F.col("_d_f1_next"), F.lit(0))
     votes_d2 = (
@@ -457,7 +489,7 @@ def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
             continue
         value = F.col(name)
         backward = F.col(_T) - _prev_valid(value, F.col(_T), w)
-        forward = _next_valid(value, F.col(_T), w) - F.col(_T)
+        forward = _next_valid(value, F.col(_T)) - F.col(_T)
         gap = F.least(
             F.coalesce(backward, sentinel), F.coalesce(forward, sentinel)
         )

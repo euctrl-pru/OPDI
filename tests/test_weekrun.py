@@ -338,13 +338,49 @@ def test_the_window_and_day_steps_together_are_the_week_steps():
     assert set(WINDOW_STEPS).isdisjoint(DAY_STEPS)
 
 
-def test_segmentation_onwards_runs_per_day_and_ingestion_does_not():
-    """Ingestion is by calendar date and has no track semantics; everything
-    after it works on tracks, which belong to a day."""
+def test_everything_except_reference_data_runs_per_day():
+    """Only step 00 is window-wide; it builds tables with no notion of a day.
+
+    Ingestion joined the per-day steps so that raw state vectors -- the one
+    table that is purely re-fetchable from upstream -- can be overwritten each
+    day instead of accumulating. A month of them was ~220 GB of intermediate
+    that nothing reads after step 02.
+    """
     from opdi.weekrun import DAY_STEPS, WINDOW_STEPS
 
-    assert WINDOW_STEPS == ("00", "01")
-    assert DAY_STEPS == ("02", "02a", "03", "04")
+    assert WINDOW_STEPS == ("00",)
+    assert DAY_STEPS == ("01", "02", "02a", "03", "04")
+
+
+def test_a_day_has_the_window_its_segmentation_will_read():
+    """Day D is segmented over [D - lookback, D+1 + lookahead), which touches
+    the previous calendar day and the next. If those are absent the
+    segmentation reads data that is not there, and the truncation check then
+    reports every late departure as cut off."""
+    import inspect
+
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_day_step)
+    assert "day - timedelta(days=1)" in src
+    assert "day + timedelta(days=1)" in src
+
+
+def test_statevectors_are_written_one_day_per_partition():
+    """Per-day partitions are what let a single day be replaced or dropped
+    without touching its neighbours -- the whole basis of the sliding window.
+
+    The partition column used to be dropped before the write, on the grounds
+    that Iceberg re-adds it. True under Iceberg; false in the opensky
+    environment, where the table is plain parquet on S3.
+    """
+    import inspect
+
+    from opdi.ingestion import osn_statevectors
+
+    src = inspect.getsource(osn_statevectors)
+    assert 'partition_by=["event_time_day"]' in src
+    assert 'df_partitioned.drop("event_time_day")' not in src
 
 
 def test_days_in_is_inclusive_of_both_ends():
@@ -367,13 +403,13 @@ def test_a_day_step_records_completion_per_day():
     assert a == "02@2026-06-01"
 
 
-def test_a_week_of_four_day_steps_is_thirty_units():
-    """Two window steps plus four per day across seven days. Stated as a number
+def test_a_week_is_thirty_six_units():
+    """One window step plus five per day across seven days. Stated as a number
     so a change to either list is visible rather than inferred."""
     from opdi.weekrun import DAY_STEPS, WINDOW_STEPS, days_in
 
     days = days_in(date(2026, 6, 1), date(2026, 6, 7))
-    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 30
+    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 36
 
 
 def test_ingestion_reaches_past_the_window():
@@ -386,11 +422,13 @@ def test_ingestion_reaches_past_the_window():
 
 
 def test_a_non_day_step_is_rejected_by_the_day_dispatcher():
-    """Calling a window step per day would re-ingest the week seven times."""
+    """Calling a window step per day would rebuild reference data every day."""
     from opdi.weekrun import run_day_step
 
+    # "00" builds reference tables for the whole campaign; running it per day
+    # would rebuild them thirty times.
     with pytest.raises(ValueError, match="not a per-day step"):
-        run_day_step(None, None, "01", date(2026, 6, 1), {})
+        run_day_step(None, None, "00", date(2026, 6, 1), {})
 
 
 # --- reference data is built once, not once per day -------------------------
@@ -501,3 +539,80 @@ def test_the_declared_outputs_cover_the_required_reference_tables():
 
     produced = {t for tables in REFERENCE_OUTPUTS.values() for t in tables}
     assert set(REQUIRED_REFERENCE_TABLES) <= produced
+
+
+def test_a_day_is_carried_through_before_the_next_day_starts():
+    """Day-major, not step-major.
+
+    Iterating steps on the outside runs every day's ingest, then every day's
+    segmentation. That was survivable while state vectors accumulated; it is
+    not now they are overwritten per day, because day 1's raw data is replaced
+    by day 2's ingest long before step 02 reaches day 1. Segmentation then
+    reads a window belonging to a later day and the output is quietly wrong
+    rather than missing.
+    """
+    from opdi.weekrun import DAY_STEPS, WEEK_STEPS, days_in
+
+    days = days_in(date(2026, 6, 1), date(2026, 6, 3))
+    units = [(s, None) for s in WEEK_STEPS if s not in DAY_STEPS]
+    for d in days:
+        units.extend((s, d) for s in WEEK_STEPS if s in DAY_STEPS)
+
+    day_units = [u for u in units if u[1] is not None]
+    # Every unit of day N precedes every unit of day N+1.
+    seen = [u[1] for u in day_units]
+    assert seen == sorted(seen), "days must not interleave"
+    # And within a day the steps keep their declared order.
+    first_day = [s for s, d in day_units if d == days[0]]
+    assert first_day == [s for s in WEEK_STEPS if s in DAY_STEPS]
+
+
+def test_the_runner_builds_units_day_major():
+    """Pins the implementation, since the failure is invisible in the output:
+    the wrong ordering produces plausible events computed from another day's
+    state vectors."""
+    import inspect
+
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_week)
+    assert "for d in all_days:" in src
+    assert "for step in steps:\n        if step in DAY_STEPS:" not in src
+
+
+# --- the ingest window slides rather than refetching ------------------------
+
+def test_consecutive_days_overlap_by_two_of_three():
+    """Why the sliding window exists at all.
+
+    Day D is segmented over [D - lookback, D+1 + lookahead), spanning D-1, D
+    and D+1. Day D+1 spans D, D+1, D+2. Refetching the whole window each day
+    would pull every calendar day from the archive three times.
+    """
+    from datetime import timedelta
+
+    d = date(2026, 6, 10)
+    win = lambda x: {x - timedelta(days=1), x, x + timedelta(days=1)}
+    assert len(win(d) & win(d + timedelta(days=1))) == 2
+
+
+def test_the_ingest_fetches_only_what_is_missing_and_drops_only_what_passed():
+    import inspect
+
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_day_step)
+    assert "list_partitions" in src, "must know what is already on disk"
+    assert "d.isoformat() not in present" in src, "fetch only the missing days"
+    assert "drop_partitions" in src, "drop only the days the window passed"
+
+
+def test_stale_days_are_dropped_after_fetching_not_before():
+    """A crash between the two would otherwise leave the window short, and the
+    next run could not tell that from a day the archive genuinely lacks."""
+    import inspect
+
+    from opdi import weekrun
+
+    src = inspect.getsource(weekrun.run_day_step)
+    assert src.index("for d in missing:") < src.index("drop_partitions")

@@ -301,7 +301,7 @@ class _StubStorage:
     def read_table(self, name):
         return self._tables[name]
 
-    def write_table(self, df, name, mode="append", partition_by=None):
+    def write_table(self, df, name, mode="append", partition_by=None, partition_values=None):
         self.written[name] = df
 
 
@@ -714,3 +714,21 @@ def test_a_measurement_inherits_the_day_from_its_parent_event(spark, stub_storag
     )
     assert joined.count() > 0, "no measurement joined its event; the test proves nothing"
     assert joined.filter(SF.col("_ms_dof") != SF.col("_ev_dof")).count() == 0
+
+
+def test_force_recomputes_every_family(spark, stub_storage, monkeypatch):
+    """`skip_if_processed=False` must mean recompute, not just "don't return".
+
+    The four family flags decide whether anything is computed. Read from the
+    progress log unconditionally, a forced re-run produced a step that ran,
+    wrote nothing, and reported success in 35 seconds -- a timing that looks
+    like a 231x speedup and is actually a no-op.
+    """
+    import inspect
+
+    from opdi.pipeline.events import FlightEventProcessor
+
+    src = inspect.getsource(FlightEventProcessor.process_month)
+    assert "_redo = not skip_if_processed" in src
+    for family in ("horizontal", "vertical", "hexaero", "seen"):
+        assert f'_redo or _batch not in self._load_processed("{family}")' in src, family

@@ -25,7 +25,7 @@ class StubStorage:
     def read_table(self, name):
         return self._airports
 
-    def write_table(self, df, table_name, mode, partition_by=None):
+    def write_table(self, df, table_name, mode, partition_by=None, partition_values=None):
         self.writes.append((table_name, mode, df.count()))
 
     def create_table(self, sql):

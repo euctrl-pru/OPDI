@@ -148,6 +148,22 @@ def _polyfill_geojson_udf(geojson_str, resolution):
         cells = set()
         for rings in polygons:
             outer, *holes = rings
+
+            # A ring of one distinct point is not a polygon.
+            #
+            # `radii_nm` starts at 0, and `generate_circle_polygon` at radius 0
+            # returns the same coordinate `num_points` times. h3 v3 answered
+            # that with an empty set, which is why it never surfaced and why
+            # the published table was built without trouble. v4 raises
+            # H3FailedError instead, so the innermost ring of the first airport
+            # killed the stage.
+            #
+            # Empty is the right answer, not an error: a zero-radius circle
+            # encloses no area, so it contains no cells. The annulus it bounds
+            # is emitted by the next radius up, which is why the published
+            # table's smallest `max_c_radius_nm` is 5 and nothing is lost here.
+            if len({(round(x, 12), round(y, 12)) for x, y in outer}) < 3:
+                continue
             outer_latlng = [(lat, lng) for lng, lat in outer]
             holes_latlng = [[(lat, lng) for lng, lat in hole] for hole in holes]
             shape = h3.LatLngPoly(outer_latlng, *holes_latlng)
@@ -261,6 +277,22 @@ class AirportDetectionZoneGenerator:
     #: these two. Three reference tables keyed to different airport sets would
     #: join to each other with gaps nothing reports.
     AIRPORT_TYPES = ("large_airport", "medium_airport")
+
+    #: Partitions to spread the ring polyfill across.
+    #:
+    #: The cross join is only 21,712 rows (16 rings x 1,357 aerodromes), so
+    #: Spark's default parallelism gives it 8 or 9 tasks -- and row count is a
+    #: terrible proxy for cost here. Each row carries an *array* of cells, and
+    #: the outermost ring is 98,250 of them, about 1.6 MB of strings in a
+    #: single row. Each row polyfills two circles (inner and outer, to make an
+    #: annulus), so ~2,400 rows in a task is roughly 7.7 GB -- and with two
+    #: cores per executor, two such tasks against a 14 GB limit. Measured: all
+    #: executors OOMKilled with exit 137.
+    #:
+    #: 2,000 partitions puts ~11 rows in a task, tens of megabytes rather than
+    #: gigabytes. It costs more, shorter tasks, which is the right trade when
+    #: the alternative is losing every executor.
+    ZONE_BUILD_PARTITIONS = 2000
 
     BBOX_OFFSET = 3  # degrees
     LAT_MIN = 26.74617
@@ -469,6 +501,12 @@ class AirportDetectionZoneGenerator:
             ring_config, on="m_col", how="left"
         )
 
+        # Spread the work before the polyfill, not after. Spark sizes tasks by
+        # row count, and these rows are wildly uneven in cost -- see
+        # ZONE_BUILD_PARTITIONS. Repartitioning here is what keeps a task's
+        # share of the 584 million cells inside the executor's memory.
+        airports_m = airports_m.repartition(self.ZONE_BUILD_PARTITIONS)
+
         print(f"Generating H3 zones at resolution {self.resolution}...")
         sdf = (
             airports_m.withColumn(
@@ -517,10 +555,40 @@ class AirportDetectionZoneGenerator:
         sdf.cache()
         self._result_sdf = sdf
 
-        result = sdf.toPandas()
-        self._result_df = result
-        print(f"Generated {len(result)} airport-ring combinations.")
-        return result
+        # Deliberately NOT collected.
+        #
+        # This used to end `self._result_df = sdf.toPandas()`, which pulls
+        # every row to the driver -- and a row here holds an *array* of cells,
+        # up to 98,250 of them for the outermost ring. Across 1,357 aerodromes
+        # that is 584 million cell strings in driver pandas, and the driver was
+        # SIGKILLed by the container (exit 137) every time.
+        #
+        # It went unnoticed because the collect was free while it was broken:
+        # under the old h3 v3 executors the polyfill returned NULL, so
+        # toPandas() brought back 21,712 empty arrays. The moment the cells
+        # were real, so was the memory.
+        #
+        # Anything that genuinely needs pandas asks for it through
+        # `result_df`, which collects on demand and says what that costs.
+        print("Generated airport-ring combinations (Spark; not collected).")
+        return sdf
+
+    @property
+    def result_df(self) -> pd.DataFrame:
+        """The generated zones as pandas, collected on first access.
+
+        **This pulls the whole result into driver memory** -- 584 million cell
+        strings for a full network build, which is enough to have the driver
+        killed by its container. Prefer ``_result_sdf`` and the ``_spark``
+        variants; this exists for the local-file and legacy pandas paths, which
+        are fallbacks rather than what production reads.
+        """
+        if self._result_df is None:
+            if self._result_sdf is None:
+                raise RuntimeError("Call generate() before collecting.")
+            print("Collecting zones to the driver -- this is large.")
+            self._result_df = self._result_sdf.toPandas()
+        return self._result_df
 
     def save_to_parquet(self, output_path: str) -> None:
         """
@@ -532,11 +600,8 @@ class AirportDetectionZoneGenerator:
         Raises:
             RuntimeError: If generate() has not been called first.
         """
-        if self._result_df is None:
-            raise RuntimeError("Call generate() before saving.")
-
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        self._result_df.to_parquet(output_path)
+        self.result_df.to_parquet(output_path)
         print(f"Saved detection zones to {output_path}")
 
     def prepare_for_flight_list(

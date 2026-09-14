@@ -67,10 +67,10 @@ WEEK_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04")
 #: because day D reads into D+1 to finish the flights that start on D. Running
 #: ingestion per day would have each day depend on the next day's ingest, which
 #: is an ordering knot with nothing to gain.
-WINDOW_STEPS: Tuple[str, ...] = ("00", "01")
+WINDOW_STEPS: Tuple[str, ...] = ("00",)
 
 #: Steps that run once per day, on the tracks that day owns.
-DAY_STEPS: Tuple[str, ...] = ("02", "02a", "03", "04")
+DAY_STEPS: Tuple[str, ...] = ("01", "02", "02a", "03", "04")
 
 #: What each reference substep produces.
 #:
@@ -424,7 +424,47 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     through ``runner.STEPS`` because those entry points take a date *range*
     and would quietly widen a day back into a month.
     """
-    if step == "02":
+    if step == "01":
+        from opdi.ingestion.osn_statevectors import StateVectorIngestion
+        from opdi.utils.storage import StorageManager
+
+        # A sliding window, not a fresh fetch.
+        #
+        # Day D is segmented over [D - lookback, D+1 + lookahead), which spans
+        # D-1, D and D+1. Consecutive days therefore overlap by two thirds: if
+        # each day re-fetched its whole window, every calendar day would be
+        # pulled from the archive three times.
+        #
+        # So fetch only the days not already on disk, and drop only the days
+        # the window has moved past. Across a campaign each calendar day is
+        # fetched once and deleted once, and the table holds three days rather
+        # than the whole month.
+        needed = [day - timedelta(days=1), day, day + timedelta(days=1)]
+        storage = StorageManager(spark, config)
+        present = set(storage.list_partitions("osn_statevectors_v2", "event_time_day"))
+
+        missing = [d for d in needed if d.isoformat() not in present]
+        stale = sorted(present - {d.isoformat() for d in needed})
+
+        print(f"  window {needed[0]} .. {needed[-1]}: "
+              f"{len(needed) - len(missing)} already present, "
+              f"{len(missing)} to fetch, {len(stale)} to drop")
+
+        sv = StateVectorIngestion(spark, config)
+        for d in missing:
+            print(f"    fetching {d}")
+            if config.project.project_name == "opensky":
+                sv.ingest_from_s3(start_date=d, end_date=d + timedelta(days=1))
+            else:
+                sv.ingest(start_date=d, end_date=d + timedelta(days=1))
+
+        if stale:
+            # After fetching, never before: a crash between the two would
+            # otherwise leave the window short and the next run would have no
+            # way to tell that from a day the archive genuinely lacks.
+            n = storage.drop_partitions("osn_statevectors_v2", "event_time_day", stale)
+            print(f"    dropped {n} day(s) the window has passed: {', '.join(stale)}")
+    elif step == "02":
         from opdi.pipeline.tracks import TrackProcessor
 
         TrackProcessor(spark, config).process_day(day, skip_if_processed=False)
@@ -462,6 +502,48 @@ def day_state_key(step: str, day: date) -> str:
 def days_in(start: date, end: date) -> List[date]:
     """Every day from ``start`` to ``end`` inclusive."""
     return [start + timedelta(days=n) for n in range((end - start).days + 1)]
+
+
+def _session_extras() -> Dict[str, str]:
+    """Spark settings applied to every step's session.
+
+    The retained-state caps are permanent: a driver keeps stage, job, task and
+    SQL-execution history for the life of its context, and that growth is what
+    put an earlier run within reach of the container's memory cap.
+
+    Event logging is opt-in through ``OPDI_EVENTLOG_DIR`` because it is a
+    measurement tool, not something a production run should pay for. Set it and
+    the run writes a per-stage cost history that can be read afterwards --
+    which is the only way to attribute a slow step to a specific shuffle rather
+    than to a guess.
+    """
+    extras = {
+        "spark.ui.retainedStages": "50",
+        "spark.ui.retainedJobs": "50",
+        "spark.ui.retainedTasks": "1000",
+        "spark.sql.ui.retainedExecutions": "50",
+    }
+    eventlog = os.environ.get("OPDI_EVENTLOG_DIR")
+    if eventlog:
+        # Spark refuses to start if the event-log directory does not exist --
+        # "FileNotFoundException: File ... does not exist" from
+        # SparkContext init, before a single step runs. For a local path there
+        # is no reason to make the operator create it by hand; for a remote one
+        # we leave it alone, because creating a bucket prefix is not ours to
+        # guess at.
+        if eventlog.startswith("file://"):
+            Path(eventlog[len("file://"):]).mkdir(parents=True, exist_ok=True)
+        elif "://" not in eventlog:
+            Path(eventlog).mkdir(parents=True, exist_ok=True)
+        extras.update({
+            "spark.eventLog.enabled": "true",
+            "spark.eventLog.dir": eventlog,
+            # Stage-level metrics are the point; without this the log records
+            # that a stage ran but not what it cost.
+            "spark.eventLog.logStageExecutorMetrics": "true",
+        })
+    return extras
+
 
 
 def _describe_memory(limit_bytes: Optional[int], used_bytes: int) -> str:
@@ -554,12 +636,26 @@ def run_week(
     # A unit of work is a (step, day) pair for the per-day steps and a bare
     # step for the window-wide ones, so resuming lands on the day that failed
     # rather than restarting the week.
+    # Day-major, not step-major: a day is carried all the way through before
+    # the next day starts.
+    #
+    # Iterating steps on the outside runs every day's ingest, then every day's
+    # segmentation, and so on. That was survivable while state vectors
+    # accumulated. It is not survivable now they are overwritten per day: day
+    # 1's raw data is replaced by day 2's ingest long before step 02 reaches
+    # day 1, so segmentation reads a window belonging to some later day and
+    # the output is quietly wrong rather than missing.
+    #
+    # Observed: `<<< step 01 day 2026-06-01` followed immediately by
+    # `>>> step 01 day 2026-06-02`.
+    #
+    # Day-major also means a failure costs one day rather than a phase, and a
+    # half-finished campaign holds whole days rather than every day's tracks
+    # and no day's events.
     units: List[Tuple[str, Optional[date]]] = []
-    for step in steps:
-        if step in DAY_STEPS:
-            units.extend((step, d) for d in all_days)
-        else:
-            units.append((step, None))
+    units.extend((step, None) for step in steps if step not in DAY_STEPS)
+    for d in all_days:
+        units.extend((step, d) for step in steps if step in DAY_STEPS)
 
     def _key(step, day):
         return day_state_key(step, day) if day is not None else step
@@ -649,12 +745,7 @@ def run_week(
             app_name=f"OPDI week {start_date}..{end_date} step {step}",
             config=config,
             distributed=distributed,
-            extra_configs={
-                "spark.ui.retainedStages": "50",
-                "spark.ui.retainedJobs": "50",
-                "spark.ui.retainedTasks": "1000",
-                "spark.sql.ui.retainedExecutions": "50",
-            },
+            extra_configs=_session_extras(),
         )
         try:
             # `(step, day)`, not `step`: todo holds pairs since the run

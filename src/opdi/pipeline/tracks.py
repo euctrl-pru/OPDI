@@ -563,7 +563,10 @@ class TrackProcessor:
         # days present are replaced, so re-running a day stops duplicating it
         # while a run over fresh days behaves exactly as append did.
         self.storage.write_table(
-            df_month, "osn_tracks", mode="overwrite", partition_by=["dof"]
+            df_month, "osn_tracks", mode="overwrite", partition_by=["dof"],
+            # A claimed batch holds exactly the day it claimed, so the
+            # partition is known without evaluating the frame to ask.
+            partition_values=([{"dof": claim[0].date()}] if claim is not None else None),
         )
 
         # Clean up memory
