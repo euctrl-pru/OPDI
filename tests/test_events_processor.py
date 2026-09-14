@@ -158,8 +158,13 @@ _T0 = dt.datetime(2024, 6, 1, 12, 0, 0)
 #: on-runway samples, seen densely only near Switzerland: ~4%/7% network vs
 #: ATOT/ALDT ~92%/~100%), so ATOT/ALDT are RETAINED under v0.2.0 for coverage,
 #: published alongside the A-CDM family for its accuracy where reception allows.
-V4_RETIRED = {"take-off", "AOBT", "AIBT",
-              "entry-runway", "exit-runway"}
+#: Types no configuration should still publish once the merge is on. ``AOBT``
+#: and ``AIBT`` are deliberately absent: v0.2.0 retired them in favour of
+#: ``off-block``/``on-block``, and v0.3.0 brings the names back because one
+#: detector should have one name. The A-CDM strings are what is retired now.
+V4_RETIRED = {"take-off", "airborne", "touchdown", "off-block", "on-block",
+              "entry-runway", "exit-runway",
+              "top-of-climb-cco", "top-of-descent-cdo"}
 
 _RWY_BEARING = 70.0
 _EBBR = (50.0, 4.0)   # runway 07 threshold, and the aerodrome reference point
@@ -523,17 +528,31 @@ def test_landing_carries_the_new_meaning_only_under_the_new_version(spark, stub_
 
 
 def test_every_top_of_climb_records_which_algorithm_produced_it(spark, stub_storage):
+    """One arm now, and it still says which.
+
+    The fuzzy arm is dropped and PRU takes the plain name, so the stamp no
+    longer disambiguates two live algorithms -- it records which one produced
+    a published row, which is what makes a past table readable after the next
+    change.
+    """
     out = _run(spark, stub_storage, EventConfig()).filter(
         F.col("type").startswith("top-of-climb"))
     methods = {json.loads(r["info"])["method"] for r in out.collect()}
-    assert methods == {"phase", "pru"}
+    assert methods == {"pru"}
 
 
 def test_every_top_of_descent_records_it_too(spark, stub_storage):
+    """One arm now, and it still says which.
+
+    The fuzzy arm is dropped and PRU takes the plain name, so the stamp no
+    longer disambiguates two live algorithms -- it records which one produced
+    a published row, which is what makes a past table readable after the next
+    change.
+    """
     out = _run(spark, stub_storage, EventConfig()).filter(
         F.col("type").startswith("top-of-descent"))
     methods = {json.loads(r["info"])["method"] for r in out.collect()}
-    assert methods == {"phase", "pru"}
+    assert methods == {"pru"}
 
 
 def test_a_go_around_does_not_depend_on_the_runway_reference_tables(spark, tmp_path):
@@ -612,11 +631,17 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
         "track_id string, type string, event_time timestamp",
     )
 
-    v4 = {r["type"] for r in calculate_block_events(sv, stand, EventConfig()).collect()}
+    shipped = {r["type"] for r in calculate_block_events(sv, stand, EventConfig()).collect()}
+    v020 = {r["type"] for r in calculate_block_events(
+        sv, stand, EventConfig(merge_duplicate_milestones=False)).collect()}
     legacy = {r["type"] for r in
               calculate_block_events(sv, stand, EventConfig.legacy()).collect()}
 
-    assert v4 == {"off-block", "on-block"}
+    # One detector, one name -- and the name is the one legacy already used.
+    # Only v0.2.0, which published the A-CDM vocabulary without merging it,
+    # spells them differently.
+    assert shipped == {"AOBT", "AIBT"}
+    assert v020 == {"off-block", "on-block"}
     assert legacy == {"AOBT", "AIBT"}
 
 

@@ -68,13 +68,22 @@ def enrich_day(
         return None
 
     days = _days_between(start_date, end_date)
-    day_strs = [d.isoformat() for d in days]
 
+    # ``between`` on a cast date rather than ``isin`` on isoformat strings:
+    # the flight list carries a ``DOF=__HIVE_DEFAULT_PARTITION__`` partition
+    # for rows with no date, and an inclusive range says plainly that those
+    # rows are out of scope rather than relying on a null comparing unequal to
+    # every string in a list.
+    #
+    # The two tables really do spell the column differently -- ``DOF`` on the
+    # flight list, ``dof`` on the events -- and the partition directories on S3
+    # follow suit.
+    dof = F.col("DOF").cast("date")
     flight_list = storage.read_table(FLIGHT_LIST_TABLE).filter(
-        F.col("DOF").cast("date").isin(*day_strs)
+        dof.between(F.lit(start_date), F.lit(end_date))
     )
     events = storage.read_table(EVENTS_TABLE).filter(
-        F.col("dof").cast("date").isin(*day_strs)
+        F.col("dof").cast("date").between(F.lit(start_date), F.lit(end_date))
     )
 
     enriched = enrich_flight_list(flight_list, events, config)
@@ -85,13 +94,13 @@ def enrich_day(
         STAGING_TABLE,
         mode="overwrite",
         partition_by=["DOF"],
-        partition_values=[{"DOF": d} for d in day_strs],
+        partition_values=[{"DOF": d} for d in days],
     )
 
     # Pass 2: replace the day's rows from a source that shares no lineage with
     # them.
     staged = storage.read_table(STAGING_TABLE).filter(
-        F.col("DOF").cast("date").isin(*day_strs)
+        F.col("DOF").cast("date").between(F.lit(start_date), F.lit(end_date))
     )
     written = staged.count()
     storage.write_table(
@@ -99,8 +108,8 @@ def enrich_day(
         FLIGHT_LIST_TABLE,
         mode="overwrite",
         partition_by=["DOF"],
-        partition_values=[{"DOF": d} for d in day_strs],
+        partition_values=[{"DOF": d} for d in days],
     )
 
-    storage.drop_partitions(STAGING_TABLE, "DOF", day_strs)
+    storage.drop_partitions(STAGING_TABLE, "DOF", [d.isoformat() for d in days])
     return written

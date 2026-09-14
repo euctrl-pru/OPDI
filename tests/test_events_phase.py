@@ -278,55 +278,87 @@ def test_the_arrival_end_elevation_also_counts(spark):
 # The level-segment defect
 
 
-def _level_types(spark, labels, config):
-    out = calculate_horizontal_segment_events(_measured(_labelled(spark, labels)), config)
-    return [r.type for r in out.orderBy("event_time", "type").collect()]
+def _cruise_traj(n_cruise, step=60):
+    """Climb, ``n_cruise`` samples of cruise, descend.
+
+    The sample step is 60 s so a single cruise sample survives
+    ``phase_twindow_seconds`` smoothing -- at 5 s it is erased as a flicker and
+    the trajectory never reaches cruise at all, which is why an earlier version
+    of these tests measured nothing. The altitudes and speeds are chosen to
+    satisfy the fuzzy classifier's cruise rule outright: the detector recomputes
+    ``flight_phase`` from ``baro_altitude_c``/``vert_rate``/``velocity`` and
+    ignores any label attached to the frame, so the phase has to be driven
+    through the physics rather than asserted.
+    """
+    samples, t = [], 0
+    for alt in range(10000, 35000, 5000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    for _ in range(n_cruise):
+        samples.append({"t": t, "baro_altitude": _m(35000),
+                        "vert_rate": 0.0, "velocity": 600 / KT_PER_MPS})
+        t += step
+    for alt in range(30000, 5000, -5000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    return samples
 
 
-def test_a_one_sample_level_segment_emits_both_a_start_and_an_end(spark):
+def _counts(spark, samples, config):
+    out = calculate_horizontal_segment_events(
+        _measured(make_track(spark, samples)), config
+    )
+    types = [r.type for r in out.collect()]
+    return {t: types.count(t) for t in
+            ("level-start", "level-end", "top-of-climb", "top-of-descent")}
+
+
+def test_a_one_sample_cruise_emits_both_a_start_and_an_end(spark):
     """The defect, and the fix, in one trajectory.
 
-    The middle sample is the only ``LVL`` one, so it is simultaneously the
-    start and the end of a level segment. The published chain was
-    first-match-wins with four things to say in one slot: this sample matched
-    the "level-start" branch and could never reach the "level-end" one, so it
-    emitted a start and no end. Measured over 2026-06-01 that cost 28,855
-    unmatched starts across 17,356 of 44,461 flights.
+    A cruise one sample long is simultaneously the start and the end of a level
+    segment. The published chain was first-match-wins with four things to say in
+    one slot, so this sample matched the "level-start, top-of-climb" branch and
+    could never reach the "level-end, top-of-descent" one. Measured over
+    2026-06-01 that cost 28,855 unmatched starts across 17,356 of 44,461
+    flights, and only 22% of them fell near ``last_seen`` -- the rest were
+    mid-flight, which is where one-sample segments live.
     """
-    labels = ["CL", "CL", "LVL", "DE", "DE"]
+    got = _counts(spark, _cruise_traj(1), EventConfig())
 
-    got = _level_types(spark, labels, EventConfig())
-
-    assert got.count("level-start") == got.count("level-end") == 1
+    assert got["level-start"] == got["level-end"] == 1
 
 
-def test_the_published_chain_still_loses_that_end(spark):
-    """The fix is a behaviour change to a published family, so the old
-    behaviour is pinned rather than assumed -- otherwise nothing distinguishes
-    "fixed" from "never broken"."""
-    labels = ["CL", "CL", "LVL", "DE", "DE"]
+def test_the_published_chain_loses_that_end_and_its_top_of_descent(spark):
+    """The old behaviour, pinned rather than assumed.
 
-    got = _level_types(spark, labels, EventConfig(emit_runway_milestones=False))
+    Without this nothing distinguishes "fixed" from "never broken". Note what
+    is lost: the precedence cost the ``level-end`` *and* the ``top-of-descent``
+    together, because both lived in the same unreachable branch.
+    """
+    got = _counts(spark, _cruise_traj(1), EventConfig(emit_runway_milestones=False))
 
-    assert got.count("level-start") == 1
-    assert got.count("level-end") == 0
-
-
-def test_a_multi_sample_level_segment_is_unchanged_by_the_fix(spark):
-    """The fix adds a label to one sample; it must not double-count the
-    ordinary case, where the start and the end are different samples."""
-    labels = ["CL", "CL", "LVL", "LVL", "LVL", "DE", "DE"]
-
-    got = _level_types(spark, labels, EventConfig())
-
-    assert got.count("level-start") == got.count("level-end") == 1
+    assert got["level-start"] == 1
+    assert got["level-end"] == 0
+    assert got["top-of-climb"] == 1
+    assert got["top-of-descent"] == 0
 
 
-def test_starts_and_ends_balance_across_several_segments(spark):
-    """The property the run log checks network-wide, at the scale of one
-    track: every start has an end."""
-    labels = ["CL", "LVL", "CL", "CL", "LVL", "LVL", "CL", "LVL", "DE"]
+def test_a_longer_cruise_was_never_affected(spark):
+    """Two cruise samples put the start and the end on different rows, so the
+    precedence never bit. The fix must leave this case exactly as it was."""
+    shipped = _counts(spark, _cruise_traj(2), EventConfig())
+    published = _counts(spark, _cruise_traj(2), EventConfig(emit_runway_milestones=False))
 
-    got = _level_types(spark, labels, EventConfig())
+    assert shipped["level-start"] == shipped["level-end"] == 1
+    assert published["level-start"] == published["level-end"] == 1
 
-    assert got.count("level-start") == got.count("level-end")
+
+def test_the_shipped_configuration_publishes_no_fuzzy_top(spark):
+    """The tops come from ``vertical_pru`` now. Two definitions of a top of
+    climb in one table, under one name, is what this release removes."""
+    got = _counts(spark, _cruise_traj(2), EventConfig())
+
+    assert got["top-of-climb"] == got["top-of-descent"] == 0

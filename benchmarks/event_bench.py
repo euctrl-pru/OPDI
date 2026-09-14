@@ -180,14 +180,20 @@ LADDER = [
             "events_version": "events_v0.2.0",
         },
     ),
+    # One variable per purpose. Its own rung rather than folded into the one
+    # below, because it changes the published vocabulary -- ATOT and ALDT stop
+    # being two events each -- and bundling that into a rung that also turns on
+    # six detectors would leave the delta unreadable.
+    (
+        "L14_merged",
+        {
+            "merge_duplicate_milestones": True,
+            "ring_radii_nm": (40.0, 50.0, 60.0, 100.0, 110.0, 120.0),
+            "events_version": "events_v0.3.0",
+        },
+    ),
 ]
 
-#: The v0.1.0 shipped configuration, reconstructed. `EventConfig()` moved to
-#: v0.2.0 when the A-CDM families landed, so the V3 baseline no longer has a
-#: constructor; these are exactly the seven new behaviour fields at their off
-#: values plus the old version string. Every V4 rung is applied cumulatively on
-#: top of this, so V00 *is* what V3 shipped and V07 must equal `EventConfig()`
-#: field for field -- `verify_plan_v4` asserts both rather than trusting them.
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
 #: v0.3.0 when the duplicate milestones were merged, so v0.2.0 -- which
 #: published ``ATOT`` beside ``airborne`` and ``ALDT`` beside ``touchdown``,
@@ -199,8 +205,20 @@ V020_BASE = dict(
     events_version="events_v0.2.0",
 )
 
+#: The v0.1.0 shipped configuration, reconstructed. `EventConfig()` moved to
+#: v0.2.0 when the A-CDM families landed, so the V3 baseline no longer has a
+#: constructor; these are exactly the new behaviour fields at their off values
+#: plus the old version string. Every V4 rung is applied cumulatively on
+#: top of this, so V00 *is* what V3 shipped and the last rung must equal
+#: `EventConfig()` field for field -- `verify_plan_v4` asserts both rather than
+#: trusting them.
 V4_BASE = dict(
     emit_runway_milestones=False,
+    # Named rather than left to follow ``emit_runway_milestones``: this dict is
+    # a literal reconstruction, and a field that differs from the shipped
+    # configuration only by inference is a field nobody reading the ladder
+    # knows is in play.
+    merge_duplicate_milestones=False,
     emit_pru_tops=False,
     level_method="icao",
     level_floors_above_field=False,
@@ -239,7 +257,12 @@ LADDER_V4 = [
      {"level_floors_above_field": True, "level_radius_enforced": True}),
     ("V05_pru_tops", {"emit_pru_tops": True, "level_anchor": "pru"}),
     ("V06_runway_milestones", {"emit_runway_milestones": True}),
-    ("V07_shipped", {"events_version": "events_v0.2.0"}),
+    ("V07_v020", {"events_version": "events_v0.2.0"}),
+    ("V08_merged", {
+        "merge_duplicate_milestones": True,
+        "ring_radii_nm": (40.0, 50.0, 60.0, 100.0, 110.0, 120.0),
+        "events_version": "events_v0.3.0",
+    }),
 ]
 
 #: Rungs that are allowed to be config-identical to the rung before them,
@@ -443,14 +466,14 @@ def verify_plan(plan: dict) -> None:
     something nobody asked about -- and costs two hours per rung to discover.
     """
     names = list(plan)
-    if names and names[0] == "L00_legacy":
+    if names and names[0] == LADDER[0][0]:
         assert plan["L00_legacy"] == EventConfig.legacy(), (
             "rung 0 must be exactly the published algorithm, or the baseline "
             "every gain is measured against is not the baseline"
         )
-    if names and names[-1] == "L13_shipped":
+    if names and names[-1] == LADDER[-1][0]:
         shipped = EventConfig()
-        got = plan["L13_shipped"]
+        got = plan[names[-1]]
         differing = [
             f
             for f in EventConfig().__dataclass_fields__
@@ -477,7 +500,7 @@ def verify_plan_v4(plan: dict) -> None:
     shipped = EventConfig()
     fields = list(EventConfig().__dataclass_fields__)
 
-    if names and names[0] == "V00_v3_shipped":
+    if names and names[0] == LADDER_V4[0][0]:
         differing = {
             f for f in fields if getattr(plan[names[0]], f) != getattr(shipped, f)
         }
@@ -488,7 +511,7 @@ def verify_plan_v4(plan: dict) -> None:
             f"is not v0.1.0; missing ones mean a behaviour shipped without a "
             f"rung measuring it."
         )
-    if names and names[-1] == "V07_shipped":
+    if names and names[-1] == LADDER_V4[-1][0]:
         differing = [
             f for f in fields if getattr(plan[names[-1]], f) != getattr(shipped, f)
         ]

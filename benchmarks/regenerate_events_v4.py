@@ -52,6 +52,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
+from event_bench import LADDER_V4  # noqa: E402
 
 def _find_portal() -> Path:
     """Locate the opdi-portal checkout that owns this paper.
@@ -89,7 +90,10 @@ PERIODS = ("2026",)
 #: configuration. Named once, because the ladder writes the table and the
 #: comparison reads it, and a disagreement between the two would compare a
 #: configuration against a truth nobody scored it on.
-SHIPPED_RUNG = "V07_shipped"
+# Derived, not spelled: the shipped rung moves whenever a rung is appended, and
+# a literal here would quietly point the paper at the rung below the one that
+# ships.
+SHIPPED_RUNG = LADDER_V4[-1][0]
 
 #: Source files whose contents define each job's result. Named explicitly: a
 #: dependency worth re-running for is a dependency worth writing down.

@@ -181,7 +181,14 @@ TRAVERSAL_KEY = ("track_id", "apt_ident", "rwy_ident", "trace_id")
 #: rebuild ``info``. The same trick ``calculate_ring_crossing_events`` uses for
 #: the aerodrome position. Disjoint from :data:`TRAVERSAL_KEY`, because the two
 #: are concatenated into one ``partition_cols`` list.
-TRAVERSAL_INFO = ("traversal_class", "align_deg", "max_gs_kt", "osn_flight_id")
+TRAVERSAL_INFO = (
+    "traversal_class", "align_deg", "max_gs_kt", "osn_flight_id",
+    # The runway's true bearing. Functionally dependent on ``rwy_ident``, like
+    # everything else here, and it has to ride along rather than be rejoined:
+    # ``_info`` builds the published JSON on the far side of
+    # ``threshold_crossings``, which keeps only the columns it is told to.
+    "rwy_bearing",
+)
 
 #: The standard event frame, as ``events.py`` shapes it. Declared explicitly so
 #: a disabled configuration can return an empty frame of exactly this shape

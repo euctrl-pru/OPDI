@@ -349,7 +349,7 @@ def test_everything_except_reference_data_runs_per_day():
     from opdi.periodrun import DAY_STEPS, WINDOW_STEPS
 
     assert WINDOW_STEPS == ("00",)
-    assert DAY_STEPS == ("01", "02", "02a", "03", "04")
+    assert DAY_STEPS == ("01", "02", "02a", "03", "04", "04b")
 
 
 def test_a_day_has_the_window_its_segmentation_will_read():
@@ -403,13 +403,13 @@ def test_a_day_step_records_completion_per_day():
     assert a == "02@2026-06-01"
 
 
-def test_a_week_is_thirty_six_units():
-    """One window step plus five per day across seven days. Stated as a number
+def test_a_week_is_forty_three_units():
+    """One window step plus six per day across seven days. Stated as a number
     so a change to either list is visible rather than inferred."""
     from opdi.periodrun import DAY_STEPS, WINDOW_STEPS, days_in
 
     days = days_in(date(2026, 6, 1), date(2026, 6, 7))
-    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 36
+    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 43
 
 
 def test_ingestion_reaches_past_the_window():

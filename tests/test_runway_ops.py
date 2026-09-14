@@ -1152,7 +1152,11 @@ def test_the_unmerged_arm_still_answers_to_the_acdm_names(spark):
     )
     by_type = {r["type"]: json.loads(r["info"]) for r in out.collect()}
     assert "touchdown" in by_type and "ALDT" not in by_type
-    assert by_type["touchdown"]["method"] is None
+    # ``to_json`` drops null fields rather than writing ``"method": null``, so
+    # "no arm to disambiguate" reads as an absent key. That is the right shape:
+    # a consumer testing for the key gets False, not a null it has to special
+    # case.
+    assert "method" not in by_type["touchdown"]
 
 
 def test_the_runway_carries_its_true_bearing(spark):
