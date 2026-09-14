@@ -190,3 +190,31 @@ figure rests on it, so it is measured rather than asserted -- see Verification.
 **Confidence:** high on the mechanism, from the code and that distribution.
 Not directly measured -- confirming it needs the phase column from
 `osn_tracks`, which was being rewritten when this was written.
+
+
+## Acceptance: a fortnight, not a month
+
+Once implemented, the acceptance run is **14 days** -- 2026-06-01 to 2026-06-14
+-- not the month originally planned. A fortnight finishes overnight and can be
+inspected the next day; a month cannot, and there is no point producing thirty
+days under a vocabulary whose first fourteen have not been looked at.
+
+At the measured per-day cost -- ingest ~20 min warm, tracks 11.7, cleaning 8.2,
+flight list 5.7, events 10.6 -- a day is about 56 minutes, so a fortnight is
+roughly **13 hours**.
+
+The month run started before this design was settled was stopped at day one for
+the same reason: it was producing `events_v0.2.0` output under a vocabulary
+about to change. Its ingested state vectors remain valid and are reused; only
+the ~41 minutes of that first ingest is carried forward rather than repeated.
+
+What the fortnight is for, in order of what would send us back to the code:
+
+1. `ATOT`/`ALDT` coverage against the legacy figures -- the merge must not
+   lose rows, only gain precision on the subset A-CDM reaches.
+2. `level-start` and `level-end` counts agreeing, per flight and in total.
+3. The ring columns populated at all six radii, both directions.
+4. `RWY_DEP`/`RWY_ARR` and `STND_DEP`/`STND_ARR` populated at the rate the
+   underlying events support -- which for stands is bounded by surface
+   reception and will be low at many aerodromes. A low rate here is a finding,
+   not a failure.
