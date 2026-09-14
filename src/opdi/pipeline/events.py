@@ -1486,12 +1486,17 @@ class FlightEventProcessor:
         if df_events is None:
             return
 
+        df_events.cache()
+
         # One variable per purpose, before anything is stamped or keyed: the
         # event id hashes the type, so merging after it would leave two ids
         # for one milestone.
+        #
+        # **After the cache, not before.** The merge unions a filtered copy of
+        # this frame with a windowed one, so it reads it twice; uncached, that
+        # is the whole detector chain evaluated twice and step 04 pays for it
+        # at cluster scale.
         df_events = merge_milestone_duplicates(df_events, self.events)
-
-        df_events.cache()
         df_events = df_events.withColumn("source", lit("OSN"))
         df_events = df_events.withColumn("version", lit(self.events.events_version))
 
