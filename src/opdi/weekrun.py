@@ -464,6 +464,38 @@ def days_in(start: date, end: date) -> List[date]:
     return [start + timedelta(days=n) for n in range((end - start).days + 1)]
 
 
+def _session_extras() -> Dict[str, str]:
+    """Spark settings applied to every step's session.
+
+    The retained-state caps are permanent: a driver keeps stage, job, task and
+    SQL-execution history for the life of its context, and that growth is what
+    put an earlier run within reach of the container's memory cap.
+
+    Event logging is opt-in through ``OPDI_EVENTLOG_DIR`` because it is a
+    measurement tool, not something a production run should pay for. Set it and
+    the run writes a per-stage cost history that can be read afterwards --
+    which is the only way to attribute a slow step to a specific shuffle rather
+    than to a guess.
+    """
+    extras = {
+        "spark.ui.retainedStages": "50",
+        "spark.ui.retainedJobs": "50",
+        "spark.ui.retainedTasks": "1000",
+        "spark.sql.ui.retainedExecutions": "50",
+    }
+    eventlog = os.environ.get("OPDI_EVENTLOG_DIR")
+    if eventlog:
+        extras.update({
+            "spark.eventLog.enabled": "true",
+            "spark.eventLog.dir": eventlog,
+            # Stage-level metrics are the point; without this the log records
+            # that a stage ran but not what it cost.
+            "spark.eventLog.logStageExecutorMetrics": "true",
+        })
+    return extras
+
+
+
 def _describe_memory(limit_bytes: Optional[int], used_bytes: int) -> str:
     if limit_bytes is None:
         return "container memory: unconstrained"
@@ -649,12 +681,7 @@ def run_week(
             app_name=f"OPDI week {start_date}..{end_date} step {step}",
             config=config,
             distributed=distributed,
-            extra_configs={
-                "spark.ui.retainedStages": "50",
-                "spark.ui.retainedJobs": "50",
-                "spark.ui.retainedTasks": "1000",
-                "spark.sql.ui.retainedExecutions": "50",
-            },
+            extra_configs=_session_extras(),
         )
         try:
             # `(step, day)`, not `step`: todo holds pairs since the run
