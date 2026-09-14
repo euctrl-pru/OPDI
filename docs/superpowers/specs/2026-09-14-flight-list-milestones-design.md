@@ -38,19 +38,31 @@ bias**. Legacy fills the nulls, which is most of them — the A-CDM family
 requires surface reception and reaches roughly 4-7% of the network against
 legacy's ~90%.
 
-`info.method` records which algorithm produced each value. This is not
+`info.method` records which algorithm produced each value, **in the event
+table only** -- the flight list carries the value alone. This is not
 decoration. **The merged column is a mixture of two estimators with different
 biases, and the mixing ratio varies by aerodrome** -- surface reception was
 measured at 12.8% of in-stand samples at LSZH against 0.1% at EBBR. An
 aggregate computed over the merged column therefore carries an
-aerodrome-dependent bias that is invisible in the column itself. The method
-must travel with the value.
+aerodrome-dependent bias that is invisible in the column itself. The method travels with the event, so the
+mixture is recoverable by anyone who needs it; the flight list is the
+convenience view and does not repeat it.
 
 ### Version
 
 This changes the published type vocabulary, so it ships as **`events_v0.3.0`**.
 `events_v0.2.0` stays reachable and reproducible; `CLAUDE.md` forbids mutating
 a released version string.
+
+### The tops keep one method
+
+`top-of-climb` and `top-of-descent` are published by the PRC/PRU method only.
+The fuzzy phase-classifier arm is dropped from the event table, and the PRU arm
+takes the plain names -- so `top-of-climb-cco` and `top-of-descent-cdo` cease
+to exist as separate types.
+
+The PRU arm is also the better-covered one: 55,819 against 32,604 a day for the
+climb, 55,810 against 32,541 for the descent.
 
 ### Ring radii
 
@@ -76,7 +88,6 @@ renumbering it would break every operator's muscle memory for no gain.
 | Column | Source |
 |---|---|
 | `ATOT`, `ALDT`, `AOBT`, `AIBT` | merged events, joined on `flight_id` |
-| `ATOT_METHOD`, `ALDT_METHOD` | `info.method` of the event chosen |
 | `RWY_DEP` | `info.runway` of the `ATOT` event |
 | `RWY_ARR` | `info.runway` of the `ALDT` event |
 | `STND_DEP` | `info.osm_ref` of `exit-parking_position` |
@@ -95,15 +106,8 @@ distinction is the `role` already carried in the ring event.
 
 ## What this does not do
 
-* **The tops are left alone.** `top-of-climb` and `top-of-climb-cco` are the
-  same duplication as ATOT/`airborne`, and so are the descent pair. They are
-  *not* merged here, because unlike take-off there is no reference source that
-  records a top of climb -- so "prefer the more accurate one" has no
-  measurement behind it. Merging them would be a preference presented as a
-  fact.
-* **`level-start` exceeds `level-end` by 25,369 events a day**, which should
-  not happen if every segment has two ends. Noted, not investigated, and not
-  addressed here.
+* **`level-start` exceeds `level-end` by 25,369 events a day.** Investigated;
+  see below. Cause identified, fix not included in this change.
 
 ## Verification
 
@@ -117,3 +121,41 @@ A day already processed is reprocessed and compared:
   exactly;
 * `RWY_DEP` matches `info.runway` of the same flight's `ATOT` event for every
   row where both exist.
+
+
+## Appendix: why `level-start` exceeds `level-end`
+
+Measured on 2026-06-01: 129,426 starts against 104,057 ends. 17,356 of 44,461
+flights carry more starts than ends, for 28,855 unmatched starts in total.
+
+The cause is not the partition boundaries. `prev_phase` and `next_phase` are
+built with `lag`/`lead` defaulting to the *string* `"None"` rather than NULL, so
+a track that begins or ends in level flight is labelled correctly at both ends.
+
+It is the `when` chain in `calculate_horizontal_segment_events`, which is
+first-match-wins:
+
+```
+.when(t == first_cr_time, ["level-start", "top-of-climb"])
+.when(t == last_cr_time,  ["level-end",   "top-of-descent"])
+.when(start_of_segment,   ["level-start"])
+.when(in CR/LVL & next_phase != phase, ["level-end"])
+```
+
+A sample that is **both the start and the end of a segment** -- a level segment
+one sample long -- matches the third branch and can never reach the fourth. It
+emits a start and no end. A single-sample *cruise* matches the first branch and
+never the second, losing `level-end` and `top-of-descent` together.
+
+The evidence fits: only 22% of unmatched starts fall within ten minutes of
+`last_seen`, so the great majority are mid-flight, which is where single-sample
+level segments occur.
+
+The fix is to emit both labels where a sample is both, which the array form
+already allows. It is not included here because it changes the level-segment
+counts every published figure rests on, and deserves its own change with its
+own before-and-after.
+
+**Confidence:** high on the mechanism, from the code and that distribution.
+Not directly measured -- confirming it needs the phase column from
+`osn_tracks`, which was being rewritten when this was written.
