@@ -581,8 +581,17 @@ def runway_identity_types(config) -> dict:
     for the A-CDM family. Mixing the two into one comparison would align two
     detections onto the same truth row and score whichever landed nearer.
     """
-    acdm = getattr(config, "emit_runway_milestones", False)
-    keep = {"airborne", "touchdown"} if acdm else {"ATOT", "ALDT"}
+    # Under ``merge_duplicate_milestones`` (v0.3.0) the two arms share the
+    # ``ATOT``/``ALDT`` type strings and are told apart by ``info.method``
+    # instead. Narrowing on the type string would then keep nothing at all --
+    # silently, as an empty comparison rather than an error -- so the merged
+    # configuration keeps the merged names and any arm-level split downstream
+    # has to read ``info.method``.
+    if getattr(config, "merge_duplicate_milestones", False):
+        keep = {"ATOT", "ALDT"}
+    else:
+        acdm = getattr(config, "emit_runway_milestones", False)
+        keep = {"airborne", "touchdown"} if acdm else {"ATOT", "ALDT"}
     return {t: m for t, m in RUNWAY_IDENTITY_TYPES.items() if t in keep}
 
 

@@ -22,8 +22,12 @@ from opdi.pipeline.flight_list_milestones import (
 
 _T0 = dt.datetime(2024, 6, 1, 10, 0, 0)
 
+#: The published flight list mixes cases -- ``ID``/``DOF`` upper, the columns
+#: the detectors read lower -- and Spark resolves either way, so the fixture
+#: mixes them too. ``DOF`` in particular is the partition column the enriched
+#: frame is written back on and must come through spelt exactly as it went in.
 FLIGHT_SCHEMA = (
-    "id string, ICAO24 string, FLT_ID string, dof timestamp, "
+    "id string, ICAO24 string, FLT_ID string, DOF timestamp, "
     "adep string, ades string, version string"
 )
 EVENT_SCHEMA = "track_id string, type string, event_time timestamp, info string, version string"
@@ -114,6 +118,21 @@ def test_empty_event_frame_leaves_every_flight_intact(spark):
 
     assert out.count() == 1
     assert all(_row(out)[c] is None for c in ADDED_COLUMNS)
+
+
+def test_the_partition_column_and_the_join_key_survive_intact(spark):
+    """``DOF`` is what the enriched frame is partitioned by on write, and a
+    duplicate column name fails that write outright -- so both are asserted
+    here rather than left to the integration."""
+    flights = _flights(spark)
+    out = enrich_flight_list(flights, _events(spark, _full_set()), EventConfig())
+
+    assert "DOF" in out.columns
+    assert dict(out.dtypes)["DOF"] == dict(flights.dtypes)["DOF"]
+    assert _row(out)["DOF"] == _T0
+    assert len(set(out.columns)) == len(out.columns)
+    # The events' ``track_id`` must not ride along beside the flight list's id.
+    assert "track_id" not in out.columns and "_track_id" not in out.columns
 
 
 def test_original_columns_are_untouched(spark):
