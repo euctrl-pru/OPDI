@@ -182,3 +182,43 @@ def test_only_the_partitions_being_written_are_deleted(spark, tmp_path):
     )
 
     assert _rows(spark, tmp_path, "t") == {(1, "2026-06-01"), (99, "2026-06-02")}
+
+
+def test_the_frame_is_persisted_before_the_partition_probe():
+    """Asking which partitions a frame will write means computing the frame.
+
+    Without a persist the subsequent write computes it a second time -- the
+    whole step, twice. Measured on step 04: stages 80, 81 and 82 were 71% of
+    its 62 minutes, all three attributed to the collect on this line, all three
+    duplicating work the write then repeated.
+
+    The behaviour is identical either way, so no output test can catch this;
+    only the plan can.
+    """
+    import ast
+    import inspect
+
+    from opdi.utils.storage import StorageManager
+
+    tree = ast.parse(inspect.getsource(StorageManager._delete_partitions).lstrip())
+    calls = [
+        n.func.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    ]
+    assert "persist" in calls, "the probe must not recompute the frame"
+    assert calls.index("persist") < calls.index("collect"), "persist before collect"
+
+
+def test_the_persist_is_released_after_the_write():
+    """Held past the write it would pin memory for the rest of the step."""
+    import ast
+    import inspect
+
+    from opdi.utils.storage import StorageManager
+
+    tree = ast.parse(inspect.getsource(StorageManager.write_table).lstrip())
+    calls = [
+        n.func.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    ]
+    assert "unpersist" in calls

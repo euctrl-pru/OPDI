@@ -155,11 +155,18 @@ class StorageManager:
                 # day and nothing reports it.
                 self._delete_partitions(df, path, partition_by)
                 s3_mode = "append"
+                persisted = True
+            else:
+                persisted = False
 
             writer = df.write.mode(s3_mode)
             if partition_by:
                 writer = writer.partitionBy(*partition_by)
             writer.parquet(path)
+            if persisted:
+                # Released only after the write, which is the consumer the
+                # persist exists for.
+                df.unpersist()
         else:
             qualified = f"`{self.project}`.`{table_name}`"
             if mode == "append":
@@ -184,6 +191,20 @@ class StorageManager:
         nothing to replace it with, and removing it would turn "this run wrote
         nothing" into "this day no longer exists".
         """
+        # Persisted first, because this collect evaluates the frame.
+        #
+        # Asking which partitions a frame will write means computing the frame.
+        # Without persisting, the subsequent .parquet() computes it a *second*
+        # time -- the whole step, twice. Measured on step 04: stages 80, 81 and
+        # 82 were 71% of its 62 minutes, all three attributed to this line, all
+        # three duplicates of work the write then repeated.
+        #
+        # MEMORY_AND_DISK rather than the default MEMORY_ONLY: a frame too big
+        # for memory would otherwise be silently recomputed, which is the exact
+        # failure this is here to remove.
+        from pyspark import StorageLevel
+
+        df.persist(StorageLevel.MEMORY_AND_DISK)
         values = df.select(*partition_by).distinct().collect()
         if not values:
             return
