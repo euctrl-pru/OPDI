@@ -214,7 +214,31 @@ What the fortnight is for, in order of what would send us back to the code:
    lose rows, only gain precision on the subset A-CDM reaches.
 2. `level-start` and `level-end` counts agreeing, per flight and in total.
 3. The ring columns populated at all six radii, both directions.
-4. `RWY_DEP`/`RWY_ARR` and `STND_DEP`/`STND_ARR` populated at the rate the
-   underlying events support -- which for stands is bounded by surface
-   reception and will be low at many aerodromes. A low rate here is a finding,
-   not a failure.
+4. `RWY_DEP`/`RWY_ARR` and `STND_DEP`/`STND_ARR` populated at the rates
+   measured below, give or take the days differing.
+
+## Expected fill rates
+
+Measured on 2026-06-01, against the leg each column belongs to -- flights with
+a known ADEP for departure columns, ADES for arrival:
+
+| Column | Source | Fill |
+|---|---|---|
+| `ATOT` | legacy `ATOT` | 49.5% |
+| `ALDT` | legacy `ALDT` | 71.6% |
+| `AOBT` | `off-block` | 31.6% |
+| `AIBT` | `on-block` | 35.1% |
+| `STND_DEP` | `exit-parking_position` | 32.8% |
+| `STND_ARR` | `entry-parking_position` | 35.1% |
+
+Two figures are easy to reach for here and both mislead. The
+industrialisation plan's 12.8% at LSZH against 0.1% at EBBR describes surface
+reception **before** the `on_ground` projection fix -- the state that fix
+removed, not the current one. The V4 campaign's 90.13% AOBT is real but is
+pooled **against APDF at the twenty study aerodromes**, which were selected for
+being the best-observed in Europe. Neither is the network-wide number.
+
+Network-wide, across 1,036 aerodromes with layouts, blocks and stands reach
+about a third of flights. `STND_DEP` tracks `AOBT` almost exactly (32.8%
+against 31.6%) because both come from the same parking-position detection --
+so a flight with a block time nearly always has a stand, and vice versa.
