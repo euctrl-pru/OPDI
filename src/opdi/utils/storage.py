@@ -12,6 +12,25 @@ from pyspark.sql import SparkSession, DataFrame
 from opdi.config import OPDIConfig
 
 
+#: What Hive -- and therefore Spark -- calls the directory holding rows whose
+#: partition column is NULL.
+HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__"
+
+
+def _partition_dir_value(value):
+    """The directory name Spark writes a partition value to.
+
+    A NULL does not become ``col=None``; it becomes
+    ``col=__HIVE_DEFAULT_PARTITION__``. Formatting it naively builds a path
+    that does not exist, so the delete finds nothing, silently succeeds, and
+    the append that follows lands *beside* the rows it was supposed to
+    replace -- duplicating every one of them, once per run. That is how a
+    flight list with 746 dateless rows came to hold two copies of each after a
+    single re-enrichment.
+    """
+    return HIVE_DEFAULT_PARTITION if value is None else value
+
+
 class StorageManager:
     """
     Abstracts table I/O so pipeline steps work against both
@@ -231,7 +250,9 @@ class StorageManager:
         jvm = self.spark._jvm
         hconf = self.spark._jsc.hadoopConfiguration()
         for row in values:
-            parts = "/".join(f"{c}={row[c]}" for c in partition_by)
+            parts = "/".join(
+                f"{c}={_partition_dir_value(row[c])}" for c in partition_by
+            )
             target = jvm.org.apache.hadoop.fs.Path(f"{path}/{parts}")
             fs = target.getFileSystem(hconf)
             if fs.exists(target):
