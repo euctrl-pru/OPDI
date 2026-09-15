@@ -54,7 +54,11 @@ def enrich_day(
     start_date: date,
     end_date: date,
 ) -> Optional[int]:
-    """Enrich every flight list partition in ``[start_date, end_date]``.
+    """Enrich the flight list against the events written so far.
+
+    ``start_date``/``end_date`` are kept for the runner's uniform step
+    signature and for logging; the enrichment itself covers every partition,
+    for the schema reason documented below.
 
     Returns the number of rows written, or ``None`` when there was nothing to
     do -- a missing flight list or a missing event table, both of which mean an
@@ -68,48 +72,47 @@ def enrich_day(
         return None
 
     days = _days_between(start_date, end_date)
+    print(f"  enriching the flight list (asked for {len(days)} day(s) "
+          f"from {start_date}; rewrites every partition)")
 
-    # ``between`` on a cast date rather than ``isin`` on isoformat strings:
-    # the flight list carries a ``DOF=__HIVE_DEFAULT_PARTITION__`` partition
-    # for rows with no date, and an inclusive range says plainly that those
-    # rows are out of scope rather than relying on a null comparing unequal to
-    # every string in a list.
+    # **The whole table, not the window.** Enriching only the requested days
+    # would leave every other partition -- including the
+    # ``DOF=__HIVE_DEFAULT_PARTITION__`` one that holds rows with no date --
+    # carrying the pre-enrichment schema. Spark does not merge parquet schemas
+    # by default; it takes the schema of one file it happens to sample. A table
+    # whose partitions disagree therefore shows or hides the twenty-two added
+    # columns depending on which file that is, and the failure is silent: the
+    # reader sees a flight list that simply has no milestones on it.
+    #
+    # Rewriting everything is affordable precisely because this table is small
+    # -- about 3 MB per day against the event table's gigabytes -- and it is
+    # self-healing: a day whose events arrived after its first enrichment picks
+    # them up on the next run rather than staying half-filled.
     #
     # The two tables really do spell the column differently -- ``DOF`` on the
     # flight list, ``dof`` on the events -- and the partition directories on S3
     # follow suit.
-    dof = F.col("DOF").cast("date")
-    flight_list = storage.read_table(FLIGHT_LIST_TABLE).filter(
-        dof.between(F.lit(start_date), F.lit(end_date))
-    )
-    events = storage.read_table(EVENTS_TABLE).filter(
-        F.col("dof").cast("date").between(F.lit(start_date), F.lit(end_date))
-    )
+    flight_list = storage.read_table(FLIGHT_LIST_TABLE)
+    events = storage.read_table(EVENTS_TABLE)
 
     enriched = enrich_flight_list(flight_list, events, config)
 
     # Pass 1: break the read-write dependency on the target.
+    #
+    # ``partition_values=None`` on purpose. Every other day-scoped write in the
+    # pipeline knows its partitions and passes them to save a probe; here the
+    # set is "whatever the table holds", which is what the probe computes. The
+    # null-date partition in particular has no value that could be named.
     storage.write_table(
-        enriched.repartition("DOF"),
-        STAGING_TABLE,
-        mode="overwrite",
+        enriched.repartition("DOF"), STAGING_TABLE, mode="overwrite",
         partition_by=["DOF"],
-        partition_values=[{"DOF": d} for d in days],
     )
 
-    # Pass 2: replace the day's rows from a source that shares no lineage with
-    # them.
-    staged = storage.read_table(STAGING_TABLE).filter(
-        F.col("DOF").cast("date").between(F.lit(start_date), F.lit(end_date))
-    )
+    # Pass 2: replace from a source that shares no lineage with the target.
+    staged = storage.read_table(STAGING_TABLE)
     written = staged.count()
     storage.write_table(
-        staged.repartition("DOF"),
-        FLIGHT_LIST_TABLE,
-        mode="overwrite",
+        staged.repartition("DOF"), FLIGHT_LIST_TABLE, mode="overwrite",
         partition_by=["DOF"],
-        partition_values=[{"DOF": d} for d in days],
     )
-
-    storage.drop_partitions(STAGING_TABLE, "DOF", [d.isoformat() for d in days])
     return written
