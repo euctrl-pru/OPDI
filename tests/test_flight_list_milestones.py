@@ -435,3 +435,23 @@ def test_track_duration_is_published_in_minutes(spark):
 
     assert row["TRACK_DURATION_MIN"] is not None
     assert row["TRACK_DURATION_MIN"] >= 0
+
+
+def test_a_day_with_no_milestones_yet_is_not_judged(spark):
+    """A half-processed table must not produce confident wrong flags.
+
+    The rule reads "no take-off" as evidence that a track never flew. Before
+    step 04 runs, *every* track has no take-off and the absence means "not
+    computed". Measured during the campaign: 2026-06-04 sat in the table with
+    step 03 done and step 04 unfinished, and 7,610 of its departures were
+    flagged on no evidence at all.
+    """
+    fl, _ = _two_tracks(spark)
+    empty = spark.createDataFrame([], EVENT_SCHEMA)
+
+    out = {r["id"]: r for r in enrich_flight_list(fl, empty, EventConfig()).collect()}
+
+    assert out["frag"]["SUPERSEDED_DEP"] is False
+    assert out["real"]["SUPERSEDED_DEP"] is False
+    # The duration is a property of the row, not of the events, so it stands.
+    assert out["frag"]["TRACK_DURATION_MIN"] == 10.0

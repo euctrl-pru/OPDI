@@ -180,13 +180,33 @@ def add_movement_columns(
     next_dep = F.lead(first_s).over(dep_order)
     prev_arr = F.lag(last_s).over(arr_order)
 
+    # The rule reads "this track has no take-off" as evidence. On a day whose
+    # events have not been extracted yet, *every* track has no take-off, and
+    # the absence means "not computed" rather than "did not fly" -- so the rule
+    # would mark real movements. Measured: day 2026-06-04 sat in the table with
+    # step 03 done and step 04 unfinished, and 7,610 of its departures were
+    # flagged on no evidence at all.
+    #
+    # A day is only judged once something in it has flown. This is per-day
+    # rather than per-row because that is the granularity at which step 04
+    # completes: the table is legitimately half-processed during a campaign,
+    # and a flag that is wrong until the next run is a flag a dashboard can
+    # read in the meantime.
+    day = Window.partitionBy("DOF")
+    day_processed = (
+        F.sum(F.when(F.col("ATOT").isNotNull() | F.col("ALDT").isNotNull(), 1)
+              .otherwise(0)).over(day) > 0
+    )
+
     superseded_dep = (
-        F.col("ATOT").isNull()
+        day_processed
+        & F.col("ATOT").isNull()
         & next_dep.isNotNull()
         & ((next_dep - first_s) <= F.lit(window_s))
     )
     superseded_arr = (
-        F.col("ALDT").isNull()
+        day_processed
+        & F.col("ALDT").isNull()
         & prev_arr.isNotNull()
         & ((last_s - prev_arr) <= F.lit(window_s))
     )
