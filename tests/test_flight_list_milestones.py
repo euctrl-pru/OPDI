@@ -16,11 +16,17 @@ import pytest
 from opdi.config import EventConfig
 from opdi.pipeline.flight_list_milestones import (
     ADDED_COLUMNS,
+    MOVEMENT_COLUMNS,
     FLIGHT_LIST_RING_RADII_NM,
     enrich_flight_list,
 )
 
 _T0 = dt.datetime(2024, 6, 1, 10, 0, 0)
+
+#: The columns that say what happened during a movement, as opposed to whether
+#: the row is one. Only these are nullable timestamps/strings; the movement
+#: columns are always answered.
+MILESTONE_COLUMNS = [c for c in ADDED_COLUMNS if c not in MOVEMENT_COLUMNS]
 
 #: The published flight list mixes cases -- ``ID``/``DOF`` upper, the columns
 #: the detectors read lower -- and Spark resolves either way, so the fixture
@@ -28,7 +34,10 @@ _T0 = dt.datetime(2024, 6, 1, 10, 0, 0)
 #: frame is written back on and must come through spelt exactly as it went in.
 FLIGHT_SCHEMA = (
     "id string, ICAO24 string, FLT_ID string, DOF timestamp, "
-    "adep string, ades string, version string"
+    "adep string, ades string, version string, "
+    # Present on the real table and required by the movement columns. Omitting
+    # them here is how a dependency of a published column stayed untested.
+    "FIRST_SEEN timestamp, LAST_SEEN timestamp"
 )
 #: The shape ``opdi_flight_events`` actually has on disk. The key is
 #: ``flight_id``: ``events.py`` writes ``track_id`` out under that alias. This
@@ -45,7 +54,8 @@ def _t(seconds: float) -> dt.datetime:
 
 def _flights(spark, rows=None):
     rows = rows or [
-        ("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2"),
+        ("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2",
+         _T0, _t(5400)),
     ]
     return spark.createDataFrame(rows, FLIGHT_SCHEMA)
 
@@ -106,15 +116,20 @@ def test_every_column_populated_for_a_complete_flight(spark):
 
 def test_flight_with_no_events_survives_with_nulls(spark):
     flights = _flights(spark, [
-        ("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "v"),
-        ("trk-2", "def456", "KLM99", _T0, "EHAM", "EBBR", "v"),
+        ("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "v", _T0, _t(5400)),
+        ("trk-2", "def456", "KLM99", _T0, "EHAM", "EBBR", "v", _T0, _t(5400)),
     ])
     out = enrich_flight_list(flights, _events(spark, _full_set()), EventConfig())
 
     assert out.count() == 2
     orphan = _row(out, "trk-2")
     assert orphan["FLT_ID"] == "KLM99"
-    assert all(orphan[c] is None for c in ADDED_COLUMNS)
+    assert all(orphan[c] is None for c in MILESTONE_COLUMNS)
+    # The movement columns are answers about the *row*, not about its events,
+    # so they are populated even here -- and must be, or a consumer filtering
+    # on `not SUPERSEDED_DEP` would silently lose every eventless flight.
+    assert orphan["SUPERSEDED_DEP"] is False
+    assert orphan["TRACK_DURATION_MIN"] == 90.0
 
 
 def test_empty_event_frame_leaves_every_flight_intact(spark):
@@ -123,7 +138,7 @@ def test_empty_event_frame_leaves_every_flight_intact(spark):
     out = enrich_flight_list(flights, empty, EventConfig())
 
     assert out.count() == 1
-    assert all(_row(out)[c] is None for c in ADDED_COLUMNS)
+    assert all(_row(out)[c] is None for c in MILESTONE_COLUMNS)
 
 
 def test_the_partition_column_and_the_join_key_survive_intact(spark):
@@ -158,14 +173,16 @@ def test_original_columns_are_untouched(spark):
 def test_ring_columns_are_all_nullable_timestamps(spark):
     out = enrich_flight_list(_flights(spark), _events(spark, _full_set()), EventConfig())
     types = dict(out.dtypes)
-    for name in ADDED_COLUMNS:
+    assert types["TRACK_DURATION_MIN"] == "double"
+    assert types["SUPERSEDED_DEP"] == types["SUPERSEDED_ARR"] == "boolean"
+    for name in MILESTONE_COLUMNS:
         if name.endswith("_BEARING_DEG"):
             assert types[name] == "double", name
         elif name.startswith("RWY_") or name.startswith("STND_"):
             assert types[name] == "string", name
         else:
             assert types[name] == "timestamp", name
-    assert all(f.nullable for f in out.schema.fields if f.name in ADDED_COLUMNS)
+    assert all(f.nullable for f in out.schema.fields if f.name in MILESTONE_COLUMNS)
 
 
 def test_duplicate_milestones_resolve_earliest_for_departure_latest_for_arrival(spark):
@@ -348,3 +365,73 @@ def test_enriching_an_already_enriched_list_recomputes_rather_than_refusing(spar
     a, b = once.collect()[0], twice.collect()[0]
     for c in ADDED_COLUMNS:
         assert a[c] == b[c], f"{c} changed on re-enrichment"
+
+
+# ---------------------------------------------------------------------------
+# Movement columns
+
+
+def _two_tracks(spark, dep_gap_s=1800, first_has_atot=False):
+    """One aircraft, two tracks departing the same aerodrome.
+
+    The first never takes off -- the ground fragment a real departure is cut
+    into when the transponder drops between stand and pushback. The second is
+    the flight.
+    """
+    rows = [
+        ("frag", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2",
+         _T0, _t(600)),
+        ("real", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2",
+         _t(dep_gap_s), _t(dep_gap_s + 5400)),
+    ]
+    ev_rows = [_event("real", "ATOT", dep_gap_s + 300, runway="25R")]
+    if first_has_atot:
+        ev_rows.append(_event("frag", "ATOT", 300, runway="25R"))
+    return spark.createDataFrame(rows, FLIGHT_SCHEMA), _events(spark, ev_rows)
+
+
+def test_a_ground_fragment_is_marked_superseded(spark):
+    """The excess movements OPDI reports over APDF are mostly this: one real
+    departure counted twice, as a stand fragment and as the flight."""
+    fl, ev = _two_tracks(spark)
+    out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
+
+    assert out["frag"]["SUPERSEDED_DEP"] is True
+    assert out["real"]["SUPERSEDED_DEP"] is False
+
+
+def test_a_track_that_took_off_is_never_superseded(spark):
+    """The rule's whole claim is that it costs no real flight -- zero of 57,990
+    on the measured day. A track with a take-off is a movement whatever follows
+    it."""
+    fl, ev = _two_tracks(spark, first_has_atot=True)
+    out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
+
+    assert out["frag"]["SUPERSEDED_DEP"] is False
+
+
+def test_a_distant_second_departure_is_a_separate_movement(spark):
+    """Beyond the window the pair is two rotations, not one split movement."""
+    fl, ev = _two_tracks(spark, dep_gap_s=6 * 3600)
+    out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
+
+    assert out["frag"]["SUPERSEDED_DEP"] is False
+
+
+def test_the_flag_is_false_not_null_where_there_is_no_pair(spark):
+    """A row with no ADEP has no next departure to be superseded by. NULL there
+    would read as 'unknown' when the answer is simply no, and would silently
+    drop out of a `not SUPERSEDED_DEP` filter."""
+    fl, ev = _one_flight(spark)
+    row = _row(enrich_flight_list(fl, ev, EventConfig()))
+
+    assert row["SUPERSEDED_DEP"] is False
+    assert row["SUPERSEDED_ARR"] is False
+
+
+def test_track_duration_is_published_in_minutes(spark):
+    fl, ev = _one_flight(spark)
+    row = _row(enrich_flight_list(fl, ev, EventConfig()))
+
+    assert row["TRACK_DURATION_MIN"] is not None
+    assert row["TRACK_DURATION_MIN"] >= 0

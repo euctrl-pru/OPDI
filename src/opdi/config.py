@@ -1176,6 +1176,29 @@ class EventConfig:
     """How close to the aerodrome the excursion must happen. Wider than the
     runway itself, because a go-around is initiated on final."""
 
+    # ----- movement counting (v0.3.0) -----------------------------------
+    supersede_window_seconds: float = 10800.0
+    """How close two movements of one aircraft at one aerodrome must be for the
+    earlier, un-flown one to be the *same* movement rather than another.
+
+    A real departure is routinely cut into two tracks: a ground fragment that
+    never leaves the stand, then the flight. Both begin at the aerodrome, so
+    both are given an ADEP and both count as movements. Measured over
+    2026-06-01..03, that made OPDI report **1.23x** APDF's departures against
+    **1.03x** its arrivals -- the asymmetry a transponder powering up before
+    pushback would produce, where reception after landing runs continuously
+    into the stand.
+
+    7,390 departures (10.3%) follow another departure of the same aircraft from
+    the same aerodrome inside three hours, and 89% of those earlier tracks have
+    no take-off at all. Three hours is comfortably longer than any turnaround
+    the fragment could span and far shorter than a genuine second rotation.
+
+    The resulting rule drops **no flight that took off** -- zero of 57,990 --
+    which is what makes it preferable to a duration threshold. A duration
+    filter is a proxy for the same thing and leaks both ways: at 30 minutes it
+    discards 4,364 real departures and still keeps hour-long circuits."""
+
     # ----- one variable per purpose (v0.3.0) ----------------------------
     merge_duplicate_milestones: Optional[bool] = None
     """Publish one event type per operational question rather than two.

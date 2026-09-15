@@ -25,7 +25,7 @@ one. The caller wires storage.
 
 from typing import Optional
 
-from pyspark.sql import Column, DataFrame
+from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
 from ..config import EventConfig
@@ -58,6 +58,18 @@ _ATOT, _ALDT, _AOBT, _AIBT = "ATOT", "ALDT", "AOBT", "AIBT"
 _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 
 #: Columns this step adds, in the order it adds them.
+#: Columns that say whether a row is a movement, rather than what happened
+#: during one. They exist because the flight list counts more movements than
+#: APDF does, and the excess is not spread evenly: it is departures (1.23x
+#: against arrivals' 1.03x, measured 2026-06-01..03).
+#:
+#: ``TRACK_DURATION_MIN`` is published rather than used as a filter here. A
+#: duration threshold is a proxy for "is this a real flight" and leaks in both
+#: directions -- at 30 minutes it discards 4,364 departures that demonstrably
+#: took off while still admitting hour-long circuits -- so the honest thing is
+#: to hand consumers the number and let them choose, not to choose for them.
+MOVEMENT_COLUMNS = ["TRACK_DURATION_MIN", "SUPERSEDED_DEP", "SUPERSEDED_ARR"]
+
 ADDED_COLUMNS = (
     [
         "ATOT", "ALDT", "AOBT", "AIBT",
@@ -66,6 +78,7 @@ ADDED_COLUMNS = (
     ]
     + [f"C{nm}_ARR" for nm in FLIGHT_LIST_RING_RADII_NM]
     + [f"C{nm}_DEP" for nm in FLIGHT_LIST_RING_RADII_NM]
+    + MOVEMENT_COLUMNS
 )
 
 
@@ -123,6 +136,70 @@ def _null_ts() -> Column:
 #: same column. Resolving it here beats making every caller know which side of
 #: the write it is on.
 FLIGHT_KEY_NAMES = ("flight_id", "track_id")
+
+
+def add_movement_columns(
+    flight_list: DataFrame, config: Optional[EventConfig] = None
+) -> DataFrame:
+    """Mark the rows that are half of a movement already counted.
+
+    A real departure is routinely cut into two tracks -- a ground fragment that
+    never leaves the stand, then the flight -- and both begin at the aerodrome,
+    so both are given an ADEP and both count. The fragment is identifiable
+    without guessing: it has **no take-off**, and another departure of the
+    **same aircraft** from the **same aerodrome** follows it within
+    ``supersede_window_seconds``.
+
+    Arrivals get the mirror rule, reversed in time: the *later* of the pair is
+    the fragment, because an arrival's flight ends at the aerodrome and the
+    ground remnant follows it.
+
+    Marked, never dropped. A row that is a superseded departure may still be a
+    perfectly good arrival, and a consumer counting one leg must not lose the
+    other. Counting movements is then::
+
+        departures = ADEP is not null and not SUPERSEDED_DEP
+        arrivals   = ADES is not null and not SUPERSEDED_ARR
+
+    Measured over three days against APDF: departures fall from 1.23x to 1.11x
+    and arrivals from 1.03x to 1.02x, while **no flight with a detected
+    take-off or landing is marked** -- zero of 57,990 and zero of 58,000.
+    """
+    config = config or EventConfig()
+    window_s = float(config.supersede_window_seconds)
+
+    first_s = F.col("FIRST_SEEN").cast("long")
+    last_s = F.col("LAST_SEEN").cast("long")
+
+    # ``lead``/``lag`` at offset 1, not an unbounded frame: the question is
+    # only about the adjacent movement of that aircraft at that aerodrome, so
+    # this stays a single-row lookup rather than a scan.
+    dep_order = Window.partitionBy("ADEP", "ICAO24").orderBy(first_s)
+    arr_order = Window.partitionBy("ADES", "ICAO24").orderBy(last_s)
+
+    next_dep = F.lead(first_s).over(dep_order)
+    prev_arr = F.lag(last_s).over(arr_order)
+
+    superseded_dep = (
+        F.col("ATOT").isNull()
+        & next_dep.isNotNull()
+        & ((next_dep - first_s) <= F.lit(window_s))
+    )
+    superseded_arr = (
+        F.col("ALDT").isNull()
+        & prev_arr.isNotNull()
+        & ((last_s - prev_arr) <= F.lit(window_s))
+    )
+
+    return (
+        flight_list
+        .withColumn("TRACK_DURATION_MIN", (last_s - first_s) / F.lit(60.0))
+        # ``coalesce`` to False: a row with no ADEP has no next departure to be
+        # superseded by, and NULL there would read as "unknown" when the answer
+        # is simply no.
+        .withColumn("SUPERSEDED_DEP", F.coalesce(superseded_dep, F.lit(False)))
+        .withColumn("SUPERSEDED_ARR", F.coalesce(superseded_arr, F.lit(False)))
+    )
 
 
 def _flight_key(events: DataFrame) -> str:
@@ -267,8 +344,16 @@ def enrich_flight_list(
     # LEFT, flight list on the left: a flight with no events at all must
     # survive with nulls rather than vanish, and the row count is part of the
     # contract this step is checked against.
-    return (
+    # The movement columns read ATOT/ALDT, so they are computed *after* the
+    # milestones land rather than beside them.
+    # The milestone columns first, then the movement columns on top: the latter
+    # read ATOT/ALDT, so they cannot be selected before those exist. Appending
+    # in this order reproduces ADDED_COLUMNS exactly, which is the published
+    # column order.
+    milestones = [c for c in ADDED_COLUMNS if c not in MOVEMENT_COLUMNS]
+    return add_movement_columns(
         flight_list.join(agg, flight_list["id"] == agg["_track_id"], "left")
         .drop("_track_id")
-        .select(*flight_list.columns, *ADDED_COLUMNS)
+        .select(*flight_list.columns, *milestones),
+        config,
     )
