@@ -12,6 +12,7 @@ import datetime as dt
 import json
 
 import pytest
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline.flight_list_milestones import (
@@ -34,7 +35,7 @@ MILESTONE_COLUMNS = [c for c in ADDED_COLUMNS if c not in MOVEMENT_COLUMNS]
 #: frame is written back on and must come through spelt exactly as it went in.
 FLIGHT_SCHEMA = (
     "id string, ICAO24 string, FLT_ID string, DOF timestamp, "
-    "adep string, ades string, version string, "
+    "ADEP string, ADES string, VERSION string, "
     # Present on the real table and required by the movement columns. Omitting
     # them here is how a dependency of a published column stayed untested.
     "FIRST_SEEN timestamp, LAST_SEEN timestamp"
@@ -480,7 +481,7 @@ def test_a_ghost_track_does_not_count_as_a_movement(spark):
     row = out["ghost"]
 
     assert out["flew"]["MOVEMENT_DEP"] is True
-    assert row["ATOT"] is None and row["ades"] is None
+    assert row["ATOT"] is None and row["ADES"] is None
     assert row["MOVEMENT_DEP"] is False
     # It is a ghost, not a superseded fragment -- the two reasons stay distinct
     # so a surprising total can be diagnosed.
@@ -565,3 +566,92 @@ def test_a_ramp_ghost_that_never_left_still_does_not_count(spark):
     out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
 
     assert out["ghost"]["MOVEMENT_DEP"] is False
+
+
+# ---------------------------------------------------------------------------
+# Ground evidence overrules the inferred aerodrome
+
+
+def _fl(rows):
+    return rows
+
+
+def test_a_ground_event_overrules_an_inferred_adep(spark):
+    """The aircraft was matched to named pavement; the flight list guessed.
+
+    ADEP/ADES come from trajectory geometry relative to aerodrome zones, which
+    is inference. A surface event is evidence, so it wins.
+    """
+    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM",
+             "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+        .withColumn("ADES_SOURCE", F.lit("aerodrome"))
+    ev = _events(spark, [
+        _event("trk-1", "exit-parking_position", 0, osm_airport="EBBR", osm_ref="A12"),
+        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+        _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
+        _event("trk-1", "entry-parking_position", 3900, osm_airport="EHAM", osm_ref="D8"),
+    ])
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["ADEP"] == "EBBR", "the pavement said EBBR; the flight list guessed LFPG"
+    assert row["ADES"] == "EHAM"
+    assert row["ADEP_SOURCE"] == "ground_event"
+
+
+def test_a_track_still_airborne_is_not_said_to_have_landed_where_it_started(spark):
+    """The case the guard exists for.
+
+    "Parked at X, departed X, still airborne" has its first *and* last ground
+    event at X. Taking the last ground aerodrome as ADES would record a landing
+    back at X that never happened.
+    """
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None,
+             "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+        .withColumn("ADES_SOURCE", F.lit("undetermined"))
+    ev = _events(spark, [
+        _event("trk-1", "exit-parking_position", 0, osm_airport="EBBR", osm_ref="A12"),
+        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+    ])
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["ADEP"] == "EBBR"
+    assert row["ADES"] is None, "it never landed; ADES must not be invented"
+
+
+def test_a_circuit_may_land_where_it_departed(spark):
+    """First and last ground aerodrome agree, but a take-off *and* a landing
+    prove it left and came back -- so ADES is that aerodrome, legitimately."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None,
+             "flight_list_v0.0.2", _T0, _t(3600))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+        .withColumn("ADES_SOURCE", F.lit("undetermined"))
+    ev = _events(spark, [
+        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+        _event("trk-1", "ALDT", 2400, apt_icao="EBBR", runway="25R"),
+    ])
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["ADEP"] == row["ADES"] == "EBBR"
+
+
+def test_a_flight_with_no_ground_evidence_keeps_what_it_had(spark):
+    """Nothing to overrule with: the inference stands, and says so."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM",
+             "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+        .withColumn("ADES_SOURCE", F.lit("aerodrome"))
+    ev = spark.createDataFrame([], EVENT_SCHEMA)
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert (row["ADEP"], row["ADES"]) == ("LFPG", "EHAM")
+    assert row["ADEP_SOURCE"] == "aerodrome"

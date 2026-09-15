@@ -148,6 +148,104 @@ def _null_ts() -> Column:
 FLIGHT_KEY_NAMES = ("flight_id", "track_id")
 
 
+#: Event types that prove the aircraft was physically on the ground at a named
+#: aerodrome. The layout family carries the aerodrome as ``info.osm_airport``,
+#: the runway family as ``info.apt_icao``.
+#:
+#: Spelled out rather than pattern-matched on the ``entry-``/``exit-`` prefix:
+#: those are generated from the OSM aeroway, and a new aeroway should have to
+#: be considered before it starts moving aerodromes on the flight list.
+GROUND_AEROWAYS = (
+    "parking_position", "taxiway", "apron", "runway", "hangar",
+    "threshold", "deicing_pad",
+)
+GROUND_TYPES = tuple(
+    f"{side}-{way}" for way in GROUND_AEROWAYS for side in ("entry", "exit")
+) + ("ATOT", "ALDT", "line-up", "take-off-roll", "runway-vacated", "touchdown")
+
+
+def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
+    """Let a ground detection overrule the flight list's inferred aerodrome.
+
+    ``ADEP``/``ADES`` come from trajectory geometry -- where the track began and
+    ended relative to aerodrome zones -- which is inference. A surface event is
+    not: the aircraft was matched to a named aerodrome's own pavement. Where the
+    two disagree, the pavement wins.
+
+    They disagree often, and not randomly. A track routinely spans the previous
+    arrival's taxi-in, a turnaround and the next departure, so the aerodrome a
+    surface event belongs to is not the one its *type* suggests. Measured on
+    2026-06-01, of 28,391 ``entry-parking_position`` events whose flight named
+    both aerodromes, **57.3% were at the ADEP** -- the aircraft parking at its
+    departure field before pushing back, not arriving at its destination.
+
+    The rule:
+
+    * ``ADEP`` is the aerodrome of the **first** ground event. The track began
+      there, on the ground, and nothing earlier can contradict it.
+    * ``ADES`` is the aerodrome of the **last** ground event, but only where
+      that is a *different* aerodrome from the first, or the track holds both a
+      take-off and a landing. Without that guard a track reading "parked at X,
+      departed X, still airborne" -- whose first and last ground events are both
+      X -- would be recorded as having landed back at X.
+
+    ``ADEP_SOURCE``/``ADES_SOURCE`` become ``"ground_event"`` where the value
+    came from here, so a correction is never silent and the evidence can be told
+    from the inference it replaced.
+    """
+    key = _flight_key(events)
+    apt = F.coalesce(_info("osm_airport"), _info("apt_icao"))
+
+    ground = events.select(
+        F.col(key).alias("_g_id"), "type", "event_time", apt.alias("_apt")
+    ).filter(F.col("type").isin(*GROUND_TYPES) & F.col("_apt").isNotNull())
+
+    per_track = ground.groupBy("_g_id").agg(
+        _first(F.lit(True), F.col("_apt")).alias("_first_apt"),
+        _last(F.lit(True), F.col("_apt")).alias("_last_apt"),
+        F.max(F.when(F.col("type") == F.lit(_ATOT), 1).otherwise(0)).alias("_flew"),
+        F.max(F.when(F.col("type") == F.lit(_ALDT), 1).otherwise(0)).alias("_landed"),
+    )
+
+    out = flight_list.join(per_track, flight_list["id"] == F.col("_g_id"), "left")
+
+    returned = (F.col("_first_apt") != F.col("_last_apt")) | (
+        (F.col("_flew") == 1) & (F.col("_landed") == 1)
+    )
+    new_adep = F.col("_first_apt")
+    new_ades = F.when(returned, F.col("_last_apt"))
+
+    # The provenance stamp is written only where the column already exists.
+    # Flight lists written before ADEP_SOURCE/ADES_SOURCE existed are still
+    # readable, and the correction itself -- which is the point -- does not
+    # depend on being able to record where it came from.
+    # Written back under the frame's *own* spelling. Spark resolves column
+    # names case-insensitively but ``withColumn`` writes the name it is given,
+    # so passing "ADEP" to a frame holding "adep" silently renames the column
+    # -- and the flight list's other columns are a published contract that this
+    # step promises not to touch.
+    def _as_named(name: str):
+        for actual in out.columns:
+            if actual.upper() == name:
+                return actual
+        return None
+
+    for name, value in (("ADEP_SOURCE", new_adep), ("ADES_SOURCE", new_ades)):
+        actual = _as_named(name)
+        if actual is not None:
+            out = out.withColumn(
+                actual,
+                F.when(value.isNotNull(), F.lit("ground_event"))
+                .otherwise(F.col(actual)),
+            )
+
+    for name, value in (("ADEP", new_adep), ("ADES", new_ades)):
+        actual = _as_named(name)
+        if actual is not None:
+            out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
+    return out.drop("_g_id", "_first_apt", "_last_apt", "_flew", "_landed")
+
+
 def add_movement_columns(
     flight_list: DataFrame, config: Optional[EventConfig] = None
 ) -> DataFrame:
@@ -322,6 +420,12 @@ def enrich_flight_list(
             ambiguous reference downstream.
     """
     config = config or EventConfig()
+
+    # Before anything else reads adep/ades. The ring columns filter on them, the
+    # movement rules test them, and the milestone columns are chosen relative to
+    # them -- correcting afterwards would leave every one of those computed
+    # against the aerodrome the evidence disagrees with.
+    flight_list = correct_aerodromes(flight_list, events)
 
     # Re-enriching is normal, not an error. Step 04b runs once per campaign day
     # and rewrites every partition, so the second day necessarily meets a table
