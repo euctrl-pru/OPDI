@@ -85,6 +85,29 @@ def test_a_flicker_no_longer_splits_the_flight(spark):
     assert n_tracks(assign_track_id(df, debounced(), P30)) == 1
 
 
+def test_a_two_sample_flicker_is_also_suppressed(spark):
+    """A multi-sample excursion is still a flicker, not two flights.
+
+    The `farthest`-vs-`nearest` forward lookup matters here: with two `XXXX`
+    samples 5 s apart, the *nearest* forward real callsign to the first
+    `XXXX` is the second `XXXX` -- still garbled -- so a lookup that answers
+    "nearest" reads it as persisted and the double-break defect returns. The
+    lookup must resolve to the farthest real callsign in the horizon, which
+    is `BEL123` again, for the flicker to collapse to nothing.
+    """
+    df = _with_callsigns(spark, ["BEL123"] * 4 + ["XXXX"] * 2 + ["BEL123"] * 4)
+
+    assert n_tracks(assign_track_id(df, recommended(), P0)) == 3
+    assert n_tracks(assign_track_id(df, debounced(), P30)) == 1
+
+
+def test_a_three_sample_flicker_is_also_suppressed(spark):
+    """One more sample than the two-sample case, same requirement."""
+    df = _with_callsigns(spark, ["BEL123"] * 4 + ["XXXX"] * 3 + ["BEL123"] * 4)
+
+    assert n_tracks(assign_track_id(df, debounced(), P30)) == 1
+
+
 def test_a_genuine_change_still_splits(spark):
     """The new value holds for the rest of the flight, so it is real."""
     df = _with_callsigns(spark, ["BEL123"] * 4 + ["KLM99"] * 10)

@@ -511,9 +511,11 @@ def debounced() -> BreakRule:
             F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
             F.trim(F.col("callsign")),
         )
-        # The timestamp of the previous real callsign, for the lookback bound.
-        # `prev_real` itself is deliberately not used as the comparison value --
-        # see the block below.
+        # The previous real callsign and its timestamp, for the lookback
+        # bound. `prev_real` is also used below to find where a new run of
+        # a real value *starts* -- it is deliberately not used as the
+        # comparison value itself; see the block after the branch.
+        prev_real = F.last(real, ignorenulls=True).over(back)
         prev_real_ts = F.last(
             F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
         ).over(back)
@@ -525,32 +527,83 @@ def debounced() -> BreakRule:
         if hold <= 0.0:
             stable = real
         else:
-            # The last real callsign within the persistence horizon, looking
-            # *forward*. A descending frame, not `first(...)` over
-            # `rowsBetween(1, unboundedFollowing)`: that is a shrinking frame,
-            # re-scanned per row and quadratic in track length. Reversing the
-            # ordering asks the same question of a growing frame -- the
-            # transformation `cleaning/native.py` documents, where it was
-            # worth 20x.
-            # A RANGE frame's bound type must match its ORDER BY column's type;
-            # `_ts` is a TIMESTAMP, and a plain integer bound (seconds) needs a
-            # numeric order column, hence `unix_timestamp` rather than `_ts`
-            # itself.
-            fwd = (
-                Window.partitionBy(*w_partition_cols())
-                .orderBy(F.unix_timestamp(F.col("_ts")).desc())
-                .rangeBetween(-int(hold), -1)
+            # A run is a maximal stretch of consecutive samples carrying the
+            # same real callsign, blanks bridged over exactly as `recommended`
+            # bridges them. `is_new_value` marks the one row that starts a
+            # run: its real callsign differs from the last real one seen (or
+            # there is no previous real value at all -- the track's very
+            # first run, which is never checked, because "does it persist"
+            # presupposes something it might be reverting *from*).
+            is_new_value = real.isNotNull() & (
+                prev_real.isNull() | (real != prev_real)
             )
-            later = F.last(real, ignorenulls=True).over(fwd)
-            # No later real callsign inside the horizon means the track ends
-            # here, and a value with nothing after it has not been shown to
-            # revert. Treating that as persistence keeps A9 from suppressing a
-            # genuine change at the end of a track.
-            persisted = later.isNull() | (later == real)
-            # The callsign only where it held. A flicker's transient value is
-            # NULL here, so it never becomes the thing later samples compare
-            # against.
-            stable = F.when(persisted, real)
+
+            # How long this run lasts before the *next* run starts --
+            # measured as a timestamp difference, not a row count, so an
+            # irregular sampling rate cannot skew it. `next_transition_ts` is
+            # the nearest future row where a new run begins, found by the
+            # same reversed-growing-frame technique `cleaning/native.py`
+            # documents (there for `_next_valid`): `F.first(...)` over
+            # `rowsBetween(1, unboundedFollowing)` is a shrinking frame,
+            # re-scanned per row and quadratic in track length; `F.last(...,
+            # ignorenulls=True)` over the reversed ordering's `rowsBetween(
+            # unboundedPreceding, -1)` asks the same question of a frame that
+            # grows, which Spark maintains incrementally. This search is
+            # genuinely unbounded -- unlike a fixed persistence horizon, the
+            # next transition could be arbitrarily far away -- so this is
+            # the one place in this arm where that transformation actually
+            # earns its keep.
+            next_transition_ts = F.last(
+                F.when(is_new_value, F.col("_ts")), ignorenulls=True
+            ).over(
+                Window.partitionBy(*w_partition_cols())
+                .orderBy(F.col("_ts").desc())
+                .rowsBetween(Window.unboundedPreceding, -1)
+            )
+
+            # Persisted if: this is the track's first run (nothing to revert
+            # from, so nothing to check); or there is no next run at all (the
+            # track ends inside this one, and a value with no later data has
+            # not been shown to revert); or the run lasted at least `hold`
+            # seconds before it was replaced. The boundary is inclusive --
+            # exactly `hold` seconds counts.
+            #
+            # This is a run-level verdict, not a per-row one, and that
+            # distinction is load-bearing. An earlier version asked whether
+            # *this row's own* forward horizon still showed its own value --
+            # which nulled every sample within `hold` seconds *before* a
+            # genuine change, because a row deep inside an established run
+            # can have a real, later transition inside its own horizon. With
+            # every sample ahead of a genuine change nulled, the arm had no
+            # earlier stable value left to compare the change against, and
+            # reported no break at all. Asking instead "how long did *the
+            # run this row belongs to* last" is answered once per run and
+            # inherited by every row in it, so a run's own impending genuine
+            # replacement cannot retroactively undermine it.
+            persisted_run = (
+                prev_real.isNull()
+                | next_transition_ts.isNull()
+                | (
+                    (
+                        F.unix_timestamp(next_transition_ts)
+                        - F.unix_timestamp(F.col("_ts"))
+                    )
+                    >= hold
+                )
+            )
+
+            # The verdict is planted only at the row that starts a run --
+            # NULL everywhere else -- then carried forward across every
+            # continuation sample of that run by the same ignorenulls
+            # forward-fill `recommended` uses to carry a real callsign
+            # across blanks. A run whose start failed the persistence check
+            # leaves no seed, so the forward-fill keeps supplying the
+            # *previous* successful run's value straight through it --
+            # "a flicker is invisible", applied per run instead of per row.
+            run_seed = F.when(is_new_value & persisted_run, real)
+            stable = F.last(run_seed, ignorenulls=True).over(
+                w.rowsBetween(Window.unboundedPreceding, 0)
+            )
 
         # **Persisted against persisted, not persisted against previous-real.**
         # A flicker trips the rule twice -- once on the X->Y excursion and again
