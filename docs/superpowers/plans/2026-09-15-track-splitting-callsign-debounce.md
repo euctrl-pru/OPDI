@@ -558,11 +558,17 @@ def debounced() -> BreakRule:
     )
 ```
 
-Add to the `METHODS` mapping at the bottom of the file:
+Add to the `ARMS` mapping at the bottom of the file (it is `ARMS`, not
+`METHODS`):
 
 ```python
     "debounced": debounced,
 ```
+
+`src/opdi/pipeline/tracks.py:300` resolves a configured method name to an arm
+with `resolved = "recommended" if method == "standard" else method`, so
+`"debounced"` passes straight through once it is in `ARMS`. Nothing else needs
+changing there.
 
 and to the `__all__` list at the top, beside `"recommended"`.
 
@@ -647,7 +653,7 @@ from pyspark.sql import functions as F
 
 from opdi.config import OPDIConfig, SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
-from opdi.pipeline.segmentation.methods import METHODS
+from opdi.pipeline.segmentation.methods import ARMS
 from opdi.utils.spark_helpers import SparkSessionManager
 from opdi.utils.storage import StorageManager
 
@@ -658,7 +664,7 @@ def measure(sv, arm: str, hold: float):
     params = SegmentationParams.from_config(
         SegmentationConfig(callsign_min_persistence_seconds=hold)
     )
-    tracked = assign_track_id(sv, METHODS[arm](), params)
+    tracked = assign_track_id(sv, ARMS[arm](), params)
 
     real = F.when(F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
                   F.trim(F.col("callsign")))
@@ -978,7 +984,9 @@ In the "Track identity is a versioned choice" bullet, add `debounced` beside `re
 
 - [ ] **Step 3: Do not change the default**
 
-`SegmentationConfig.method` stays `recommended`. Promoting A9 changes `track_id` for every future dataset and breaks continuity with everything published since 2026-08-27 — the same cost A8 itself carried. That is a decision for the owner of the published contract, taken with these measurements in hand, not a consequence of this plan.
+`SegmentationConfig.method` stays `standard` — which is the production name for
+the arm `methods.py` calls `recommended`, resolved at `tracks.py:300`. Promoting
+A9 changes `track_id` for every future dataset and breaks continuity with everything published since 2026-08-27 — the same cost A8 itself carried. That is a decision for the owner of the published contract, taken with these measurements in hand, not a consequence of this plan.
 
 - [ ] **Step 4: Commit and open a PR**
 
@@ -1010,7 +1018,7 @@ from opdi.config import SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams
 p = SegmentationParams.from_config(SegmentationConfig())
 assert p.callsign_min_persistence_seconds == 0.0
-assert SegmentationConfig().method == 'recommended'
+assert SegmentationConfig().method == 'standard'
 print('default arm and default debounce unchanged')
 "
 ```
