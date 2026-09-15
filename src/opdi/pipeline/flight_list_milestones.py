@@ -117,6 +117,27 @@ def _null_ts() -> Column:
     return F.lit(None).cast("timestamp")
 
 
+#: What the flight key is called, most-published name first. ``events.py``
+#: writes ``track_id`` out as ``flight_id``, so a table read back from storage
+#: and a frame taken straight from a detector disagree about the name of the
+#: same column. Resolving it here beats making every caller know which side of
+#: the write it is on.
+FLIGHT_KEY_NAMES = ("flight_id", "track_id")
+
+
+def _flight_key(events: DataFrame) -> str:
+    """The name the events frame uses for the flight key."""
+    for name in FLIGHT_KEY_NAMES:
+        if name in events.columns:
+            return name
+    raise ValueError(
+        "the events frame has no flight key: expected one of "
+        f"{', '.join(FLIGHT_KEY_NAMES)}, found {sorted(events.columns)}. "
+        "opdi_flight_events names it flight_id; a detector frame names it "
+        "track_id."
+    )
+
+
 def enrich_flight_list(
     flight_list: DataFrame,
     events: DataFrame,
@@ -128,10 +149,15 @@ def enrich_flight_list(
         flight_list: the flight list, keyed on ``id`` (the ``track_id``) and
             carrying ``adep``/``ades``. Returned unchanged but for the added
             columns -- same names, same types, same order, same row count.
-        events: ``opdi_flight_events``-shaped: ``track_id``, ``type``,
-            ``event_time``, ``info``. Any other columns are ignored, and no
-            filter on ``version`` is applied: the caller decides which
-            vocabulary it is enriching from.
+        events: ``opdi_flight_events``-shaped: ``type``, ``event_time``,
+            ``info`` and the flight key. The **published** table names that key
+            ``flight_id`` -- ``events.py`` writes ``track_id`` out under that
+            alias -- while every detector frame upstream of the write still
+            calls it ``track_id``. Either is accepted, ``flight_id`` first, so
+            this works on a table read back from storage and on a frame handed
+            straight from a detector. Other columns are ignored, and no filter
+            on ``version`` is applied: the caller decides which vocabulary it
+            is enriching from.
         config: supplies ``ring_radii_nm``. A radius it does not list still
             gets its column, filled with nulls.
 
@@ -173,9 +199,12 @@ def enrich_flight_list(
         F.col("ades").alias("_ades"),
     )
     narrowed = (
-        events.select("track_id", "type", "event_time", "info")
+        events.select(
+            F.col(_flight_key(events)).alias("_event_key"),
+            "type", "event_time", "info",
+        )
         .filter(F.col("type").isin(wanted))
-        .join(keys, F.col("track_id") == F.col("_track_id"), "inner")
+        .join(keys, F.col("_event_key") == F.col("_track_id"), "inner")
     )
 
     apt = _info("apt_icao")

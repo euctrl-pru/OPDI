@@ -30,7 +30,13 @@ FLIGHT_SCHEMA = (
     "id string, ICAO24 string, FLT_ID string, DOF timestamp, "
     "adep string, ades string, version string"
 )
-EVENT_SCHEMA = "track_id string, type string, event_time timestamp, info string, version string"
+#: The shape ``opdi_flight_events`` actually has on disk. The key is
+#: ``flight_id``: ``events.py`` writes ``track_id`` out under that alias. This
+#: file previously built its frames with ``track_id``, so every test passed
+#: against a shape that exists nowhere, and enriching the real table failed on
+#: the first day of the campaign. Default to what is published; the
+#: detector-frame name gets its own test.
+EVENT_SCHEMA = "flight_id string, type string, event_time timestamp, info string, version string"
 
 
 def _t(seconds: float) -> dt.datetime:
@@ -278,3 +284,52 @@ def test_enriching_twice_is_refused(spark):
     once = enrich_flight_list(_flights(spark), _events(spark, _full_set()), EventConfig())
     with pytest.raises(ValueError, match="already"):
         enrich_flight_list(once, _events(spark, _full_set()), EventConfig())
+
+
+# ---------------------------------------------------------------------------
+# The flight key, under both of its names
+
+
+def _rename_key(events, to):
+    src = "flight_id" if "flight_id" in events.columns else "track_id"
+    return events.withColumnRenamed(src, to)
+
+
+def _one_flight(spark):
+    return _flights(spark), _events(spark, _full_set())
+
+
+def test_the_published_event_table_key_is_accepted(spark):
+    """``opdi_flight_events`` names the flight key ``flight_id``.
+
+    ``events.py`` writes ``track_id`` out under that alias, so a table read back
+    from storage does not carry the name the detectors use. Enriching against
+    the real table failed on exactly this and cost a campaign day: the unit
+    tests all built their frames with ``track_id``, so nothing here could see
+    it. This test uses the name that is actually on disk.
+    """
+    fl, ev = _one_flight(spark)
+    out = enrich_flight_list(fl, _rename_key(ev, "flight_id"), EventConfig())
+
+    row = out.collect()[0]
+    assert row["ATOT"] is not None
+    assert row["RWY_DEP"] is not None
+
+
+def test_the_detector_frame_key_is_accepted_too(spark):
+    """Upstream of the write the same column is ``track_id``, and a caller
+    holding a detector frame should not have to know which side it is on."""
+    fl, ev = _one_flight(spark)
+    out = enrich_flight_list(fl, _rename_key(ev, "track_id"), EventConfig())
+
+    assert out.collect()[0]["ATOT"] is not None
+
+
+def test_a_frame_with_no_flight_key_says_so(spark):
+    """Naming both candidates beats an UNRESOLVED_COLUMN from deep inside a
+    select, which is what this cost the first time."""
+    fl, ev = _one_flight(spark)
+    keyless = _rename_key(ev, "something_else")
+
+    with pytest.raises(ValueError, match="no flight key"):
+        enrich_flight_list(fl, keyless, EventConfig())
