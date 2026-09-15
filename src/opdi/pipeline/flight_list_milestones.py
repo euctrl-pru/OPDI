@@ -171,12 +171,20 @@ def enrich_flight_list(
     """
     config = config or EventConfig()
 
-    existing = {c.upper() for c in flight_list.columns}
-    clashes = [c for c in ADDED_COLUMNS if c.upper() in existing]
-    if clashes:
-        raise ValueError(
-            f"flight_list already carries {clashes}; it looks enriched already"
-        )
+    # Re-enriching is normal, not an error. Step 04b runs once per campaign day
+    # and rewrites every partition, so the second day necessarily meets a table
+    # the first day already enriched; a re-run after an events fix meets one
+    # too. Refusing made the step non-idempotent and stopped a campaign dead on
+    # its first retry.
+    #
+    # Every added column is *derived* -- recomputable from the events in full
+    # -- so dropping the previous answer and recomputing is exactly right, and
+    # is what makes a day whose events arrived late pick them up later. Matched
+    # case-insensitively because the flight list mixes cases and Spark resolves
+    # either way; dropped by their real names so the drop actually finds them.
+    stale = [c for c in flight_list.columns if c.upper() in {a.upper() for a in ADDED_COLUMNS}]
+    if stale:
+        flight_list = flight_list.drop(*stale)
 
     radii = {float(r) for r in config.ring_radii_nm}
     ring_types = [

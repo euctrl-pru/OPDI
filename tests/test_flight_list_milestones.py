@@ -280,12 +280,6 @@ def test_runway_bearing_is_null_when_the_key_predates_the_column(spark):
     assert row["RWY_ARR_BEARING_DEG"] is None
 
 
-def test_enriching_twice_is_refused(spark):
-    once = enrich_flight_list(_flights(spark), _events(spark, _full_set()), EventConfig())
-    with pytest.raises(ValueError, match="already"):
-        enrich_flight_list(once, _events(spark, _full_set()), EventConfig())
-
-
 # ---------------------------------------------------------------------------
 # The flight key, under both of its names
 
@@ -333,3 +327,24 @@ def test_a_frame_with_no_flight_key_says_so(spark):
 
     with pytest.raises(ValueError, match="no flight key"):
         enrich_flight_list(fl, keyless, EventConfig())
+
+
+def test_enriching_an_already_enriched_list_recomputes_rather_than_refusing(spark):
+    """Step 04b rewrites every partition on every campaign day, so the second
+    day always meets a table the first already enriched -- and so does any
+    re-run after an events fix. Refusing stopped a campaign on its first retry.
+
+    Every added column is derived, so the right answer is to drop the previous
+    one and recompute: that is also what lets a day whose events arrived late
+    pick them up on a later run.
+    """
+    fl, ev = _one_flight(spark)
+
+    once = enrich_flight_list(fl, ev, EventConfig())
+    twice = enrich_flight_list(once, ev, EventConfig())
+
+    assert twice.columns == once.columns, "a second pass must not widen the frame"
+    assert twice.count() == once.count()
+    a, b = once.collect()[0], twice.collect()[0]
+    for c in ADDED_COLUMNS:
+        assert a[c] == b[c], f"{c} changed on re-enrichment"

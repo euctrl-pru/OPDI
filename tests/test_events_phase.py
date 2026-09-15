@@ -414,3 +414,39 @@ def test_a_clean_level_off_is_unchanged(spark):
     got = _counts(spark, _level_off_traj(False), EventConfig())
 
     assert got["level-start"] == got["level-end"] == 1
+
+
+def test_scattered_abstentions_do_not_shatter_one_level_segment(spark):
+    """Balance is necessary but not sufficient.
+
+    Treating an abstention as a phase *change* balances the counts perfectly
+    and destroys the family: every scattered NULL splits a real segment in two.
+    Measured on a production day it took level-start from 128,481 to 4,657,328
+    -- about 104 segments per flight -- with a delta of exactly zero. A test
+    that only asserted balance passed.
+
+    Six level samples with abstentions sprinkled through them are one level
+    segment, not four.
+    """
+    samples, t, step = [], 0, 60
+    for alt in (8000, 11000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    for i in range(6):
+        samples.append({"t": t, "baro_altitude": _m(15000), "vert_rate": 0.0,
+                        # every other sample abstains
+                        "velocity": None if i % 2 else 300 / KT_PER_MPS})
+        t += step
+    for alt in (12000, 9000, 6000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+
+    got = _counts(spark, samples, EventConfig())
+
+    assert got["level-start"] == got["level-end"], "boundaries must balance"
+    assert got["level-start"] == 1, (
+        f"one interrupted level segment is one segment, got "
+        f"{got['level-start']} -- abstentions are splitting it"
+    )

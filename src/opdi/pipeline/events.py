@@ -797,8 +797,56 @@ def calculate_horizontal_segment_events(
         .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
     )
 
-    df = df.withColumn("prev_phase", lag("flight_phase", 1, "None").over(window_phase))
-    df = df.withColumn("next_phase", lead("flight_phase", 1, "None").over(window_phase))
+    if config.merge_duplicate_milestones:
+        # The nearest *known* phase either side, not the immediate neighbour.
+        #
+        # The classifier abstains -- returns NULL -- whenever a rule's inputs
+        # are incomplete, and abstentions are frequent and scattered. Compared
+        # against the immediate neighbour, `NULL != "LVL"` is NULL rather than
+        # TRUE, so a level segment adjacent to an abstention emitted no
+        # boundary there; asymmetrically, because the first_cr_time/
+        # last_cr_time terms rescue cruise and nothing rescues a level-off
+        # below it. That was the +15,682 surplus of starts left after the
+        # precedence fix.
+        #
+        # The obvious repair -- comparing null-safely, so an abstention counts
+        # as a different phase -- balances the counts and destroys the family:
+        # measured, it took one day from 128,481 level-starts to 4,657,328,
+        # about 104 segments per flight, because every scattered abstention
+        # split a real segment in two. Balance bought by shattering segments
+        # is not a fix.
+        #
+        # Skipping the abstentions instead leaves a segment interrupted by
+        # them as one segment, puts boundaries only at genuine phase changes,
+        # and is symmetric by construction.
+        #
+        # The descending frame is deliberate. `first(...).over(rowsBetween(1,
+        # unboundedFollowing))` is a *shrinking* frame, re-scanned per row and
+        # quadratic in track length; reversing the ordering turns the same
+        # question into a growing frame and an incremental scan. Same answer,
+        # O(n) instead of O(n^2) -- the transformation cleaning/native.py
+        # documents, where it was worth 20x.
+        known = when(col("flight_phase").isNotNull(), col("flight_phase"))
+        back = window_phase.rowsBetween(Window.unboundedPreceding, -1)
+        forward = (
+            Window.partitionBy("track_id")
+            .orderBy(col("event_time").desc())
+            .rowsBetween(Window.unboundedPreceding, -1)
+        )
+        # ``"None"`` is the sentinel the published detector used for a track
+        # edge, kept so a track beginning or ending in level flight is still
+        # labelled at both ends rather than comparing against NULL.
+        df = df.withColumn(
+            "prev_phase",
+            F.coalesce(F.last(known, ignorenulls=True).over(back), lit("None")),
+        )
+        df = df.withColumn(
+            "next_phase",
+            F.coalesce(F.last(known, ignorenulls=True).over(forward), lit("None")),
+        )
+    else:
+        df = df.withColumn("prev_phase", lag("flight_phase", 1, "None").over(window_phase))
+        df = df.withColumn("next_phase", lead("flight_phase", 1, "None").over(window_phase))
 
     df.cache()
 
@@ -812,23 +860,8 @@ def calculate_horizontal_segment_events(
         f_max(when(col("flight_phase") == "CR", col("event_time"))).over(window_cumulative),
     )
 
-    # ``eqNullSafe``, not ``!=``. The classifier abstains -- returns NULL --
-    # whenever a rule's inputs are incomplete, and ``NULL != "LVL"`` is NULL,
-    # not TRUE. So a level segment whose neighbour is an abstention failed both
-    # this test and the end test below, and emitted nothing there.
-    #
-    # It did not fail symmetrically. A *cruise* segment is rescued by the
-    # ``first_cr_time``/``last_cr_time`` terms, which fire regardless of the
-    # neighbour; a level-off below cruise has no such rescue, so it emitted a
-    # start at its clean edge and no end at its abstaining one. Measured on
-    # 2026-06-01 after the precedence fix: 128,481 starts against 112,799 ends,
-    # +15,682 still unbalanced -- this is the rest of it.
-    #
-    # Treating an abstention as a different phase is also the right reading:
-    # "we do not know what this sample is" is not a continuation of level
-    # flight, so the segment genuinely ends there.
     start_of_segment = (col("flight_phase").isin("CR", "LVL")) & (
-        ~col("prev_phase").eqNullSafe(col("flight_phase"))
+        col("prev_phase") != col("flight_phase")
     )
     df = df.withColumn("start_of_segment", start_of_segment)
     df = df.withColumn(
@@ -840,7 +873,7 @@ def calculate_horizontal_segment_events(
     is_level_start = start_of_segment | (col("event_time") == col("first_cr_time"))
     is_level_end = (
         (col("flight_phase").isin("CR", "LVL"))
-        & (~col("next_phase").eqNullSafe(col("flight_phase")))
+        & (col("next_phase") != col("flight_phase"))
     ) | (col("event_time") == col("last_cr_time"))
 
     if config.merge_duplicate_milestones:
