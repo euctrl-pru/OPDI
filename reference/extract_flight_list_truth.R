@@ -7,10 +7,20 @@
 # benchmark, or from a Quarto render: `quarto render` must succeed with no
 # credentials and no database.
 #
-#   Rscript reference/extract_flight_list_truth.R                    # the campaign fortnight
-#   Rscript reference/extract_flight_list_truth.R 2026-06-01 2026-06-14
+#   Rscript reference/extract_flight_list_truth.R                    # all of 2026-06
+#   Rscript reference/extract_flight_list_truth.R 2026-07            # another month
+#   Rscript reference/extract_flight_list_truth.R 2026-06-01 2026-06-14   # narrowed
 #
-# Both dates are INCLUSIVE.
+# The default is the WHOLE MONTH, and that is the shape to prefer. The month is
+# fetched whole regardless (see months_spanned below), so narrowing buys nothing
+# at the database and costs something in the result: the window is applied to
+# MVT_TIME_UTC, which is the take-off on a departure row and the landing on an
+# arrival row, so a flight departing late on the last day and landing after
+# midnight keeps its departure and loses its arrival. Whole months have no such
+# edge. Rows outside the campaign simply find no OPDI counterpart, which is
+# harmless.
+#
+# Both dates are INCLUSIVE when given.
 #
 # WHY THIS EXISTS BESIDE extract.R
 #
@@ -37,8 +47,8 @@
 # what to record afterwards.
 # ---------------------------------------------------------------------------
 
-DEFAULT_FROM <- "2026-06-01"   # the events_v0.3.0 acceptance campaign
-DEFAULT_TO   <- "2026-06-14"
+#: The month holding the events_v0.3.0 acceptance campaign (2026-06-01..06-14).
+DEFAULT_MONTH <- "2026-06"
 OUT_DIR <- "reference"
 
 suppressPackageStartupMessages({
@@ -145,22 +155,58 @@ pivot_to_flight_shape <- function(apdf) {
 }
 
 
-main <- function(from_arg, to_arg) {
-  from <- suppressWarnings(ymd(from_arg))
-  to <- suppressWarnings(ymd(to_arg))
+#' Resolve the command line into a month to pull and an optional narrower window.
+#'
+#' One argument is a month (`2026-06`) and means the whole of it. Two are
+#' inclusive dates and narrow the result. `from` comes back NULL when no
+#' narrowing was asked for, which is what the pivot stage keys on.
+parse_args <- function(args) {
+  if (length(args) == 0L) args <- DEFAULT_MONTH
+
+  if (length(args) == 1L) {
+    month <- suppressWarnings(ymd(paste0(args[[1]], "-01")))
+    if (is.na(month)) {
+      # Tolerate a full date given alone: it names the month it falls in.
+      month <- suppressWarnings(ymd(args[[1]]))
+      if (is.na(month)) {
+        stop("Could not parse '", args[[1]], "'. Expected YYYY-MM, e.g. 2026-06.")
+      }
+      month <- floor_date(month, "month")
+    }
+    return(list(months = months_spanned(month, month), from = NULL, to = NULL))
+  }
+
+  from <- suppressWarnings(ymd(args[[1]]))
+  to <- suppressWarnings(ymd(args[[2]]))
   if (is.na(from) || is.na(to)) {
-    stop("Could not parse '", from_arg, "' / '", to_arg, "'. Expected YYYY-MM-DD.")
+    stop("Could not parse '", args[[1]], "' / '", args[[2]], "'. Expected YYYY-MM-DD.")
   }
   if (to < from) stop("The end date precedes the start date.")
+  list(months = months_spanned(from, to), from = from, to = to)
+}
+
+
+main <- function(args) {
   if (!dir.exists(OUT_DIR)) {
     stop("Directory '", OUT_DIR, "' not found. Run this from the repo root.")
   }
 
-  months <- months_spanned(from, to)
-  message(sprintf(
-    "Window %s .. %s inclusive, pulled as %d calendar month(s): %s",
-    from, to, length(months), paste(format(months, "%Y-%m"), collapse = ", ")
-  ))
+  parsed <- parse_args(args)
+  months <- parsed$months
+  from <- parsed$from
+  to <- parsed$to
+
+  if (is.null(from)) {
+    message(sprintf(
+      "Whole month(s): %s -- no narrowing, which is the shape to prefer.",
+      paste(format(months, "%Y-%m"), collapse = ", ")
+    ))
+  } else {
+    message(sprintf(
+      "Window %s .. %s inclusive, pulled as %d whole calendar month(s): %s",
+      from, to, length(months), paste(format(months, "%Y-%m"), collapse = ", ")
+    ))
+  }
 
   # One connection for every query, closed however this exits. on.exit only
   # fires inside a function -- hence main().
@@ -200,23 +246,27 @@ main <- function(from_arg, to_arg) {
   apdf <- bind_rows(apdf_all)
   flights <- bind_rows(flights_all)
 
-  # -- restrict to the requested window ------------------------------------
+  # -- restrict to the requested window, if one was asked for ---------------
   #
-  # On MVT_TIME_UTC, which is the take-off on a DEP row and the landing on an
-  # ARR row. A flight departing late on the last day and landing after midnight
-  # therefore keeps its departure and loses its arrival. That asymmetry is
-  # real and is why the full monthly extracts above are written too: re-window
-  # from those rather than re-querying.
-  til_exclusive <- to + days(1)
-  before <- nrow(apdf)
-  apdf <- apdf |> filter(.data$MVT_TIME_UTC >= from, .data$MVT_TIME_UTC < til_exclusive)
-  message(sprintf(
-    "\nWindowed to %s .. %s: %s of %s movement rows kept.",
-    from, to, format(nrow(apdf), big.mark = ","), format(before, big.mark = ",")
-  ))
+  # Skipped by default, and that is the better default. The filter applies to
+  # MVT_TIME_UTC -- the take-off on a DEP row, the landing on an ARR row -- so
+  # a flight departing late on the last day and landing after midnight keeps
+  # its departure and loses its arrival. Whole months have no such edge, and
+  # the month is fetched whole either way, so narrowing costs an asymmetry and
+  # saves nothing.
+  if (!is.null(from)) {
+    til_exclusive <- to + days(1)
+    before <- nrow(apdf)
+    apdf <- apdf |> filter(.data$MVT_TIME_UTC >= from, .data$MVT_TIME_UTC < til_exclusive)
+    message(sprintf(
+      "\nWindowed to %s .. %s: %s of %s movement rows kept. Note that a flight",
+      from, to, format(nrow(apdf), big.mark = ","), format(before, big.mark = ",")
+    ))
+    message("  straddling the end of the window keeps one phase and loses the other.")
+  }
 
   if (nrow(apdf) == 0L) {
-    stop("No movements in the window. Nothing to write.")
+    stop("No movements to write. Has the month been delivered?")
   }
 
   # -- sanity checks, before the pivot hides them --------------------------
@@ -251,7 +301,13 @@ main <- function(from_arg, to_arg) {
   message("  C50 / C60 / C110 / C120 -- NO GROUND TRUTH. APDF records 40 NM and")
   message("  100 NM only. Do not report those four columns as validated.")
 
-  tag <- sprintf("%s_%s", format(from, "%Y%m%d"), format(to, "%Y%m%d"))
+  # The tag says what the file actually holds, so a whole-month extract and a
+  # narrowed one can never be mistaken for each other on disk.
+  tag <- if (is.null(from)) {
+    paste(format(months, "%Y%m"), collapse = "_")
+  } else {
+    sprintf("%s_%s", format(from, "%Y%m%d"), format(to, "%Y%m%d"))
+  }
   out <- file.path(OUT_DIR, sprintf("flight_list_truth_%s.parquet", tag))
   write_parquet(truth, out)
   message("\n", format(nrow(truth), big.mark = ","), " flights -> ", out)
@@ -263,9 +319,14 @@ main <- function(from_arg, to_arg) {
   message("       git cat-file -p :", out, " | head -3")
   message("     Expect 'version https://git-lfs.github.com/spec/v1' + oid + size.")
   message("  2. Add a row to ", file.path(OUT_DIR, "MANIFEST.md"), ":")
+  invocation <- if (is.null(from)) {
+    paste(format(months, "%Y-%m"), collapse = " ")
+  } else {
+    sprintf("%s %s", from, to)
+  }
   message(sprintf(
-    "       | flight_list_truth_%s.parquet | extract_flight_list_truth.R %s %s | %s | %s |",
-    tag, from, to, Sys.Date(), format(nrow(truth), big.mark = ",")
+    "       | flight_list_truth_%s.parquet | extract_flight_list_truth.R %s | %s | %s |",
+    tag, invocation, Sys.Date(), format(nrow(truth), big.mark = ",")
   ))
   message("  3. Commit and push, then pull on the OSN server.")
 
@@ -273,8 +334,4 @@ main <- function(from_arg, to_arg) {
 }
 
 
-args <- commandArgs(trailingOnly = TRUE)
-main(
-  if (length(args) >= 1) args[[1]] else DEFAULT_FROM,
-  if (length(args) >= 2) args[[2]] else DEFAULT_TO
-)
+main(commandArgs(trailingOnly = TRUE))
