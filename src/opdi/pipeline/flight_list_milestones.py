@@ -148,82 +148,64 @@ def _null_ts() -> Column:
 FLIGHT_KEY_NAMES = ("flight_id", "track_id")
 
 
-#: Event types that prove the aircraft was physically on the ground at a named
-#: aerodrome. The layout family carries the aerodrome as ``info.osm_airport``,
-#: the runway family as ``info.apt_icao``.
+#: Runway events that belong to a *specific leg*. A take-off is this flight's
+#: departure and a landing is its arrival, so the aerodrome such an event names
+#: is the aerodrome of that leg -- not merely somewhere the aircraft once was.
 #:
-#: Spelled out rather than pattern-matched on the ``entry-``/``exit-`` prefix:
-#: those are generated from the OSM aeroway, and a new aeroway should have to
-#: be considered before it starts moving aerodromes on the flight list.
-GROUND_AEROWAYS = (
-    "parking_position", "taxiway", "apron", "runway", "hangar",
-    "threshold", "deicing_pad",
-)
-GROUND_TYPES = tuple(
-    f"{side}-{way}" for way in GROUND_AEROWAYS for side in ("entry", "exit")
-) + ("ATOT", "ALDT", "line-up", "take-off-roll", "runway-vacated", "touchdown")
+#: Stand, taxiway and apron events are deliberately **not** here. They prove
+#: presence, not which leg: a track routinely covers the previous arrival's
+#: taxi-in and a turnaround, so the aircraft parks at its *departure* field
+#: before pushing back. Measured on 2026-06-01, where both kinds of evidence
+#: exist they disagree on 19.2% of departures and 21.2% of arrivals -- and the
+#: runway evidence is the one that is leg-specific. Runway-only also costs
+#: nothing in reach: 20,879 departures and 23,521 arrivals against the ground
+#: family's 23,103 of each.
+DEPARTURE_RUNWAY_TYPES = ("ATOT", "line-up", "take-off-roll")
+ARRIVAL_RUNWAY_TYPES = ("ALDT", "touchdown", "runway-vacated")
 
 
 def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
-    """Let a ground detection overrule the flight list's inferred aerodrome.
+    """Let a runway event overrule the flight list's inferred aerodrome.
 
-    ``ADEP``/``ADES`` come from trajectory geometry -- where the track began and
-    ended relative to aerodrome zones -- which is inference. A surface event is
-    not: the aircraft was matched to a named aerodrome's own pavement. Where the
-    two disagree, the pavement wins.
+    ``ADEP``/``ADES`` come from trajectory geometry relative to aerodrome
+    zones, which is inference. A runway event is not: the aircraft was matched
+    to a named aerodrome's own pavement *while taking off or landing*. Where
+    the two disagree, the pavement wins.
 
-    They disagree often, and not randomly. A track routinely spans the previous
-    arrival's taxi-in, a turnaround and the next departure, so the aerodrome a
-    surface event belongs to is not the one its *type* suggests. Measured on
-    2026-06-01, of 28,391 ``entry-parking_position`` events whose flight named
-    both aerodromes, **57.3% were at the ADEP** -- the aircraft parking at its
-    departure field before pushing back, not arriving at its destination.
+    No first/last heuristic and no guard against inventing a landing: a
+    departure aerodrome is where the take-off happened and an arrival aerodrome
+    is where the landing did. A track with no landing gets no ``ADES`` from
+    here, which is the right answer rather than a case to special-case.
 
-    The rule:
-
-    * ``ADEP`` is the aerodrome of the **first** ground event. The track began
-      there, on the ground, and nothing earlier can contradict it.
-    * ``ADES`` is the aerodrome of the **last** ground event, but only where
-      that is a *different* aerodrome from the first, or the track holds both a
-      take-off and a landing. Without that guard a track reading "parked at X,
-      departed X, still airborne" -- whose first and last ground events are both
-      X -- would be recorded as having landed back at X.
-
-    ``ADEP_SOURCE``/``ADES_SOURCE`` become ``"ground_event"`` where the value
-    came from here, so a correction is never silent and the evidence can be told
-    from the inference it replaced.
+    ``ADEP_SOURCE``/``ADES_SOURCE`` become ``"runway_event"`` where the value
+    came from here, so a correction is never silent and the evidence can be
+    told from the inference it replaced.
     """
     key = _flight_key(events)
-    apt = F.coalesce(_info("osm_airport"), _info("apt_icao"))
+    apt = F.coalesce(_info("apt_icao"), _info("osm_airport"))
 
-    ground = events.select(
+    runway = events.select(
         F.col(key).alias("_g_id"), "type", "event_time", apt.alias("_apt")
-    ).filter(F.col("type").isin(*GROUND_TYPES) & F.col("_apt").isNotNull())
+    ).filter(F.col("_apt").isNotNull())
 
-    per_track = ground.groupBy("_g_id").agg(
-        _first(F.lit(True), F.col("_apt")).alias("_first_apt"),
-        _last(F.lit(True), F.col("_apt")).alias("_last_apt"),
-        F.max(F.when(F.col("type") == F.lit(_ATOT), 1).otherwise(0)).alias("_flew"),
-        F.max(F.when(F.col("type") == F.lit(_ALDT), 1).otherwise(0)).alias("_landed"),
+    dep = F.col("type").isin(*DEPARTURE_RUNWAY_TYPES)
+    arr = F.col("type").isin(*ARRIVAL_RUNWAY_TYPES)
+    per_track = runway.groupBy("_g_id").agg(
+        # Earliest departure evidence and latest arrival evidence, matching how
+        # the milestone columns pick their own events: where a track holds more
+        # than one movement, the flight list's departure describes how it began
+        # and its arrival how it ended.
+        _first(dep, F.col("_apt")).alias("_dep_apt"),
+        _last(arr, F.col("_apt")).alias("_arr_apt"),
     )
 
     out = flight_list.join(per_track, flight_list["id"] == F.col("_g_id"), "left")
+    new_adep, new_ades = F.col("_dep_apt"), F.col("_arr_apt")
 
-    returned = (F.col("_first_apt") != F.col("_last_apt")) | (
-        (F.col("_flew") == 1) & (F.col("_landed") == 1)
-    )
-    new_adep = F.col("_first_apt")
-    new_ades = F.when(returned, F.col("_last_apt"))
-
-    # The provenance stamp is written only where the column already exists.
-    # Flight lists written before ADEP_SOURCE/ADES_SOURCE existed are still
-    # readable, and the correction itself -- which is the point -- does not
-    # depend on being able to record where it came from.
     # Written back under the frame's *own* spelling. Spark resolves column
     # names case-insensitively but ``withColumn`` writes the name it is given,
-    # so passing "ADEP" to a frame holding "adep" silently renames the column
-    # -- and the flight list's other columns are a published contract that this
-    # step promises not to touch.
+    # so passing "ADEP" to a frame holding "adep" silently renames a column the
+    # flight list publishes.
     def _as_named(name: str):
         for actual in out.columns:
             if actual.upper() == name:
@@ -235,15 +217,14 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
         if actual is not None:
             out = out.withColumn(
                 actual,
-                F.when(value.isNotNull(), F.lit("ground_event"))
-                .otherwise(F.col(actual)),
+                F.when(value.isNotNull(), F.lit("runway_event")).otherwise(F.col(actual)),
             )
-
     for name, value in (("ADEP", new_adep), ("ADES", new_ades)):
         actual = _as_named(name)
         if actual is not None:
             out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
-    return out.drop("_g_id", "_first_apt", "_last_apt", "_flew", "_landed")
+
+    return out.drop("_g_id", "_dep_apt", "_arr_apt")
 
 
 def add_movement_columns(
@@ -501,21 +482,40 @@ def enrich_flight_list(
     # arrival how it ended. Picking by the extreme of ``event_time`` also makes
     # the answer independent of row order, so a re-run reproduces it; the
     # struct comparison breaks a tie on the value itself for the same reason.
+    # Each milestone must come from an event at the aerodrome of *its own leg*.
+    # A track routinely covers the previous arrival's taxi-in, a turnaround and
+    # this departure, so an ``entry-parking_position`` on it is as likely to be
+    # the stand the aircraft arrived on *last* night as this flight's. Without
+    # the check, 52% of published STND_ARR values were the stand at a different
+    # aerodrome; correcting ADEP/ADES from ground evidence only moved that to
+    # 48%, because the disagreement is real rather than an error -- the event
+    # belongs to a leg this row does not describe.
+    #
+    # The ring columns have always applied this test. The milestones did not,
+    # and the inconsistency was the bug.
+    # Filters what is demonstrably wrong, not what is merely unverifiable. An
+    # event naming no aerodrome cannot be checked against the leg, and
+    # discarding it would lose coverage to no purpose -- a null here means the
+    # detector did not record where, not that it recorded somewhere else.
+    at = F.coalesce(_info("osm_airport"), apt)
+    _matches = lambda leg: at.isNull() | (at == F.col(leg))  # noqa: E731
+    is_dep = lambda t: (F.col("type") == F.lit(t)) & _matches("_adep")  # noqa: E731
+    is_arr = lambda t: (F.col("type") == F.lit(t)) & _matches("_ades")  # noqa: E731
     is_ = lambda t: F.col("type") == F.lit(t)  # noqa: E731
     agg = narrowed.groupBy("_track_id").agg(
-        _first(is_(_ATOT), F.col("event_time")).alias("ATOT"),
-        _last(is_(_ALDT), F.col("event_time")).alias("ALDT"),
+        _first(is_dep(_ATOT), F.col("event_time")).alias("ATOT"),
+        _last(is_arr(_ALDT), F.col("event_time")).alias("ALDT"),
         _first(is_(_AOBT), F.col("event_time")).alias("AOBT"),
         _last(is_(_AIBT), F.col("event_time")).alias("AIBT"),
         # The runway of the very event the time was taken from, not of some
         # other ATOT on the same track: same predicate, same extreme, so the
         # pair cannot disagree.
-        _first(is_(_ATOT), _runway()).alias("RWY_DEP"),
-        _first(is_(_ATOT), _runway_bearing()).alias("RWY_DEP_BEARING_DEG"),
-        _last(is_(_ALDT), _runway()).alias("RWY_ARR"),
-        _last(is_(_ALDT), _runway_bearing()).alias("RWY_ARR_BEARING_DEG"),
-        _first(is_(_STAND_EXIT), _info("osm_ref")).alias("STND_DEP"),
-        _last(is_(_STAND_ENTRY), _info("osm_ref")).alias("STND_ARR"),
+        _first(is_dep(_ATOT), _runway()).alias("RWY_DEP"),
+        _first(is_dep(_ATOT), _runway_bearing()).alias("RWY_DEP_BEARING_DEG"),
+        _last(is_arr(_ALDT), _runway()).alias("RWY_ARR"),
+        _last(is_arr(_ALDT), _runway_bearing()).alias("RWY_ARR_BEARING_DEG"),
+        _first(is_dep(_STAND_EXIT), _info("osm_ref")).alias("STND_DEP"),
+        _last(is_arr(_STAND_ENTRY), _info("osm_ref")).alias("STND_ARR"),
         *[ring(nm, arrival=True).alias(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM],
         *[ring(nm, arrival=False).alias(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM],
     )
