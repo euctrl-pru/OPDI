@@ -28,7 +28,7 @@ REPO = Path(__file__).resolve().parent.parent
 #: What the rule achieved when it was introduced, measured over three days.
 #: A later run landing far from these has either changed the rule or changed
 #: the segmentation feeding it, and either is worth knowing about.
-BASELINE = {"dep_raw": 1.23, "arr_raw": 1.03, "dep_kept": 0.96, "arr_kept": 0.99}
+BASELINE = {"dep_raw": 1.23, "arr_raw": 1.03, "dep_kept": 1.02, "arr_kept": 1.01}
 
 
 def _s3():
@@ -113,13 +113,43 @@ def main() -> None:
           f"arr {kept[1]:8,} ({kept[1]/na:5.2f}x)   baseline {BASELINE['dep_kept']}x / {BASELINE['arr_kept']}x")
 
     # The rule's central claim, restated as a check rather than a memory.
-    flown_dep = (opdi["ATOT"].notna() & ~opdi["MOVEMENT_DEP"].fillna(False)).sum()
-    flown_arr = (opdi["ALDT"].notna() & ~opdi["MOVEMENT_ARR"].fillna(False)).sum()
-    verdict = "OK" if flown_dep == flown_arr == 0 else "REGRESSION"
-    print(f"\n  flights with a detected take-off not counted: {flown_dep:,}")
-    print(f"  flights with a detected landing not counted : {flown_arr:,}   [{verdict}]")
-    print("  (the rule's whole claim is that these are zero; a non-zero value "
-          "means it is\n   now discarding real movements and should be revisited)")
+    # The claim under test is narrow and must stay narrow: *the rules* discard
+    # no flight that flew. A flight with a take-off but no ADEP is not counted
+    # either, but nothing here excluded it -- there is simply no aerodrome to
+    # count it at, which is an upstream gap and a different problem. Conflating
+    # the two made this print REGRESSION for 50 departures the rules never
+    # touched.
+    rule_dep = (opdi["ATOT"].notna() & opdi["ADEP"].notna()
+                & ~opdi["MOVEMENT_DEP"].fillna(False)).sum()
+    rule_arr = (opdi["ALDT"].notna() & opdi["ADES"].notna()
+                & ~opdi["MOVEMENT_ARR"].fillna(False)).sum()
+    verdict = "OK" if rule_dep == rule_arr == 0 else "REGRESSION"
+    print(f"\n  flew, has an aerodrome, excluded by a rule: dep {rule_dep:,}  "
+          f"arr {rule_arr:,}   [{verdict}]")
+    print("  (the rules' whole claim is that these are zero; a non-zero value "
+          "means they are\n   now discarding real movements and should be revisited)")
+
+    # Surfaced separately rather than folded in: these are movements OPDI saw
+    # happen and cannot attribute to an aerodrome, so they are missing from
+    # every per-aerodrome total and no filter will bring them back.
+    orphan_dep = (opdi["ATOT"].notna() & opdi["ADEP"].isna()).sum()
+    orphan_arr = (opdi["ALDT"].notna() & opdi["ADES"].isna()).sum()
+    # The aggregate cancelled a 0.39x aerodrome against over-counts elsewhere
+    # and still read 0.96x. Per-aerodrome is not an optional extra view here;
+    # it is the only one that can see that.
+    kept_dep = opdi[opdi["MOVEMENT_DEP"].fillna(False)]["ADEP"].value_counts()
+    worst = []
+    for apt in ref_dep.head(40).index:
+        r = kept_dep.get(apt, 0) / ref_dep[apt]
+        worst.append((abs(r - 1.0), apt, ref_dep[apt], kept_dep.get(apt, 0), r))
+    worst.sort(reverse=True)
+    print("\n  furthest from APDF, of the 40 busiest departure aerodromes:")
+    for _, apt, ref, got, r in worst[:6]:
+        print(f"    {apt}  APDF {ref:6,}  OPDI {got:6,}  {r:5.2f}x")
+
+    print(f"\n  flew but no aerodrome named  : dep {orphan_dep:,}  arr {orphan_arr:,}")
+    print("  (an upstream ADEP/ADES gap, not a counting rule -- these movements "
+          "are real\n   and are absent from every per-aerodrome figure)")
 
 
 if __name__ == "__main__":

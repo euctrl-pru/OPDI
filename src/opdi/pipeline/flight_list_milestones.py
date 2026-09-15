@@ -231,8 +231,32 @@ def add_movement_columns(
     # Guarded by ``day_processed`` for the same reason as above and more
     # sharply: before step 04 runs, *every* row has a null ATOT, so every
     # departure without a destination would be condemned as a ghost.
-    ghost_dep = day_processed & F.col("ATOT").isNull() & F.col("ADES").isNull()
-    ghost_arr = day_processed & F.col("ALDT").isNull() & F.col("ADEP").isNull()
+    # ``left_dep``/``came_arr``: any ring crossing at all, which is positive
+    # evidence the aircraft actually went somewhere. It is the part that makes
+    # this rule survive poor coverage -- a take-off can be missed while the
+    # same flight is still seen at 40 NM, and at the edge of the network that
+    # is the common case, not the exception.
+    #
+    # Coalesced across every ring rather than pinned to C40, so a configuration
+    # that does not emit 40 NM does not silently condemn every departure.
+    left_dep = F.coalesce(*[F.col(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM])
+    came_arr = F.coalesce(*[F.col(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM])
+
+    # Without the ring term this rule is a coverage detector wearing a movement
+    # detector's clothes. Measured: dropping rows on "no take-off and no other
+    # end" alone fixed EBBR (1.80x to 1.00x) and destroyed LTFM, which fell
+    # from 0.97x to **0.39x** -- because at the edge of coverage a real
+    # departure has no take-off and no destination either, and looks exactly
+    # like a ramp ghost. The network aggregate still read 0.96x, flattered by
+    # one aerodrome's under-count cancelling another's over-count.
+    ghost_dep = (
+        day_processed
+        & F.col("ATOT").isNull() & F.col("ADES").isNull() & left_dep.isNull()
+    )
+    ghost_arr = (
+        day_processed
+        & F.col("ALDT").isNull() & F.col("ADEP").isNull() & came_arr.isNull()
+    )
 
     # The single question a consumer actually has. Composed here so that
     # counting movements is one predicate rather than three, and so the

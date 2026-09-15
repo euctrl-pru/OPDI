@@ -519,3 +519,49 @@ def test_an_unprocessed_day_counts_every_leg_it_has(spark):
     row = enrich_flight_list(fl, empty, EventConfig()).collect()[0]
 
     assert row["MOVEMENT_DEP"] is True
+
+
+def test_a_departure_seen_at_forty_miles_counts_even_with_nothing_else(spark):
+    """The term that keeps the ghost rule from being a coverage detector.
+
+    At the edge of the network a real departure has no detected take-off and no
+    destination -- the aircraft leaves coverage. Judged on those two absences
+    alone it is indistinguishable from a ramp ghost, and LTFM fell from 0.97x
+    of APDF's departures to **0.39x** when it was. A ring crossing is positive
+    evidence the aircraft went somewhere, and it survives the poor low-altitude
+    reception that loses the take-off.
+    """
+    rows = [
+        ("edge", "abc123", "BEL123", _T0, "LTFM", None,
+         "flight_list_v0.0.2", _T0, _t(4000)),
+        ("flew", "def456", "KLM99", _T0, "LTFM", "EHAM",
+         "flight_list_v0.0.2", _T0, _t(5400)),
+    ]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    ev = _events(spark, [
+        _event("flew", "ATOT", 300, runway="25R"),
+        # no take-off for `edge`, no destination -- but it reached 40 NM out
+        _event("edge", "xing-40nm", 900, direction="outbound", apt_icao="LTFM"),
+    ])
+
+    out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
+
+    assert out["edge"]["C40_DEP"] is not None
+    assert out["edge"]["MOVEMENT_DEP"] is True, "a ring crossing is evidence it left"
+
+
+def test_a_ramp_ghost_that_never_left_still_does_not_count(spark):
+    """The rule must still reach the thing it was built for: no take-off, no
+    destination, and never seen away from the field."""
+    rows = [
+        ("ghost", "abc123", "BEL123", _T0, "EBBR", None,
+         "flight_list_v0.0.2", _T0, _t(900)),
+        ("flew", "def456", "KLM99", _T0, "EBBR", "EHAM",
+         "flight_list_v0.0.2", _T0, _t(5400)),
+    ]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    ev = _events(spark, [_event("flew", "ATOT", 300, runway="25R")])
+
+    out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
+
+    assert out["ghost"]["MOVEMENT_DEP"] is False
