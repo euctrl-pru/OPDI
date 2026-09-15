@@ -28,7 +28,11 @@ REPO = Path(__file__).resolve().parent.parent
 #: What the rule achieved when it was introduced, measured over three days.
 #: A later run landing far from these has either changed the rule or changed
 #: the segmentation feeding it, and either is worth knowing about.
-BASELINE = {"dep_raw": 1.23, "arr_raw": 1.03, "dep_kept": 1.02, "arr_kept": 1.01}
+#: Measured on the shipped rules over 2026-06-01..03. ``dep_kept`` is 1.03
+#: rather than the 1.02 of the analysis that designed the rule, because the
+#: shipped version coalesces across every ring while the analysis used C40
+#: alone -- so it keeps a few more departures, deliberately.
+BASELINE = {"dep_raw": 1.23, "arr_raw": 1.03, "dep_kept": 1.03, "arr_kept": 1.02}
 
 
 def _s3():
