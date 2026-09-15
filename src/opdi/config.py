@@ -1521,6 +1521,14 @@ class SegmentationConfig:
     callsign_lookback_minutes: float | None = None
     """Bound on A8's callsign lookback, in minutes. ``None`` follows ``gap_minutes``."""
 
+    callsign_min_persistence_seconds: float = 0.0
+    """How long a new callsign must hold before A9 treats it as a real change.
+
+    Zero reproduces A8 `recommended` exactly, which is what every dataset
+    published since 2026-08-27 uses. Raising it changes ``track_id``, so it is
+    a deliberate act and belongs to the ``debounced`` arm rather than to the
+    shipped one."""
+
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""
 

@@ -99,6 +99,15 @@ class SegmentationParams:
     #: blank samples. Nothing says one number is right for both; they were the
     #: same number because one was to hand when the other was needed.
     callsign_lookback_minutes: float | None = None
+    #: How long a new callsign must persist before it breaks a track, in
+    #: seconds. ``0.0`` means "break immediately", which is what `recommended`
+    #: does and therefore the only default that reproduces published ids.
+    #:
+    #: The rule it guards: a callsign that appears for one sample and reverts
+    #: is noise, not a new flight. Measured on 2026-06-01, 1,457 of 1,765
+    #: sub-minute splits had the same resolved callsign on both halves and a
+    #: median implied speed of 421 kt across the gap -- one flight, cut in two.
+    callsign_min_persistence_seconds: float = 0.0
     # A5-A7 knobs; unused by the gap family.
     ground_dwell_minutes: float = 5.0
     turnaround_max_height_ft: float = 1000.0
