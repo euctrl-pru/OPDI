@@ -158,6 +158,28 @@ def main() -> None:
               f"  ({100 * r['count'] / max(n_boundaries, 1):5.1f}%)")
     print(f"    {'TOTAL':<24} {n_boundaries:>8,}")
 
+    # Fix round 1, finding 1 (code review): where two flickers abut with no
+    # stable sample between them (X,Y,X,Y,X -- LBT808 and MSR730 above show an
+    # airframe garbling its callsign repeatedly), a single boundary can be
+    # BOTH the revert leg of one flicker and the excursion leg of the next.
+    # `.when()` precedence resolves that silently to `flicker`, which is fine
+    # for the 23.1% headline (it sums both buckets either way), but it means
+    # the exact 5,241-boundary match against the first pass's flicker count is
+    # not, on its own, proof of a clean one-to-one correspondence -- some of
+    # it could be collisions washing out. Count it rather than assume it.
+    n_collision = classified.filter(
+        F.col("_is_flicker_x").isNotNull() & F.col("_is_flicker_y").isNotNull()
+    ).count()
+    print(f"\n  boundaries matching BOTH a flicker's revert leg and another"
+          f" flicker's excursion leg: {n_collision:,}")
+    if n_collision == 0:
+        print("  -> no collisions: the flicker-bucket count is a clean 1:1"
+              " match against the first-pass flicker count.")
+    else:
+        print("  -> collisions present: the flicker-bucket count and the"
+              " first-pass flicker count agreeing exactly is not, by itself,"
+              " proof of a 1:1 correspondence -- some boundaries satisfy both.")
+
     spark.stop()
 
 
