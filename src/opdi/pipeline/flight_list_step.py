@@ -95,6 +95,24 @@ def enrich_day(
     flight_list = storage.read_table(FLIGHT_LIST_TABLE)
     events = storage.read_table(EVENTS_TABLE)
 
+    # ``ID`` is the track identifier and the flight list's primary key: one row
+    # per flight, always. Enforced here because 04b is the only step that reads
+    # the whole table, so it is the only place that can see a violation -- and
+    # because it self-heals one. The NULL-partition delete bug (a NULL value
+    # formatted as ``DOF=None``, a path that does not exist) left 746 dateless
+    # rows duplicated; the delete is fixed, so they no longer multiply, but
+    # nothing would have removed the copies already written.
+    #
+    # Reported rather than silently dropped. A duplicate in a *dated* partition
+    # would mean something new and worse than a stale write, and the count is
+    # how anyone would notice.
+    before = flight_list.count()
+    flight_list = flight_list.dropDuplicates(["ID"])
+    removed = before - flight_list.count()
+    if removed:
+        print(f"  removed {removed:,} duplicate ID(s) -- the flight list is "
+              f"keyed on ID and must hold one row per flight")
+
     enriched = enrich_flight_list(flight_list, events, config)
 
     # Pass 1: break the read-write dependency on the target.
