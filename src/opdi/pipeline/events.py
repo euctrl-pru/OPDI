@@ -812,8 +812,23 @@ def calculate_horizontal_segment_events(
         f_max(when(col("flight_phase") == "CR", col("event_time"))).over(window_cumulative),
     )
 
+    # ``eqNullSafe``, not ``!=``. The classifier abstains -- returns NULL --
+    # whenever a rule's inputs are incomplete, and ``NULL != "LVL"`` is NULL,
+    # not TRUE. So a level segment whose neighbour is an abstention failed both
+    # this test and the end test below, and emitted nothing there.
+    #
+    # It did not fail symmetrically. A *cruise* segment is rescued by the
+    # ``first_cr_time``/``last_cr_time`` terms, which fire regardless of the
+    # neighbour; a level-off below cruise has no such rescue, so it emitted a
+    # start at its clean edge and no end at its abstaining one. Measured on
+    # 2026-06-01 after the precedence fix: 128,481 starts against 112,799 ends,
+    # +15,682 still unbalanced -- this is the rest of it.
+    #
+    # Treating an abstention as a different phase is also the right reading:
+    # "we do not know what this sample is" is not a continuation of level
+    # flight, so the segment genuinely ends there.
     start_of_segment = (col("flight_phase").isin("CR", "LVL")) & (
-        col("prev_phase") != col("flight_phase")
+        ~col("prev_phase").eqNullSafe(col("flight_phase"))
     )
     df = df.withColumn("start_of_segment", start_of_segment)
     df = df.withColumn(
@@ -825,7 +840,7 @@ def calculate_horizontal_segment_events(
     is_level_start = start_of_segment | (col("event_time") == col("first_cr_time"))
     is_level_end = (
         (col("flight_phase").isin("CR", "LVL"))
-        & (col("next_phase") != col("flight_phase"))
+        & (~col("next_phase").eqNullSafe(col("flight_phase")))
     ) | (col("event_time") == col("last_cr_time"))
 
     if config.merge_duplicate_milestones:

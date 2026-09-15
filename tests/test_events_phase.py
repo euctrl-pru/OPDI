@@ -362,3 +362,55 @@ def test_the_shipped_configuration_publishes_no_fuzzy_top(spark):
     got = _counts(spark, _cruise_traj(2), EventConfig())
 
     assert got["top-of-climb"] == got["top-of-descent"] == 0
+
+
+def _level_off_traj(trailing_abstention, step=60):
+    """A level-off below cruise, optionally followed by an abstention.
+
+    15,000 ft at 300 kt is level but not cruise, so the track contains no
+    ``CR`` sample at all and neither ``first_cr_time`` nor ``last_cr_time``
+    exists to rescue a boundary. That is what makes this the case the cruise
+    tests cannot reach.
+    """
+    samples, t = [], 0
+    for alt in (8000, 11000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    for _ in range(3):
+        samples.append({"t": t, "baro_altitude": _m(15000),
+                        "vert_rate": 0.0, "velocity": 300 / KT_PER_MPS})
+        t += step
+    if trailing_abstention:
+        # No velocity -> the cruise rule is incomplete -> the classifier
+        # abstains and flight_phase is NULL.
+        samples.append({"t": t, "baro_altitude": _m(15000),
+                        "vert_rate": 0.0, "velocity": None})
+        t += step
+    for alt in (12000, 9000, 6000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    return samples
+
+
+def test_an_abstention_ends_a_level_segment_rather_than_swallowing_it(spark):
+    """``NULL != "LVL"`` is NULL, not TRUE.
+
+    The classifier abstains whenever a rule's inputs are incomplete, so a
+    plain ``!=`` against the neighbouring phase silently failed at every
+    abstention. Cruise survived it -- ``last_cr_time`` fires regardless of the
+    neighbour -- but a level-off below cruise has no such rescue and emitted a
+    start with no end. That was the +15,682 still unbalanced on 2026-06-01
+    after the precedence fix.
+    """
+    got = _counts(spark, _level_off_traj(True), EventConfig())
+
+    assert got["level-start"] == got["level-end"] == 1
+
+
+def test_a_clean_level_off_is_unchanged(spark):
+    """The null-safe comparison must not alter the ordinary case."""
+    got = _counts(spark, _level_off_traj(False), EventConfig())
+
+    assert got["level-start"] == got["level-end"] == 1
