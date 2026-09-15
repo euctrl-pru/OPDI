@@ -45,6 +45,7 @@ from opdi.pipeline.segmentation.base import (
     lookback_minutes,
     segment_window,
     speed_kt,
+    w_partition_cols,
 )
 
 __all__ = [
@@ -58,6 +59,7 @@ __all__ = [
     "airport_anchored",
     "vertical_profile",
     "recommended",
+    "debounced",
     "TRAFFIC_DEFAULT_GAP_MINUTES",
     "ARMS",
 ]
@@ -482,6 +484,109 @@ def recommended() -> BreakRule:
     )
 
 
+def debounced() -> BreakRule:
+    """A9 -- A8, but a callsign must persist before it breaks a track.
+
+    `recommended` breaks on the first sample whose real callsign differs from
+    the previous real one. A value that appears once and reverts therefore cuts
+    a flight in half. Measured on 2026-06-01: of 1,765 track splits with a
+    sub-minute gap -- which neither gap rule can produce, so all of them are
+    callsign breaks -- **1,457 had the same resolved callsign on both halves**,
+    at cruise, with a median implied speed of 421 kt across the gap. One flight,
+    cut in two.
+
+    The extra condition is that the new value is still in force
+    ``callsign_min_persistence_seconds`` later. A flicker fails it because the
+    value has already reverted; a genuine change passes because the new
+    callsign is still there.
+
+    ``callsign_min_persistence_seconds = 0`` reproduces `recommended` exactly,
+    which is what makes this safe to add beside a published arm.
+    """
+
+    def expr(p):
+        w = segment_window()
+        back = w.rowsBetween(Window.unboundedPreceding, -1)
+        real = F.when(
+            F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
+            F.trim(F.col("callsign")),
+        )
+        # The timestamp of the previous real callsign, for the lookback bound.
+        # `prev_real` itself is deliberately not used as the comparison value --
+        # see the block below.
+        prev_real_ts = F.last(
+            F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
+        ).over(back)
+        recent = (
+            F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
+        ) / 60.0 < lookback_minutes(p)
+
+        hold = float(p.callsign_min_persistence_seconds)
+        if hold <= 0.0:
+            stable = real
+        else:
+            # The last real callsign within the persistence horizon, looking
+            # *forward*. A descending frame, not `first(...)` over
+            # `rowsBetween(1, unboundedFollowing)`: that is a shrinking frame,
+            # re-scanned per row and quadratic in track length. Reversing the
+            # ordering asks the same question of a growing frame -- the
+            # transformation `cleaning/native.py` documents, where it was
+            # worth 20x.
+            # A RANGE frame's bound type must match its ORDER BY column's type;
+            # `_ts` is a TIMESTAMP, and a plain integer bound (seconds) needs a
+            # numeric order column, hence `unix_timestamp` rather than `_ts`
+            # itself.
+            fwd = (
+                Window.partitionBy(*w_partition_cols())
+                .orderBy(F.unix_timestamp(F.col("_ts")).desc())
+                .rangeBetween(-int(hold), -1)
+            )
+            later = F.last(real, ignorenulls=True).over(fwd)
+            # No later real callsign inside the horizon means the track ends
+            # here, and a value with nothing after it has not been shown to
+            # revert. Treating that as persistence keeps A9 from suppressing a
+            # genuine change at the end of a track.
+            persisted = later.isNull() | (later == real)
+            # The callsign only where it held. A flicker's transient value is
+            # NULL here, so it never becomes the thing later samples compare
+            # against.
+            stable = F.when(persisted, real)
+
+        # **Persisted against persisted, not persisted against previous-real.**
+        # A flicker trips the rule twice -- once on the X->Y excursion and again
+        # on the Y->X revert -- and measured on 2026-06-01 both legs are there:
+        # 5,241 revert boundaries and 5,000 excursion boundaries, 23.1% of all
+        # 44,406 boundaries between them.
+        #
+        # Comparing the new value against the previous *real* one suppresses
+        # only the excursion: at the first X after the flicker, the previous
+        # real callsign is Y, the current is X, and X does persist -- so it
+        # breaks. The flight still splits, in two instead of three, and the
+        # fragmentation measurement would show a real but halved improvement,
+        # plausible enough to be accepted.
+        #
+        # Carrying the last *stable* callsign forward instead leaves the
+        # transient invisible: stable is X,X,X,X,NULL,X,X,X,X across a flicker,
+        # so every comparison is X against X and nothing breaks. A genuine
+        # change gives X,X,X,X,Y,Y,Y,Y and breaks once, at the first Y.
+        prev_stable = F.last(stable, ignorenulls=True).over(back)
+        callsign_change = (
+            stable.isNotNull()
+            & prev_stable.isNotNull()
+            & recent
+            & (stable != prev_stable)
+        )
+        return F.coalesce(callsign_change, F.lit(False)) | legacy().break_expr(p)
+
+    return BreakRule(
+        name="debounced",
+        group_cols=["icao24"],
+        break_expr=expr,
+        month_suffix=False,
+        id_from_start_time=True,
+    )
+
+
 ARMS = {
     "legacy": legacy,
     "no_month_suffix": no_month_suffix,
@@ -491,4 +596,5 @@ ARMS = {
     "airport_anchored": airport_anchored,
     "vertical_profile": vertical_profile,
     "recommended": recommended,
+    "debounced": debounced,
 }

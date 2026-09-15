@@ -49,6 +49,7 @@ __all__ = [
     "SegmentationParams",
     "assign_track_id",
     "segment_window",
+    "w_partition_cols",
     "gap_minutes",
     "altitude_ft",
     "speed_kt",
@@ -243,6 +244,16 @@ def segment_window() -> WindowSpec:
     else, with nothing in the output to show it.
     """
     return Window.partitionBy(_GRP).orderBy(_TS)
+
+
+def w_partition_cols() -> list:
+    """The columns :func:`segment_window` partitions by.
+
+    Exposed because a reversed-order window must partition identically to the
+    engine's own or it answers a different question, and rebuilding it from the
+    private column name by copy-paste is how arms drifted apart before.
+    """
+    return [F.col(_GRP)]
 
 
 def gap_minutes() -> Column:
