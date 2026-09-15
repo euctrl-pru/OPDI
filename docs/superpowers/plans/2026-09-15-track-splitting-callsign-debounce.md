@@ -356,7 +356,20 @@ git commit -m "feat(segmentation): declare the callsign debounce, defaulting to 
 
 **How the debounce works.** `recommended` breaks where the current real callsign differs from the previous real one. `debounced` additionally requires the *new* value to still be in force `callsign_min_persistence_seconds` later. Expressed forwards over the window: look ahead to the last real callsign within the persistence horizon and require it to equal the current one. A flicker fails that test because the value has already reverted; a genuine change passes because the new callsign is still there.
 
-The forward lookup uses a **descending** frame. `F.first(...).over(rowsBetween(1, unboundedFollowing))` is a shrinking frame, re-scanned per row and quadratic in track length; reversing the ordering asks the same question of a growing frame. Same answer, O(n). `cleaning/native.py` documents the transformation, where it was worth 20×.
+The forward lookup uses a **bounded ascending** frame: `rangeBetween(1, hold)`
+over `unix_timestamp(_ts)` ascending, with `F.last(real, ignorenulls=True)`
+giving the *farthest* real callsign within the `hold`-second horizon. Farthest,
+not nearest, is the point: a flicker two or more samples long still reverts
+before the horizon closes, so the value at the far edge is the reverted one and
+the flicker is suppressed. A `F.first`/nearest reading, or a descending frame
+that resolves to nearest, breaks on a multi-sample flicker.
+
+Do **not** reach for a descending frame here for performance. The O(n²) trap
+`cleaning/native.py` documents is specific to *unbounded* frames —
+`rowsBetween(1, unboundedFollowing)` is re-scanned per row. A `rangeBetween`
+bounded to a fixed time window is O(n) in either order, so there is no
+performance reason to reverse it and doing so only inverts the
+nearest/farthest semantics.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -405,6 +418,15 @@ def test_a_flicker_no_longer_splits_the_flight(spark):
         "excursion boundaries. If this is not 3, `recommended` no longer has "
         "the defect and this whole plan is measuring something else."
     )
+    assert n_tracks(assign_track_id(df, debounced(), P30)) == 1
+
+
+def test_a_two_sample_flicker_is_also_suppressed(spark):
+    """A flicker need not be one sample. Two garbled samples that revert before
+    the persistence horizon closes are still noise, and the far-edge check must
+    see the reverted value rather than the second garbled one."""
+    df = _with_callsigns(spark, ["BEL123"] * 4 + ["XXXX"] * 2 + ["BEL123"] * 4)
+
     assert n_tracks(assign_track_id(df, debounced(), P30)) == 1
 
 
@@ -500,17 +522,25 @@ def debounced() -> BreakRule:
         if hold <= 0.0:
             stable = real
         else:
-            # The last real callsign within the persistence horizon, looking
-            # *forward*. A descending frame, not `first(...)` over
-            # `rowsBetween(1, unboundedFollowing)`: that is a shrinking frame,
-            # re-scanned per row and quadratic in track length. Reversing the
-            # ordering asks the same question of a growing frame -- the
-            # transformation `cleaning/native.py` documents, where it was
-            # worth 20x.
+            # The FARTHEST real callsign within the persistence horizon,
+            # looking forward. A bounded ascending range frame: 1 to `hold`
+            # seconds ahead, ordered on the integer unix timestamp (a
+            # rangeBetween in seconds needs an integer-typed order, not a
+            # TIMESTAMP). `F.last` over this ascending frame is the far edge of
+            # the horizon -- which is what suppresses a multi-sample flicker,
+            # since a flicker reverts before the horizon closes and the far
+            # edge is therefore the reverted value.
+            #
+            # Not a descending frame and not `rowsBetween(1, unboundedFollowing)`.
+            # The latter is unbounded and O(n^2); a descending bounded frame is
+            # O(n) but resolves to the NEAREST forward sample, which reads a
+            # 2-sample flicker as persisted and breaks on it. A bounded range
+            # frame is O(n) in either order, so ascending costs nothing and is
+            # the only one with the right semantics.
             fwd = (
                 Window.partitionBy(*w_partition_cols())
-                .orderBy(F.col("_ts").desc())
-                .rangeBetween(-int(hold), -1)
+                .orderBy(F.unix_timestamp(F.col("_ts")))
+                .rangeBetween(1, int(hold))
             )
             later = F.last(real, ignorenulls=True).over(fwd)
             # No later real callsign inside the horizon means the track ends
