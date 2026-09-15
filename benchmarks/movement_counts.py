@@ -28,7 +28,7 @@ REPO = Path(__file__).resolve().parent.parent
 #: What the rule achieved when it was introduced, measured over three days.
 #: A later run landing far from these has either changed the rule or changed
 #: the segmentation feeding it, and either is worth knowing about.
-BASELINE = {"dep_raw": 1.23, "arr_raw": 1.03, "dep_kept": 1.11, "arr_kept": 1.02}
+BASELINE = {"dep_raw": 1.23, "arr_raw": 1.03, "dep_kept": 0.96, "arr_kept": 0.99}
 
 
 def _s3():
@@ -48,7 +48,8 @@ def _s3():
 
 def flight_list(days, bucket="eurocontrol", warehouse="opdi-prod") -> pd.DataFrame:
     s3 = _s3()
-    cols = ["ID", "ADEP", "ADES", "ATOT", "ALDT", "SUPERSEDED_DEP", "SUPERSEDED_ARR"]
+    cols = ["ID", "ADEP", "ADES", "ATOT", "ALDT", "SUPERSEDED_DEP", "SUPERSEDED_ARR",
+            "MOVEMENT_DEP", "MOVEMENT_ARR"]
     frames = []
     for day in days:
         prefix = f"{warehouse}/opdi_flight_list/DOF={day}/"
@@ -98,8 +99,10 @@ def main() -> None:
 
     has_dep, has_arr = opdi["ADEP"].notna(), opdi["ADES"].notna()
     raw = count(has_dep, has_arr)
-    kept = count(has_dep & ~opdi["SUPERSEDED_DEP"].fillna(False),
-                 has_arr & ~opdi["SUPERSEDED_ARR"].fillna(False))
+    # MOVEMENT_DEP/ARR compose every rule; reading them here rather than
+    # re-deriving keeps this check measuring the shipped definition rather than
+    # a second copy of it that can drift.
+    kept = count(opdi["MOVEMENT_DEP"].fillna(False), opdi["MOVEMENT_ARR"].fillna(False))
     nd, na = ref_dep.sum(), ref_arr.sum()
 
     print(f"days {', '.join(args.days)}   aerodromes reported by APDF: {len(covered):,}")
@@ -110,11 +113,11 @@ def main() -> None:
           f"arr {kept[1]:8,} ({kept[1]/na:5.2f}x)   baseline {BASELINE['dep_kept']}x / {BASELINE['arr_kept']}x")
 
     # The rule's central claim, restated as a check rather than a memory.
-    flown_dep = (opdi["ATOT"].notna() & opdi["SUPERSEDED_DEP"].fillna(False)).sum()
-    flown_arr = (opdi["ALDT"].notna() & opdi["SUPERSEDED_ARR"].fillna(False)).sum()
+    flown_dep = (opdi["ATOT"].notna() & ~opdi["MOVEMENT_DEP"].fillna(False)).sum()
+    flown_arr = (opdi["ALDT"].notna() & ~opdi["MOVEMENT_ARR"].fillna(False)).sum()
     verdict = "OK" if flown_dep == flown_arr == 0 else "REGRESSION"
-    print(f"\n  flights with a detected take-off marked superseded: {flown_dep:,}")
-    print(f"  flights with a detected landing marked superseded : {flown_arr:,}   [{verdict}]")
+    print(f"\n  flights with a detected take-off not counted: {flown_dep:,}")
+    print(f"  flights with a detected landing not counted : {flown_arr:,}   [{verdict}]")
     print("  (the rule's whole claim is that these are zero; a non-zero value "
           "means it is\n   now discarding real movements and should be revisited)")
 

@@ -63,12 +63,22 @@ _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 #: APDF does, and the excess is not spread evenly: it is departures (1.23x
 #: against arrivals' 1.03x, measured 2026-06-01..03).
 #:
+#: ``MOVEMENT_DEP``/``MOVEMENT_ARR`` are the ones to filter on: they answer
+#: "does this row count as a departure / an arrival", which is the only
+#: question most consumers have. ``SUPERSEDED_*`` remain beside them to say
+#: *why* a row does not count, which is what makes a surprising total
+#: diagnosable rather than merely surprising.
+#:
 #: ``TRACK_DURATION_MIN`` is published rather than used as a filter here. A
 #: duration threshold is a proxy for "is this a real flight" and leaks in both
 #: directions -- at 30 minutes it discards 4,364 departures that demonstrably
 #: took off while still admitting hour-long circuits -- so the honest thing is
 #: to hand consumers the number and let them choose, not to choose for them.
-MOVEMENT_COLUMNS = ["TRACK_DURATION_MIN", "SUPERSEDED_DEP", "SUPERSEDED_ARR"]
+MOVEMENT_COLUMNS = [
+    "TRACK_DURATION_MIN",
+    "SUPERSEDED_DEP", "SUPERSEDED_ARR",   # why a row does not count
+    "MOVEMENT_DEP", "MOVEMENT_ARR",       # whether it counts -- filter on these
+]
 
 ADDED_COLUMNS = (
     [
@@ -211,6 +221,25 @@ def add_movement_columns(
         & ((last_s - prev_arr) <= F.lit(window_s))
     )
 
+    # A "ghost": the row claims a leg, but nothing was seen to fly and no other
+    # end was named. That is not evidence of a movement, only of an aircraft
+    # near an aerodrome. They are the whole of the residual over-count -- at
+    # EBBR, 338 of a 342-departure excess -- and the superseded rule cannot
+    # reach them, because a ghost has no later real departure to be superseded
+    # by.
+    #
+    # Guarded by ``day_processed`` for the same reason as above and more
+    # sharply: before step 04 runs, *every* row has a null ATOT, so every
+    # departure without a destination would be condemned as a ghost.
+    ghost_dep = day_processed & F.col("ATOT").isNull() & F.col("ADES").isNull()
+    ghost_arr = day_processed & F.col("ALDT").isNull() & F.col("ADEP").isNull()
+
+    # The single question a consumer actually has. Composed here so that
+    # counting movements is one predicate rather than three, and so the
+    # definition lives in one place when it changes again.
+    movement_dep = F.col("ADEP").isNotNull() & ~superseded_dep & ~ghost_dep
+    movement_arr = F.col("ADES").isNotNull() & ~superseded_arr & ~ghost_arr
+
     return (
         flight_list
         .withColumn("TRACK_DURATION_MIN", (last_s - first_s) / F.lit(60.0))
@@ -219,6 +248,8 @@ def add_movement_columns(
         # is simply no.
         .withColumn("SUPERSEDED_DEP", F.coalesce(superseded_dep, F.lit(False)))
         .withColumn("SUPERSEDED_ARR", F.coalesce(superseded_arr, F.lit(False)))
+        .withColumn("MOVEMENT_DEP", F.coalesce(movement_dep, F.lit(False)))
+        .withColumn("MOVEMENT_ARR", F.coalesce(movement_arr, F.lit(False)))
     )
 
 

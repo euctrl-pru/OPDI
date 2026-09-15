@@ -455,3 +455,67 @@ def test_a_day_with_no_milestones_yet_is_not_judged(spark):
     assert out["real"]["SUPERSEDED_DEP"] is False
     # The duration is a property of the row, not of the events, so it stands.
     assert out["frag"]["TRACK_DURATION_MIN"] == 10.0
+
+
+def test_a_ghost_track_does_not_count_as_a_movement(spark):
+    """Nothing seen to fly, and no other end named.
+
+    That is not evidence of a movement, only of an aircraft near an aerodrome.
+    Ghosts are the whole of the residual over-count the superseded rule cannot
+    reach -- it needs a later real departure to supersede against, and a ghost
+    has none. At EBBR they were 338 of a 342-departure excess.
+    """
+    rows = [
+        ("ghost", "abc123", "BEL123", _T0, "EBBR", None,
+         "flight_list_v0.0.2", _T0, _t(900)),
+        # A second flight that did fly, so the day reads as processed and the
+        # ghost rule is actually in force rather than abstaining.
+        ("flew", "def456", "KLM99", _T0, "EBBR", "EHAM",
+         "flight_list_v0.0.2", _T0, _t(5400)),
+    ]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    ev = _events(spark, [_event("flew", "ATOT", 300, runway="25R")])
+
+    out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
+    row = out["ghost"]
+
+    assert out["flew"]["MOVEMENT_DEP"] is True
+    assert row["ATOT"] is None and row["ades"] is None
+    assert row["MOVEMENT_DEP"] is False
+    # It is a ghost, not a superseded fragment -- the two reasons stay distinct
+    # so a surprising total can be diagnosed.
+    assert row["SUPERSEDED_DEP"] is False
+
+
+def test_a_departure_that_flew_counts_even_with_no_destination(spark):
+    """Leaving the coverage area is normal. A take-off is evidence enough."""
+    rows = [("flew", "abc123", "BEL123", _T0, "EBBR", None,
+             "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    ev = _events(spark, [_event("flew", "ATOT", 300, runway="25R")])
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["MOVEMENT_DEP"] is True
+
+
+def test_a_superseded_departure_can_still_be_a_real_arrival(spark):
+    """The legs are judged independently; a row is not all-or-nothing."""
+    fl, ev = _two_tracks(spark)
+    out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
+
+    assert out["frag"]["MOVEMENT_DEP"] is False
+    assert out["real"]["MOVEMENT_DEP"] is True
+
+
+def test_an_unprocessed_day_counts_every_leg_it_has(spark):
+    """Before step 04 every ATOT is null, so an unguarded ghost rule would
+    condemn every destination-less departure. The flags abstain instead."""
+    rows = [("a", "abc123", "BEL123", _T0, "EBBR", None,
+             "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    empty = spark.createDataFrame([], EVENT_SCHEMA)
+
+    row = enrich_flight_list(fl, empty, EventConfig()).collect()[0]
+
+    assert row["MOVEMENT_DEP"] is True
