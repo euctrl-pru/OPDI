@@ -704,7 +704,14 @@ def measure(sv, arm: str, hold: float):
         # track holds two *different* callsigns, which a single value hides.
         F.collect_set(real).alias("callsigns"),
     )
-    per_flight = per_track.groupBy("icao24", F.col("callsigns")[0].alias("cs")) \
+    # A track's representative callsign, for grouping tracks into flights.
+    # `F.get(..., 0)` on the sorted set is null-tolerant -- an all-blank track
+    # yields an empty set and NULL here rather than throwing -- and
+    # deterministic, unlike indexing the unordered `collect_set` directly.
+    # Tracks with no real callsign group under NULL, which is correct: they
+    # cannot be identified as a flight.
+    rep = F.get(F.sort_array(F.col("callsigns")), 0)
+    per_flight = per_track.withColumn("cs", rep).groupBy("icao24", "cs") \
         .agg(F.count(F.lit(1)).alias("n_tracks"))
 
     return {
