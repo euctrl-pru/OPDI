@@ -399,8 +399,11 @@ def test_a_flicker_no_longer_splits_the_flight(spark):
     df = _with_callsigns(spark, ["BEL123"] * 4 + ["XXXX"] + ["BEL123"] * 4)
 
     assert n_tracks(assign_track_id(df, recommended(), P0)) == 3, (
-        "if this is not 3, `recommended` no longer has the defect and this "
-        "whole plan is measuring something else"
+        "Three, not two: a flicker trips the rule on the X->Y excursion AND on "
+        "the Y->X revert, so it cuts the flight into three pieces. Measured on "
+        "2026-06-01, both legs are present -- 5,241 revert boundaries and 5,000 "
+        "excursion boundaries. If this is not 3, `recommended` no longer has "
+        "the defect and this whole plan is measuring something else."
     )
     assert n_tracks(assign_track_id(df, debounced(), P30)) == 1
 
@@ -483,7 +486,9 @@ def debounced() -> BreakRule:
             F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
             F.trim(F.col("callsign")),
         )
-        prev_real = F.last(real, ignorenulls=True).over(back)
+        # The timestamp of the previous real callsign, for the lookback bound.
+        # `prev_real` itself is deliberately not used as the comparison value --
+        # see the block below.
         prev_real_ts = F.last(
             F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
         ).over(back)
@@ -493,7 +498,7 @@ def debounced() -> BreakRule:
 
         hold = float(p.callsign_min_persistence_seconds)
         if hold <= 0.0:
-            persisted = F.lit(True)
+            stable = real
         else:
             # The last real callsign within the persistence horizon, looking
             # *forward*. A descending frame, not `first(...)` over
@@ -513,13 +518,34 @@ def debounced() -> BreakRule:
             # revert. Treating that as persistence keeps A9 from suppressing a
             # genuine change at the end of a track.
             persisted = later.isNull() | (later == real)
+            # The callsign only where it held. A flicker's transient value is
+            # NULL here, so it never becomes the thing later samples compare
+            # against.
+            stable = F.when(persisted, real)
 
+        # **Persisted against persisted, not persisted against previous-real.**
+        # A flicker trips the rule twice -- once on the X->Y excursion and again
+        # on the Y->X revert -- and measured on 2026-06-01 both legs are there:
+        # 5,241 revert boundaries and 5,000 excursion boundaries, 23.1% of all
+        # 44,406 boundaries between them.
+        #
+        # Comparing the new value against the previous *real* one suppresses
+        # only the excursion: at the first X after the flicker, the previous
+        # real callsign is Y, the current is X, and X does persist -- so it
+        # breaks. The flight still splits, in two instead of three, and the
+        # fragmentation measurement would show a real but halved improvement,
+        # plausible enough to be accepted.
+        #
+        # Carrying the last *stable* callsign forward instead leaves the
+        # transient invisible: stable is X,X,X,X,NULL,X,X,X,X across a flicker,
+        # so every comparison is X against X and nothing breaks. A genuine
+        # change gives X,X,X,X,Y,Y,Y,Y and breaks once, at the first Y.
+        prev_stable = F.last(stable, ignorenulls=True).over(back)
         callsign_change = (
-            real.isNotNull()
-            & prev_real.isNotNull()
+            stable.isNotNull()
+            & prev_stable.isNotNull()
             & recent
-            & (real != prev_real)
-            & persisted
+            & (stable != prev_stable)
         )
         return F.coalesce(callsign_change, F.lit(False)) | legacy().break_expr(p)
 
