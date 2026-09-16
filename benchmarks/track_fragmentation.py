@@ -26,8 +26,13 @@ and acceptable, but it is NOT a from-raw measurement: it measures re-
 segmentation of already-cleaned-and-split data, not segmentation from raw
 state vectors. Task 5, which runs a full pipeline into the research prefix,
 is the from-raw measurement -- do not present the two as equivalent.
+
+With ``--out-name`` and ``--results-dir`` the per-arm, per-hold table this
+script prints is also staged as a CSV, one row per (arm, hold) combination.
 """
 import argparse
+import csv
+from pathlib import Path
 
 from pyspark.sql import functions as F
 
@@ -104,6 +109,11 @@ def main() -> None:
     ap.add_argument("--warehouse", default="s3a://eurocontrol/opdi-prod")
     ap.add_argument("--holds", type=float, nargs="+", default=[15.0, 30.0, 60.0])
     ap.add_argument("--executors", type=int, default=8)
+    ap.add_argument("--results-dir", type=Path, default=None,
+                     help="stage the per-arm, per-hold table here as a CSV, "
+                          "if --out-name is also given")
+    ap.add_argument("--out-name", default=None,
+                     help="CSV filename under --results-dir")
     args = ap.parse_args()
 
     config = OPDIConfig.for_environment("opensky")
@@ -132,6 +142,17 @@ def main() -> None:
           "in one track.\nIt must stay near recommended value -- a rise means "
           "the arm is fusing genuine\nflights. `2+raw` counts flicker-containing "
           "tracks and is EXPECTED to rise.")
+
+    if args.results_dir and args.out_name:
+        args.results_dir.mkdir(parents=True, exist_ok=True)
+        out = args.results_dir / args.out_name
+        fieldnames = sorted({k for row in rows for k in row})
+        with out.open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=fieldnames)
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+        print(f"\n  staged {out}")
 
     spark.stop()
 

@@ -12,11 +12,22 @@ measurement that justified them and the regression check that keeps them
 honest: run it after a campaign and the ratios should sit near the figures
 below, per aerodrome as well as in total.
 
+**The debounce guard (Task 5).** ``--warehouses`` takes one or more
+``LABEL=WAREHOUSE`` pairs and measures each against the same APDF days, so one
+invocation produces both the shipped baseline and the debounced arm's numbers
+on a shared yardstick. The default pair is the one Task 5 used:
+``recommended=opdi-prod`` (the shipped arm, already in production) and
+``debounced=opdi/research/a9`` (the self-contained warehouse
+``run_debounced_day.py`` builds for 2026-06-03, read-only here). With
+``--out-name`` and ``--results-dir`` the per-label row is staged as a CSV, one
+row per label, so ``regenerate_track_v3.py`` can declare this as a job.
+
 Reads committed reference data and the published flight list. No Spark.
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import io
 import os
 from pathlib import Path
@@ -33,6 +44,12 @@ REPO = Path(__file__).resolve().parent.parent
 #: shipped version coalesces across every ring while the analysis used C40
 #: alone -- so it keeps a few more departures, deliberately.
 BASELINE = {"dep_raw": 1.23, "arr_raw": 1.03, "dep_kept": 1.03, "arr_kept": 1.02}
+
+#: Task 5's pair, matching ``run_debounced_day.py``'s own "downstream" note:
+#: the shipped arm reads straight from production, and the debounced arm
+#: reads the self-contained research warehouse that script populated for
+#: 2026-06-03 -- both read-only, neither touches production.
+DEFAULT_WAREHOUSES = ["recommended=opdi-prod", "debounced=opdi/research/a9"]
 
 
 def _s3():
@@ -79,16 +96,15 @@ def apdf_movements(days, month: str) -> pd.DataFrame:
     return df[df["day"].isin(days)]
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--days", nargs="+", required=True, help="YYYY-MM-DD ...")
-    ap.add_argument("--month", default=None, help="APDF month, YYYYMM (default: from --days)")
-    ap.add_argument("--warehouse", default="opdi-prod")
-    args = ap.parse_args()
-    month = args.month or args.days[0][:7].replace("-", "")
+def measure(label: str, warehouse: str, days, month: str) -> dict:
+    """Score one warehouse's flight list against APDF, and return one row.
 
-    opdi = flight_list(args.days, warehouse=args.warehouse)
-    apdf = apdf_movements(args.days, month)
+    Printed in full (the per-aerodrome breakdown included) and also returned
+    as the flat dict a CSV row wants -- the two must not drift, so the row is
+    read out of the same variables the prints use, not recomputed.
+    """
+    opdi = flight_list(days, warehouse=warehouse)
+    apdf = apdf_movements(days, month)
 
     ref_dep = apdf[apdf["SRC_PHASE"] == "DEP"]["ADEP_ICAO"].value_counts()
     ref_arr = apdf[apdf["SRC_PHASE"] == "ARR"]["ADES_ICAO"].value_counts()
@@ -109,7 +125,8 @@ def main() -> None:
     kept = count(opdi["MOVEMENT_DEP"].fillna(False), opdi["MOVEMENT_ARR"].fillna(False))
     nd, na = ref_dep.sum(), ref_arr.sum()
 
-    print(f"days {', '.join(args.days)}   aerodromes reported by APDF: {len(covered):,}")
+    print(f"\n=== {label}  (warehouse={warehouse}) ===")
+    print(f"days {', '.join(days)}   aerodromes reported by APDF: {len(covered):,}")
     print(f"  APDF                       dep {nd:8,}          arr {na:8,}")
     print(f"  OPDI, every row            dep {raw[0]:8,} ({raw[0]/nd:5.2f}x)  "
           f"arr {raw[1]:8,} ({raw[1]/na:5.2f}x)   baseline {BASELINE['dep_raw']}x / {BASELINE['arr_raw']}x")
@@ -154,6 +171,64 @@ def main() -> None:
     print(f"\n  flew but no aerodrome named  : dep {orphan_dep:,}  arr {orphan_arr:,}")
     print("  (an upstream ADEP/ADES gap, not a counting rule -- these movements "
           "are real\n   and are absent from every per-aerodrome figure)")
+
+    max_abs_err = max((w[4] for w in worst), default=float("nan"))
+    return {
+        "label": label,
+        "warehouse": warehouse,
+        "days": ";".join(days),
+        "apdf_dep": int(nd),
+        "apdf_arr": int(na),
+        "n_aerodromes_covered": len(covered),
+        "opdi_raw_dep": int(raw[0]),
+        "opdi_raw_dep_ratio": round(raw[0] / nd, 4),
+        "opdi_raw_arr": int(raw[1]),
+        "opdi_raw_arr_ratio": round(raw[1] / na, 4),
+        "opdi_kept_dep": int(kept[0]),
+        "opdi_kept_dep_ratio": round(kept[0] / nd, 4),
+        "opdi_kept_arr": int(kept[1]),
+        "opdi_kept_arr_ratio": round(kept[1] / na, 4),
+        "rule_dep_excluded": int(rule_dep),
+        "rule_arr_excluded": int(rule_arr),
+        "guard_verdict": verdict,
+        "orphan_dep": int(orphan_dep),
+        "orphan_arr": int(orphan_arr),
+        "worst_dep_aerodrome_ratio": round(max_abs_err, 4) if worst else None,
+    }
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--days", nargs="+", required=True, help="YYYY-MM-DD ...")
+    ap.add_argument("--month", default=None, help="APDF month, YYYYMM (default: from --days)")
+    ap.add_argument("--warehouses", nargs="+", default=DEFAULT_WAREHOUSES,
+                     help="one or more LABEL=WAREHOUSE pairs, each scored "
+                          "against the same APDF days")
+    ap.add_argument("--results-dir", type=Path, default=None,
+                     help="stage one row per label here as a CSV, if "
+                          "--out-name is also given")
+    ap.add_argument("--out-name", default=None,
+                     help="CSV filename under --results-dir")
+    args = ap.parse_args()
+    month = args.month or args.days[0][:7].replace("-", "")
+
+    rows = []
+    for pair in args.warehouses:
+        if "=" not in pair:
+            raise SystemExit(f"--warehouses entry {pair!r} is not LABEL=WAREHOUSE")
+        label, warehouse = pair.split("=", 1)
+        rows.append(measure(label, warehouse, args.days, month))
+
+    if args.results_dir and args.out_name:
+        args.results_dir.mkdir(parents=True, exist_ok=True)
+        out = args.results_dir / args.out_name
+        fieldnames = sorted({k for row in rows for k in row})
+        with out.open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=fieldnames)
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+        print(f"\nstaged {out}")
 
 
 if __name__ == "__main__":

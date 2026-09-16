@@ -7,9 +7,13 @@ halves. That is consistent with a transient value -- but the resolved callsign
 is a per-track summary, so it cannot tell a flicker from a genuine change the
 flight list then smooths away. Only the raw per-sample sequence can.
 
-Read-only. Writes nothing.
+Read-only against OSN tables. With ``--out-name`` and ``--results-dir`` it also
+writes the boundary-cause breakdown and the flicker-holding-time stats as one
+CSV row, so ``regenerate_track_v3.py`` can stage it for the paper.
 """
 import argparse
+import csv
+from pathlib import Path
 
 from pyspark.sql import functions as F, Window
 
@@ -26,6 +30,11 @@ def main() -> None:
     ap.add_argument("--day", default="2026-06-01")
     ap.add_argument("--warehouse", default="s3a://eurocontrol/opdi-prod")
     ap.add_argument("--executors", type=int, default=6)
+    ap.add_argument("--results-dir", type=Path, default=None,
+                     help="stage the boundary-cause breakdown here as a CSV "
+                          "row, if --out-name is also given")
+    ap.add_argument("--out-name", default=None,
+                     help="CSV filename under --results-dir")
     args = ap.parse_args()
 
     config = OPDIConfig.for_environment("opensky")
@@ -81,13 +90,15 @@ def main() -> None:
     print(f"  raw callsign changes            {total:,}")
     print(f"  of which X -> Y -> X (flicker)  {n_flicker:,}"
           f"  ({100 * n_flicker / max(total, 1):.1f}%)")
-    print("\n  how long the transient value held, seconds:")
-    held.selectExpr(
+    held_stats = held.selectExpr(
         "percentile_approx(_held_s, 0.5) AS p50",
         "percentile_approx(_held_s, 0.9) AS p90",
         "percentile_approx(_held_s, 0.99) AS p99",
         "max(_held_s) AS max",
-    ).show(truncate=False)
+    )
+    print("\n  how long the transient value held, seconds:")
+    held_stats.show(truncate=False)
+    held_row = held_stats.collect()[0]
 
     print("  sample of flickers:")
     flicker.select("icao24", "_prev", "_cs", "_next", "event_time").show(15, False)
@@ -179,6 +190,40 @@ def main() -> None:
         print("  -> collisions present: the flicker-bucket count and the"
               " first-pass flicker count agreeing exactly is not, by itself,"
               " proof of a 1:1 correspondence -- some boundaries satisfy both.")
+
+    if args.results_dir and args.out_name:
+        # One row, wide: every quantity this script measures, so the paper
+        # reads one CSV rather than several. `_class` labels are the raw
+        # bucket names the classifier above assigns -- "flicker" is the
+        # revert leg (this boundary's event_time matches a flicker's
+        # `_next_t`), "unexplained" is the excursion leg (matches the
+        # flicker's own event_time but not already claimed by a revert): both
+        # are flicker-caused, the paper just names them more plainly.
+        row = {
+            "day": args.day,
+            "raw_callsign_changes": total,
+            "raw_flicker_changes": n_flicker,
+            "raw_flicker_pct": round(100 * n_flicker / max(total, 1), 1),
+            "held_p50_s": held_row["p50"],
+            "held_p90_s": held_row["p90"],
+            "held_p99_s": held_row["p99"],
+            "held_max_s": held_row["max"],
+            "n_boundaries": n_boundaries,
+            "n_collision": n_collision,
+            "collision_pct": round(100 * n_collision / max(n_boundaries, 1), 1),
+        }
+        for r in counts:
+            cls = r["_class"]
+            row[f"boundary_{cls}"] = r["count"]
+            row[f"boundary_{cls}_pct"] = round(100 * r["count"] / max(n_boundaries, 1), 1)
+
+        args.results_dir.mkdir(parents=True, exist_ok=True)
+        out = args.results_dir / args.out_name
+        with out.open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=sorted(row))
+            w.writeheader()
+            w.writerow(row)
+        print(f"\n  staged {out}")
 
     spark.stop()
 
