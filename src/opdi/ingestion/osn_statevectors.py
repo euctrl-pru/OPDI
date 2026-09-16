@@ -572,8 +572,23 @@ class StateVectorIngestion:
         row_count = df.count()
         print(f"Read {row_count:,} state vectors.")
 
-        # Write via StorageManager
-        self.storage.write_table(df, "osn_statevectors_v2", mode="overwrite")
+        # Write via StorageManager, partitioned by day and replacing only the
+        # days present in this frame.
+        #
+        # This is the write the opensky environment actually uses -- the other
+        # one, in `_write_batch`, serves the local-file path. Partitioning only
+        # that one left this as a plain overwrite, so a per-day ingest wiped
+        # the whole table on every call and only the last day survived. Day D's
+        # segmentation then read a window that was two-thirds absent, claimed
+        # almost no tracks, and wrote an empty osn_tracks whose schema could
+        # not be inferred downstream.
+        df = df.withColumn("event_time_day", to_date(col("event_time")))
+        days = [r[0] for r in df.select("event_time_day").distinct().collect()]
+        self.storage.write_table(
+            df, "osn_statevectors_v2", mode="overwrite",
+            partition_by=["event_time_day"],
+            partition_values=[{"event_time_day": d} for d in days],
+        )
         print(f"Written to osn_statevectors_v2 ({row_count:,} rows).")
 
         return row_count

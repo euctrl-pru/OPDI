@@ -395,7 +395,7 @@ def test_airborne_is_interpolated_to_the_height_threshold(spark):
         {"t": 10, "baro_altitude": _m(25.0), "velocity": _mps(160), "vert_rate": 10.0},
     ])
     out = runway_milestones(_prepared(sv), _departure_traversal(spark), EventConfig())
-    airborne = out.filter(F.col("type") == "airborne").collect()
+    airborne = out.filter(F.col("type") == "ATOT").collect()
     assert len(airborne) == 1
     assert airborne[0]["event_time"].second == 5
 
@@ -405,7 +405,7 @@ def test_a_departure_emits_line_up_then_roll_then_airborne_in_order(spark):
                             EventConfig())
     seq = [r["type"] for r in
            out.orderBy("event_time").filter(F.col("type") != "go-around").collect()]
-    assert seq == ["line-up", "take-off-roll", "airborne"]
+    assert seq == ["line-up", "take-off-roll", "ATOT"]
 
 
 def test_take_off_roll_ignores_a_single_fast_sample(spark):
@@ -530,7 +530,7 @@ def test_an_arrival_emits_landing_then_touchdown_then_vacated(spark):
     out = runway_milestones(_arrival_track(spark), _arrival_traversal(spark),
                             EventConfig())
     seq = [r["type"] for r in out.orderBy("event_time").collect()]
-    assert seq == ["landing", "touchdown", "runway-vacated"]
+    assert seq == ["landing", "ALDT", "runway-vacated"]
 
 
 def test_landing_is_interpolated_to_the_threshold_plane(spark):
@@ -552,14 +552,14 @@ def test_every_milestone_carries_its_icao_number(spark):
     numbers = {r["type"]: json.loads(r["info"]).get("milestone")
                for r in out.collect()}
     assert numbers["landing"] == "T16"
-    assert numbers["touchdown"] == "T17"
+    assert numbers["ALDT"] == "T17"
     assert numbers["runway-vacated"] == "T19"
 
 
 def test_milestone_info_names_the_runway_and_the_classification(spark):
     out = runway_milestones(_arrival_track(spark), _arrival_traversal(spark),
                             EventConfig())
-    info = json.loads(out.filter(F.col("type") == "touchdown").collect()[0]["info"])
+    info = json.loads(out.filter(F.col("type") == "ALDT").collect()[0]["info"])
     assert info["rwy_ident"] == "07"
     assert info["apt_icao"] == "EBBR"
     assert info["traversal_class"] == "arrival"
@@ -829,7 +829,7 @@ def test_a_departure_from_the_lower_of_two_aerodromes_still_lifts_off(spark):
     assert rows[0]["class"] == "departure"
 
     airborne = runway_milestones(sv, traversals, EventConfig()).filter(
-        F.col("type") == "airborne"
+        F.col("type") == "ATOT"
     ).collect()
     assert len(airborne) == 1
     assert (airborne[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(
@@ -856,7 +856,7 @@ def test_an_arrival_at_the_lower_of_two_aerodromes_still_touches_down(spark):
     assert rows[0]["class"] == "arrival"
 
     touchdown = runway_milestones(sv, traversals, EventConfig()).filter(
-        F.col("type") == "touchdown"
+        F.col("type") == "ALDT"
     ).collect()
     assert len(touchdown) == 1
     assert (touchdown[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(
@@ -977,9 +977,9 @@ def test_departure_at_a_grid_airport_with_high_field_emits_airborne(spark):
     out = runway_milestones(sv, traversals, EventConfig())
     seq = [r["type"] for r in
            out.orderBy("event_time").filter(F.col("type") != "go-around").collect()]
-    assert seq == ["line-up", "take-off-roll", "airborne"]
+    assert seq == ["line-up", "take-off-roll", "ATOT"]
 
-    airborne = out.filter(F.col("type") == "airborne").collect()
+    airborne = out.filter(F.col("type") == "ATOT").collect()
     assert len(airborne) == 1
     assert (airborne[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(
         45.75, abs=0.01
@@ -1003,8 +1003,8 @@ def test_arrival_from_final_approach_emits_touchdown(spark):
     out = runway_milestones(sv, traversals, EventConfig())
 
     seq = [r["type"] for r in out.orderBy("event_time").collect()]
-    assert seq == ["landing", "touchdown", "runway-vacated"]
-    assert out.filter(F.col("type") == "touchdown").count() == 1
+    assert seq == ["landing", "ALDT", "runway-vacated"]
+    assert out.filter(F.col("type") == "ALDT").count() == 1
 
 
 def _sparse_arrival_track(spark):
@@ -1062,8 +1062,8 @@ def test_a_sparse_arrival_still_emits_touchdown_from_the_approach_corridor(spark
 
     out = runway_milestones(sv, traversals, EventConfig())
     seq = [r["type"] for r in out.orderBy("event_time").collect()]
-    assert seq == ["landing", "touchdown", "runway-vacated"]
-    assert out.filter(F.col("type") == "touchdown").count() == 1
+    assert seq == ["landing", "ALDT", "runway-vacated"]
+    assert out.filter(F.col("type") == "ALDT").count() == 1
 
 
 def test_a_crossing_emits_the_two_crossing_types_end_to_end(spark):
@@ -1123,3 +1123,48 @@ def test_no_traversal_milestone_under_the_legacy_configuration_end_to_end(spark)
     assert [f.name for f in out.schema.fields] == [
         f.name for f in MILESTONE_SCHEMA.fields
     ]
+
+
+# ---------------------------------------------------------------------------
+# The merge
+
+
+def test_the_lift_off_and_touchdown_take_the_merged_names(spark):
+    """Under the shipped configuration these are ``ATOT``/``ALDT``.
+
+    They share those strings with the legacy window detector, which answers the
+    same two questions less precisely, and ``info.method`` is what keeps the two
+    arms distinguishable once they do.
+    """
+    out = runway_milestones(_arrival_track(spark), _arrival_traversal(spark),
+                            EventConfig())
+    by_type = {r["type"]: json.loads(r["info"]) for r in out.collect()}
+    assert "ALDT" in by_type and "touchdown" not in by_type
+    assert by_type["ALDT"]["method"] == "acdm"
+
+
+def test_the_unmerged_arm_still_answers_to_the_acdm_names(spark):
+    """v0.2.0 published ``airborne``/``touchdown`` and no method stamp, because
+    there was no second arm under those names to be told apart from."""
+    out = runway_milestones(
+        _arrival_track(spark), _arrival_traversal(spark),
+        EventConfig(merge_duplicate_milestones=False),
+    )
+    by_type = {r["type"]: json.loads(r["info"]) for r in out.collect()}
+    assert "touchdown" in by_type and "ALDT" not in by_type
+    # ``to_json`` drops null fields rather than writing ``"method": null``, so
+    # "no arm to disambiguate" reads as an absent key. That is the right shape:
+    # a consumer testing for the key gets False, not a null it has to special
+    # case.
+    assert "method" not in by_type["touchdown"]
+
+
+def test_the_runway_carries_its_true_bearing(spark):
+    """The designator fixes the direction only to the nearest ten degrees and is
+    null whenever the runway could not be named, so the bearing is what makes
+    the direction of use answerable. Runway 07 here points at 70 degrees."""
+    out = runway_milestones(_arrival_track(spark), _arrival_traversal(spark),
+                            EventConfig())
+    info = json.loads(out.filter(F.col("type") == "ALDT").collect()[0]["info"])
+    assert info["runway"] == "07"
+    assert info["runway_bearing_deg"] == pytest.approx(70.0, abs=1.0)

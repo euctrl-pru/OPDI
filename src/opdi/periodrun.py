@@ -24,7 +24,7 @@ from the cgroup's real headroom at launch.
 ``create_session`` without ``distributed=True``, so even under ``--env
 opensky`` it never attaches to the Kubernetes master and silently runs
 local-only. That is survivable for a day of one aerodrome and hopeless for a
-week of the network.
+period of the network.
 
 A fourth choice is deliberate rather than corrective: **one Spark session per
 step**. A long-lived ``SparkContext`` accumulates retained UI state -- stages,
@@ -57,7 +57,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #: ``runner.REFERENCE_SUBSTEPS``. Skipping 00 is still possible
 #: (``--steps 01 02 02a 03 04``), and then the reference tables must already
 #: exist, which ``preflight`` checks.
-WEEK_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04")
+PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04", "04b")
 
 #: Steps that run once for the whole window, not per day.
 #:
@@ -70,7 +70,7 @@ WEEK_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04")
 WINDOW_STEPS: Tuple[str, ...] = ("00",)
 
 #: Steps that run once per day, on the tracks that day owns.
-DAY_STEPS: Tuple[str, ...] = ("01", "02", "02a", "03", "04")
+DAY_STEPS: Tuple[str, ...] = ("01", "02", "02a", "03", "04", "04b")
 
 #: What each reference substep produces.
 #:
@@ -128,12 +128,12 @@ INGEST_LOOKAHEAD_DAYS = 2
 DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi-prod"
 
 #: Steps available but not run by default. Export and statistics are
-#: publication actions; a test week should be inspected before anything is
+#: publication actions; a test period should be inspected before anything is
 #: published from it.
 OPTIONAL_STEPS: Tuple[str, ...] = ("05", "06", "07", "08")
 
 #: Steps that take no date range. Mirrors the same split in ``runner.py``; if
-#: that list changes this one must change with it, which ``test_weekrun``
+#: that list changes this one must change with it, which ``test_periodrun``
 #: pins.
 UNDATED_STEPS: frozenset = frozenset({"00", "07", "08"})
 
@@ -246,7 +246,7 @@ def _parse_size_gb(size: str) -> int:
     raise ValueError(f"cannot parse memory size {size!r}; use e.g. '6g'")
 
 
-def week_window(start: date, days: int = 7) -> Tuple[date, date]:
+def period_window(start: date, days: int = 7) -> Tuple[date, date]:
     """The half-open window ``[start, start + days)`` as inclusive dates.
 
     The pipeline's steps take ``start_date``/``end_date`` and treat them as an
@@ -484,6 +484,16 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         from opdi.pipeline.events import FlightEventProcessor
 
         FlightEventProcessor(spark, config).process_day(day, skip_if_processed=False)
+    elif step == "04b":
+        from opdi.pipeline.flight_list_step import enrich_day
+        from opdi.utils.storage import StorageManager
+
+        # One day at a time, and only the day this unit owns: the enrichment
+        # replaces the flight list partition it reads, so a wider window would
+        # rewrite days this unit was not asked for.
+        written = enrich_day(StorageManager(spark, config), config.events, day, day)
+        if written is not None:
+            print(f"  flight list enriched: {written:,} rows")
     else:
         raise ValueError(
             f"{step!r} is not a per-day step; expected one of {DAY_STEPS}."
@@ -556,11 +566,11 @@ def _describe_memory(limit_bytes: Optional[int], used_bytes: int) -> str:
     )
 
 
-def run_week(
+def run_period(
     env: str = "opensky",
     start: Optional[date] = None,
     days: int = 7,
-    steps: Sequence[str] = WEEK_STEPS,
+    steps: Sequence[str] = PERIOD_STEPS,
     state_path: Optional[Path] = None,
     force: bool = False,
     driver_memory: Optional[str] = None,
@@ -585,7 +595,7 @@ def run_week(
             a constraint on it.
         steps: Step ids to run, in dependency order.
         state_path: Where completion is recorded. Defaults to
-            ``logs/weekrun_{start}_{days}d.json``.
+            ``logs/periodrun_{start}_{days}d.json``.
         force: Re-run steps already marked complete.
         driver_memory: Override the heap. Still capped to what the container
             can hold -- an override raises the ask, it does not waive physics.
@@ -606,15 +616,26 @@ def run_week(
     from opdi.utils.storage import StorageManager
 
     if start is None:
-        raise ValueError("start is required; a week run must name its window")
+        raise ValueError("start is required; a period run must name its window")
 
     unknown = [s for s in steps if s not in STEPS]
     if unknown:
         raise ValueError(f"unknown step(s) {unknown}; valid: {sorted(STEPS)}")
 
-    start_date, end_date = week_window(start, days)
+    start_date, end_date = period_window(start, days)
     if state_path is None:
-        state_path = Path("logs") / f"weekrun_{start_date.isoformat()}_{days}d.json"
+        state_path = Path("logs") / f"periodrun_{start_date.isoformat()}_{days}d.json"
+        if not state_path.exists():
+            # A campaign started before this module was renamed keeps its
+            # progress under the old name. Losing sight of it would restart a
+            # thirty-day run at day one, so the legacy file is adopted when the
+            # new one does not exist yet.
+            legacy = state_path.with_name(
+                f"weekrun_{start_date.isoformat()}_{days}d.json"
+            )
+            if legacy.exists():
+                print(f"  resuming from pre-rename state file {legacy}")
+                state_path = legacy
     state = RunState.load(Path(state_path))
 
     if not state.matches(env, start_date, end_date):
@@ -635,7 +656,7 @@ def run_week(
 
     # A unit of work is a (step, day) pair for the per-day steps and a bare
     # step for the window-wide ones, so resuming lands on the day that failed
-    # rather than restarting the week.
+    # rather than restarting the period.
     # Day-major, not step-major: a day is carried all the way through before
     # the next day starts.
     #
@@ -676,7 +697,7 @@ def run_week(
     )
 
     print("=" * 72)
-    print("OPDI week run")
+    print("OPDI period run")
     print("=" * 72)
     print(f"  environment : {env}")
     print(f"  window      : {start_date} .. {end_date}  ({days} days)")
@@ -742,7 +763,7 @@ def run_week(
         # hours; a fresh context per step keeps that growth inside one step
         # rather than accumulating across all of them.
         spark = SparkSessionManager.create_session(
-            app_name=f"OPDI week {start_date}..{end_date} step {step}",
+            app_name=f"OPDI period {start_date}..{end_date} step {step}",
             config=config,
             distributed=distributed,
             extra_configs=_session_extras(),

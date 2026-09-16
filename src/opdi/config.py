@@ -965,12 +965,21 @@ class EventConfig:
     so an uninterpolated comparison would measure our snapping rather than the
     algorithm."""
 
-    ring_radii_nm: tuple = (40.0, 100.0)
+    ring_radii_nm: tuple = (40.0, 50.0, 60.0, 100.0, 110.0, 120.0)
     """Distance rings around an aerodrome at which crossings are detected.
     40 NM is ICAO's ASMA cylinder for KPI08 and the reference area for KPI05;
     100 NM is the documented variant for aerodromes whose holding sits outside
-    40 NM. ``h3_airport_detection_zones`` already reaches 110 NM, so both are
-    available without regenerating reference data.
+    40 NM. The remaining four exist because the flight list publishes a
+    ``C{NM}_ARR``/``C{NM}_DEP`` column for each, giving a coarse descent and
+    climb profile without a join to the event table.
+
+    **Only these six, not every 10 NM.** Twelve radii would grow the event
+    table by roughly 30% -- 1.77M to about 2.3M rows a day -- to carry six
+    columns nobody reads.
+
+    The 110 NM extent of ``h3_airport_detection_zones`` does not cap this:
+    crossings are computed from a haversine distance to the aerodrome's own
+    coordinates, not from the zone grid, so 120 NM is reachable.
 
     Wired by ``events.calculate_ring_crossing_events``, which builds the
     distance frame from the flight's **own** ADEP and ADES rather than from the
@@ -1167,12 +1176,82 @@ class EventConfig:
     """How close to the aerodrome the excursion must happen. Wider than the
     runway itself, because a go-around is initiated on final."""
 
+    # ----- movement counting (v0.3.0) -----------------------------------
+    supersede_window_seconds: float = 10800.0
+    """How close two movements of one aircraft at one aerodrome must be for the
+    earlier, un-flown one to be the *same* movement rather than another.
+
+    A real departure is routinely cut into two tracks: a ground fragment that
+    never leaves the stand, then the flight. Both begin at the aerodrome, so
+    both are given an ADEP and both count as movements. Measured over
+    2026-06-01..03, that made OPDI report **1.23x** APDF's departures against
+    **1.03x** its arrivals -- the asymmetry a transponder powering up before
+    pushback would produce, where reception after landing runs continuously
+    into the stand.
+
+    7,390 departures (10.3%) follow another departure of the same aircraft from
+    the same aerodrome inside three hours, and 89% of those earlier tracks have
+    no take-off at all. Three hours is comfortably longer than any turnaround
+    the fragment could span and far shorter than a genuine second rotation.
+
+    The resulting rule drops **no flight that took off** -- zero of 57,990 --
+    which is what makes it preferable to a duration threshold. A duration
+    filter is a proxy for the same thing and leaks both ways: at 30 minutes it
+    discards 4,364 real departures and still keeps hour-long circuits."""
+
+    # ----- one variable per purpose (v0.3.0) ----------------------------
+    merge_duplicate_milestones: Optional[bool] = None
+    """Publish one event type per operational question rather than two.
+
+    **Defaults to following ``emit_runway_milestones``.** Left as ``None`` it
+    resolves in ``__post_init__`` to whatever that flag says, because the merge
+    has nothing to do when the A-CDM family is off -- it exists to reconcile
+    that family with the legacy one. This keeps ``EventConfig()`` fully merged
+    and ``EventConfig(emit_runway_milestones=False)`` coherent without either
+    caller naming both flags. Setting it ``True`` while the A-CDM family is off
+    is contradictory and raises rather than being quietly ignored.
+
+    ``events_v0.2.0`` ships two events for one purpose. ``ATOT`` and
+    ``airborne`` both name the take-off instant; ``ALDT`` and ``touchdown``
+    both name the landing. Which to prefer depends on the aerodrome, so every
+    consumer had to encode that judgement itself. Under this flag the pair is
+    merged at source::
+
+        ATOT = coalesce(A-CDM airborne,  legacy ATOT)
+        ALDT = coalesce(A-CDM touchdown, legacy ALDT)
+
+    A-CDM wins where it exists because it is the better instant -- the
+    interpolated crossing of ``runway_airborne_height_ft`` above field
+    elevation, against legacy's extreme *sample* of a detection window, which
+    carries a measured +19 s median bias. Legacy fills the rest, which is most
+    of them: the A-CDM family needs surface reception and reaches roughly 4-7%
+    of the network against legacy's ~90%.
+
+    ``info.method`` records which arm produced each value -- ``"acdm"`` or
+    ``"legacy"`` -- **in the event table only**. That is not decoration. The
+    merged column is a mixture of two estimators with different biases and the
+    mixing ratio varies by aerodrome, so an aggregate over it carries an
+    aerodrome-dependent bias invisible in the column itself. The method travels
+    with the event so the mixture stays recoverable.
+
+    The same flag renames ``off-block``/``on-block`` to ``AOBT``/``AIBT`` (one
+    detector, one name) and gives the PRU tops the plain ``top-of-climb`` /
+    ``top-of-descent`` strings, the fuzzy arm having been dropped.
+
+    Off under ``legacy()`` and under any reconstruction of v0.2.0, both of
+    which must keep reproducing what they published."""
+
     # ----- PRU vertical profile ----------------------------------------
     emit_pru_tops: bool = True
-    """Emit ``top-of-climb-cco`` and ``top-of-descent-cdo`` -- the PRU tops --
-    *alongside* the published fuzzy ``top-of-climb``/``top-of-descent``, which
-    are unchanged. Both are published because no reference data records a top
-    of climb, so neither can be shown better than the other."""
+    """Emit the PRU tops -- the D200/A200 pair, relocated out of the exclusion
+    box. Under ``merge_duplicate_milestones`` these take the plain
+    ``top-of-climb``/``top-of-descent`` names and are the only tops published;
+    otherwise they are ``top-of-climb-cco``/``top-of-descent-cdo`` published
+    alongside the fuzzy pair.
+
+    The PRU arm is both the better-defined and the better-covered one: 55,819
+    against 32,604 a day for the climb, 55,810 against 32,541 for the
+    descent."""
 
     level_method: str = "pru"
     """Which level-segment arm runs: ``"icao"`` is the anchored-band algorithm
@@ -1295,7 +1374,7 @@ class EventConfig:
     track-based runway detection, start-of-movement -- are all closed-form and
     express natively as column and window expressions."""
 
-    events_version: str = "events_v0.2.0"
+    events_version: str = "events_v0.3.0"
     """Version stamped on events this configuration produces.
 
     A single string covered every event type before this, so a new detector
@@ -1303,6 +1382,19 @@ class EventConfig:
     change what a published version means. Never mutate a released value."""
 
     def __post_init__(self) -> None:
+        if self.merge_duplicate_milestones is None:
+            object.__setattr__(
+                self, "merge_duplicate_milestones", self.emit_runway_milestones
+            )
+        elif self.merge_duplicate_milestones and not self.emit_runway_milestones:
+            raise ValueError(
+                "merge_duplicate_milestones=True requires emit_runway_milestones. "
+                "The merge exists to reconcile the A-CDM family with the legacy "
+                "one; with A-CDM off there is nothing to merge, and the fuzzy "
+                "take-off/landing pair would be published beside a vocabulary "
+                "that has no place for it. Leave it unset to follow "
+                "emit_runway_milestones."
+            )
         if self.level_method not in ("icao", "pru"):
             raise ValueError(
                 f"level_method must be 'icao' or 'pru', got {self.level_method!r}. "
@@ -1351,6 +1443,7 @@ class EventConfig:
             # Rings did not exist at all.
             ring_radii_nm=(),
             emit_runway_milestones=False,
+            merge_duplicate_milestones=False,
             emit_pru_tops=False,
             level_method="icao",
             level_floors_above_field=False,
@@ -1392,19 +1485,27 @@ class SegmentationConfig:
     ``gap_minutes`` or a shorter gap below ``low_alt_gap_ft``, and suffix the id
     with ``_{year}_{month}``.
 
-    ``"standard"`` is the rule this release ships. It groups on the airframe
-    alone and splits when the last *non-blank* callsign genuinely changes. Two
-    independent failures of the legacy key motivate it, and they are separable:
-    blank callsigns formed tracks of their own (42.4% of legacy tracks are
-    blank-labelled, which is where its fragmentation comes from), and a callsign
-    change mid-airframe was invisible once callsign was in the key.
+    ``"standard"`` is a pointer to whatever arm this release recommends for
+    production; it is not itself an arm. As of this release it resolves to
+    ``"debounced"`` (A9): group on the airframe alone, split when the last
+    *non-blank* callsign genuinely changes, **but** ignore a callsign change
+    unless the new value persists for ``callsign_min_persistence_seconds``
+    (30 s) before the next transition -- so a callsign that flickers to a
+    garbled value and back does not split one flight into several. Until this
+    release ``"standard"`` resolved to ``"recommended"`` (A8), the same rule
+    without the persistence guard; A8 measured 23.1% of its track boundaries as
+    flicker artefacts, and the guard removes them for ~19% fewer tracks,
+    merge-neutral. A8 stays reachable under its own name ``"recommended"`` for
+    anyone reproducing data published between 2026-08-27 and this release.
 
     .. warning::
 
        **This changes ``track_id`` for all data produced from this release
        forward**, in shape as well as value -- there is no ``_{year}_{month}``
-       suffix. A consumer joining on ``track_id`` across the boundary gets an
-       empty join rather than an error, which reads as missing data.
+       suffix, and the debounce further changes which samples share an id
+       relative to A8. A consumer joining on ``track_id`` across either
+       boundary gets an empty join rather than an error, which reads as missing
+       data.
 
        **Nothing in the published data says which rule produced a row.**
        ``osn_tracks`` carries no version column, so the only way to tell is to
@@ -1427,6 +1528,17 @@ class SegmentationConfig:
 
     callsign_lookback_minutes: float | None = None
     """Bound on A8's callsign lookback, in minutes. ``None`` follows ``gap_minutes``."""
+
+    callsign_min_persistence_seconds: float = 30.0
+    """How long a new callsign must hold before the ``debounced`` arm (A9)
+    treats it as a real change.
+
+    30 s is the shipped value, and the one every debounce measurement was taken
+    at: 23.1% of A8's track boundaries are flicker artefacts a 30 s guard
+    removes, for ~19% fewer tracks, merge-neutral. Zero reproduces A8
+    `recommended` exactly -- what every dataset published between 2026-08-27 and
+    this release uses -- so set ``method="recommended"`` (which ignores this
+    field) rather than zeroing it if you need the A8 ``track_id``."""
 
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""

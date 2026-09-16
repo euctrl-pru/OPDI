@@ -181,7 +181,14 @@ TRAVERSAL_KEY = ("track_id", "apt_ident", "rwy_ident", "trace_id")
 #: rebuild ``info``. The same trick ``calculate_ring_crossing_events`` uses for
 #: the aerodrome position. Disjoint from :data:`TRAVERSAL_KEY`, because the two
 #: are concatenated into one ``partition_cols`` list.
-TRAVERSAL_INFO = ("traversal_class", "align_deg", "max_gs_kt", "osn_flight_id")
+TRAVERSAL_INFO = (
+    "traversal_class", "align_deg", "max_gs_kt", "osn_flight_id",
+    # The runway's true bearing. Functionally dependent on ``rwy_ident``, like
+    # everything else here, and it has to ride along rather than be rejoined:
+    # ``_info`` builds the published JSON on the far side of
+    # ``threshold_crossings``, which keeps only the columns it is told to.
+    "rwy_bearing",
+)
 
 #: The standard event frame, as ``events.py`` shapes it. Declared explicitly so
 #: a disabled configuration can return an empty frame of exactly this shape
@@ -205,10 +212,18 @@ MILESTONE_NUMBERS = {
     "line-up": "T06",
     "take-off-roll": "T07",
     "airborne": "T08",
+    "ATOT": "T08",
     "landing": "T16",
     "touchdown": "T17",
+    "ALDT": "T17",
     "runway-vacated": "T19",
 }
+
+#: What the lift-off and touchdown instants are called. Under
+#: ``merge_duplicate_milestones`` they take the ``ATOT``/``ALDT`` names and
+#: carry ``info.method = "acdm"``, so they merge with the legacy detector's
+#: output for the same two questions rather than sitting beside it.
+ACDM_NAMES = {"airborne": "ATOT", "touchdown": "ALDT"}
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +604,7 @@ def _empty_milestones(sdf: DataFrame) -> DataFrame:
     return _session(sdf).createDataFrame([], MILESTONE_SCHEMA)
 
 
-def _info(milestone: Optional[str]):
+def _info(milestone: Optional[str], method: Optional[str] = None):
     """The ``info`` JSON every runway milestone carries.
 
     ``milestone`` is the ICAO number, and it is what lets a consumer tell the
@@ -597,19 +612,42 @@ def _info(milestone: Optional[str]):
     without parsing version strings. The classification, the runway and the
     alignment travel with it so the decision that produced the row is auditable
     from the row.
+
+    ``method`` names the arm on the two types the merge makes ambiguous:
+    ``ATOT`` and ``ALDT`` may come from here (``"acdm"``) or from the legacy
+    window detector (``"legacy"``), and the two have different biases. It is
+    NULL on every type with only one source, where there is nothing to
+    disambiguate.
     """
     return F.to_json(F.struct(
+        # ``runway`` is the canonical key: the legacy ATOT/ALDT detector writes
+        # it under that name, and under ``merge_duplicate_milestones`` both
+        # arms publish the same ``type``, so a consumer reading the runway off
+        # an ATOT event must not have to know which arm produced it.
+        # ``rwy_ident`` is kept beside it as the name this family shipped with.
+        F.col("rwy_ident").alias("runway"),
         F.col("rwy_ident").alias("rwy_ident"),
+        # The centreline's TRUE bearing, from the threshold geometry -- a
+        # property of the pavement, identical for every movement on it. Not a
+        # heading: a heading is magnetic and wind-corrected, so two aircraft
+        # using this runway in the same minute report different ones. The
+        # designator fixes the direction only to the nearest ten degrees, and
+        # is null whenever the runway could not be named, so this is what makes
+        # "which way was the runway used" answerable.
+        F.col("rwy_bearing").cast("double").alias("runway_bearing_deg"),
         F.col("apt_ident").alias("apt_icao"),
         F.col("traversal_class").alias("traversal_class"),
         F.col("align_deg").alias("align_deg"),
         F.col("max_gs_kt").alias("max_gs_kt"),
         F.col("osn_flight_id").alias("osn_flight_id"),
         F.lit(milestone).cast("string").alias("milestone"),
+        F.lit(method).cast("string").alias("method"),
     ))
 
 
-def _event(sdf: DataFrame, type_: str, time_col: str) -> DataFrame:
+def _event(
+    sdf: DataFrame, type_: str, time_col: str, method: Optional[str] = None
+) -> DataFrame:
     """Project onto the standard event frame."""
     return sdf.select(
         F.col("track_id"),
@@ -620,7 +658,7 @@ def _event(sdf: DataFrame, type_: str, time_col: str) -> DataFrame:
         F.col("altitude_ft").cast("double").alias("altitude_ft"),
         F.col("cumulative_distance_nm").cast("double").alias("cumulative_distance_nm"),
         F.col("cumulative_time_s").cast("double").alias("cumulative_time_s"),
-        _info(MILESTONE_NUMBERS.get(type_)).alias("info"),
+        _info(MILESTONE_NUMBERS.get(type_), method).alias("info"),
     )
 
 
@@ -879,6 +917,14 @@ def runway_milestones(
     # was on the runway" means and is what every occupancy milestone reads; the
     # extended one exists solely so the threshold-plane crossing has a sample
     # short of the threshold to interpolate from. See ARRIVAL_LEAD_SECONDS.
+    # Under the merge these two are ``ATOT``/``ALDT`` and are stamped with the
+    # arm that produced them; without it they keep the A-CDM names and have no
+    # second source to be told apart from.
+    merged = config.merge_duplicate_milestones
+    lift_off = ACDM_NAMES["airborne"] if merged else "airborne"
+    touch_down = ACDM_NAMES["touchdown"] if merged else "touchdown"
+    method = "acdm" if merged else None
+
     samples = _traversal_samples(sv, traversals, lead_seconds=ARRIVAL_LEAD_SECONDS)
     bounded = samples.filter(F.col("_in_polygon"))
 
@@ -891,10 +937,10 @@ def runway_milestones(
         # A departure: lined up, rolling, then off the deck.
         _event(_at_extreme(dep, True), "line-up", "entry_time"),
         _event(_roll_start(dep, config), "take-off-roll", "event_time"),
-        _event(_height_crossing(dep, config, "up"), "airborne", "event_time"),
+        _event(_height_crossing(dep, config, "up"), lift_off, "event_time", method),
         # An arrival: over the threshold, wheels down, off the strip.
         _event(_threshold_plane(arr_approach, config), "landing", "event_time"),
-        _event(_height_crossing(arr, config, "down"), "touchdown", "event_time"),
+        _event(_height_crossing(arr, config, "down"), touch_down, "event_time", method),
         _event(_at_extreme(arr, False), "runway-vacated", "exit_time"),
         # A crossing is not a movement: it gets its two instants and nothing
         # else, so it can never be counted as one.

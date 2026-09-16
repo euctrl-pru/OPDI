@@ -381,8 +381,12 @@ def calculate_block_events(
         lit(None).cast("double").alias("cumulative_distance_nm"),
         lit(None).cast("long").alias("cumulative_time_s"),
     ]
-    off_type = "off-block" if config.emit_runway_milestones else "AOBT"
-    on_type = "on-block" if config.emit_runway_milestones else "AIBT"
+    # ``AOBT``/``AIBT`` under the merge and under legacy; ``off-block``/
+    # ``on-block`` only in v0.2.0, which published the A-CDM vocabulary
+    # without merging it. One detector, one name per configuration.
+    _acdm_names = config.emit_runway_milestones and not config.merge_duplicate_milestones
+    off_type = "off-block" if _acdm_names else "AOBT"
+    on_type = "on-block" if _acdm_names else "AIBT"
     aobt = blocks.filter(col("aobt").isNotNull()).select(
         col("track_id"), lit(off_type).alias("type"), col("aobt").alias("event_time"),
         *common,
@@ -464,13 +468,95 @@ def calculate_runway_events(
         to_json(
             struct(
                 col("rwy_ident").alias("runway"),
+                # Same quantity, same key as the A-CDM arm writes: under the
+                # merge both arms publish the same ``type``, so a consumer must
+                # not have to know which produced a row to read its runway.
+                col("rwy_bearing").cast("double").alias("runway_bearing_deg"),
                 col("apt_ident").alias("apt_icao"),
                 col("role").alias("role"),
                 col("bearing_error").alias("bearing_error_deg"),
                 col("n_samples").alias("n_samples"),
+                # Which arm produced this instant. Under
+                # ``merge_duplicate_milestones`` these rows share the ``ATOT``/
+                # ``ALDT`` type with the A-CDM family, and the two have
+                # different biases -- legacy reports the extreme *sample* of a
+                # detection window (+19 s median on departures), A-CDM the
+                # interpolated 15 ft crossing. NULL where there is no second
+                # arm to be told apart from.
+                (
+                    lit("legacy") if config.merge_duplicate_milestones
+                    else lit(None).cast("string")
+                ).alias("method"),
             )
         ).alias("info"),
     )
+
+
+#: The types the merge reconciles. Each is produced by two detectors answering
+#: the same operational question, and each row carries ``info.method`` naming
+#: the arm that produced it.
+MERGED_TYPES = ("ATOT", "ALDT")
+
+#: Which arm wins where both fired. A-CDM is the interpolated crossing of
+#: ``runway_airborne_height_ft`` above field elevation; legacy is the extreme
+#: *sample* of a detection window, which carries a measured +19 s median bias
+#: on departures. Lower sorts first.
+_METHOD_RANK = {"acdm": 0, "legacy": 1}
+
+
+def merge_milestone_duplicates(
+    df_events: DataFrame, config: Optional[EventConfig] = None
+) -> DataFrame:
+    """Collapse the two arms of ``ATOT``/``ALDT`` to one event per flight.
+
+    ``events_v0.2.0`` published two events for one purpose: ``ATOT`` beside
+    ``airborne``, ``ALDT`` beside ``touchdown``. Which to trust depended on the
+    aerodrome, so every consumer had to encode that judgement itself. Under
+    ``merge_duplicate_milestones`` both arms emit the same ``type`` and this
+    keeps one row per ``(track_id, type)``::
+
+        ATOT = coalesce(A-CDM airborne,  legacy ATOT)
+        ALDT = coalesce(A-CDM touchdown, legacy ALDT)
+
+    A-CDM wins on accuracy where it exists; legacy fills the rest, which is
+    most of them -- the A-CDM family needs surface reception and reaches
+    roughly 4-7% of the network against legacy's ~90%.
+
+    **This is a coalesce, so coverage can only rise.** A flight with a legacy
+    ``ATOT`` and no A-CDM one keeps the legacy row unchanged; a flight with
+    both loses the legacy row, not the milestone.
+
+    Only the merged types are touched. Every other row passes through
+    untouched, including those with no ``method`` at all -- a type with one
+    source has nothing to disambiguate and is not this function's business.
+    """
+    config = config or EventConfig()
+    if not config.merge_duplicate_milestones:
+        return df_events
+
+    merged = col("type").isin(*MERGED_TYPES)
+    rank = F.coalesce(
+        F.create_map(
+            *[x for k, v in _METHOD_RANK.items() for x in (lit(k), lit(v))]
+        )[F.get_json_object(col("info"), "$.method")],
+        # An unrecognised or absent method sorts last: it is neither arm, so it
+        # may fill a gap but must never displace one that is.
+        lit(len(_METHOD_RANK)),
+    )
+    # ``event_time`` breaks a tie within one arm so the choice is deterministic
+    # across runs -- two rows of the same method for one flight would otherwise
+    # be resolved by partition order, which is the non-determinism this table
+    # has already been bitten by once.
+    best = Window.partitionBy("track_id", "type").orderBy(
+        rank.asc(), col("event_time").asc()
+    )
+    kept = (
+        df_events.filter(merged)
+        .withColumn("_rank", F.row_number().over(best))
+        .filter(col("_rank") == 1)
+        .drop("_rank")
+    )
+    return df_events.filter(~merged | col("type").isNull()).unionByName(kept)
 
 
 def calculate_ring_crossing_events(
@@ -711,8 +797,56 @@ def calculate_horizontal_segment_events(
         .rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
     )
 
-    df = df.withColumn("prev_phase", lag("flight_phase", 1, "None").over(window_phase))
-    df = df.withColumn("next_phase", lead("flight_phase", 1, "None").over(window_phase))
+    if config.merge_duplicate_milestones:
+        # The nearest *known* phase either side, not the immediate neighbour.
+        #
+        # The classifier abstains -- returns NULL -- whenever a rule's inputs
+        # are incomplete, and abstentions are frequent and scattered. Compared
+        # against the immediate neighbour, `NULL != "LVL"` is NULL rather than
+        # TRUE, so a level segment adjacent to an abstention emitted no
+        # boundary there; asymmetrically, because the first_cr_time/
+        # last_cr_time terms rescue cruise and nothing rescues a level-off
+        # below it. That was the +15,682 surplus of starts left after the
+        # precedence fix.
+        #
+        # The obvious repair -- comparing null-safely, so an abstention counts
+        # as a different phase -- balances the counts and destroys the family:
+        # measured, it took one day from 128,481 level-starts to 4,657,328,
+        # about 104 segments per flight, because every scattered abstention
+        # split a real segment in two. Balance bought by shattering segments
+        # is not a fix.
+        #
+        # Skipping the abstentions instead leaves a segment interrupted by
+        # them as one segment, puts boundaries only at genuine phase changes,
+        # and is symmetric by construction.
+        #
+        # The descending frame is deliberate. `first(...).over(rowsBetween(1,
+        # unboundedFollowing))` is a *shrinking* frame, re-scanned per row and
+        # quadratic in track length; reversing the ordering turns the same
+        # question into a growing frame and an incremental scan. Same answer,
+        # O(n) instead of O(n^2) -- the transformation cleaning/native.py
+        # documents, where it was worth 20x.
+        known = when(col("flight_phase").isNotNull(), col("flight_phase"))
+        back = window_phase.rowsBetween(Window.unboundedPreceding, -1)
+        forward = (
+            Window.partitionBy("track_id")
+            .orderBy(col("event_time").desc())
+            .rowsBetween(Window.unboundedPreceding, -1)
+        )
+        # ``"None"`` is the sentinel the published detector used for a track
+        # edge, kept so a track beginning or ending in level flight is still
+        # labelled at both ends rather than comparing against NULL.
+        df = df.withColumn(
+            "prev_phase",
+            F.coalesce(F.last(known, ignorenulls=True).over(back), lit("None")),
+        )
+        df = df.withColumn(
+            "next_phase",
+            F.coalesce(F.last(known, ignorenulls=True).over(forward), lit("None")),
+        )
+    else:
+        df = df.withColumn("prev_phase", lag("flight_phase", 1, "None").over(window_phase))
+        df = df.withColumn("next_phase", lead("flight_phase", 1, "None").over(window_phase))
 
     df.cache()
 
@@ -736,21 +870,60 @@ def calculate_horizontal_segment_events(
     )
 
     # Create event type arrays
-    milestone_types = (
-        F.when(
-            col("event_time") == col("first_cr_time"),
-            F.array(lit("level-start"), lit("top-of-climb")),
+    is_level_start = start_of_segment | (col("event_time") == col("first_cr_time"))
+    is_level_end = (
+        (col("flight_phase").isin("CR", "LVL"))
+        & (col("next_phase") != col("flight_phase"))
+    ) | (col("event_time") == col("last_cr_time"))
+
+    if config.merge_duplicate_milestones:
+        # Two independent questions, asked independently.
+        #
+        # The chain this replaces was first-match-wins, and it had four things
+        # to say in one slot. A sample that is both the start and the end of a
+        # level segment -- a segment one sample long -- matched the
+        # "level-start" branch and could never reach the "level-end" one, so it
+        # emitted a start and no end. Measured on 2026-06-01: 129,426 starts
+        # against 104,057 ends, 28,855 of them unmatched across 17,356 of
+        # 44,461 flights. Only 22% of the unmatched starts fell within ten
+        # minutes of ``last_seen``, so the great majority were mid-flight --
+        # which is exactly where one-sample level segments occur.
+        #
+        # It is not a boundary artefact: ``prev_phase``/``next_phase`` default
+        # to the *string* "None", so a track beginning or ending in level
+        # flight is labelled correctly at both ends.
+        #
+        # Dropping the fuzzy tops removes two of the four things, and what is
+        # left are two independent predicates rather than a precedence order.
+        # A sample that is both now emits both, structurally -- there is no
+        # longer a precedence for a one-sample segment to fall foul of.
+        milestone_types = F.filter(
+            F.array(
+                F.when(is_level_start, lit("level-start")),
+                F.when(is_level_end, lit("level-end")),
+            ),
+            lambda x: x.isNotNull(),
         )
-        .when(
-            col("event_time") == col("last_cr_time"),
-            F.array(lit("level-end"), lit("top-of-descent")),
+    else:
+        # v0.2.0 and earlier, reproduced exactly: first-match-wins, fuzzy tops
+        # carried in the same slot. Kept because it is what those versions
+        # published, defect and all.
+        milestone_types = (
+            F.when(
+                col("event_time") == col("first_cr_time"),
+                F.array(lit("level-start"), lit("top-of-climb")),
+            )
+            .when(
+                col("event_time") == col("last_cr_time"),
+                F.array(lit("level-end"), lit("top-of-descent")),
+            )
+            .when(start_of_segment, F.array(lit("level-start")))
+            .when(
+                (col("flight_phase").isin("CR", "LVL"))
+                & (col("next_phase") != col("flight_phase")),
+                F.array(lit("level-end")),
+            )
         )
-        .when(start_of_segment, F.array(lit("level-start")))
-        .when(
-            (col("flight_phase").isin("CR", "LVL")) & (col("next_phase") != col("flight_phase")),
-            F.array(lit("level-end")),
-        )
-    )
 
     # ``take-off`` and ``landing`` here are the *ground-contact* reading: the
     # sample at which the phase changed. ``runway_ops`` publishes the same two
@@ -763,6 +936,10 @@ def calculate_horizontal_segment_events(
     # ladder's baseline rung reconstructs v0.1.0, which *did* publish this
     # pair; a version gate would strip them from the rung named after them.
     if not config.emit_runway_milestones:
+        # Only reachable on the legacy arm: ``emit_runway_milestones`` off
+        # implies ``merge_duplicate_milestones`` off, since the merge exists to
+        # reconcile the A-CDM family with this one. The chain is still a
+        # when-chain here, so ``.when`` composes.
         milestone_types = milestone_types.when(
             (col("prev_phase") == "GND") & (col("next_phase") == "CL"),
             F.array(lit("take-off")),
@@ -771,7 +948,9 @@ def calculate_horizontal_segment_events(
             F.array(lit("landing")),
         )
 
-    df = df.withColumn("milestone_types", milestone_types.otherwise(F.array()))
+    if not config.merge_duplicate_milestones:
+        milestone_types = milestone_types.otherwise(F.array())
+    df = df.withColumn("milestone_types", milestone_types)
 
     # Explode to one row per event
     df_exploded = df.select("*", explode(col("milestone_types")).alias("type"))
@@ -1356,6 +1535,16 @@ class FlightEventProcessor:
             return
 
         df_events.cache()
+
+        # One variable per purpose, before anything is stamped or keyed: the
+        # event id hashes the type, so merging after it would leave two ids
+        # for one milestone.
+        #
+        # **After the cache, not before.** The merge unions a filtered copy of
+        # this frame with a windowed one, so it reads it twice; uncached, that
+        # is the whole detector chain evaluated twice and step 04 pays for it
+        # at cluster scale.
+        df_events = merge_milestone_duplicates(df_events, self.events)
         df_events = df_events.withColumn("source", lit("OSN"))
         df_events = df_events.withColumn("version", lit(self.events.events_version))
 

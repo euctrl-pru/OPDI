@@ -222,3 +222,18 @@ def test_the_persist_is_released_after_the_write():
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     ]
     assert "unpersist" in calls
+
+
+def test_a_null_partition_value_maps_to_the_hive_default_directory():
+    """Spark writes NULLs to ``col=__HIVE_DEFAULT_PARTITION__``.
+
+    Formatting the value naively gives ``col=None``, a path that does not
+    exist. The delete then finds nothing, succeeds silently, and the append
+    lands beside the rows it should have replaced -- duplicating them once per
+    run. Measured: a flight list with 746 dateless rows held two copies of each
+    after one re-enrichment, and would have held fifteen after the campaign.
+    """
+    from opdi.utils.storage import HIVE_DEFAULT_PARTITION, _partition_dir_value
+
+    assert _partition_dir_value(None) == HIVE_DEFAULT_PARTITION
+    assert _partition_dir_value("2026-06-01") == "2026-06-01"

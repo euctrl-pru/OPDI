@@ -11,16 +11,16 @@ import json
 import pytest
 
 from opdi.runner import STEPS
-from opdi.weekrun import (
+from opdi.periodrun import (
     MIN_DRIVER_HEAP_GB,
     REQUIRED_REFERENCE_TABLES,
     UNDATED_STEPS,
-    WEEK_STEPS,
+    PERIOD_STEPS,
     RunState,
     plan_steps,
     preflight,
     safe_driver_memory,
-    week_window,
+    period_window,
 )
 
 from datetime import date
@@ -82,27 +82,27 @@ def test_a_seven_day_window_ends_six_days_later():
     Off by one here is a whole extra day of ingestion that nobody asked for and
     that nothing in the output would show.
     """
-    assert week_window(date(2026, 6, 1), 7) == (date(2026, 6, 1), date(2026, 6, 7))
+    assert period_window(date(2026, 6, 1), 7) == (date(2026, 6, 1), date(2026, 6, 7))
 
 
 def test_a_single_day_window_starts_and_ends_together():
-    assert week_window(date(2026, 6, 1), 1) == (date(2026, 6, 1), date(2026, 6, 1))
+    assert period_window(date(2026, 6, 1), 1) == (date(2026, 6, 1), date(2026, 6, 1))
 
 
 def test_a_zero_day_window_is_rejected():
     with pytest.raises(ValueError, match="days must be >= 1"):
-        week_window(date(2026, 6, 1), 0)
+        period_window(date(2026, 6, 1), 0)
 
 
 # --- planning ---------------------------------------------------------------
 
 def test_every_step_this_module_names_exists_in_the_runner(tmp_path):
-    """WEEK_STEPS is a hand-written list; the registry is the authority.
+    """PERIOD_STEPS is a hand-written list; the registry is the authority.
 
     A typo here would be reported as 'unknown step' only at launch, after the
     operator had already queued the run.
     """
-    assert set(WEEK_STEPS) <= set(STEPS)
+    assert set(PERIOD_STEPS) <= set(STEPS)
 
 
 def test_the_undated_step_split_matches_the_runner(tmp_path):
@@ -231,7 +231,7 @@ def test_a_week_run_builds_its_own_reference_tables():
     that run produced. Dropping 00 from this tuple would silently reintroduce
     the published warehouse's reference tables as inputs.
     """
-    from opdi.weekrun import WEEK_STEPS as W
+    from opdi.periodrun import PERIOD_STEPS as W
     assert W[0] == "00"
 
 
@@ -242,7 +242,7 @@ def test_the_default_warehouse_is_not_the_published_one():
     to attempt; pointing the default at the published prefix would make it the
     opposite.
     """
-    from opdi.weekrun import DEFAULT_WAREHOUSE
+    from opdi.periodrun import DEFAULT_WAREHOUSE
     assert DEFAULT_WAREHOUSE.rstrip("/") != "s3a://eurocontrol/opdi"
     assert DEFAULT_WAREHOUSE.startswith("s3a://")
 
@@ -286,14 +286,14 @@ class _Cfg:
 def test_the_environment_overrides_the_configured_extract(monkeypatch):
     """Matches runner._step_00b_airport_layouts' own precedence. If these two
     disagreed, the check would pass on a file the step does not read."""
-    from opdi.weekrun import resolve_pbf_path
+    from opdi.periodrun import resolve_pbf_path
 
     monkeypatch.setenv("OPDI_OSM_PBF", "/from/env.pbf")
     assert resolve_pbf_path(_Cfg("/from/config.pbf")) == "/from/env.pbf"
 
 
 def test_the_configured_extract_is_used_when_the_environment_is_silent(monkeypatch):
-    from opdi.weekrun import resolve_pbf_path
+    from opdi.periodrun import resolve_pbf_path
 
     monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
     assert resolve_pbf_path(_Cfg("/from/config.pbf")) == "/from/config.pbf"
@@ -302,7 +302,7 @@ def test_the_configured_extract_is_used_when_the_environment_is_silent(monkeypat
 def test_no_extract_at_all_is_a_preflight_problem(monkeypatch):
     """Falling through to Overpass is worse than failing: it returns empty
     results without erroring, so the run completes and reports no stands."""
-    from opdi.weekrun import preflight_fresh_build
+    from opdi.periodrun import preflight_fresh_build
 
     monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
     problems = preflight_fresh_build(_Cfg(None))
@@ -311,7 +311,7 @@ def test_no_extract_at_all_is_a_preflight_problem(monkeypatch):
 
 
 def test_an_extract_path_that_does_not_exist_is_caught(monkeypatch, tmp_path):
-    from opdi.weekrun import preflight_fresh_build
+    from opdi.periodrun import preflight_fresh_build
 
     monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
     problems = preflight_fresh_build(_Cfg(str(tmp_path / "absent.pbf")))
@@ -320,7 +320,7 @@ def test_an_extract_path_that_does_not_exist_is_caught(monkeypatch, tmp_path):
 
 
 def test_a_real_extract_passes(monkeypatch, tmp_path):
-    from opdi.weekrun import preflight_fresh_build
+    from opdi.periodrun import preflight_fresh_build
 
     monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
     pbf = tmp_path / "aeroway.osm.pbf"
@@ -332,7 +332,7 @@ def test_a_real_extract_passes(monkeypatch, tmp_path):
 
 def test_the_window_and_day_steps_together_are_the_week_steps():
     """No step may fall between the two lists, or it silently never runs."""
-    from opdi.weekrun import DAY_STEPS, WEEK_STEPS as W, WINDOW_STEPS
+    from opdi.periodrun import DAY_STEPS, PERIOD_STEPS as W, WINDOW_STEPS
 
     assert set(WINDOW_STEPS) | set(DAY_STEPS) == set(W)
     assert set(WINDOW_STEPS).isdisjoint(DAY_STEPS)
@@ -346,10 +346,10 @@ def test_everything_except_reference_data_runs_per_day():
     day instead of accumulating. A month of them was ~220 GB of intermediate
     that nothing reads after step 02.
     """
-    from opdi.weekrun import DAY_STEPS, WINDOW_STEPS
+    from opdi.periodrun import DAY_STEPS, WINDOW_STEPS
 
     assert WINDOW_STEPS == ("00",)
-    assert DAY_STEPS == ("01", "02", "02a", "03", "04")
+    assert DAY_STEPS == ("01", "02", "02a", "03", "04", "04b")
 
 
 def test_a_day_has_the_window_its_segmentation_will_read():
@@ -359,9 +359,9 @@ def test_a_day_has_the_window_its_segmentation_will_read():
     reports every late departure as cut off."""
     import inspect
 
-    from opdi import weekrun
+    from opdi import periodrun
 
-    src = inspect.getsource(weekrun.run_day_step)
+    src = inspect.getsource(periodrun.run_day_step)
     assert "day - timedelta(days=1)" in src
     assert "day + timedelta(days=1)" in src
 
@@ -384,7 +384,7 @@ def test_statevectors_are_written_one_day_per_partition():
 
 
 def test_days_in_is_inclusive_of_both_ends():
-    from opdi.weekrun import days_in
+    from opdi.periodrun import days_in
 
     got = days_in(date(2026, 6, 1), date(2026, 6, 7))
     assert len(got) == 7
@@ -395,7 +395,7 @@ def test_days_in_is_inclusive_of_both_ends():
 def test_a_day_step_records_completion_per_day():
     """A bare step name would mark all seven days done after the first, and the
     rest of the week would be skipped in silence on resume."""
-    from opdi.weekrun import day_state_key
+    from opdi.periodrun import day_state_key
 
     a = day_state_key("02", date(2026, 6, 1))
     b = day_state_key("02", date(2026, 6, 2))
@@ -403,27 +403,27 @@ def test_a_day_step_records_completion_per_day():
     assert a == "02@2026-06-01"
 
 
-def test_a_week_is_thirty_six_units():
-    """One window step plus five per day across seven days. Stated as a number
+def test_a_week_is_forty_three_units():
+    """One window step plus six per day across seven days. Stated as a number
     so a change to either list is visible rather than inferred."""
-    from opdi.weekrun import DAY_STEPS, WINDOW_STEPS, days_in
+    from opdi.periodrun import DAY_STEPS, WINDOW_STEPS, days_in
 
     days = days_in(date(2026, 6, 1), date(2026, 6, 7))
-    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 36
+    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 43
 
 
 def test_ingestion_reaches_past_the_window():
     """The last day is segmented over data running into the day after it, so
     ingestion must already have that tail or every late departure on the final
     day is truncated."""
-    from opdi.weekrun import INGEST_LOOKAHEAD_DAYS
+    from opdi.periodrun import INGEST_LOOKAHEAD_DAYS
 
     assert INGEST_LOOKAHEAD_DAYS >= 1
 
 
 def test_a_non_day_step_is_rejected_by_the_day_dispatcher():
     """Calling a window step per day would rebuild reference data every day."""
-    from opdi.weekrun import run_day_step
+    from opdi.periodrun import run_day_step
 
     # "00" builds reference tables for the whole campaign; running it per day
     # would rebuild them thirty times.
@@ -436,7 +436,7 @@ def test_a_non_day_step_is_rejected_by_the_day_dispatcher():
 def test_the_reference_check_is_complete_not_merely_non_empty():
     """A *partial* reference set means an earlier build died midway, and
     finishing it is what should happen. Only a complete set may be reused."""
-    from opdi.weekrun import REQUIRED_REFERENCE_TABLES, preflight
+    from opdi.periodrun import REQUIRED_REFERENCE_TABLES, preflight
 
     partial = _Storage(set(REQUIRED_REFERENCE_TABLES) - {"h3_runway_zones"})
     assert preflight(partial) == ["h3_runway_zones"]
@@ -446,21 +446,21 @@ def test_the_reference_check_is_complete_not_merely_non_empty():
 def test_the_state_file_is_scoped_to_its_window():
     """Which is why reference reuse cannot rely on it: day 2 gets a different
     file and so has no record that day 1 built anything."""
-    from opdi.weekrun import run_week  # noqa: F401  (documents the coupling)
+    from opdi.periodrun import run_period  # noqa: F401  (documents the coupling)
     import inspect
-    from opdi import weekrun
+    from opdi import periodrun
 
-    src = inspect.getsource(weekrun.run_week)
-    assert "weekrun_{start_date.isoformat()}_{days}d.json" in src
+    src = inspect.getsource(periodrun.run_period)
+    assert "periodrun_{start_date.isoformat()}_{days}d.json" in src
 
 
 def test_the_first_unit_comparison_uses_a_step_day_pair():
     """`todo` holds (step, day) pairs. Comparing the bare step name to
     `todo[0]` is always False, which silently disabled the preflight."""
     import inspect
-    from opdi import weekrun
+    from opdi import periodrun
 
-    src = inspect.getsource(weekrun.run_week)
+    src = inspect.getsource(periodrun.run_period)
     assert "(step, day) == todo[0]" in src
     assert "and step == todo[0]" not in src
 
@@ -502,7 +502,7 @@ def test_a_built_substep_is_skipped_while_a_missing_one_runs():
     """Step 00 was all-or-nothing: once the set was incomplete it ran, and
     every substep ran with it -- so a build that died on the runway grid
     re-downloaded OurAirports on the way back to it."""
-    from opdi.weekrun import reference_substeps_to_run
+    from opdi.periodrun import reference_substeps_to_run
 
     # Exactly the state a killed build left: OurAirports and the aircraft DB
     # are fine, layouts and the runway grid never finished.
@@ -517,7 +517,7 @@ def test_a_built_substep_is_skipped_while_a_missing_one_runs():
 
 
 def test_force_rebuilds_every_substep():
-    from opdi.weekrun import reference_substeps_to_run
+    from opdi.periodrun import reference_substeps_to_run
 
     storage = _Storage({"oa_airports", "oa_runways", "osn_aircraft_db"})
     assert all(reference_substeps_to_run(storage, force=True).values())
@@ -526,7 +526,7 @@ def test_force_rebuilds_every_substep():
 def test_every_substep_declares_what_it_produces():
     """A substep with no declared output would be skipped forever, because an
     empty requirement list is trivially satisfied."""
-    from opdi.weekrun import REFERENCE_OUTPUTS
+    from opdi.periodrun import REFERENCE_OUTPUTS
 
     assert set(REFERENCE_OUTPUTS) == {"00a", "00b", "00c", "00d", "00e", "00f"}
     assert all(tables for tables in REFERENCE_OUTPUTS.values())
@@ -535,7 +535,7 @@ def test_every_substep_declares_what_it_produces():
 def test_the_declared_outputs_cover_the_required_reference_tables():
     """Anything preflight demands must be produced by some substep, or the run
     reports a missing table that nothing is able to build."""
-    from opdi.weekrun import REFERENCE_OUTPUTS, REQUIRED_REFERENCE_TABLES
+    from opdi.periodrun import REFERENCE_OUTPUTS, REQUIRED_REFERENCE_TABLES
 
     produced = {t for tables in REFERENCE_OUTPUTS.values() for t in tables}
     assert set(REQUIRED_REFERENCE_TABLES) <= produced
@@ -551,12 +551,12 @@ def test_a_day_is_carried_through_before_the_next_day_starts():
     reads a window belonging to a later day and the output is quietly wrong
     rather than missing.
     """
-    from opdi.weekrun import DAY_STEPS, WEEK_STEPS, days_in
+    from opdi.periodrun import DAY_STEPS, PERIOD_STEPS, days_in
 
     days = days_in(date(2026, 6, 1), date(2026, 6, 3))
-    units = [(s, None) for s in WEEK_STEPS if s not in DAY_STEPS]
+    units = [(s, None) for s in PERIOD_STEPS if s not in DAY_STEPS]
     for d in days:
-        units.extend((s, d) for s in WEEK_STEPS if s in DAY_STEPS)
+        units.extend((s, d) for s in PERIOD_STEPS if s in DAY_STEPS)
 
     day_units = [u for u in units if u[1] is not None]
     # Every unit of day N precedes every unit of day N+1.
@@ -564,7 +564,7 @@ def test_a_day_is_carried_through_before_the_next_day_starts():
     assert seen == sorted(seen), "days must not interleave"
     # And within a day the steps keep their declared order.
     first_day = [s for s, d in day_units if d == days[0]]
-    assert first_day == [s for s in WEEK_STEPS if s in DAY_STEPS]
+    assert first_day == [s for s in PERIOD_STEPS if s in DAY_STEPS]
 
 
 def test_the_runner_builds_units_day_major():
@@ -573,9 +573,9 @@ def test_the_runner_builds_units_day_major():
     state vectors."""
     import inspect
 
-    from opdi import weekrun
+    from opdi import periodrun
 
-    src = inspect.getsource(weekrun.run_week)
+    src = inspect.getsource(periodrun.run_period)
     assert "for d in all_days:" in src
     assert "for step in steps:\n        if step in DAY_STEPS:" not in src
 
@@ -599,9 +599,9 @@ def test_consecutive_days_overlap_by_two_of_three():
 def test_the_ingest_fetches_only_what_is_missing_and_drops_only_what_passed():
     import inspect
 
-    from opdi import weekrun
+    from opdi import periodrun
 
-    src = inspect.getsource(weekrun.run_day_step)
+    src = inspect.getsource(periodrun.run_day_step)
     assert "list_partitions" in src, "must know what is already on disk"
     assert "d.isoformat() not in present" in src, "fetch only the missing days"
     assert "drop_partitions" in src, "drop only the days the window passed"
@@ -612,7 +612,67 @@ def test_stale_days_are_dropped_after_fetching_not_before():
     next run could not tell that from a day the archive genuinely lacks."""
     import inspect
 
-    from opdi import weekrun
+    from opdi import periodrun
 
-    src = inspect.getsource(weekrun.run_day_step)
+    src = inspect.getsource(periodrun.run_day_step)
     assert src.index("for d in missing:") < src.index("drop_partitions")
+
+
+def test_a_campaign_started_before_the_rename_still_resumes(tmp_path, monkeypatch):
+    """The module was called `weekrun` while it already ran arbitrary periods.
+
+    Renaming it would have orphaned any campaign in flight: the new code would
+    look for `periodrun_*.json`, find nothing, and restart a thirty-day run at
+    day one. The old name is adopted when the new one does not exist.
+    """
+    import inspect
+
+    from opdi import periodrun
+
+    src = inspect.getsource(periodrun.run_period)
+    assert 'f"weekrun_{start_date.isoformat()}_{days}d.json"' in src
+    assert "resuming from pre-rename state file" in src
+
+
+def test_the_name_no_longer_claims_a_week():
+    """It runs any number of days -- a month, at the time of writing."""
+    from opdi import periodrun
+
+    assert hasattr(periodrun, "run_period")
+    assert hasattr(periodrun, "PERIOD_STEPS")
+    assert not hasattr(periodrun, "run_week")
+
+
+def test_every_statevector_write_partitions_by_day():
+    """There are two write sites, and only one being fixed is what broke the
+    month run.
+
+    `_write_batch` serves the local-file path; `ingest_from_s3` serves the
+    opensky cluster. Partitioning only the first left the second a plain
+    overwrite, so a per-day ingest wiped the whole table on every call and only
+    the last day survived. Day D's segmentation then read a window that was
+    two-thirds absent and wrote an empty osn_tracks, whose schema could not be
+    inferred downstream.
+    """
+    import ast
+    import inspect
+
+    from opdi.ingestion import osn_statevectors
+
+    tree = ast.parse(inspect.getsource(osn_statevectors))
+    writes = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "attr", "") == "write_table"
+        and any(
+            isinstance(a, ast.Constant) and a.value == "osn_statevectors_v2"
+            for a in n.args
+        )
+    ]
+    assert len(writes) >= 2, "expected both write sites to still exist"
+    for w in writes:
+        kw = {k.arg for k in w.keywords}
+        assert "partition_by" in kw, (
+            "a statevector write without partition_by overwrites the whole "
+            "table, discarding every other day in the ingest window"
+        )

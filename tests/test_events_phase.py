@@ -118,7 +118,13 @@ def test_a_rule_with_a_missing_input_does_not_win(spark):
 
 
 def test_a_complete_rule_still_wins(spark):
-    """The guard must not suppress phases where every input is present."""
+    """The guard must not suppress phases where every input is present.
+
+    Asserted on ``level-start`` rather than on a top: the shipped
+    configuration publishes the PRU tops from ``vertical_pru`` and this
+    function no longer emits the fuzzy pair at all. The phase it finds is what
+    is under test, and a cruise phase is what produces a level segment.
+    """
     samples = [
         {"t": i * 5, "baro_altitude": _m(35000), "vert_rate": 0.0,
          "velocity": 600 / KT_PER_MPS}
@@ -128,7 +134,11 @@ def test_a_complete_rule_still_wins(spark):
 
     types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
 
-    assert "top-of-climb" in types
+    assert "level-start" in types
+    assert "top-of-climb" not in types, (
+        "the fuzzy tops belong to vertical_pru now; two definitions of a top of "
+        "climb in one table is what this release removes"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -262,3 +272,181 @@ def test_the_arrival_end_elevation_also_counts(spark):
     types = {r.type for r in calculate_horizontal_segment_events(sdf, GROUND_CONTACT).collect()}
 
     assert "take-off" in types
+
+
+# ---------------------------------------------------------------------------
+# The level-segment defect
+
+
+def _cruise_traj(n_cruise, step=60):
+    """Climb, ``n_cruise`` samples of cruise, descend.
+
+    The sample step is 60 s so a single cruise sample survives
+    ``phase_twindow_seconds`` smoothing -- at 5 s it is erased as a flicker and
+    the trajectory never reaches cruise at all, which is why an earlier version
+    of these tests measured nothing. The altitudes and speeds are chosen to
+    satisfy the fuzzy classifier's cruise rule outright: the detector recomputes
+    ``flight_phase`` from ``baro_altitude_c``/``vert_rate``/``velocity`` and
+    ignores any label attached to the frame, so the phase has to be driven
+    through the physics rather than asserted.
+    """
+    samples, t = [], 0
+    for alt in range(10000, 35000, 5000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    for _ in range(n_cruise):
+        samples.append({"t": t, "baro_altitude": _m(35000),
+                        "vert_rate": 0.0, "velocity": 600 / KT_PER_MPS})
+        t += step
+    for alt in range(30000, 5000, -5000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    return samples
+
+
+def _counts(spark, samples, config):
+    out = calculate_horizontal_segment_events(
+        _measured(make_track(spark, samples)), config
+    )
+    types = [r.type for r in out.collect()]
+    return {t: types.count(t) for t in
+            ("level-start", "level-end", "top-of-climb", "top-of-descent")}
+
+
+def test_a_one_sample_cruise_emits_both_a_start_and_an_end(spark):
+    """The defect, and the fix, in one trajectory.
+
+    A cruise one sample long is simultaneously the start and the end of a level
+    segment. The published chain was first-match-wins with four things to say in
+    one slot, so this sample matched the "level-start, top-of-climb" branch and
+    could never reach the "level-end, top-of-descent" one. Measured over
+    2026-06-01 that cost 28,855 unmatched starts across 17,356 of 44,461
+    flights, and only 22% of them fell near ``last_seen`` -- the rest were
+    mid-flight, which is where one-sample segments live.
+    """
+    got = _counts(spark, _cruise_traj(1), EventConfig())
+
+    assert got["level-start"] == got["level-end"] == 1
+
+
+def test_the_published_chain_loses_that_end_and_its_top_of_descent(spark):
+    """The old behaviour, pinned rather than assumed.
+
+    Without this nothing distinguishes "fixed" from "never broken". Note what
+    is lost: the precedence cost the ``level-end`` *and* the ``top-of-descent``
+    together, because both lived in the same unreachable branch.
+    """
+    got = _counts(spark, _cruise_traj(1), EventConfig(emit_runway_milestones=False))
+
+    assert got["level-start"] == 1
+    assert got["level-end"] == 0
+    assert got["top-of-climb"] == 1
+    assert got["top-of-descent"] == 0
+
+
+def test_a_longer_cruise_was_never_affected(spark):
+    """Two cruise samples put the start and the end on different rows, so the
+    precedence never bit. The fix must leave this case exactly as it was."""
+    shipped = _counts(spark, _cruise_traj(2), EventConfig())
+    published = _counts(spark, _cruise_traj(2), EventConfig(emit_runway_milestones=False))
+
+    assert shipped["level-start"] == shipped["level-end"] == 1
+    assert published["level-start"] == published["level-end"] == 1
+
+
+def test_the_shipped_configuration_publishes_no_fuzzy_top(spark):
+    """The tops come from ``vertical_pru`` now. Two definitions of a top of
+    climb in one table, under one name, is what this release removes."""
+    got = _counts(spark, _cruise_traj(2), EventConfig())
+
+    assert got["top-of-climb"] == got["top-of-descent"] == 0
+
+
+def _level_off_traj(trailing_abstention, step=60):
+    """A level-off below cruise, optionally followed by an abstention.
+
+    15,000 ft at 300 kt is level but not cruise, so the track contains no
+    ``CR`` sample at all and neither ``first_cr_time`` nor ``last_cr_time``
+    exists to rescue a boundary. That is what makes this the case the cruise
+    tests cannot reach.
+    """
+    samples, t = [], 0
+    for alt in (8000, 11000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    for _ in range(3):
+        samples.append({"t": t, "baro_altitude": _m(15000),
+                        "vert_rate": 0.0, "velocity": 300 / KT_PER_MPS})
+        t += step
+    if trailing_abstention:
+        # No velocity -> the cruise rule is incomplete -> the classifier
+        # abstains and flight_phase is NULL.
+        samples.append({"t": t, "baro_altitude": _m(15000),
+                        "vert_rate": 0.0, "velocity": None})
+        t += step
+    for alt in (12000, 9000, 6000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    return samples
+
+
+def test_an_abstention_ends_a_level_segment_rather_than_swallowing_it(spark):
+    """``NULL != "LVL"`` is NULL, not TRUE.
+
+    The classifier abstains whenever a rule's inputs are incomplete, so a
+    plain ``!=`` against the neighbouring phase silently failed at every
+    abstention. Cruise survived it -- ``last_cr_time`` fires regardless of the
+    neighbour -- but a level-off below cruise has no such rescue and emitted a
+    start with no end. That was the +15,682 still unbalanced on 2026-06-01
+    after the precedence fix.
+    """
+    got = _counts(spark, _level_off_traj(True), EventConfig())
+
+    assert got["level-start"] == got["level-end"] == 1
+
+
+def test_a_clean_level_off_is_unchanged(spark):
+    """The null-safe comparison must not alter the ordinary case."""
+    got = _counts(spark, _level_off_traj(False), EventConfig())
+
+    assert got["level-start"] == got["level-end"] == 1
+
+
+def test_scattered_abstentions_do_not_shatter_one_level_segment(spark):
+    """Balance is necessary but not sufficient.
+
+    Treating an abstention as a phase *change* balances the counts perfectly
+    and destroys the family: every scattered NULL splits a real segment in two.
+    Measured on a production day it took level-start from 128,481 to 4,657,328
+    -- about 104 segments per flight -- with a delta of exactly zero. A test
+    that only asserted balance passed.
+
+    Six level samples with abstentions sprinkled through them are one level
+    segment, not four.
+    """
+    samples, t, step = [], 0, 60
+    for alt in (8000, 11000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+    for i in range(6):
+        samples.append({"t": t, "baro_altitude": _m(15000), "vert_rate": 0.0,
+                        # every other sample abstains
+                        "velocity": None if i % 2 else 300 / KT_PER_MPS})
+        t += step
+    for alt in (12000, 9000, 6000):
+        samples.append({"t": t, "baro_altitude": _m(alt),
+                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        t += step
+
+    got = _counts(spark, samples, EventConfig())
+
+    assert got["level-start"] == got["level-end"], "boundaries must balance"
+    assert got["level-start"] == 1, (
+        f"one interrupted level segment is one segment, got "
+        f"{got['level-start']} -- abstentions are splitting it"
+    )

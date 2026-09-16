@@ -83,13 +83,23 @@ def _at(rows, apt, type_=None):
     return sorted(out, key=lambda r: r.event_time)
 
 
-def test_an_arrival_crosses_both_rings_inbound(spark, storage):
-    sdf = _approach(spark, [120, 90, 60, 45, 35, 20, 10])
+def test_an_arrival_crosses_every_configured_ring_inbound(spark, storage):
+    """All six radii, from outside the widest.
+
+    The approach starts at 130 NM so the 120 NM ring is genuinely crossed
+    rather than straddled by the first sample, and the expectation is derived
+    from ``ring_radii_nm`` rather than spelled out -- the set is a published
+    contract and a test that repeats it by hand stops checking the moment the
+    contract changes.
+    """
+    sdf = _approach(spark, [130, 115, 105, 90, 70, 55, 45, 35, 20, 10])
 
     rows = calculate_ring_crossing_events(sdf, MONTH, storage, EventConfig()).collect()
     got = sorted((r.type, json.loads(r.info)["direction"]) for r in _at(rows, "EBBR"))
 
-    assert got == [("xing-100nm", "inbound"), ("xing-40nm", "inbound")]
+    assert got == sorted(
+        (f"xing-{int(r)}nm", "inbound") for r in EventConfig().ring_radii_nm
+    )
 
 
 def test_the_departure_aerodrome_gets_its_own_rings(spark, storage):

@@ -57,7 +57,7 @@ def test_a_config_without_events_still_builds(processor, spark, tmp_path):
 
 
 def test_the_version_stamped_is_the_configured_one(processor):
-    assert processor(EventConfig()).events.events_version == "events_v0.2.0"
+    assert processor(EventConfig()).events.events_version == "events_v0.3.0"
     assert processor(EventConfig.legacy()).events.events_version == "events_v0.0.2"
 
 
@@ -158,8 +158,13 @@ _T0 = dt.datetime(2024, 6, 1, 12, 0, 0)
 #: on-runway samples, seen densely only near Switzerland: ~4%/7% network vs
 #: ATOT/ALDT ~92%/~100%), so ATOT/ALDT are RETAINED under v0.2.0 for coverage,
 #: published alongside the A-CDM family for its accuracy where reception allows.
-V4_RETIRED = {"take-off", "AOBT", "AIBT",
-              "entry-runway", "exit-runway"}
+#: Types no configuration should still publish once the merge is on. ``AOBT``
+#: and ``AIBT`` are deliberately absent: v0.2.0 retired them in favour of
+#: ``off-block``/``on-block``, and v0.3.0 brings the names back because one
+#: detector should have one name. The A-CDM strings are what is retired now.
+V4_RETIRED = {"take-off", "airborne", "touchdown", "off-block", "on-block",
+              "entry-runway", "exit-runway",
+              "top-of-climb-cco", "top-of-descent-cdo"}
 
 _RWY_BEARING = 70.0
 _EBBR = (50.0, 4.0)   # runway 07 threshold, and the aerodrome reference point
@@ -418,9 +423,37 @@ def test_v4_keeps_atot_aldt_alongside_the_acdm_family(spark, stub_storage):
     ``ATOT``/``ALDT`` for coverage and publishes the A-CDM family alongside for
     its interpolated-crossing accuracy where reception allows -- both in one
     table, told apart by type string and version."""
-    types = _types(_run(spark, stub_storage, EventConfig()))
+    types = _types(_run(spark, stub_storage, EventConfig(**event_bench.V020_BASE)))
     assert {"ATOT", "ALDT"} <= types, f"ATOT/ALDT must be retained under v0.2.0; got {sorted(types)}"
     assert {"airborne", "touchdown"} <= types
+
+
+def test_v5_publishes_one_type_per_question(spark, stub_storage):
+    """The merge, stated as an absence.
+
+    v0.2.0 answered "when did it take off" twice -- once as ``ATOT``, once as
+    ``airborne`` -- and left the consumer to decide which to trust, an answer
+    that varies by aerodrome. Under v0.3.0 the A-CDM arm takes the ``ATOT``
+    name and the two collapse. ``airborne`` and ``touchdown`` must therefore
+    not appear at all: their surviving would mean the merge renamed nothing and
+    simply added two more rows.
+    """
+    types = _types(_run(spark, stub_storage, EventConfig()))
+    assert {"ATOT", "ALDT"} <= types
+    assert types & {"airborne", "touchdown"} == set(), (
+        f"the merged names must replace the A-CDM ones, not join them: {sorted(types)}"
+    )
+    assert types & {"off-block", "on-block"} == set()
+    assert {"AOBT", "AIBT"} <= types
+
+
+def test_v5_publishes_one_top_per_direction(spark, stub_storage):
+    """The fuzzy arm is dropped and the PRU arm takes the plain names, so there
+    is exactly one top-of-climb definition in the table rather than two under
+    different suffixes."""
+    types = _types(_run(spark, stub_storage, EventConfig()))
+    assert {"top-of-climb", "top-of-descent"} <= types
+    assert types & {"top-of-climb-cco", "top-of-descent-cdo"} == set()
 
 
 def test_v4_emits_the_a_cdm_runway_family(spark, stub_storage):
@@ -428,7 +461,7 @@ def test_v4_emits_the_a_cdm_runway_family(spark, stub_storage):
     arrived. Without this the previous test passes on a step that emits
     nothing at all."""
     got = _types(_run(spark, stub_storage, EventConfig()))
-    assert {"line-up", "take-off-roll", "airborne", "landing", "touchdown",
+    assert {"line-up", "take-off-roll", "ATOT", "landing", "ALDT",
             "runway-vacated"} <= got
 
 
@@ -442,7 +475,7 @@ def test_legacy_keeps_the_undifferentiated_runway_pair(spark, stub_storage):
     """``entry-runway`` is retired by the flag, not by the version string."""
     got = _types(_run(spark, stub_storage, EventConfig.legacy()))
     assert {"entry-runway", "exit-runway"} <= got
-    assert got & {"line-up", "airborne", "touchdown"} == set()
+    assert got & {"line-up", "take-off-roll", "runway-vacated"} == set()
 
 
 def test_the_v0_1_0_rung_is_reconstructible(spark, stub_storage):
@@ -495,17 +528,31 @@ def test_landing_carries_the_new_meaning_only_under_the_new_version(spark, stub_
 
 
 def test_every_top_of_climb_records_which_algorithm_produced_it(spark, stub_storage):
+    """One arm now, and it still says which.
+
+    The fuzzy arm is dropped and PRU takes the plain name, so the stamp no
+    longer disambiguates two live algorithms -- it records which one produced
+    a published row, which is what makes a past table readable after the next
+    change.
+    """
     out = _run(spark, stub_storage, EventConfig()).filter(
         F.col("type").startswith("top-of-climb"))
     methods = {json.loads(r["info"])["method"] for r in out.collect()}
-    assert methods == {"phase", "pru"}
+    assert methods == {"pru"}
 
 
 def test_every_top_of_descent_records_it_too(spark, stub_storage):
+    """One arm now, and it still says which.
+
+    The fuzzy arm is dropped and PRU takes the plain name, so the stamp no
+    longer disambiguates two live algorithms -- it records which one produced
+    a published row, which is what makes a past table readable after the next
+    change.
+    """
     out = _run(spark, stub_storage, EventConfig()).filter(
         F.col("type").startswith("top-of-descent"))
     methods = {json.loads(r["info"])["method"] for r in out.collect()}
-    assert methods == {"phase", "pru"}
+    assert methods == {"pru"}
 
 
 def test_a_go_around_does_not_depend_on_the_runway_reference_tables(spark, tmp_path):
@@ -584,11 +631,17 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
         "track_id string, type string, event_time timestamp",
     )
 
-    v4 = {r["type"] for r in calculate_block_events(sv, stand, EventConfig()).collect()}
+    shipped = {r["type"] for r in calculate_block_events(sv, stand, EventConfig()).collect()}
+    v020 = {r["type"] for r in calculate_block_events(
+        sv, stand, EventConfig(merge_duplicate_milestones=False)).collect()}
     legacy = {r["type"] for r in
               calculate_block_events(sv, stand, EventConfig.legacy()).collect()}
 
-    assert v4 == {"off-block", "on-block"}
+    # One detector, one name -- and the name is the one legacy already used.
+    # Only v0.2.0, which published the A-CDM vocabulary without merging it,
+    # spells them differently.
+    assert shipped == {"AOBT", "AIBT"}
+    assert v020 == {"off-block", "on-block"}
     assert legacy == {"AOBT", "AIBT"}
 
 

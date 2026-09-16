@@ -40,10 +40,15 @@ def test_the_first_rung_is_exactly_the_published_algorithm():
 
 
 def test_the_last_rung_is_exactly_what_ships():
-    """Otherwise the ladder's verdict is about a configuration nobody runs."""
+    """Otherwise the ladder's verdict is about a configuration nobody runs.
+
+    Named through ``LADDER[-1]`` rather than by literal: a test that hardcodes
+    the rung name stops testing the ladder the moment a rung is added, which is
+    precisely when the property is worth checking.
+    """
     plan = build_plan()
 
-    assert plan["L13_shipped"] == EventConfig()
+    assert plan[LADDER[-1][0]] == EventConfig()
 
 
 def test_no_two_adjacent_rungs_are_identical():
@@ -122,10 +127,10 @@ def test_a_redirected_write_is_allowed_through(spark, pristine_storage):
 
 
 def test_the_v4_baseline_is_v0_1_0_and_nothing_else():
-    """Exactly the eight reconstructed fields differ from what ships.
+    """Exactly the reconstructed fields differ from what ships, and no others.
 
-    A ninth difference means the baseline is not v0.1.0. An eighth missing one
-    means a behaviour shipped with no rung measuring it.
+    An extra difference means the baseline is not v0.1.0. A missing one means a
+    behaviour shipped with no rung measuring it.
     """
     base = build_plan(ladder="v4")["V00_v3_shipped"]
     shipped = EventConfig()
@@ -136,12 +141,16 @@ def test_the_v4_baseline_is_v0_1_0_and_nothing_else():
     }
 
     assert differing == set(V4_BASE)
-    assert len(V4_BASE) == 8
+    assert len(V4_BASE) == 9
 
 
 def test_the_last_v4_rung_is_exactly_what_ships():
-    """Otherwise the ladder's verdict is about a configuration nobody runs."""
-    assert build_plan(ladder="v4")["V07_shipped"] == EventConfig()
+    """Otherwise the ladder's verdict is about a configuration nobody runs.
+
+    Named through ``LADDER_V4[-1]``: hardcoding the rung name makes the test
+    stop testing the ladder the moment a rung is appended.
+    """
+    assert build_plan(ladder="v4")[LADDER_V4[-1][0]] == EventConfig()
 
 
 def test_the_v4_ladder_verifies():
@@ -192,7 +201,7 @@ def test_v0_1_0_landing_is_scored_against_aldt():
 
 def test_v0_2_0_landing_is_not_scored_at_all():
     """It is a threshold crossing; touchdown is that vocabulary's ALDT."""
-    mapping = milestone_map(build_plan(ladder="v4")["V07_shipped"])
+    mapping = milestone_map(build_plan(ladder="v4")["V07_v020"])
 
     assert "landing" not in mapping
     assert mapping["touchdown"] == "ALDT"
@@ -213,7 +222,7 @@ def test_runway_identity_types_never_mix_the_two_vocabularies():
     plan = build_plan(ladder="v4")
 
     assert runway_identity_types(plan["V00_v3_shipped"]) == {"ATOT": "ATOT", "ALDT": "ALDT"}
-    assert runway_identity_types(plan["V07_shipped"]) == {
+    assert runway_identity_types(plan["V07_v020"]) == {
         "airborne": "ATOT", "touchdown": "ALDT"}
 
 
@@ -377,7 +386,7 @@ def test_the_reader_finds_the_runway_under_both_info_keys(spark):
 
 def test_the_shipped_mapping_drops_landing_from_the_scored_frame(spark):
     tracks = _event_rows(spark)
-    shipped = build_plan(ladder="v4")["V07_shipped"]
+    shipped = build_plan(ladder="v4")["V07_v020"]
 
     got = detected_events(
         spark, "v4_events_under_test", tracks=tracks, identity="tracks",
