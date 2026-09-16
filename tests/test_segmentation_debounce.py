@@ -88,12 +88,13 @@ def test_a_flicker_no_longer_splits_the_flight(spark):
 def test_a_two_sample_flicker_is_also_suppressed(spark):
     """A multi-sample excursion is still a flicker, not two flights.
 
-    The `farthest`-vs-`nearest` forward lookup matters here: with two `XXXX`
-    samples 5 s apart, the *nearest* forward real callsign to the first
-    `XXXX` is the second `XXXX` -- still garbled -- so a lookup that answers
-    "nearest" reads it as persisted and the double-break defect returns. The
-    lookup must resolve to the farthest real callsign in the horizon, which
-    is `BEL123` again, for the flicker to collapse to nothing.
+    The run-level persistence verdict is what handles this: the two-sample
+    `XXXX` run lasts 5 s before the next transition back to `BEL123`, far under
+    the 30 s hold, so the run is not `persisted`, plants no `stable` seed, and
+    the forward-fill keeps `BEL123` in force across it. Both `XXXX` samples
+    collapse into the surrounding `BEL123` track. (An earlier per-row
+    nearest/farthest-horizon design was abandoned for this run-level one; see
+    EVENTS_RUN_LOG decision 44.)
     """
     df = _with_callsigns(spark, ["BEL123"] * 4 + ["XXXX"] * 2 + ["BEL123"] * 4)
 
