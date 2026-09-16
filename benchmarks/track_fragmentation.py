@@ -12,7 +12,7 @@ is the other internal metric, but it cannot be computed here: this script runs
 segmentation only, and milestones need step 04. It is measured in Task 5, where
 a full pipeline run into the research prefix has produced events.
 
-Guard: `merged_distinct_callsigns` must stay at zero. A debounce that merged
+Guard: `tracks_2plus_persisted_callsigns` must stay near recommended value. A debounce that merged
 two flights with genuinely different callsigns would lower fragmentation and be
 badly wrong, and nothing else here would say so.
 
@@ -54,23 +54,47 @@ def measure(sv, arm: str, hold: float):
         # track holds two *different* callsigns, which a single value hides.
         F.collect_set(real).alias("callsigns"),
     )
-    # `F.col("callsigns")[0]` throws under Spark's default ANSI mode when a
-    # track transmitted no real callsign at all (empty array from
-    # `collect_set` above) -- `F.get` is the ANSI-safe equivalent, returning
-    # NULL for an out-of-range index instead of raising. `sort_array` makes
-    # the representative callsign deterministic rather than depending on
-    # `collect_set`'s arbitrary element order.
+    # A track's representative callsign, for grouping tracks into flights.
+    # `F.get(..., 0)` on the sorted set is null-tolerant -- an all-blank track
+    # yields an empty set and NULL here rather than throwing -- and
+    # deterministic, unlike indexing the unordered `collect_set` directly.
+    # Tracks with no real callsign group under NULL, which is correct: they
+    # cannot be identified as a flight.
     rep = F.get(F.sort_array(F.col("callsigns")), 0)
     per_flight = per_track.withColumn("cs", rep).groupBy("icao24", "cs") \
         .agg(F.count(F.lit(1)).alias("n_tracks"))
 
+    # THE GUARD. A track that swallowed a flicker legitimately contains the
+    # real callsign AND the transient garble, so counting *distinct raw*
+    # callsigns per track cannot tell a suppressed flicker from a genuine merge
+    # of two real flights -- both show set size 2. It must instead count
+    # distinct *persisted* callsigns: a callsign whose samples span at least
+    # `hold` seconds within the track. A garble spans one-to-a-few samples
+    # (< hold); a genuinely merged second flight spans minutes. So this stays
+    # near recommended value if the arm only ever swallows flickers, and rises
+    # to thousands only if it is wrongly fusing distinct flights -- the one
+    # thing the verification must be able to detect.
+    ts = F.unix_timestamp("event_time")
+    cs_span = (
+        tracked.groupBy("track_id", real.alias("cs"))
+        .agg((F.max(ts) - F.min(ts)).alias("span_s"))
+        .filter(F.col("cs").isNotNull() & (F.col("span_s") >= F.lit(hold)))
+    )
+    merged_persisted = (
+        cs_span.groupBy("track_id").agg(F.count(F.lit(1)).alias("n_cs"))
+        .filter(F.col("n_cs") > 1).count()
+    )
     return {
         "arm": arm,
         "hold_s": hold,
         "tracks": tracked.select("track_id").distinct().count(),
         "tracks_per_flight": per_flight.agg(F.avg("n_tracks")).collect()[0][0],
-        "merged_distinct_callsigns":
+        # Informative, not the guard: flicker-containing tracks show here, so a
+        # rise is expected and correct for the debounced arm.
+        "tracks_2plus_raw_callsigns":
             per_track.filter(F.size("callsigns") > 1).count(),
+        # The guard. Must stay near recommended value.
+        "tracks_2plus_persisted_callsigns": merged_persisted,
     }
 
 
@@ -98,14 +122,16 @@ def main() -> None:
     rows = [measure(sv, "recommended", 0.0)]
     rows += [measure(sv, "debounced", h) for h in args.holds]
 
-    print(f"\n{'arm':14s} {'hold':>6s} {'tracks':>10s} {'per flight':>11s} "
-          f"{'2+ callsigns':>13s}")
+    print(f"\n{'arm':12s} {'hold':>5s} {'tracks':>9s} {'per flt':>8s} "
+          f"{'2+raw':>7s} {'2+persist':>10s}")
     for r in rows:
-        print(f"{r['arm']:14s} {r['hold_s']:6.0f} {r['tracks']:10,} "
-              f"{r['tracks_per_flight']:11.3f} {r['merged_distinct_callsigns']:13,}")
-    print("\n`2+ callsigns` must stay at recommended's value. A rise means the "
-          "debounce is\nmerging flights that genuinely changed identity, which "
-          "lowers fragmentation\nand is badly wrong.")
+        print(f"{r['arm']:12s} {r['hold_s']:5.0f} {r['tracks']:9,} "
+              f"{r['tracks_per_flight']:8.3f} {r['tracks_2plus_raw_callsigns']:7,} "
+              f"{r['tracks_2plus_persisted_callsigns']:10,}")
+    print("\n`2+persist` is the guard: distinct callsigns each lasting >= hold "
+          "in one track.\nIt must stay near recommended value -- a rise means "
+          "the arm is fusing genuine\nflights. `2+raw` counts flicker-containing "
+          "tracks and is EXPECTED to rise.")
 
     spark.stop()
 
