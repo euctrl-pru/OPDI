@@ -57,8 +57,11 @@ def measure(sv, arm: str, hold: float):
     # `F.col("callsigns")[0]` throws under Spark's default ANSI mode when a
     # track transmitted no real callsign at all (empty array from
     # `collect_set` above) -- `F.get` is the ANSI-safe equivalent, returning
-    # NULL for an out-of-range index instead of raising.
-    per_flight = per_track.groupBy("icao24", F.get("callsigns", 0).alias("cs")) \
+    # NULL for an out-of-range index instead of raising. `sort_array` makes
+    # the representative callsign deterministic rather than depending on
+    # `collect_set`'s arbitrary element order.
+    rep = F.get(F.sort_array(F.col("callsigns")), 0)
+    per_flight = per_track.withColumn("cs", rep).groupBy("icao24", "cs") \
         .agg(F.count(F.lit(1)).alias("n_tracks"))
 
     return {
