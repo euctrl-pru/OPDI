@@ -13,15 +13,18 @@ from opdi.config import SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams
 
 
-def test_the_default_is_no_debounce():
-    """Zero reproduces `recommended` exactly.
+def test_the_default_is_debounce_at_30s():
+    """The shipped default is now A9 debounce at 30 s.
 
-    A8 is what every dataset since 2026-08-27 was published with, and
-    `track_id` is a published contract. A non-zero default would change ids for
-    every arm that inherits this field, silently.
+    `standard` resolves to the `debounced` arm, and this field is what makes it
+    debounce rather than reproduce A8 -- so the default must be the validated
+    30 s, not zero. This reshapes `track_id` from this release forward, which is
+    the contract-owner's deliberate choice; A8 stays reachable as
+    `method="recommended"` (which ignores this field) for reproducing data
+    published between 2026-08-27 and this release.
     """
-    assert SegmentationParams().callsign_min_persistence_seconds == 0.0
-    assert SegmentationConfig().callsign_min_persistence_seconds == 0.0
+    assert SegmentationParams().callsign_min_persistence_seconds == 30.0
+    assert SegmentationConfig().callsign_min_persistence_seconds == 30.0
 
 
 def test_the_field_carries_its_unit():
@@ -46,8 +49,8 @@ from conftest import make_track
 from opdi.pipeline.segmentation import assign_track_id
 from opdi.pipeline.segmentation.methods import debounced, recommended
 
-P0 = SegmentationParams()                                        # debounce off
-P30 = SegmentationParams(callsign_min_persistence_seconds=30.0)  # debounce on
+P0 = SegmentationParams(callsign_min_persistence_seconds=0.0)    # debounce off (A8)
+P30 = SegmentationParams(callsign_min_persistence_seconds=30.0)  # debounce on (shipped default)
 
 
 def n_tracks(df):

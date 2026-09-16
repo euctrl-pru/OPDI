@@ -1485,19 +1485,27 @@ class SegmentationConfig:
     ``gap_minutes`` or a shorter gap below ``low_alt_gap_ft``, and suffix the id
     with ``_{year}_{month}``.
 
-    ``"standard"`` is the rule this release ships. It groups on the airframe
-    alone and splits when the last *non-blank* callsign genuinely changes. Two
-    independent failures of the legacy key motivate it, and they are separable:
-    blank callsigns formed tracks of their own (42.4% of legacy tracks are
-    blank-labelled, which is where its fragmentation comes from), and a callsign
-    change mid-airframe was invisible once callsign was in the key.
+    ``"standard"`` is a pointer to whatever arm this release recommends for
+    production; it is not itself an arm. As of this release it resolves to
+    ``"debounced"`` (A9): group on the airframe alone, split when the last
+    *non-blank* callsign genuinely changes, **but** ignore a callsign change
+    unless the new value persists for ``callsign_min_persistence_seconds``
+    (30 s) before the next transition -- so a callsign that flickers to a
+    garbled value and back does not split one flight into several. Until this
+    release ``"standard"`` resolved to ``"recommended"`` (A8), the same rule
+    without the persistence guard; A8 measured 23.1% of its track boundaries as
+    flicker artefacts, and the guard removes them for ~19% fewer tracks,
+    merge-neutral. A8 stays reachable under its own name ``"recommended"`` for
+    anyone reproducing data published between 2026-08-27 and this release.
 
     .. warning::
 
        **This changes ``track_id`` for all data produced from this release
        forward**, in shape as well as value -- there is no ``_{year}_{month}``
-       suffix. A consumer joining on ``track_id`` across the boundary gets an
-       empty join rather than an error, which reads as missing data.
+       suffix, and the debounce further changes which samples share an id
+       relative to A8. A consumer joining on ``track_id`` across either
+       boundary gets an empty join rather than an error, which reads as missing
+       data.
 
        **Nothing in the published data says which rule produced a row.**
        ``osn_tracks`` carries no version column, so the only way to tell is to
@@ -1521,13 +1529,16 @@ class SegmentationConfig:
     callsign_lookback_minutes: float | None = None
     """Bound on A8's callsign lookback, in minutes. ``None`` follows ``gap_minutes``."""
 
-    callsign_min_persistence_seconds: float = 0.0
-    """How long a new callsign must hold before A9 treats it as a real change.
+    callsign_min_persistence_seconds: float = 30.0
+    """How long a new callsign must hold before the ``debounced`` arm (A9)
+    treats it as a real change.
 
-    Zero reproduces A8 `recommended` exactly, which is what every dataset
-    published since 2026-08-27 uses. Raising it changes ``track_id``, so it is
-    a deliberate act and belongs to the ``debounced`` arm rather than to the
-    shipped one."""
+    30 s is the shipped value, and the one every debounce measurement was taken
+    at: 23.1% of A8's track boundaries are flicker artefacts a 30 s guard
+    removes, for ~19% fewer tracks, merge-neutral. Zero reproduces A8
+    `recommended` exactly -- what every dataset published between 2026-08-27 and
+    this release uses -- so set ``method="recommended"`` (which ignores this
+    field) rather than zeroing it if you need the A8 ``track_id``."""
 
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""

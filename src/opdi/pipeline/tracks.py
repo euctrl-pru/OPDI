@@ -128,9 +128,10 @@ class TrackProcessor:
     So the algorithm is selected by ``config.segmentation.method``. ``legacy``
     reproduces the published ids byte for byte and remains selectable;
     ``standard`` is the study's recommendation and, as of this release, the
-    default. Both delegate to ``pipeline/segmentation``, so production runs
-    the code the study measured rather than a second implementation of the
-    same prose.
+    default -- it now resolves to ``debounced`` (A9), the callsign-flicker-aware
+    arm, having resolved to ``recommended`` (A8) before it. All delegate to
+    ``pipeline/segmentation``, so production runs the code the study measured
+    rather than a second implementation of the same prose.
     """
 
     def __init__(
@@ -290,14 +291,17 @@ class TrackProcessor:
         from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
         from opdi.pipeline.segmentation.methods import ARMS
 
-        # "standard" is the production name for the arm the study calls
-        # "recommended". Two names because they answer different questions:
-        # inside the study an arm is one candidate among eight, while a
-        # deployment wants to say which segmentation it is running without
-        # implying a comparison it is not making. Every other arm name is
-        # accepted too, which is what lets the benchmark drive the real
-        # pipeline instead of a harness that only resembles it.
-        resolved = "recommended" if method == "standard" else method
+        # "standard" is the production pointer to whatever arm this release
+        # recommends -- not an arm itself. Two names because they answer
+        # different questions: inside the study an arm is one candidate among
+        # several, while a deployment wants to name the segmentation it runs
+        # without implying a comparison it is not making. As of this release
+        # "standard" resolves to "debounced" (A9); before it it resolved to
+        # "recommended" (A8). Both stay reachable under their own names -- A8 as
+        # "recommended" for reproducing data published before this release.
+        # Every other arm name is accepted too, which is what lets the benchmark
+        # drive the real pipeline instead of a harness that only resembles it.
+        resolved = "debounced" if method == "standard" else method
         if resolved not in ARMS:
             known = sorted(set(ARMS) | {"standard"})
             raise ValueError(

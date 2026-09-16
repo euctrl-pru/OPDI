@@ -18,7 +18,7 @@ from conftest import make_track
 
 from opdi.config import OPDIConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
-from opdi.pipeline.segmentation.methods import recommended
+from opdi.pipeline.segmentation.methods import debounced, recommended
 from opdi.pipeline.tracks import TrackProcessor
 
 
@@ -46,6 +46,18 @@ BLANKING = (
     [{"t": i * 60, "callsign": "ABC123"} for i in range(5)]
     + [{"t": (5 + i) * 60, "callsign": ""} for i in range(5)]
     + [{"t": (10 + i) * 60, "callsign": "ABC123"} for i in range(5)]
+)
+
+#: One airframe, one flight, whose callsign flickers to a garbled non-blank
+#: value for 10 s (t=30,35) and returns. A8 (`recommended`) treats each
+#: non-blank change as genuine and splits into three tracks; A9 (`debounced`)
+#: sees the XYZ run last 10 s -- under the 30 s hold -- so it never persists and
+#: the flight stays whole. This is exactly the flicker the debounce arm exists
+#: to suppress, and the case that separates `standard` (now A9) from A8.
+FLICKER = (
+    [{"t": i * 5, "callsign": "ABC123"} for i in range(6)]
+    + [{"t": 30 + i * 5, "callsign": "XYZ"} for i in range(2)]
+    + [{"t": 40 + i * 5, "callsign": "ABC123"} for i in range(6)]
 )
 
 
@@ -77,15 +89,33 @@ def test_standard_changes_the_partition(spark, tmp_path):
 def test_standard_is_the_arm_the_study_benchmarked(spark, tmp_path):
     """Production and the benchmark must be one algorithm, not two.
 
-    Compared as partitions rather than id strings: the study's harness and the
-    pipeline are entitled to format ids differently, but if they ever group
-    samples differently then the published numbers describe something other
-    than what runs.
+    As of this release ``standard`` resolves to ``debounced`` (A9), so the arm
+    it must match is ``debounced`` -- with ``SegmentationParams()``, whose
+    persistence default (30 s) is the shipped one. Compared as partitions
+    rather than id strings: the study's harness and the pipeline are entitled to
+    format ids differently, but if they ever group samples differently then the
+    published numbers describe something other than what runs.
     """
-    df = make_track(spark, BLANKING)
+    df = make_track(spark, FLICKER)
     through_pipeline = _proc(spark, tmp_path, "standard")._add_track_id(df)
-    through_study = assign_track_id(df, recommended(), SegmentationParams())
+    through_study = assign_track_id(df, debounced(), SegmentationParams())
     assert _partition(through_pipeline) == _partition(through_study)
+
+
+def test_standard_now_debounces_where_recommended_would_split(spark, tmp_path):
+    """The flip is real, not cosmetic: ``standard`` no longer equals A8.
+
+    On a sub-30 s callsign flicker A8 (``recommended``) splits one flight into
+    three tracks; the shipped ``standard`` (``debounced`` at 30 s) keeps it
+    whole. If ``standard`` ever silently reverted to A8 this partition would
+    jump from one group to three.
+    """
+    df = make_track(spark, FLICKER)
+    standard = _partition(_proc(spark, tmp_path, "standard")._add_track_id(df))
+    a8 = _partition(_proc(spark, tmp_path, "recommended")._add_track_id(df))
+    assert len(standard) == 1
+    assert len(a8) == 3
+    assert standard != a8
 
 
 def test_an_unknown_method_raises_rather_than_falling_back(spark, tmp_path):

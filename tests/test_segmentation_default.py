@@ -27,9 +27,25 @@ def test_legacy_is_still_reachable():
     assert "legacy" in ARMS
 
 
-def test_standard_resolves_to_the_recommended_rule():
-    """`standard` is an alias. If it ever stops resolving to the arm the study
-    measured, the shipped algorithm and the published evidence part company."""
+def test_standard_resolves_to_the_debounced_rule():
+    """`standard` is a pointer to the current production arm. As of this release
+    it resolves to `debounced` (A9); if it ever stops resolving to the arm the
+    study measured, the shipped algorithm and the published evidence part
+    company. A9 keeps A8's airframe grouping and suffix-free id shape."""
+    rule = ARMS["debounced"]()
+    assert rule.group_cols == ["icao24"]
+    assert rule.month_suffix is False
+
+
+def test_a8_stays_reachable_under_its_own_name():
+    """`recommended` (A8) must remain selectable so data published between
+    2026-08-27 and this release stays reproducible."""
     rule = ARMS["recommended"]()
     assert rule.group_cols == ["icao24"]
     assert rule.month_suffix is False
+
+
+def test_the_shipped_persistence_guard_is_active_by_default():
+    """`standard` == `debounced` only debounces if the hold is non-zero; zero
+    collapses it to A8. The shipped default must therefore be the validated 30 s."""
+    assert OPDIConfig.for_environment("opensky").segmentation.callsign_min_persistence_seconds == 30.0
