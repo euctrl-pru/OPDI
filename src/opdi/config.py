@@ -287,12 +287,15 @@ class IngestionConfig:
     track_gap_low_altitude_meters: float = 1524.0
     """Altitude threshold for low altitude track splitting (meters, ~5000 ft)."""
 
-    # Altitude cleaning
-    max_vertical_rate_mps: float = 25.4
-    """Maximum realistic vertical rate in m/s (~5000 ft/min)."""
-
-    altitude_smoothing_window_minutes: int = 5
-    """Window size for altitude smoothing (minutes)."""
+    # Altitude cleaning moved to CleaningConfig.
+    #
+    # `max_vertical_rate_mps` (25.4 m/s) and
+    # `altitude_smoothing_window_minutes` (5) used to drive
+    # `tracks.py::_add_clean_altitude`, which replaced an implausible altitude
+    # with a rolling mean. It now masks to NULL against
+    # `CleaningConfig.{baro,geo}_altitude_d1_max_ft_s`, the same Alligier
+    # bound the derivative filter uses, so both settings are gone rather than
+    # left as knobs that quietly do nothing.
 
 
 @dataclass

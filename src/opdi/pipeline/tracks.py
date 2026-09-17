@@ -25,6 +25,7 @@ from pyspark.sql.functions import (
 from pyspark.sql.types import StringType
 import h3
 
+from opdi.cleaning.native import AVIATION_UNIT_FACTOR
 from opdi.config import OPDIConfig
 from opdi.utils.datetime_helpers import get_start_end_of_month
 from opdi.utils.h3_helpers import h3_list_prep
@@ -159,12 +160,6 @@ class TrackProcessor:
         self.gap_threshold_minutes = config.ingestion.track_gap_threshold_minutes
         self.gap_low_alt_minutes = config.ingestion.track_gap_low_altitude_minutes
         self.low_altitude_meters = config.ingestion.track_gap_low_altitude_meters
-
-        # Altitude cleaning threshold
-        self.max_vertical_rate_mps = config.ingestion.max_vertical_rate_mps
-        self.altitude_smoothing_window_minutes = (
-            config.ingestion.altitude_smoothing_window_minutes
-        )
 
         # Ensure log directory exists
         os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
@@ -390,72 +385,70 @@ class TrackProcessor:
         return df
 
     def _add_clean_altitude(self, df: DataFrame, col_name: str) -> DataFrame:
-        """
-        Clean altitude data by removing unrealistic climb/descent rates.
+        """Mask altitudes whose first derivative is implausible.
 
-        Detects and replaces altitude values with unrealistic vertical rates
-        (> 25.4 m/s or ~5000 ft/min) using a rolling average.
+        ``{col_name}_c`` is the column with bad samples **masked to NULL**. It
+        is never a substituted value, and that is the point of this function
+        rather than an implementation detail.
+
+        It used to replace an implausible reading with a +/-5 minute centred
+        rolling mean. Two things were wrong with that:
+
+        * A substituted value is indistinguishable downstream from a measured
+          one. OPDI's cleaning follows the 2024 PRC approach -- mask to NULL,
+          keep the row -- precisely so that "no data" and "interpolated data"
+          stay distinguishable. This function was the one place that did not.
+        * During a climb the +/-5 minute mean is roughly the altitude the
+          aircraft reaches *minutes later*. On 2026-06-10 a smooth climb
+          through 8,000 ft was rewritten to 11,125 ft for two samples, which
+          made the FL crossing detector report a crossing up through FL100 and
+          back down again -- 23,088 such reversals that day, across 6,651
+          flights, because the detector reads this column.
+
+        The threshold is ``CleaningConfig.{baro,geo}_altitude_d1_max_ft_s``,
+        the Alligier first-derivative bound the vote-based filter in
+        :mod:`opdi.cleaning.native` already uses. The previous
+        ``max_vertical_rate_mps`` of 25.4 m/s is 83.3 ft/s -- 5,000 ft/min,
+        which jets exceed routinely. Of the 119,154 samples it rejected on
+        2026-06-10, 64,088 (53.8%) were climbing between 83.3 and 200 ft/s and
+        were perfectly good.
+
+        Stated in ft/s and compared in ft/s: the stored column stays SI, and
+        only the comparison is scaled, which is the pattern
+        ``cleaning/native.py`` uses for the same reason -- the output is a
+        NULL mask, which carries no unit.
 
         Args:
-            df: DataFrame with altitude and event_time columns
-            col_name: Name of altitude column (e.g., "geo_altitude" or "baro_altitude")
+            df: DataFrame with the altitude column, ``track_id`` and
+                ``event_time``.
+            col_name: ``"baro_altitude"`` or ``"geo_altitude"``.
 
         Returns:
-            DataFrame with {col_name}_c column containing cleaned altitude
+            The same rows, plus ``{col_name}_c``.
         """
-        # Define window for rate of climb calculation
         window_spec = Window.partitionBy("track_id").orderBy("event_time")
 
-        # Get previous altitude and time
-        df = df.withColumn(f"prev_{col_name}", lag(col_name).over(window_spec))
-        df = df.withColumn("prev_event_time", lag("event_time").over(window_spec))
+        seconds = unix_timestamp("event_time") - unix_timestamp(
+            lag("event_time").over(window_spec)
+        )
+        # A zero or absent gap yields NULL rather than a division error, and a
+        # NULL rate does not trip the comparison below -- the first sample of
+        # a track has nothing to be implausible against.
+        rate_ft_s = f_abs(
+            (col(col_name) - lag(col_name).over(window_spec))
+            * AVIATION_UNIT_FACTOR[col_name]
+            / F.nullif(seconds.cast("double"), lit(0.0))
+        )
 
-        # Calculate time difference in seconds
-        df = df.withColumn(
-            "time_diff",
-            (unix_timestamp("event_time") - unix_timestamp("prev_event_time")).cast(
-                "double"
+        threshold = getattr(
+            self.config.cleaning, f"{col_name}_d1_max_ft_s"
+        )
+        return df.withColumn(
+            f"{col_name}_c",
+            when(rate_ft_s > lit(threshold), lit(None).cast("double")).otherwise(
+                col(col_name)
             ),
         )
-
-        # Calculate altitude change and rate of climb
-        df = df.withColumn("altitude_diff", col(col_name) - col(f"prev_{col_name}"))
-        df = df.withColumn("rate_of_climb", col("altitude_diff") / col("time_diff"))
-
-        # Create window for rolling average (5 minutes = 300 seconds)
-        time_window = self.altitude_smoothing_window_minutes * 60
-        df = df.withColumn("event_time_epoch", unix_timestamp("event_time").cast("bigint"))
-        window_spec_avg = (
-            Window.partitionBy("track_id")
-            .orderBy("event_time_epoch")
-            .rangeBetween(-time_window, time_window)
-        )
-
-        # Calculate rolling average
-        df = df.withColumn(f"smoothed_{col_name}", avg(col_name).over(window_spec_avg))
-
-        # Replace unrealistic values with smoothed values
-        # Threshold: 25.4 m/s = 5000 ft/min
-        df = df.withColumn(
-            f"{col_name}_c",
-            when(
-                f_abs(col("rate_of_climb")) > self.max_vertical_rate_mps,
-                col(f"smoothed_{col_name}"),
-            ).otherwise(col(col_name)),
-        )
-
-        # Drop temporary columns
-        df = df.drop(
-            f"smoothed_{col_name}",
-            f"prev_{col_name}",
-            "prev_event_time",
-            "time_diff",
-            "altitude_diff",
-            "rate_of_climb",
-            "event_time_epoch",
-        )
-
-        return df
 
     def process_month(
         self,
