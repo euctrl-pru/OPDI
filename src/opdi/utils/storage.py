@@ -313,3 +313,95 @@ class StorageManager:
             return True
         except Exception:
             return False
+
+    COVERAGE_MARKER = "coverage_marker"
+    """One row, recording which coverage wrote this warehouse.
+
+    Not ``_coverage_marker``: Spark's file-index listing filters out paths
+    whose name begins with ``_`` or ``.`` (the ``_SUCCESS``/``_committed``
+    convention), so an underscore-prefixed table name would be fragile to read
+    back in S3 mode and could make ``table_exists``/``read_table`` behave as
+    though the marker were absent -- which would make this guard silently
+    always-pass, the exact inverse of its purpose.
+    """
+
+    def write_coverage_marker(self) -> None:
+        """Record which coverage this warehouse holds. Idempotent.
+
+        Overwrite rather than append: this is a property of the warehouse, not
+        a history of runs against it, and an append would leave two rows whose
+        disagreement nothing resolves.
+        """
+        # In Iceberg mode, write_table's "overwrite" path assumes the table
+        # already exists -- every other writer in this codebase calls its own
+        # create_table_if_not_exists() first. The marker has no dedicated
+        # processor class to hold that method, so it is inlined here; a no-op
+        # in S3 mode, same as every other create_table call.
+        self.create_table(
+            f"""
+            CREATE TABLE IF NOT EXISTS `{self.project}`.`{self.COVERAGE_MARKER}` (
+              coverage STRING COMMENT 'Coverage label this warehouse was written under: europe, worldwide, or custom',
+              bbox ARRAY<DOUBLE> COMMENT 'min_lon, min_lat, max_lon, max_lat degrees; NULL for worldwide',
+              airport_types ARRAY<STRING> COMMENT 'Aerodrome types included when this warehouse reference data was built'
+            )
+            USING iceberg
+            COMMENT 'One row: which coverage wrote this warehouse. Not a data product -- nothing reads it at query time.'
+            """
+        )
+        cov = self.config.coverage
+        df = self.spark.createDataFrame(
+            [(cov.label,
+              [float(x) for x in cov.bbox] if cov.bbox else None,
+              list(cov.airport_types))],
+            "coverage string, bbox array<double>, airport_types array<string>",
+        )
+        self.write_table(df, self.COVERAGE_MARKER, mode="overwrite")
+
+    def read_coverage_marker(self) -> Optional[dict]:
+        """The marker, or ``None`` if this warehouse has never been stamped.
+
+        Every failure reads as unstamped -- absent, unreadable, or empty. A
+        marker that cannot be read must not block a run: the guard exists to
+        catch a specific mistake, and a guard that fails closed on its own
+        malfunction would make every warehouse unusable the first time the
+        parquet read hiccuped.
+        """
+        try:
+            rows = self.read_table(self.COVERAGE_MARKER).limit(1).collect()
+        except Exception:
+            return None
+        if not rows:
+            return None
+        r = rows[0]
+        return {
+            "coverage": r["coverage"],
+            "bbox": list(r["bbox"]) if r["bbox"] is not None else None,
+            "airport_types": list(r["airport_types"]),
+        }
+
+    def check_coverage(self) -> Optional[str]:
+        """A problem describing a coverage mismatch, or ``None``.
+
+        An unstamped warehouse is **not** a problem: it is a first run, or a
+        warehouse written before markers existed. Refusing those would make
+        every existing prefix unusable, which is a bigger break than the one
+        being prevented.
+        """
+        marker = self.read_coverage_marker()
+        if marker is None:
+            return None
+        cov = self.config.coverage
+        if marker["coverage"] == cov.label and marker["bbox"] == (
+            [float(x) for x in cov.bbox] if cov.bbox else None
+        ):
+            return None
+        return (
+            f"coverage mismatch at {self.base_path}: the warehouse was written "
+            f"with coverage {marker['coverage']!r} (bbox {marker['bbox']}) and "
+            f"this run is {cov.label!r} (bbox "
+            f"{list(cov.bbox) if cov.bbox else None}). Mixing two coverages in "
+            "one warehouse is silent -- the rows are indistinguishable "
+            "afterwards and the track_id contract only holds for one of them. "
+            "Point this run at a different warehouse, or delete the existing "
+            "tables if they are no longer wanted."
+        )

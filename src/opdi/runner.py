@@ -335,6 +335,16 @@ def _step_00_reference_data(spark, config, **kwargs):
     print("STEP 00 - Reference data generation")
     print("=" * 70)
 
+    from opdi.utils.storage import StorageManager
+
+    storage = StorageManager(spark, config)
+    # Checked first, before any substep runs: a coverage mismatch is cheaper
+    # to catch now than after minutes of reference geometry have been built
+    # into the wrong warehouse.
+    problem = storage.check_coverage()
+    if problem is not None:
+        raise RuntimeError(problem)
+
     run_ref = kwargs.get("run_reference", {})
 
     for substep_id, (label, fn) in REFERENCE_SUBSTEPS.items():
@@ -342,6 +352,11 @@ def _step_00_reference_data(spark, config, **kwargs):
             print(f"\n  Skipping {substep_id} ({label})")
             continue
         fn(spark, config, **kwargs)
+
+    # Stamped only after every substep has run to completion. A reference
+    # build that dies halfway must not leave a marker claiming this warehouse
+    # holds a coverage it never finished populating.
+    storage.write_coverage_marker()
 
 
 def _step_01_ingest_statevectors(spark, config, start_date, end_date, **kwargs):

@@ -392,7 +392,21 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
     Returns a list rather than raising so the caller can report every problem
     at once. Being told about one missing table, fixing it, and then being told
     about the next is the behaviour this avoids.
+
+    A coverage mismatch, if any, is prepended ahead of the table checks -- it
+    is the more fundamental problem: a period run that is about to mix
+    coverages in one warehouse should be told that before it is told which
+    tables it would have read. ``storage`` may be a lightweight stand-in used
+    in tests that has no ``check_coverage``; that case is treated the same as
+    "no problem", not as a failure.
     """
+    problems: List[str] = []
+    check_coverage = getattr(storage, "check_coverage", None)
+    if check_coverage is not None:
+        coverage_problem = check_coverage()
+        if coverage_problem is not None:
+            problems.append(coverage_problem)
+
     missing: List[str] = []
     for name in tables:
         try:
@@ -412,7 +426,7 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
                 missing.append(name)
         except Exception:
             missing.append(name)
-    return missing
+    return problems + missing
 
 
 def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
@@ -774,6 +788,20 @@ def run_period(
             # always False -- which made this whole block dead code.
             if not skip_preflight and (step, day) == todo[0]:
                 storage = StorageManager(spark, config)
+
+                # Checked on its own, ahead of the table-presence logic below.
+                # `preflight()` also folds a coverage problem into the list it
+                # returns, but the `building_reference` branch below treats
+                # *any* non-empty `preflight()` result as "tables to build" --
+                # so a mismatch left to flow through that path would be
+                # misread as a missing table and the run would attempt to
+                # build reference data into the wrong warehouse instead of
+                # refusing. This check is what actually stops that.
+                coverage_problem = storage.check_coverage()
+                if coverage_problem is not None:
+                    print(f"Preflight failed: {coverage_problem}")
+                    return 1
+
                 if building_reference:
                     # Reference tables already in the warehouse are reused, not
                     # rebuilt.
