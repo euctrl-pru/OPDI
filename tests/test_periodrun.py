@@ -805,3 +805,66 @@ def test_an_old_state_file_with_no_coverage_field_still_matches_europe(tmp_path)
     assert s.coverage == ""
     assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "europe")
     assert not s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "worldwide")
+
+
+# --- run_period.py, the top-level wrapper --------------------------------
+#
+# Not opdi.periodrun.run_period itself -- the standalone script at the repo
+# root that campaigns actually invoke. It has its own argparse parser and
+# imports `run_period` (the function) by name at module load time, so
+# monkeypatching opdi.periodrun.run_period would not reach it; the patch has
+# to land on the script module's own `run_period` attribute, which is what
+# `main()` actually calls.
+
+def _fake_run_period(monkeypatch, script):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(script, "run_period", fake)
+    return captured
+
+
+def test_the_wrapper_script_leaves_warehouse_unset_by_default(monkeypatch):
+    """This is the test that would have caught the defect: --warehouse used
+    to default to the DEFAULT_WAREHOUSE *string*, so argparse materialised it
+    before run_period() ever saw it -- _resolve_warehouse would then take the
+    "explicit" branch and a --worldwide run would silently write into
+    opdi-prod. Parsing with no --warehouse must yield the sentinel."""
+    import run_period as script
+
+    captured = _fake_run_period(monkeypatch, script)
+    script.main(["--start", "2026-06-01"])
+    assert captured["warehouse"] is script._UNSET
+
+
+def test_the_wrapper_script_passes_worldwide_through(monkeypatch):
+    """--worldwide must reach run_period() as worldwide=True, and its absence
+    as worldwide=False -- mirrors the cli.py coverage for `opdi run`."""
+    import run_period as script
+
+    captured = _fake_run_period(monkeypatch, script)
+    script.main(["--start", "2026-06-01"])
+    assert captured["worldwide"] is False
+
+    captured.clear()
+    script.main(["--start", "2026-06-01", "--worldwide"])
+    assert captured["worldwide"] is True
+
+
+def test_the_wrapper_script_still_lets_an_explicit_warehouse_win(monkeypatch):
+    """An operator who names a prefix explicitly must get exactly that
+    prefix, in either coverage -- the sentinel only changes what an *omitted*
+    --warehouse resolves to."""
+    import run_period as script
+
+    captured = _fake_run_period(monkeypatch, script)
+    script.main(["--start", "2026-06-01", "--warehouse", "s3a://eurocontrol/scratch"])
+    assert captured["warehouse"] == "s3a://eurocontrol/scratch"
+
+    captured.clear()
+    script.main(["--start", "2026-06-01", "--worldwide",
+                 "--warehouse", "s3a://eurocontrol/scratch"])
+    assert captured["warehouse"] == "s3a://eurocontrol/scratch"
