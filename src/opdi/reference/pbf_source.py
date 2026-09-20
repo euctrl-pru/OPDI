@@ -449,6 +449,19 @@ class PbfLayoutSource:
                               # whose own boundary missed the point still
                               # keeps a closer neighbour's box from claiming it
             for _, r in box_only.iterrows():
+                # `r.lon_min`/`r.lon_max` may be -180/180 here -- `airport_boxes`
+                # widens a box that straddles the antimeridian to the full
+                # circle rather than leaving an inverted interval `between`
+                # would match nothing on. That widening is only safe because
+                # of the nearest-guard immediately below: it does not accept
+                # every point this (now unbounded) box contains, it claims a
+                # point only if THIS aerodrome is nearer than every other one
+                # in `_boxes`, so a full-circle box cannot steal features near
+                # a different, closer aerodrome anywhere on the globe. If that
+                # guard is ever relaxed or removed, this must become a
+                # wrap-aware interval test instead (`lon >= lon_min OR
+                # lon <= lon_max`), not stay a widened box with no guard
+                # behind it.
                 inside = lat.between(r.lat_min, r.lat_max) & lon.between(
                     r.lon_min, r.lon_max
                 )

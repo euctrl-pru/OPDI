@@ -63,8 +63,10 @@ BBOX = EUROPE_BBOX
 BORDER_MARGIN_NM = 30.0
 
 #: Marker for an aerodrome outside the observed area. A flight that entered
-#: European airspace already airborne has an origin no ADS-B feed here can
-#: name, and saying so is a different -- and correct -- answer from silence.
+#: the configured coverage already airborne -- the published European box by
+#: default, or nothing at all worldwide -- has an origin no ADS-B feed here
+#: can name, and saying so is a different -- and correct -- answer from
+#: silence.
 OOA = "OOA"
 
 #: The ``version`` stamped on every flight-list row.
@@ -712,7 +714,9 @@ class FlightListProcessor:
         a null indistinguishable from a detection failure.
 
         The test is the one ``classify_endpoints`` uses, deliberately: a fix
-        within :data:`BORDER_MARGIN_NM` of the ingestion bbox edge. Precedence
+        within :data:`BORDER_MARGIN_NM` of the configured coverage edge --
+        the published European box by default, inert worldwide since there is
+        no edge to be near. Precedence
         is the same too -- **aerodrome first, border second**. The other order
         looks equivalent and is not: Ponta Delgada sits about 8 NM inside the
         western edge, and letting the border test win labels its departures

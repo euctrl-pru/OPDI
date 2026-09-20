@@ -169,3 +169,54 @@ def test_run_period_takes_worldwide():
     import inspect
     from opdi.periodrun import run_period
     assert inspect.signature(run_period).parameters["worldwide"].default is False
+
+
+def test_opdi_py_script_accepts_worldwide(monkeypatch):
+    """The repo-root `opdi.py` is documented in CLAUDE.md as one of three ways
+    to run the pipeline, alongside `opdi run` (covered above) and
+    `run_period.py`. Its own argparse `main()` had no `--worldwide` and never
+    forwarded `worldwide=` to `run_pipeline` -- found by trying to actually
+    run it (progress.md), not by reading the diff.
+
+    Loaded via `importlib` from the file path rather than `import opdi`:
+    that name resolves to the *installed package* here (`src/opdi/__init__.py`
+    wins over the repo-root script under `python -m pytest`'s sys.path), so a
+    plain `import opdi` would silently test the wrong module and this
+    regression would pass even with the flag missing.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    script_path = Path(__file__).resolve().parent.parent / "opdi.py"
+    spec = importlib.util.spec_from_file_location("opdi_root_script", script_path)
+    opdi_script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(opdi_script)
+
+    captured = {}
+
+    def fake_run_pipeline(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("opdi.runner.run_pipeline", fake_run_pipeline)
+
+    opdi_script.main(["--start", "2024-01-01", "--end", "2024-01-02"])
+    assert captured["worldwide"] is False
+
+    captured.clear()
+    opdi_script.main(
+        ["--start", "2024-01-01", "--end", "2024-01-02", "--worldwide"]
+    )
+    assert captured["worldwide"] is True
+
+    # opensky is worldwide's only real target -- the S3 warehouse and the OSN
+    # data both live there -- so --worldwide is unreachable at its intended
+    # use if --env rejects "opensky". This combination used to die on an
+    # argparse "invalid choice" error before --env's choices included it.
+    captured.clear()
+    opdi_script.main(
+        ["--env", "opensky", "--worldwide",
+         "--start", "2024-01-01", "--end", "2024-01-02"]
+    )
+    assert captured["env"] == "opensky"
+    assert captured["worldwide"] is True

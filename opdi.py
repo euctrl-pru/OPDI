@@ -17,6 +17,9 @@ Usage::
     # Run only a specific step
     python opdi.py --step 02 --start 2024-01-01 --end 2024-02-01
 
+    # Worldwide, into its own warehouse rather than the European one
+    python opdi.py --env opensky --worldwide --start 2024-01-01 --end 2024-02-01
+
     # After pip install, also available as:
     opdi run --env live --start 2024-01-01 --end 2024-06-01
 
@@ -38,7 +41,7 @@ import sys
 from datetime import date
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="OPDI v2.0.0 - Full pipeline runner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -46,9 +49,13 @@ def main():
     )
     parser.add_argument(
         "--env",
-        choices=["dev", "live", "local"],
+        choices=["dev", "live", "local", "opensky"],
         default="dev",
-        help="Target environment (default: dev).",
+        help="Target environment (default: dev). NOTE: this script and "
+             "`opdi run` build a local-only Spark session -- they call "
+             "create_session without distributed=True -- so --env opensky "
+             "here does not attach to the Kubernetes cluster. A real "
+             "cluster run goes through run_period.py.",
     )
     parser.add_argument(
         "--start",
@@ -81,8 +88,18 @@ def main():
         default=4,
         help="Only export last N months (default: 4).",
     )
+    parser.add_argument(
+        "--worldwide",
+        action="store_true",
+        default=False,
+        help="Drop the published European bounding box and run worldwide. "
+             "Two consequences: no coverage filter is applied to ingest, "
+             "detection or reference geometry, and output goes to a separate "
+             "worldwide warehouse rather than the European one, so the "
+             "two coverages can never mix in one warehouse.",
+    )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     start_date = date.fromisoformat(args.start)
     end_date = date.fromisoformat(args.end) if args.end else date.today()
@@ -97,6 +114,7 @@ def main():
         airports_hex_path=args.airports_hex_path,
         export_dir=args.export_dir,
         last_n_months=args.last_n_months,
+        worldwide=args.worldwide,
     )
 
 
