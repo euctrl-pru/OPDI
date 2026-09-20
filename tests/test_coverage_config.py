@@ -121,3 +121,51 @@ def test_the_airport_types_are_the_ones_every_reference_table_uses():
     each other with gaps nothing reports -- the failure h3_airport_zones'
     AIRPORT_TYPES comment records."""
     assert CoverageConfig().airport_types == ("large_airport", "medium_airport")
+
+
+def test_the_zone_partition_count_scales_with_the_airport_count():
+    """2,000 partitions was tuned for 1,357 aerodromes -- ~11 rows per task,
+    because 2,400 rows in a task measured 7.7 GB and OOMKilled every executor.
+    Worldwide is 3.89x the aerodromes, so a fixed 2,000 restores exactly the
+    memory profile that number exists to avoid."""
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator as G
+    assert G.zone_build_partitions(1357) == 2000        # Europe, unchanged
+    assert G.zone_build_partitions(5280) >= 7000        # worldwide
+    assert G.zone_build_partitions(50) == 2000          # floor, never fewer
+
+
+def test_the_cli_accepts_worldwide(monkeypatch):
+    """The parser merely existing is not enough -- `main(["run", "--help"])`
+    inside `pytest.raises(SystemExit)` would pass even if `--worldwide` were
+    absent entirely, since `--help` always exits. Assert instead on the value
+    `run_pipeline` actually receives, which fails if the flag is not wired
+    through to dispatch."""
+    from opdi.cli import main
+
+    captured = {}
+
+    def fake_run_pipeline(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("opdi.runner.run_pipeline", fake_run_pipeline)
+
+    main(["run", "--start", "2024-01-01", "--end", "2024-01-02"])
+    assert captured["worldwide"] is False
+
+    captured.clear()
+    main(["run", "--start", "2024-01-01", "--end", "2024-01-02", "--worldwide"])
+    assert captured["worldwide"] is True
+
+
+def test_run_pipeline_takes_worldwide():
+    import inspect
+    from opdi.runner import run_pipeline
+    sig = inspect.signature(run_pipeline)
+    assert sig.parameters["worldwide"].default is False
+
+
+def test_run_period_takes_worldwide():
+    import inspect
+    from opdi.periodrun import run_period
+    assert inspect.signature(run_period).parameters["worldwide"].default is False

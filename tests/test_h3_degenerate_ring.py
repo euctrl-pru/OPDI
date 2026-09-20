@@ -70,7 +70,7 @@ def test_the_ring_build_is_spread_widely_enough_to_fit_in_an_executor():
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator as G
 
     rows = 16 * 1357
-    per_task = rows / G.ZONE_BUILD_PARTITIONS
+    per_task = rows / G.zone_build_partitions(1357)
     assert per_task < 25, (
         f"{per_task:.0f} rows per task; one row can hold 1.6 MB of cells and "
         "each polyfills two circles"

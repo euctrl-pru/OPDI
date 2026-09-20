@@ -275,6 +275,12 @@ class RunState:
     start_date: str = ""
     end_date: str = ""
     env: str = ""
+    coverage: str = ""
+    """``config.coverage.label`` at the time this state was written. An empty
+    string reads as ``"europe"`` in :meth:`matches` -- every state file
+    written before this field existed described a European run, since
+    worldwide coverage did not exist yet, so an old file must keep matching a
+    European re-invocation rather than suddenly refusing it."""
     completed: Dict[str, dict] = field(default_factory=dict)
 
     @classmethod
@@ -289,6 +295,7 @@ class RunState:
             start_date=data.get("start_date", ""),
             end_date=data.get("end_date", ""),
             env=data.get("env", ""),
+            coverage=data.get("coverage", ""),
             completed=data.get("completed", {}),
         )
 
@@ -299,6 +306,7 @@ class RunState:
             "start_date": self.start_date,
             "end_date": self.end_date,
             "env": self.env,
+            "coverage": self.coverage,
             "completed": self.completed,
         }
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -317,12 +325,23 @@ class RunState:
         }
         self.save()
 
-    def matches(self, env: str, start: date, end: date) -> bool:
-        """Whether this state describes the window now being asked for.
+    def matches(
+        self, env: str, start: date, end: date, coverage: str = "europe"
+    ) -> bool:
+        """Whether this state describes the window and coverage now being
+        asked for.
 
         A state file from a different window must never be used to skip steps:
         the step names are identical, so nothing else would catch it, and the
-        result would be a run that silently reports someone else's data.
+        result would be a run that silently reports someone else's data. Same
+        reasoning for coverage: a European run's progress must not be mistaken
+        for a worldwide one's, or vice versa -- this has bitten before, when a
+        stale ``weekrun_2026-06-01_1d.json`` made a run report five completed
+        units and skip steps 02-04 entirely.
+
+        ``self.coverage`` empty (an old state file, written before this field
+        existed) is read as ``"europe"``, since every run before worldwide
+        coverage existed was implicitly European.
         """
         if not self.completed:
             return True
@@ -330,6 +349,7 @@ class RunState:
             self.env == env
             and self.start_date == start.isoformat()
             and self.end_date == end.isoformat()
+            and (self.coverage or "europe") == coverage
         )
 
 
@@ -593,6 +613,7 @@ def run_period(
     dry_run: bool = False,
     warehouse: str = DEFAULT_WAREHOUSE,
     allow_existing: bool = False,
+    worldwide: bool = False,
 ) -> int:
     """Run the pipeline over a window of ``days``, resuming where it stopped.
 
@@ -623,9 +644,13 @@ def run_period(
         allow_existing: Proceed even though the warehouse prefix already holds
             objects. Off by default: a rebuild that silently merged with a
             previous attempt's output would produce a table nobody could date.
+        worldwide: Drop the published European bounding box. Off by default.
+            When on, and ``warehouse`` was left at its default, the *default*
+            follows coverage to the worldwide warehouse instead of
+            ``opdi-prod`` -- an explicitly-passed ``warehouse`` still wins.
     """
     from opdi.config import OPDIConfig
-    from opdi.runner import STEPS
+    from opdi.runner import STEPS, reference_substeps_for_coverage
     from opdi.utils.spark_helpers import SparkSessionManager
     from opdi.utils.storage import StorageManager
 
@@ -635,6 +660,11 @@ def run_period(
     unknown = [s for s in steps if s not in STEPS]
     if unknown:
         raise ValueError(f"unknown step(s) {unknown}; valid: {sorted(STEPS)}")
+
+    # Built early, ahead of the state-file check: the state file must be
+    # scoped to a coverage as well as a window, and `config.coverage.label`
+    # is what scopes it.
+    config = OPDIConfig.for_environment(env, worldwide=worldwide)
 
     start_date, end_date = period_window(start, days)
     if state_path is None:
@@ -652,17 +682,22 @@ def run_period(
                 state_path = legacy
     state = RunState.load(Path(state_path))
 
-    if not state.matches(env, start_date, end_date):
+    if not state.matches(env, start_date, end_date, config.coverage.label):
         raise SystemExit(
             f"state file {state_path} describes {state.env} "
-            f"{state.start_date}..{state.end_date}, but this run is {env} "
-            f"{start_date}..{end_date}. Refusing to reuse it -- pass a "
-            "different --state-path, or delete that file if it is stale."
+            f"{state.start_date}..{state.end_date} "
+            f"({state.coverage or 'europe'}), but this run is {env} "
+            f"{start_date}..{end_date} ({config.coverage.label}). Refusing "
+            "to reuse it -- pass a different --state-path, or delete that "
+            "file if it is stale. This has bitten before: a stale state file "
+            "once made a run report units complete and skip steps it had "
+            "never actually run."
         )
 
     state.env = env
     state.start_date = start_date.isoformat()
     state.end_date = end_date.isoformat()
+    state.coverage = config.coverage.label
     if not state.run_id:
         state.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -698,7 +733,14 @@ def run_period(
     todo = [u for u in units if force or _key(*u) not in state.completed]
     done = [u for u in units if u not in todo]
 
-    config = OPDIConfig.for_environment(env)
+    # `warehouse` defaults to the European prefix (`DEFAULT_WAREHOUSE`), so a
+    # worldwide run that did not name one explicitly would land there --
+    # silently discarding `--worldwide` at the one entry point production
+    # actually uses. The default must follow the coverage; an explicitly
+    # passed warehouse still wins, because a caller who named a prefix means
+    # it.
+    if worldwide and warehouse == DEFAULT_WAREHOUSE:
+        warehouse = config.project.warehouse_path   # set by for_environment
     # Before anything reads it. StorageManager resolves every table name
     # against this, so setting it here redirects reference tables, intermediate
     # tables and outputs together -- there is no second place a stale prefix
@@ -714,6 +756,7 @@ def run_period(
     print("OPDI period run")
     print("=" * 72)
     print(f"  environment : {env}")
+    print(f"  coverage    : {config.coverage.label}")
     print(f"  window      : {start_date} .. {end_date}  ({days} days)")
     print(f"  steps       : {' '.join(steps)}")
     if done:
@@ -834,6 +877,17 @@ def run_period(
                         # re-download OurAirports on the way to the runway
                         # grid.
                         todo_subs = reference_substeps_to_run(storage, force=force)
+                        # `todo_subs` is derived from table presence alone, and
+                        # a fresh worldwide warehouse has no
+                        # `opdi_h3_airspace_ref` table -- so without this it
+                        # would return `{"00c": True}` and build the European
+                        # airspace layer into a worldwide warehouse. The skip
+                        # inside `_step_00_reference_data` catches this too,
+                        # but composing it here keeps the "already built"
+                        # summary printed below honest about 00c as well.
+                        for substep, run in reference_substeps_for_coverage(config).items():
+                            if not run:
+                                todo_subs[substep] = False
                         kwargs["run_reference"] = todo_subs
                         skipped = [k for k, v in sorted(todo_subs.items()) if not v]
                         if skipped:

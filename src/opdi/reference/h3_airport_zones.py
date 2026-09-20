@@ -268,7 +268,12 @@ class AirportDetectionZoneGenerator:
         >>> generator.save_to_parquet("data/airport_hex/zones_res7.parquet")
     """
 
-    #: Partitions to spread the ring polyfill across.
+    #: Rows per partition the 2,000-partition figure implies: 21,712 / 2,000.
+    #: Kept as the derived quantity so the two numbers cannot disagree.
+    ZONE_ROWS_PER_TASK = 21712 / 2000    # ~10.9
+
+    #: Partitions to spread the ring polyfill across, and the floor
+    #: :meth:`zone_build_partitions` never goes below.
     #:
     #: The cross join is only 21,712 rows (16 rings x 1,357 aerodromes), so
     #: Spark's default parallelism gives it 8 or 9 tasks -- and row count is a
@@ -282,7 +287,26 @@ class AirportDetectionZoneGenerator:
     #: 2,000 partitions puts ~11 rows in a task, tens of megabytes rather than
     #: gigabytes. It costs more, shorter tasks, which is the right trade when
     #: the alternative is losing every executor.
-    ZONE_BUILD_PARTITIONS = 2000
+    ZONE_BUILD_PARTITIONS_FLOOR = 2000
+
+    @classmethod
+    def zone_build_partitions(cls, n_airports: int, n_rings: int = 16) -> int:
+        """Partitions for the ring polyfill, scaled to the build's size.
+
+        2,000 was tuned for 21,712 rows (16 rings x 1,357 aerodromes) to put
+        ~11 rows in a task -- see :attr:`ZONE_BUILD_PARTITIONS_FLOOR`. A
+        worldwide build has 5,280 aerodromes, 3.89x as many, and a fixed 2,000
+        would put 42 rows in a task: four times the memory that already
+        OOMKilled every executor at 2,400.
+
+        Row count is a terrible proxy for cost here -- each row carries an
+        *array* of cells and the outermost ring is ~98,250 of them -- so the
+        figure that matters is rows per task, not partitions. 2,000 is the
+        floor rather than the answer: it was right for 1,357 aerodromes, and
+        the worldwide build has 5,280.
+        """
+        want = math.ceil(n_airports * n_rings / cls.ZONE_ROWS_PER_TASK)
+        return max(cls.ZONE_BUILD_PARTITIONS_FLOOR, want)
 
     POLAR_LIMIT_DEG = 85.0
     """Beyond this latitude a circle is a cap, and H3 polygon fill has no cap.
@@ -513,6 +537,7 @@ class AirportDetectionZoneGenerator:
         """
         print("Loading airports...")
         airports_df = self._load_airports(airports_url, airports_df=airports_df)
+        n_airports = airports_df.count()
 
         print("Building ring configuration...")
         ring_config = self._build_ring_config()
@@ -524,9 +549,12 @@ class AirportDetectionZoneGenerator:
 
         # Spread the work before the polyfill, not after. Spark sizes tasks by
         # row count, and these rows are wildly uneven in cost -- see
-        # ZONE_BUILD_PARTITIONS. Repartitioning here is what keeps a task's
+        # zone_build_partitions. Repartitioning here is what keeps a task's
         # share of the 584 million cells inside the executor's memory.
-        airports_m = airports_m.repartition(self.ZONE_BUILD_PARTITIONS)
+        n_partitions = self.zone_build_partitions(n_airports, len(self.radii_nm))
+        print(f"  {n_airports:,} aerodromes x {len(self.radii_nm)} rings -> "
+              f"{n_partitions:,} partitions for the ring polyfill")
+        airports_m = airports_m.repartition(n_partitions)
 
         print(f"Generating H3 zones at resolution {self.resolution}...")
         sdf = (

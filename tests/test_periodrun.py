@@ -676,3 +676,65 @@ def test_every_statevector_write_partitions_by_day():
             "a statevector write without partition_by overwrites the whole "
             "table, discarding every other day in the ingest window"
         )
+
+
+# --- coverage plumbing -------------------------------------------------------
+
+def test_airspaces_are_skipped_worldwide():
+    """00c's sources are PRU Atlas ANSP/FIR parquets, which cover Europe only,
+    and opdi_h3_airspace_ref is read by nothing. Running it worldwide would
+    write a European table into a worldwide warehouse and cost cluster time for
+    a product with no consumer."""
+    from opdi.runner import reference_substeps_for_coverage
+    from opdi.config import OPDIConfig
+    world = reference_substeps_for_coverage(
+        OPDIConfig.for_environment("opensky", worldwide=True))
+    assert world["00c"] is False
+    europe = reference_substeps_for_coverage(OPDIConfig.for_environment("opensky"))
+    assert europe["00c"] is True
+
+
+def test_a_worldwide_period_run_does_not_default_to_the_european_prefix():
+    """periodrun overwrites config.project.warehouse_path with its own default,
+    which is the European prefix. Without this the --worldwide flag would be
+    silently discarded at the one entry point production actually uses."""
+    import inspect
+    from opdi.periodrun import run_period, DEFAULT_WAREHOUSE
+    assert DEFAULT_WAREHOUSE == "s3a://eurocontrol/opdi-prod"
+    assert inspect.signature(run_period).parameters["worldwide"].default is False
+    # Behavioural half: resolve the warehouse the way run_period does.
+    from opdi.config import OPDIConfig
+    world = OPDIConfig.for_environment("opensky", worldwide=True)
+    assert world.project.warehouse_path != DEFAULT_WAREHOUSE
+
+
+def test_a_worldwide_run_state_does_not_match_a_european_one(tmp_path):
+    """RunState.matches must distinguish coverage as well as window: a European
+    run's progress must never be read as a worldwide run's, or the reverse.
+    This has bitten before -- a stale weekrun_2026-06-01_1d.json once made a
+    run report five completed units and skip steps 02-04 entirely."""
+    from opdi.periodrun import RunState
+
+    s = RunState(path=tmp_path / "s.json", env="opensky", coverage="europe",
+                 start_date="2026-06-01", end_date="2026-06-07",
+                 completed={"01": {}})
+    assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "europe")
+    assert not s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "worldwide")
+
+
+def test_an_old_state_file_with_no_coverage_field_still_matches_europe(tmp_path):
+    """State files written before this field existed have no `coverage` key.
+    They described European runs -- worldwide did not exist yet -- so they
+    must keep matching a European re-invocation rather than refusing it."""
+    from opdi.periodrun import RunState
+
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({
+        "run_id": "R", "env": "opensky",
+        "start_date": "2026-06-01", "end_date": "2026-06-07",
+        "completed": {"01": {}},
+    }))
+    s = RunState.load(p)
+    assert s.coverage == ""
+    assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "europe")
+    assert not s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "worldwide")
