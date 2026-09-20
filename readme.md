@@ -276,8 +276,11 @@ config = OPDIConfig.for_environment("opensky", worldwide=True)
   `OOA`.
 - **The airport and reference-data footprint is much larger.** OurAirports
   lists 5,280 large + medium aerodromes worldwide against 1,357 inside the
-  European box, and `h3_airport_detection_zones` scales accordingly — on the
-  order of 125 M cells against Europe's ~32 M. The OSM aeroway extract needed
+  European box (both measured), and `h3_airport_detection_zones` scales
+  accordingly — **projected**, not yet measured, at the order of 125 M cells
+  against Europe's measured ~32 M (the aerodrome ratio applied to the
+  European cell count; the worldwide reference build has not completed, so
+  nobody has counted the real table). The OSM aeroway extract needed
   for step 00b's ground layouts is a planet-wide Geofabrik/Overpass pull,
   filtered down to aeroway geometry the same way the European extract is (see
   [Step 00b](#step-00b-airport-ground-layouts)) — 66.5 MB from a 94.86 GB
