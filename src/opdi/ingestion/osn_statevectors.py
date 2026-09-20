@@ -24,6 +24,11 @@ DECIMATION_MODULO = "modulo"
 DECIMATION_BUCKET = "bucket"
 
 
+#: Distinguishes "the caller said nothing" from "the caller said worldwide".
+#: ``None`` used to mean the first; worldwide needs it to mean the second.
+_UNSET = object()
+
+
 class StateVectorIngestion:
     """
     Handles ingestion of OpenSky Network state vectors from MinIO storage.
@@ -54,16 +59,13 @@ class StateVectorIngestion:
         "serials": "serials",
     }
 
-    # Default OPDI bounding box: SW=[lon, lat] NE=[lon, lat]
-    DEFAULT_BBOX: Tuple[float, float, float, float] = (-25.86653, 26.74617, 49.65699, 70.25976)
-
     def __init__(
         self,
         spark: SparkSession,
         config: OPDIConfig,
         local_download_path: str = "OPDI_live/data/ec-datadump",
         log_file_path: str = "OPDI_live/logs/01_osn_statevectors_etl.log",
-        bbox: Optional[Tuple[float, float, float, float]] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = _UNSET,
         time_interval: int = 5,
         decimation: Optional[str] = None,
     ):
@@ -75,9 +77,11 @@ class StateVectorIngestion:
             config: OPDI configuration object
             local_download_path: Local directory for temporary file downloads
             log_file_path: Path to file tracking processed files
-            bbox: Bounding box as (min_lon, min_lat, max_lon, max_lat).
-                  Defaults to OPDI European coverage area.
-                  Pass None to use the default, or False-y value to disable.
+            bbox: Bounding box as ``(min_lon, min_lat, max_lon, max_lat)``.
+                  Omit it to follow ``config.coverage.bbox`` -- the European
+                  box by default, ``None`` under ``worldwide=True``. Pass
+                  ``None`` explicitly to force worldwide regardless of the
+                  configuration; pass a tuple to force a specific box.
             time_interval: Thinning interval in seconds. Defaults to 5. Set to 1
                   to keep every row.
             decimation: Which thinning rule to apply. ``"modulo"`` (default)
@@ -92,7 +96,7 @@ class StateVectorIngestion:
         self.log_file_path = log_file_path
         self.project = config.project.project_name
         self.batch_size = config.ingestion.batch_size
-        self.bbox = bbox if bbox is not None else self.DEFAULT_BBOX
+        self.bbox = config.coverage.bbox if bbox is _UNSET else bbox
         self.time_interval = time_interval
         # None means "whatever the configuration says", so the rule is set in
         # one place rather than at every call site. An explicit argument still
