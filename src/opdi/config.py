@@ -5,10 +5,12 @@ Provides centralized configuration using dataclasses for project settings,
 Spark configurations, H3 parameters, and ingestion settings.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import List, Dict, Optional
 import os
+
+from opdi.coverage import EUROPE_BBOX, CoverageConfig
 
 
 def _load_dotenv() -> None:
@@ -1556,6 +1558,46 @@ class SegmentationConfig:
     """Altitude a descent must reach before a following climb is a new sortie (feet)."""
 
 
+#: The opensky environment's warehouse path before OPDI_WAREHOUSE is applied.
+#:
+#: Hoisted out of the opensky branch of `for_environment` so the worldwide
+#: switch can reach the *declared* default without going through the
+#: environment-resolved `config.project.warehouse_path` -- see
+#: `_worldwide_warehouse`.
+_OPENSKY_DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi"
+
+
+def _worldwide_warehouse(env: str, declared_warehouse_path: str) -> str:
+    """Where a worldwide run writes.
+
+    ``OPDI_WAREHOUSE_WORLD`` wins; otherwise the environment's declared
+    warehouse path with its last segment suffixed ``-world``.
+
+    **``OPDI_WAREHOUSE`` is deliberately not consulted.** That variable is how
+    production points the pipeline at the European prefix, so it is exported in
+    the shell an operator would most likely run a worldwide experiment from. If
+    it steered worldwide runs too, ``--worldwide`` would silently append
+    planet-wide rows to ``opdi-prod`` -- the exact outcome the separate table
+    set exists to prevent. Task 6's coverage marker is the second line of
+    defence behind this one.
+
+    For ``opensky`` specifically, "declared" cannot mean
+    ``config.project.warehouse_path``: by the time this function runs, that
+    value has already absorbed ``OPDI_WAREHOUSE`` (see the opensky branch of
+    `OPDIConfig.for_environment`), so consulting it here would let
+    ``OPDI_WAREHOUSE`` leak into the worldwide prefix through the back door.
+    The worldwide suffix is therefore always applied to
+    `_OPENSKY_DEFAULT_WAREHOUSE` for that environment, never to the
+    environment-resolved value; the other environments have no such override
+    to worry about, so their own declared path is used directly.
+    """
+    override = os.environ.get("OPDI_WAREHOUSE_WORLD")
+    if override:
+        return override
+    base = _OPENSKY_DEFAULT_WAREHOUSE if env == "opensky" else declared_warehouse_path
+    return base.rstrip("/") + "-world"
+
+
 @dataclass
 class OPDIConfig:
     """Main OPDI configuration container."""
@@ -1568,21 +1610,26 @@ class OPDIConfig:
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     events: EventConfig = field(default_factory=EventConfig)
     segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
+    coverage: CoverageConfig = field(default_factory=CoverageConfig)
 
     @classmethod
-    def for_environment(cls, env: str = "dev") -> "OPDIConfig":
+    def for_environment(cls, env: str = "dev", worldwide: bool = False) -> "OPDIConfig":
         """
         Create configuration for specific environment.
 
         Args:
-            env: Environment name ("dev", "live", or "local")
+            env: Environment name ("dev", "live", "local", or "opensky")
+            worldwide: Drop the coverage bounding box and route output to the
+                worldwide warehouse. **Off by default, and that is the point**
+                -- the European box is a published contract and every existing
+                caller must keep getting it without saying so.
 
         Returns:
             OPDIConfig instance with environment-specific settings
         """
         if env == "live":
             # Production environment settings
-            return cls(
+            config = cls(
                 project=ProjectConfig(
                     project_name="project_opdi",
                     warehouse_path="abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged",
@@ -1598,7 +1645,7 @@ class OPDIConfig:
             )
         elif env == "dev":
             # Development environment settings
-            return cls(
+            config = cls(
                 project=ProjectConfig(
                     project_name="project_opdi",
                     warehouse_path="abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/opdi.db/unmanaged",
@@ -1615,7 +1662,7 @@ class OPDIConfig:
             )
         elif env == "local":
             # Local testing environment
-            return cls(
+            config = cls(
                 project=ProjectConfig(
                     project_name="opdi_local",
                     warehouse_path="./data/warehouse",
@@ -1633,7 +1680,7 @@ class OPDIConfig:
             )
         elif env == "opensky":
             # OpenSky Network S3 environment (read-only access to state vectors)
-            return cls(
+            config = cls(
                 project=ProjectConfig(
                     project_name="opensky",
                     # One knob isolates every table this environment reads or
@@ -1643,7 +1690,7 @@ class OPDIConfig:
                     # touching a production table, which is what makes a
                     # from-scratch rebuild safe to attempt.
                     warehouse_path=os.environ.get(
-                        "OPDI_WAREHOUSE", "s3a://eurocontrol/opdi"),
+                        "OPDI_WAREHOUSE", _OPENSKY_DEFAULT_WAREHOUSE),
                     hadoop_filesystem="",
                 ),
                 spark=SparkConfig(
@@ -1689,6 +1736,14 @@ class OPDIConfig:
             )
         else:
             raise ValueError(f"Unknown environment: {env}. Use 'dev', 'live', 'local', or 'opensky'.")
+
+        if worldwide:
+            config.coverage = CoverageConfig(bbox=None)
+            config.project = replace(
+                config.project,
+                warehouse_path=_worldwide_warehouse(env, config.project.warehouse_path),
+            )
+        return config
 
     @classmethod
     def default(cls) -> "OPDIConfig":
