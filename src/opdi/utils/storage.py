@@ -9,6 +9,7 @@ tables are stored as parquet directories on S3.
 from typing import Any, Mapping, Optional, Sequence
 
 from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import functions as F
 from opdi.config import OPDIConfig
 
 
@@ -199,7 +200,13 @@ class StorageManager:
                 if partition_by:
                     df.writeTo(qualified).overwritePartitions()
                 else:
-                    df.writeTo(qualified).overwrite()
+                    # PySpark's DataFrameWriterV2.overwrite() takes a required
+                    # `condition` -- there is no zero-arg form, in any version
+                    # this repo has run against. lit(True) is "replace
+                    # everything", which is what an unpartitioned overwrite
+                    # means here; omitting the argument is not a default, it
+                    # is a TypeError raised before any write happens.
+                    df.writeTo(qualified).overwrite(F.lit(True))
             else:
                 df.write.mode("overwrite").insertInto(f"{self.project}.{table_name}")
 
