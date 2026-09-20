@@ -127,6 +127,49 @@ INGEST_LOOKAHEAD_DAYS = 2
 #: one knob redirects the entire pipeline.
 DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi-prod"
 
+#: Distinguishes "the caller said nothing" from "the caller explicitly passed
+#: the string that happens to equal ``DEFAULT_WAREHOUSE``". Only the first
+#: should follow coverage; the second is a caller who named that exact prefix
+#: and meant it. Same pattern as ``ingestion.osn_statevectors._UNSET``, for
+#: the same reason: a sentinel value, not a comparison against the default
+#: itself, is the only thing that can tell the two apart.
+_UNSET = object()
+
+
+def _resolve_warehouse(
+    warehouse,
+    worldwide: bool,
+    worldwide_warehouse: str,
+    default: str = DEFAULT_WAREHOUSE,
+) -> str:
+    """Which warehouse prefix a period run actually writes to.
+
+    Pure and Spark-free on purpose, so the coverage guard this exists to
+    enforce -- worldwide data must never land in ``opdi-prod`` by default --
+    is directly unit-testable without stubbing the rest of ``run_period``.
+
+    Args:
+        warehouse: What the caller passed for ``warehouse``, or ``_UNSET`` if
+            they passed nothing (``run_period``'s own default).
+        worldwide: Whether this run has dropped the European bounding box.
+        worldwide_warehouse: The warehouse ``OPDIConfig.for_environment``
+            resolved for ``worldwide=True`` in this environment -- used only
+            when ``warehouse`` is unset and ``worldwide`` is true.
+        default: What an unset, non-worldwide ``warehouse`` resolves to.
+
+    An explicit ``warehouse`` -- including one that happens to equal
+    ``default`` -- always wins outright, because the caller named a prefix
+    and meant it. Comparing ``warehouse == default`` instead of using a
+    sentinel could not distinguish that case from "the caller said nothing",
+    so an explicitly-passed ``default`` would have been silently overridden
+    under ``worldwide=True`` -- exactly the bug this function exists to
+    close.
+    """
+    if warehouse is not _UNSET:
+        return warehouse
+    return worldwide_warehouse if worldwide else default
+
+
 #: Steps available but not run by default. Export and statistics are
 #: publication actions; a test period should be inspected before anything is
 #: published from it.
@@ -611,7 +654,7 @@ def run_period(
     executors: Optional[int] = None,
     skip_preflight: bool = False,
     dry_run: bool = False,
-    warehouse: str = DEFAULT_WAREHOUSE,
+    warehouse: str = _UNSET,
     allow_existing: bool = False,
     worldwide: bool = False,
 ) -> int:
@@ -638,16 +681,19 @@ def run_period(
         skip_preflight: Do not check the reference tables. For when a
             reference table is known-missing and the run is deliberate.
         dry_run: Report the plan and exit without creating a session.
-        warehouse: Prefix every table is resolved against. Defaults to a
-            prefix separate from the published one, so a run neither reads
-            nor damages published data.
+        warehouse: Prefix every table is resolved against. Omit it (the
+            default is the ``_UNSET`` sentinel, not a literal string) to get
+            ``DEFAULT_WAREHOUSE`` -- or, under ``worldwide=True``, the
+            worldwide warehouse instead. Pass any string, including one that
+            happens to equal ``DEFAULT_WAREHOUSE``, to pin that exact prefix
+            regardless of coverage; see :func:`_resolve_warehouse`.
         allow_existing: Proceed even though the warehouse prefix already holds
             objects. Off by default: a rebuild that silently merged with a
             previous attempt's output would produce a table nobody could date.
         worldwide: Drop the published European bounding box. Off by default.
-            When on, and ``warehouse`` was left at its default, the *default*
-            follows coverage to the worldwide warehouse instead of
-            ``opdi-prod`` -- an explicitly-passed ``warehouse`` still wins.
+            When on, and ``warehouse`` was left unset, the default follows
+            coverage to the worldwide warehouse instead of ``opdi-prod`` --
+            an explicitly-passed ``warehouse`` still wins, always.
     """
     from opdi.config import OPDIConfig
     from opdi.runner import STEPS, reference_substeps_for_coverage
@@ -733,14 +779,13 @@ def run_period(
     todo = [u for u in units if force or _key(*u) not in state.completed]
     done = [u for u in units if u not in todo]
 
-    # `warehouse` defaults to the European prefix (`DEFAULT_WAREHOUSE`), so a
-    # worldwide run that did not name one explicitly would land there --
+    # An unset `warehouse` defaults to the European prefix (`DEFAULT_WAREHOUSE`),
+    # so a worldwide run that did not name one explicitly would land there --
     # silently discarding `--worldwide` at the one entry point production
-    # actually uses. The default must follow the coverage; an explicitly
-    # passed warehouse still wins, because a caller who named a prefix means
-    # it.
-    if worldwide and warehouse == DEFAULT_WAREHOUSE:
-        warehouse = config.project.warehouse_path   # set by for_environment
+    # actually uses. `_resolve_warehouse` makes the default follow coverage
+    # while an explicitly passed warehouse -- even one spelled identically to
+    # `DEFAULT_WAREHOUSE` -- always wins.
+    warehouse = _resolve_warehouse(warehouse, worldwide, config.project.warehouse_path)
     # Before anything reads it. StorageManager resolves every table name
     # against this, so setting it here redirects reference tables, intermediate
     # tables and outputs together -- there is no second place a stale prefix

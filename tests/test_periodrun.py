@@ -708,6 +708,73 @@ def test_a_worldwide_period_run_does_not_default_to_the_european_prefix():
     assert world.project.warehouse_path != DEFAULT_WAREHOUSE
 
 
+# --- _resolve_warehouse ------------------------------------------------------
+#
+# The behavioural half of the DEFAULT_WAREHOUSE leak lives in this pure
+# function, extracted specifically so the guard is testable without stubbing
+# all of run_period's dependencies (a Spark session, a state file, a
+# warehouse to preflight). `test_a_worldwide_period_run_does_not_default_to_
+# the_european_prefix` above only pins config.py's OPDIConfig.for_environment
+# behaviour, already covered by test_coverage_config.py -- it never calls
+# into periodrun.py at all, so the guard itself needed its own tests.
+
+def test_resolve_warehouse_follows_coverage_when_omitted_worldwide():
+    """Caller omitted `warehouse`, `worldwide=True` -> the worldwide path."""
+    from opdi.periodrun import _resolve_warehouse, _UNSET
+    assert _resolve_warehouse(
+        _UNSET, True, "s3a://eurocontrol/opdi-world"
+    ) == "s3a://eurocontrol/opdi-world"
+
+
+def test_resolve_warehouse_defaults_to_opdi_prod_when_omitted_european():
+    """Caller omitted `warehouse`, `worldwide=False` -> DEFAULT_WAREHOUSE,
+    unchanged from before this function existed."""
+    from opdi.periodrun import _resolve_warehouse, _UNSET, DEFAULT_WAREHOUSE
+    assert _resolve_warehouse(
+        _UNSET, False, "s3a://eurocontrol/opdi-world"
+    ) == DEFAULT_WAREHOUSE
+
+
+def test_resolve_warehouse_an_explicit_value_wins_worldwide():
+    """Caller passed an explicit warehouse, `worldwide=True` -> the caller's
+    value wins, even though it is not the worldwide path for this env."""
+    from opdi.periodrun import _resolve_warehouse
+    assert _resolve_warehouse(
+        "s3a://eurocontrol/scratch", True, "s3a://eurocontrol/opdi-world"
+    ) == "s3a://eurocontrol/scratch"
+
+
+def test_resolve_warehouse_an_explicit_value_wins_european():
+    """Caller passed an explicit warehouse, `worldwide=False` -> the caller's
+    value wins, unchanged from before this function existed."""
+    from opdi.periodrun import _resolve_warehouse
+    assert _resolve_warehouse(
+        "s3a://eurocontrol/scratch", False, "s3a://eurocontrol/opdi-world"
+    ) == "s3a://eurocontrol/scratch"
+
+
+def test_resolve_warehouse_an_explicit_default_lookalike_still_wins():
+    """The bug this function exists to close: a caller who explicitly passed
+    the exact string DEFAULT_WAREHOUSE, under worldwide=True, must not have
+    it silently overridden by the worldwide path. A bare `warehouse ==
+    DEFAULT_WAREHOUSE` comparison cannot tell that apart from "the caller
+    said nothing" -- only the _UNSET sentinel can, which is why the default
+    changed from a literal to the sentinel."""
+    from opdi.periodrun import _resolve_warehouse, DEFAULT_WAREHOUSE
+    assert _resolve_warehouse(
+        DEFAULT_WAREHOUSE, True, "s3a://eurocontrol/opdi-world"
+    ) == DEFAULT_WAREHOUSE
+
+
+def test_run_period_still_defaults_the_warehouse_parameter_to_unset():
+    """Pins the signature change itself: an unset `warehouse` must be the
+    sentinel, not the literal DEFAULT_WAREHOUSE, or the lookalike case above
+    could never be reached from a real call."""
+    import inspect
+    from opdi.periodrun import run_period, _UNSET
+    assert inspect.signature(run_period).parameters["warehouse"].default is _UNSET
+
+
 def test_a_worldwide_run_state_does_not_match_a_european_one(tmp_path):
     """RunState.matches must distinguish coverage as well as window: a European
     run's progress must never be read as a worldwide run's, or the reverse.
