@@ -16,6 +16,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import functions as F
 from pyspark.sql.functions import udf, col, lit, array_except, explode
 from pyspark.sql.types import (
     StructType,
@@ -224,7 +225,15 @@ def generate_circle_polygon(
             math.cos(distance_rad) - math.sin(lat_rad) * math.sin(lat_new_rad),
         )
 
-        return [math.degrees(lon_new_rad), math.degrees(lat_new_rad)]
+        # Normalised to [-180, 180], the same as
+        # `utils.geospatial.destination_point` already does. Without this a
+        # circle near the dateline returns vertices past 180, which H3 does not
+        # read as wrapped longitudes -- it silently drops the cells beyond the
+        # meridian. Measured at longitude 179.9: 14,986 cells instead of
+        # 27,694, no error raised. H3's own transmeridian handling is correct
+        # on normalised input, so nothing else needs to change.
+        lon_new = ((math.degrees(lon_new_rad) + 180.0) % 360.0) - 180.0
+        return [lon_new, math.degrees(lat_new_rad)]
 
     points = [
         calculate_point(lon, lat, radius_km, (360 / num_points) * i)
@@ -274,6 +283,16 @@ class AirportDetectionZoneGenerator:
     #: gigabytes. It costs more, shorter tasks, which is the right trade when
     #: the alternative is losing every executor.
     ZONE_BUILD_PARTITIONS = 2000
+
+    POLAR_LIMIT_DEG = 85.0
+    """Beyond this latitude a circle is a cap, and H3 polygon fill has no cap.
+
+    One aerodrome is affected in the whole OurAirports large+medium set: NZSP
+    (Amundsen-Scott, latitude -90.0). The five above 75N are all fine -- a
+    110 NM ring from 82.5N reaches only 84.3N. Excluded rather than built,
+    because a cap built as a band is a zone claiming to cover somewhere it does
+    not, and no join would report it.
+    """
 
     AIRPORT_SCHEMA = StructType([
         StructField("id", StringType(), True),
@@ -339,20 +358,30 @@ class AirportDetectionZoneGenerator:
     def filter_airports(self, sdf: DataFrame) -> DataFrame:
         """Aerodromes this coverage builds zones for.
 
-        Type first, then geography. Both filters must be here: the type filter
-        alone once widened the candidate set tenfold and OOM'd every executor,
-        and the geography filter alone is what this task exists to make follow
-        configuration.
+        Type first, then geography, then latitude. All three must be here: the
+        type filter alone once widened the candidate set tenfold and OOM'd
+        every executor, the geography filter is what follows configuration,
+        and the latitude filter is what keeps a pole out of a polygon fill
+        that cannot express one.
         """
         cov = self.config.coverage
-        return sdf.filter(
-            col("type").isin(list(cov.airport_types))
+        kept = sdf.filter(
+            F.col("type").isin(list(cov.airport_types))
             & cov.spark_filter(
-                col("latitude_deg").cast("double"),
-                col("longitude_deg").cast("double"),
+                F.col("latitude_deg").cast("double"),
+                F.col("longitude_deg").cast("double"),
                 offset=True,
             )
         )
+        polar = F.abs(F.col("latitude_deg")) > F.lit(self.POLAR_LIMIT_DEG)
+        # Counted and named, never silent. An aerodrome that vanishes from a
+        # reference table with no log line is indistinguishable from one OSM
+        # never mapped, and the two need completely different responses.
+        excluded = [r.ident for r in kept.filter(polar).select("ident").collect()]
+        if excluded:
+            print(f"  Excluded {len(excluded)} aerodrome(s) beyond "
+                  f"{self.POLAR_LIMIT_DEG:g} deg latitude: {', '.join(excluded)}")
+        return kept.filter(~polar)
 
     def cell_filter(self, lat_col, lon_col):
         """Which generated cells are kept, by their centre.

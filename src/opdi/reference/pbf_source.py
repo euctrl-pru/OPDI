@@ -332,6 +332,19 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
     out.loc[miss, "lon_max"] = out.loc[miss, "apt_lon"] + [
         _deg_lon(FALLBACK_HALF_KM, v) for v in out.loc[miss, "apt_lat"]
     ]
+
+    # An aerodrome whose padded box crosses the antimeridian gets an inverted
+    # longitude interval, and `between` on an inverted interval matches nothing
+    # -- the aerodrome silently gets no geometry, which looks exactly like an
+    # aerodrome OSM never mapped. No large or medium aerodrome has runways
+    # actually crossing 180, so widening to the full range costs a handful of
+    # extra candidate features and cannot lose any.
+    wrapped = out["lon_min"] > out["lon_max"]
+    if wrapped.any():
+        print(f"  {int(wrapped.sum())} aerodrome box(es) cross the antimeridian; "
+              "widening their longitude range to the full circle.")
+        out.loc[wrapped, "lon_min"] = -180.0
+        out.loc[wrapped, "lon_max"] = 180.0
     return out
 
 
