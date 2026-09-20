@@ -89,6 +89,27 @@ def test_the_zone_airport_filter_follows_coverage(spark, worldwide, expect):
     assert got == expect, "small_airport must be excluded in both modes"
 
 
+def test_the_offset_asymmetry_between_filter_airports_and_cell_filter_is_pinned(spark):
+    """`filter_airports` uses the coverage box plus a 3-degree offset;
+    `cell_filter` uses the bare box. Deliberate -- ingestion clips state
+    vectors to the bare box, so a cell in the margin can never match one --
+    and arrived at by reverting a change that would have altered a published
+    European reference table. Every other `cell_filter` test above runs
+    worldwide, where the offset is irrelevant, so nothing pins this under
+    European coverage; a future "unification" to `offset=True` everywhere
+    would pass the whole suite while silently adding unselectable rows to a
+    published table."""
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
+    gen = AirportDetectionZoneGenerator(spark, OPDIConfig.for_environment("opensky"))
+    apt = spark.createDataFrame(
+        [("MARGIN", "large_airport", 71.5, 20.0)],  # 1.24 deg past max_lat=70.25976
+        "ident string, type string, latitude_deg double, longitude_deg double",
+    )
+    assert {r.ident for r in gen.filter_airports(apt).collect()} == {"MARGIN"}
+    cells = spark.createDataFrame([(71.5, 20.0)], "lat double, lon double")
+    assert cells.filter(gen.cell_filter(F.col("lat"), F.col("lon"))).count() == 0
+
+
 def test_the_cell_centre_filter_follows_coverage_too(spark):
     """The sixth copy, and the one that would have made the other five look
     ineffective: `prepare_for_flight_list_spark` filters the H3 cells, so a

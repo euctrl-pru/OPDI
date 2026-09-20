@@ -429,6 +429,15 @@ def resolve_pbf_path(config) -> Optional[str]:
     )
 
 
+#: Degrees added to ``EUROPE_BBOX`` before checking a worldwide-configured
+#: extract for out-of-Europe aerodrome geometry (see
+#: ``preflight_fresh_build``). Covers legitimate "greater Europe" outliers a
+#: real European regional extract ships (Svalbard, the Azores) so they are
+#: not mistaken for evidence of worldwide coverage; measured worst case 8.67
+#: degrees against ``aeroway-europe.osm.pbf``.
+_GREATER_EUROPE_MARGIN_DEG = 10.0
+
+
 def preflight_fresh_build(config) -> List[str]:
     """Problems that would make a from-scratch reference build fail or lie.
 
@@ -446,6 +455,46 @@ def preflight_fresh_build(config) -> List[str]:
         )
     elif not Path(pbf).exists():
         problems.append(f"the configured OSM extract does not exist: {pbf}")
+    elif getattr(getattr(config, "coverage", None), "is_worldwide", False):
+        # A worldwide run pointed at a European-only extract would build
+        # worldwide detection zones and a worldwide runway grid (both from
+        # ``oa_airports``/``oa_runways``, not the extract) but European-only
+        # ground layouts (00b, the only substep this file drives) -- every
+        # aerodrome outside Europe then has no geometry, indistinguishable
+        # from "OSM never mapped it", a documented normal outcome. Caught
+        # here rather than left to be discovered after hours of build: one
+        # aerodrome outside the box is enough, so this stops at the first
+        # match rather than reading the whole file.
+        #
+        # The check is against ``EUROPE_BBOX`` widened by
+        # ``_GREATER_EUROPE_MARGIN_DEG``, not the bare box. Geofabrik's own
+        # "europe" regional extract -- the real file this guard exists to
+        # catch -- legitimately ships aerodromes outside the strict box:
+        # Svalbard/Jan Mayen (up to 8.67 degrees past ``max_lat``) and the
+        # Azores (past ``min_lon``). Measured directly against
+        # ``aeroway-europe.osm.pbf``: 17 of 7,263 aerodromes sit outside the
+        # bare box, worst excursion 8.67 degrees (Ny-Alesund, Svalbard). A
+        # bare-box check would treat that legitimate European extract as
+        # already worldwide and never report a problem -- the false negative
+        # this guard exists to prevent, just moved one level down. 10
+        # degrees clears every measured legitimate excursion with margin to
+        # spare, while a genuinely worldwide extract's nearest non-European
+        # aerodrome (confirmed against ``aeroway-planet.osm.pbf``: Sydney,
+        # ~100 degrees of longitude away) is nowhere near it.
+        from opdi.coverage import EUROPE_BBOX
+        from opdi.reference.pbf_source import pbf_has_aerodrome_outside_bbox
+
+        min_lon, min_lat, max_lon, max_lat = EUROPE_BBOX
+        d = _GREATER_EUROPE_MARGIN_DEG
+        greater_europe = (min_lon - d, min_lat - d, max_lon + d, max_lat + d)
+        if not pbf_has_aerodrome_outside_bbox(pbf, greater_europe):
+            problems.append(
+                f"worldwide coverage is configured, but the OSM extract at "
+                f"{pbf} has no aerodrome outside the European box -- it "
+                "looks like a European-only extract. A worldwide run built "
+                "from it would silently have no ground layouts (stands, "
+                "taxiways, aprons) for every aerodrome outside Europe."
+            )
     return problems
 
 

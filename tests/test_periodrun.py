@@ -7,6 +7,7 @@ still need running, and whether a state file describes the window being asked
 for. Those are the decisions that cost a week of cluster time when wrong.
 """
 import json
+import os
 
 import pytest
 
@@ -278,9 +279,16 @@ class _H3Cfg:
         self.airport_layout_pbf_path = path
 
 
+class _CoverageStub:
+    def __init__(self, is_worldwide):
+        self.is_worldwide = is_worldwide
+
+
 class _Cfg:
-    def __init__(self, path=None):
+    def __init__(self, path=None, coverage=None):
         self.h3 = _H3Cfg(path)
+        if coverage is not None:
+            self.coverage = coverage
 
 
 def test_the_environment_overrides_the_configured_extract(monkeypatch):
@@ -326,6 +334,93 @@ def test_a_real_extract_passes(monkeypatch, tmp_path):
     pbf = tmp_path / "aeroway.osm.pbf"
     pbf.write_bytes(b"not really a pbf, but it exists")
     assert preflight_fresh_build(_Cfg(str(pbf))) == []
+
+
+def _write_osm(path, body):
+    path.write_text(
+        "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\">\n"
+        + body + "\n</osm>\n"
+    )
+    return str(path)
+
+
+def test_european_coverage_does_not_run_the_worldwide_extract_check(monkeypatch, tmp_path):
+    """The European path must be unaffected: no new work, no new failure
+    mode, when coverage is not worldwide -- even against an extract that
+    (like this one) has no aerodrome at all."""
+    from opdi.periodrun import preflight_fresh_build
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    pbf = _write_osm(tmp_path / "aeroway.osm", "")
+    cfg = _Cfg(pbf, coverage=_CoverageStub(is_worldwide=False))
+    assert preflight_fresh_build(cfg) == []
+
+
+def test_worldwide_coverage_against_a_european_only_extract_is_a_preflight_problem(
+    monkeypatch, tmp_path
+):
+    """A `--worldwide` run pointed at `aeroway-europe.osm.pbf` would build
+    worldwide detection zones and a worldwide runway grid but European-only
+    ground layouts, and every aerodrome outside Europe would silently get no
+    geometry -- indistinguishable from OSM never having mapped it."""
+    from opdi.periodrun import preflight_fresh_build
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    pbf = _write_osm(
+        tmp_path / "aeroway.osm",
+        """
+  <node id="1" lat="49.000" lon="6.000">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="ELLX"/>
+  </node>""",
+    )
+    cfg = _Cfg(pbf, coverage=_CoverageStub(is_worldwide=True))
+    problems = preflight_fresh_build(cfg)
+    assert len(problems) == 1
+    assert pbf in problems[0]
+
+
+def test_worldwide_coverage_against_a_worldwide_extract_passes(monkeypatch, tmp_path):
+    from opdi.periodrun import preflight_fresh_build
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    pbf = _write_osm(
+        tmp_path / "aeroway.osm",
+        """
+  <node id="1" lat="49.000" lon="6.000">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="ELLX"/>
+  </node>
+  <node id="2" lat="-33.946" lon="151.177">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="YSSY"/>
+  </node>""",
+    )
+    cfg = _Cfg(pbf, coverage=_CoverageStub(is_worldwide=True))
+    assert preflight_fresh_build(cfg) == []
+
+
+_PLANET_PBF = "/home/jupyter/work/osm/aeroway-planet.osm.pbf"
+_EUROPE_PBF = "/home/jupyter/work/osm/aeroway-europe.osm.pbf"
+
+
+@pytest.mark.skipif(
+    not (os.path.exists(_PLANET_PBF) and os.path.exists(_EUROPE_PBF)),
+    reason="real OSM extracts not present on this machine",
+)
+def test_real_extracts_are_told_apart_by_the_worldwide_check(monkeypatch):
+    """The synthetic fixtures above exercise the logic; this confirms it
+    against the actual extracts the branch was built and blocked on."""
+    from opdi.periodrun import preflight_fresh_build
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    worldwide_cfg = _CoverageStub(is_worldwide=True)
+
+    problems = preflight_fresh_build(_Cfg(_EUROPE_PBF, coverage=worldwide_cfg))
+    assert len(problems) == 1
+    assert _EUROPE_PBF in problems[0]
+
+    assert preflight_fresh_build(_Cfg(_PLANET_PBF, coverage=worldwide_cfg)) == []
 
 
 # --- the day loop -----------------------------------------------------------

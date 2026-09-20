@@ -7,8 +7,6 @@ dataset whose track_id contract says Europe.
 """
 from pathlib import Path
 
-import pytest
-
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
 

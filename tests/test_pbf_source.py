@@ -272,7 +272,13 @@ def test_node_mapped_parking_position_becomes_a_point(tmp_path):
 
 # --- Aerodrome assignment ---------------------------------------------------
 
-from opdi.reference.pbf_source import PbfLayoutSource, airport_boxes, read_aerodromes
+from opdi.reference.pbf_source import (
+    BOX_MARGIN_KM,
+    PbfLayoutSource,
+    _deg_lon,
+    airport_boxes,
+    read_aerodromes,
+)
 
 
 class _Storage:
@@ -308,6 +314,89 @@ def test_a_box_is_built_from_the_runway_extent(spark):
     ellx = boxes.loc["ELLX"]
     assert ellx.lat_min < 49.6200 and ellx.lat_max > 49.6266
     assert ellx.lon_min < 6.1867 and ellx.lon_max > 6.2247
+
+
+class _AntimeridianStorage:
+    """A single aerodrome whose runway thresholds sit close enough to 180E
+    that padding by `BOX_MARGIN_KM` pushes `lon_max` past +180, without ever
+    inverting `lon_min > lon_max`."""
+
+    def __init__(self, spark):
+        self._t = {
+            "oa_airports": spark.createDataFrame(
+                [("TEST", 0.0, 179.995, "large_airport")],
+                "ident string, latitude_deg double, longitude_deg double, type string",
+            ),
+            "oa_runways": spark.createDataFrame(
+                [("TEST", 0.0, 179.990, 0.0, 179.999)],
+                "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
+                "he_latitude_deg double, he_longitude_deg double",
+            ),
+        }
+
+    def table_exists(self, name):
+        return name in self._t
+
+    def read_table(self, name):
+        return self._t[name]
+
+
+def test_a_box_past_180_is_widened_to_the_full_circle(spark, capsys):
+    """The padded box (threshold at 179.999E + BOX_MARGIN_KM=1.5km pad, which
+    is ~0.0135deg at the equator) lands at lon_max ~= 180.0125 -- past +180,
+    but with lon_min (~179.9765) still less than lon_max, so the old
+    `lon_min > lon_max` predicate never fired on it. `between(lon_min, lon_max)`
+    on a bound past 180 cannot match the wrapped-around side, so without
+    widening this aerodrome would silently get no geometry."""
+    # Independent of `airport_boxes` itself: confirm the fixture's raw
+    # threshold + margin actually crosses 180, so the test exercises the
+    # real condition rather than an artefact of the widening it is meant to
+    # detect.
+    raw_lon_max = 179.999 + _deg_lon(BOX_MARGIN_KM, 0.0)
+    assert raw_lon_max > 180.0, "fixture must actually push the bound past 180"
+
+    boxes = airport_boxes(_AntimeridianStorage(spark)).set_index("ident")
+    test = boxes.loc["TEST"]
+    assert test.lon_min == -180.0
+    assert test.lon_max == 180.0
+    assert "antimeridian" in capsys.readouterr().out
+
+
+# --- Outside-bbox detection for a worldwide-vs-European extract check ------
+
+from opdi.reference.pbf_source import pbf_has_aerodrome_outside_bbox
+
+_EUROPE_BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)
+
+
+def test_no_aerodrome_outside_the_box_returns_false(tmp_path):
+    pbf = _write_osm(
+        tmp_path,
+        "eu_only.osm",
+        """
+  <node id="1" lat="49.6233" lon="6.2044">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="ELLX"/>
+  </node>""",
+    )
+    assert pbf_has_aerodrome_outside_bbox(pbf, _EUROPE_BBOX) is False
+
+
+def test_an_aerodrome_outside_the_box_returns_true(tmp_path):
+    pbf = _write_osm(
+        tmp_path,
+        "mixed.osm",
+        """
+  <node id="1" lat="49.6233" lon="6.2044">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="ELLX"/>
+  </node>
+  <node id="2" lat="-33.9461" lon="151.1772">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="YSSY"/>
+  </node>""",
+    )
+    assert pbf_has_aerodrome_outside_bbox(pbf, _EUROPE_BBOX) is True
 
 
 @needs_luxembourg

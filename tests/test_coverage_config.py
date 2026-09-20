@@ -1,5 +1,4 @@
 """The coverage switch: one box, two modes, and a default that must not move."""
-import pytest
 from pyspark.sql import functions as F
 
 from opdi.config import OPDIConfig

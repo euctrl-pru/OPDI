@@ -233,12 +233,23 @@ See `notebooks/opensky_quickstart.ipynb` for a ready-to-run notebook.
 By default OPDI covers a published European bounding box
 (`opdi.coverage.EUROPE_BBOX`) — the box every released `track_id` and every
 detection study was tuned inside. Passing one flag drops it and runs
-worldwide instead:
+worldwide instead. **Use `run_period.py` for a real worldwide run** — it is
+the only one of these that attaches to the Kubernetes cluster
+(`create_session(..., distributed=True)`, see above); a worldwide build
+needs it, and running local-only against network-wide traffic is what cost
+the first worldwide reference build its first attempt:
 
 ```bash
-opdi run --env opensky --worldwide --start 2026-06-01 --end 2026-06-02
-python opdi.py --worldwide --start 2026-06-01 --end 2026-06-02
-python run_period.py --start 2026-06-01 --worldwide   # the cluster path, see above
+python run_period.py --start 2026-06-01 --worldwide   # the cluster path -- use this
+```
+
+`opdi run` and `python opdi.py` accept `--worldwide` too, but both are
+**local-driver-only** (see above) and cannot perform a real worldwide run —
+fine for a single day against one aerodrome, not for network-wide traffic:
+
+```bash
+opdi run --env opensky --worldwide --start 2026-06-01 --end 2026-06-02   # local-only
+python opdi.py --worldwide --start 2026-06-01 --end 2026-06-02           # local-only
 ```
 
 or programmatically:
@@ -289,8 +300,13 @@ config = OPDIConfig.for_environment("opensky", worldwide=True)
   2.73× over three hours of 2026-06-01: 1.95× at 06Z, rising to 3.86× at 18Z
   as the Americas wake up and Europe winds down — well below the 3.89×
   airport-count ratio, because OpenSky's own receiver network is
-  Europe-heavy). Budget storage accordingly; a single worldwide day has been
-  projected at 10–20 GB before events.
+  Europe-heavy). Budget storage accordingly; a single worldwide day is
+  **projected** at ~23 GB before events — the 11-day European campaign's
+  per-day storage (statevectors, tracks, clean tracks) scaled by the
+  measured 2.73× row ratio: 2.7 + 10.6 + 9.8 GB. This supersedes an earlier
+  10–20 GB estimate, which undercounted; the worldwide run is currently
+  blocked on a bucket quota, so planning against too small a number is a live
+  risk, not a hypothetical one.
 
 **Worldwide output is not comparable to published European data**, and not
 only because it lives in a different warehouse. There is no ground truth to

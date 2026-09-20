@@ -254,6 +254,55 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
 
+def pbf_has_aerodrome_outside_bbox(pbf_path: str, bbox) -> bool:
+    """True as soon as an ``aeroway=aerodrome`` object outside *bbox* is found.
+
+    *bbox* is ``(min_lon, min_lat, max_lon, max_lat)``.
+
+    Exists for ``periodrun.preflight_fresh_build``: a worldwide run pointed at
+    a European-only extract would build worldwide detection zones and a
+    worldwide runway grid but European-only ground layouts, and every
+    aerodrome outside Europe would then have no geometry -- indistinguishable
+    from "OSM never mapped it", a documented normal outcome. One aerodrome
+    outside the box is enough to prove the extract is not European-only, so
+    this stops at the first match rather than reading the whole file.
+
+    ``with_locations()`` gives node coordinates directly and lets a way's
+    first referenced node stand in for the way's location -- cheap compared
+    to assembling its full polygon (``read_aerodromes``), and this check only
+    needs a yes/no, not the aerodrome's true boundary.
+    """
+    min_lon, min_lat, max_lon, max_lat = bbox
+    fp = (
+        osmium.FileProcessor(pbf_path)
+        .with_locations()
+        .with_filter(osmium.filter.KeyFilter("aeroway"))
+    )
+    for obj in fp:
+        if obj.tags.get("aeroway") != "aerodrome":
+            continue
+        try:
+            if isinstance(obj, osmium.osm.Node):
+                loc = obj.location
+            elif isinstance(obj, osmium.osm.Way):
+                nodes = obj.nodes
+                if len(nodes) == 0:
+                    continue
+                loc = nodes[0].location
+            else:
+                continue
+            if not loc.valid():
+                continue
+            lat, lon = loc.lat, loc.lon
+        except Exception:
+            # A malformed or unresolvable location proves nothing either
+            # way; skip it rather than let it crash a preflight check.
+            continue
+        if not (min_lat <= lat <= max_lat and min_lon <= lon <= max_lon):
+            return True
+    return False
+
+
 import math
 
 from pyspark.sql import functions as F
@@ -333,13 +382,15 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
         _deg_lon(FALLBACK_HALF_KM, v) for v in out.loc[miss, "apt_lat"]
     ]
 
-    # An aerodrome whose padded box crosses the antimeridian gets an inverted
-    # longitude interval, and `between` on an inverted interval matches nothing
-    # -- the aerodrome silently gets no geometry, which looks exactly like an
-    # aerodrome OSM never mapped. No large or medium aerodrome has runways
-    # actually crossing 180, so widening to the full range costs a handful of
-    # extra candidate features and cannot lose any.
-    wrapped = out["lon_min"] > out["lon_max"]
+    # An aerodrome near the antimeridian can get a padded bound past +-180
+    # (e.g. lon_max = 180.0115) -- not an inverted interval, since lon_min and
+    # lon_max are built as min-pad/max+pad and can never cross. `between` on a
+    # bound outside [-180, 180] simply never matches the wrapped-around side,
+    # so the aerodrome silently gets no geometry, which looks exactly like an
+    # aerodrome OSM never mapped. No large or medium aerodrome currently has a
+    # box within the margin of 180, so widening to the full range costs a
+    # handful of extra candidate features and cannot lose any.
+    wrapped = (out["lon_max"] > 180.0) | (out["lon_min"] < -180.0)
     if wrapped.any():
         print(f"  {int(wrapped.sum())} aerodrome box(es) cross the antimeridian; "
               "widening their longitude range to the full circle.")
