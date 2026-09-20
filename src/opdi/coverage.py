@@ -58,11 +58,19 @@ class CoverageConfig:
     airport_types: Tuple[str, ...] = ("large_airport", "medium_airport")
     """Which aerodromes get reference data.
 
+    Measured against the released ``h3_airport_detection_zones``: it holds
+    large and medium aerodromes and nothing else. The filter used to be a
+    bounding box alone, and inside that box OurAirports lists 13,973
+    aerodromes -- 6,782 small, 3,820 heliports, 1,952 *closed* -- against
+    1,357 large or medium.
+
+    Rebuilding without this therefore did two things at once. It changed the
+    ADEP/ADES candidate set by a factor of ten, silently, against the set
+    every detection study tuned on; and at H3 resolution 7 with rings out to
+    110 NM it generated enough cells to OOM every executor in the namespace.
+
     All three reference tables -- detection zones, ground layouts, runway grid
     -- must use one set, or they join to each other with gaps nothing reports.
-    Widening this once changed the ADEP/ADES candidate set tenfold against the
-    set every detection study tuned on, and OOM'd every executor in the
-    namespace; see ``h3_airport_zones.AIRPORT_TYPES``.
     """
 
     @property

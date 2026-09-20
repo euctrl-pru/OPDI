@@ -59,3 +59,44 @@ def test_an_explicit_none_means_worldwide_not_the_default(spark):
         spark, OPDIConfig.for_environment("opensky"), bbox=None, time_interval=1)
     assert ing.bbox is None
     assert ing._apply_filters(_sv(spark)).count() == len(PLACES)
+
+
+def test_no_reference_generator_keeps_a_private_box():
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
+    from opdi.reference.h3_airport_layouts import AirportLayoutGenerator
+    from opdi.reference.h3_runway_grid import RunwayGridGenerator
+    for cls in (AirportDetectionZoneGenerator, AirportLayoutGenerator,
+                RunwayGridGenerator):
+        for attr in ("LAT_MIN", "LAT_MAX", "LON_MIN", "LON_MAX", "BBOX_OFFSET"):
+            assert not hasattr(cls, attr), f"{cls.__name__}.{attr} still exists"
+
+
+@pytest.mark.parametrize("worldwide,expect", [(False, {"EBBR"}),
+                                              (True, {"EBBR", "KJFK", "NZAA", "WSSS"})])
+def test_the_zone_airport_filter_follows_coverage(spark, worldwide, expect):
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
+    cfg = OPDIConfig.for_environment("opensky", worldwide=worldwide)
+    gen = AirportDetectionZoneGenerator(spark, cfg)
+    apt = spark.createDataFrame(
+        [("EBBR", "large_airport", 50.90, 4.48),
+         ("KJFK", "large_airport", 40.64, -73.78),
+         ("NZAA", "large_airport", -37.01, 174.79),
+         ("WSSS", "large_airport", 1.36, 103.99),
+         ("EBCI", "small_airport", 50.46, 4.45)],
+        "ident string, type string, latitude_deg double, longitude_deg double",
+    )
+    got = {r.ident for r in gen.filter_airports(apt).collect()}
+    assert got == expect, "small_airport must be excluded in both modes"
+
+
+def test_the_cell_centre_filter_follows_coverage_too(spark):
+    """The sixth copy, and the one that would have made the other five look
+    ineffective: `prepare_for_flight_list_spark` filters the H3 cells, so a
+    European filter there drops every worldwide cell no matter how many
+    airports the generator was given."""
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
+    gen = AirportDetectionZoneGenerator(
+        spark, OPDIConfig.for_environment("opensky", worldwide=True))
+    cells = spark.createDataFrame(
+        [(50.9, 4.48), (-37.0, 174.8)], "lat double, lon double")
+    assert cells.filter(gen.cell_filter(F.col("lat"), F.col("lon"))).count() == 2

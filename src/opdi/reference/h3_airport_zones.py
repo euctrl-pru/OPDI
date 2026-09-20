@@ -259,25 +259,6 @@ class AirportDetectionZoneGenerator:
         >>> generator.save_to_parquet("data/airport_hex/zones_res7.parquet")
     """
 
-    # European bounding box with offset for edge airports
-    #: Airport types that get detection zones.
-    #:
-    #: Measured against the released ``h3_airport_detection_zones``: it holds
-    #: large and medium aerodromes and nothing else. The filter here was a
-    #: bounding box alone, and inside that box OurAirports lists 13,973
-    #: aerodromes -- 6,782 small, 3,820 heliports, 1,952 *closed* -- against
-    #: 1,357 large or medium.
-    #:
-    #: Rebuilding without this therefore did two things at once. It changed the
-    #: ADEP/ADES candidate set by a factor of ten, silently, against the set
-    #: every detection study tuned on; and at H3 resolution 7 with rings out to
-    #: 110 NM it generated enough cells to OOM every executor in the namespace.
-    #:
-    #: ``h3_runway_grid`` and ``h3_airport_layouts`` already build for exactly
-    #: these two. Three reference tables keyed to different airport sets would
-    #: join to each other with gaps nothing reports.
-    AIRPORT_TYPES = ("large_airport", "medium_airport")
-
     #: Partitions to spread the ring polyfill across.
     #:
     #: The cross join is only 21,712 rows (16 rings x 1,357 aerodromes), so
@@ -293,12 +274,6 @@ class AirportDetectionZoneGenerator:
     #: gigabytes. It costs more, shorter tasks, which is the right trade when
     #: the alternative is losing every executor.
     ZONE_BUILD_PARTITIONS = 2000
-
-    BBOX_OFFSET = 3  # degrees
-    LAT_MIN = 26.74617
-    LAT_MAX = 70.25976
-    LON_MIN = -25.86653
-    LON_MAX = 49.65699
 
     AIRPORT_SCHEMA = StructType([
         StructField("id", StringType(), True),
@@ -355,14 +330,47 @@ class AirportDetectionZoneGenerator:
             list(range(0, 45, 5))          # 0-40 NM, 5 NM steps
             + list(range(50, 120, 10))     # 50-110 NM, 10 NM steps
         )
-        #: Overridable, so widening the set stays possible -- but as a decision
-        #: someone makes rather than the default nobody chose.
-        self.airport_types = self.AIRPORT_TYPES
         self._result_df: Optional[pd.DataFrame] = None
         self._result_sdf: Optional[DataFrame] = None
 
         # Register UDF
         self._circle_udf = udf(generate_circle_polygon, StringType())
+
+    def filter_airports(self, sdf: DataFrame) -> DataFrame:
+        """Aerodromes this coverage builds zones for.
+
+        Type first, then geography. Both filters must be here: the type filter
+        alone once widened the candidate set tenfold and OOM'd every executor,
+        and the geography filter alone is what this task exists to make follow
+        configuration.
+        """
+        cov = self.config.coverage
+        return sdf.filter(
+            col("type").isin(list(cov.airport_types))
+            & cov.spark_filter(
+                col("latitude_deg").cast("double"),
+                col("longitude_deg").cast("double"),
+                offset=True,
+            )
+        )
+
+    def cell_filter(self, lat_col, lon_col):
+        """Which generated cells are kept, by their centre.
+
+        Deliberately **without** the offset ``filter_airports`` uses: the bare
+        box mirrors what ingestion itself clips state vectors to
+        (``StateVectorIngestion._apply_filters`` filters on
+        ``config.coverage.bbox``, the same object, with no offset). A cell in
+        the 3-degree margin band can therefore never match an observed state
+        vector, so keeping it would only grow the published table with rows
+        that can never be selected -- an aerodrome admitted by the offset
+        legitimately gets a zone that reaches past the bare box, but the
+        portion of it past the box is provably unreachable, not merely
+        asymmetric. Worldwide, ``bbox is None`` makes ``spark_filter`` return
+        ``lit(True)`` regardless of ``offset``, so this only matters for a
+        bounded coverage.
+        """
+        return self.config.coverage.spark_filter(lat_col, lon_col, offset=False)
 
     def _load_airports(
         self,
@@ -370,13 +378,13 @@ class AirportDetectionZoneGenerator:
         airports_df: Optional[DataFrame] = None,
     ) -> DataFrame:
         """
-        Load airport data from OurAirports and filter to European bounding box.
+        Load airport data from OurAirports and filter to this run's coverage.
 
         Args:
             airports_url: URL to OurAirports airports CSV.
 
         Returns:
-            Spark DataFrame with airport data filtered to Europe.
+            Spark DataFrame with airport data filtered to this coverage.
         """
         if airports_df is not None:
             # Already-ingested OurAirports table (step 00d). Preferred on the
@@ -387,18 +395,6 @@ class AirportDetectionZoneGenerator:
 
         df_apt = pd.read_csv(airports_url)
 
-        # Type and European bounding box filter. Both paths must agree, or
-        # which source the zones came from changes what is in them.
-        offset = self.BBOX_OFFSET
-        f_type = df_apt["type"].isin(list(self.airport_types))
-        f_lat = df_apt.latitude_deg.between(
-            self.LAT_MIN - offset, self.LAT_MAX + offset
-        )
-        f_lon = df_apt.longitude_deg.between(
-            self.LON_MIN - offset, self.LON_MAX + offset
-        )
-        df_apt = df_apt[f_type & f_lat & f_lon]
-
         # Ensure column types
         df_apt.columns = df_apt.columns.astype(str)
         df_apt = df_apt.astype({
@@ -407,25 +403,21 @@ class AirportDetectionZoneGenerator:
             "elevation_ft": "float64",
         })
 
-        return self.spark.createDataFrame(df_apt, schema=self.AIRPORT_SCHEMA)
+        # Type and coverage filter. Both paths must agree, or which source the
+        # zones came from changes what is in them.
+        sdf = self.spark.createDataFrame(df_apt, schema=self.AIRPORT_SCHEMA)
+        return self.filter_airports(sdf)
 
     def _filter_airports_spark(self, airports_df: DataFrame) -> DataFrame:
-        """Apply the European bounding-box filter to an already-loaded table.
+        """Apply this run's coverage filter to an already-loaded table.
 
         The Spark-side twin of the pandas path in :meth:`_load_airports`, for
         when airports come from the ingested OurAirports table (step 00d)
-        rather than the public CSV. Same bounding box, same offset, and the
+        rather than the public CSV. Same coverage, same offset, and the
         result is cast to ``AIRPORT_SCHEMA`` so everything downstream sees
         identical types whichever source was used.
         """
-        offset = self.BBOX_OFFSET
-        df = airports_df.filter(
-            col("type").isin(list(self.airport_types))
-            & (col("latitude_deg").cast("double") >= self.LAT_MIN - offset)
-            & (col("latitude_deg").cast("double") <= self.LAT_MAX + offset)
-            & (col("longitude_deg").cast("double") >= self.LON_MIN - offset)
-            & (col("longitude_deg").cast("double") <= self.LON_MAX + offset)
-        )
+        df = self.filter_airports(airports_df)
         # Project onto AIRPORT_SCHEMA, tolerating columns the ingested table
         # does not carry -- OurAirports adds and drops fields over time and a
         # missing optional column should not fail zone generation.
@@ -657,10 +649,11 @@ class AirportDetectionZoneGenerator:
         df["lon"] = df["geo"].apply(lambda g: g[1])
         df = df.drop("geo", axis=1)
 
-        # European bounding box filter
-        f_lat = np.logical_and(df.lat >= self.LAT_MIN, df.lat <= self.LAT_MAX)
-        f_lon = np.logical_and(df.lon >= self.LON_MIN, df.lon <= self.LON_MAX)
-        df = df[np.logical_and(f_lat, f_lon)]
+        # Coverage filter, by cell centre. No offset -- see cell_filter's
+        # docstring (the Spark-native twin of this method): a cell in the
+        # margin band can never match an observed state vector, since
+        # ingestion itself clips to the bare box.
+        df = df[self.config.coverage.pandas_mask(df.lat, df.lon, offset=False)]
 
         # Add center hex ID for each airport
         df["center_hex_id"] = df.apply(
@@ -734,12 +727,7 @@ class AirportDetectionZoneGenerator:
             .filter(col("hex_id").isNotNull())
             .withColumn("lat", _hex_lat_udf(col("hex_id")))
             .withColumn("lon", _hex_lon_udf(col("hex_id")))
-            .filter(
-                (col("lat") >= float(self.LAT_MIN))
-                & (col("lat") <= float(self.LAT_MAX))
-                & (col("lon") >= float(self.LON_MIN))
-                & (col("lon") <= float(self.LON_MAX))
-            )
+            .filter(self.cell_filter(col("lat"), col("lon")))
             .withColumn(
                 "center_hex_id",
                 _geo_to_h3_udf(

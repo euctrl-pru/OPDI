@@ -67,17 +67,34 @@ def test_the_bounding_box_still_applies(spark):
 def test_the_type_set_matches_the_other_reference_builds(spark):
     """h3_runway_grid and h3_airport_layouts both build for exactly these two.
     Three reference tables keyed to different airport sets would join to each
-    other with silent gaps."""
-    assert AirportDetectionZoneGenerator.AIRPORT_TYPES == (
+    other with silent gaps.
+
+    Rewritten from a direct check of the (now-deleted) class constant
+    ``AirportDetectionZoneGenerator.AIRPORT_TYPES`` -- the type set now lives
+    on ``config.coverage.airport_types``, asked for by every reference
+    generator alike, so this asserts the same behaviour through that seam."""
+    assert _gen(spark).config.coverage.airport_types == (
         "large_airport", "medium_airport",
     )
 
 
 def test_the_type_set_can_be_widened_deliberately(spark):
     """Overridable, so including small fields stays possible -- but as a
-    decision someone makes, not as the default nobody chose."""
-    gen = _gen(spark)
-    gen.airport_types = ("large_airport", "small_airport")
+    decision someone makes, not as the default nobody chose.
+
+    Rewritten: widening used to be done by setting the generator's own
+    ``airport_types`` instance attribute. That seam is gone -- ``filter_airports``
+    now reads ``self.config.coverage.airport_types`` directly -- so widening is
+    now a decision made in the ``CoverageConfig`` passed to the generator."""
+    from opdi.coverage import CoverageConfig
+
+    cfg = OPDIConfig()
+    cfg.coverage = CoverageConfig(
+        bbox=cfg.coverage.bbox,
+        bbox_offset_deg=cfg.coverage.bbox_offset_deg,
+        airport_types=("large_airport", "small_airport"),
+    )
+    gen = AirportDetectionZoneGenerator(spark, cfg)
     df = _airports(spark, [
         ("EBBR", "large_airport", *IN_BOX),
         ("EBXX", "small_airport", *IN_BOX),

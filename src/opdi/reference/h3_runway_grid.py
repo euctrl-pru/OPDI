@@ -365,14 +365,6 @@ class RunwayGridGenerator:
         >>> success, failed = generator.save_prepared_to_table()
     """
 
-    # OPDI state vector coverage bounding box -- identical to
-    # AirportLayoutGenerator's, so the two steps cover the same airports.
-    BBOX_OFFSET = 3  # degrees
-    LAT_MIN = 26.74617
-    LAT_MAX = 70.25976
-    LON_MIN = -25.86653
-    LON_MAX = 49.65699
-
     def __init__(
         self,
         spark: SparkSession,
@@ -413,7 +405,7 @@ class RunwayGridGenerator:
     # -- airport / runway sourcing, no network ------------------------------
 
     def fetch_airport_list(self, airport_types: Optional[List[str]] = None) -> pd.DataFrame:
-        """Large+medium airports within the OPDI bbox.
+        """Large+medium airports within this run's coverage.
 
         Unlike ``AirportLayoutGenerator.fetch_airport_list``, this reads the
         already-ingested ``oa_airports`` table (step 00d, which runs before
@@ -422,8 +414,9 @@ class RunwayGridGenerator:
         not reachable from the OSN cluster anyway (see ``_step_00a_airport_zones``
         in ``runner.py`` for the same reasoning).
         """
+        cov = self.config.coverage
         if airport_types is None:
-            airport_types = ["large_airport", "medium_airport"]
+            airport_types = list(cov.airport_types)
 
         if not self.storage.table_exists("oa_airports"):
             print("  oa_airports table not found; cannot build the runway grid.")
@@ -432,14 +425,17 @@ class RunwayGridGenerator:
         apt = self.storage.read_table("oa_airports").select(
             "ident", "latitude_deg", "longitude_deg", "type"
         )
-        offset = self.BBOX_OFFSET
         apt = apt.filter(
             F.col("type").isin(airport_types)
-            & F.col("latitude_deg").between(self.LAT_MIN - offset, self.LAT_MAX + offset)
-            & F.col("longitude_deg").between(self.LON_MIN - offset, self.LON_MAX + offset)
+            & cov.spark_filter(
+                F.col("latitude_deg").cast("double"),
+                F.col("longitude_deg").cast("double"),
+                offset=True,
+            )
         )
         airports_df = apt.toPandas()
-        print(f"There are {len(airports_df)} airports to process (within OPDI bbox)...")
+        print(f"There are {len(airports_df)} airports to process "
+              f"(coverage: {cov.label})...")
         return airports_df
 
     def fetch_runways(self, apt_idents: Optional[List[str]]) -> pd.DataFrame:
