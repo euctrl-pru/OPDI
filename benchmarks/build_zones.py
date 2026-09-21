@@ -29,12 +29,16 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+from opdi.coverage import CoverageConfig
 
 AIRPORTS_TABLE = "s3a://eurocontrol/opdi/oa_airports"
 
 #: Detection needs large and medium aerodromes; small fields and heliports were
 #: measured to cost accuracy without adding coverage (ADEP/ADES study v2).
-AIRPORT_TYPES = ["large_airport", "medium_airport"]
+#: Read from ``CoverageConfig.airport_types`` -- the one place this set is
+#: defined -- rather than kept as a separate literal that could silently
+#: diverge from it if the type set is ever widened.
+AIRPORT_TYPES = list(CoverageConfig().airport_types)
 
 
 def main() -> None:

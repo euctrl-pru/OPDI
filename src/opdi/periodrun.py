@@ -127,6 +127,49 @@ INGEST_LOOKAHEAD_DAYS = 2
 #: one knob redirects the entire pipeline.
 DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi-prod"
 
+#: Distinguishes "the caller said nothing" from "the caller explicitly passed
+#: the string that happens to equal ``DEFAULT_WAREHOUSE``". Only the first
+#: should follow coverage; the second is a caller who named that exact prefix
+#: and meant it. Same pattern as ``ingestion.osn_statevectors._UNSET``, for
+#: the same reason: a sentinel value, not a comparison against the default
+#: itself, is the only thing that can tell the two apart.
+_UNSET = object()
+
+
+def _resolve_warehouse(
+    warehouse,
+    worldwide: bool,
+    worldwide_warehouse: str,
+    default: str = DEFAULT_WAREHOUSE,
+) -> str:
+    """Which warehouse prefix a period run actually writes to.
+
+    Pure and Spark-free on purpose, so the coverage guard this exists to
+    enforce -- worldwide data must never land in ``opdi-prod`` by default --
+    is directly unit-testable without stubbing the rest of ``run_period``.
+
+    Args:
+        warehouse: What the caller passed for ``warehouse``, or ``_UNSET`` if
+            they passed nothing (``run_period``'s own default).
+        worldwide: Whether this run has dropped the European bounding box.
+        worldwide_warehouse: The warehouse ``OPDIConfig.for_environment``
+            resolved for ``worldwide=True`` in this environment -- used only
+            when ``warehouse`` is unset and ``worldwide`` is true.
+        default: What an unset, non-worldwide ``warehouse`` resolves to.
+
+    An explicit ``warehouse`` -- including one that happens to equal
+    ``default`` -- always wins outright, because the caller named a prefix
+    and meant it. Comparing ``warehouse == default`` instead of using a
+    sentinel could not distinguish that case from "the caller said nothing",
+    so an explicitly-passed ``default`` would have been silently overridden
+    under ``worldwide=True`` -- exactly the bug this function exists to
+    close.
+    """
+    if warehouse is not _UNSET:
+        return warehouse
+    return worldwide_warehouse if worldwide else default
+
+
 #: Steps available but not run by default. Export and statistics are
 #: publication actions; a test period should be inspected before anything is
 #: published from it.
@@ -275,6 +318,12 @@ class RunState:
     start_date: str = ""
     end_date: str = ""
     env: str = ""
+    coverage: str = ""
+    """``config.coverage.label`` at the time this state was written. An empty
+    string reads as ``"europe"`` in :meth:`matches` -- every state file
+    written before this field existed described a European run, since
+    worldwide coverage did not exist yet, so an old file must keep matching a
+    European re-invocation rather than suddenly refusing it."""
     completed: Dict[str, dict] = field(default_factory=dict)
 
     @classmethod
@@ -289,6 +338,7 @@ class RunState:
             start_date=data.get("start_date", ""),
             end_date=data.get("end_date", ""),
             env=data.get("env", ""),
+            coverage=data.get("coverage", ""),
             completed=data.get("completed", {}),
         )
 
@@ -299,6 +349,7 @@ class RunState:
             "start_date": self.start_date,
             "end_date": self.end_date,
             "env": self.env,
+            "coverage": self.coverage,
             "completed": self.completed,
         }
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -317,12 +368,23 @@ class RunState:
         }
         self.save()
 
-    def matches(self, env: str, start: date, end: date) -> bool:
-        """Whether this state describes the window now being asked for.
+    def matches(
+        self, env: str, start: date, end: date, coverage: str = "europe"
+    ) -> bool:
+        """Whether this state describes the window and coverage now being
+        asked for.
 
         A state file from a different window must never be used to skip steps:
         the step names are identical, so nothing else would catch it, and the
-        result would be a run that silently reports someone else's data.
+        result would be a run that silently reports someone else's data. Same
+        reasoning for coverage: a European run's progress must not be mistaken
+        for a worldwide one's, or vice versa -- this has bitten before, when a
+        stale ``weekrun_2026-06-01_1d.json`` made a run report five completed
+        units and skip steps 02-04 entirely.
+
+        ``self.coverage`` empty (an old state file, written before this field
+        existed) is read as ``"europe"``, since every run before worldwide
+        coverage existed was implicitly European.
         """
         if not self.completed:
             return True
@@ -330,6 +392,7 @@ class RunState:
             self.env == env
             and self.start_date == start.isoformat()
             and self.end_date == end.isoformat()
+            and (self.coverage or "europe") == coverage
         )
 
 
@@ -366,6 +429,15 @@ def resolve_pbf_path(config) -> Optional[str]:
     )
 
 
+#: Degrees added to ``EUROPE_BBOX`` before checking a worldwide-configured
+#: extract for out-of-Europe aerodrome geometry (see
+#: ``preflight_fresh_build``). Covers legitimate "greater Europe" outliers a
+#: real European regional extract ships (Svalbard, the Azores) so they are
+#: not mistaken for evidence of worldwide coverage; measured worst case 8.67
+#: degrees against ``aeroway-europe.osm.pbf``.
+_GREATER_EUROPE_MARGIN_DEG = 10.0
+
+
 def preflight_fresh_build(config) -> List[str]:
     """Problems that would make a from-scratch reference build fail or lie.
 
@@ -383,6 +455,46 @@ def preflight_fresh_build(config) -> List[str]:
         )
     elif not Path(pbf).exists():
         problems.append(f"the configured OSM extract does not exist: {pbf}")
+    elif getattr(getattr(config, "coverage", None), "is_worldwide", False):
+        # A worldwide run pointed at a European-only extract would build
+        # worldwide detection zones and a worldwide runway grid (both from
+        # ``oa_airports``/``oa_runways``, not the extract) but European-only
+        # ground layouts (00b, the only substep this file drives) -- every
+        # aerodrome outside Europe then has no geometry, indistinguishable
+        # from "OSM never mapped it", a documented normal outcome. Caught
+        # here rather than left to be discovered after hours of build: one
+        # aerodrome outside the box is enough, so this stops at the first
+        # match rather than reading the whole file.
+        #
+        # The check is against ``EUROPE_BBOX`` widened by
+        # ``_GREATER_EUROPE_MARGIN_DEG``, not the bare box. Geofabrik's own
+        # "europe" regional extract -- the real file this guard exists to
+        # catch -- legitimately ships aerodromes outside the strict box:
+        # Svalbard/Jan Mayen (up to 8.67 degrees past ``max_lat``) and the
+        # Azores (past ``min_lon``). Measured directly against
+        # ``aeroway-europe.osm.pbf``: 17 of 7,263 aerodromes sit outside the
+        # bare box, worst excursion 8.67 degrees (Ny-Alesund, Svalbard). A
+        # bare-box check would treat that legitimate European extract as
+        # already worldwide and never report a problem -- the false negative
+        # this guard exists to prevent, just moved one level down. 10
+        # degrees clears every measured legitimate excursion with margin to
+        # spare, while a genuinely worldwide extract's nearest non-European
+        # aerodrome (confirmed against ``aeroway-planet.osm.pbf``: Sydney,
+        # ~100 degrees of longitude away) is nowhere near it.
+        from opdi.coverage import EUROPE_BBOX
+        from opdi.reference.pbf_source import pbf_has_aerodrome_outside_bbox
+
+        min_lon, min_lat, max_lon, max_lat = EUROPE_BBOX
+        d = _GREATER_EUROPE_MARGIN_DEG
+        greater_europe = (min_lon - d, min_lat - d, max_lon + d, max_lat + d)
+        if not pbf_has_aerodrome_outside_bbox(pbf, greater_europe):
+            problems.append(
+                f"worldwide coverage is configured, but the OSM extract at "
+                f"{pbf} has no aerodrome outside the European box -- it "
+                "looks like a European-only extract. A worldwide run built "
+                "from it would silently have no ground layouts (stands, "
+                "taxiways, aprons) for every aerodrome outside Europe."
+            )
     return problems
 
 
@@ -392,7 +504,21 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
     Returns a list rather than raising so the caller can report every problem
     at once. Being told about one missing table, fixing it, and then being told
     about the next is the behaviour this avoids.
+
+    A coverage mismatch, if any, is prepended ahead of the table checks -- it
+    is the more fundamental problem: a period run that is about to mix
+    coverages in one warehouse should be told that before it is told which
+    tables it would have read. ``storage`` may be a lightweight stand-in used
+    in tests that has no ``check_coverage``; that case is treated the same as
+    "no problem", not as a failure.
     """
+    problems: List[str] = []
+    check_coverage = getattr(storage, "check_coverage", None)
+    if check_coverage is not None:
+        coverage_problem = check_coverage()
+        if coverage_problem is not None:
+            problems.append(coverage_problem)
+
     missing: List[str] = []
     for name in tables:
         try:
@@ -412,7 +538,7 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
                 missing.append(name)
         except Exception:
             missing.append(name)
-    return missing
+    return problems + missing
 
 
 def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
@@ -577,8 +703,9 @@ def run_period(
     executors: Optional[int] = None,
     skip_preflight: bool = False,
     dry_run: bool = False,
-    warehouse: str = DEFAULT_WAREHOUSE,
+    warehouse: str = _UNSET,
     allow_existing: bool = False,
+    worldwide: bool = False,
 ) -> int:
     """Run the pipeline over a window of ``days``, resuming where it stopped.
 
@@ -603,15 +730,22 @@ def run_period(
         skip_preflight: Do not check the reference tables. For when a
             reference table is known-missing and the run is deliberate.
         dry_run: Report the plan and exit without creating a session.
-        warehouse: Prefix every table is resolved against. Defaults to a
-            prefix separate from the published one, so a run neither reads
-            nor damages published data.
+        warehouse: Prefix every table is resolved against. Omit it (the
+            default is the ``_UNSET`` sentinel, not a literal string) to get
+            ``DEFAULT_WAREHOUSE`` -- or, under ``worldwide=True``, the
+            worldwide warehouse instead. Pass any string, including one that
+            happens to equal ``DEFAULT_WAREHOUSE``, to pin that exact prefix
+            regardless of coverage; see :func:`_resolve_warehouse`.
         allow_existing: Proceed even though the warehouse prefix already holds
             objects. Off by default: a rebuild that silently merged with a
             previous attempt's output would produce a table nobody could date.
+        worldwide: Drop the published European bounding box. Off by default.
+            When on, and ``warehouse`` was left unset, the default follows
+            coverage to the worldwide warehouse instead of ``opdi-prod`` --
+            an explicitly-passed ``warehouse`` still wins, always.
     """
     from opdi.config import OPDIConfig
-    from opdi.runner import STEPS
+    from opdi.runner import STEPS, reference_substeps_for_coverage
     from opdi.utils.spark_helpers import SparkSessionManager
     from opdi.utils.storage import StorageManager
 
@@ -621,6 +755,11 @@ def run_period(
     unknown = [s for s in steps if s not in STEPS]
     if unknown:
         raise ValueError(f"unknown step(s) {unknown}; valid: {sorted(STEPS)}")
+
+    # Built early, ahead of the state-file check: the state file must be
+    # scoped to a coverage as well as a window, and `config.coverage.label`
+    # is what scopes it.
+    config = OPDIConfig.for_environment(env, worldwide=worldwide)
 
     start_date, end_date = period_window(start, days)
     if state_path is None:
@@ -638,17 +777,22 @@ def run_period(
                 state_path = legacy
     state = RunState.load(Path(state_path))
 
-    if not state.matches(env, start_date, end_date):
+    if not state.matches(env, start_date, end_date, config.coverage.label):
         raise SystemExit(
             f"state file {state_path} describes {state.env} "
-            f"{state.start_date}..{state.end_date}, but this run is {env} "
-            f"{start_date}..{end_date}. Refusing to reuse it -- pass a "
-            "different --state-path, or delete that file if it is stale."
+            f"{state.start_date}..{state.end_date} "
+            f"({state.coverage or 'europe'}), but this run is {env} "
+            f"{start_date}..{end_date} ({config.coverage.label}). Refusing "
+            "to reuse it -- pass a different --state-path, or delete that "
+            "file if it is stale. This has bitten before: a stale state file "
+            "once made a run report units complete and skip steps it had "
+            "never actually run."
         )
 
     state.env = env
     state.start_date = start_date.isoformat()
     state.end_date = end_date.isoformat()
+    state.coverage = config.coverage.label
     if not state.run_id:
         state.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -684,7 +828,13 @@ def run_period(
     todo = [u for u in units if force or _key(*u) not in state.completed]
     done = [u for u in units if u not in todo]
 
-    config = OPDIConfig.for_environment(env)
+    # An unset `warehouse` defaults to the European prefix (`DEFAULT_WAREHOUSE`),
+    # so a worldwide run that did not name one explicitly would land there --
+    # silently discarding `--worldwide` at the one entry point production
+    # actually uses. `_resolve_warehouse` makes the default follow coverage
+    # while an explicitly passed warehouse -- even one spelled identically to
+    # `DEFAULT_WAREHOUSE` -- always wins.
+    warehouse = _resolve_warehouse(warehouse, worldwide, config.project.warehouse_path)
     # Before anything reads it. StorageManager resolves every table name
     # against this, so setting it here redirects reference tables, intermediate
     # tables and outputs together -- there is no second place a stale prefix
@@ -700,6 +850,7 @@ def run_period(
     print("OPDI period run")
     print("=" * 72)
     print(f"  environment : {env}")
+    print(f"  coverage    : {config.coverage.label}")
     print(f"  window      : {start_date} .. {end_date}  ({days} days)")
     print(f"  steps       : {' '.join(steps)}")
     if done:
@@ -774,6 +925,20 @@ def run_period(
             # always False -- which made this whole block dead code.
             if not skip_preflight and (step, day) == todo[0]:
                 storage = StorageManager(spark, config)
+
+                # Checked on its own, ahead of the table-presence logic below.
+                # `preflight()` also folds a coverage problem into the list it
+                # returns, but the `building_reference` branch below treats
+                # *any* non-empty `preflight()` result as "tables to build" --
+                # so a mismatch left to flow through that path would be
+                # misread as a missing table and the run would attempt to
+                # build reference data into the wrong warehouse instead of
+                # refusing. This check is what actually stops that.
+                coverage_problem = storage.check_coverage()
+                if coverage_problem is not None:
+                    print(f"Preflight failed: {coverage_problem}")
+                    return 1
+
                 if building_reference:
                     # Reference tables already in the warehouse are reused, not
                     # rebuilt.
@@ -806,6 +971,17 @@ def run_period(
                         # re-download OurAirports on the way to the runway
                         # grid.
                         todo_subs = reference_substeps_to_run(storage, force=force)
+                        # `todo_subs` is derived from table presence alone, and
+                        # a fresh worldwide warehouse has no
+                        # `opdi_h3_airspace_ref` table -- so without this it
+                        # would return `{"00c": True}` and build the European
+                        # airspace layer into a worldwide warehouse. The skip
+                        # inside `_step_00_reference_data` catches this too,
+                        # but composing it here keeps the "already built"
+                        # summary printed below honest about 00c as well.
+                        for substep, run in reference_substeps_for_coverage(config).items():
+                            if not run:
+                                todo_subs[substep] = False
                         kwargs["run_reference"] = todo_subs
                         skipped = [k for k, v in sorted(todo_subs.items()) if not v]
                         if skipped:

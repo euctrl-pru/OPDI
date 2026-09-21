@@ -22,11 +22,16 @@ Usage::
     # Just one step
     .venv310/bin/python run_period.py --start 2026-06-01 --steps 04
 
+    # Worldwide, into its own warehouse rather than opdi-prod
+    .venv310/bin/python run_period.py --start 2026-06-01 --worldwide
+
 Everything is written under ``--warehouse`` (default
-``s3a://eurocontrol/opdi-prod``), **including the reference tables**: step 00
-runs first and rebuilds airport zones, ground layouts, the runway grid,
-OurAirports and the aircraft database into that prefix. A run therefore reads
-only tables it produced, and cannot touch the published ``s3a://eurocontrol/opdi``.
+``s3a://eurocontrol/opdi-prod``, or the worldwide warehouse under
+``--worldwide``), **including the reference tables**: step 00 runs first and
+rebuilds airport zones, ground layouts, the runway grid, OurAirports and the
+aircraft database into that prefix. A run therefore reads only tables it
+produced, and cannot touch the published ``s3a://eurocontrol/opdi``. An
+explicit ``--warehouse`` always wins, in either coverage.
 
 The reference substeps execute in dependency order rather than id order -- 00d
 creates ``oa_airports``, which 00a, 00b and 00f all read. See
@@ -48,6 +53,7 @@ from opdi.periodrun import (  # noqa: E402
     DEFAULT_WAREHOUSE,
     OPTIONAL_STEPS,
     PERIOD_STEPS,
+    _UNSET,
     run_period,
 )
 
@@ -86,10 +92,18 @@ def main(argv=None) -> int:
                         "container can hold.")
     p.add_argument("--executors", type=int, default=None,
                    help="Override spark.executor.instances.")
-    p.add_argument("--warehouse", default=DEFAULT_WAREHOUSE,
+    p.add_argument("--warehouse", default=_UNSET,
                    help="Prefix every table is written to and read from "
-                        f"(default: {DEFAULT_WAREHOUSE}). Reference tables "
-                        "included -- a run reuses nothing from elsewhere.")
+                        f"(default: {DEFAULT_WAREHOUSE}, or the worldwide "
+                        "warehouse under --worldwide). Reference tables "
+                        "included -- a run reuses nothing from elsewhere. "
+                        "An explicit value here always wins, in either "
+                        "coverage.")
+    p.add_argument("--worldwide", action="store_true", default=False,
+                   help="Drop the published European bounding box: read and "
+                        "write the worldwide warehouse instead of "
+                        f"{DEFAULT_WAREHOUSE}, unless --warehouse names a "
+                        "prefix explicitly.")
     p.add_argument("--allow-existing", action="store_true",
                    help="Build even though the warehouse already holds "
                         "reference tables. Off by default so a rebuild cannot "
@@ -114,6 +128,7 @@ def main(argv=None) -> int:
         dry_run=args.dry_run,
         warehouse=args.warehouse,
         allow_existing=args.allow_existing,
+        worldwide=args.worldwide,
     )
 
 

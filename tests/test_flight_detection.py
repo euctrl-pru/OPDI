@@ -16,6 +16,7 @@ import datetime as dt
 import pytest
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
+    BooleanType,
     DateType,
     DoubleType,
     IntegerType,
@@ -224,6 +225,147 @@ def test_at_border_scales_the_longitude_margin_with_latitude(spark):
 def test_at_border_is_false_well_inside_the_area(spark):
     df = spark.createDataFrame([(50.0, 4.0)], ["lat", "lon"])
     assert df.select(at_border(F.col("lat"), F.col("lon")).alias("b")).collect()[0].b is False
+
+
+def test_at_border_is_false_everywhere_when_there_is_no_box(spark):
+    """Worldwide there is no edge, so nothing can be at it.
+
+    Returning the old European edge instead would label a flight crossing 26.7N
+    over the Sahara as having left the observed area, in a dataset that
+    observes the Sahara.
+    """
+    df = spark.createDataFrame(
+        [(26.8, 0.0), (0.0, 0.0), (-89.9, 179.9), (70.2, 49.6)],
+        "lat double, lon double",
+    )
+    got = [r.b for r in df.select(
+        at_border(F.col("lat"), F.col("lon"), bbox=None).alias("b")).collect()]
+    assert got == [False, False, False, False]
+
+
+def test_at_border_uses_the_box_it_is_given(spark):
+    """A point inside the European box can be at the border of a smaller one.
+    If this ever stops holding, `at_border` has gone back to a module constant.
+    """
+    df = spark.createDataFrame([(50.9, 4.48)], "lat double, lon double")
+    inside_europe = df.select(
+        at_border(F.col("lat"), F.col("lon")).alias("b")).collect()[0].b
+    at_edge_of_small = df.select(
+        at_border(F.col("lat"), F.col("lon"),
+                  bbox=(4.0, 50.5, 5.0, 51.5)).alias("b")).collect()[0].b
+    assert inside_europe is False
+    assert at_edge_of_small is True
+
+
+# ---------------------------------------------------------------------------
+# Wiring: the configured box reaches both `at_border` call sites
+# ---------------------------------------------------------------------------
+#
+# `FlightListProcessor._endpoint_candidates_frame` does not exist -- the two
+# real places `at_border` and `OOA` meet are `_track_border_flags` (feeds
+# `trend`'s out-of-area label) and `build_endpoint_candidates` (feeds
+# `classify_endpoints`'s, by way of the `at_border` column it caches). Both
+# are exercised for real here; only `_get_data_within_timeframe` (needs S3)
+# and `_load_airports_hex` (needs the H3 reference tables) are stubbed, since
+# those are the only two dependencies this task did not touch and cannot
+# supply locally. Everything else -- the window functions, the join, the
+# elevation attach, the final cache write -- is the real production code,
+# executed with `.collect()` / `.count()`, so a wiring mistake anywhere in
+# that path would surface as a real failure, not just a missed call.
+
+
+def _tracks_for_border_wiring(spark):
+    """Two samples of one track: enough columns for `_track_border_flags` and
+    `build_endpoint_candidates` to run their real logic end to end.
+
+    The geometry is irrelevant -- `at_border` itself is replaced by a
+    recorder in the test below, so nothing here depends on where these points
+    actually are relative to any box.
+    """
+    schema = StructType([
+        StructField("track_id", StringType()),
+        StructField("icao24", StringType()),
+        StructField("flight_id", StringType()),
+        StructField("event_time", TimestampType()),
+        StructField("lat", DoubleType()),
+        StructField("lon", DoubleType()),
+        StructField("baro_altitude", DoubleType()),
+        StructField("on_ground", BooleanType()),
+        StructField("h3_res_7", StringType()),
+    ])
+    rows = [
+        ("trk-1", "abc123", "TEST01", _EPOCH, 50.0, 4.0, 1000.0, False, "871"),
+        ("trk-1", "abc123", "TEST01",
+         _EPOCH + dt.timedelta(seconds=60), 50.1, 4.1, 1200.0, False, "872"),
+    ]
+    return spark.createDataFrame(rows, schema=schema)
+
+
+def _wiring_processor(spark, tmp_path, bbox):
+    """A `FlightListProcessor` stubbed down to exactly the two border call
+    sites under test.
+
+    Built with `__new__`, the same pattern `_processor_with_airports` above
+    uses -- the real `__init__` needs a writable log directory and a real
+    `StorageManager`, neither of which this test needs to prove the box is
+    threaded through.
+    """
+    from opdi.config import OPDIConfig
+    from opdi.coverage import CoverageConfig
+
+    class _Storage:
+        def table_exists(self, name):
+            return False
+
+        def write_table(self, df, name, mode="overwrite"):
+            df.count()  # force the lazy plan -- including at_border -- to run
+
+    proc = FlightListProcessor.__new__(FlightListProcessor)
+    proc.spark = spark
+    proc.config = OPDIConfig(coverage=CoverageConfig(bbox=bbox))
+    proc.storage = _Storage()
+    proc._tracks_table_override = "stub_tracks"
+    proc._get_data_within_timeframe = lambda table_name, month: _tracks_for_border_wiring(spark)
+    proc._load_airports_hex = lambda *a, **kw: spark.createDataFrame(
+        [],
+        "apt_hex_id string, apt_ident string, "
+        "apt_latitude_deg double, apt_longitude_deg double",
+    )
+    proc._endpoint_log = str(tmp_path / "endpoint_log.parquet")
+    return proc
+
+
+def test_border_wiring_threads_the_configured_box_through_both_call_sites(
+    spark, tmp_path, monkeypatch
+):
+    """The wiring this task adds: both call sites must pass the box the run
+    was configured with, not the module default and not a hardcoded value.
+
+    The sentinel box is neither `EUROPE_BBOX` nor `None` on purpose. A test
+    built on the European default could pass with the config ignored and the
+    module default used instead; a test built on `worldwide` could pass with
+    `bbox` hardcoded to `None` regardless of configuration. Only a value that
+    cannot arise except by reading `self.config.coverage.bbox` proves the
+    threading actually happened.
+    """
+    import opdi.pipeline.flights as flights_mod
+
+    sentinel_bbox = (1.0, 2.0, 3.0, 4.0)
+    recorded = []
+    real_at_border = flights_mod.at_border
+
+    def recorder(lat, lon, margin_nm=flights_mod.BORDER_MARGIN_NM, bbox=flights_mod.BBOX):
+        recorded.append(bbox)
+        return real_at_border(lat, lon, margin_nm=margin_nm, bbox=bbox)
+
+    monkeypatch.setattr(flights_mod, "at_border", recorder)
+
+    proc = _wiring_processor(spark, tmp_path, sentinel_bbox)
+
+    proc._track_border_flags(_EPOCH.date()).collect()
+    proc.build_endpoint_candidates(_EPOCH.date(), rebuild=True)
+
+    assert recorded == [sentinel_bbox, sentinel_bbox]
 
 
 def test_version_is_new_unless_the_run_is_a_legacy_one():

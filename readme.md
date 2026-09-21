@@ -79,6 +79,18 @@ from opdi.runner import run_pipeline
 run_pipeline(env="live", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
 ```
 
+**All three of these are local-driver-only, even under `--env opensky`.** They
+call `SparkSessionManager.create_session(...)` without `distributed=True`, so
+the driver never attaches to the Kubernetes master and the whole pipeline runs
+in one process. That is survivable for a day of one aerodrome and hopeless for
+a real period of network-wide traffic — it cost a failed worldwide reference
+build during development, diagnosed as `PYTHON_VERSION_MISMATCH` with every
+task attributed to "executor driver" rather than a Kubernetes worker. **A real
+cluster run goes through `run_period.py`** (`python run_period.py --start
+2026-06-01 --worldwide`), which calls `create_session(..., distributed=True)`
+explicitly. This is also documented in `run_period.py`'s own module docstring,
+which is why the script exists.
+
 ## Pipeline stages
 
 | Step | Script origin | Module | Description |
@@ -215,6 +227,95 @@ df.show(10)
 ```
 
 See `notebooks/opensky_quickstart.ipynb` for a ready-to-run notebook.
+
+## Worldwide coverage
+
+By default OPDI covers a published European bounding box
+(`opdi.coverage.EUROPE_BBOX`) — the box every released `track_id` and every
+detection study was tuned inside. Passing one flag drops it and runs
+worldwide instead. **Use `run_period.py` for a real worldwide run** — it is
+the only one of these that attaches to the Kubernetes cluster
+(`create_session(..., distributed=True)`, see above); a worldwide build
+needs it, and running local-only against network-wide traffic is what cost
+the first worldwide reference build its first attempt:
+
+```bash
+python run_period.py --start 2026-06-01 --worldwide   # the cluster path -- use this
+```
+
+`opdi run` and `python opdi.py` accept `--worldwide` too, but both are
+**local-driver-only** (see above) and cannot perform a real worldwide run —
+fine for a single day against one aerodrome, not for network-wide traffic:
+
+```bash
+opdi run --env opensky --worldwide --start 2026-06-01 --end 2026-06-02   # local-only
+python opdi.py --worldwide --start 2026-06-01 --end 2026-06-02           # local-only
+```
+
+or programmatically:
+
+```python
+config = OPDIConfig.for_environment("opensky", worldwide=True)
+```
+
+**What changes:**
+
+- **No coverage filter.** `config.coverage.bbox` is `None` rather than the
+  European tuple; ingestion, detection and every H3 reference generator treat
+  that as "everywhere" (`lit(True)`, not a box of ±180/±90 — a longitude range
+  cannot express "everywhere" once the coordinate wraps at the antimeridian).
+- **A separate warehouse.** Worldwide writes to `s3a://eurocontrol/opdi-world`
+  by default, never to the European `s3a://eurocontrol/opdi-prod`.
+  **`OPDI_WAREHOUSE` is deliberately ignored under `--worldwide`** — that
+  variable is how production points the European runs at their prefix and is
+  normally exported, so honouring it here too would silently send planet-wide
+  rows into `opdi-prod`. Point a worldwide run somewhere else with
+  `OPDI_WAREHOUSE_WORLD` instead.
+- **A `coverage_marker` table stamps each warehouse** with the coverage that
+  built it (`europe` / `worldwide` / `custom`) and refuses to mix: pointing a
+  worldwide run at a warehouse already marked European fails at step 00 with a
+  message naming both coverages, and the reverse fails the same way. An
+  unmarked warehouse (nothing has ever written to it) is treated as a
+  legitimate first run, not refused.
+- **Step 00c (airspaces) does not run.** Its sources are the PRU Atlas
+  ANSP/FIR parquets, which are European; there is no global FIR source to
+  build from, so the substep is skipped automatically whenever
+  `config.coverage.is_worldwide`.
+- **The out-of-area (`OOA`) label is inert.** `OOA` marks a flight that
+  entered the observed area already airborne — meaningful only when there is
+  an edge to have crossed. Worldwide there is none, so no row is ever labelled
+  `OOA`.
+- **The airport and reference-data footprint is much larger.** OurAirports
+  lists 5,280 large + medium aerodromes worldwide against 1,357 inside the
+  European box (both measured), and `h3_airport_detection_zones` scales
+  accordingly — **projected**, not yet measured, at the order of 125 M cells
+  against Europe's measured ~32 M (the aerodrome ratio applied to the
+  European cell count; the worldwide reference build has not completed, so
+  nobody has counted the real table). The OSM aeroway extract needed
+  for step 00b's ground layouts is a planet-wide Geofabrik/Overpass pull,
+  filtered down to aeroway geometry the same way the European extract is (see
+  [Step 00b](#step-00b-airport-ground-layouts)) — 66.5 MB from a 94.86 GB
+  planet source, in one measured build.
+- **State-vector volume is roughly 2.7×** the European figure (measured
+  2.73× over three hours of 2026-06-01: 1.95× at 06Z, rising to 3.86× at 18Z
+  as the Americas wake up and Europe winds down — well below the 3.89×
+  airport-count ratio, because OpenSky's own receiver network is
+  Europe-heavy). Budget storage accordingly; a single worldwide day is
+  **projected** at ~23 GB before events — the 11-day European campaign's
+  per-day storage (statevectors, tracks, clean tracks) scaled by the
+  measured 2.73× row ratio: 2.7 + 10.6 + 9.8 GB. This supersedes an earlier
+  10–20 GB estimate, which undercounted; the worldwide run is currently
+  blocked on a bucket quota, so planning against too small a number is a live
+  risk, not a hypothetical one.
+
+**Worldwide output is not comparable to published European data**, and not
+only because it lives in a different warehouse. There is no ground truth to
+check it against: `eurocontrol`'s PRISME/APDF extracts are European, so
+ADEP/ADES accuracy and milestone quality worldwide are **unmeasured** — every
+accuracy figure OPDI has ever published comes from that European ground
+truth. A worldwide run is a wider *pipeline* output, not a benchmarked one; a
+paper or dashboard using it must say so rather than carrying European
+accuracy figures across.
 
 ## Building a flight list
 

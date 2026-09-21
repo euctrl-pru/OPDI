@@ -329,19 +329,56 @@ REFERENCE_SUBSTEPS = {
 }
 
 
+def reference_substeps_for_coverage(config) -> dict:
+    """Per-substep run flags dictated by coverage alone, independent of what
+    the caller asked for.
+
+    00c's sources are the PRU Atlas ANSP/FIR parquets, which cover Europe
+    only, and ``opdi_h3_airspace_ref`` is read by nothing today. Building it
+    worldwide would write a European table into a worldwide warehouse and
+    cost cluster time for a product with no consumer, so it is forced off
+    whenever ``config.coverage.is_worldwide``. Every other substep is
+    unaffected by coverage.
+    """
+    return {
+        substep_id: not (substep_id == "00c" and config.coverage.is_worldwide)
+        for substep_id in REFERENCE_SUBSTEPS
+    }
+
+
 def _step_00_reference_data(spark, config, **kwargs):
     """Step 00: Generate reference data (airports, airspaces)."""
     print("\n" + "=" * 70)
     print("STEP 00 - Reference data generation")
     print("=" * 70)
 
+    from opdi.utils.storage import StorageManager
+
+    storage = StorageManager(spark, config)
+    # Checked first, before any substep runs: a coverage mismatch is cheaper
+    # to catch now than after minutes of reference geometry have been built
+    # into the wrong warehouse.
+    problem = storage.check_coverage()
+    if problem is not None:
+        raise RuntimeError(problem)
+
     run_ref = kwargs.get("run_reference", {})
+    coverage_ref = reference_substeps_for_coverage(config)
 
     for substep_id, (label, fn) in REFERENCE_SUBSTEPS.items():
+        if not coverage_ref.get(substep_id, True):
+            print(f"\n  Skipping {substep_id} ({label}): sources are "
+                  "European and nothing reads the table")
+            continue
         if not run_ref.get(substep_id, True):
             print(f"\n  Skipping {substep_id} ({label})")
             continue
         fn(spark, config, **kwargs)
+
+    # Stamped only after every substep has run to completion. A reference
+    # build that dies halfway must not leave a marker claiming this warehouse
+    # holds a coverage it never finished populating.
+    storage.write_coverage_marker()
 
 
 def _step_01_ingest_statevectors(spark, config, start_date, end_date, **kwargs):
@@ -551,6 +588,7 @@ def run_pipeline(
     last_n_months: int = 4,
     adep_mode: Optional[str] = None,
     ades_mode: Optional[str] = None,
+    worldwide: bool = False,
 ) -> int:
     """
     Run the OPDI pipeline end-to-end or a single step.
@@ -580,6 +618,9 @@ def run_pipeline(
             (produced by step 00, consumed by step 03).
         export_dir: Base directory for parquet/CSV exports (steps 05-06).
         last_n_months: Only export the last N months of data (step 05).
+        worldwide: Drop the published European bounding box and route output
+            to a separate worldwide warehouse. Off by default, so every
+            existing caller keeps the European coverage without saying so.
 
     Returns:
         Exit code: ``0`` on success, ``1`` on failure.
@@ -600,13 +641,15 @@ def run_pipeline(
     if end_date is None:
         end_date = date.today()
 
-    config = OPDIConfig.for_environment(env)
+    config = OPDIConfig.for_environment(env, worldwide=worldwide)
 
     print("=" * 70)
     print("OPDI Pipeline Runner v2.0.0")
     print("=" * 70)
     print(f"  Environment : {env}")
     print(f"  Project     : {config.project.project_name}")
+    print(f"  Coverage    : {config.coverage.label}")
+    print(f"  Warehouse   : {config.project.warehouse_path}")
     print(f"  Date range  : {start_date} to {end_date}")
     run_reference = {
         "00a": run_airport_zones,

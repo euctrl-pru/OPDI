@@ -35,9 +35,9 @@ S3_BASE = "s3a://opensky-hdfs-backup/tables_v4/state_vectors"
 # production tables under opdi/ -- those must never be overwritten.
 OUT_BASE = "s3a://eurocontrol/opdi/research/statevectors"
 
-# Matches StateVectorIngestion.DEFAULT_BBOX exactly. Do not drift from it: the
-# benchmark is meaningless if it evaluates a different spatial population than
-# the pipeline ingests.
+# Matches config.coverage.bbox (the published European box, opdi.coverage.
+# EUROPE_BBOX) exactly. Do not drift from it: the benchmark is meaningless if
+# it evaluates a different spatial population than the pipeline ingests.
 BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)  # min_lon, min_lat, max_lon, max_lat
 TIME_INTERVAL = 5  # seconds; keep rows where event_time % 5 == 0
 

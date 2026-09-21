@@ -89,11 +89,16 @@ NON_AEROPLANE_CLASSES = ("H", "G", "T")
 SURFACE_VEHICLE_PATTERNS = ("Surface Vehicle", "Ground Obstruction", "Point Obstacle")
 
 #: Out-of-area sentinel. A flight whose origin or destination lies outside the
-#: ingestion bounding box cannot have that aerodrome named from this data, and
+#: observed area -- the published European box this script evaluates (see
+#: ``BBOX`` below) -- cannot have that aerodrome named from this data, and
 #: saying so is a different -- and correct -- answer from staying silent.
+#: Matches the wording of ``opdi.pipeline.flights.OOA``, which documents the
+#: same constant for the production pipeline (there, "configured coverage"
+#: rather than a fixed European box, since that path also runs worldwide).
 OOA = "OOA"
 
-#: Ingestion bounding box, from ``StateVectorIngestion.DEFAULT_BBOX``.
+#: Ingestion bounding box, from ``config.coverage.bbox`` (the published
+#: European box, ``opdi.coverage.EUROPE_BBOX``).
 BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)  # min_lon, min_lat, max_lon, max_lat
 
 #: How close to the bbox edge an endpoint must be to read as "left the area"

@@ -381,13 +381,6 @@ class AirportLayoutGenerator:
         >>> generator.process_all()
     """
 
-    # OPDI state vector coverage bounding box
-    BBOX_OFFSET = 3  # degrees
-    LAT_MIN = 26.74617
-    LAT_MAX = 70.25976
-    LON_MIN = -25.86653
-    LON_MAX = 49.65699
-
     def __init__(
         self,
         spark: SparkSession,
@@ -439,7 +432,7 @@ class AirportLayoutGenerator:
         airports_url: Optional[str] = None,
         airport_types: Optional[List[str]] = None,
     ) -> pd.DataFrame:
-        """Large+medium airports within the OPDI bbox, from ``oa_airports``.
+        """Large+medium airports within this run's coverage, from ``oa_airports``.
 
         Reads the already-ingested table (step 00d) rather than downloading the
         public OurAirports CSV. Three reasons, in increasing order of how much
@@ -465,22 +458,19 @@ class AirportLayoutGenerator:
             DataFrame with columns: ident, latitude_deg, longitude_deg,
             elevation_ft, type.
         """
+        cov = self.config.coverage
         if airport_types is None:
-            airport_types = ["large_airport", "medium_airport"]
+            airport_types = list(cov.airport_types)
 
-        offset = self.BBOX_OFFSET
         cols = ["ident", "latitude_deg", "longitude_deg", "elevation_ft", "type"]
 
         if airports_url is not None:
             airports_df = pd.read_csv(airports_url)
             airports_df = airports_df[airports_df["type"].isin(airport_types)][cols]
-            f_lat = airports_df.latitude_deg.between(
-                self.LAT_MIN - offset, self.LAT_MAX + offset
+            mask = cov.pandas_mask(
+                airports_df.latitude_deg, airports_df.longitude_deg, offset=True
             )
-            f_lon = airports_df.longitude_deg.between(
-                self.LON_MIN - offset, self.LON_MAX + offset
-            )
-            airports_df = airports_df[f_lat & f_lon]
+            airports_df = airports_df[mask]
         else:
             if not self.storage.table_exists("oa_airports"):
                 raise RuntimeError(
@@ -493,16 +483,16 @@ class AirportLayoutGenerator:
             apt = self.storage.read_table("oa_airports").select(*cols)
             apt = apt.filter(
                 F.col("type").isin(airport_types)
-                & F.col("latitude_deg").between(
-                    self.LAT_MIN - offset, self.LAT_MAX + offset
-                )
-                & F.col("longitude_deg").between(
-                    self.LON_MIN - offset, self.LON_MAX + offset
+                & cov.spark_filter(
+                    F.col("latitude_deg").cast("double"),
+                    F.col("longitude_deg").cast("double"),
+                    offset=True,
                 )
             )
             airports_df = apt.toPandas()
 
-        print(f"There are {len(airports_df)} airports to process (within OPDI bbox)...")
+        print(f"There are {len(airports_df)} airports to process "
+              f"(coverage: {cov.label})...")
         return airports_df
 
     def process_airport(self, apt_icao: str) -> Optional[pd.DataFrame]:

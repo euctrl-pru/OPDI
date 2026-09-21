@@ -41,6 +41,7 @@ from pyspark.sql.functions import (
 from pyspark.sql.window import Window
 
 from opdi.config import OPDIConfig
+from opdi.coverage import EUROPE_BBOX
 from opdi.utils.datetime_helpers import (
     generate_months,
     get_start_end_of_month,
@@ -48,9 +49,13 @@ from opdi.utils.datetime_helpers import (
 from opdi.utils.storage import StorageManager
 
 
-#: Ingestion bounding box, from ``StateVectorIngestion.DEFAULT_BBOX``. Used to
-#: decide whether a track endpoint has left the observed area.
-BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)  # min_lon, min_lat, max_lon, max_lat
+#: Default box for :func:`at_border`, kept so the two existing callers in the
+#: tests read unchanged. Production passes ``config.coverage.bbox`` explicitly
+#: (see :meth:`FlightListProcessor._track_border_flags` and
+#: :meth:`FlightListProcessor.build_endpoint_candidates`); this default exists
+#: for the test seam, not for the pipeline. See ``opdi.coverage.EUROPE_BBOX``,
+#: the one published copy of this tuple.
+BBOX = EUROPE_BBOX
 
 #: How close to the bbox edge an endpoint must be to read as "left the area"
 #: rather than "stopped being seen". Reception falls off before the nominal
@@ -58,8 +63,10 @@ BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)  # min_lon, min_lat, max_lon, m
 BORDER_MARGIN_NM = 30.0
 
 #: Marker for an aerodrome outside the observed area. A flight that entered
-#: European airspace already airborne has an origin no ADS-B feed here can
-#: name, and saying so is a different -- and correct -- answer from silence.
+#: the configured coverage already airborne -- the published European box by
+#: default, or nothing at all worldwide -- has an origin no ADS-B feed here
+#: can name, and saying so is a different -- and correct -- answer from
+#: silence.
 OOA = "OOA"
 
 #: The ``version`` stamped on every flight-list row.
@@ -242,14 +249,21 @@ def haversine_nm(lat1, lon1, lat2, lon2):
     return lit(2 * EARTH_R_NM) * F.asin(F.sqrt(clamped))
 
 
-def at_border(lat, lon, margin_nm: float = BORDER_MARGIN_NM):
-    """True where a position sits within *margin_nm* of the ingestion bbox edge.
+def at_border(lat, lon, margin_nm: float = BORDER_MARGIN_NM, bbox=BBOX):
+    """True where a position sits within *margin_nm* of the coverage edge.
+
+    ``bbox=None`` means worldwide, and returns ``lit(False)`` everywhere: there
+    is no edge, so nothing can be near it. That is not the same as a box of
+    +/-180/90, which would make every flight crossing the antimeridian look
+    like it had left the observed area.
 
     The longitude margin is scaled by 1/cos(latitude): a degree of longitude
     shrinks toward the pole, so an unscaled margin would be twice as strict in
     northern Norway as in the Canaries.
     """
-    min_lon, min_lat, max_lon, max_lat = BBOX
+    if bbox is None:
+        return lit(False)
+    min_lon, min_lat, max_lon, max_lat = bbox
     dlat = margin_nm / NM_PER_DEG
     dlon = dlat / F.greatest(cos(radians(lat)), lit(0.1))
     return (
@@ -658,7 +672,10 @@ class FlightListProcessor:
         # which is not resolved.
         sv = sv.fillna({"flight_id": ""})
         sv = sv.withColumn("event_time", F.to_timestamp(col("event_time")))
-        sv = sv.withColumn("_border", at_border(col("lat"), col("lon")))
+        sv = sv.withColumn(
+            "_border",
+            at_border(col("lat"), col("lon"), bbox=self.config.coverage.bbox),
+        )
 
         w = Window.partitionBy("track_id").orderBy("event_time")
         w_desc = Window.partitionBy("track_id").orderBy(col("event_time").desc())
@@ -697,7 +714,9 @@ class FlightListProcessor:
         a null indistinguishable from a detection failure.
 
         The test is the one ``classify_endpoints`` uses, deliberately: a fix
-        within :data:`BORDER_MARGIN_NM` of the ingestion bbox edge. Precedence
+        within :data:`BORDER_MARGIN_NM` of the configured coverage edge --
+        the published European box by default, inert worldwide since there is
+        no edge to be near. Precedence
         is the same too -- **aerodrome first, border second**. The other order
         looks equivalent and is not: Ponta Delgada sits about 8 NM inside the
         western edge, and letting the border test win labels its departures
@@ -835,7 +854,10 @@ class FlightListProcessor:
             .withColumn("_rr", row_number().over(w.orderBy(col("event_time").desc())))
             .filter((col("_rn") == 1) | (col("_rr") == 1))
             .withColumn("role", when(col("_rn") == 1, lit("adep")).otherwise(lit("ades")))
-            .withColumn("at_border", at_border(col("lat"), col("lon")))
+            .withColumn(
+                "at_border",
+                at_border(col("lat"), col("lon"), bbox=self.config.coverage.bbox),
+            )
             .select(
                 "track_id", "icao24", "flight_id", "role", "event_time",
                 "lat", "lon", "baro_altitude", "on_ground", "at_border", "h3_res_7",

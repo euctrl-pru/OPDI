@@ -7,6 +7,7 @@ still need running, and whether a state file describes the window being asked
 for. Those are the decisions that cost a week of cluster time when wrong.
 """
 import json
+import os
 
 import pytest
 
@@ -278,9 +279,16 @@ class _H3Cfg:
         self.airport_layout_pbf_path = path
 
 
+class _CoverageStub:
+    def __init__(self, is_worldwide):
+        self.is_worldwide = is_worldwide
+
+
 class _Cfg:
-    def __init__(self, path=None):
+    def __init__(self, path=None, coverage=None):
         self.h3 = _H3Cfg(path)
+        if coverage is not None:
+            self.coverage = coverage
 
 
 def test_the_environment_overrides_the_configured_extract(monkeypatch):
@@ -326,6 +334,93 @@ def test_a_real_extract_passes(monkeypatch, tmp_path):
     pbf = tmp_path / "aeroway.osm.pbf"
     pbf.write_bytes(b"not really a pbf, but it exists")
     assert preflight_fresh_build(_Cfg(str(pbf))) == []
+
+
+def _write_osm(path, body):
+    path.write_text(
+        "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\">\n"
+        + body + "\n</osm>\n"
+    )
+    return str(path)
+
+
+def test_european_coverage_does_not_run_the_worldwide_extract_check(monkeypatch, tmp_path):
+    """The European path must be unaffected: no new work, no new failure
+    mode, when coverage is not worldwide -- even against an extract that
+    (like this one) has no aerodrome at all."""
+    from opdi.periodrun import preflight_fresh_build
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    pbf = _write_osm(tmp_path / "aeroway.osm", "")
+    cfg = _Cfg(pbf, coverage=_CoverageStub(is_worldwide=False))
+    assert preflight_fresh_build(cfg) == []
+
+
+def test_worldwide_coverage_against_a_european_only_extract_is_a_preflight_problem(
+    monkeypatch, tmp_path
+):
+    """A `--worldwide` run pointed at `aeroway-europe.osm.pbf` would build
+    worldwide detection zones and a worldwide runway grid but European-only
+    ground layouts, and every aerodrome outside Europe would silently get no
+    geometry -- indistinguishable from OSM never having mapped it."""
+    from opdi.periodrun import preflight_fresh_build
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    pbf = _write_osm(
+        tmp_path / "aeroway.osm",
+        """
+  <node id="1" lat="49.000" lon="6.000">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="ELLX"/>
+  </node>""",
+    )
+    cfg = _Cfg(pbf, coverage=_CoverageStub(is_worldwide=True))
+    problems = preflight_fresh_build(cfg)
+    assert len(problems) == 1
+    assert pbf in problems[0]
+
+
+def test_worldwide_coverage_against_a_worldwide_extract_passes(monkeypatch, tmp_path):
+    from opdi.periodrun import preflight_fresh_build
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    pbf = _write_osm(
+        tmp_path / "aeroway.osm",
+        """
+  <node id="1" lat="49.000" lon="6.000">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="ELLX"/>
+  </node>
+  <node id="2" lat="-33.946" lon="151.177">
+    <tag k="aeroway" v="aerodrome"/>
+    <tag k="icao" v="YSSY"/>
+  </node>""",
+    )
+    cfg = _Cfg(pbf, coverage=_CoverageStub(is_worldwide=True))
+    assert preflight_fresh_build(cfg) == []
+
+
+_PLANET_PBF = "/home/jupyter/work/osm/aeroway-planet.osm.pbf"
+_EUROPE_PBF = "/home/jupyter/work/osm/aeroway-europe.osm.pbf"
+
+
+@pytest.mark.skipif(
+    not (os.path.exists(_PLANET_PBF) and os.path.exists(_EUROPE_PBF)),
+    reason="real OSM extracts not present on this machine",
+)
+def test_real_extracts_are_told_apart_by_the_worldwide_check(monkeypatch):
+    """The synthetic fixtures above exercise the logic; this confirms it
+    against the actual extracts the branch was built and blocked on."""
+    from opdi.periodrun import preflight_fresh_build
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    worldwide_cfg = _CoverageStub(is_worldwide=True)
+
+    problems = preflight_fresh_build(_Cfg(_EUROPE_PBF, coverage=worldwide_cfg))
+    assert len(problems) == 1
+    assert _EUROPE_PBF in problems[0]
+
+    assert preflight_fresh_build(_Cfg(_PLANET_PBF, coverage=worldwide_cfg)) == []
 
 
 # --- the day loop -----------------------------------------------------------
@@ -676,3 +771,195 @@ def test_every_statevector_write_partitions_by_day():
             "a statevector write without partition_by overwrites the whole "
             "table, discarding every other day in the ingest window"
         )
+
+
+# --- coverage plumbing -------------------------------------------------------
+
+def test_airspaces_are_skipped_worldwide():
+    """00c's sources are PRU Atlas ANSP/FIR parquets, which cover Europe only,
+    and opdi_h3_airspace_ref is read by nothing. Running it worldwide would
+    write a European table into a worldwide warehouse and cost cluster time for
+    a product with no consumer."""
+    from opdi.runner import reference_substeps_for_coverage
+    from opdi.config import OPDIConfig
+    world = reference_substeps_for_coverage(
+        OPDIConfig.for_environment("opensky", worldwide=True))
+    assert world["00c"] is False
+    europe = reference_substeps_for_coverage(OPDIConfig.for_environment("opensky"))
+    assert europe["00c"] is True
+
+
+def test_a_worldwide_period_run_does_not_default_to_the_european_prefix():
+    """periodrun overwrites config.project.warehouse_path with its own default,
+    which is the European prefix. Without this the --worldwide flag would be
+    silently discarded at the one entry point production actually uses."""
+    import inspect
+    from opdi.periodrun import run_period, DEFAULT_WAREHOUSE
+    assert DEFAULT_WAREHOUSE == "s3a://eurocontrol/opdi-prod"
+    assert inspect.signature(run_period).parameters["worldwide"].default is False
+    # Behavioural half: resolve the warehouse the way run_period does.
+    from opdi.config import OPDIConfig
+    world = OPDIConfig.for_environment("opensky", worldwide=True)
+    assert world.project.warehouse_path != DEFAULT_WAREHOUSE
+
+
+# --- _resolve_warehouse ------------------------------------------------------
+#
+# The behavioural half of the DEFAULT_WAREHOUSE leak lives in this pure
+# function, extracted specifically so the guard is testable without stubbing
+# all of run_period's dependencies (a Spark session, a state file, a
+# warehouse to preflight). `test_a_worldwide_period_run_does_not_default_to_
+# the_european_prefix` above only pins config.py's OPDIConfig.for_environment
+# behaviour, already covered by test_coverage_config.py -- it never calls
+# into periodrun.py at all, so the guard itself needed its own tests.
+
+def test_resolve_warehouse_follows_coverage_when_omitted_worldwide():
+    """Caller omitted `warehouse`, `worldwide=True` -> the worldwide path."""
+    from opdi.periodrun import _resolve_warehouse, _UNSET
+    assert _resolve_warehouse(
+        _UNSET, True, "s3a://eurocontrol/opdi-world"
+    ) == "s3a://eurocontrol/opdi-world"
+
+
+def test_resolve_warehouse_defaults_to_opdi_prod_when_omitted_european():
+    """Caller omitted `warehouse`, `worldwide=False` -> DEFAULT_WAREHOUSE,
+    unchanged from before this function existed."""
+    from opdi.periodrun import _resolve_warehouse, _UNSET, DEFAULT_WAREHOUSE
+    assert _resolve_warehouse(
+        _UNSET, False, "s3a://eurocontrol/opdi-world"
+    ) == DEFAULT_WAREHOUSE
+
+
+def test_resolve_warehouse_an_explicit_value_wins_worldwide():
+    """Caller passed an explicit warehouse, `worldwide=True` -> the caller's
+    value wins, even though it is not the worldwide path for this env."""
+    from opdi.periodrun import _resolve_warehouse
+    assert _resolve_warehouse(
+        "s3a://eurocontrol/scratch", True, "s3a://eurocontrol/opdi-world"
+    ) == "s3a://eurocontrol/scratch"
+
+
+def test_resolve_warehouse_an_explicit_value_wins_european():
+    """Caller passed an explicit warehouse, `worldwide=False` -> the caller's
+    value wins, unchanged from before this function existed."""
+    from opdi.periodrun import _resolve_warehouse
+    assert _resolve_warehouse(
+        "s3a://eurocontrol/scratch", False, "s3a://eurocontrol/opdi-world"
+    ) == "s3a://eurocontrol/scratch"
+
+
+def test_resolve_warehouse_an_explicit_default_lookalike_still_wins():
+    """The bug this function exists to close: a caller who explicitly passed
+    the exact string DEFAULT_WAREHOUSE, under worldwide=True, must not have
+    it silently overridden by the worldwide path. A bare `warehouse ==
+    DEFAULT_WAREHOUSE` comparison cannot tell that apart from "the caller
+    said nothing" -- only the _UNSET sentinel can, which is why the default
+    changed from a literal to the sentinel."""
+    from opdi.periodrun import _resolve_warehouse, DEFAULT_WAREHOUSE
+    assert _resolve_warehouse(
+        DEFAULT_WAREHOUSE, True, "s3a://eurocontrol/opdi-world"
+    ) == DEFAULT_WAREHOUSE
+
+
+def test_run_period_still_defaults_the_warehouse_parameter_to_unset():
+    """Pins the signature change itself: an unset `warehouse` must be the
+    sentinel, not the literal DEFAULT_WAREHOUSE, or the lookalike case above
+    could never be reached from a real call."""
+    import inspect
+    from opdi.periodrun import run_period, _UNSET
+    assert inspect.signature(run_period).parameters["warehouse"].default is _UNSET
+
+
+def test_a_worldwide_run_state_does_not_match_a_european_one(tmp_path):
+    """RunState.matches must distinguish coverage as well as window: a European
+    run's progress must never be read as a worldwide run's, or the reverse.
+    This has bitten before -- a stale weekrun_2026-06-01_1d.json once made a
+    run report five completed units and skip steps 02-04 entirely."""
+    from opdi.periodrun import RunState
+
+    s = RunState(path=tmp_path / "s.json", env="opensky", coverage="europe",
+                 start_date="2026-06-01", end_date="2026-06-07",
+                 completed={"01": {}})
+    assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "europe")
+    assert not s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "worldwide")
+
+
+def test_an_old_state_file_with_no_coverage_field_still_matches_europe(tmp_path):
+    """State files written before this field existed have no `coverage` key.
+    They described European runs -- worldwide did not exist yet -- so they
+    must keep matching a European re-invocation rather than refusing it."""
+    from opdi.periodrun import RunState
+
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({
+        "run_id": "R", "env": "opensky",
+        "start_date": "2026-06-01", "end_date": "2026-06-07",
+        "completed": {"01": {}},
+    }))
+    s = RunState.load(p)
+    assert s.coverage == ""
+    assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "europe")
+    assert not s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "worldwide")
+
+
+# --- run_period.py, the top-level wrapper --------------------------------
+#
+# Not opdi.periodrun.run_period itself -- the standalone script at the repo
+# root that campaigns actually invoke. It has its own argparse parser and
+# imports `run_period` (the function) by name at module load time, so
+# monkeypatching opdi.periodrun.run_period would not reach it; the patch has
+# to land on the script module's own `run_period` attribute, which is what
+# `main()` actually calls.
+
+def _fake_run_period(monkeypatch, script):
+    captured = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(script, "run_period", fake)
+    return captured
+
+
+def test_the_wrapper_script_leaves_warehouse_unset_by_default(monkeypatch):
+    """This is the test that would have caught the defect: --warehouse used
+    to default to the DEFAULT_WAREHOUSE *string*, so argparse materialised it
+    before run_period() ever saw it -- _resolve_warehouse would then take the
+    "explicit" branch and a --worldwide run would silently write into
+    opdi-prod. Parsing with no --warehouse must yield the sentinel."""
+    import run_period as script
+
+    captured = _fake_run_period(monkeypatch, script)
+    script.main(["--start", "2026-06-01"])
+    assert captured["warehouse"] is script._UNSET
+
+
+def test_the_wrapper_script_passes_worldwide_through(monkeypatch):
+    """--worldwide must reach run_period() as worldwide=True, and its absence
+    as worldwide=False -- mirrors the cli.py coverage for `opdi run`."""
+    import run_period as script
+
+    captured = _fake_run_period(monkeypatch, script)
+    script.main(["--start", "2026-06-01"])
+    assert captured["worldwide"] is False
+
+    captured.clear()
+    script.main(["--start", "2026-06-01", "--worldwide"])
+    assert captured["worldwide"] is True
+
+
+def test_the_wrapper_script_still_lets_an_explicit_warehouse_win(monkeypatch):
+    """An operator who names a prefix explicitly must get exactly that
+    prefix, in either coverage -- the sentinel only changes what an *omitted*
+    --warehouse resolves to."""
+    import run_period as script
+
+    captured = _fake_run_period(monkeypatch, script)
+    script.main(["--start", "2026-06-01", "--warehouse", "s3a://eurocontrol/scratch"])
+    assert captured["warehouse"] == "s3a://eurocontrol/scratch"
+
+    captured.clear()
+    script.main(["--start", "2026-06-01", "--worldwide",
+                 "--warehouse", "s3a://eurocontrol/scratch"])
+    assert captured["warehouse"] == "s3a://eurocontrol/scratch"

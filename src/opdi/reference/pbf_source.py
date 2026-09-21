@@ -254,6 +254,55 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
 
+def pbf_has_aerodrome_outside_bbox(pbf_path: str, bbox) -> bool:
+    """True as soon as an ``aeroway=aerodrome`` object outside *bbox* is found.
+
+    *bbox* is ``(min_lon, min_lat, max_lon, max_lat)``.
+
+    Exists for ``periodrun.preflight_fresh_build``: a worldwide run pointed at
+    a European-only extract would build worldwide detection zones and a
+    worldwide runway grid but European-only ground layouts, and every
+    aerodrome outside Europe would then have no geometry -- indistinguishable
+    from "OSM never mapped it", a documented normal outcome. One aerodrome
+    outside the box is enough to prove the extract is not European-only, so
+    this stops at the first match rather than reading the whole file.
+
+    ``with_locations()`` gives node coordinates directly and lets a way's
+    first referenced node stand in for the way's location -- cheap compared
+    to assembling its full polygon (``read_aerodromes``), and this check only
+    needs a yes/no, not the aerodrome's true boundary.
+    """
+    min_lon, min_lat, max_lon, max_lat = bbox
+    fp = (
+        osmium.FileProcessor(pbf_path)
+        .with_locations()
+        .with_filter(osmium.filter.KeyFilter("aeroway"))
+    )
+    for obj in fp:
+        if obj.tags.get("aeroway") != "aerodrome":
+            continue
+        try:
+            if isinstance(obj, osmium.osm.Node):
+                loc = obj.location
+            elif isinstance(obj, osmium.osm.Way):
+                nodes = obj.nodes
+                if len(nodes) == 0:
+                    continue
+                loc = nodes[0].location
+            else:
+                continue
+            if not loc.valid():
+                continue
+            lat, lon = loc.lat, loc.lon
+        except Exception:
+            # A malformed or unresolvable location proves nothing either
+            # way; skip it rather than let it crash a preflight check.
+            continue
+        if not (min_lat <= lat <= max_lat and min_lon <= lon <= max_lon):
+            return True
+    return False
+
+
 import math
 
 from pyspark.sql import functions as F
@@ -332,6 +381,21 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
     out.loc[miss, "lon_max"] = out.loc[miss, "apt_lon"] + [
         _deg_lon(FALLBACK_HALF_KM, v) for v in out.loc[miss, "apt_lat"]
     ]
+
+    # An aerodrome near the antimeridian can get a padded bound past +-180
+    # (e.g. lon_max = 180.0115) -- not an inverted interval, since lon_min and
+    # lon_max are built as min-pad/max+pad and can never cross. `between` on a
+    # bound outside [-180, 180] simply never matches the wrapped-around side,
+    # so the aerodrome silently gets no geometry, which looks exactly like an
+    # aerodrome OSM never mapped. No large or medium aerodrome currently has a
+    # box within the margin of 180, so widening to the full range costs a
+    # handful of extra candidate features and cannot lose any.
+    wrapped = (out["lon_max"] > 180.0) | (out["lon_min"] < -180.0)
+    if wrapped.any():
+        print(f"  {int(wrapped.sum())} aerodrome box(es) cross the antimeridian; "
+              "widening their longitude range to the full circle.")
+        out.loc[wrapped, "lon_min"] = -180.0
+        out.loc[wrapped, "lon_max"] = 180.0
     return out
 
 
@@ -436,6 +500,19 @@ class PbfLayoutSource:
                               # whose own boundary missed the point still
                               # keeps a closer neighbour's box from claiming it
             for _, r in box_only.iterrows():
+                # `r.lon_min`/`r.lon_max` may be -180/180 here -- `airport_boxes`
+                # widens a box that straddles the antimeridian to the full
+                # circle rather than leaving an inverted interval `between`
+                # would match nothing on. That widening is only safe because
+                # of the nearest-guard immediately below: it does not accept
+                # every point this (now unbounded) box contains, it claims a
+                # point only if THIS aerodrome is nearer than every other one
+                # in `_boxes`, so a full-circle box cannot steal features near
+                # a different, closer aerodrome anywhere on the globe. If that
+                # guard is ever relaxed or removed, this must become a
+                # wrap-aware interval test instead (`lon >= lon_min OR
+                # lon <= lon_max`), not stay a widened box with no guard
+                # behind it.
                 inside = lat.between(r.lat_min, r.lat_max) & lon.between(
                     r.lon_min, r.lon_max
                 )
