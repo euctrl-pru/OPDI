@@ -963,3 +963,59 @@ def test_the_wrapper_script_still_lets_an_explicit_warehouse_win(monkeypatch):
     script.main(["--start", "2026-06-01", "--worldwide",
                  "--warehouse", "s3a://eurocontrol/scratch"])
     assert captured["warehouse"] == "s3a://eurocontrol/scratch"
+
+
+def test_prune_tracks_drops_only_the_track_tables():
+    """Pruning must not touch the outputs it exists to protect.
+
+    The whole point is that the flight list, events and measurements survive;
+    if this list ever grew to include them, a long period would delete the only
+    thing it was run to produce.
+    """
+    from opdi.periodrun import TRACK_TABLES
+    assert TRACK_TABLES == ("osn_tracks", "osn_tracks_clean")
+
+
+def test_prune_tracks_for_day_drops_that_day_in_both_tables():
+    from datetime import date
+    from opdi.periodrun import prune_tracks_for_day
+
+    calls = []
+
+    class _Storage:
+        def drop_partitions(self, table, column, values):
+            calls.append((table, column, tuple(values)))
+            return len(values)
+
+    n = prune_tracks_for_day(_Storage(), date(2026, 6, 2))
+    assert n == 2
+    assert calls == [
+        ("osn_tracks", "dof", ("2026-06-02",)),
+        ("osn_tracks_clean", "dof", ("2026-06-02",)),
+    ]
+
+
+def test_prune_failure_does_not_propagate():
+    """A retention step must never fail a run whose outputs are already safe.
+
+    The day's flight list, events and measurements are written by the time this
+    runs; raising here would turn a complete day into a failed one.
+    """
+    from datetime import date
+    from opdi.periodrun import prune_tracks_for_day
+
+    class _Broken:
+        def drop_partitions(self, table, column, values):
+            raise RuntimeError("s3 refused")
+
+    assert prune_tracks_for_day(_Broken(), date(2026, 6, 2)) == 0
+
+
+def test_run_period_defaults_to_keeping_tracks():
+    """Retention is opt-in. A plain run must behave exactly as before, or every
+    existing caller silently starts deleting its own intermediates."""
+    import inspect
+    from opdi.periodrun import run_period
+    sig = inspect.signature(run_period)
+    assert sig.parameters["prune_tracks"].default is False
+    assert tuple(sig.parameters["keep_tracks_on"].default) == ()

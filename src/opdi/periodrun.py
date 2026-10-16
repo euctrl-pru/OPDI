@@ -541,6 +541,38 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
     return problems + missing
 
 
+#: Tables that exist only to feed later steps and can be dropped once a day's
+#: outputs are written.
+#:
+#: `osn_tracks` and `osn_tracks_clean` are the bulk of a day -- ~9.8 GB and
+#: ~9.4 GB worldwide against ~1.5 GB for the flight list, events and
+#: measurements combined. They are inputs to steps 03 and 04, so they cannot be
+#: skipped at write time; retention is therefore a decision made AFTER the
+#: dependent steps land, not a flag on the write.
+TRACK_TABLES: Tuple[str, ...] = ("osn_tracks", "osn_tracks_clean")
+
+
+def prune_tracks_for_day(storage, day: date) -> int:
+    """Drop the track partitions for *day*. Returns partitions removed.
+
+    Only safe once every step that reads tracks has completed for this day --
+    03 builds the flight list from them and 04 derives events from them. The
+    caller enforces that ordering; this function does not check it.
+
+    What is lost is re-derivation without re-ingest: events for a pruned day
+    cannot be recomputed from stored tracks, only by ingesting the day again.
+    The benchmarker's `trajectory` cache table also reads `osn_tracks`, so a
+    pruned day has no trajectory view.
+    """
+    removed = 0
+    for table in TRACK_TABLES:
+        try:
+            removed += storage.drop_partitions(table, "dof", [day.isoformat()])
+        except Exception as exc:  # noqa: BLE001 - pruning must not fail a run
+            print(f"  prune: {table} dof={day} not dropped ({exc})")
+    return removed
+
+
 def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     """Run one pipeline step for the tracks that started on ``day``.
 
@@ -704,6 +736,8 @@ def run_period(
     skip_preflight: bool = False,
     dry_run: bool = False,
     warehouse: str = _UNSET,
+    prune_tracks: bool = False,
+    keep_tracks_on: Sequence[date] = (),
     allow_existing: bool = False,
     worldwide: bool = False,
 ) -> int:
@@ -857,6 +891,14 @@ def run_period(
         print(f"  already done: {len(done)} unit(s)  (from {state_path})")
     print(f"  to run      : {len(todo)} unit(s) over {len(all_days)} day(s)")
     print(f"  day steps   : {' '.join(s for s in steps if s in DAY_STEPS)}")
+    # The last day-step in the REQUESTED order, not in DAY_STEPS order: a run
+    # asking for only 01 02 must prune after 02, not wait for an 04b it never
+    # runs.
+    last_day_step = next((s for s in reversed(list(steps)) if s in DAY_STEPS), None)
+    keep_set = set(keep_tracks_on)
+    if prune_tracks:
+        print(f"  retention   : tracks pruned after {last_day_step}"
+              + (f", kept for {', '.join(str(d) for d in sorted(keep_set))}" if keep_set else ""))
     print(f"  {_describe_memory(limit_bytes, used_bytes)}")
     if heap != (driver_memory or config.spark.driver_memory):
         print(
@@ -1030,6 +1072,27 @@ def run_period(
         elapsed = time.time() - step_start
         state.mark(_key(step, day), elapsed)
         print(f"<<< step {step} {scope} done in {elapsed:.1f}s")
+
+        # Retention, decided after the day's outputs exist rather than at write
+        # time: steps 03 and 04 read the tracks this drops, so pruning may only
+        # happen once the last day-step for THIS day has been marked. Days named
+        # in `keep_tracks_on` are exempt, which is how a reference day keeps its
+        # trajectories while a long period keeps only its outputs.
+        if prune_tracks and day is not None and step == last_day_step:
+            if day in keep_set:
+                print(f"  prune: keeping tracks for {day} (exempt)")
+            else:
+                storage = StorageManager(
+                    SparkSessionManager.create_session(
+                        app_name=f"opdi prune {day}", config=config,
+                        distributed=False),
+                    config,
+                )
+                try:
+                    n = prune_tracks_for_day(storage, day)
+                    print(f"  prune: dropped {n} track partition(s) for {day}")
+                finally:
+                    storage.spark.stop()
 
     print(f"\nAll requested steps complete in {time.time() - overall:.1f}s.")
     print(f"State: {state_path}")

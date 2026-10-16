@@ -99,6 +99,18 @@ def main(argv=None) -> int:
                         "included -- a run reuses nothing from elsewhere. "
                         "An explicit value here always wins, in either "
                         "coverage.")
+    p.add_argument("--prune-tracks", action="store_true", default=False,
+                   help="Drop osn_tracks and osn_tracks_clean for each day "
+                        "once that day's outputs are written. They are ~19 GB "
+                        "a day worldwide against ~1.5 GB for the flight list, "
+                        "events and measurements, so a long period is only "
+                        "affordable without them. Costs the trajectory view "
+                        "and re-derivation without re-ingest.")
+    p.add_argument("--keep-tracks-on", nargs="*", default=[],
+                   type=date.fromisoformat, metavar="YYYY-MM-DD",
+                   help="Days exempt from --prune-tracks, so a reference day "
+                        "keeps its trajectories while the rest of the period "
+                        "keeps only outputs.")
     p.add_argument("--worldwide", action="store_true", default=False,
                    help="Drop the published European bounding box: read and "
                         "write the worldwide warehouse instead of "
@@ -129,6 +141,8 @@ def main(argv=None) -> int:
         warehouse=args.warehouse,
         allow_existing=args.allow_existing,
         worldwide=args.worldwide,
+        prune_tracks=args.prune_tracks,
+        keep_tracks_on=args.keep_tracks_on,
     )
 
 
