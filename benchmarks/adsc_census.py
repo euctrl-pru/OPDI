@@ -100,14 +100,26 @@ def census(df: DataFrame, bbox) -> DataFrame:
         for c in TRACKED
     ]
 
+    # The altitude and geography bands are counted **inside the box**, not over
+    # the whole feed. That is the population OPDI would ingest, so it is the
+    # one a claim about what ADS-C can reach has to be made over. Counting them
+    # globally gives a similar-looking percentage for a different population --
+    # and two tables quoting "97.6% above FL300" about different denominators
+    # is worse than one table quoting nothing.
     base = df.agg(
         F.count("*").alias("rows"),
         F.sum(in_box.cast("long")).alias("rows_in_box"),
         F.countDistinct("hex").alias("airframes"),
         F.countDistinct(F.when(in_box, F.col("hex"))).alias("airframes_in_box"),
-        F.sum((F.col("alt_baro_ft") > 30000).cast("long")).alias("rows_above_fl300"),
-        F.sum((F.col("alt_baro_ft") < 10000).cast("long")).alias("rows_below_10000ft"),
-        F.sum((F.col("lon") < -10.0).cast("long")).alias("rows_west_of_10w"),
+        F.sum((in_box & (F.col("alt_baro_ft") > 30000)).cast("long"))
+        .alias("in_box_above_fl300"),
+        F.sum((in_box & (F.col("alt_baro_ft") < 10000)).cast("long"))
+        .alias("in_box_below_10000ft"),
+        F.sum((in_box & (F.col("lon") < -10.0)).cast("long"))
+        .alias("in_box_west_of_10w"),
+        F.sum((in_box & F.col("on_ground")).cast("long"))
+        .alias("in_box_on_ground")
+        if "on_ground" in df.columns else F.lit(0).cast("long").alias("in_box_on_ground"),
         *fills,
     )
     return base.crossJoin(cadence).crossJoin(dupe_rows)

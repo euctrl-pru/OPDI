@@ -55,11 +55,19 @@ def test_median_cadence_is_per_airframe_and_ignores_duplicates(spark, feed):
     assert r["median_cadence_s"] == pytest.approx(600.0, abs=0.1)
 
 
-def test_altitude_bands_and_duplicates(spark, feed):
+def test_altitude_and_geography_bands_are_counted_inside_the_box(spark, feed):
+    # In the box, not over the whole feed: the box is the population OPDI would
+    # ingest, so it is the one a claim about what ADS-C can reach has to be
+    # made over. 3c6568's two FL380 rows sit at 40W and must not be counted.
     r = adsc_census.census(feed, EUROPE_BBOX).collect()[0]
-    assert r["rows_above_fl300"] == 4
-    assert r["rows_below_10000ft"] == 1
-    assert r["rows_west_of_10w"] == 2
+    assert r["in_box_above_fl300"] == 2       # the two FL350 rows, not the FL380 pair
+    assert r["in_box_below_10000ft"] == 1
+    assert r["in_box_west_of_10w"] == 0       # -5/-6/-7 are all east of 10W
+    assert r["in_box_on_ground"] == 0
+
+
+def test_exact_duplicates_are_counted(spark, feed):
+    r = adsc_census.census(feed, EUROPE_BBOX).collect()[0]
     assert r["exact_duplicate_rows"] == 1
 
 
