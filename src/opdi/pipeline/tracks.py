@@ -179,6 +179,73 @@ class TrackProcessor:
             processed_df = pd.DataFrame({"months": processed_months})
             processed_df.to_parquet(self.log_file_path)
 
+    def _read_adsc(self, start_time_str: str, end_time_str: str) -> DataFrame:
+        """The ADS-C state vectors for this batch's window.
+
+        Separate from :meth:`_merge_adsc` so the union logic is testable
+        without a table: the test replaces this method, which is the only part
+        that touches storage.
+        """
+        ref = self.storage.table_ref(self.config.adsc.table)
+        return self.spark.sql(
+            f"""
+            SELECT * FROM {ref}
+            WHERE (event_time >= TIMESTAMP('{start_time_str}'))
+              AND (event_time < TIMESTAMP('{end_time_str}'));
+        """
+        )
+
+    def _merge_adsc(
+        self, df_sv: DataFrame, start_time_str: str, end_time_str: str
+    ) -> DataFrame:
+        """Union ADS-C into the state-vector frame, before segmentation.
+
+        **Before**, deliberately. The question this fusion exists to answer is
+        whether a second source extends tracks and closes reception holes, and
+        both of those are properties of ``track_id`` -- which
+        :meth:`_add_track_id` assigns from the frame it is given. Merging
+        afterwards could only attach ADS-C to tracks ADS-B had already drawn,
+        which is not the hypothesis.
+
+        Returns ``df_sv`` **unchanged, column for column**, when
+        ``config.adsc.enabled`` is false. The ``source`` column is not added in
+        that case: it would appear in the partitions a new run writes and not
+        in the ones already on S3, and ``spark.read.parquet`` infers a table's
+        schema from a sample of footers -- so a consumer would intermittently
+        see a column that intermittently does not exist.
+        """
+        cfg = self.config.adsc
+        if not cfg.enabled:
+            return df_sv
+
+        from opdi.ingestion.osn_adsc import ADSB_SOURCE, shadow_filter
+
+        if not self.storage.table_exists(cfg.table):
+            raise RuntimeError(
+                f"config.adsc.enabled is True but {cfg.table!r} is absent from "
+                f"{self.config.project.warehouse_path!r}. Run step 01b for this "
+                f"window first. Falling back to ADS-B only here would write the "
+                f"baseline arm under the merged arm's name, and the two arms' "
+                f"tables are schema-identical -- nothing downstream could tell."
+            )
+
+        df_adsc = self._read_adsc(start_time_str, end_time_str)
+        kept = shadow_filter(df_adsc, df_sv,
+                             cfg.shadow_before_seconds,
+                             cfg.shadow_after_seconds)
+
+        # The partition column of the table `process_month` read back. ADS-C
+        # rows must carry their own day, not NULL: `process_month` selects
+        # every input column through to the write, and a NULL partition value
+        # lands in `__HIVE_DEFAULT_PARTITION__` where no day's read finds it.
+        if "event_time_day" in df_sv.columns:
+            kept = kept.withColumn("event_time_day", to_date(col("event_time")))
+
+        return (
+            df_sv.withColumn("source", lit(ADSB_SOURCE))
+            .unionByName(kept, allowMissingColumns=True)
+        )
+
     def _add_track_id(self, df: DataFrame) -> DataFrame:
         """
         Add unique track ID to each state vector.
@@ -511,6 +578,10 @@ class TrackProcessor:
         """
         )
 
+        # Before `original_columns`, so `source` survives the select below,
+        # and before `_add_track_id`, so segmentation sees both feeds.
+        df_month = self._merge_adsc(df_month, start_time_str, end_time_str)
+
         # Store original column names + new columns we'll add
         original_columns = df_month.columns + ["track_id"] + h3_columns
 
@@ -695,6 +766,16 @@ class TrackProcessor:
 
         today = date.today().strftime("%d %B %Y")
 
+        # `source` is deliberately absent from this DDL.
+        #
+        # A run with `config.adsc.enabled` writes an extra `source` column
+        # ("ADS-B" / "ADS-C") into the parquet it produces. That arm runs in
+        # the `opensky` environment, where `create_table` is a no-op and the
+        # schema is whatever the files carry -- so the column costs nothing
+        # there. Adding it here would put it on the Iceberg tables in dev and
+        # live, where the writer does not supply it and a by-name write would
+        # fail. The merged arm is a research arm; when it becomes a production
+        # one, this DDL and `cleaning/cleaner.py`'s change together.
         create_table_sql = f"""
         CREATE TABLE IF NOT EXISTS `{self.project}`.`osn_tracks` (
           event_time TIMESTAMP COMMENT 'Timestamp of state vector',
