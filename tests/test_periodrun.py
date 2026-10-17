@@ -444,7 +444,7 @@ def test_everything_except_reference_data_runs_per_day():
     from opdi.periodrun import DAY_STEPS, WINDOW_STEPS
 
     assert WINDOW_STEPS == ("00",)
-    assert DAY_STEPS == ("01", "02", "02a", "03", "04", "04b")
+    assert DAY_STEPS == ("01", "01b", "02", "02a", "03", "04", "04b")
 
 
 def test_a_day_has_the_window_its_segmentation_will_read():
@@ -498,13 +498,18 @@ def test_a_day_step_records_completion_per_day():
     assert a == "02@2026-06-01"
 
 
-def test_a_week_is_forty_three_units():
-    """One window step plus six per day across seven days. Stated as a number
-    so a change to either list is visible rather than inferred."""
+def test_a_week_is_fifty_units():
+    """One window step plus seven per day across seven days. Stated as a number
+    so a change to either list is visible rather than inferred.
+
+    Was 43 before step 01b (ADS-C ingestion) joined the per-day steps. 01b is
+    a no-op unless `config.adsc.enabled`, but it is a unit either way: a step
+    that is only counted when a flag is set is a step whose cost appears from
+    nowhere the first time someone sets it."""
     from opdi.periodrun import DAY_STEPS, WINDOW_STEPS, days_in
 
     days = days_in(date(2026, 6, 1), date(2026, 6, 7))
-    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 43
+    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 50
 
 
 def test_ingestion_reaches_past_the_window():

@@ -49,7 +49,9 @@ def main(argv=None):
     run_parser.add_argument(
         "--step",
         default=None,
-        help="Run only this step (00-08). Omit to run all steps.",
+        help="Run only this step, 00-08 -- including the lettered ones, "
+             "01b (ADS-C ingestion) and 02a (trajectory cleaning). "
+             "Omit to run all steps.",
     )
     run_parser.add_argument(
         "--no-airport-zones",

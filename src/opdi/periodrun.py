@@ -57,7 +57,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #: ``runner.REFERENCE_SUBSTEPS``. Skipping 00 is still possible
 #: (``--steps 01 02 02a 03 04``), and then the reference tables must already
 #: exist, which ``preflight`` checks.
-PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04", "04b")
+PERIOD_STEPS: Tuple[str, ...] = (
+    "00", "01", "01b", "02", "02a", "03", "04", "04b")
 
 #: Steps that run once for the whole window, not per day.
 #:
@@ -70,7 +71,7 @@ PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04", "04b")
 WINDOW_STEPS: Tuple[str, ...] = ("00",)
 
 #: Steps that run once per day, on the tracks that day owns.
-DAY_STEPS: Tuple[str, ...] = ("01", "02", "02a", "03", "04", "04b")
+DAY_STEPS: Tuple[str, ...] = ("01", "01b", "02", "02a", "03", "04", "04b")
 
 #: What each reference substep produces.
 #:
@@ -622,6 +623,26 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
             # way to tell that from a day the archive genuinely lacks.
             n = storage.drop_partitions("osn_statevectors_v2", "event_time_day", stale)
             print(f"    dropped {n} day(s) the window has passed: {', '.join(stale)}")
+    elif step == "01b":
+        if not config.adsc.enabled:
+            print("  ADS-C ingestion: disabled (config.adsc.enabled is False)")
+            return
+
+        from opdi.ingestion.osn_adsc import AdscIngestion
+
+        # The same three-day sliding window step 01 uses, and for the same
+        # reason: day D is segmented over [D-1, D+2), so the merge needs ADS-C
+        # for all three days or the tracks at the window's edges would see one
+        # source on one side of midnight and two on the other.
+        #
+        # No partition pruning of the kind step 01 does, because the whole
+        # table is a few megabytes per day: refetching three days costs less
+        # than the listing that would avoid it.
+        adsc = AdscIngestion(spark, config)
+        adsc.ingest_from_s3(
+            start_date=day - timedelta(days=1),
+            end_date=day + timedelta(days=2),
+        )
     elif step == "02":
         from opdi.pipeline.tracks import TrackProcessor
 
