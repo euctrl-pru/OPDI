@@ -186,6 +186,21 @@ def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
         kwargs = {
             "airports_hex_path": str(
                 REPO / "data" / "airport_hex" / "zones_res7_processed.parquet"),
+            # Per-arm, and not optional.
+            #
+            # The ETL progress logs live on the driver's local disk, and one of
+            # them gates a *remote* write: `build_endpoint_candidates` is
+            # deliberately not keyed to `skip_if_processed`, so it skips on its
+            # own day log and step 03 then reads the table it did not write.
+            # The first attempt at this run died exactly there -- a production
+            # campaign over 2026-06-01..14 had logged all fourteen days on this
+            # pod, so the arm skipped the build and hit PATH_NOT_FOUND against
+            # its own research prefix. Redirecting the tables is not enough;
+            # the local state that claims they exist has to move too.
+            #
+            # Per *arm* rather than per run, because the two arms write
+            # different tables under DERIVED and each has to build its own.
+            "log_dir": str(REPO / "OPDI_live" / "logs" / f"adsc-{arm}"),
         }
         for step in steps:
             print(f"\n{'-' * 72}\n>>> arm {arm}  step {step}  day {day}\n"

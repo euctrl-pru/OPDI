@@ -574,6 +574,32 @@ def prune_tracks_for_day(storage, day: date) -> int:
     return removed
 
 
+#: Default directory for the per-step ETL progress logs.
+DEFAULT_LOG_DIR = "OPDI_live/logs"
+
+
+def _log_dir(kwargs: dict) -> str:
+    """Where this run's local ETL progress logs live.
+
+    **A run that redirects its tables must redirect these too.** The logs sit
+    on the driver's local disk, and one of them gates a *remote* write:
+    `build_endpoint_candidates` is deliberately not keyed to
+    `skip_if_processed` -- rebuilding the flight list with different thresholds
+    does not invalidate the candidates, which is the point of caching them --
+    so it skips on its own day log and step 03 then reads the table it did not
+    write.
+
+    That is exactly how the ADS-C arm run failed on its first attempt: a
+    production campaign over 2026-06-01..14 had logged all fourteen days on
+    this pod, so the arm run skipped the build and died with PATH_NOT_FOUND
+    against its own research prefix. The tables were redirected; the local
+    state saying they existed was not.
+
+    Defaulting to the shared directory keeps every existing caller unchanged.
+    """
+    return kwargs.get("log_dir") or DEFAULT_LOG_DIR
+
+
 def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     """Run one pipeline step for the tracks that started on ``day``.
 
@@ -646,15 +672,25 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     elif step == "02":
         from opdi.pipeline.tracks import TrackProcessor
 
-        TrackProcessor(spark, config).process_day(day, skip_if_processed=False)
+        TrackProcessor(
+            spark, config,
+            log_file_path=os.path.join(
+                _log_dir(kwargs), "02_osn-tracks-etl-log.parquet"),
+        ).process_day(day, skip_if_processed=False)
     elif step == "02a":
         from opdi.cleaning.cleaner import TrackCleaner
 
-        TrackCleaner(spark, config).process_day(day, skip_if_processed=False)
+        TrackCleaner(
+            spark, config,
+            log_file_path=os.path.join(
+                _log_dir(kwargs), "02a_track_cleaning.log"),
+        ).process_day(day, skip_if_processed=False)
     elif step == "03":
         from opdi.pipeline.flights import FlightListProcessor
 
-        FlightListProcessor(spark, config).process_day(
+        FlightListProcessor(
+            spark, config, log_dir=_log_dir(kwargs),
+        ).process_day(
             day,
             airports_hex_path=kwargs.get("airports_hex_path"),
             skip_if_processed=False,
@@ -662,7 +698,9 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     elif step == "04":
         from opdi.pipeline.events import FlightEventProcessor
 
-        FlightEventProcessor(spark, config).process_day(day, skip_if_processed=False)
+        FlightEventProcessor(
+            spark, config, log_dir=_log_dir(kwargs),
+        ).process_day(day, skip_if_processed=False)
     elif step == "04b":
         from opdi.pipeline.flight_list_step import enrich_day
         from opdi.utils.storage import StorageManager

@@ -1024,3 +1024,22 @@ def test_run_period_defaults_to_keeping_tracks():
     sig = inspect.signature(run_period)
     assert sig.parameters["prune_tracks"].default is False
     assert tuple(sig.parameters["keep_tracks_on"].default) == ()
+
+
+def test_the_log_dir_defaults_to_the_shared_one():
+    """Every existing caller keeps the shared directory without saying so."""
+    from opdi.periodrun import DEFAULT_LOG_DIR, _log_dir
+
+    assert _log_dir({}) == DEFAULT_LOG_DIR
+    assert _log_dir({"log_dir": None}) == DEFAULT_LOG_DIR
+
+
+def test_the_log_dir_can_be_redirected():
+    """A run that redirects its tables has to redirect this too: one of these
+    logs gates a *remote* write (`build_endpoint_candidates` is not keyed to
+    skip_if_processed), so a shared log makes step 03 read a table it never
+    wrote."""
+    from opdi.periodrun import _log_dir
+
+    assert _log_dir({"log_dir": "OPDI_live/logs/adsc-merged"}) == \
+        "OPDI_live/logs/adsc-merged"

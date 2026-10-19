@@ -124,3 +124,27 @@ def test_the_merged_arm_is_the_only_one_with_adsc_enabled():
 def test_the_steps_include_adsc_ingestion():
     assert "01b" in r.STEPS
     assert list(r.STEPS).index("01b") < list(r.STEPS).index("02")
+
+
+def test_each_arm_gets_its_own_etl_log_dir():
+    # The ETL progress logs are local files, and one of them gates a remote
+    # write: `build_endpoint_candidates` is not keyed to skip_if_processed, so
+    # it skips on its own day log and step 03 then reads a table it never
+    # wrote. The first attempt at the arm run died exactly there, because a
+    # production campaign had logged the same days on this pod.
+    import inspect
+
+    src = inspect.getsource(r.run_arm)
+    assert '"log_dir"' in src
+    assert 'adsc-{arm}' in src
+
+
+def test_the_log_dir_is_not_the_shared_production_one():
+    import inspect
+
+    from opdi.periodrun import DEFAULT_LOG_DIR
+
+    src = inspect.getsource(r.run_arm)
+    # The shared directory appears only as the prefix of an arm-specific
+    # subdirectory, never on its own.
+    assert f'"{DEFAULT_LOG_DIR}"' not in src
