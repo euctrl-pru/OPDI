@@ -65,6 +65,7 @@ def arm_summary(tracks: DataFrame) -> DataFrame:
 
     per_track = df.groupBy("track_id").agg(
         F.count(F.lit(1)).alias("_n"),
+        F.sum("_adsc").alias("_n_adsc"),
         F.max("_adsc").alias("_has_adsc"),
         F.min("event_time").alias("_first"),
         F.max("event_time").alias("_last"),
@@ -90,6 +91,19 @@ def arm_summary(tracks: DataFrame) -> DataFrame:
          / F.lit(3600.0)).alias("track_hours"),
         F.sum((F.col("_callsigns") >= 2).cast("long"))
         .alias("tracks_with_two_callsigns"),
+        # Tracks made of nothing but ADS-C.
+        #
+        # This is what separates the two reasons the merged arm can hold more
+        # tracks than the baseline, which the bare count cannot. Bridging only
+        # ever joins tracks or leaves them alone, so it cannot raise the count.
+        # But an airframe heard *only* by ADS-C in a window has no baseline
+        # track at all, and the merge creates one -- a coverage gain presenting
+        # as an increase. Splitting an existing track would also raise it, and
+        # that would be harm. Without this column the two are
+        # indistinguishable, and the first reading of this study made exactly
+        # that mistake.
+        F.sum(((F.col("_n_adsc") == F.col("_n")) & (F.col("_n") > 0))
+              .cast("long")).alias("tracks_all_adsc"),
     )
     return totals.crossJoin(per_track_totals)
 

@@ -43,7 +43,12 @@ import events_gt  # noqa: E402
 import events_score  # noqa: E402
 from event_bench import detected_events, milestone_map  # noqa: E402
 
-ARM_PREFIX = "s3a://eurocontrol/opdi/research/adsc"
+#: The warehouse the ``opensky`` environment resolves relative table names
+#: against. Named because :func:`arm_tables` has to express one of its two
+#: paths relative to it and the other absolute -- see that docstring.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+
+ARM_PREFIX = f"{WAREHOUSE}/research/adsc"
 ARMS = ("base", "merged")
 
 #: The flight-events-v4 period: APDF 202606, days 2026-06-05/06/07. Named here
@@ -53,17 +58,37 @@ PERIOD = "2026"
 
 
 def arm_tables(prefix: str, arm: str) -> dict:
-    """Absolute paths to one arm's event table and flight list.
+    """One arm's event table and flight list, each in the form its reader wants.
 
-    Absolute, not warehouse-relative: ``detected_events`` branches on the
-    ``s3a://`` prefix, and a relative name would be resolved against
-    ``OPDI_WAREHOUSE`` -- which production exports.
+    **Two paths, two conventions, and the asymmetry is not cosmetic:**
+
+    * ``events`` is **absolute**. ``detected_events`` branches on the
+      ``s3a://`` prefix and reads it with ``spark.read.parquet``, so a
+      relative name there would be resolved against ``OPDI_WAREHOUSE`` --
+      which production exports.
+    * ``flight_list`` is **warehouse-relative**. It is handed to
+      ``storage.read_table``, which resolves every name as
+      ``{warehouse}/{name}``. An absolute path there yields
+      ``s3a://eurocontrol/opdi/s3a:/eurocontrol/opdi/research/...`` -- a path
+      containing its own prefix twice -- and a PATH_NOT_FOUND that names it.
+      That is exactly how this job failed on its first run. ``event_bench``'s
+      own ``PERIOD_TRACKS`` entries use relative names (``research/
+      flight_list_2026``) for the same reason.
+
+    Both are derived from one *prefix* argument so the two cannot drift apart.
     """
     if arm not in ARMS:
         raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
+    if not prefix.startswith(WAREHOUSE + "/"):
+        raise ValueError(
+            f"prefix {prefix!r} must sit under {WAREHOUSE!r}: the flight list "
+            f"is read through StorageManager, which can only resolve a name "
+            f"relative to that warehouse."
+        )
+    relative = prefix[len(WAREHOUSE) + 1:]
     return {
         "events": f"{prefix}/{arm}/opdi_flight_events",
-        "flight_list": f"{prefix}/{arm}/opdi_flight_list",
+        "flight_list": f"{relative}/{arm}/opdi_flight_list",
     }
 
 

@@ -160,3 +160,30 @@ def test_extension_is_signed_so_a_regression_is_visible(spark, base):
     ext = extension_by_airframe(base, later).collect()[0]
     assert ext["first_shift_s"] == pytest.approx(100.0)
     assert ext["last_shift_s"] == pytest.approx(100.0)
+
+
+def test_tracks_made_only_of_adsc_are_counted(spark):
+    # The column that separates the two reasons the merged arm can hold more
+    # tracks than the baseline. An airframe heard only by ADS-C has no baseline
+    # track at all, so the merge creates one -- a coverage gain presenting as a
+    # count increase. Splitting an existing track would also raise the count,
+    # and that would be harm. The bare count cannot tell them apart.
+    df = spark.createDataFrame([
+        # t1: mixed -- existed in the baseline, gained an ADS-C sample.
+        _r("t1", 0, "ADS-B"), _r("t1", 600, "ADS-C", callsign=None),
+        # t2: ADS-C only -- an airframe ADS-B never heard.
+        _r("t2", 0, "ADS-C", callsign=None),
+        _r("t2", 600, "ADS-C", callsign=None),
+        # t3: ADS-B only.
+        _r("t3", 0, "ADS-B"), _r("t3", 5, "ADS-B"),
+    ], schema=SOURCED)
+    r = arm_summary(df).collect()[0]
+    assert r["tracks"] == 3
+    assert r["tracks_with_adsc"] == 2
+    assert r["tracks_all_adsc"] == 1
+
+
+def test_a_baseline_arm_has_no_adsc_only_tracks(spark, base):
+    # No source column at all, so every row counts as ADS-B and the count must
+    # be zero rather than everything.
+    assert arm_summary(base).collect()[0]["tracks_all_adsc"] == 0

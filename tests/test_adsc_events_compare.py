@@ -9,8 +9,7 @@ def test_arm_tables_point_at_the_arm_prefix():
     t = a.arm_tables("s3a://eurocontrol/opdi/research/adsc", "merged")
     assert t["events"] == (
         "s3a://eurocontrol/opdi/research/adsc/merged/opdi_flight_events")
-    assert t["flight_list"] == (
-        "s3a://eurocontrol/opdi/research/adsc/merged/opdi_flight_list")
+    assert t["flight_list"] == "research/adsc/merged/opdi_flight_list"
 
 
 def test_the_event_table_is_an_absolute_path():
@@ -20,6 +19,30 @@ def test_the_event_table_is_an_absolute_path():
     # production exports -- so the scorer would silently read opdi-prod.
     for arm in a.ARMS:
         assert a.arm_tables(a.ARM_PREFIX, arm)["events"].startswith("s3a://")
+
+
+def test_the_flight_list_is_warehouse_relative():
+    # The opposite convention to `events`, and the asymmetry is load-bearing.
+    # The flight list goes to `storage.read_table`, which resolves every name
+    # as `{warehouse}/{name}` -- so an absolute path yields
+    # "s3a://eurocontrol/opdi/s3a:/eurocontrol/opdi/research/..." , a path
+    # holding its own prefix twice, and PATH_NOT_FOUND. This job failed exactly
+    # that way on its first run against real tables, with both paths absolute.
+    for arm in a.ARMS:
+        fl = a.arm_tables(a.ARM_PREFIX, arm)["flight_list"]
+        assert not fl.startswith("s3a://"), fl
+        assert fl.startswith("research/adsc/"), fl
+        # And the two conventions must still name the same arm directory.
+        ev = a.arm_tables(a.ARM_PREFIX, arm)["events"]
+        assert ev == f"{a.WAREHOUSE}/{fl.rsplit('/', 1)[0]}/opdi_flight_events"
+
+
+def test_a_prefix_outside_the_warehouse_is_refused():
+    # The flight list can only be expressed relative to one warehouse, so a
+    # prefix elsewhere cannot be served and must say so rather than emitting a
+    # name that resolves somewhere surprising.
+    with pytest.raises(ValueError, match="must sit under"):
+        a.arm_tables("s3a://somewhere-else/adsc", "base")
 
 
 def test_both_arms_are_scored():
