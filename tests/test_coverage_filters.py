@@ -29,7 +29,7 @@ def _sv(spark):
 
 
 def test_the_european_ingest_keeps_only_european_rows(spark):
-    ing = StateVectorIngestion(spark, OPDIConfig.for_environment("opensky"),
+    ing = StateVectorIngestion(spark, OPDIConfig.for_environment("opensky", worldwide=False),
                                time_interval=1)
     assert ing.bbox == EUROPE_BBOX
     assert ing._apply_filters(_sv(spark)).count() == 1
@@ -56,7 +56,8 @@ def test_an_explicit_none_means_worldwide_not_the_default(spark):
     """The collision this fix exists for: `None` used to mean 'use the default
     European box', so there was no way to ask for worldwide by argument."""
     ing = StateVectorIngestion(
-        spark, OPDIConfig.for_environment("opensky"), bbox=None, time_interval=1)
+        spark, OPDIConfig.for_environment("opensky", worldwide=False), bbox=None,
+        time_interval=1)
     assert ing.bbox is None
     assert ing._apply_filters(_sv(spark)).count() == len(PLACES)
 
@@ -100,7 +101,8 @@ def test_the_offset_asymmetry_between_filter_airports_and_cell_filter_is_pinned(
     would pass the whole suite while silently adding unselectable rows to a
     published table."""
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
-    gen = AirportDetectionZoneGenerator(spark, OPDIConfig.for_environment("opensky"))
+    gen = AirportDetectionZoneGenerator(
+        spark, OPDIConfig.for_environment("opensky", worldwide=False))
     apt = spark.createDataFrame(
         [("MARGIN", "large_airport", 71.5, 20.0)],  # 1.24 deg past max_lat=70.25976
         "ident string, type string, latitude_deg double, longitude_deg double",

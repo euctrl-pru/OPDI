@@ -1,4 +1,5 @@
-"""The coverage switch: one box, two modes, and a default that must not move."""
+"""The coverage switch: one box, two modes, worldwide unless asked otherwise."""
+import pytest
 from pyspark.sql import functions as F
 
 from opdi.config import OPDIConfig
@@ -14,11 +15,17 @@ def test_the_european_box_is_the_published_one():
     assert EUROPE_BBOX == PUBLISHED
 
 
-def test_every_environment_still_defaults_to_europe():
+def test_every_environment_defaults_to_worldwide():
     """A coverage that varied by environment would let dev publish rows local
     runs cannot reproduce, with nothing in the data saying why."""
     for env in ("opensky", "local", "dev", "live"):
-        assert OPDIConfig.for_environment(env).coverage.bbox == PUBLISHED
+        assert OPDIConfig.for_environment(env).coverage.bbox is None
+
+
+def test_every_environment_can_still_ask_for_europe():
+    for env in ("opensky", "local", "dev", "live"):
+        c = OPDIConfig.for_environment(env, worldwide=False).coverage
+        assert c.bbox == PUBLISHED
 
 
 def test_worldwide_means_no_box():
@@ -29,7 +36,7 @@ def test_worldwide_means_no_box():
 
 
 def test_europe_is_not_worldwide():
-    c = OPDIConfig.for_environment("opensky").coverage
+    c = OPDIConfig.for_environment("opensky", worldwide=False).coverage
     assert c.is_worldwide is False
     assert c.label == "europe"
 
@@ -44,7 +51,7 @@ def test_worldwide_writes_to_its_own_warehouse():
     """The decision that keeps the published European tables safe. If these two
     are ever equal, a worldwide run appends planet-wide rows to the table the
     European track_id contract lives in."""
-    eu = OPDIConfig.for_environment("opensky")
+    eu = OPDIConfig.for_environment("opensky", worldwide=False)
     world = OPDIConfig.for_environment("opensky", worldwide=True)
     assert world.project.warehouse_path != eu.project.warehouse_path
     assert world.project.warehouse_path.endswith("opdi-world")
@@ -150,24 +157,32 @@ def test_the_cli_accepts_worldwide(monkeypatch):
     monkeypatch.setattr("opdi.runner.run_pipeline", fake_run_pipeline)
 
     main(["run", "--start", "2024-01-01", "--end", "2024-01-02"])
-    assert captured["worldwide"] is False
+    assert captured["worldwide"] is True
 
     captured.clear()
     main(["run", "--start", "2024-01-01", "--end", "2024-01-02", "--worldwide"])
     assert captured["worldwide"] is True
+
+    captured.clear()
+    main(["run", "--start", "2024-01-01", "--end", "2024-01-02", "--europe"])
+    assert captured["worldwide"] is False
+
+    with pytest.raises(SystemExit):
+        main(["run", "--start", "2024-01-01", "--end", "2024-01-02",
+              "--worldwide", "--europe"])
 
 
 def test_run_pipeline_takes_worldwide():
     import inspect
     from opdi.runner import run_pipeline
     sig = inspect.signature(run_pipeline)
-    assert sig.parameters["worldwide"].default is False
+    assert sig.parameters["worldwide"].default is True
 
 
 def test_run_period_takes_worldwide():
     import inspect
     from opdi.periodrun import run_period
-    assert inspect.signature(run_period).parameters["worldwide"].default is False
+    assert inspect.signature(run_period).parameters["worldwide"].default is True
 
 
 def test_opdi_py_script_accepts_worldwide(monkeypatch):
@@ -200,6 +215,10 @@ def test_opdi_py_script_accepts_worldwide(monkeypatch):
     monkeypatch.setattr("opdi.runner.run_pipeline", fake_run_pipeline)
 
     opdi_script.main(["--start", "2024-01-01", "--end", "2024-01-02"])
+    assert captured["worldwide"] is True
+
+    captured.clear()
+    opdi_script.main(["--start", "2024-01-01", "--end", "2024-01-02", "--europe"])
     assert captured["worldwide"] is False
 
     captured.clear()

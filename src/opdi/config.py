@@ -1714,16 +1714,19 @@ class OPDIConfig:
     coverage: CoverageConfig = field(default_factory=CoverageConfig)
 
     @classmethod
-    def for_environment(cls, env: str = "dev", worldwide: bool = False) -> "OPDIConfig":
+    def for_environment(cls, env: str = "dev", worldwide: bool = True) -> "OPDIConfig":
         """
         Create configuration for specific environment.
 
         Args:
             env: Environment name ("dev", "live", "local", or "opensky")
             worldwide: Drop the coverage bounding box and route output to the
-                worldwide warehouse. **Off by default, and that is the point**
-                -- the European box is a published contract and every existing
-                caller must keep getting it without saying so.
+                worldwide warehouse. **On by default**: OPDI works worldwide
+                unless a caller asks otherwise. Pass ``worldwide=False`` to get
+                the published European box (``EUROPE_BBOX``) and the European
+                warehouse -- the box itself is still a published contract and
+                is unchanged, it is just no longer what you get by saying
+                nothing.
 
         Returns:
             OPDIConfig instance with environment-specific settings

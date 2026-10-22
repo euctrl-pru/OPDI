@@ -611,7 +611,7 @@ def run_pipeline(
     last_n_months: int = 4,
     adep_mode: Optional[str] = None,
     ades_mode: Optional[str] = None,
-    worldwide: bool = False,
+    worldwide: bool = True,
 ) -> int:
     """
     Run the OPDI pipeline end-to-end or a single step.
@@ -642,8 +642,8 @@ def run_pipeline(
         export_dir: Base directory for parquet/CSV exports (steps 05-06).
         last_n_months: Only export the last N months of data (step 05).
         worldwide: Drop the published European bounding box and route output
-            to a separate worldwide warehouse. Off by default, so every
-            existing caller keeps the European coverage without saying so.
+            to a separate worldwide warehouse. On by default; pass ``False``
+            for the European box and the European warehouse.
 
     Returns:
         Exit code: ``0`` on success, ``1`` on failure.

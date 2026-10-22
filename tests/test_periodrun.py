@@ -790,7 +790,8 @@ def test_airspaces_are_skipped_worldwide():
     world = reference_substeps_for_coverage(
         OPDIConfig.for_environment("opensky", worldwide=True))
     assert world["00c"] is False
-    europe = reference_substeps_for_coverage(OPDIConfig.for_environment("opensky"))
+    europe = reference_substeps_for_coverage(
+        OPDIConfig.for_environment("opensky", worldwide=False))
     assert europe["00c"] is True
 
 
@@ -801,7 +802,7 @@ def test_a_worldwide_period_run_does_not_default_to_the_european_prefix():
     import inspect
     from opdi.periodrun import run_period, DEFAULT_WAREHOUSE
     assert DEFAULT_WAREHOUSE == "s3a://eurocontrol/opdi-prod"
-    assert inspect.signature(run_period).parameters["worldwide"].default is False
+    assert inspect.signature(run_period).parameters["worldwide"].default is True
     # Behavioural half: resolve the warehouse the way run_period does.
     from opdi.config import OPDIConfig
     world = OPDIConfig.for_environment("opensky", worldwide=True)
@@ -941,17 +942,22 @@ def test_the_wrapper_script_leaves_warehouse_unset_by_default(monkeypatch):
 
 
 def test_the_wrapper_script_passes_worldwide_through(monkeypatch):
-    """--worldwide must reach run_period() as worldwide=True, and its absence
-    as worldwide=False -- mirrors the cli.py coverage for `opdi run`."""
+    """Worldwide is the default: no flag and --worldwide both reach
+    run_period() as worldwide=True, --europe as worldwide=False -- mirrors the
+    cli.py coverage for `opdi run`."""
     import run_period as script
 
     captured = _fake_run_period(monkeypatch, script)
     script.main(["--start", "2026-06-01"])
-    assert captured["worldwide"] is False
+    assert captured["worldwide"] is True
 
     captured.clear()
     script.main(["--start", "2026-06-01", "--worldwide"])
     assert captured["worldwide"] is True
+
+    captured.clear()
+    script.main(["--start", "2026-06-01", "--europe"])
+    assert captured["worldwide"] is False
 
 
 def test_the_wrapper_script_still_lets_an_explicit_warehouse_win(monkeypatch):

@@ -12,7 +12,7 @@ from opdi.utils.storage import StorageManager
 
 
 def _mgr(spark, tmp_path, worldwide=False):
-    cfg = OPDIConfig.for_environment("local")
+    cfg = OPDIConfig.for_environment("local", worldwide=False)
     # The suite runs against a bare local SparkSession with no Iceberg
     # runtime on the classpath (see tests/conftest.py: "No cluster, no Hive,
     # no Iceberg, no credentials"). `local`'s declared config is Iceberg-mode

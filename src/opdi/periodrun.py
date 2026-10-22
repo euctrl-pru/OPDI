@@ -798,7 +798,7 @@ def run_period(
     prune_tracks: bool = False,
     keep_tracks_on: Sequence[date] = (),
     allow_existing: bool = False,
-    worldwide: bool = False,
+    worldwide: bool = True,
 ) -> int:
     """Run the pipeline over a window of ``days``, resuming where it stopped.
 
@@ -832,10 +832,11 @@ def run_period(
         allow_existing: Proceed even though the warehouse prefix already holds
             objects. Off by default: a rebuild that silently merged with a
             previous attempt's output would produce a table nobody could date.
-        worldwide: Drop the published European bounding box. Off by default.
-            When on, and ``warehouse`` was left unset, the default follows
-            coverage to the worldwide warehouse instead of ``opdi-prod`` --
-            an explicitly-passed ``warehouse`` still wins, always.
+        worldwide: Drop the published European bounding box. On by default;
+            pass ``False`` for a European run. When on, and ``warehouse`` was
+            left unset, the default follows coverage to the worldwide
+            warehouse instead of ``opdi-prod`` -- an explicitly-passed
+            ``warehouse`` still wins, always.
     """
     from opdi.config import OPDIConfig
     from opdi.runner import STEPS, reference_substeps_for_coverage

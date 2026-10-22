@@ -102,15 +102,23 @@ def main(argv=None):
         default="data/airport_hex/zones_res7_processed.parquet",
         help="Path to pre-generated airport hex zones parquet.",
     )
-    run_parser.add_argument(
+    coverage = run_parser.add_mutually_exclusive_group()
+    coverage.add_argument(
         "--worldwide",
+        dest="worldwide",
         action="store_true",
-        default=False,
-        help="Drop the published European bounding box and run worldwide. "
-             "Two consequences: no coverage filter is applied to ingest, "
-             "detection or reference geometry, and output goes to a separate "
-             "worldwide warehouse rather than the European one, so the "
-             "two coverages can never mix in one warehouse.",
+        default=True,
+        help="Run worldwide (the default; kept so existing commands still "
+             "parse). No coverage filter is applied to ingest, detection or "
+             "reference geometry, and output goes to the worldwide warehouse, "
+             "so the two coverages can never mix in one warehouse.",
+    )
+    coverage.add_argument(
+        "--europe",
+        dest="worldwide",
+        action="store_false",
+        help="Apply the published European bounding box and write to the "
+             "European warehouse instead of the worldwide one.",
     )
 
     args = parser.parse_args(argv)
