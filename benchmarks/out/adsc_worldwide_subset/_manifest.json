@@ -19,14 +19,14 @@
       "src/opdi/pipeline/tracks.py"
     ],
     "git_dirty": true,
-    "git_sha": "e15b962",
+    "git_sha": "0abb242",
     "input_tables": {},
     "inputs": {
       "day": "2026-06-05",
       "flights": 1334
     },
     "notes": "Holes over 30 min in the ADS-B of NM flights crossing the European box and landing on the day.",
-    "produced_utc": "2026-11-03T22:07:40+00:00",
+    "produced_utc": "2026-11-03T22:27:29+00:00",
     "script": "benchmarks/adsc_bridging_diagnosis.py",
     "sha256_16": "775af2cb13fbb2a0"
   },
@@ -50,14 +50,14 @@
       "src/opdi/pipeline/tracks.py"
     ],
     "git_dirty": true,
-    "git_sha": "e15b962",
+    "git_sha": "0abb242",
     "input_tables": {},
     "inputs": {
       "day": "2026-06-05",
       "flights": 1334
     },
     "notes": "Holes over 30 min in the ADS-B of NM flights crossing the European box and landing on the day.",
-    "produced_utc": "2026-11-03T22:07:40+00:00",
+    "produced_utc": "2026-11-03T22:27:29+00:00",
     "script": "benchmarks/adsc_bridging_diagnosis.py",
     "sha256_16": "1fc299655e54352f"
   },
@@ -81,7 +81,7 @@
       "src/opdi/pipeline/tracks.py"
     ],
     "git_dirty": true,
-    "git_sha": "e15b962",
+    "git_sha": "0abb242",
     "input_tables": {
       "s3a://eurocontrol/opdi-world/research/adsc_airframes/base/opdi_flight_list": {
         "bytes": 590901,
@@ -101,7 +101,7 @@
       "truth_sha256_16": "830f8174874f743d"
     },
     "notes": "One day, worldwide, airframes with ADS-C only. NM is the truth.",
-    "produced_utc": "2026-11-03T22:06:55+00:00",
+    "produced_utc": "2026-11-03T22:26:42+00:00",
     "script": "benchmarks/adsc_flight_list_truth.py",
     "sha256_16": "0776d247559b0c2f"
   },
@@ -124,8 +124,8 @@
       "src/opdi/pipeline/flights.py",
       "src/opdi/pipeline/tracks.py"
     ],
-    "git_dirty": true,
-    "git_sha": "e15b962",
+    "git_dirty": false,
+    "git_sha": "0abb242",
     "input_tables": {
       "s3a://eurocontrol/opdi-world/research/adsc_airframes/base/opdi_flight_list": {
         "bytes": 590901,
@@ -145,7 +145,7 @@
       "truth_sha256_16": "830f8174874f743d"
     },
     "notes": "One day, worldwide, airframes with ADS-C only. NM is the truth.",
-    "produced_utc": "2026-11-03T22:06:54+00:00",
+    "produced_utc": "2026-11-03T22:26:42+00:00",
     "script": "benchmarks/adsc_flight_list_truth.py",
     "sha256_16": "33889edb2ce4241b"
   },
