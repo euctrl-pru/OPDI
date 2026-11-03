@@ -121,7 +121,8 @@ def main() -> int:
         add("adsc_only_tracks_airframe_has_no_adsb_track_that_day",
             only.where("not airframe_heard_by_adsb").count())
         add("adsc_only_tracks_single_sample", only.where("samples = 1").count())
-        add("adsc_only_track_hours", only.agg(F.sum("span_s")).first()[0] / 3600.0)
+        add("adsc_only_track_hours",
+            (only.agg(F.sum("span_s")).first()[0] or 0) / 3600.0)
         add("adsc_only_airframes_no_adsb_in_three_day_window",
             only.select("icao24").distinct()
             .join(window_adsb, "icao24", "left_anti").count())
@@ -159,9 +160,11 @@ def main() -> int:
         w.writerows(rows)
 
     import provenance
+    from regenerate_adsc_v1 import CORE
     provenance.record(
         out, name, "benchmarks/adsc_subset_breakdown.py", sys.argv[1:],
-        ["benchmarks/adsc_subset_breakdown.py", "benchmarks/adsc_coverage_gain.py"],
+        ["benchmarks/adsc_subset_breakdown.py", "benchmarks/adsc_coverage_gain.py",
+         *CORE],
         inputs={"day": args.day, "reference_day": args.reference_day},
         notes="Reads the one-day worldwide airframe subset built by "
               "run_adsc_day.py --worldwide --adsc-airframes-only.")

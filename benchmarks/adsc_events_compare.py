@@ -58,14 +58,18 @@ PERIOD = "2026"
 
 
 def scoring_config():
-    """The European configuration, stated rather than defaulted.
+    """The European configuration, on the arms' own warehouse.
 
     APDF is European and the arms live under ``opdi/``. Since the worldwide
-    default, saying nothing resolves the flight list under ``opdi-world/``.
+    default, saying nothing resolves the flight list under ``opdi-world/``. Set
+    explicitly because ``OPDI_WAREHOUSE`` is normally exported as ``opdi-prod``,
+    which would read the events and the flight list from different warehouses.
     """
     from opdi.config import OPDIConfig
 
-    return OPDIConfig.for_environment("opensky", worldwide=False)
+    cfg = OPDIConfig.for_environment("opensky", worldwide=False)
+    cfg.project.warehouse_path = WAREHOUSE
+    return cfg
 
 
 def arm_tables(prefix: str, arm: str) -> dict:

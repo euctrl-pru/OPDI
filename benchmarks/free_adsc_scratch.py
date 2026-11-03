@@ -14,9 +14,9 @@ re-running the arms (about 5 h for three days) and `regenerate_adsc_v1.py
 --check` cannot tell that the tables are gone. To free only the re-fetchable
 state vectors, pass `--prefix opdi/research/adsc/input/osn_statevectors_v2/`.
 
-**What it does NOT touch:** anything outside `opdi/research/adsc/`. Two
-assertions enforce that -- one on the prefix argument, one on every key before
-it is deleted.
+**What it does NOT touch:** anything outside `opdi/research/adsc/`. Two checks
+enforce that, one on the prefix argument and one on every key before it is
+deleted. They raise rather than assert, so `python -O` cannot remove them.
 
     python benchmarks/free_adsc_scratch.py          # dry run: list and total
     python benchmarks/free_adsc_scratch.py --yes    # actually delete
@@ -35,19 +35,18 @@ PREFIX = ROOT
 BUCKET = "eurocontrol"
 ENDPOINT = "https://s3.opensky-network.org"
 
-#: Prefixes outside the ADS-C study that must never be reachable, asserted
-#: rather than assumed. The study's own tables are deliberately NOT listed:
-#: they are the thing this script exists to remove, and every number derived
-#: from them is already staged as a committed CSV under
-#: ``opdi-portal/papers/adsc-fusion-v1/data/`` with provenance. What is lost by
-#: deleting them is the ability to re-derive those numbers without re-running
-#: the arms (~5 h for three days), not the numbers themselves.
-PROTECTED = (
-    "opdi-prod/",
-    "opdi-world/",
-    "opdi/research/reference/",
-    "opdi/research/benchmarker/",
-)
+
+def validate_prefix(prefix: str) -> str:
+    """The prefix, if it sits under :data:`ROOT`. Raises rather than asserts."""
+    if not prefix.startswith(ROOT):
+        raise SystemExit(f"refusing to run: {prefix!r} is not under {ROOT!r}")
+    return prefix
+
+
+def assert_in_scope(key: str, prefix: str) -> None:
+    """Per key: a server ignoring the prefix would otherwise hand back the bucket."""
+    if not key.startswith(prefix):
+        raise SystemExit(f"refusing to delete stray key {key!r}")
 
 
 def _credentials() -> dict:
@@ -71,12 +70,7 @@ def main() -> int:
                     help=f"narrow the target; must sit under {ROOT}")
     args = ap.parse_args()
 
-    prefix = args.prefix
-    assert prefix.startswith(ROOT), (
-        f"refusing to run: {prefix!r} is not under the ADS-C prefix {ROOT!r}")
-    for protected in PROTECTED:
-        assert not protected.startswith(prefix) and not prefix.startswith(protected), (
-            f"refusing to run: {prefix!r} and {protected!r} overlap")
+    prefix = validate_prefix(args.prefix)
 
     import boto3
 
@@ -94,9 +88,7 @@ def main() -> int:
         if not objs:
             continue
         for o in objs:
-            # Every key, not just the prefix constant: a server that ignored
-            # the prefix would otherwise hand back the whole bucket.
-            assert o["Key"].startswith(prefix), f"stray key {o['Key']!r}"
+            assert_in_scope(o["Key"], prefix)
         keys += [o["Key"] for o in objs]
         total += sum(o["Size"] for o in objs)
         count += len(objs)
@@ -111,8 +103,8 @@ def main() -> int:
     if not args.yes:
         print("\nDRY RUN. Re-run with --yes to delete.")
         print("Re-create with: for d in 2026-06-05 2026-06-06 2026-06-07; do "
-              "python benchmarks/run_adsc_day.py --day $d --arm merged "
-              "--steps 01 01b; done")
+              "python benchmarks/run_adsc_day.py --day $d --arm both; "
+              "done  (about 5 h)")
         return 0
 
     # One key per request, not the batch `delete_objects` API.
@@ -125,7 +117,7 @@ def main() -> int:
     # per-key loop also means a failure part-way leaves a partially freed
     # prefix rather than an ambiguous batch result.
     for i, key in enumerate(keys, 1):
-        assert key.startswith(prefix), f"stray key {key!r}"
+        assert_in_scope(key, prefix)
         s3.delete_object(Bucket=BUCKET, Key=key)
         if i % 100 == 0 or i == count:
             print(f"  deleted {i:,}/{count:,}", flush=True)

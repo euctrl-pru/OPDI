@@ -136,7 +136,7 @@ def test_each_arm_gets_its_own_etl_log_dir():
 
     src = inspect.getsource(r.run_arm)
     assert '"log_dir"' in src
-    assert 'adsc-{arm}' in src
+    assert "log_dir_name(arm)" in src
 
 
 def test_the_log_dir_is_not_the_shared_production_one():
@@ -160,12 +160,81 @@ def test_a_run_without_a_coverage_flag_is_the_european_study(_reset_coverage):
     # The default of `OPDIConfig.for_environment` became worldwide, and this
     # runner's prefixes are European. Left to the default it would have written
     # planet-wide rows into the European research prefix.
-    import inspect
-
-    src = inspect.getsource(r.run_arm)
-    assert 'for_environment("opensky", worldwide=worldwide)' in src
-    assert inspect.signature(r.run_arm).parameters["worldwide"].default is False
     assert r.ARM_PREFIX == "s3a://eurocontrol/opdi/research/adsc"
+    assert _coverage_run_arm_asks_for() is False
+
+
+def _coverage_run_arm_asks_for():
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake(env, worldwide=None):
+        seen["worldwide"] = worldwide
+        raise Stop
+
+    orig = r.OPDIConfig.for_environment
+    r.OPDIConfig.for_environment = fake
+    try:
+        with pytest.raises(Stop):
+            r.run_arm("base", None, 1, "s3a://eurocontrol/opdi-prod")
+    finally:
+        r.OPDIConfig.for_environment = orig
+    return seen["worldwide"]
+
+
+def test_run_arm_takes_its_coverage_from_the_prefix(_reset_coverage):
+    r.set_coverage("worldwide")
+    assert _coverage_run_arm_asks_for() is True
+
+
+def test_the_guard_refuses_a_wrong_prefix_constant(_reset_coverage, monkeypatch):
+    # A guard built only from ARM_PREFIX passes whatever ARM_PREFIX says.
+    monkeypatch.setitem(r.ARM_PREFIX_BY_COVERAGE, "europe",
+                        "s3a://eurocontrol/opdi-prod")
+    with pytest.raises(ValueError, match="refusing"):
+        r.set_coverage("europe")
+    monkeypatch.setattr(r, "ARM_PREFIX", "s3a://eurocontrol/opdi-prod")
+    with pytest.raises(AssertionError):
+        r.guard_write_path("s3a://eurocontrol/opdi-prod/merged/osn_tracks")
+
+
+def test_the_guard_needs_a_whole_path_component(_reset_coverage):
+    with pytest.raises(AssertionError):
+        r.guard_write_path(
+            "s3a://eurocontrol/opdi/research/adsc_airframes/merged/osn_tracks")
+
+
+def test_the_base_arm_may_not_ingest_a_subset():
+    # Step 01b is a no-op without ADS-C, so it would filter on a stale table.
+    with pytest.raises(ValueError, match="merged"):
+        r.check_subset_steps(("01b", "01"), ("base", "merged"))
+    r.check_subset_steps(("02", "02a"), ("base", "merged"))
+
+
+def test_subset_inputs_must_be_empty_and_the_airframes_this_days():
+    from datetime import date
+
+    day = date(2026, 6, 5)
+    window = ["2026-06-04", "2026-06-05", "2026-06-06"]
+    r.check_subset_inputs([], window, day)
+    with pytest.raises(ValueError, match="already holds"):
+        r.check_subset_inputs(["2026-06-05"], window, day)
+    with pytest.raises(ValueError, match="another day"):
+        r.check_subset_inputs([], [], day)
+    with pytest.raises(ValueError, match="another day"):
+        r.check_subset_inputs([], window + ["2026-06-07"], day)
+
+
+def test_each_prefix_has_its_own_logs(_reset_coverage):
+    names = {r.log_dir_name("merged")}
+    r.set_coverage("worldwide")
+    names.add(r.log_dir_name("merged"))
+    r.set_coverage("worldwide", adsc_airframes_only=True)
+    names.add(r.log_dir_name("merged"))
+    assert len(names) == 3
+    assert r.log_dir_name("base") != r.log_dir_name("merged")
 
 
 def test_worldwide_writes_under_the_worldwide_warehouse(_reset_coverage):

@@ -36,8 +36,9 @@ classification that defaults is a classification that is wrong silently.
 """
 
 import argparse
+import re
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -49,9 +50,8 @@ from opdi.periodrun import run_day_step  # noqa: E402
 from opdi.utils.spark_helpers import SparkSessionManager  # noqa: E402
 from opdi.utils.storage import StorageManager  # noqa: E402
 
-#: Root of every table this script writes, per coverage. Appears in
-#: :func:`guard_write_path`, so a typo here cannot send a write to production
-#: -- it fails the guard.
+#: Root of every table this script writes, per coverage. Checked against
+#: :data:`ALLOWED_WRITE_ROOT`, so a typo here cannot send a write to production.
 #:
 #: Worldwide writes under ``opdi-world``, not under the European prefix. That
 #: is the pipeline's own rule (``config._worldwide_warehouse``) and it exists
@@ -62,6 +62,11 @@ ARM_PREFIX_BY_COVERAGE = {
     "europe": "s3a://eurocontrol/opdi/research/adsc",
     "worldwide": "s3a://eurocontrol/opdi-world/research/adsc",
 }
+
+#: The only places this script may ever write, independent of the prefixes above:
+#: a guard built from ``ARM_PREFIX`` could not notice ``ARM_PREFIX`` being wrong.
+ALLOWED_WRITE_ROOT = re.compile(
+    r"^s3a://eurocontrol/opdi(-world)?/research/adsc(_airframes)?/")
 
 #: Where the read-only reference tables live, per coverage. The worldwide H3
 #: zones, runway grid and HexAero layouts are built for global aerodromes;
@@ -105,21 +110,56 @@ def set_coverage(label: str, adsc_airframes_only: bool = False) -> None:
         # counts describe a selected population and must not be read as the
         # feed's.
         ARM_PREFIX = f"{ARM_PREFIX}_airframes"
+    if not ALLOWED_WRITE_ROOT.match(f"{ARM_PREFIX}/"):
+        raise ValueError(f"refusing write prefix {ARM_PREFIX!r}")
 
 
-def check_subset_steps(steps) -> None:
+def check_subset_steps(steps, arms=("merged",)) -> None:
     """Refuse a subset run that would ingest ADS-B before the airframes exist.
 
-    Step 01 filters on the table step 01b writes. A run with neither reuses the
-    inputs an earlier arm already wrote.
+    Step 01 filters on the table step 01b writes, and step 01b only runs with
+    ADS-C enabled, so only the merged arm may ingest. Otherwise the base arm would
+    filter on whatever an earlier run left there. A run with neither step reuses
+    the inputs an earlier arm already wrote.
     """
     steps = list(steps)
     if "01" not in steps:
         return
+    if tuple(arms) != ("merged",):
+        raise ValueError(
+            "--adsc-airframes-only ingests with --arm merged only: "
+            f"got {' '.join(arms)}")
     if "01b" not in steps or steps.index("01b") > steps.index("01"):
         raise ValueError(
             "--adsc-airframes-only needs step 01b before step 01: "
             f"got {' '.join(steps)}")
+
+
+def check_subset_inputs(adsb_present, adsc_days, day: date) -> None:
+    """Refuse to filter ADS-B unless the airframe list is this day's and only it.
+
+    ADS-B partitions already present were filtered on an earlier airframe list,
+    and step 01 does not refetch them, so a second day cannot share a subset
+    prefix. An ADS-C ingest that finds nothing leaves the old table untouched, so
+    the table's days are checked rather than the ingest's success.
+    """
+    if adsb_present:
+        raise ValueError(
+            "the subset's ADS-B input already holds "
+            f"{', '.join(sorted(adsb_present))}: they were filtered on an earlier "
+            f"airframe list. Clear {ARM_PREFIX}/input first.")
+    window = {(day + timedelta(days=n)).isoformat() for n in (-1, 0, 1)}
+    found = set(adsc_days)
+    if not found & window or found - window:
+        raise ValueError(
+            f"the ADS-C table holds {sorted(found)}, not the window of {day}: "
+            "the airframe list would be another day's, or empty.")
+
+
+def log_dir_name(arm: str) -> str:
+    """Per arm *and* per prefix: the logs claim tables exist in one prefix only."""
+    subset = "-airframes" if ADSC_AIRFRAMES_ONLY else ""
+    return f"adsc-{COVERAGE}{subset}-{arm}"
 
 
 def is_subset_target(table_name: str) -> bool:
@@ -190,11 +230,12 @@ def guard_write_path(path: str) -> None:
     replace seven production tables, and the difference between the right and
     the wrong prefix is one string.
     """
-    assert path.startswith(ARM_PREFIX), (
-        f"refusing to write {path!r}: every table this script writes must sit "
-        f"under {ARM_PREFIX!r}. A passthrough table is read-only and must "
-        f"never be written by an arm run."
-    )
+    if not (path.startswith(f"{ARM_PREFIX}/") and ALLOWED_WRITE_ROOT.match(path)):
+        # Raised, not asserted: `python -O` must not remove this.
+        raise AssertionError(
+            f"refusing to write {path!r}: every table this script writes must "
+            f"sit under {ARM_PREFIX!r}. A passthrough table is read-only and "
+            f"must never be written by an arm run.")
 
 
 def redirect_arm(arm: str, reference_warehouse: str) -> None:
@@ -244,9 +285,13 @@ def restore() -> None:
 
 
 def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
-            steps=STEPS, worldwide: bool = False) -> None:
-    """One arm, one day, through the real per-day entry points."""
-    cfg = OPDIConfig.for_environment("opensky", worldwide=worldwide)
+            steps=STEPS) -> None:
+    """One arm, one day, through the real per-day entry points.
+
+    Coverage comes from :func:`set_coverage`, so the rows and the prefix they are
+    written to cannot disagree.
+    """
+    cfg = OPDIConfig.for_environment("opensky", worldwide=COVERAGE == "worldwide")
     # The reference warehouse, not the coverage's own: `for_environment`
     # already routed `warehouse_path` to opdi-world under worldwide, and the
     # redirect below overrides it for everything except PASSTHROUGH anyway.
@@ -288,9 +333,18 @@ def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
             #
             # Per *arm* rather than per run, because the two arms write
             # different tables under DERIVED and each has to build its own.
-            "log_dir": str(REPO / "OPDI_live" / "logs" / f"adsc-{arm}"),
+            "log_dir": str(REPO / "OPDI_live" / "logs" / log_dir_name(arm)),
         }
+        storage = StorageManager(spark, cfg)
+        problem = storage.check_coverage()
+        if problem:
+            raise RuntimeError(problem)
         for step in steps:
+            if ADSC_AIRFRAMES_ONLY and step == "01":
+                check_subset_inputs(
+                    storage.list_partitions("osn_statevectors_v2", "event_time_day"),
+                    storage.list_partitions("osn_adsc_statevectors", "event_time_day"),
+                    day)
             print(f"\n{'-' * 72}\n>>> arm {arm}  step {step}  day {day}\n"
                   f"{'-' * 72}", flush=True)
             run_day_step(spark, cfg, step, day, kwargs)
@@ -334,14 +388,14 @@ def main() -> int:
     coverage = "worldwide" if args.worldwide else "europe"
     set_coverage(coverage, adsc_airframes_only=args.adsc_airframes_only)
     if args.adsc_airframes_only:
-        check_subset_steps(args.steps)
+        check_subset_steps(
+            args.steps, ARMS if args.arm == "both" else (args.arm,))
     reference = args.reference_warehouse or REFERENCE_BY_COVERAGE[coverage]
 
     day = date.fromisoformat(args.day)
     arms = ARMS if args.arm == "both" else (args.arm,)
     for arm in arms:
-        run_arm(arm, day, args.executors, reference, args.steps,
-                worldwide=args.worldwide)
+        run_arm(arm, day, args.executors, reference, args.steps)
     print(f"\nDone. {', '.join(arms)} written for {day} under {ARM_PREFIX} "
           f"(coverage: {coverage})")
     return 0

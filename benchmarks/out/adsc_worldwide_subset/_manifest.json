@@ -1,4 +1,154 @@
 {
+  "adsc_bridging_holes.csv": {
+    "argv": [
+      "--day",
+      "2026-06-05",
+      "--results-dir",
+      "benchmarks/out/adsc_worldwide_subset"
+    ],
+    "bytes": 178052,
+    "code_fingerprint": "e537e1fb8fe1d0a9",
+    "code_paths": [
+      "benchmarks/adsc_bridging_diagnosis.py",
+      "benchmarks/adsc_flight_list_truth.py",
+      "benchmarks/run_adsc_day.py",
+      "src/opdi/cleaning/native.py",
+      "src/opdi/config.py",
+      "src/opdi/coverage.py",
+      "src/opdi/ingestion/osn_adsc.py",
+      "src/opdi/pipeline/tracks.py"
+    ],
+    "git_dirty": true,
+    "git_sha": "e15b962",
+    "input_tables": {},
+    "inputs": {
+      "day": "2026-06-05",
+      "flights": 1334
+    },
+    "notes": "Holes over 30 min in the ADS-B of NM flights crossing the European box and landing on the day.",
+    "produced_utc": "2026-11-03T22:07:40+00:00",
+    "script": "benchmarks/adsc_bridging_diagnosis.py",
+    "sha256_16": "775af2cb13fbb2a0"
+  },
+  "adsc_bridging_summary.csv": {
+    "argv": [
+      "--day",
+      "2026-06-05",
+      "--results-dir",
+      "benchmarks/out/adsc_worldwide_subset"
+    ],
+    "bytes": 641,
+    "code_fingerprint": "e537e1fb8fe1d0a9",
+    "code_paths": [
+      "benchmarks/adsc_bridging_diagnosis.py",
+      "benchmarks/adsc_flight_list_truth.py",
+      "benchmarks/run_adsc_day.py",
+      "src/opdi/cleaning/native.py",
+      "src/opdi/config.py",
+      "src/opdi/coverage.py",
+      "src/opdi/ingestion/osn_adsc.py",
+      "src/opdi/pipeline/tracks.py"
+    ],
+    "git_dirty": true,
+    "git_sha": "e15b962",
+    "input_tables": {},
+    "inputs": {
+      "day": "2026-06-05",
+      "flights": 1334
+    },
+    "notes": "Holes over 30 min in the ADS-B of NM flights crossing the European box and landing on the day.",
+    "produced_utc": "2026-11-03T22:07:40+00:00",
+    "script": "benchmarks/adsc_bridging_diagnosis.py",
+    "sha256_16": "1fc299655e54352f"
+  },
+  "adsc_flight_list_both_ends.csv": {
+    "argv": [
+      "--day",
+      "2026-06-05",
+      "--results-dir",
+      "benchmarks/out/adsc_worldwide_subset"
+    ],
+    "bytes": 1583,
+    "code_fingerprint": "b7b2608b3349f869",
+    "code_paths": [
+      "benchmarks/adsc_flight_list_truth.py",
+      "benchmarks/run_adsc_day.py",
+      "src/opdi/cleaning/native.py",
+      "src/opdi/config.py",
+      "src/opdi/coverage.py",
+      "src/opdi/ingestion/osn_adsc.py",
+      "src/opdi/pipeline/flights.py",
+      "src/opdi/pipeline/tracks.py"
+    ],
+    "git_dirty": true,
+    "git_sha": "e15b962",
+    "input_tables": {
+      "s3a://eurocontrol/opdi-world/research/adsc_airframes/base/opdi_flight_list": {
+        "bytes": 590901,
+        "newest": "2026-11-03T21:32:49.324000+00:00",
+        "objects": 5
+      },
+      "s3a://eurocontrol/opdi-world/research/adsc_airframes/merged/opdi_flight_list": {
+        "bytes": 667001,
+        "newest": "2026-11-03T21:45:55.790000+00:00",
+        "objects": 5
+      }
+    },
+    "inputs": {
+      "day": "2026-06-05",
+      "truth": "/home/jupyter/work/opdi-workspace/opdi/.claude/worktrees/adsc-followups/reference/flights_202606.parquet",
+      "truth_flights": 2505,
+      "truth_sha256_16": "830f8174874f743d"
+    },
+    "notes": "One day, worldwide, airframes with ADS-C only. NM is the truth.",
+    "produced_utc": "2026-11-03T22:06:55+00:00",
+    "script": "benchmarks/adsc_flight_list_truth.py",
+    "sha256_16": "0776d247559b0c2f"
+  },
+  "adsc_flight_list_truth.csv": {
+    "argv": [
+      "--day",
+      "2026-06-05",
+      "--results-dir",
+      "benchmarks/out/adsc_worldwide_subset"
+    ],
+    "bytes": 5638,
+    "code_fingerprint": "b7b2608b3349f869",
+    "code_paths": [
+      "benchmarks/adsc_flight_list_truth.py",
+      "benchmarks/run_adsc_day.py",
+      "src/opdi/cleaning/native.py",
+      "src/opdi/config.py",
+      "src/opdi/coverage.py",
+      "src/opdi/ingestion/osn_adsc.py",
+      "src/opdi/pipeline/flights.py",
+      "src/opdi/pipeline/tracks.py"
+    ],
+    "git_dirty": true,
+    "git_sha": "e15b962",
+    "input_tables": {
+      "s3a://eurocontrol/opdi-world/research/adsc_airframes/base/opdi_flight_list": {
+        "bytes": 590901,
+        "newest": "2026-11-03T21:32:49.324000+00:00",
+        "objects": 5
+      },
+      "s3a://eurocontrol/opdi-world/research/adsc_airframes/merged/opdi_flight_list": {
+        "bytes": 667001,
+        "newest": "2026-11-03T21:45:55.790000+00:00",
+        "objects": 5
+      }
+    },
+    "inputs": {
+      "day": "2026-06-05",
+      "truth": "/home/jupyter/work/opdi-workspace/opdi/.claude/worktrees/adsc-followups/reference/flights_202606.parquet",
+      "truth_flights": 2505,
+      "truth_sha256_16": "830f8174874f743d"
+    },
+    "notes": "One day, worldwide, airframes with ADS-C only. NM is the truth.",
+    "produced_utc": "2026-11-03T22:06:54+00:00",
+    "script": "benchmarks/adsc_flight_list_truth.py",
+    "sha256_16": "33889edb2ce4241b"
+  },
   "adsc_gain_worldwide_subset.csv": {
     "argv": [
       "--days",
