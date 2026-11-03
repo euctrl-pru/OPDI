@@ -7,7 +7,7 @@ Spark configurations, H3 parameters, and ingestion settings.
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import os
 
 from opdi.coverage import EUROPE_BBOX, CoverageConfig
@@ -460,6 +460,23 @@ class CleaningConfig:
     """A value further than this from any other valid value of the *same*
     column, on both sides, is unverifiable and is NULLed."""
 
+    sparse_sources: Tuple[str, ...] = ("ADS-C",)
+    """``source`` values exempt from the stages that assume a dense feed.
+
+    Two stages here encode "a real measurement has neighbours": the
+    isolated-point rule discards a value whose nearest same-column neighbour is
+    more than :attr:`isolated_max_gap_seconds` (20 s) away on both sides, and
+    the stale-broadcast rule reads an unchanged value as carried forward rather
+    than re-measured. Both are true of ADS-B and false of ADS-C, whose median
+    cadence is ~600 s and which has no second message type to carry anything
+    forward from. Left unexempted, step 02a NULLs the position, altitude and
+    speed of **every** ADS-C sample, and the fusion would measure as a no-op
+    for a reason having nothing to do with its idea.
+
+    Matched against the ``source`` column, which exists only in a run with
+    ``adsc.enabled``; where the column is absent this setting has no effect.
+    """
+
     # -- Stage 6: gap segmentation ---------------------------------------
     segment_gap_seconds: float = 300.0
     """Coverage holes at or beyond this become a new ``segment_id``, so
@@ -490,6 +507,89 @@ class CleaningConfig:
     altitude is one fewer candidate sample. Expect this to cost coverage and
     buy accuracy; which way the exchange falls is a measurement, not an
     assumption."""
+
+
+@dataclass
+class AdscConfig:
+    """ADS-C ingestion (step 01b) and fusion into the ADS-B frame (step 02).
+
+    **Off by default, and that is the point.** Enabling it unions a second
+    source into the frame ``_add_track_id`` sees, so ``track_id`` changes for
+    every airframe that has an ADS-C sample. That is a fourth ``track_id``
+    boundary after legacy -> A8 -> A9, and like those it is silent to a joiner
+    (an empty join, not an error). It must therefore be a deliberate act, taken
+    in a research warehouse, not a default anyone inherits.
+
+    **What the source is.** ``readsb``'s ADS-C topic. Measured over eleven days
+    spanning 2023-09 to 2026-10 (``benchmarks/adsc_census.py``): 409-32,206
+    rows/day worldwide, 140-5,420 inside ``EUROPE_BBOX``, from 74-994 in-box
+    airframes, at a median cadence of 277-1,139 s -- three orders of magnitude
+    sparser than the 5 s ADS-B grid. 94.4-98.6% of in-box rows are above FL300
+    and 65.8-83.8% sit west of 10W, ``on_ground`` is **never** true, and the
+    whole box sees 1-67 rows a day below 10,000 ft. So this is an oceanic
+    cruise feed: it can extend a track's ends and bridge reception holes over
+    the Atlantic, and it cannot contribute to a runway or A-CDM milestone,
+    which needs samples the feed does not contain.
+
+    **The feed's schema has grown.** ``track``, ``gs`` and ``baro_rate`` are
+    empty before roughly 2025-09; ``flight``, ``squawk`` and ``on_ground``
+    before roughly 2026-06. A merged arm over 2023-2024 therefore writes ADS-C
+    rows with NULL ``velocity`` and ``vert_rate``.
+    """
+
+    enabled: bool = False
+    """Union ADS-C into the state-vector frame before segmentation."""
+
+    s3_base: str = "s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro"
+    """Hourly-partitioned raw topic. Snappy parquet, despite the `.avro` name."""
+
+    table: str = "osn_adsc_statevectors"
+    """Where step 01b writes the mapped rows, in the run's own warehouse."""
+
+    shadow_before_seconds: int = 60
+    """Drop an ADS-C row when an ADS-B row for the same airframe is this far
+    **behind** it.
+
+    The two feeds report the same aircraft from different links, so a
+    near-coincident pair is two renderings of one position, not two
+    measurements. Keeping both puts a second point a few hundred metres away at
+    nearly the same instant. ADS-B wins by construction: it is denser, it is
+    what every detector was tuned on, and it carries ``on_ground``.
+
+    Split from a single symmetric window because the window is defined in a
+    **skewed** time base. Measured against interpolated ADS-B, ADS-C reports sit
+    a median +1.48 s ahead of where ADS-B puts the aircraft at the same
+    timestamp, and one airframe in twenty-five is persistently -12.9 s. "The
+    same observation" is therefore not centred on zero, and the two sides have
+    to be settable independently once that is known. At the measured
+    magnitudes a symmetric 60 s window already catches every duplicate pair --
+    this split is what makes the time base explicit, not a fix for a present
+    failure.
+    """
+
+    shadow_after_seconds: int = 60
+    """Drop an ADS-C row when an ADS-B row for the same airframe is this far
+    **ahead** of it. See :attr:`shadow_before_seconds`."""
+
+    time_offset_seconds: float = 0.0
+    """Seconds added to every ADS-C ``event_time``. **Deliberately zero.**
+
+    The skew is real -- a median +1.48 s along-track displacement against
+    interpolated ADS-B, with a 43:1 along-to-cross ratio that rules out a
+    position error, and ADS-B's own position age (median 0.22 s, max 0.92 s)
+    too small to explain it. But it is a property of the **individual
+    airframe**, not of the feed: within an airframe the implied offset holds to
+    sigma 0.10-0.31 s, while between airframes it runs from +0.01 s to +2.09 s
+    with one at -12.9 s. A single constant would therefore be wrong for nearly
+    every aircraft and would actively damage the ones already synchronised.
+
+    The knob exists so a third arm can test a correction, not because one is
+    recommended. A per-airframe offset, estimated on coverage-overlap data and
+    applied where ADS-B is absent, is the real fix; it needs a stability study
+    over weeks before it could be believed, and 25 airframes on one day cannot
+    support it. See ``benchmarks/adsc_time_sync.py`` and the paper's
+    time-synchronisation chapter.
+    """
 
 
 @dataclass
@@ -1607,22 +1707,26 @@ class OPDIConfig:
     h3: H3Config = field(default_factory=H3Config)
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     cleaning: CleaningConfig = field(default_factory=CleaningConfig)
+    adsc: AdscConfig = field(default_factory=AdscConfig)
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     events: EventConfig = field(default_factory=EventConfig)
     segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
     coverage: CoverageConfig = field(default_factory=CoverageConfig)
 
     @classmethod
-    def for_environment(cls, env: str = "dev", worldwide: bool = False) -> "OPDIConfig":
+    def for_environment(cls, env: str = "dev", worldwide: bool = True) -> "OPDIConfig":
         """
         Create configuration for specific environment.
 
         Args:
             env: Environment name ("dev", "live", "local", or "opensky")
             worldwide: Drop the coverage bounding box and route output to the
-                worldwide warehouse. **Off by default, and that is the point**
-                -- the European box is a published contract and every existing
-                caller must keep getting it without saying so.
+                worldwide warehouse. **On by default**: OPDI works worldwide
+                unless a caller asks otherwise. Pass ``worldwide=False`` to get
+                the published European box (``EUROPE_BBOX``) and the European
+                warehouse -- the box itself is still a published contract and
+                is unchanged, it is just no longer what you get by saying
+                nothing.
 
         Returns:
             OPDIConfig instance with environment-specific settings

@@ -1,0 +1,4 @@
+airframe_days,arm,days,first_shift_median_s,last_shift_median_s,median_samples_per_track,rows,rows_adsc,seen_earlier,seen_later,segments,track_hours,tracks,tracks_all_adsc,tracks_with_adsc,tracks_with_two_callsigns
+,base,2026-06-05,,,702,11576848,0,,,15101,16971.87277777778,11698,0,0,365
+,merged,2026-06-05,,,559,11605132,25682,,,28874,19783.71111111111,14123,2509,4287,366
+3515,extension,2026-06-05,0.0,0.0,,,,600,347,,,,,,

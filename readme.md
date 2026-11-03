@@ -230,35 +230,40 @@ See `notebooks/opensky_quickstart.ipynb` for a ready-to-run notebook.
 
 ## Worldwide coverage
 
-By default OPDI covers a published European bounding box
+**OPDI runs worldwide by default** — every entry point, and
+`OPDIConfig.for_environment()` itself. The published European bounding box
 (`opdi.coverage.EUROPE_BBOX`) — the box every released `track_id` and every
-detection study was tuned inside. Passing one flag drops it and runs
-worldwide instead. **Use `run_period.py` for a real worldwide run** — it is
+detection study was tuned inside — is unchanged, but you now have to ask for
+it: `--europe` on the command line, `worldwide=False` in code. `--worldwide`
+is still accepted and is a no-op. **Use `run_period.py` for a real worldwide
+run** — it is
 the only one of these that attaches to the Kubernetes cluster
 (`create_session(..., distributed=True)`, see above); a worldwide build
 needs it, and running local-only against network-wide traffic is what cost
 the first worldwide reference build its first attempt:
 
 ```bash
-python run_period.py --start 2026-06-01 --worldwide   # the cluster path -- use this
+python run_period.py --start 2026-06-01             # worldwide, the cluster path -- use this
+python run_period.py --start 2026-06-01 --europe    # the published European box, into opdi-prod
 ```
 
-`opdi run` and `python opdi.py` accept `--worldwide` too, but both are
+`opdi run` and `python opdi.py` take the same `--europe` switch, but both are
 **local-driver-only** (see above) and cannot perform a real worldwide run —
 fine for a single day against one aerodrome, not for network-wide traffic:
 
 ```bash
-opdi run --env opensky --worldwide --start 2026-06-01 --end 2026-06-02   # local-only
-python opdi.py --worldwide --start 2026-06-01 --end 2026-06-02           # local-only
+opdi run --env opensky --start 2026-06-01 --end 2026-06-02   # local-only, worldwide
+python opdi.py --europe --start 2026-06-01 --end 2026-06-02  # local-only, European box
 ```
 
 or programmatically:
 
 ```python
-config = OPDIConfig.for_environment("opensky", worldwide=True)
+config = OPDIConfig.for_environment("opensky")                   # worldwide
+config = OPDIConfig.for_environment("opensky", worldwide=False)  # European box
 ```
 
-**What changes:**
+**How worldwide differs from `--europe`:**
 
 - **No coverage filter.** `config.coverage.bbox` is `None` rather than the
   European tuple; ingestion, detection and every H3 reference generator treat
@@ -266,7 +271,7 @@ config = OPDIConfig.for_environment("opensky", worldwide=True)
   cannot express "everywhere" once the coordinate wraps at the antimeridian).
 - **A separate warehouse.** Worldwide writes to `s3a://eurocontrol/opdi-world`
   by default, never to the European `s3a://eurocontrol/opdi-prod`.
-  **`OPDI_WAREHOUSE` is deliberately ignored under `--worldwide`** — that
+  **`OPDI_WAREHOUSE` is deliberately ignored worldwide** — that
   variable is how production points the European runs at their prefix and is
   normally exported, so honouring it here too would silently send planet-wide
   rows into `opdi-prod`. Point a worldwide run somewhere else with

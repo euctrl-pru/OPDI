@@ -57,7 +57,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #: ``runner.REFERENCE_SUBSTEPS``. Skipping 00 is still possible
 #: (``--steps 01 02 02a 03 04``), and then the reference tables must already
 #: exist, which ``preflight`` checks.
-PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04", "04b")
+PERIOD_STEPS: Tuple[str, ...] = (
+    "00", "01", "01b", "02", "02a", "03", "04", "04b")
 
 #: Steps that run once for the whole window, not per day.
 #:
@@ -70,7 +71,7 @@ PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "02", "02a", "03", "04", "04b")
 WINDOW_STEPS: Tuple[str, ...] = ("00",)
 
 #: Steps that run once per day, on the tracks that day owns.
-DAY_STEPS: Tuple[str, ...] = ("01", "02", "02a", "03", "04", "04b")
+DAY_STEPS: Tuple[str, ...] = ("01", "01b", "02", "02a", "03", "04", "04b")
 
 #: What each reference substep produces.
 #:
@@ -541,6 +542,64 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
     return problems + missing
 
 
+#: Tables that exist only to feed later steps and can be dropped once a day's
+#: outputs are written.
+#:
+#: `osn_tracks` and `osn_tracks_clean` are the bulk of a day -- ~9.8 GB and
+#: ~9.4 GB worldwide against ~1.5 GB for the flight list, events and
+#: measurements combined. They are inputs to steps 03 and 04, so they cannot be
+#: skipped at write time; retention is therefore a decision made AFTER the
+#: dependent steps land, not a flag on the write.
+TRACK_TABLES: Tuple[str, ...] = ("osn_tracks", "osn_tracks_clean")
+
+
+def prune_tracks_for_day(storage, day: date) -> int:
+    """Drop the track partitions for *day*. Returns partitions removed.
+
+    Only safe once every step that reads tracks has completed for this day --
+    03 builds the flight list from them and 04 derives events from them. The
+    caller enforces that ordering; this function does not check it.
+
+    What is lost is re-derivation without re-ingest: events for a pruned day
+    cannot be recomputed from stored tracks, only by ingesting the day again.
+    The benchmarker's `trajectory` cache table also reads `osn_tracks`, so a
+    pruned day has no trajectory view.
+    """
+    removed = 0
+    for table in TRACK_TABLES:
+        try:
+            removed += storage.drop_partitions(table, "dof", [day.isoformat()])
+        except Exception as exc:  # noqa: BLE001 - pruning must not fail a run
+            print(f"  prune: {table} dof={day} not dropped ({exc})")
+    return removed
+
+
+#: Default directory for the per-step ETL progress logs.
+DEFAULT_LOG_DIR = "OPDI_live/logs"
+
+
+def _log_dir(kwargs: dict) -> str:
+    """Where this run's local ETL progress logs live.
+
+    **A run that redirects its tables must redirect these too.** The logs sit
+    on the driver's local disk, and one of them gates a *remote* write:
+    `build_endpoint_candidates` is deliberately not keyed to
+    `skip_if_processed` -- rebuilding the flight list with different thresholds
+    does not invalidate the candidates, which is the point of caching them --
+    so it skips on its own day log and step 03 then reads the table it did not
+    write.
+
+    That is exactly how the ADS-C arm run failed on its first attempt: a
+    production campaign over 2026-06-01..14 had logged all fourteen days on
+    this pod, so the arm run skipped the build and died with PATH_NOT_FOUND
+    against its own research prefix. The tables were redirected; the local
+    state saying they existed was not.
+
+    Defaulting to the shared directory keeps every existing caller unchanged.
+    """
+    return kwargs.get("log_dir") or DEFAULT_LOG_DIR
+
+
 def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     """Run one pipeline step for the tracks that started on ``day``.
 
@@ -590,18 +649,48 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
             # way to tell that from a day the archive genuinely lacks.
             n = storage.drop_partitions("osn_statevectors_v2", "event_time_day", stale)
             print(f"    dropped {n} day(s) the window has passed: {', '.join(stale)}")
+    elif step == "01b":
+        if not config.adsc.enabled:
+            print("  ADS-C ingestion: disabled (config.adsc.enabled is False)")
+            return
+
+        from opdi.ingestion.osn_adsc import AdscIngestion
+
+        # The same three-day sliding window step 01 uses, and for the same
+        # reason: day D is segmented over [D-1, D+2), so the merge needs ADS-C
+        # for all three days or the tracks at the window's edges would see one
+        # source on one side of midnight and two on the other.
+        #
+        # No partition pruning of the kind step 01 does, because the whole
+        # table is a few megabytes per day: refetching three days costs less
+        # than the listing that would avoid it.
+        adsc = AdscIngestion(spark, config)
+        adsc.ingest_from_s3(
+            start_date=day - timedelta(days=1),
+            end_date=day + timedelta(days=2),
+        )
     elif step == "02":
         from opdi.pipeline.tracks import TrackProcessor
 
-        TrackProcessor(spark, config).process_day(day, skip_if_processed=False)
+        TrackProcessor(
+            spark, config,
+            log_file_path=os.path.join(
+                _log_dir(kwargs), "02_osn-tracks-etl-log.parquet"),
+        ).process_day(day, skip_if_processed=False)
     elif step == "02a":
         from opdi.cleaning.cleaner import TrackCleaner
 
-        TrackCleaner(spark, config).process_day(day, skip_if_processed=False)
+        TrackCleaner(
+            spark, config,
+            log_file_path=os.path.join(
+                _log_dir(kwargs), "02a_track_cleaning.log"),
+        ).process_day(day, skip_if_processed=False)
     elif step == "03":
         from opdi.pipeline.flights import FlightListProcessor
 
-        FlightListProcessor(spark, config).process_day(
+        FlightListProcessor(
+            spark, config, log_dir=_log_dir(kwargs),
+        ).process_day(
             day,
             airports_hex_path=kwargs.get("airports_hex_path"),
             skip_if_processed=False,
@@ -609,7 +698,9 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     elif step == "04":
         from opdi.pipeline.events import FlightEventProcessor
 
-        FlightEventProcessor(spark, config).process_day(day, skip_if_processed=False)
+        FlightEventProcessor(
+            spark, config, log_dir=_log_dir(kwargs),
+        ).process_day(day, skip_if_processed=False)
     elif step == "04b":
         from opdi.pipeline.flight_list_step import enrich_day
         from opdi.utils.storage import StorageManager
@@ -704,8 +795,10 @@ def run_period(
     skip_preflight: bool = False,
     dry_run: bool = False,
     warehouse: str = _UNSET,
+    prune_tracks: bool = False,
+    keep_tracks_on: Sequence[date] = (),
     allow_existing: bool = False,
-    worldwide: bool = False,
+    worldwide: bool = True,
 ) -> int:
     """Run the pipeline over a window of ``days``, resuming where it stopped.
 
@@ -739,10 +832,11 @@ def run_period(
         allow_existing: Proceed even though the warehouse prefix already holds
             objects. Off by default: a rebuild that silently merged with a
             previous attempt's output would produce a table nobody could date.
-        worldwide: Drop the published European bounding box. Off by default.
-            When on, and ``warehouse`` was left unset, the default follows
-            coverage to the worldwide warehouse instead of ``opdi-prod`` --
-            an explicitly-passed ``warehouse`` still wins, always.
+        worldwide: Drop the published European bounding box. On by default;
+            pass ``False`` for a European run. When on, and ``warehouse`` was
+            left unset, the default follows coverage to the worldwide
+            warehouse instead of ``opdi-prod`` -- an explicitly-passed
+            ``warehouse`` still wins, always.
     """
     from opdi.config import OPDIConfig
     from opdi.runner import STEPS, reference_substeps_for_coverage
@@ -857,6 +951,14 @@ def run_period(
         print(f"  already done: {len(done)} unit(s)  (from {state_path})")
     print(f"  to run      : {len(todo)} unit(s) over {len(all_days)} day(s)")
     print(f"  day steps   : {' '.join(s for s in steps if s in DAY_STEPS)}")
+    # The last day-step in the REQUESTED order, not in DAY_STEPS order: a run
+    # asking for only 01 02 must prune after 02, not wait for an 04b it never
+    # runs.
+    last_day_step = next((s for s in reversed(list(steps)) if s in DAY_STEPS), None)
+    keep_set = set(keep_tracks_on)
+    if prune_tracks:
+        print(f"  retention   : tracks pruned after {last_day_step}"
+              + (f", kept for {', '.join(str(d) for d in sorted(keep_set))}" if keep_set else ""))
     print(f"  {_describe_memory(limit_bytes, used_bytes)}")
     if heap != (driver_memory or config.spark.driver_memory):
         print(
@@ -1030,6 +1132,27 @@ def run_period(
         elapsed = time.time() - step_start
         state.mark(_key(step, day), elapsed)
         print(f"<<< step {step} {scope} done in {elapsed:.1f}s")
+
+        # Retention, decided after the day's outputs exist rather than at write
+        # time: steps 03 and 04 read the tracks this drops, so pruning may only
+        # happen once the last day-step for THIS day has been marked. Days named
+        # in `keep_tracks_on` are exempt, which is how a reference day keeps its
+        # trajectories while a long period keeps only its outputs.
+        if prune_tracks and day is not None and step == last_day_step:
+            if day in keep_set:
+                print(f"  prune: keeping tracks for {day} (exempt)")
+            else:
+                storage = StorageManager(
+                    SparkSessionManager.create_session(
+                        app_name=f"opdi prune {day}", config=config,
+                        distributed=False),
+                    config,
+                )
+                try:
+                    n = prune_tracks_for_day(storage, day)
+                    print(f"  prune: dropped {n} track partition(s) for {day}")
+                finally:
+                    storage.spark.stop()
 
     print(f"\nAll requested steps complete in {time.time() - overall:.1f}s.")
     print(f"State: {state_path}")

@@ -400,6 +400,28 @@ def _step_01_ingest_statevectors(spark, config, start_date, end_date, **kwargs):
         sv.ingest(start_date=start_date, end_date=end_date)
 
 
+def _step_01b_ingest_adsc(spark, config, start_date, end_date, **kwargs):
+    """Step 01b: Ingest ADS-C state vectors from the readsb topic.
+
+    A no-op unless ``config.adsc.enabled``. Registered unconditionally so that
+    a full run names it and skips it out loud: a step that exists only when a
+    flag is set is a step nobody remembers to run.
+    """
+    if not config.adsc.enabled:
+        print("\nSTEP 01b - ADS-C ingestion: disabled "
+              "(config.adsc.enabled is False)")
+        return
+
+    print("\n" + "=" * 70)
+    print(f"STEP 01b - ADS-C ingestion ({start_date} to {end_date})")
+    print("=" * 70)
+
+    from opdi.ingestion.osn_adsc import AdscIngestion
+
+    AdscIngestion(spark, config).ingest_from_s3(
+        start_date=start_date, end_date=end_date)
+
+
 def _step_02_process_tracks(spark, config, start_date, end_date, **kwargs):
     """Step 02: Process raw state vectors into flight tracks."""
     print("\n" + "=" * 70)
@@ -560,6 +582,7 @@ def _step_08_advanced_stats(spark, config, **kwargs):
 STEPS = {
     "00": _step_00_reference_data,
     "01": _step_01_ingest_statevectors,
+    "01b": _step_01b_ingest_adsc,
     "02": _step_02_process_tracks,
     "02a": _step_02a_clean_tracks,
     "03": _step_03_generate_flight_list,
@@ -588,7 +611,7 @@ def run_pipeline(
     last_n_months: int = 4,
     adep_mode: Optional[str] = None,
     ades_mode: Optional[str] = None,
-    worldwide: bool = False,
+    worldwide: bool = True,
 ) -> int:
     """
     Run the OPDI pipeline end-to-end or a single step.
@@ -619,8 +642,8 @@ def run_pipeline(
         export_dir: Base directory for parquet/CSV exports (steps 05-06).
         last_n_months: Only export the last N months of data (step 05).
         worldwide: Drop the published European bounding box and route output
-            to a separate worldwide warehouse. Off by default, so every
-            existing caller keeps the European coverage without saying so.
+            to a separate worldwide warehouse. On by default; pass ``False``
+            for the European box and the European warehouse.
 
     Returns:
         Exit code: ``0`` on success, ``1`` on failure.
@@ -661,7 +684,8 @@ def run_pipeline(
     }
     skip_all_ref = not any(run_reference.values())
 
-    step_label = step or ("ALL (01-08)" if skip_all_ref else "ALL (00-08)")
+    step_label = step or ("ALL (01-08, incl. 01b/02a)" if skip_all_ref
+                          else "ALL (00-08, incl. 01b/02a)")
     print(f"  Step        : {step_label}")
     if step is None:
         skipped = [k for k, v in run_reference.items() if not v]

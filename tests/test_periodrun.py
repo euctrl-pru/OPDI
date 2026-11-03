@@ -444,7 +444,7 @@ def test_everything_except_reference_data_runs_per_day():
     from opdi.periodrun import DAY_STEPS, WINDOW_STEPS
 
     assert WINDOW_STEPS == ("00",)
-    assert DAY_STEPS == ("01", "02", "02a", "03", "04", "04b")
+    assert DAY_STEPS == ("01", "01b", "02", "02a", "03", "04", "04b")
 
 
 def test_a_day_has_the_window_its_segmentation_will_read():
@@ -498,13 +498,18 @@ def test_a_day_step_records_completion_per_day():
     assert a == "02@2026-06-01"
 
 
-def test_a_week_is_forty_three_units():
-    """One window step plus six per day across seven days. Stated as a number
-    so a change to either list is visible rather than inferred."""
+def test_a_week_is_fifty_units():
+    """One window step plus seven per day across seven days. Stated as a number
+    so a change to either list is visible rather than inferred.
+
+    Was 43 before step 01b (ADS-C ingestion) joined the per-day steps. 01b is
+    a no-op unless `config.adsc.enabled`, but it is a unit either way: a step
+    that is only counted when a flag is set is a step whose cost appears from
+    nowhere the first time someone sets it."""
     from opdi.periodrun import DAY_STEPS, WINDOW_STEPS, days_in
 
     days = days_in(date(2026, 6, 1), date(2026, 6, 7))
-    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 43
+    assert len(WINDOW_STEPS) + len(DAY_STEPS) * len(days) == 50
 
 
 def test_ingestion_reaches_past_the_window():
@@ -785,7 +790,8 @@ def test_airspaces_are_skipped_worldwide():
     world = reference_substeps_for_coverage(
         OPDIConfig.for_environment("opensky", worldwide=True))
     assert world["00c"] is False
-    europe = reference_substeps_for_coverage(OPDIConfig.for_environment("opensky"))
+    europe = reference_substeps_for_coverage(
+        OPDIConfig.for_environment("opensky", worldwide=False))
     assert europe["00c"] is True
 
 
@@ -796,7 +802,7 @@ def test_a_worldwide_period_run_does_not_default_to_the_european_prefix():
     import inspect
     from opdi.periodrun import run_period, DEFAULT_WAREHOUSE
     assert DEFAULT_WAREHOUSE == "s3a://eurocontrol/opdi-prod"
-    assert inspect.signature(run_period).parameters["worldwide"].default is False
+    assert inspect.signature(run_period).parameters["worldwide"].default is True
     # Behavioural half: resolve the warehouse the way run_period does.
     from opdi.config import OPDIConfig
     world = OPDIConfig.for_environment("opensky", worldwide=True)
@@ -936,17 +942,22 @@ def test_the_wrapper_script_leaves_warehouse_unset_by_default(monkeypatch):
 
 
 def test_the_wrapper_script_passes_worldwide_through(monkeypatch):
-    """--worldwide must reach run_period() as worldwide=True, and its absence
-    as worldwide=False -- mirrors the cli.py coverage for `opdi run`."""
+    """Worldwide is the default: no flag and --worldwide both reach
+    run_period() as worldwide=True, --europe as worldwide=False -- mirrors the
+    cli.py coverage for `opdi run`."""
     import run_period as script
 
     captured = _fake_run_period(monkeypatch, script)
     script.main(["--start", "2026-06-01"])
-    assert captured["worldwide"] is False
+    assert captured["worldwide"] is True
 
     captured.clear()
     script.main(["--start", "2026-06-01", "--worldwide"])
     assert captured["worldwide"] is True
+
+    captured.clear()
+    script.main(["--start", "2026-06-01", "--europe"])
+    assert captured["worldwide"] is False
 
 
 def test_the_wrapper_script_still_lets_an_explicit_warehouse_win(monkeypatch):
@@ -963,3 +974,78 @@ def test_the_wrapper_script_still_lets_an_explicit_warehouse_win(monkeypatch):
     script.main(["--start", "2026-06-01", "--worldwide",
                  "--warehouse", "s3a://eurocontrol/scratch"])
     assert captured["warehouse"] == "s3a://eurocontrol/scratch"
+
+
+def test_prune_tracks_drops_only_the_track_tables():
+    """Pruning must not touch the outputs it exists to protect.
+
+    The whole point is that the flight list, events and measurements survive;
+    if this list ever grew to include them, a long period would delete the only
+    thing it was run to produce.
+    """
+    from opdi.periodrun import TRACK_TABLES
+    assert TRACK_TABLES == ("osn_tracks", "osn_tracks_clean")
+
+
+def test_prune_tracks_for_day_drops_that_day_in_both_tables():
+    from datetime import date
+    from opdi.periodrun import prune_tracks_for_day
+
+    calls = []
+
+    class _Storage:
+        def drop_partitions(self, table, column, values):
+            calls.append((table, column, tuple(values)))
+            return len(values)
+
+    n = prune_tracks_for_day(_Storage(), date(2026, 6, 2))
+    assert n == 2
+    assert calls == [
+        ("osn_tracks", "dof", ("2026-06-02",)),
+        ("osn_tracks_clean", "dof", ("2026-06-02",)),
+    ]
+
+
+def test_prune_failure_does_not_propagate():
+    """A retention step must never fail a run whose outputs are already safe.
+
+    The day's flight list, events and measurements are written by the time this
+    runs; raising here would turn a complete day into a failed one.
+    """
+    from datetime import date
+    from opdi.periodrun import prune_tracks_for_day
+
+    class _Broken:
+        def drop_partitions(self, table, column, values):
+            raise RuntimeError("s3 refused")
+
+    assert prune_tracks_for_day(_Broken(), date(2026, 6, 2)) == 0
+
+
+def test_run_period_defaults_to_keeping_tracks():
+    """Retention is opt-in. A plain run must behave exactly as before, or every
+    existing caller silently starts deleting its own intermediates."""
+    import inspect
+    from opdi.periodrun import run_period
+    sig = inspect.signature(run_period)
+    assert sig.parameters["prune_tracks"].default is False
+    assert tuple(sig.parameters["keep_tracks_on"].default) == ()
+
+
+def test_the_log_dir_defaults_to_the_shared_one():
+    """Every existing caller keeps the shared directory without saying so."""
+    from opdi.periodrun import DEFAULT_LOG_DIR, _log_dir
+
+    assert _log_dir({}) == DEFAULT_LOG_DIR
+    assert _log_dir({"log_dir": None}) == DEFAULT_LOG_DIR
+
+
+def test_the_log_dir_can_be_redirected():
+    """A run that redirects its tables has to redirect this too: one of these
+    logs gates a *remote* write (`build_endpoint_candidates` is not keyed to
+    skip_if_processed), so a shared log makes step 03 read a table it never
+    wrote."""
+    from opdi.periodrun import _log_dir
+
+    assert _log_dir({"log_dir": "OPDI_live/logs/adsc-merged"}) == \
+        "OPDI_live/logs/adsc-merged"

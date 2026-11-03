@@ -95,6 +95,23 @@ def _with_epoch(df: DataFrame) -> DataFrame:
     return df.withColumn(_T, F.unix_timestamp("event_time").cast("double"))
 
 
+def _sparse_mask(df: DataFrame, cfg: CleaningConfig) -> Column:
+    """True where the row's source is exempt from the density stages.
+
+    Two stages here encode "a measurement has neighbours": the isolated-point
+    rule and the stale-broadcast rule. Both are properties of ADS-B's 5 s grid
+    and separate message types, and neither holds for a 600 s satellite feed
+    with a single report type. Applied to ADS-C they do not clean it, they
+    delete it -- every value of every row.
+
+    Inert, by construction, on a frame with no ``source`` column: that is every
+    existing caller, including production and the rest of the test suite.
+    """
+    if "source" not in df.columns or not cfg.sparse_sources:
+        return F.lit(False)
+    return F.col("source").isin(list(cfg.sparse_sources))
+
+
 def _prev_valid(value: Column, target: Column, window: Window) -> Column:
     """Value of *target* at the previous row where *value* is non-NULL."""
     return F.last(F.when(value.isNotNull(), target), ignorenulls=True).over(
@@ -168,8 +185,13 @@ def drop_duplicate_statevectors(df: DataFrame, cfg: CleaningConfig) -> DataFrame
     if not cfg.dedup_enabled:
         return df
 
+    # ADS-B first, then the freshest observation. The source term is the outer
+    # key: where both feeds report one instant the two values are the same
+    # position rendered by two links, and the dense feed is the one every
+    # detector was tuned on -- and the only one carrying `on_ground`.
     ordering = Window.partitionBy("track_id", "event_time").orderBy(
-        F.col("last_contact").desc_nulls_last()
+        F.when(_sparse_mask(df, cfg), 1).otherwise(0).asc(),
+        F.col("last_contact").desc_nulls_last(),
     )
     return (
         df.withColumn("_clean_rn", F.row_number().over(ordering))
@@ -274,10 +296,16 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     position = lat_or_lon | changed("baro_altitude")
     speed = changed("vert_rate") | changed("heading") | changed("velocity")
 
+    # A sparse source cannot be stale: there is no second message type for a
+    # value to have been carried forward from.
+    exempt = _sparse_mask(df, cfg)
     df = (
-        df.withColumn("_stale_latlon", ~F.coalesce(lat_or_lon, F.lit(False)))
-        .withColumn("_stale_position", ~F.coalesce(position, F.lit(False)))
-        .withColumn("_stale_speed", ~F.coalesce(speed, F.lit(False)))
+        df.withColumn("_stale_latlon",
+                      ~exempt & ~F.coalesce(lat_or_lon, F.lit(False)))
+        .withColumn("_stale_position",
+                    ~exempt & ~F.coalesce(position, F.lit(False)))
+        .withColumn("_stale_speed",
+                    ~exempt & ~F.coalesce(speed, F.lit(False)))
     )
 
     for name in ("lat", "lon"):
@@ -483,6 +511,7 @@ def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     w = _track_window()
     limit = F.lit(cfg.isolated_max_gap_seconds)
     sentinel = F.lit(_NO_NEIGHBOUR)
+    exempt = _sparse_mask(df, cfg)
 
     for name in CLEANED_COLUMNS:
         if name not in df.columns:
@@ -493,7 +522,7 @@ def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
         gap = F.least(
             F.coalesce(backward, sentinel), F.coalesce(forward, sentinel)
         )
-        df = df.withColumn(name, F.when(gap <= limit, value))
+        df = df.withColumn(name, F.when((gap <= limit) | exempt, value))
 
     return df.drop(_T)
 

@@ -22,12 +22,13 @@ Usage::
     # Just one step
     .venv310/bin/python run_period.py --start 2026-06-01 --steps 04
 
-    # Worldwide, into its own warehouse rather than opdi-prod
-    .venv310/bin/python run_period.py --start 2026-06-01 --worldwide
+    # European box, into opdi-prod rather than the worldwide warehouse
+    .venv310/bin/python run_period.py --start 2026-06-01 --europe
 
-Everything is written under ``--warehouse`` (default
-``s3a://eurocontrol/opdi-prod``, or the worldwide warehouse under
-``--worldwide``), **including the reference tables**: step 00 runs first and
+Runs are worldwide unless ``--europe`` is given. Everything is written under
+``--warehouse`` (default: the worldwide warehouse, or
+``s3a://eurocontrol/opdi-prod`` under ``--europe``), **including the reference
+tables**: step 00 runs first and
 rebuilds airport zones, ground layouts, the runway grid, OurAirports and the
 aircraft database into that prefix. A run therefore reads only tables it
 produced, and cannot touch the published ``s3a://eurocontrol/opdi``. An
@@ -94,16 +95,33 @@ def main(argv=None) -> int:
                    help="Override spark.executor.instances.")
     p.add_argument("--warehouse", default=_UNSET,
                    help="Prefix every table is written to and read from "
-                        f"(default: {DEFAULT_WAREHOUSE}, or the worldwide "
-                        "warehouse under --worldwide). Reference tables "
+                        "(default: the worldwide warehouse, or "
+                        f"{DEFAULT_WAREHOUSE} under --europe). Reference tables "
                         "included -- a run reuses nothing from elsewhere. "
                         "An explicit value here always wins, in either "
                         "coverage.")
-    p.add_argument("--worldwide", action="store_true", default=False,
-                   help="Drop the published European bounding box: read and "
-                        "write the worldwide warehouse instead of "
-                        f"{DEFAULT_WAREHOUSE}, unless --warehouse names a "
-                        "prefix explicitly.")
+    p.add_argument("--prune-tracks", action="store_true", default=False,
+                   help="Drop osn_tracks and osn_tracks_clean for each day "
+                        "once that day's outputs are written. They are ~19 GB "
+                        "a day worldwide against ~1.5 GB for the flight list, "
+                        "events and measurements, so a long period is only "
+                        "affordable without them. Costs the trajectory view "
+                        "and re-derivation without re-ingest.")
+    p.add_argument("--keep-tracks-on", nargs="*", default=[],
+                   type=date.fromisoformat, metavar="YYYY-MM-DD",
+                   help="Days exempt from --prune-tracks, so a reference day "
+                        "keeps its trajectories while the rest of the period "
+                        "keeps only outputs.")
+    coverage = p.add_mutually_exclusive_group()
+    coverage.add_argument("--worldwide", dest="worldwide", action="store_true",
+                          default=True,
+                          help="Run worldwide: no bounding box, and the "
+                               "worldwide warehouse unless --warehouse names a "
+                               "prefix explicitly. The default; kept so "
+                               "existing commands still parse.")
+    coverage.add_argument("--europe", dest="worldwide", action="store_false",
+                          help="Apply the published European bounding box and "
+                               f"default the warehouse to {DEFAULT_WAREHOUSE}.")
     p.add_argument("--allow-existing", action="store_true",
                    help="Build even though the warehouse already holds "
                         "reference tables. Off by default so a rebuild cannot "
@@ -129,6 +147,8 @@ def main(argv=None) -> int:
         warehouse=args.warehouse,
         allow_existing=args.allow_existing,
         worldwide=args.worldwide,
+        prune_tracks=args.prune_tracks,
+        keep_tracks_on=args.keep_tracks_on,
     )
 
 
