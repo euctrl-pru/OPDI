@@ -49,9 +49,87 @@ from opdi.periodrun import run_day_step  # noqa: E402
 from opdi.utils.spark_helpers import SparkSessionManager  # noqa: E402
 from opdi.utils.storage import StorageManager  # noqa: E402
 
-#: Root of every table this script writes. Appears in :func:`guard_write_path`,
-#: so a typo here cannot send a write to production -- it fails the guard.
-ARM_PREFIX = "s3a://eurocontrol/opdi/research/adsc"
+#: Root of every table this script writes, per coverage. Appears in
+#: :func:`guard_write_path`, so a typo here cannot send a write to production
+#: -- it fails the guard.
+#:
+#: Worldwide writes under ``opdi-world``, not under the European prefix. That
+#: is the pipeline's own rule (``config._worldwide_warehouse``) and it exists
+#: because the two coverages are not comparable: a worldwide track reaches
+#: aerodromes the European reference tables never described, and mixing them
+#: in one prefix would make "which coverage produced this row" unanswerable.
+ARM_PREFIX_BY_COVERAGE = {
+    "europe": "s3a://eurocontrol/opdi/research/adsc",
+    "worldwide": "s3a://eurocontrol/opdi-world/research/adsc",
+}
+
+#: Where the read-only reference tables live, per coverage. The worldwide H3
+#: zones, runway grid and HexAero layouts are built for global aerodromes;
+#: pointing a worldwide run at the European ones would find no aerodrome for
+#: any track outside the box and report every aerodrome-anchored family empty
+#: rather than broken.
+REFERENCE_BY_COVERAGE = {
+    "europe": "s3a://eurocontrol/opdi-prod",
+    "worldwide": "s3a://eurocontrol/opdi-world",
+}
+
+#: Set by :func:`set_coverage` before any path is resolved.
+ARM_PREFIX = ARM_PREFIX_BY_COVERAGE["europe"]
+COVERAGE = "europe"
+
+#: Restrict the ADS-B input to airframes present in the ADS-C table. Sound for
+#: the comparison because segmentation partitions by airframe: an airframe with
+#: no ADS-C is identical in both arms, so dropping it changes no difference
+#: between them. It changes the totals, so a percentage needs the full feed's
+#: denominator. Exists because a full worldwide day (about 21.5 GB per arm,
+#: measured on opdi-world) does not fit the bucket.
+ADSC_AIRFRAMES_ONLY = False
+
+
+def set_coverage(label: str, adsc_airframes_only: bool = False) -> None:
+    """Switch which coverage's prefixes this run reads and writes.
+
+    Must be called before anything resolves a path. Rebinding the module
+    globals is sound because every consumer reads them at call time.
+    """
+    global ARM_PREFIX, COVERAGE, ADSC_AIRFRAMES_ONLY
+    if label not in ARM_PREFIX_BY_COVERAGE:
+        raise ValueError(
+            f"unknown coverage {label!r}; expected one of "
+            f"{tuple(ARM_PREFIX_BY_COVERAGE)}")
+    ARM_PREFIX = ARM_PREFIX_BY_COVERAGE[label]
+    COVERAGE = label
+    ADSC_AIRFRAMES_ONLY = adsc_airframes_only
+    if adsc_airframes_only:
+        # Beside the full-feed prefix, never inside it. Its row and track
+        # counts describe a selected population and must not be read as the
+        # feed's.
+        ARM_PREFIX = f"{ARM_PREFIX}_airframes"
+
+
+def check_subset_steps(steps) -> None:
+    """Refuse a subset run that would ingest ADS-B before the airframes exist.
+
+    Step 01 filters on the table step 01b writes. A run with neither reuses the
+    inputs an earlier arm already wrote.
+    """
+    steps = list(steps)
+    if "01" not in steps:
+        return
+    if "01b" not in steps or steps.index("01b") > steps.index("01"):
+        raise ValueError(
+            "--adsc-airframes-only needs step 01b before step 01: "
+            f"got {' '.join(steps)}")
+
+
+def is_subset_target(table_name: str) -> bool:
+    """The one table the subset filters. Everything else derives from it."""
+    return table_name == "osn_statevectors_v2"
+
+
+def keep_adsc_airframes(adsb, adsc):
+    """ADS-B rows of the airframes that appear in the ADS-C table."""
+    return adsb.join(adsc.select("icao24").distinct(), "icao24", "left_semi")
 
 #: Reference data, read and never written. Resolved against the run's own
 #: ``warehouse_path`` (production), because re-deriving an H3 airport layout
@@ -143,6 +221,10 @@ def redirect_arm(arm: str, reference_warehouse: str) -> None:
     def write_table(self, df, table_name, mode="append", partition_by=None,
                     partition_values=None):
         guard_write_path(_s3_path(self, table_name))
+        if ADSC_AIRFRAMES_ONLY and is_subset_target(table_name):
+            df = keep_adsc_airframes(
+                df,
+                self.spark.read.parquet(arm_path(arm, "osn_adsc_statevectors")))
         return orig_write(self, df, table_name, mode, partition_by,
                           partition_values)
 
@@ -162,9 +244,14 @@ def restore() -> None:
 
 
 def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
-            steps=STEPS) -> None:
+            steps=STEPS, worldwide: bool = False) -> None:
     """One arm, one day, through the real per-day entry points."""
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=worldwide)
+    # The reference warehouse, not the coverage's own: `for_environment`
+    # already routed `warehouse_path` to opdi-world under worldwide, and the
+    # redirect below overrides it for everything except PASSTHROUGH anyway.
+    # Setting it explicitly keeps one source of truth for where reference data
+    # is read from.
     cfg.project.warehouse_path = reference_warehouse
     cfg.adsc.enabled = (arm == "merged")
     cfg.spark.executor_instances = str(executors)
@@ -176,6 +263,7 @@ def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
     print(f"  inputs     : {ARM_PREFIX}/input")
     print(f"  outputs    : {ARM_PREFIX}/{arm}")
     print(f"  segment'n  : {cfg.segmentation.method}")
+    print(f"  coverage   : {cfg.coverage.label}  (bbox={cfg.coverage.bbox})")
     print(f"  steps      : {' '.join(steps)}")
     print("=" * 72, flush=True)
 
@@ -219,17 +307,43 @@ def main() -> int:
                     help="subset of the per-day steps, in order")
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument(
-        "--reference-warehouse", default="s3a://eurocontrol/opdi-prod",
-        help="where the read-only reference tables live. opdi-prod, not opdi: "
-             "the bare `opdi` prefix holds an unpartitioned scratch copy of "
-             "the pipeline tables.")
+        "--worldwide", action="store_true", default=False,
+        help="Drop the coverage bounding box and run over the whole feed. Off "
+             "by default. ADS-C is a satellite feed and the European box "
+             "excludes 81%% of it, so this is the arm that measures what ADS-C "
+             "actually adds -- but APDF cannot score outside Europe, so a "
+             "worldwide run is a coverage study with no scored arm.")
+    ap.add_argument(
+        "--adsc-airframes-only", action="store_true", default=False,
+        help="Keep only the ADS-B of airframes present in the ADS-C table, "
+             "under a separate prefix. The between-arm differences are "
+             "unchanged and the totals are not the feed's. Build the merged "
+             "arm first with --steps 01b 01 02 02a, then the base arm with "
+             "--steps 02 02a: 01b only runs with ADS-C enabled.")
+    ap.add_argument(
+        "--reference-warehouse", default=None,
+        help="where the read-only reference tables live. Defaults to "
+             "opdi-prod for Europe and opdi-world for worldwide. opdi-prod, "
+             "not opdi: the bare `opdi` prefix holds an unpartitioned scratch "
+             "copy of the pipeline tables.")
     args = ap.parse_args()
+
+    # Before anything resolves a path. A run that wrote worldwide rows into the
+    # European research prefix while reporting itself worldwide is worse than
+    # one that failed to start.
+    coverage = "worldwide" if args.worldwide else "europe"
+    set_coverage(coverage, adsc_airframes_only=args.adsc_airframes_only)
+    if args.adsc_airframes_only:
+        check_subset_steps(args.steps)
+    reference = args.reference_warehouse or REFERENCE_BY_COVERAGE[coverage]
 
     day = date.fromisoformat(args.day)
     arms = ARMS if args.arm == "both" else (args.arm,)
     for arm in arms:
-        run_arm(arm, day, args.executors, args.reference_warehouse, args.steps)
-    print(f"\nDone. {', '.join(arms)} written for {day} under {ARM_PREFIX}")
+        run_arm(arm, day, args.executors, reference, args.steps,
+                worldwide=args.worldwide)
+    print(f"\nDone. {', '.join(arms)} written for {day} under {ARM_PREFIX} "
+          f"(coverage: {coverage})")
     return 0
 
 

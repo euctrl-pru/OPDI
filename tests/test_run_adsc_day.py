@@ -148,3 +148,83 @@ def test_the_log_dir_is_not_the_shared_production_one():
     # The shared directory appears only as the prefix of an arm-specific
     # subdirectory, never on its own.
     assert f'"{DEFAULT_LOG_DIR}"' not in src
+
+
+@pytest.fixture
+def _reset_coverage():
+    yield
+    r.set_coverage("europe")
+
+
+def test_a_run_without_a_coverage_flag_is_the_european_study(_reset_coverage):
+    # The default of `OPDIConfig.for_environment` became worldwide, and this
+    # runner's prefixes are European. Left to the default it would have written
+    # planet-wide rows into the European research prefix.
+    import inspect
+
+    src = inspect.getsource(r.run_arm)
+    assert 'for_environment("opensky", worldwide=worldwide)' in src
+    assert inspect.signature(r.run_arm).parameters["worldwide"].default is False
+    assert r.ARM_PREFIX == "s3a://eurocontrol/opdi/research/adsc"
+
+
+def test_worldwide_writes_under_the_worldwide_warehouse(_reset_coverage):
+    r.set_coverage("worldwide")
+    assert r.arm_path("merged", "osn_tracks") == (
+        "s3a://eurocontrol/opdi-world/research/adsc/merged/osn_tracks")
+
+
+def test_worldwide_cannot_write_into_the_european_prefix(_reset_coverage):
+    r.set_coverage("worldwide")
+    with pytest.raises(AssertionError, match="opdi-world"):
+        r.guard_write_path(
+            "s3a://eurocontrol/opdi/research/adsc/merged/osn_tracks")
+
+
+def test_an_unknown_coverage_is_refused(_reset_coverage):
+    with pytest.raises(ValueError, match="unknown coverage"):
+        r.set_coverage("wordlwide")
+
+
+def test_an_airframe_subset_has_its_own_prefix(_reset_coverage):
+    # A subset's track count looks like a coverage result. In the full-feed
+    # prefix nothing would say which airframes a table holds.
+    r.set_coverage("worldwide", adsc_airframes_only=True)
+    assert r.arm_path("base", "osn_tracks") == (
+        "s3a://eurocontrol/opdi-world/research/adsc_airframes/base/osn_tracks")
+    with pytest.raises(AssertionError):
+        r.guard_write_path(
+            "s3a://eurocontrol/opdi-world/research/adsc/base/osn_tracks")
+
+
+def test_resetting_coverage_clears_the_subset(_reset_coverage):
+    r.set_coverage("worldwide", adsc_airframes_only=True)
+    r.set_coverage("europe")
+    assert r.ADSC_AIRFRAMES_ONLY is False
+    assert r.ARM_PREFIX == "s3a://eurocontrol/opdi/research/adsc"
+
+
+def test_the_subset_needs_adsc_ingested_before_adsb():
+    r.check_subset_steps(("01b", "01", "02", "02a"))
+    r.check_subset_steps(("02", "02a"))  # the second arm reuses the inputs
+    with pytest.raises(ValueError, match="01b"):
+        r.check_subset_steps(("01", "01b", "02"))
+    with pytest.raises(ValueError, match="01b"):
+        r.check_subset_steps(("01", "02"))
+
+
+def test_subset_keeps_only_airframes_seen_in_adsc(spark, _reset_coverage):
+    adsb = spark.createDataFrame(
+        [("aaa111", 1), ("aaa111", 2), ("bbb222", 3)], ["icao24", "v"])
+    adsc = spark.createDataFrame(
+        [("aaa111", 9), ("aaa111", 8), ("ccc333", 7)], ["icao24", "v"])
+    kept = r.keep_adsc_airframes(adsb, adsc)
+    assert sorted(x.v for x in kept.collect()) == [1, 2]
+    # A semi join: no ADS-C column and no row multiplied by repeat reports.
+    assert kept.columns == ["icao24", "v"]
+
+
+def test_subset_filters_only_the_adsb_table(_reset_coverage):
+    assert r.is_subset_target("osn_statevectors_v2")
+    assert not r.is_subset_target("osn_adsc_statevectors")
+    assert not r.is_subset_target("osn_tracks")
