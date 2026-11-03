@@ -13,9 +13,12 @@ track that starts on D, because that is the only direction in which being too
 short silently truncates.
 """
 import datetime as dt
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from conftest import make_track
+from pyspark.sql import functions as F
 
 from opdi.pipeline.tracks import keep_tracks_starting_in
 
@@ -129,3 +132,132 @@ def test_a_run_whose_lookahead_was_enough_reports_nothing(spark):
 
     sv = make_track(spark, [{"t": 0, "track_id": "a"}, {"t": HOUR, "track_id": "a"}])
     assert tracks_touching_window_end(sv, _at(6 * HOUR)).count() == 0
+
+
+# --- the lookback, under an arm that links across holes -----------------------
+
+def _processor_capturing_windows(monkeypatch, method, **segmentation):
+    """A TrackProcessor with no IO, recording the windows `process_day` reads."""
+    from opdi import pipeline
+    from opdi.config import SegmentationConfig
+    from opdi.pipeline.tracks import TrackProcessor
+
+    monkeypatch.setattr(
+        pipeline.tracks,
+        "tracks_touching_window_end",
+        lambda df, read_end: SimpleNamespace(count=lambda: 0),
+    )
+    processor = TrackProcessor.__new__(TrackProcessor)
+    processor.config = SimpleNamespace(
+        segmentation=SegmentationConfig(method=method, **segmentation)
+    )
+    processor.storage = MagicMock()
+    processor.windows = []
+    processor.process_month = lambda **kw: processor.windows.append(kw["window"])
+    return processor
+
+
+def test_cruise_linked_reads_back_past_its_longest_gap():
+    """A linked track's old piece is at most `link_max_gap_minutes` before the new."""
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    p = SegmentationParams()
+    assert required_lookback_hours("cruise_linked", p) == 7
+    assert required_lookback_hours("debounced", p) == 3
+    assert required_lookback_hours("standard", p) == 3
+    assert required_lookback_hours("legacy", p) == 3
+
+    p120 = SegmentationParams(link_max_gap_minutes=120.0)
+    assert required_lookback_hours("cruise_linked", p120) == 3
+    # A part-hour rounds up.
+    p241 = SegmentationParams(link_max_gap_minutes=241.0)
+    assert required_lookback_hours("cruise_linked", p241) == 6
+
+
+def test_process_day_reads_the_lookback_its_arm_requires(spark, monkeypatch):
+    day = dt.date(2024, 6, 2)
+
+    linked = _processor_capturing_windows(monkeypatch, "cruise_linked")
+    linked.process_day(day)
+    assert linked.windows[0][0] == "2024-06-01 17:00:00"
+
+    wider = _processor_capturing_windows(monkeypatch, "cruise_linked")
+    wider.process_day(day, lookback_hours=9)
+    assert wider.windows[0][0] == "2024-06-01 15:00:00"
+
+    default = _processor_capturing_windows(monkeypatch, "standard")
+    default.process_day(day)
+    assert default.windows[0][0] == "2024-06-01 21:00:00"
+
+
+def test_too_short_an_explicit_lookback_raises(spark, monkeypatch):
+    processor = _processor_capturing_windows(monkeypatch, "cruise_linked")
+    with pytest.raises(ValueError, match="lookback_hours=6.*7"):
+        processor.process_day(dt.date(2024, 6, 2), lookback_hours=6)
+    assert processor.windows == []
+
+
+def test_other_arms_keep_their_explicit_lookback(spark, monkeypatch):
+    """The guard is about linking. Other arms' breaks are local, so one hour is fine."""
+    processor = _processor_capturing_windows(monkeypatch, "debounced")
+    processor.process_day(dt.date(2024, 6, 2), lookback_hours=1)
+    assert processor.windows[0][0] == "2024-06-01 23:00:00"
+
+
+def _claimed_by_day(sv, day_start, lookback_hours):
+    """One day of `process_day`: read wide, segment, keep the tracks starting in it."""
+    from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
+    from opdi.pipeline.segmentation.methods import cruise_linked
+
+    day_end = day_start + dt.timedelta(days=1)
+    read = sv.filter(
+        (F.col("event_time") >= F.lit(day_start - dt.timedelta(hours=lookback_hours)))
+        & (F.col("event_time") < F.lit(day_end + dt.timedelta(hours=24)))
+    )
+    tracks = assign_track_id(read, cruise_linked(), SegmentationParams())
+    return keep_tracks_starting_in(tracks, day_start, day_end)
+
+
+def test_a_piece_after_midnight_is_claimed_once(spark):
+    """Old piece 20:50-20:55 on D-1, new piece 00:10-00:20 on D: one linked flight.
+
+    Read back only 3 h, D never sees the old piece, takes the new one for a track
+    starting on D, and claims it while D-1 claims the same samples inside the
+    linked track: published twice under two ids.
+    """
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    d_minus_1 = dt.datetime(2024, 6, 1)
+    d = dt.datetime(2024, 6, 2)
+    at = lambda moment: (moment - EPOCH).total_seconds()   # noqa: E731
+    cruise = {"lat": 0.0, "baro_altitude": 11000.0, "vert_rate": 0.0, "callsign": "DLH1"}
+
+    old_start = at(d_minus_1 + dt.timedelta(hours=20, minutes=50))
+    new_start = at(d + dt.timedelta(minutes=10))
+    gap_min = (new_start - (old_start + 5 * 60)) / 60
+    samples = [
+        {**cruise, "t": old_start + i * 60, "lon": 0.0} for i in range(6)
+    ] + [
+        # 480 kt across the hole, on the equator.
+        {**cruise, "t": new_start + i * 60, "lon": 480.0 * gap_min / 60 / 60.04}
+        for i in range(11)
+    ]
+    sv = make_track(spark, samples)
+
+    hours = required_lookback_hours("cruise_linked", SegmentationParams())
+    claims = [
+        r["last_contact"]
+        for day in (d_minus_1, d)
+        for r in _claimed_by_day(sv, day, hours).select("last_contact").collect()
+    ]
+    assert sorted(claims) == sorted(s["t"] for s in samples)
+
+    # The same two days at A9's lookback: the duplicate this guard exists to stop.
+    too_short = [
+        r["last_contact"]
+        for day in (d_minus_1, d)
+        for r in _claimed_by_day(sv, day, 3).select("last_contact").collect()
+    ]
+    assert len(too_short) == len(samples) + 11

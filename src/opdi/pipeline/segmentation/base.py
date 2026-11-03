@@ -56,11 +56,13 @@ __all__ = [
     "lookback_minutes",
     "FT_PER_M",
     "KT_PER_MPS",
+    "FPM_PER_MPS",
 ]
 
 #: Reused from the pipeline's own conversions so the two can never drift.
 FT_PER_M = 3.28084
 KT_PER_MPS = 1.94384
+FPM_PER_MPS = 196.850394
 
 #: Gap in minutes from the previous sample of the same group. Available to every
 #: break expression; the window is applied by :func:`assign_track_id`.
@@ -112,6 +114,19 @@ class SegmentationParams:
     #: ``SegmentationConfig.callsign_min_persistence_seconds``;
     #: ``test_segmentation_base.py`` asserts the two default sets are identical.
     callsign_min_persistence_seconds: float = 30.0
+    # A10 knobs, read only by ``cruise_linked``. Each is one test of ``linkable``
+    # in ``methods.py``; these are starting values, and the study's grid chooses.
+    link_max_gap_minutes: float = 360.0
+    link_cruise_floor_ft: float = 25000.0
+    link_edge_vert_rate_fpm: float = 500.0
+    link_callsign_lookahead_minutes: float = 10.0
+    link_min_implied_speed_kt: float = 315.0
+    link_max_implied_speed_kt: float = 750.0
+    #: ``0.0`` turns this test off.
+    link_min_speed_ratio: float = 0.0
+    #: ``0.0`` turns this test off.
+    link_min_stop_minutes: float = 0.0
+    link_vfast_kt: float = 650.0
     # A5-A7 knobs; unused by the gap family.
     ground_dwell_minutes: float = 5.0
     turnaround_max_height_ft: float = 1000.0

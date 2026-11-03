@@ -1645,6 +1645,38 @@ class SegmentationConfig:
     this release uses -- so set ``method="recommended"`` (which ignores this
     field) rather than zeroing it if you need the A8 ``track_id``."""
 
+    link_max_gap_minutes: float = 360.0
+    """Longest reception hole the ``cruise_linked`` arm (A10) can link (minutes).
+
+    Also sets how far back ``process_day`` must read under that arm: see
+    ``tracks.required_lookback_hours``."""
+
+    link_cruise_floor_ft: float = 25000.0
+    """Lowest altitude at either edge of a hole A10 can link (feet)."""
+
+    link_edge_vert_rate_fpm: float = 500.0
+    """Mean edge vertical rate past which a hole reads as descend-then-climb (ft/min)."""
+
+    link_callsign_lookahead_minutes: float = 10.0
+    """How far after a hole A10 looks for the first non-blank callsign (minutes)."""
+
+    link_min_implied_speed_kt: float = 315.0
+    """Slowest great-circle speed across a hole A10 can link (knots)."""
+
+    link_max_implied_speed_kt: float = 750.0
+    """Fastest great-circle speed across a hole A10 can link (knots). Above this
+    is a duplicate address, not wind."""
+
+    link_min_speed_ratio: float = 0.0
+    """Lowest implied speed over edge ground speed A10 can link. ``0.0`` is off."""
+
+    link_min_stop_minutes: float = 0.0
+    """Time left over at ``link_vfast_kt`` that reads as room for a stop (minutes).
+    ``0.0`` is off."""
+
+    link_vfast_kt: float = 650.0
+    """Fastest plausible ground speed, for ``link_min_stop_minutes`` (knots)."""
+
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""
 

@@ -9,6 +9,7 @@ Transforms raw state vectors into structured flight tracks with:
 - Altitude cleaning
 """
 
+import math
 import os
 from datetime import date, datetime, timedelta
 from typing import List, Optional
@@ -104,6 +105,27 @@ def tracks_touching_window_end(df, read_end, margin_seconds=60):
     )
     cutoff = lit(read_end) - expr(f"INTERVAL {int(margin_seconds)} SECONDS")
     return per_track.filter(col("_track_last_sample") >= cutoff)
+
+
+def _resolve_segmentation_method(method: str) -> str:
+    """The arm a configured method names: ``standard`` is a pointer, not an arm."""
+    return "debounced" if method == "standard" else method
+
+
+def required_lookback_hours(method: str, p) -> int:
+    """Hours ``process_day`` must read before the day under *method*.
+
+    For most arms a break is a local condition, so any silence longer than the gap
+    rule proves a sample starts a track, and ``DEFAULT_LOOKBACK_HOURS`` is plenty.
+    ``cruise_linked`` breaks that: a piece after midnight may belong to a track
+    whose old piece ended up to ``link_max_gap_minutes`` earlier. If the read window
+    misses the old piece, the day sees a new track and claims it, while the day
+    before claims the same samples inside the linked track, under another id. The
+    extra hour keeps the old edge's samples in the window too.
+    """
+    if _resolve_segmentation_method(method) == "cruise_linked":
+        return math.ceil(p.link_max_gap_minutes / 60) + 1
+    return TrackProcessor.DEFAULT_LOOKBACK_HOURS
 
 
 class TrackProcessor:
@@ -363,7 +385,7 @@ class TrackProcessor:
         # "recommended" for reproducing data published before this release.
         # Every other arm name is accepted too, which is what lets the benchmark
         # drive the real pipeline instead of a harness that only resembles it.
-        resolved = "debounced" if method == "standard" else method
+        resolved = _resolve_segmentation_method(method)
         if resolved not in ARMS:
             known = sorted(set(ARMS) | {"standard"})
             raise ValueError(
@@ -651,7 +673,8 @@ class TrackProcessor:
     #: Hours read before the day, so a track overlapping midnight can be told
     #: from one that genuinely starts just after it. Only has to exceed the gap
     #: threshold (30 min): a break is a local condition, so three hours of
-    #: silence in front of a sample already proves it starts a track.
+    #: silence in front of a sample already proves it starts a track. Not so
+    #: under ``cruise_linked``, which ``required_lookback_hours`` reads further for.
     DEFAULT_LOOKBACK_HOURS = 3
 
     #: Hours read after the day, so a track starting inside it is complete.
@@ -683,7 +706,22 @@ class TrackProcessor:
         A track running past midnight is processed by the day it *started*,
         in full -- that is what the lookahead is for.
         """
-        lookback = self.DEFAULT_LOOKBACK_HOURS if lookback_hours is None else lookback_hours
+        from opdi.pipeline.segmentation import SegmentationParams
+
+        method = self.config.segmentation.method
+        required = required_lookback_hours(
+            method, SegmentationParams.from_config(self.config.segmentation)
+        )
+        lookback = required if lookback_hours is None else lookback_hours
+        if (
+            _resolve_segmentation_method(method) == "cruise_linked"
+            and lookback < required
+        ):
+            raise ValueError(
+                f"lookback_hours={lookback} under {method!r} is under the {required} "
+                f"hours a linked track can reach back: samples after midnight would "
+                f"be claimed by two days, under two ids"
+            )
         lookahead = (
             self.DEFAULT_LOOKAHEAD_HOURS if lookahead_hours is None else lookahead_hours
         )
