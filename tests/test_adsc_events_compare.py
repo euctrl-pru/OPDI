@@ -84,3 +84,14 @@ def test_one_truth_frame_scores_both_arms():
     src = inspect.getsource(a.main)
     assert src.count("events_gt.build") == 1
     assert src.index("events_gt.build") < src.index("for arm in args.arms")
+
+
+def test_the_scorer_is_pinned_to_the_european_warehouse():
+    # `storage.read_table` resolves the arm's flight list against the config's
+    # warehouse, and the arms live under `opdi/`. The worldwide default would
+    # resolve it under `opdi-world/`, where this study has no flight list.
+    from opdi.coverage import EUROPE_BBOX
+
+    cfg = a.scoring_config()
+    assert cfg.coverage.bbox == EUROPE_BBOX
+    assert "opdi-world" not in cfg.project.warehouse_path

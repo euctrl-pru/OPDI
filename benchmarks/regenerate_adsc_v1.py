@@ -84,10 +84,19 @@ DATA = PAPER / "data"
 #: the merge that puts it in front of segmentation, and the cleaning exemption
 #: without which every ADS-C value is NULLed. A job that reads a pipeline table
 #: depends on all three, because a change to any one changes its answer.
+#:
+#: The other three decide which rows an arm holds at all: the coverage default,
+#: the box, and the runner that builds the arms. ``config.py`` is edited often,
+#: so these jobs read stale after changes that cannot move their answer. That
+#: is the price of ``--check`` not reporting "current" across a coverage flip,
+#: which it did for 305fc36.
 CORE = [
     "src/opdi/ingestion/osn_adsc.py",
     "src/opdi/pipeline/tracks.py",
     "src/opdi/cleaning/native.py",
+    "src/opdi/config.py",
+    "src/opdi/coverage.py",
+    "benchmarks/run_adsc_day.py",
 ]
 
 #: The days both arms were built for. The flight-events-v4 period.

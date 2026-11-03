@@ -88,3 +88,12 @@ def test_the_census_covers_more_than_the_study_period():
     assert set(R.DAYS) < set(R.CENSUS_DAYS)
     assert len(R.CENSUS_DAYS) >= 10
     assert min(R.CENSUS_DAYS) < "2024"
+
+
+def test_a_change_of_coverage_default_marks_pipeline_jobs_stale():
+    # `for_environment` flipped to worldwide in 305fc36 and `--check` went on
+    # reporting every output current, because nothing here named the code that
+    # chose the coverage. The runner is named too: it builds the arms.
+    for path in ("src/opdi/config.py", "src/opdi/coverage.py",
+                 "benchmarks/run_adsc_day.py"):
+        assert path in R.CORE

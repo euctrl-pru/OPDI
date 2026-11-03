@@ -57,6 +57,17 @@ ARMS = ("base", "merged")
 PERIOD = "2026"
 
 
+def scoring_config():
+    """The European configuration, stated rather than defaulted.
+
+    APDF is European and the arms live under ``opdi/``. Since the worldwide
+    default, saying nothing resolves the flight list under ``opdi-world/``.
+    """
+    from opdi.config import OPDIConfig
+
+    return OPDIConfig.for_environment("opensky", worldwide=False)
+
+
 def arm_tables(prefix: str, arm: str) -> dict:
     """One arm's event table and flight list, each in the form its reader wants.
 
@@ -130,10 +141,9 @@ def main() -> int:
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
-    from opdi.config import OPDIConfig
     from opdi.utils.storage import StorageManager
 
-    config = OPDIConfig.for_environment("opensky")
+    config = scoring_config()
     storage = StorageManager(spark, config)
 
     # The shipped vocabulary, which is what both arms' step 04 ran. `landing`
