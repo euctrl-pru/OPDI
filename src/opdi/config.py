@@ -1686,8 +1686,8 @@ class SegmentationConfig:
     on 2026-06-14, 1,073 of 7,355 cruise holes had none at the edge sample itself.
     No position inside this span means split.
 
-    The read behind the old edge is covered by the lookback ``process_day`` requires
-    only while this stays within ``link_callsign_lookback_minutes``."""
+    ``process_day`` reads at least this far behind the old edge: see
+    ``tracks.required_lookback_hours``."""
 
     link_min_implied_speed_kt: float = 315.0
     """Slowest great-circle speed across a hole A10 can link (knots)."""

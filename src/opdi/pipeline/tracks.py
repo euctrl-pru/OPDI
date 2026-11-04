@@ -126,17 +126,18 @@ def required_lookback_hours(method: str, p) -> int:
     misses the old piece, the day sees a new track and claims it, while the day
     before claims the same samples inside the linked track, under another id.
 
-    ``link_callsign_lookback_minutes`` is added because the decision also reads the
-    callsign up to that long behind the old edge. Every day's read must hold that
-    evidence, or two days decide one hole differently and a piece can be claimed by
-    no day at all. The edge position read behind the old edge sits inside the same
-    allowance, as ``link_edge_position_minutes`` is far shorter than that lookback.
+    The longer of ``link_callsign_lookback_minutes`` and
+    ``link_edge_position_minutes`` is added because the decision also reads the
+    callsign and the position that far behind the old edge. Every day's read must
+    hold that evidence, or two days decide one hole differently and a piece can be
+    claimed by no day at all. Taking the longer rather than assuming the callsign's
+    covers it means neither setting can move the position outside the read.
     """
     if _resolve_segmentation_method(method) == "cruise_linked":
         return max(
             TrackProcessor.DEFAULT_LOOKBACK_HOURS,
             math.ceil(p.link_max_gap_minutes / 60)
-            + math.ceil(p.link_callsign_lookback_minutes / 60),
+            + math.ceil(max(p.link_callsign_lookback_minutes, p.link_edge_position_minutes) / 60),
         )
     return TrackProcessor.DEFAULT_LOOKBACK_HOURS
 
@@ -721,7 +722,8 @@ class TrackProcessor:
 
         The lookback defaults to ``required_lookback_hours``: 3 h, or under
         ``cruise_linked`` ``max(3, ceil(link_max_gap_minutes / 60) +
-        ceil(link_callsign_lookback_minutes / 60))``, which is 7 h at the defaults.
+        ceil(max(link_callsign_lookback_minutes, link_edge_position_minutes) / 60))``,
+        which is 7 h at the defaults.
 
         Raises:
             ValueError: ``lookback_hours`` is below that under ``cruise_linked``.

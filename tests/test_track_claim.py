@@ -180,6 +180,16 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
     assert required_lookback_hours("cruise_linked", p90) == 8
     short = SegmentationParams(link_max_gap_minutes=60.0)
     assert required_lookback_hours("cruise_linked", short) == 3
+    # The read behind the old edge is the longer of the callsign and position reads.
+    far_position = SegmentationParams(link_edge_position_minutes=90.0)
+    assert required_lookback_hours("cruise_linked", far_position) == 8
+    no_callsign = SegmentationParams(link_callsign_lookback_minutes=0.0)
+    assert required_lookback_hours("cruise_linked", no_callsign) == 7
+    neither = SegmentationParams(
+        link_callsign_lookback_minutes=0.0, link_edge_position_minutes=0.0
+    )
+    assert required_lookback_hours("cruise_linked", neither) == 6
+    assert required_lookback_hours("debounced", far_position) == 3
 
 
 def test_process_day_reads_the_lookback_its_arm_requires(spark):
@@ -212,7 +222,7 @@ def test_other_arms_keep_their_explicit_lookback(spark):
     assert processor.windows[0][0] == "2024-06-01 23:00:00"
 
 
-def _claimed_by_day(sv, day_start, lookback_hours):
+def _claimed_by_day(sv, day_start, lookback_hours, p=None):
     """One day of `process_day`: read wide, segment, keep the tracks starting in it."""
     from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
     from opdi.pipeline.segmentation.methods import cruise_linked
@@ -222,7 +232,7 @@ def _claimed_by_day(sv, day_start, lookback_hours):
         (F.col("event_time") >= F.lit(day_start - dt.timedelta(hours=lookback_hours)))
         & (F.col("event_time") < F.lit(day_end + dt.timedelta(hours=24)))
     )
-    tracks = assign_track_id(read, cruise_linked(), SegmentationParams())
+    tracks = assign_track_id(read, cruise_linked(), p or SegmentationParams())
     return keep_tracks_starting_in(tracks, day_start, day_end)
 
 
@@ -350,7 +360,7 @@ def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookbac
 
     Old edge 18:00, its last position 17:55, new edge 00:00, its first position 00:05.
     D's 7 h read begins at 17:00, so both reads see that position, link, and D claims
-    nothing. The 60 min callsign lookback in the requirement is what leaves that room.
+    nothing.
     """
     from opdi.pipeline.segmentation import SegmentationParams
     from opdi.pipeline.tracks import required_lookback_hours
@@ -363,7 +373,6 @@ def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookbac
     samples += _every(D, D + hours(0, 4), 1, callsign="DLH1", **blank)
     samples += _every(D + hours(0, 5), D + hours(0, 20), 5, lon=_lon_after(370), callsign="DLH1")
 
-    assert p.link_edge_position_minutes <= p.link_callsign_lookback_minutes
     lookback = required_lookback_hours("cruise_linked", p)
     assert lookback == 7
     _assert_claimed_once(spark, samples)
@@ -378,6 +387,45 @@ def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookbac
     assert _claimed_by_day(sv, D, lookback - 1).count() == len(
         _every(D, D + hours(0, 4), 1) + _every(D + hours(0, 5), D + hours(0, 20), 5)
     )
+
+
+@pytest.mark.parametrize(
+    "settings, position_min_before_edge",
+    [
+        # The position window reaches past the callsign lookback.
+        ({"link_edge_position_minutes": 90.0}, 90),
+        # No callsign lookback at all, which must not take the position's read with it.
+        ({"link_callsign_lookback_minutes": 0.0}, 5),
+    ],
+)
+def test_the_old_edge_position_is_always_inside_the_read(
+    spark, settings, position_min_before_edge
+):
+    """The longest hole, ending at midnight, with the position at the window's limit.
+
+    Both reads must see it and link. A lookback an hour shorter starts at or after the
+    position, so D would take the new piece for a new track while D-1 claims it too.
+    """
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    p = SegmentationParams(**settings)
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    old_edge = D_MINUS_1 + hours(18)
+    position_at = old_edge - dt.timedelta(minutes=position_min_before_edge)
+    blank = {"lat": None, "lon": None}
+    samples = _every(position_at - hours(0, 10), position_at, 5, lon=0.0, callsign="DLH1")
+    samples += _every(position_at + hours(0, 1), old_edge, 1, callsign="DLH1", **blank)
+    new_piece = _every(D, D + hours(0, 20), 5, callsign="DLH1", lon=_lon_after(360 + position_min_before_edge))
+    samples += new_piece
+    sv = make_track(spark, samples)
+
+    lookback = required_lookback_hours("cruise_linked", p)
+    assert _claimed_by_day(sv, D_MINUS_1, lookback, p).select("track_id").distinct().count() == 1
+    assert _claimed_by_day(sv, D_MINUS_1, lookback, p).count() == len(samples)
+    assert _claimed_by_day(sv, D, lookback, p).count() == 0
+
+    assert _claimed_by_day(sv, D, lookback - 1, p).count() == len(new_piece)
 
 
 # --- the truncation warning, under an arm that links across holes -------------

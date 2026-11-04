@@ -6,8 +6,9 @@ decision is applied to real reception holes and to the holes of
 ``track_link_controls``. Among the points within three safety limits, on numbers pooled
 over the days, the pick is the most flights crossing the European box in one track, which
 is the owner's goal, then the most flights in one track overall, then the more
-conservative settings: the higher ``link_min_implied_speed_kt``, then the shorter
-``link_max_gap_minutes``. The limits are:
+conservative settings: the higher ``link_min_implied_speed_kt``, the shorter
+``link_max_gap_minutes``, the higher ``link_min_speed_ratio``, and the higher
+``link_min_stop_minutes``. The limits are:
 
   negative controls   the upper bound on the false-join rate is at most 1%, over the
                       controls whose gap the point allows and whose realised depth is
@@ -729,10 +730,12 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
     The most flights crossing the European box in one track, as those are the flights
     the rule exists for, then the most flights in one track overall. A tie then goes
     to the more conservative settings, as a wrongly glued flight is worse than a split
-    one: the higher ``link_min_implied_speed_kt``, then the shorter
-    ``link_max_gap_minutes``. The false-join bound is not compared here, because a point
-    inside the limits has already met it. The first point takes any tie left, so the
-    pick is deterministic.
+    one: the higher ``link_min_implied_speed_kt``, the shorter ``link_max_gap_minutes``,
+    the higher ``link_min_speed_ratio``, then the higher ``link_min_stop_minutes``. The
+    last two are there because the grid lists each off setting first, so without them a
+    tie would fall to the point with those checks off. The false-join bound is not
+    compared here, because a point inside the limits has already met it. The first point
+    takes any tie left, so the pick is deterministic.
     """
     passing = [r for r in rows if r["within_limits"]]
     if not passing:
@@ -744,6 +747,8 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
             -r["flights_in_one_track"],
             -r["link_min_implied_speed_kt"],
             r["link_max_gap_minutes"],
+            -r["link_min_speed_ratio"],
+            -r["link_min_stop_minutes"],
             r["point_id"],
         ),
     )

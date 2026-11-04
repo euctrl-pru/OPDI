@@ -197,6 +197,8 @@ def _counts(point_id=0, **overrides):
         point_id=point_id,
         link_min_implied_speed_kt=315.0,
         link_max_gap_minutes=360.0,
+        link_min_speed_ratio=0.0,
+        link_min_stop_minutes=0.0,
         flights=100,
         tracks_on_flights=110,
         flights_in_one_track=90,
@@ -742,6 +744,36 @@ def test_a_tie_on_flights_goes_to_the_higher_speed_floor():
 def test_a_tie_on_the_speed_floor_goes_to_the_shorter_gap():
     rows = [
         _counts(point_id=0, link_max_gap_minutes=360.0),
+        _counts(point_id=1, link_max_gap_minutes=240.0),
+    ]
+    assert pick_recommended(rows)["point_id"] == 1
+
+
+def test_a_tie_on_the_gap_goes_to_the_higher_speed_ratio():
+    """More checks on. The first point is off on this one and strictest on the next,
+    which only counts after this."""
+    rows = [
+        _counts(point_id=0, link_min_speed_ratio=0.0, link_min_stop_minutes=35.0),
+        _counts(point_id=1, link_min_speed_ratio=0.85, link_min_stop_minutes=0.0),
+    ]
+    assert pick_recommended(rows)["point_id"] == 1
+
+
+def test_a_tie_on_the_ratio_goes_to_the_higher_stop_minutes():
+    rows = [
+        _counts(point_id=0, link_min_stop_minutes=0.0),
+        _counts(point_id=1, link_min_stop_minutes=20.0),
+        _counts(point_id=2, link_min_stop_minutes=35.0),
+    ]
+    assert pick_recommended(rows)["point_id"] == 2
+
+
+def test_the_gap_outranks_the_checks_that_follow_it():
+    rows = [
+        _counts(
+            point_id=0, link_max_gap_minutes=360.0,
+            link_min_speed_ratio=0.85, link_min_stop_minutes=35.0,
+        ),
         _counts(point_id=1, link_max_gap_minutes=240.0),
     ]
     assert pick_recommended(rows)["point_id"] == 1
