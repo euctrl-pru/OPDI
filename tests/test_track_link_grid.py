@@ -10,6 +10,8 @@ import json
 import math
 import re
 
+import adsc_flight_list_truth
+import pandas as pd
 import provenance
 import pytest
 from conftest import _EPOCH, make_track
@@ -25,6 +27,7 @@ from track_fragmentation import measure
 from track_link_controls import (
     control_funnel,
     flight_samples,
+    label_real_holes,
     negative_controls,
     positive_controls,
     real_hole_candidates,
@@ -41,15 +44,22 @@ from track_link_grid import (
     lowest_bound_point,
     negative_counts,
     pick_recommended,
+    pool_counts,
     pool_rows,
     pool_strata,
+    population_track_counts,
     positive_counts,
+    positive_reason_counts,
     read_tracks,
     real_hole_counts,
+    reason_counts,
+    reasons_params_from_json,
     recommendation,
     run_study,
     strata_counts,
+    true_link_holes,
     truth_months,
+    with_population,
     with_verdicts,
 )
 
@@ -107,10 +117,17 @@ def _leg(start_s, minutes, start_nm=0.0, callsign="DLH1", icao24="abc123", altit
 
 
 def _truth(spark, *flights):
-    """``(key, icao24, t_off_s, t_land_s)`` as ``load_flight_intervals`` would have them."""
+    """``(key, icao24, t_off_s, t_land_s[, crosses_box])``, as ``main`` loads them."""
     rows = [
-        {"flight_key": k, "icao24": a, "callsign": "X", "t_off": _at(t0), "t_land": _at(t1)}
-        for k, a, t0, t1 in flights
+        {
+            "flight_key": k,
+            "icao24": a,
+            "callsign": "X",
+            "t_off": _at(t0),
+            "t_land": _at(t1),
+            "crosses_box": bool(crosses and crosses[0]),
+        }
+        for k, a, t0, t1, *crosses in flights
     ]
     return spark.createDataFrame(rows)
 
@@ -831,16 +848,21 @@ def _read_csv(path):
         return list(csv.DictReader(fh))
 
 
-def test_run_study_writes_every_output_with_provenance(spark, tmp_path, capsys):
-    """Two identical fixture days, a two-point grid. Nothing reaches S3."""
+def _study_day_with_a_pair(spark):
+    """Two flights of one airframe, so there are negative controls: the landing sits in
+    the hour between them, and at 100 kt nothing links across it."""
     tracks, truth = _study_day(spark)
-    # Two flights of one airframe, so there are negative controls: the landing sits in
-    # the hour between them, and at 100 kt nothing links across it.
     pair = _leg(0, 90, icao24="fff666") + _leg(150 * 60, 90, start_nm=720 + 100, icao24="fff666")
     tracks = tracks.unionByName(make_track(spark, pair))
     truth = truth.unionByName(
         _truth(spark, ("F6", "fff666", -60, 90 * 60 + 60), ("F7", "fff666", 150 * 60 - 60, 240 * 60 + 60))
     )
+    return tracks, truth
+
+
+def test_run_study_writes_every_output_with_provenance(spark, tmp_path, capsys):
+    """Two identical fixture days, a two-point grid. Nothing reaches S3."""
+    tracks, truth = _study_day_with_a_pair(spark)
     grid = [SegmentationParams(link_max_gap_minutes=120.0), P]
 
     run_study(
@@ -904,3 +926,410 @@ def test_run_study_writes_every_output_with_provenance(spark, tmp_path, capsys):
         "control funnel", "2026-06-14: grid of 2 points", "2025-06-14: two-callsign counts",
     ):
         assert re.search(rf"^{stage}: \d+ s$", out, re.MULTILINE), stage
+
+
+# --- round 2: which flights count as crossing the box ------------------------
+
+
+def _airports(spark, *rows):
+    return spark.createDataFrame(rows, ["ident", "longitude_deg", "latitude_deg"])
+
+
+def _airport_table(spark):
+    """Two inside ``EUROPE_BBOX``, one twice as ``oa_airports`` could hold it, one outside."""
+    return _airports(
+        spark,
+        ("EDDF", 8.57, 50.03),
+        ("EGLL", -0.46, 51.47),
+        ("EGLL", -0.46, 51.47),
+        ("KJFK", -73.78, 40.64),
+    )
+
+
+def test_crossing_agrees_with_the_far_end_labels(spark):
+    pairs = [
+        ("EDDF", "EGLL"), ("KJFK", "EDDF"), ("EDDF", "KJFK"), ("KJFK", "ZZZZ"),
+        ("ZZZZ", "EDDF"), ("EDDF", None), (None, None),
+    ]
+    truth = spark.createDataFrame(
+        [(i, a, b) for i, (a, b) in enumerate(pairs)],
+        "flight_key int, gt_adep string, gt_ades string",
+    )
+    got = {r["flight_key"]: r["crosses_box"] for r in with_population(truth, _airport_table(spark)).collect()}
+
+    labelled = adsc_flight_list_truth.label_far_end(
+        pd.DataFrame(pairs, columns=["gt_adep", "gt_ades"]), {"EDDF", "EGLL"}
+    )["flow"]
+    want = labelled.isin(["europe_to_outside", "outside_to_europe"]).tolist()
+    assert [got[i] for i in range(len(pairs))] == want
+    assert want == [False, True, True, False, True, True, False]
+
+
+def test_crossing_reads_padded_idents(spark):
+    # load_flight_intervals does not trim ADEP/ADES as the far-end labels' reader does.
+    truth = spark.createDataFrame(
+        [(1, "EDDF ", " KJFK")], "flight_key int, gt_adep string, gt_ades string"
+    )
+    assert with_population(truth, _airport_table(spark)).first()["crosses_box"] is True
+
+
+# --- round 2: tracks per population ------------------------------------------
+
+
+def _with_crossing(spark, truth, *crossing_keys):
+    keys = list(crossing_keys)
+    return truth.drop("crosses_box").withColumn("crosses_box", F.col("flight_key").isin(keys))
+
+
+def _population_counts(tracks, truth, p=P):
+    flights = flight_base_tracks(tracks, truth, p).join(
+        truth.select("flight_key", "crosses_box").distinct(), on="flight_key"
+    )
+    holes = real_hole_candidates(tracks, p)
+    return population_track_counts(flights, holes_inside_flights(holes, truth), p)
+
+
+def test_tracks_are_counted_per_population_and_sum_to_the_flights_total(spark):
+    tracks, truth = _study_day(spark)
+    # F1 links, F2 splits, F3 is one track, F4 splits, F5 was never seen.
+    truth = _with_crossing(spark, truth, "F1", "F2")
+
+    counts = _population_counts(tracks, truth)
+
+    assert counts == {
+        "crossing_flights": 2,
+        "crossing_flights_in_one_track": 1,
+        "crossing_tracks": 3,
+        "base_crossing_flights_in_one_track": 0,
+        "base_crossing_tracks": 4,
+        "other_flights": 3,
+        "other_flights_in_one_track": 1,
+        "other_tracks": 3,
+        "base_other_flights_in_one_track": 1,
+        "base_other_tracks": 3,
+    }
+    total = _flight_counts(spark, tracks, truth)
+    for population_name, total_name in (
+        ("flights", "flights"),
+        ("flights_in_one_track", "flights_in_one_track"),
+        ("tracks", "tracks_on_flights"),
+    ):
+        assert counts[f"crossing_{population_name}"] + counts[f"other_{population_name}"] == total[total_name]
+    assert counts["base_crossing_tracks"] + counts["base_other_tracks"] == total["base_tracks_on_flights"]
+
+
+def test_population_shares_are_derived_and_pooled_from_counts():
+    day1 = _counts(
+        crossing_flights=10, crossing_flights_in_one_track=1, crossing_tracks=19,
+        base_crossing_flights_in_one_track=0, base_crossing_tracks=20,
+        other_flights=90, other_flights_in_one_track=89, other_tracks=91,
+    )
+    day2 = _counts(
+        crossing_flights=30, crossing_flights_in_one_track=30, crossing_tracks=30,
+        base_crossing_flights_in_one_track=3, base_crossing_tracks=60,
+    )
+    assert day1["crossing_share_one_track"] == pytest.approx(0.1)
+    assert day1["crossing_tracks_per_flight"] == pytest.approx(1.9)
+    assert day1["base_crossing_share_one_track"] == 0.0
+    assert day1["base_crossing_tracks_per_flight"] == pytest.approx(2.0)
+    assert day1["other_share_one_track"] == pytest.approx(89 / 90)
+
+    [pooled] = pool_rows([[day1], [day2]])
+    assert pooled["crossing_flights"] == 40
+    assert pooled["crossing_share_one_track"] == pytest.approx(31 / 40)
+    assert pooled["base_crossing_share_one_track"] == pytest.approx(3 / 40)
+
+
+# --- round 2: why a hole stays split -----------------------------------------
+
+
+def _reason_holes(spark, rows):
+    """Holes from ``(population, feature_row)``, as :func:`true_link_holes` leaves them."""
+    schema = StructType([StructField("population", StringType(), True)] + _FEATURE_SCHEMA)
+    return spark.createDataFrame([(pop, *features) for pop, features in rows], schema)
+
+
+def _by_key(rows):
+    return {
+        (r["population"], r["gap_band"], r["first_failed_test"]): (r["holes"], r["only_failed_test_holes"])
+        for r in rows
+    }
+
+
+def test_a_hole_is_counted_under_the_first_test_it_fails(spark):
+    linked = _feature_row(gap_min=120.0)
+    too_slow = _feature_row(gap_min=120.0, speed_kt=100.0)
+    # Fails the callsign test and then the speed test: it belongs to the callsign, and
+    # relaxing either alone would still not link it.
+    two_tests = _feature_row(gap_min=120.0, speed_kt=100.0, cs_after="BAW2")
+    holes = _reason_holes(
+        spark,
+        [("crosses_box", linked), ("crosses_box", too_slow), ("crosses_box", two_tests), ("other", too_slow)],
+    )
+
+    assert _by_key(reason_counts(holes, P)) == {
+        ("crosses_box", "60-120", "linked"): (1, 0),
+        ("crosses_box", "60-120", "implied_speed_not_too_slow"): (1, 1),
+        ("crosses_box", "60-120", "callsign_agrees"): (1, 0),
+        ("other", "60-120", "implied_speed_not_too_slow"): (1, 1),
+    }
+
+
+@pytest.mark.parametrize(
+    "gap_min, band",
+    [
+        (30.5, "30-60"), (60.0, "30-60"), (60.5, "60-120"), (120.0, "60-120"), (120.5, "120-240"),
+        (240.0, "120-240"), (240.5, "240-360"), (360.0, "240-360"), (360.5, "over-360"),
+    ],
+)
+def test_a_hole_falls_in_one_length_band(spark, gap_min, band):
+    holes = _reason_holes(spark, [("other", _feature_row(gap_min=gap_min))])
+    [row] = reason_counts(holes, P)
+    assert row["gap_band"] == band
+    assert row["first_failed_test"] == ("gap_not_too_long" if gap_min > 360.0 else "linked")
+
+
+def test_reasons_read_the_settings_they_are_given(spark):
+    holes = _reason_holes(spark, [("other", _feature_row(gap_min=200.0))])
+    [row] = reason_counts(holes, SegmentationParams(link_max_gap_minutes=120.0))
+    assert (row["first_failed_test"], row["holes"], row["only_failed_test_holes"]) == ("gap_not_too_long", 1, 1)
+
+
+def _labelled_holes(spark, tracks, truth, p=P):
+    return label_real_holes(real_hole_candidates(tracks, p), truth)
+
+
+def test_reasons_count_only_true_links_and_every_one_of_them(spark):
+    tracks, truth = _study_day_with_a_pair(spark)
+    truth = _with_crossing(spark, truth, "F1")
+    holes = _labelled_holes(spark, tracks, truth)
+    all_labels = {r["label"]: r["count"] for r in holes.groupBy("label").count().collect()}
+    assert all_labels["false_join"] == 1 and all_labels["true_link"] == 2
+
+    # F1's hole links and F2's does not: neither decision moves a hole out of the count.
+    kept = true_link_holes(holes, truth)
+    assert {r["population"]: r["count"] for r in kept.groupBy("population").count().collect()} == {
+        "crosses_box": 1,
+        "other": 1,
+    }
+    assert _by_key(reason_counts(kept, P)) == {
+        ("crosses_box", "120-240", "linked"): (1, 0),
+        ("other", "60-120", "implied_speed_not_too_slow"): (1, 1),
+    }
+
+
+def test_the_population_split_sums_to_the_total(spark):
+    tracks, truth = _study_day(spark)
+    truth = _with_crossing(spark, truth, "F2")
+    holes = _labelled_holes(spark, tracks, truth)
+    rows = reason_counts(true_link_holes(holes, truth), P)
+    assert sum(r["holes"] for r in rows) == holes.filter(F.col("label") == "true_link").count() == 2
+    assert {r["population"] for r in rows} == {"crosses_box", "other"}
+
+
+def test_a_hole_inside_two_truth_flights_counts_once_and_as_crossing(spark):
+    tracks = make_track(spark, _leg(0, 30) + _leg(30 * 60 + 191 * 60, 30, start_nm=240 + 191 * 8))
+    # Two rows of truth over one flight, as a refiled flight plan leaves in Network Manager.
+    truth = _truth(
+        spark,
+        ("A", "abc123", -60, 30 * 60 + 191 * 60 + 30 * 60 + 60, False),
+        ("B", "abc123", -50, 30 * 60 + 191 * 60 + 30 * 60 + 50, True),
+    )
+    kept = true_link_holes(_labelled_holes(spark, tracks, truth), truth).collect()
+    assert [r["population"] for r in kept] == ["crosses_box"]
+
+
+def test_a_missed_positive_control_is_counted_under_its_first_failed_test(spark):
+    controls = _positives(
+        spark,
+        [
+            (120.0, _feature_row(gap_min=120.0)),
+            (120.0, _feature_row(gap_min=120.0, speed_kt=100.0)),
+            (360.0, _feature_row(gap_min=360.0, speed_kt=100.0)),
+            (360.0, _feature_row(gap_min=360.0, speed_kt=100.0, cs_after="BAW2")),
+        ],
+    )
+    rows = positive_reason_counts(controls, P)
+    assert {(r["requested_gap_min"], r["first_failed_test"]): r["positive_missed_by_test"] for r in rows} == {
+        (120.0, "implied_speed_not_too_slow"): 1,
+        (360.0, "implied_speed_not_too_slow"): 1,
+        (360.0, "callsign_agrees"): 1,
+    }
+    assert sum(r["positive_missed_by_test"] for r in rows) == (
+        positive_counts(controls, P)["positive_controls"] - positive_counts(controls, P)["positive_linked"]
+    )
+
+
+def test_pooling_reasons_sums_within_each_key():
+    day1 = [
+        {"day": "a", "population": "other", "first_failed_test": "linked", "holes": 2, "only_failed_test_holes": 0},
+        {"day": "a", "population": "other", "first_failed_test": "x", "holes": 1, "only_failed_test_holes": 1},
+    ]
+    day2 = [
+        {"day": "b", "population": "other", "first_failed_test": "x", "holes": 4, "only_failed_test_holes": 2},
+        {"day": "b", "population": "crosses_box", "first_failed_test": "x", "holes": 8, "only_failed_test_holes": 0},
+    ]
+    pooled = pool_counts([day1, day2], ("holes", "only_failed_test_holes"))
+    assert {
+        (r["day"], r["population"], r["first_failed_test"]): (r["holes"], r["only_failed_test_holes"])
+        for r in pooled
+    } == {
+        ("pooled", "other", "linked"): (2, 0),
+        ("pooled", "other", "x"): (5, 3),
+        ("pooled", "crosses_box", "x"): (8, 0),
+    }
+
+
+# --- round 2: how much safety leans on the callsign test ---------------------
+
+
+def test_false_joins_without_the_callsign_test_drop_that_test_and_no_other(spark):
+    differs = _feature_row(gap_min=120.0, cs_after="BAW2")
+    differs_and_too_slow = _feature_row(gap_min=120.0, speed_kt=100.0, cs_after="BAW2")
+    same = _feature_row(gap_min=120.0)
+    differs_over_gap = _feature_row(gap_min=400.0, cs_after="BAW2")
+    differs_shallow = ("p5", _feature_row(gap_min=120.0, cs_after="BAW2"), 0.0, 0.0)
+    controls = _negatives(
+        spark,
+        [("p1", differs), ("p2", differs_and_too_slow), ("p3", same), ("p4", differs_over_gap), differs_shallow],
+    )
+
+    counts = negative_counts(controls, P)
+
+    # Under the limit's population: p1 joins once the test is gone, p3 joined anyway.
+    assert counts["negative_limit_false_joins"] == 1
+    assert counts["negative_limit_false_joins_no_callsign"] == 2
+
+
+def test_false_joins_without_the_callsign_test_are_reported_and_not_limited():
+    row = _counts(negative_limit_false_joins_no_callsign=500)
+    assert row["negative_no_callsign_false_join_rate"] == pytest.approx(0.5)
+    assert row["negative_no_callsign_upper_95"] == pytest.approx(rule_of_three_upper(500, 1000))
+    assert row["negative_within_limit"] is True
+    assert row["within_limits"] is True
+
+    [pooled] = pool_rows([[_counts(negative_limit_false_joins_no_callsign=1)]] * 2)
+    assert pooled["negative_limit_false_joins_no_callsign"] == 2
+    assert pooled["negative_no_callsign_upper_95"] == pytest.approx(rule_of_three_upper(2, 2000))
+
+
+# --- round 2: the settings the reasons are read at ---------------------------
+
+
+def test_reasons_params_json_keeps_unnamed_settings_at_their_defaults():
+    p = reasons_params_from_json('{"link_max_gap_minutes": 240, "link_min_speed_ratio": 0.85}', [P])
+    assert p == SegmentationParams(link_max_gap_minutes=240.0, link_min_speed_ratio=0.85)
+
+
+def test_reasons_params_json_takes_what_the_features_were_made_with_from_the_grid():
+    grid = [SegmentationParams(link_cruise_floor_ft=30000.0)]
+    assert reasons_params_from_json('{"link_max_gap_minutes": 240}', grid).link_cruise_floor_ft == 30000.0
+    assert reasons_params_from_json('{"link_cruise_floor_ft": 30000}', grid).link_cruise_floor_ft == 30000.0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{}",
+        "[1]",
+        '{"link_max_gap_minute": 240}',
+        '{"link_max_gap_minutes": "240"}',
+        '{"link_max_gap_minutes": [240]}',
+        # The features are made once, at the grid's value, so this could not be honoured.
+        '{"link_cruise_floor_ft": 30000}',
+        '{"link_callsign_lookahead_minutes": 20}',
+    ],
+)
+def test_reasons_params_json_refuses_what_it_cannot_honour(text):
+    with pytest.raises(ValueError):
+        reasons_params_from_json(text, [P])
+
+
+# --- round 2: the whole study ------------------------------------------------
+
+
+def test_run_study_writes_the_reasons_at_the_chosen_point_and_pools_them(spark, tmp_path):
+    tracks, truth = _study_day_with_a_pair(spark)
+    truth = _with_crossing(spark, truth, "F1")
+    grid = [SegmentationParams(link_max_gap_minutes=120.0), P]
+
+    run_study(
+        ["2026-06-14", "2025-06-14"], grid,
+        load_tracks=lambda day: tracks, load_truth=lambda day: truth, results_dir=tmp_path,
+    )
+
+    manifest = json.loads((tmp_path / "_manifest.json").read_text())
+    for stem in ("link_reasons", "link_positive_reasons"):
+        for tail in ("2026-06-14", "2025-06-14", "pooled"):
+            assert f"{stem}_{tail}.csv" in manifest
+
+    # Point 0 is chosen, and its 120 min limit is what stops F1's 191 min hole.
+    rows = _read_csv(tmp_path / "link_reasons_2026-06-14.csv")
+    assert {r["settings_from"] for r in rows} == {"not_recommended_lowest_bound"}
+    assert {r["link_max_gap_minutes"] for r in rows} == {"120.0"}
+    assert {(r["population"], r["gap_band"], r["first_failed_test"], r["holes"], r["only_failed_test_holes"]) for r in rows} == {
+        ("crosses_box", "120-240", "gap_not_too_long", "1", "1"),
+        ("other", "60-120", "implied_speed_not_too_slow", "1", "1"),
+    }
+    pooled = _read_csv(tmp_path / "link_reasons_pooled.csv")
+    assert {r["day"] for r in pooled} == {"pooled"}
+    assert sorted(int(r["holes"]) for r in pooled) == [2, 2]
+
+    grid_row = _read_csv(tmp_path / "link_grid_2026-06-14.csv")[0]
+    missed = _read_csv(tmp_path / "link_positive_reasons_2026-06-14.csv")
+    assert sum(int(r["positive_missed_by_test"]) for r in missed) == (
+        int(grid_row["positive_controls"]) - int(grid_row["positive_linked"])
+    )
+    pooled_missed = _read_csv(tmp_path / "link_positive_reasons_pooled.csv")
+    assert sum(int(r["positive_missed_by_test"]) for r in pooled_missed) == 2 * sum(
+        int(r["positive_missed_by_test"]) for r in missed
+    )
+
+    # The populations and the no-callsign count reach the grid rows, and pool.
+    pooled_grid = _read_csv(tmp_path / "link_grid_pooled.csv")[1]
+    assert int(pooled_grid["crossing_flights"]) == 2
+    assert int(pooled_grid["crossing_flights_in_one_track"]) == 2
+    assert int(pooled_grid["crossing_flights"]) + int(pooled_grid["other_flights"]) == int(pooled_grid["flights"])
+    assert "negative_limit_false_joins_no_callsign" in pooled_grid
+
+
+def test_run_study_reads_the_reasons_at_settings_it_is_given(spark, tmp_path):
+    tracks, truth = _study_day_with_a_pair(spark)
+    grid = [SegmentationParams(link_max_gap_minutes=120.0)]
+
+    run_study(
+        ["2026-06-14"], grid,
+        load_tracks=lambda day: tracks, load_truth=lambda day: truth, results_dir=tmp_path,
+        reasons_params=P,
+    )
+
+    rows = _read_csv(tmp_path / "link_reasons_2026-06-14.csv")
+    assert {r["settings_from"] for r in rows} == {"given"}
+    assert {r["first_failed_test"] for r in rows} == {"linked", "implied_speed_not_too_slow"}
+
+
+def test_with_nothing_chosen_and_nothing_given_no_reasons_are_written(spark, tmp_path):
+    tracks, truth = _study_day(spark)
+    run_study(
+        ["2026-06-14"], [P],
+        load_tracks=lambda day: tracks, load_truth=lambda day: truth, results_dir=tmp_path,
+    )
+    assert _read_csv(tmp_path / "link_recommended.csv")[0]["status"] == "no_evidence"
+    assert not list(tmp_path.glob("link_*reasons*"))
+
+
+def test_a_day_with_no_true_link_holes_still_writes_its_reasons_header(spark, tmp_path):
+    # Long enough for a positive control, which links, so neither report has a row.
+    tracks = make_track(spark, _leg(0, 120, icao24="ccc333"))
+    truth = _truth(spark, ("F3", "ccc333", -60, 120 * 60 + 60))
+    run_study(
+        ["2026-06-14"], [P],
+        load_tracks=lambda day: tracks, load_truth=lambda day: truth, results_dir=tmp_path,
+        reasons_params=P,
+    )
+    for stem in ("link_reasons", "link_positive_reasons"):
+        for tail in ("2026-06-14", "pooled"):
+            with (tmp_path / f"{stem}_{tail}.csv").open() as fh:
+                reader = csv.DictReader(fh)
+                assert list(reader) == []
+                assert "first_failed_test" in reader.fieldnames

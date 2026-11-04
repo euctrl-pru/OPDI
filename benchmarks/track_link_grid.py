@@ -30,6 +30,25 @@ A point with nothing to measure it on is not within the limits. If no point pass
 none is recommended, and ``link_recommended.csv`` names the point with the lowest
 bound, labelled not recommended, for Stage 2 to run at.
 
+**Three reports beside the choice.** None of them touches a limit.
+
+  why holes stay split  ``link_reasons_{day}.csv`` and ``link_reasons_pooled.csv``, for
+                        the real holes truth calls ``true_link``, whatever the rule
+                        decides. One row per population, length band and
+                        ``first_failed_test``, ``linked`` when none fails.
+                        ``only_failed_test_holes`` is how many of the row's ``holes``
+                        fail that test and no other, so it is what relaxing that one
+                        test would gain. ``link_positive_reasons_*.csv`` counts missed
+                        positive controls the same way. Both are read at the chosen
+                        point, or at ``--reasons-params-json``, once the days are
+                        pooled, and ``settings_from`` says which.
+  the target population ``crossing_*`` and ``other_*`` in each grid row split its flight
+                        counts, as ``base_`` does for A9. Crossing means exactly one
+                        end inside ``EUROPE_BBOX``, as ``adsc_flight_list_truth`` labels
+                        it: an ident ``oa_airports`` does not place counts as outside.
+  the callsign test     ``negative_limit_false_joins_no_callsign`` counts what the 1%
+                        limit's controls would do without that test, with its bound.
+
 **Why 54 points do not need 54 segmentations.** A10 breaks where A9 breaks, except at
 a gap over ``gap_minutes`` that links. Nothing else about the rule depends on a link:
 a callsign break is evaluated over the whole airframe and is not "recent" across such
@@ -49,7 +68,8 @@ heavy steps are the whole-day feature windows of the real holes; the controls an
 funnel, which together make about 26 passes over the samples inside truth flights, so
 those samples are cached first; and the two-callsign counts, which segment the whole
 day under both arms, once per day, for the chosen point only. Each point then runs
-about six small jobs over small cached frames. Elapsed time per stage is printed.
+about seven small jobs over small cached frames, and the reasons two per day over
+frames kept until the days are pooled. Elapsed time per stage is printed.
 Nothing is written to S3. Results go to a local directory, and each day's are on disk
 before the next day starts.
 
@@ -62,6 +82,11 @@ before the next day starts.
 
 Settings it does not name keep their defaults. Those that shape the cuts and features
 (:data:`ONE_VALUE_PER_RUN`) may take only one value, so vary them across runs.
+
+``--reasons-params-json`` names the one point the reasons are read at, in place of the
+chosen one, and need not be in the grid:
+
+    --reasons-params-json '{"link_min_implied_speed_kt": 315, "link_max_gap_minutes": 360}'
 """
 
 import argparse
@@ -73,8 +98,10 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
+from functools import reduce
+from operator import and_
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
@@ -97,10 +124,17 @@ from track_link_controls import (
 )
 from track_truth import REFERENCE_BASE, load_flight_intervals
 
+from opdi.coverage import EUROPE_BBOX
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
-from opdi.pipeline.segmentation.methods import debounced, link_feature_columns, linkable
+from opdi.pipeline.segmentation.methods import (
+    debounced,
+    link_checks,
+    link_feature_columns,
+    linkable,
+)
 
 SOURCE = "s3a://eurocontrol/opdi-world/osn_tracks"
+AIRPORTS = "s3a://eurocontrol/opdi-world/oa_airports"
 DEFAULT_DAYS = ("2026-06-14", "2025-06-14")
 
 #: The study's grid, 3 x 2 x 3 x 3 = 54 points.
@@ -147,6 +181,7 @@ COUNT_FIELDS = (
     "negative_limit_controls",
     "negative_limit_false_joins",
     "negative_limit_pairs_with_false_join",
+    "negative_limit_false_joins_no_callsign",
     "negative_shallow_controls",
     "negative_shallow_false_joins",
     "negative_over_gap_controls",
@@ -158,6 +193,16 @@ COUNT_FIELDS = (
     "positive_controls",
     "positive_within_gap",
     "positive_linked",
+    "crossing_flights",
+    "crossing_flights_in_one_track",
+    "crossing_tracks",
+    "base_crossing_flights_in_one_track",
+    "base_crossing_tracks",
+    "other_flights",
+    "other_flights_in_one_track",
+    "other_tracks",
+    "base_other_flights_in_one_track",
+    "base_other_tracks",
 )
 
 _STRATUM_KEYS = (
@@ -177,6 +222,7 @@ _CODE_PATHS = [
     "benchmarks/track_link_controls.py",
     "benchmarks/track_truth.py",
     "benchmarks/track_fragmentation.py",
+    "src/opdi/coverage.py",
     "src/opdi/pipeline/flights.py",
     "src/opdi/pipeline/segmentation/__init__.py",
     "src/opdi/pipeline/segmentation/base.py",
@@ -235,6 +281,26 @@ def grid_from_json(text: str) -> List[SegmentationParams]:
     return _product({name: [float(v) for v in values] for name, values in settings.items()})
 
 
+def reasons_params_from_json(text: str, grid: List[SegmentationParams]) -> SegmentationParams:
+    """The one point of ``--reasons-params-json``, ``{setting: value}``.
+
+    Validated as :func:`grid_from_json` is, and for the same reason. The features are
+    made once, with the grid's :data:`ONE_VALUE_PER_RUN`, so the point takes those from
+    the grid, and asking for another value raises rather than reading the wrong features.
+    """
+    settings = json.loads(text)
+    if not isinstance(settings, dict) or not settings:
+        raise ValueError("--reasons-params-json needs an object of {setting: value}")
+    [point] = grid_from_json(json.dumps({name: [value] for name, value in settings.items()}))
+    for name in ONE_VALUE_PER_RUN:
+        if name in settings and getattr(point, name) != getattr(grid[0], name):
+            raise ValueError(
+                f"{name} shapes the cuts and features, which this run makes at "
+                f"{getattr(grid[0], name)}, so it cannot read reasons at {settings[name]}"
+            )
+    return replace(point, **{name: getattr(grid[0], name) for name in ONE_VALUE_PER_RUN})
+
+
 def truth_months(day: str) -> List[str]:
     """The truth files for a day. A flight in the window can key to an adjacent day.
 
@@ -251,6 +317,28 @@ def truth_months(day: str) -> List[str]:
 def _linked(p: SegmentationParams) -> Column:
     """The rule's verdict at *p*, read from a frame of stored features."""
     return linkable({name: F.col(name) for name in link_feature_columns(p)}, p)
+
+
+def _checks(p: SegmentationParams) -> Dict[str, Column]:
+    """The rule's tests at *p*, read from a frame of stored features."""
+    return link_checks({name: F.col(name) for name in link_feature_columns(p)}, p)
+
+
+def _linked_without_callsign(p: SegmentationParams) -> Column:
+    """The rule's verdict at *p* with the callsign test removed and nothing else."""
+    checks = _checks(p)
+    del checks["callsign_agrees"]
+    return reduce(and_, checks.values())
+
+
+def _first_failed_test(checks: Dict[str, Column]) -> Column:
+    """The name of the first test that fails, in the rule's order, or ``linked``."""
+    tests = iter(checks.items())
+    name, check = next(tests)
+    first = F.when(~check, name)
+    for name, check in tests:
+        first = first.when(~check, name)
+    return first.otherwise("linked")
 
 
 def _sum_when(condition: Column) -> Column:
@@ -295,6 +383,9 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
         _sum_when(under_limit & linked).alias("negative_limit_false_joins"),
         F.countDistinct(F.when(under_limit & linked, F.col("pair_id"))).alias(
             "negative_limit_pairs_with_false_join"
+        ),
+        _sum_when(under_limit & _linked_without_callsign(p)).alias(
+            "negative_limit_false_joins_no_callsign"
         ),
         _sum_when(shallow).alias("negative_shallow_controls"),
         _sum_when(shallow & linked).alias("negative_shallow_false_joins"),
@@ -401,21 +492,25 @@ def holes_inside_flights(holes: DataFrame, truth: DataFrame) -> DataFrame:
     )
 
 
-def flight_track_counts(flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams) -> Dict[str, int]:
-    """Tracks on truth flights at *p*: each flight's A9 tracks less its linked holes.
-
-    The ``base_`` counts are A9 itself, what the current rule scores, so the gain of
-    every point is in its row.
-    """
+def _flights_with_tracks(flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams) -> DataFrame:
+    """*flights* with ``_tracks``, each flight's A9 tracks less its holes *p* links."""
     linked = (
         holes_in_flights.filter(_linked(p))
         .groupBy("flight_key")
         .agg(F.count(F.lit(1)).alias("_linked_holes"))
     )
     tracks = F.col("base_tracks") - F.coalesce(F.col("_linked_holes"), F.lit(0))
+    return flights.join(linked, on="flight_key", how="left").withColumn("_tracks", tracks)
+
+
+def flight_track_counts(flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams) -> Dict[str, int]:
+    """Tracks on truth flights at *p*: each flight's A9 tracks less its linked holes.
+
+    The ``base_`` counts are A9 itself, what the current rule scores, so the gain of
+    every point is in its row.
+    """
     row = (
-        flights.join(linked, on="flight_key", how="left")
-        .withColumn("_tracks", tracks)
+        _flights_with_tracks(flights, holes_in_flights, p)
         .agg(
             F.count(F.lit(1)).alias("flights"),
             F.coalesce(F.sum("_tracks"), F.lit(0)).alias("tracks_on_flights"),
@@ -427,6 +522,131 @@ def flight_track_counts(flights: DataFrame, holes_in_flights: DataFrame, p: Segm
         .first()
     )
     return row.asDict()
+
+
+# --- the two populations -----------------------------------------------------
+
+
+def with_population(truth: DataFrame, airports: DataFrame) -> DataFrame:
+    """Add ``crosses_box``: exactly one of ADEP and ADES is inside ``EUROPE_BBOX``.
+
+    The Spark form of ``adsc_flight_list_truth.label_far_end``, whose two crossing flows
+    this is. An ident ``airports`` does not place counts as outside, which is where NM's
+    ZZZZ and AFIL go. Trimmed, as that function's reader trims and
+    ``load_flight_intervals`` does not. ``airports`` has the ``oa_airports`` columns.
+    """
+    min_lon, min_lat, max_lon, max_lat = EUROPE_BBOX
+    in_box = airports.where(
+        F.col("longitude_deg").between(min_lon, max_lon)
+        & F.col("latitude_deg").between(min_lat, max_lat)
+    ).select("ident").distinct()
+
+    def inside(frame: DataFrame, column: str, flag: str) -> DataFrame:
+        idents = F.broadcast(
+            in_box.select(F.col("ident").alias(f"{flag}_ident"), F.lit(True).alias(flag))
+        )
+        return frame.join(idents, F.trim(F.col(column)) == F.col(f"{flag}_ident"), "left").drop(f"{flag}_ident")
+
+    return (
+        inside(inside(truth, "gt_adep", "_adep_in_box"), "gt_ades", "_ades_in_box")
+        .withColumn(
+            "crosses_box",
+            F.coalesce(F.col("_adep_in_box"), F.lit(False)) != F.coalesce(F.col("_ades_in_box"), F.lit(False)),
+        )
+        .drop("_adep_in_box", "_ades_in_box")
+    )
+
+
+def population_track_counts(
+    flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams
+) -> Dict[str, int]:
+    """:func:`flight_track_counts` for each population. *flights* has ``crosses_box``."""
+    tracks, base = F.col("_tracks"), F.col("base_tracks")
+    aggregates = []
+    for name, member in (("crossing", F.col("crosses_box")), ("other", ~F.col("crosses_box"))):
+        aggregates += [
+            _sum_when(member).alias(f"{name}_flights"),
+            _sum_when(member & (tracks == 1)).alias(f"{name}_flights_in_one_track"),
+            F.coalesce(F.sum(F.when(member, tracks)), F.lit(0)).alias(f"{name}_tracks"),
+            _sum_when(member & (base == 1)).alias(f"base_{name}_flights_in_one_track"),
+            F.coalesce(F.sum(F.when(member, base)), F.lit(0)).alias(f"base_{name}_tracks"),
+        ]
+    return _flights_with_tracks(flights, holes_in_flights, p).agg(*aggregates).first().asDict()
+
+
+# --- why a hole stays split ---------------------------------------------------
+
+
+def true_link_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
+    """The labelled holes inside one truth flight, one row each, with ``population``.
+
+    NM can hold two rows over one flight, so a hole can lie inside two: it counts once,
+    as ``crosses_box`` if either row does, since that is the population at stake.
+    """
+    key = ["icao24", "t_old_edge", "t_new_edge"]
+    inside = holes.filter(F.col("label") == "true_link")
+    flights = truth.select(
+        F.col("icao24").alias("_truth_icao24"), "t_off", "t_land", "crosses_box"
+    ).distinct()
+    populations = (
+        inside.select(*key)
+        .join(
+            flights,
+            (F.col("icao24") == F.col("_truth_icao24"))
+            & (F.col("t_off") <= F.col("t_old_edge"))
+            & (F.col("t_new_edge") <= F.col("t_land")),
+        )
+        .groupBy(*key)
+        .agg(F.max("crosses_box").alias("_crosses_box"))
+    )
+    return (
+        inside.join(populations, on=key)
+        .withColumn("population", F.when(F.col("_crosses_box"), "crosses_box").otherwise("other"))
+        .drop("_crosses_box")
+    )
+
+
+def _gap_band(gap_min: Column) -> Column:
+    """The length bands of the reasons. Upper edges belong to the lower one."""
+    return (
+        F.when(gap_min <= 60.0, "30-60")
+        .when(gap_min <= 120.0, "60-120")
+        .when(gap_min <= 240.0, "120-240")
+        .when(gap_min <= 360.0, "240-360")
+        .otherwise("over-360")
+    )
+
+
+def reason_counts(holes: DataFrame, p: SegmentationParams) -> List[Dict]:
+    """Holes per population, length band and first failed test at *p*.
+
+    A hole failing two tests counts under the first, and not in
+    ``only_failed_test_holes``: relaxing either alone would still not link it.
+    """
+    checks = _checks(p)
+    failed = sum(F.when(check, 0).otherwise(1) for check in checks.values())
+    rows = (
+        holes.withColumn("gap_band", _gap_band(F.col("gap_min")))
+        .withColumn("first_failed_test", _first_failed_test(checks))
+        .groupBy("population", "gap_band", "first_failed_test")
+        .agg(F.count(F.lit(1)).alias("holes"), _sum_when(failed == 1).alias("only_failed_test_holes"))
+        .orderBy("population", "gap_band", "first_failed_test")
+        .collect()
+    )
+    return [r.asDict() for r in rows]
+
+
+def positive_reason_counts(controls: DataFrame, p: SegmentationParams) -> List[Dict]:
+    """Positive controls *p* misses, per requested length and first failed test."""
+    rows = (
+        controls.withColumn("first_failed_test", _first_failed_test(_checks(p)))
+        .filter(F.col("first_failed_test") != "linked")
+        .groupBy("requested_gap_min", "first_failed_test")
+        .agg(F.count(F.lit(1)).alias("positive_missed_by_test"))
+        .orderBy("requested_gap_min", "first_failed_test")
+        .collect()
+    )
+    return [r.asDict() for r in rows]
 
 
 # --- the safety limits and the pick ------------------------------------------
@@ -456,6 +676,18 @@ def with_verdicts(row: Dict) -> Dict:
     real_ok = real_rate is not None and real_rate <= REAL_HOLE_FALSE_JOIN_LIMIT
     missed = row["positive_within_gap"] - row["positive_linked"]
 
+    population_shares = {}
+    for name in ("crossing", "other"):
+        n = row[f"{name}_flights"]
+        population_shares.update(
+            {
+                f"{name}_share_one_track": _share(row[f"{name}_flights_in_one_track"], n),
+                f"{name}_tracks_per_flight": _share(row[f"{name}_tracks"], n),
+                f"base_{name}_share_one_track": _share(row[f"base_{name}_flights_in_one_track"], n),
+                f"base_{name}_tracks_per_flight": _share(row[f"base_{name}_tracks"], n),
+            }
+        )
+
     return {
         **row,
         "tracks_per_flight": _share(row["tracks_on_flights"], row["flights"]),
@@ -468,10 +700,17 @@ def with_verdicts(row: Dict) -> Dict:
             row["negative_limit_false_joins"], row["negative_limit_controls"]
         ),
         "negative_false_join_upper_95": negative_upper,
+        "negative_no_callsign_false_join_rate": _share(
+            row["negative_limit_false_joins_no_callsign"], row["negative_limit_controls"]
+        ),
+        "negative_no_callsign_upper_95": rule_of_three_upper(
+            row["negative_limit_false_joins_no_callsign"], row["negative_limit_controls"]
+        ),
         "same_callsign_false_join_rate": _share(row["same_callsign_false_joins"], same_n),
         "same_callsign_upper_95": same_upper,
         "same_callsign_blank_share": _share(row["same_callsign_blank"], same_n),
         "positive_missed_share": _share(missed, row["positive_within_gap"]),
+        **population_shares,
         "negative_within_limit": negative_ok,
         "same_callsign_status": same_status,
         "real_holes_within_limit": real_ok,
@@ -552,6 +791,20 @@ def pool_strata(days: List[List[Dict]]) -> List[Dict]:
     return [_finish_stratum(row) for row in pooled.values()]
 
 
+def pool_counts(days: Iterable[List[Dict]], count_names: Sequence[str]) -> List[Dict]:
+    """One row per key, the key being every field but ``day`` and *count_names*."""
+    pooled = {}
+    for row in itertools.chain.from_iterable(days):
+        key = tuple(v for name, v in row.items() if name != "day" and name not in count_names)
+        into = pooled.get(key)
+        if into is None:
+            pooled[key] = {**row, "day": "pooled"}
+        else:
+            for name in count_names:
+                into[name] += row[name]
+    return list(pooled.values())
+
+
 # --- one day -----------------------------------------------------------------
 
 
@@ -571,6 +824,18 @@ def _keep(frame: DataFrame) -> DataFrame:
 
 
 @dataclass
+class ReasonFrames:
+    """What the reasons are counted on, kept until the days are pooled and a point chosen."""
+
+    true_link_holes: DataFrame
+    positive: DataFrame
+
+    def release(self) -> None:
+        self.true_link_holes.unpersist()
+        self.positive.unpersist()
+
+
+@dataclass
 class DayFeatures:
     """Everything a grid point is scored on, for one day, built once."""
 
@@ -580,9 +845,11 @@ class DayFeatures:
     flights: DataFrame
     holes_in_flights: DataFrame
     funnel: Dict
+    reasons: ReasonFrames
 
     def release(self) -> None:
-        for frame in (self.holes, self.negative, self.positive, self.flights, self.holes_in_flights):
+        """Free all but the :class:`ReasonFrames`, which outlive the day."""
+        for frame in (self.holes, self.negative, self.flights, self.holes_in_flights):
             frame.unpersist()
 
 
@@ -598,7 +865,7 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
     tracks = tracks.select(*_TRACK_COLUMNS)
     floor_ft = p.link_cruise_floor_ft
     with _timed("truth"):
-        truth = _keep(truth.select("flight_key", "icao24", "t_off", "t_land"))
+        truth = _keep(truth.select("flight_key", "icao24", "t_off", "t_land", "crosses_box"))
 
     with _timed("real holes"):
         # Kept before labelling, which reads its input twice.
@@ -612,7 +879,11 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
         ).persist(StorageLevel.MEMORY_AND_DISK)
         airframes.count()
     with _timed("A9 tracks per flight"):
-        flights = _keep(flight_base_tracks(airframes, truth, p))
+        flights = _keep(
+            flight_base_tracks(airframes, truth, p).join(
+                truth.select("flight_key", "crosses_box").distinct(), on="flight_key"
+            )
+        )
     with _timed("samples inside flights"):
         samples = flight_samples(airframes, truth).persist(StorageLevel.MEMORY_AND_DISK)
         samples.count()
@@ -629,14 +900,15 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
             "positive_controls_scored": positive.count(),
         }
     holes_in_flights = _keep(holes_inside_flights(holes, truth))
+    reasons = ReasonFrames(_keep(true_link_holes(holes, truth)), positive)
 
     samples.unpersist()
     truth.unpersist()
-    return DayFeatures(holes, negative, positive, flights, holes_in_flights, funnel)
+    return DayFeatures(holes, negative, positive, flights, holes_in_flights, funnel, reasons)
 
 
 def score_day(day: str, tracks: DataFrame, truth: DataFrame, grid: List[SegmentationParams]) -> tuple:
-    """Grid rows, strata rows and the funnel row for one day."""
+    """Grid rows, strata rows, the funnel row and the frames the reasons need, for one day."""
     print(f"--- {day}", flush=True)
     with _timed(f"{day}: features"):
         features = build_features(tracks, truth, grid[0])
@@ -650,6 +922,7 @@ def score_day(day: str, tracks: DataFrame, truth: DataFrame, grid: List[Segmenta
                         "point_id": point_id,
                         **{name: getattr(p, name) for name in _link_fields()},
                         **flight_track_counts(features.flights, features.holes_in_flights, p),
+                        **population_track_counts(features.flights, features.holes_in_flights, p),
                         **real_hole_counts(features.holes, p),
                         **negative_counts(features.negative, p),
                         **positive_counts(features.positive, p),
@@ -660,7 +933,39 @@ def score_day(day: str, tracks: DataFrame, truth: DataFrame, grid: List[Segmenta
                 strata += [{"day": day, **s} for s in strata_counts(controls, kind, p, point_id)]
     funnel = {"day": day, **features.funnel}
     features.release()
-    return rows, strata, funnel
+    return rows, strata, funnel, features.reasons
+
+
+def write_reasons(
+    frames_per_day: Dict[str, ReasonFrames],
+    p: SegmentationParams,
+    settings_from: str,
+    stage: Callable[..., None],
+) -> None:
+    """Stage both reasons reports for each day and pooled, each row naming its settings."""
+    settings = {"settings_from": settings_from, **{name: getattr(p, name) for name in _link_fields()}}
+    reports = (
+        (
+            "link_reasons",
+            lambda frames: reason_counts(frames.true_link_holes, p),
+            ("population", "gap_band", "first_failed_test"),
+            ("holes", "only_failed_test_holes"),
+        ),
+        (
+            "link_positive_reasons",
+            lambda frames: positive_reason_counts(frames.positive, p),
+            ("requested_gap_min", "first_failed_test"),
+            ("positive_missed_by_test",),
+        ),
+    )
+    for stem, count, key_names, count_names in reports:
+        # Named here because a day can have no rows, and a CSV keeps its header then.
+        columns = ["day", *settings, *key_names, *count_names]
+        per_day = []
+        for day, frames in frames_per_day.items():
+            per_day.append([{"day": day, **settings, **row} for row in count(frames)])
+            stage(f"{stem}_{day}.csv", per_day[-1], columns)
+        stage(f"{stem}_pooled.csv", pool_counts(per_day, count_names), columns)
 
 
 def two_callsign_counts(tracks: DataFrame, p: SegmentationParams) -> Dict[str, int]:
@@ -690,14 +995,19 @@ def run_study(
     argv: Sequence[str] = (),
     input_tables: Sequence[str] = (),
     reference_base: str = REFERENCE_BASE,
+    reasons_params: Optional[SegmentationParams] = None,
 ) -> Dict:
-    """Score each day, pool them, choose, and stage every CSV with its provenance."""
+    """Score each day, pool them, choose, and stage every CSV with its provenance.
+
+    ``load_truth`` gives flights with ``crosses_box``: see :func:`with_population`.
+    ``reasons_params`` reads the reasons there rather than at the chosen point.
+    """
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    def stage(name: str, rows: List[Dict]) -> None:
+    def stage(name: str, rows: List[Dict], columns: Optional[List[str]] = None) -> None:
         with (results_dir / name).open("w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+            writer = csv.DictWriter(fh, fieldnames=columns or list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
         provenance.record(
@@ -713,9 +1023,11 @@ def run_study(
         )
         print(f"wrote {results_dir / name}", flush=True)
 
-    all_rows, all_strata = [], []
+    all_rows, all_strata, reason_frames = [], [], {}
     for day in days:
-        rows, strata, funnel = score_day(day, load_tracks(day), load_truth(day), grid)
+        rows, strata, funnel, reason_frames[day] = score_day(
+            day, load_tracks(day), load_truth(day), grid
+        )
         all_rows.append(rows)
         all_strata.append(strata)
         stage(f"link_grid_{day}.csv", rows)
@@ -730,6 +1042,15 @@ def run_study(
     choice = recommendation(pooled)
     stage("link_recommended.csv", [choice])
     print(f"choice: {choice['status']}, point {choice.get('point_id')}", flush=True)
+
+    if reasons_params is not None:
+        write_reasons(reason_frames, reasons_params, "given", stage)
+    elif "point_id" in choice:
+        write_reasons(reason_frames, grid[choice["point_id"]], choice["status"], stage)
+    else:
+        print("no reasons: nothing chosen and no settings given", flush=True)
+    for frames in reason_frames.values():
+        frames.release()
 
     if "point_id" in choice:
         totals: Dict[str, int] = {}
@@ -760,13 +1081,20 @@ def main() -> int:
     ap.add_argument("--days", nargs="+", default=list(DEFAULT_DAYS))
     ap.add_argument("--source", default=SOURCE)
     ap.add_argument("--reference-base", default=REFERENCE_BASE)
+    ap.add_argument("--airports", default=AIRPORTS, help="oa_airports, to place ADEP and ADES")
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--grid-json", default=None, help="replace the grid: see the docstring")
+    ap.add_argument(
+        "--reasons-params-json", default=None, help="read the reasons here: see the docstring"
+    )
     ap.add_argument("--executors", type=int, default=8)
     args = ap.parse_args()
 
     # Before the session exists, so a bad grid costs nothing.
     grid = grid_from_json(args.grid_json) if args.grid_json else grid_points()
+    reasons_params = (
+        reasons_params_from_json(args.reasons_params_json, grid) if args.reasons_params_json else None
+    )
 
     import osn_sample
     from osn_sample import build_spark, load_dotenv
@@ -778,8 +1106,11 @@ def main() -> int:
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
     def load_truth(day: str) -> DataFrame:
-        return load_flight_intervals(
-            spark, truth_months(day), [day], reference_base=args.reference_base
+        return with_population(
+            load_flight_intervals(
+                spark, truth_months(day), [day], reference_base=args.reference_base
+            ),
+            spark.read.parquet(args.airports),
         )
 
     try:
@@ -787,8 +1118,9 @@ def main() -> int:
             args.days, grid, lambda day: read_tracks(spark, args.source, day), load_truth,
             args.results_dir,
             argv=sys.argv[1:],
-            input_tables=[f"{args.source}/dof={day}" for day in args.days],
+            input_tables=[f"{args.source}/dof={day}" for day in args.days] + [args.airports],
             reference_base=args.reference_base,
+            reasons_params=reasons_params,
         )
     finally:
         spark.stop()

@@ -25,6 +25,7 @@ from opdi.pipeline.segmentation.methods import (
     cruise_linked,
     debounced,
     debounced_callsign_change,
+    link_checks,
     link_feature_columns,
     linkable,
     recommended,
@@ -554,3 +555,99 @@ def test_edge_speed_is_required_once_the_ratio_is_on(spark):
     on = dataclasses.replace(P, link_min_speed_ratio=0.85)
     assert _decide(spark, on) is True
     assert _decide(spark, on, spd_before_kt=None) is False
+
+
+# --- link_checks: one named verdict per test of the rule --------------------------
+
+
+_CHECK_NAMES = [
+    "gap_not_too_long",
+    "cruise_at_old_edge",
+    "cruise_at_new_edge",
+    "not_descend_then_climb",
+    "callsign_agrees",
+    "implied_speed_not_too_slow",
+    "implied_speed_not_impossible",
+    "not_slow_for_this_flight",
+    "no_time_for_a_stop",
+    "real_address",
+]
+
+#: A hole every test accepts at the defaults: 191 min at 480 kt.
+_GOOD_HOLE = {
+    "gap_min": 191.0,
+    "gc_nm": 1528.0,
+    "alt_before_ft": 36000.0,
+    "alt_after_ft": 36000.0,
+    "vr_before_fpm": 0.0,
+    "vr_after_fpm": 0.0,
+    "spd_before_kt": 480.0,
+    "cs_before": "DLH1",
+    "cs_after": "DLH1",
+    "icao24": "abc123",
+}
+
+_RATIO_ON = dataclasses.replace(P, link_min_speed_ratio=0.85)
+_STOP_ON = dataclasses.replace(P, link_min_stop_minutes=20.0)
+
+#: ``(settings, what differs from the good hole, the tests that must fail)``.
+_CHECK_CASES = [
+    (P, {}, []),
+    (P, {"gap_min": 400.0, "gc_nm": 3200.0}, ["gap_not_too_long"]),
+    (P, {"alt_before_ft": 20000.0}, ["cruise_at_old_edge"]),
+    (P, {"alt_before_ft": None}, ["cruise_at_old_edge"]),
+    (P, {"alt_after_ft": 20000.0}, ["cruise_at_new_edge"]),
+    (P, {"alt_after_ft": None}, ["cruise_at_new_edge"]),
+    (P, {"vr_before_fpm": -1000.0, "vr_after_fpm": 1000.0}, ["not_descend_then_climb"]),
+    (P, {"vr_before_fpm": None, "vr_after_fpm": 1000.0}, []),
+    (P, {"vr_before_fpm": -1000.0, "vr_after_fpm": None}, []),
+    (P, {"cs_after": "BAW2"}, ["callsign_agrees"]),
+    (P, {"cs_before": None}, []),
+    (P, {"cs_before": None, "cs_after": None}, []),
+    (P, {"gc_nm": 100.0}, ["implied_speed_not_too_slow"]),
+    (P, {"gc_nm": 5000.0}, ["implied_speed_not_impossible"]),
+    (P, {"gc_nm": None}, ["implied_speed_not_too_slow", "implied_speed_not_impossible"]),
+    # Two samples in one second: no speed can be implied, and the division is guarded.
+    (P, {"gap_min": 0.0}, ["implied_speed_not_too_slow", "implied_speed_not_impossible"]),
+    (
+        P,
+        {"gap_min": None},
+        ["gap_not_too_long", "implied_speed_not_too_slow", "implied_speed_not_impossible"],
+    ),
+    (P, {"icao24": "000000"}, ["real_address"]),
+    (P, {"icao24": "FFFFFF"}, ["real_address"]),
+    (P, {"icao24": None}, ["real_address"]),
+    # Off at 0.0, so a missing or high speed cannot fail them.
+    (P, {"spd_before_kt": None}, []),
+    (P, {"spd_before_kt": 900.0}, []),
+    (_RATIO_ON, {}, []),
+    (_RATIO_ON, {"spd_before_kt": 900.0}, ["not_slow_for_this_flight"]),
+    (_RATIO_ON, {"spd_before_kt": None}, ["not_slow_for_this_flight"]),
+    # 191 min at 480 kt takes 141 min at 650 kt, which leaves 50 min for a stop.
+    (_STOP_ON, {}, ["no_time_for_a_stop"]),
+    (_STOP_ON, {"gc_nm": 1960.0}, []),
+    (_STOP_ON, {"gc_nm": None}, [
+        "implied_speed_not_too_slow", "implied_speed_not_impossible", "no_time_for_a_stop",
+    ]),
+    # Several at once: every failing test says so.
+    (P, {"alt_after_ft": 20000.0, "cs_after": "BAW2"}, ["cruise_at_new_edge", "callsign_agrees"]),
+]
+
+
+def _feature_literals(hole):
+    types = {"cs_before": "string", "cs_after": "string", "icao24": "string"}
+    return {name: F.lit(value).cast(types.get(name, "double")) for name, value in hole.items()}
+
+
+@pytest.mark.parametrize("p, changes, failing", _CHECK_CASES)
+def test_link_checks_name_each_failing_test_and_linkable_is_their_and(spark, p, changes, failing):
+    f = _feature_literals({**_GOOD_HOLE, **changes})
+    checks = link_checks(f, p)
+    row = spark.range(1).select(
+        *[c.alias(name) for name, c in checks.items()], linkable(f, p).alias("linked")
+    ).first()
+    assert list(checks) == _CHECK_NAMES
+    verdicts = {name: row[name] for name in _CHECK_NAMES}
+    assert all(v is True or v is False for v in verdicts.values()), verdicts
+    assert [name for name, ok in verdicts.items() if not ok] == failing
+    assert row["linked"] is (not failing)

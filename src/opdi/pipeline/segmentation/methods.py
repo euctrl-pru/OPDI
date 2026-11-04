@@ -46,6 +46,8 @@ on every long gap, as it would under the floor; and a gap over
 ``link_max_gap_minutes`` always breaks, whatever the edges look like.
 """
 
+from functools import reduce
+from operator import and_
 from typing import Dict, Mapping
 
 from pyspark.sql import Column, Window
@@ -78,6 +80,7 @@ __all__ = [
     "stable_callsign",
     "debounced_callsign_change",
     "link_feature_columns",
+    "link_checks",
     "linkable",
     "cruise_linked",
     "LINK_EDGE_SAMPLES",
@@ -755,19 +758,19 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     }
 
 
-def linkable(f: Mapping[str, Column], p) -> Column:
-    """Whether a hole's two edges can be one flight. Never NULL.
+def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
+    """One named verdict per test of the rule, in the spec's order. Never NULL.
 
     A pure function of the features and the thresholds, so the study can score a
-    parameter set without re-segmenting. A wrongly glued flight is worse than a
-    split one, so a NULL in any required input means not linkable; the outer
-    ``coalesce`` is what enforces that.
+    parameter set without re-segmenting, and can say which test stopped a hole.
+    A wrongly glued flight is worse than a split one, so a NULL in a required input
+    fails its test; the ``coalesce`` on every entry is what enforces that.
 
     Three tests are neutral on NULL rather than failing closed, each for a reason:
     vertical rate arrives in separate ADS-B messages, so its absence says nothing;
     a blank callsign agrees with anything; and the edge speed and time-budget
-    tests are skipped outright at their ``0.0`` off setting, so a missing speed
-    cannot fail a test that is switched off.
+    tests pass outright at their ``0.0`` off setting, so a missing speed cannot
+    fail a test that is switched off.
     """
     # Guarded because two samples can share a second, and a Spark 4 session raises
     # on a zero divisor. A plain division here would fail the whole job on them.
@@ -778,22 +781,32 @@ def linkable(f: Mapping[str, Column], p) -> Column:
     )
     callsign_differs = f["cs_before"] != f["cs_after"]
 
-    tests = (
-        (f["gap_min"] <= p.link_max_gap_minutes)
-        & (f["alt_before_ft"] >= p.link_cruise_floor_ft)
-        & (f["alt_after_ft"] >= p.link_cruise_floor_ft)
-        & ~F.coalesce(descend_then_climb, F.lit(False))
-        & ~F.coalesce(callsign_differs, F.lit(False))
-        & (implied_kt >= p.link_min_implied_speed_kt)
-        & (implied_kt <= p.link_max_implied_speed_kt)
-        & ~F.lower(f["icao24"]).isin(*PLACEHOLDER_ICAO24)
-    )
-    if p.link_min_speed_ratio > 0.0:
-        tests = tests & (implied_kt >= p.link_min_speed_ratio * f["spd_before_kt"])
-    if p.link_min_stop_minutes > 0.0:
-        slack_min = f["gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0
-        tests = tests & (slack_min < p.link_min_stop_minutes)
-    return F.coalesce(tests, F.lit(False))
+    tests = {
+        "gap_not_too_long": f["gap_min"] <= p.link_max_gap_minutes,
+        "cruise_at_old_edge": f["alt_before_ft"] >= p.link_cruise_floor_ft,
+        "cruise_at_new_edge": f["alt_after_ft"] >= p.link_cruise_floor_ft,
+        "not_descend_then_climb": ~F.coalesce(descend_then_climb, F.lit(False)),
+        "callsign_agrees": ~F.coalesce(callsign_differs, F.lit(False)),
+        "implied_speed_not_too_slow": implied_kt >= p.link_min_implied_speed_kt,
+        "implied_speed_not_impossible": implied_kt <= p.link_max_implied_speed_kt,
+        "not_slow_for_this_flight": (
+            implied_kt >= p.link_min_speed_ratio * f["spd_before_kt"]
+            if p.link_min_speed_ratio > 0.0
+            else F.lit(True)
+        ),
+        "no_time_for_a_stop": (
+            f["gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0 < p.link_min_stop_minutes
+            if p.link_min_stop_minutes > 0.0
+            else F.lit(True)
+        ),
+        "real_address": ~F.lower(f["icao24"]).isin(*PLACEHOLDER_ICAO24),
+    }
+    return {name: F.coalesce(test, F.lit(False)) for name, test in tests.items()}
+
+
+def linkable(f: Mapping[str, Column], p) -> Column:
+    """Whether a hole's two edges can be one flight: every :func:`link_checks` holds."""
+    return reduce(and_, link_checks(f, p).values())
 
 
 def cruise_linked() -> BreakRule:
