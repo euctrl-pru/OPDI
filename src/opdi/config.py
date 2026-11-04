@@ -1690,9 +1690,11 @@ class SegmentationConfig:
 
     link_edge_position_minutes: float = 5.0
     """How far from each edge of a hole A10 reads through blank samples for a
-    position (minutes). A position message often arrives after altitude and speed:
-    on 2026-06-14, 1,073 of 7,355 cruise holes had none at the edge sample itself.
-    No position inside this span means split.
+    position (minutes), because a position message often arrives after altitude and
+    speed. No position inside this span means split.
+
+    It also bounds the edge's altitude, vertical rate and speed samples: of the
+    ``LINK_EDGE_SAMPLES`` rows at an edge, those further away than this do not count.
 
     Must be below ``low_alt_gap_minutes``, or the read could cross a low-altitude
     split into another flight; A10 raises otherwise. ``process_day`` reads at least

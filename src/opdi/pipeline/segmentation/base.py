@@ -130,8 +130,10 @@ class SegmentationParams:
     link_callsign_lookback_minutes: float = 60.0
     #: How far from each edge of a hole to read through blank samples for a
     #: position, because a position message often arrives after altitude and speed.
-    #: None inside it means split. ``process_day`` reads at least this far behind
-    #: the old edge: see ``tracks.required_lookback_hours``.
+    #: None inside it means split. Also bounds the edge's altitude, vertical rate and
+    #: speed samples: of the ``LINK_EDGE_SAMPLES`` rows at an edge, those further away
+    #: than this do not count. ``process_day`` reads at least this far behind the old
+    #: edge: see ``tracks.required_lookback_hours``.
     link_edge_position_minutes: float = 5.0
     #: 400 kt rejects nearly all hidden landings at small cost; chosen by the
     #: track-construction-v4 study.
