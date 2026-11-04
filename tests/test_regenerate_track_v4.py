@@ -89,3 +89,44 @@ def test_check_needs_no_credentials(monkeypatch, capsys):
                                      "--allow-stale"])
     R.main()
     assert "analysis at" in capsys.readouterr().out
+
+
+def test_every_job_covers_its_scripts_own_code_paths():
+    for job in R.jobs():
+        assert set(R.script_code_paths(job.script)) <= set(job.code_paths), job.name
+
+
+def test_changed_arguments_mark_a_job_stale(tmp_path, monkeypatch):
+    job = _job("stage2")
+    monkeypatch.setattr(job, "data", tmp_path)
+    for n in job.outputs:
+        (tmp_path / n).write_text("a\n")
+        R.provenance.record(tmp_path, n, job.script, job.args, job.code_paths)
+    assert job.stale() == {}
+    job.args = ["--day", "2026-06-15"]
+    assert set(job.stale().values()) == {"arguments changed"}
+
+
+def test_missing_optional_reasons_are_not_stale_but_a_recorded_one_is(
+        tmp_path, monkeypatch):
+    job = _job("final_grid")
+    assert job.optional <= set(job.outputs)
+    monkeypatch.setattr(job, "data", tmp_path)
+    for n in job.outputs:
+        if n not in job.optional:
+            (tmp_path / n).write_text("a\n")
+            R.provenance.record(tmp_path, n, job.script, job.args, job.code_paths)
+    assert job.stale() == {}
+    gone = sorted(job.optional)[0]
+    (tmp_path / gone).write_text("a\n")
+    R.provenance.record(tmp_path, gone, job.script, job.args, job.code_paths)
+    (tmp_path / gone).unlink()
+    assert job.stale() == {gone: "output missing"}
+
+
+def test_the_paper_inputs_are_declared():
+    names = set(_job("final_grid").outputs)
+    for stem in ("link_reasons", "link_positive_reasons", "link_negative_reasons"):
+        assert f"{stem}_pooled.csv" in names
+    assert set(_job("final_direction").outputs) == {
+        "link_grid_pooled.csv", "link_controls_pooled.csv"}

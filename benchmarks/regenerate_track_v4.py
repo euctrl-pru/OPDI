@@ -40,6 +40,7 @@ regenerated: no job here names them and ``--force`` leaves them alone.
 """
 
 import argparse
+import ast
 import json
 import os
 import shutil
@@ -91,6 +92,29 @@ def _grid_outputs(days):
     return names
 
 
+#: Written only when the grid picks a point (or is given one): the reasons
+#: reports are read at that point. A grid that picks none produces none.
+def _reasons_outputs(days):
+    return [f"{stem}_{d}.csv"
+            for stem in ("link_reasons", "link_positive_reasons",
+                         "link_negative_reasons")
+            for d in [*days, "pooled"]]
+
+
+def script_code_paths(script):
+    """The ``_CODE_PATHS`` a script declares for its own outputs.
+
+    Read from the source with ``ast`` rather than by import: the scripts import
+    pyspark at module level, and ``--check`` must run anywhere.
+    """
+    tree = ast.parse((REPO / script).read_text())
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(getattr(t, "id", "") == "_CODE_PATHS" for t in node.targets)):
+            return list(ast.literal_eval(node.value))
+    raise SystemExit(f"{script} declares no _CODE_PATHS")
+
+
 STAGE2_OUTPUTS = [
     "link_flight_list.csv", "link_both_ends.csv", "link_events.csv",
     "link_level_across_hole.csv", "link_distance_across_hole.csv",
@@ -101,18 +125,31 @@ STAGE2_OUTPUTS = [
 class Job:
     """One analysis step: a command, its outputs, and what it depends on."""
 
-    def __init__(self, name, script, args, outputs, code_paths, notes=""):
+    def __init__(self, name, script, args, outputs, code_paths, notes="",
+                 optional=()):
         self.name = name
         self.data = DATA / name
         self.script = script
         self.args = args
         self.outputs = outputs
-        self.code_paths = [script] + list(code_paths)
+        # Union with what the script itself says its outputs depend on, so the
+        # runner can never know less than the script that records them.
+        self.code_paths = list(dict.fromkeys(
+            [script, *code_paths, *script_code_paths(script)]))
         self.notes = notes
+        self.optional = set(optional)
 
     def stale(self):
         reasons = {}
+        manifest = provenance.load_manifest(self.data)
         for staged in self.outputs.values():
+            if (staged in self.optional and not (self.data / staged).is_file()
+                    and staged not in manifest):
+                continue  # never produced: the grid picked no point
+            entry = manifest.get(staged)
+            if entry is not None and entry.get("argv") != list(self.args):
+                reasons[staged] = "arguments changed"
+                continue
             bad, why = provenance.is_stale(self.data, staged, self.code_paths, [])
             if bad:
                 reasons[staged] = why
@@ -140,6 +177,15 @@ class Job:
                 raise SystemExit(f"{self.name} failed with exit {r.returncode}")
             for produced, staged in self.outputs.items():
                 src = Path(tmp) / produced
+                if not src.is_file() and produced in self.optional:
+                    # Drop a stale entry and file from an earlier run that did
+                    # choose a point, so the paper cannot read old reasons.
+                    (self.data / staged).unlink(missing_ok=True)
+                    m = provenance.load_manifest(self.data)
+                    if m.pop(staged, None) is not None:
+                        provenance.save_manifest(self.data, m)
+                    print(f"  no {produced} (nothing chosen)")
+                    continue
                 if not src.is_file():
                     raise SystemExit(f"{self.name} did not produce {produced}")
                 self.data.mkdir(parents=True, exist_ok=True)
@@ -164,11 +210,12 @@ def jobs() -> list:
                 "link_max_gap_minutes": [360, 480, 600],
                 "link_cruise_floor_ft": [18000],
             })],
-            outputs={n: n for n in _grid_outputs(DAYS)},
+            outputs={n: n for n in _grid_outputs(DAYS) + _reasons_outputs(DAYS)},
+            optional=_reasons_outputs(DAYS),
             code_paths=CORE,
             notes="Final cruise-link grid over two days, pooled, with the "
-                  "recommendation. Reasons reports are staged beside these "
-                  "when a point is chosen and are not tracked individually.",
+                  "recommendation and, when a point is chosen, the reasons "
+                  "reports read at it.",
         ),
         Job(
             name="final_direction",
@@ -181,7 +228,8 @@ def jobs() -> list:
                 "link_directional_edges": [False, True],
                 "link_cruise_floor_ft": [18000],
             })],
-            outputs={n: n for n in _grid_outputs(DAYS)},
+            outputs={n: n for n in ("link_grid_pooled.csv",
+                                    "link_controls_pooled.csv")},
             code_paths=CORE,
             notes="The chosen point with directional edges off and on.",
         ),
