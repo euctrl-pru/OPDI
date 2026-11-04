@@ -5,12 +5,15 @@ same flight is processed twice (double-counted) or not at all (lost). The rule
 is "the day the track's first sample falls in", and it has to survive the fact
 that a batch reads well past midnight to capture flights that run over.
 
-The window is asymmetric on purpose. The lookback only has to be longer than
-the gap threshold, because breaks are decided locally: a track whose first
-in-window sample lands after midnight with hours of silence in front of it
-genuinely starts there. The lookahead has to cover the whole duration of a
-track that starts on D, because that is the only direction in which being too
-short silently truncates.
+The window is asymmetric on purpose. Under most arms the lookback only has to be
+longer than the gap threshold, because breaks are decided locally: a track whose
+first in-window sample lands after midnight with hours of silence in front of it
+genuinely starts there. ``cruise_linked`` is the exception. It can join across
+hours of silence, so its lookback has to reach the old edge of the longest
+linkable hole and the callsign evidence behind that edge, or two days' reads
+decide one hole differently; see ``required_lookback_hours``. The lookahead has
+to cover the whole duration of a track that starts on D, because that is the only
+direction in which being too short silently truncates.
 """
 import datetime as dt
 from types import SimpleNamespace
@@ -18,6 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from conftest import make_track
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 from opdi.pipeline.tracks import keep_tracks_starting_in
@@ -136,22 +140,20 @@ def test_a_run_whose_lookahead_was_enough_reports_nothing(spark):
 
 # --- the lookback, under an arm that links across holes -----------------------
 
-def _processor_capturing_windows(monkeypatch, method, **segmentation):
+def _processor_capturing_windows(method, **segmentation):
     """A TrackProcessor with no IO, recording the windows `process_day` reads."""
-    from opdi import pipeline
     from opdi.config import SegmentationConfig
     from opdi.pipeline.tracks import TrackProcessor
 
-    monkeypatch.setattr(
-        pipeline.tracks,
-        "tracks_touching_window_end",
-        lambda df, read_end: SimpleNamespace(count=lambda: 0),
-    )
     processor = TrackProcessor.__new__(TrackProcessor)
     processor.config = SimpleNamespace(
         segmentation=SegmentationConfig(method=method, **segmentation)
     )
     processor.storage = MagicMock()
+    # Nothing written, so the truncation check has a real frame to report on.
+    processor.storage.read_table.return_value = make_track(
+        SparkSession.getActiveSession(), [{"t": 0}]
+    ).withColumn("dof", F.lit(dt.date(1999, 1, 1)))
     processor.windows = []
     processor.process_month = lambda **kw: processor.windows.append(kw["window"])
     return processor
@@ -173,34 +175,39 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
     # A part-hour rounds up.
     p241 = SegmentationParams(link_max_gap_minutes=241.0)
     assert required_lookback_hours("cruise_linked", p241) == 6
+    # The callsign lookback is added on top, also rounded up, with a floor at 3.
+    p90 = SegmentationParams(link_callsign_lookback_minutes=90.0)
+    assert required_lookback_hours("cruise_linked", p90) == 8
+    short = SegmentationParams(link_max_gap_minutes=60.0)
+    assert required_lookback_hours("cruise_linked", short) == 3
 
 
-def test_process_day_reads_the_lookback_its_arm_requires(spark, monkeypatch):
+def test_process_day_reads_the_lookback_its_arm_requires(spark):
     day = dt.date(2024, 6, 2)
 
-    linked = _processor_capturing_windows(monkeypatch, "cruise_linked")
+    linked = _processor_capturing_windows("cruise_linked")
     linked.process_day(day)
     assert linked.windows[0][0] == "2024-06-01 17:00:00"
 
-    wider = _processor_capturing_windows(monkeypatch, "cruise_linked")
+    wider = _processor_capturing_windows("cruise_linked")
     wider.process_day(day, lookback_hours=9)
     assert wider.windows[0][0] == "2024-06-01 15:00:00"
 
-    default = _processor_capturing_windows(monkeypatch, "standard")
+    default = _processor_capturing_windows("standard")
     default.process_day(day)
     assert default.windows[0][0] == "2024-06-01 21:00:00"
 
 
-def test_too_short_an_explicit_lookback_raises(spark, monkeypatch):
-    processor = _processor_capturing_windows(monkeypatch, "cruise_linked")
+def test_too_short_an_explicit_lookback_raises(spark):
+    processor = _processor_capturing_windows("cruise_linked")
     with pytest.raises(ValueError, match="lookback_hours=6.*7"):
         processor.process_day(dt.date(2024, 6, 2), lookback_hours=6)
     assert processor.windows == []
 
 
-def test_other_arms_keep_their_explicit_lookback(spark, monkeypatch):
+def test_other_arms_keep_their_explicit_lookback(spark):
     """The guard is about linking. Other arms' breaks are local, so one hour is fine."""
-    processor = _processor_capturing_windows(monkeypatch, "debounced")
+    processor = _processor_capturing_windows("debounced")
     processor.process_day(dt.date(2024, 6, 2), lookback_hours=1)
     assert processor.windows[0][0] == "2024-06-01 23:00:00"
 
@@ -261,3 +268,130 @@ def test_a_piece_after_midnight_is_claimed_once(spark):
         for r in _claimed_by_day(sv, day, 3).select("last_contact").collect()
     ]
     assert len(too_short) == len(samples) + 11
+
+
+D_MINUS_1 = dt.datetime(2024, 6, 1)
+D = dt.datetime(2024, 6, 2)
+CRUISE = {"lat": 0.0, "baro_altitude": 11000.0, "vert_rate": 0.0}
+
+
+def _t(moment):
+    return (moment - EPOCH).total_seconds()
+
+
+def _every(start, end, minutes, **fields):
+    """Cruise samples from *start* up to and including *end*."""
+    out = []
+    moment = start
+    while moment <= end:
+        out.append({**CRUISE, **fields, "t": _t(moment)})
+        moment += dt.timedelta(minutes=minutes)
+    return out
+
+
+def _lon_after(gap_minutes):
+    """Equator longitude reached in a hole of that length at 480 kt."""
+    return 480.0 * gap_minutes / 60 / 60.04
+
+
+def _assert_claimed_once(spark, samples):
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    sv = make_track(spark, samples)
+    hours = required_lookback_hours("cruise_linked", SegmentationParams())
+    claims = [
+        r["last_contact"]
+        for day in (D_MINUS_1, D)
+        for r in _claimed_by_day(sv, day, hours).select("last_contact").collect()
+    ]
+    assert sorted(claims) == sorted(s["t"] for s in samples)
+
+
+def test_a_callsign_older_than_the_read_cannot_lose_a_piece(spark):
+    """DLH1 until 13:00, blank to 22:00, a 130 min hole, BAW2 from 00:10.
+
+    If the old callsign counted without a bound, D-1's read would see DLH1 against
+    BAW2 and split, while D's read, starting at 17:00, would see blank against BAW2
+    and link, so the track would start on D-1 and D would not claim it. The piece
+    after the hole would then be published by no day.
+    """
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    samples = _every(D_MINUS_1 + hours(12), D_MINUS_1 + hours(13), 10, lon=0.0, callsign="DLH1")
+    samples += _every(D_MINUS_1 + hours(13, 10), D_MINUS_1 + hours(22), 10, lon=0.0, callsign="")
+    samples += _every(D + hours(0, 10), D + hours(0, 30), 2, lon=_lon_after(130), callsign="BAW2")
+    _assert_claimed_once(spark, samples)
+
+
+def test_a_recent_callsign_splits_in_both_reads(spark):
+    """DLH1 until 21:30, so it counts in both reads: D claims the BAW2 piece."""
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    samples = _every(D_MINUS_1 + hours(20), D_MINUS_1 + hours(21, 30), 10, lon=0.0, callsign="DLH1")
+    samples += _every(D_MINUS_1 + hours(21, 40), D_MINUS_1 + hours(22), 10, lon=0.0, callsign="")
+    samples += _every(D + hours(0, 10), D + hours(0, 30), 2, lon=_lon_after(130), callsign="BAW2")
+    _assert_claimed_once(spark, samples)
+
+
+def test_the_furthest_evidence_a_hole_can_use_is_inside_the_read(spark):
+    """The longest hole, ending at midnight, with the callsign at the lookback's limit.
+
+    Old edge 18:00, DLH1 last seen 17:00, exactly where D's 7 h read begins. Both
+    reads must see it, and split.
+    """
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    samples = _every(D_MINUS_1 + hours(15), D_MINUS_1 + hours(17), 10, lon=0.0, callsign="DLH1")
+    samples += _every(D_MINUS_1 + hours(17, 10), D_MINUS_1 + hours(18), 10, lon=0.0, callsign="")
+    samples += _every(D, D + hours(0, 20), 2, lon=_lon_after(360), callsign="BAW2")
+    _assert_claimed_once(spark, samples)
+
+
+# --- the truncation warning, under an arm that links across holes -------------
+
+
+def _straddling_read_end(spark):
+    """What D-1 writes when a 240 min hole straddles its read end.
+
+    Cruise from 13:00 on D-1 to 21:00 on D, then a hole, then samples from 01:00 on
+    D+1. D-1 reads to 00:00 on D+1, so the track's last read sample is 3 h short of
+    the edge. The piece after the hole is lost, and no other day will claim it.
+    """
+    from pyspark.sql.functions import lit
+
+    hours = lambda h: dt.timedelta(hours=h)     # noqa: E731
+    samples = _every(D_MINUS_1 + hours(13), D + hours(21), 20, lon=0.0, callsign="DLH1")
+    samples += _every(D + hours(25), D + hours(26), 5, lon=_lon_after(240), callsign="DLH1")
+    written = _claimed_by_day(make_track(spark, samples), D_MINUS_1, 7)
+    return written.withColumn("dof", lit(D_MINUS_1.date()))
+
+
+def _warning_from_process_day(capsys, written, method, **segmentation):
+    processor = _processor_capturing_windows(method, **segmentation)
+    processor.storage.read_table.return_value = written
+    processor.process_day(D_MINUS_1.date())
+    return capsys.readouterr().out
+
+
+def test_a_hole_straddling_the_read_end_is_reported(spark, capsys):
+    out = _warning_from_process_day(
+        capsys, _straddling_read_end(spark), "cruise_linked"
+    )
+    assert "WARNING: 1 track(s)" in out
+    assert "covered every track" not in out
+
+
+def test_the_margin_follows_the_longest_linkable_hole(spark, capsys):
+    """Allowing only 120 min, a track 3 h short of the edge cannot be waiting on a link."""
+    out = _warning_from_process_day(
+        capsys, _straddling_read_end(spark), "cruise_linked",
+        link_max_gap_minutes=120.0,
+    )
+    assert "WARNING" not in out
+    assert "covered every track" in out
+
+
+def test_other_arms_keep_the_60_second_margin(spark, capsys):
+    out = _warning_from_process_day(
+        capsys, _straddling_read_end(spark), "debounced"
+    )
+    assert "WARNING" not in out
+    assert "covered every track" in out

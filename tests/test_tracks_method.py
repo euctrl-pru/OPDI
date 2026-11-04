@@ -18,7 +18,7 @@ from conftest import make_track
 
 from opdi.config import OPDIConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
-from opdi.pipeline.segmentation.methods import debounced, recommended
+from opdi.pipeline.segmentation.methods import cruise_linked, debounced, recommended
 from opdi.pipeline.tracks import TrackProcessor
 
 
@@ -59,6 +59,29 @@ FLICKER = (
     + [{"t": 30 + i * 5, "callsign": "XYZ"} for i in range(2)]
     + [{"t": 40 + i * 5, "callsign": "ABC123"} for i in range(6)]
 )
+
+
+#: One airframe at cruise, 1,530 NM and 191 minutes across a reception hole: 480 kt.
+#: A9 splits it, and A10 keeps it whole. Selecting A10 must need no patching.
+HOLE = (
+    [{"t": i * 5, "baro_altitude": 11000.0, "lat": 0.0, "lon": 0.0,
+      "vert_rate": 0.0, "callsign": "DLH1"} for i in range(10)]
+    + [{"t": 45 + 191 * 60 + i * 5, "baro_altitude": 11000.0, "lat": 0.0, "lon": 25.48,
+        "vert_rate": 0.0, "callsign": "DLH1"} for i in range(10)]
+)
+
+
+def test_cruise_linked_is_selectable_through_the_pipeline(spark, tmp_path):
+    df = make_track(spark, HOLE)
+    processor = _proc(spark, tmp_path, "cruise_linked")
+
+    through_pipeline = processor._add_track_id_segmentation(df, "cruise_linked")
+    assert len(_partition(through_pipeline)) == 1
+    assert _partition(through_pipeline) == _partition(
+        assign_track_id(df, cruise_linked(), SegmentationParams())
+    )
+    assert len(_partition(processor._add_track_id(df))) == 1
+    assert len(_partition(_proc(spark, tmp_path, "standard")._add_track_id(df))) == 2
 
 
 def test_the_default_is_now_standard(spark, tmp_path):

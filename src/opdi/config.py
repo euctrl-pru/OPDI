@@ -1603,6 +1603,16 @@ class SegmentationConfig:
     merge-neutral. A8 stays reachable under its own name ``"recommended"`` for
     anyone reproducing data published between 2026-08-27 and this release.
 
+    ``"cruise_linked"`` (A10) is A9 with one change: a gap over ``gap_minutes``
+    does not split a track when its two edges look like one flight, read from the
+    ``link_*`` fields below. So a flight crossing an en-route reception hole keeps
+    one ``track_id``. **It is not the default**, ``"standard"`` does not resolve to
+    it, and it is selected only by naming it. Selecting it creates another silent
+    ``track_id`` boundary: a consumer joining across it gets an empty join rather
+    than an error, and nothing in the data says which rule produced a row. Under
+    it ``process_day`` reads further back and refuses a shorter explicit lookback;
+    see ``tracks.required_lookback_hours``.
+
     .. warning::
 
        **This changes ``track_id`` for all data produced from this release
@@ -1659,6 +1669,16 @@ class SegmentationConfig:
 
     link_callsign_lookahead_minutes: float = 10.0
     """How far after a hole A10 looks for the first non-blank callsign (minutes)."""
+
+    link_callsign_lookback_minutes: float = 60.0
+    """How long before a hole's old edge a callsign may last have been seen and
+    still count against the one after the hole (minutes). Older counts as blank.
+
+    The bound is what makes the decision independent of the read window. Without
+    it, one day's read could see an old callsign and split a hole while the next
+    day's read, starting later, could not see it and link the same hole, and the
+    piece after the hole would be claimed by neither day. It adds to the lookback
+    ``process_day`` requires: see ``tracks.required_lookback_hours``."""
 
     link_min_implied_speed_kt: float = 315.0
     """Slowest great-circle speed across a hole A10 can link (knots)."""

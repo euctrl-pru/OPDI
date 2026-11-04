@@ -120,6 +120,10 @@ class SegmentationParams:
     link_cruise_floor_ft: float = 25000.0
     link_edge_vert_rate_fpm: float = 500.0
     link_callsign_lookahead_minutes: float = 10.0
+    #: How old the callsign before a hole may be and still count. Bounded because
+    #: ``process_day`` reads this far behind the old edge, so two days' reads see
+    #: the same evidence: see ``tracks.required_lookback_hours``.
+    link_callsign_lookback_minutes: float = 60.0
     link_min_implied_speed_kt: float = 315.0
     link_max_implied_speed_kt: float = 750.0
     #: ``0.0`` turns this test off.

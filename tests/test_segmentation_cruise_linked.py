@@ -207,12 +207,31 @@ def test_a_callsign_past_the_lookahead_slips_through(spark):
     assert n_tracks(make_track(spark, samples)) == 1
 
 
-def test_no_bound_looking_back_for_the_old_callsign(spark):
-    """The old callsign ended well before the hole and still counts against BAW2."""
-    samples = _piece(-40 * 60, 0.0, n=5, callsign="DLH1")
-    samples += _piece(-25 * 60, 0.0, n=10, step_s=150, callsign="")
-    samples += _piece(191 * 60, _lon(1530.0), n=10, callsign="BAW2")
-    assert n_tracks(make_track(spark, samples)) == 2
+def _old_callsign_then_blank(spark, seen_min_before_edge):
+    """DLH1 last seen that long before the old edge, blank from there to the edge,
+    a hole, then BAW2."""
+    seen_s = -seen_min_before_edge * 60
+    samples = _piece(seen_s - 45, 0.0, callsign="DLH1")
+    for t in [*range(seen_s + 300, 0, 300), 0]:
+        samples += _piece(t, 0.0, n=1, callsign="")
+    samples += _piece(191 * 60, _lon(1530.0), callsign="BAW2")
+    return make_track(spark, samples)
+
+
+def test_an_old_callsign_within_the_lookback_still_counts(spark):
+    """It ended well before the hole, and is still evidence against BAW2. Inclusive."""
+    assert n_tracks(_old_callsign_then_blank(spark, 37)) == 2
+    assert n_tracks(_old_callsign_then_blank(spark, 60)) == 2
+
+
+def test_an_old_callsign_past_the_lookback_counts_as_blank(spark):
+    """Otherwise the answer would depend on how far back this day's read reaches."""
+    assert n_tracks(_old_callsign_then_blank(spark, 61)) == 1
+
+
+def test_the_lookback_is_a_parameter(spark):
+    wider = dataclasses.replace(P, link_callsign_lookback_minutes=90.0)
+    assert n_tracks(_old_callsign_then_blank(spark, 61), wider) == 2
 
 
 def test_blank_throughout_is_neutral(spark):
@@ -342,6 +361,7 @@ def test_defaults_are_on_both_config_classes():
         "link_cruise_floor_ft": 25000.0,
         "link_edge_vert_rate_fpm": 500.0,
         "link_callsign_lookahead_minutes": 10.0,
+        "link_callsign_lookback_minutes": 60.0,
         "link_min_implied_speed_kt": 315.0,
         "link_max_implied_speed_kt": 750.0,
         "link_min_speed_ratio": 0.0,

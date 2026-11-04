@@ -4,7 +4,8 @@ Each returns a :class:`~opdi.pipeline.segmentation.base.BreakRule`. No Spark
 session logic lives here -- an arm is a grouping, a predicate and a flag.
 
 **Every domain arm (A5-A7) ORs a legacy gap rule in as a floor.** Two reasons,
-and they are the standing rule for any arm added later:
+and they are the standing rule for any arm added later, with the one exception
+recorded at the end of this docstring:
 
 1. *The ladder measures one change at a time.* Each domain arm is "legacy plus
    one idea", so its delta from A0 is attributable to that idea alone. An arm
@@ -31,8 +32,18 @@ low-altitude rule would make the arm floor itself on the very rule it exists to
 replace, and reason 1 above would forbid measuring the replacement at all. Reason
 2 is still satisfied without it: an airframe with NULL inputs still splits on any
 gap over 30 minutes, so no month-long track can form. See
-:func:`airport_anchored`, which is the only arm claiming to *remove* a legacy
-split and therefore the only one where a full floor conflicts.
+:func:`airport_anchored`, which among A5-A7 is the only arm claiming to *remove* a
+legacy split and therefore the only one there where a full floor conflicts.
+
+**A10 is a conditional exception.** :func:`cruise_linked` builds on A9 rather than
+on legacy, and keeps :func:`legacy_low_altitude_gap` whole, but it makes
+:func:`legacy_general_gap` conditional: a long gap does not split when the two
+edges can be one flight. That is the arm's whole idea, so a full floor would make
+it unmeasurable, as it would for A6. Reason 1 survives, because the arm is A9 plus
+this one change. Reason 2 survives for two reasons of its own: a NULL in any input
+:func:`linkable` requires fails closed, so an airframe with missing inputs splits
+on every long gap, as it would under the floor; and a gap over
+``link_max_gap_minutes`` always breaks, whatever the edges look like.
 """
 
 from typing import Dict, Mapping
@@ -687,7 +698,8 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     Every value is computed on every row, gap or no gap, and carries no verdict:
     the study applies many parameter sets to one cached frame, so nothing here may
     read a threshold the grid varies. The only parameters reached are the callsign
-    lookahead and, through :func:`stable_callsign`, the debounce it shares with A9.
+    lookahead and lookback and, through :func:`stable_callsign`, the debounce it
+    shares with A9.
 
     ``window`` defaults to the engine's :func:`segment_window`. Whichever is used,
     the frame needs the arm contract's ``_ts`` and the ``_alt_ft`` and ``_spd_kt``
@@ -701,6 +713,20 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     seconds = w.orderBy(F.unix_timestamp(F.col("_ts")))
     lookahead = seconds.rangeBetween(0, int(p.link_callsign_lookahead_minutes * 60))
     vert_rate_fpm = F.col("vert_rate") * FPM_PER_MPS
+
+    # The callsign before the hole, and whether it is recent enough to count. The
+    # bound is measured back from the old edge, and `process_day` reads at least
+    # that far behind it, so two days' reads of one hole see the same evidence.
+    # Unbounded, one read could see an old callsign and split where the next day's
+    # read could not and link, and the piece after the hole would be published by
+    # neither day.
+    back = w.rowsBetween(Window.unboundedPreceding, -1)
+    real = _real_callsign()
+    old_edge_ts = F.lag(F.col("_ts")).over(w)
+    last_seen_ts = F.last(F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True).over(back)
+    seen_recently = (
+        F.unix_timestamp(old_edge_ts) - F.unix_timestamp(last_seen_ts)
+    ) / 60.0 <= p.link_callsign_lookback_minutes
 
     return {
         # Computed here rather than read from `gap_minutes()`, which is the
@@ -720,11 +746,11 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
         "vr_before_fpm": F.avg(vert_rate_fpm).over(before),
         "vr_after_fpm": F.avg(vert_rate_fpm).over(after),
         "spd_before_kt": F.avg(speed_kt()).over(before),
-        # No bound looking back: the hole being judged is itself hours long.
-        "cs_before": F.last(stable_callsign(p, w), ignorenulls=True).over(
-            w.rowsBetween(Window.unboundedPreceding, -1)
+        "cs_before": F.when(
+            seen_recently,
+            F.last(stable_callsign(p, w), ignorenulls=True).over(back),
         ),
-        "cs_after": F.first(_real_callsign(), ignorenulls=True).over(lookahead),
+        "cs_after": F.first(real, ignorenulls=True).over(lookahead),
         "icao24": F.col("icao24"),
     }
 

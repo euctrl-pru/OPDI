@@ -99,6 +99,10 @@ def tracks_touching_window_end(df, read_end, margin_seconds=60):
     Counting them is how the lookahead gets checked against reality instead of
     being trusted. A healthy run returns zero; a non-zero count means
     ``lookahead_hours`` is too short for this traffic.
+
+    ``process_day`` widens the margin to ``link_max_gap_minutes`` under
+    ``cruise_linked``. There a hole can straddle ``read_end``, which leaves the last
+    read sample far from the edge while the rest of the track waits beyond it.
     """
     per_track = df.groupBy("track_id").agg(
         f_max("event_time").alias("_track_last_sample")
@@ -120,11 +124,19 @@ def required_lookback_hours(method: str, p) -> int:
     ``cruise_linked`` breaks that: a piece after midnight may belong to a track
     whose old piece ended up to ``link_max_gap_minutes`` earlier. If the read window
     misses the old piece, the day sees a new track and claims it, while the day
-    before claims the same samples inside the linked track, under another id. The
-    extra hour keeps the old edge's samples in the window too.
+    before claims the same samples inside the linked track, under another id.
+
+    ``link_callsign_lookback_minutes`` is added because the decision also reads the
+    callsign up to that long behind the old edge. Every day's read must hold that
+    evidence, or two days decide one hole differently and a piece can be claimed by
+    no day at all.
     """
     if _resolve_segmentation_method(method) == "cruise_linked":
-        return math.ceil(p.link_max_gap_minutes / 60) + 1
+        return max(
+            TrackProcessor.DEFAULT_LOOKBACK_HOURS,
+            math.ceil(p.link_max_gap_minutes / 60)
+            + math.ceil(p.link_callsign_lookback_minutes / 60),
+        )
     return TrackProcessor.DEFAULT_LOOKBACK_HOURS
 
 
@@ -705,22 +717,29 @@ class TrackProcessor:
 
         A track running past midnight is processed by the day it *started*,
         in full -- that is what the lookahead is for.
+
+        The lookback defaults to ``required_lookback_hours``: 3 h, or under
+        ``cruise_linked`` ``max(3, ceil(link_max_gap_minutes / 60) +
+        ceil(link_callsign_lookback_minutes / 60))``, which is 7 h at the defaults.
+
+        Raises:
+            ValueError: ``lookback_hours`` is below that under ``cruise_linked``.
+                Two days could then decide one hole differently, and samples after
+                midnight would be claimed twice or not at all. Other arms decide
+                breaks locally, so their explicit value is taken as given.
         """
         from opdi.pipeline.segmentation import SegmentationParams
 
         method = self.config.segmentation.method
-        required = required_lookback_hours(
-            method, SegmentationParams.from_config(self.config.segmentation)
-        )
+        params = SegmentationParams.from_config(self.config.segmentation)
+        links_across_holes = _resolve_segmentation_method(method) == "cruise_linked"
+        required = required_lookback_hours(method, params)
         lookback = required if lookback_hours is None else lookback_hours
-        if (
-            _resolve_segmentation_method(method) == "cruise_linked"
-            and lookback < required
-        ):
+        if links_across_holes and lookback < required:
             raise ValueError(
                 f"lookback_hours={lookback} under {method!r} is under the {required} "
-                f"hours a linked track can reach back: samples after midnight would "
-                f"be claimed by two days, under two ids"
+                f"hours a linked track can reach back: samples after midnight could "
+                f"be claimed by two days or by none"
             )
         lookahead = (
             self.DEFAULT_LOOKAHEAD_HOURS if lookahead_hours is None else lookahead_hours
@@ -752,12 +771,15 @@ class TrackProcessor:
         written = self.storage.read_table("osn_tracks").filter(
             col("dof") == lit(day)
         )
-        n_truncated = tracks_touching_window_end(written, read_end).count()
+        margin_seconds = params.link_max_gap_minutes * 60 if links_across_holes else 60
+        n_truncated = tracks_touching_window_end(
+            written, read_end, margin_seconds=margin_seconds
+        ).count()
         if n_truncated:
             print(
-                f"  WARNING: {n_truncated} track(s) starting on {day} were "
-                f"still transmitting at the end of the read window "
-                f"({read_end:{fmt}}). Their tails are missing and no other "
+                f"  WARNING: {n_truncated} track(s) starting on {day} ended within "
+                f"{margin_seconds:.0f} s of the end of the read window "
+                f"({read_end:{fmt}}). Their tails may be missing and no other "
                 f"day will claim them. Re-run this day with a larger "
                 f"lookahead_hours (currently {lookahead})."
             )
