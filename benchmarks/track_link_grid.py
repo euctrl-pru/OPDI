@@ -208,6 +208,8 @@ GRID_BASE = {
     "link_cruise_floor_ft": 25000.0,
     "link_min_implied_speed_kt": 315.0,
     "link_max_gap_minutes": 360.0,
+    "link_old_edge_climb": False,
+    "link_new_edge_descent": False,
 }
 
 #: Settings the cuts and features are made with, once per run, so they cannot vary

@@ -46,6 +46,7 @@ P = SegmentationParams(
     link_cruise_floor_ft=25000.0,
     link_min_implied_speed_kt=315.0,
     link_max_gap_minutes=360.0,
+    link_old_edge_climb=False,
 )
 SHIPPED = SegmentationParams()
 _BOTH_DIRECTIONS = {"link_old_edge_climb": True, "link_new_edge_descent": True}
@@ -525,12 +526,26 @@ CLIMBING = {"baro_altitude": FL200, "vert_rate": 1500.0 / FPM_PER_MPS}
 DESCENDING = {"baro_altitude": FL200, "vert_rate": -1500.0 / FPM_PER_MPS}
 
 
-def test_directional_edges_are_off_by_default():
+def test_directional_edges_default_to_climb_on_descent_off():
     for cls in (SegmentationParams, SegmentationConfig):
         defaults = {f.name: f.default for f in dataclasses.fields(cls)}
-        assert defaults["link_old_edge_climb"] is False, cls.__name__
+        assert defaults["link_old_edge_climb"] is True, cls.__name__
         assert defaults["link_new_edge_descent"] is False, cls.__name__
         assert "link_directional_edges" not in defaults, cls.__name__
+
+
+def test_a_climbing_old_edge_links_by_default(spark):
+    df = _hole(spark, before=CLIMBING)
+    assert n_tracks(df, dataclasses.replace(SHIPPED, link_cruise_floor_ft=25000.0,
+                                            link_min_implied_speed_kt=315.0,
+                                            link_max_gap_minutes=360.0)) == 1
+
+
+def test_a_descending_new_edge_splits_by_default(spark):
+    df = _hole(spark, after=DESCENDING)
+    assert n_tracks(df, dataclasses.replace(SHIPPED, link_cruise_floor_ft=25000.0,
+                                            link_min_implied_speed_kt=315.0,
+                                            link_max_gap_minutes=360.0)) == 2
 
 
 def test_a_flight_reappearing_on_approach_links_only_with_direction_on(spark):

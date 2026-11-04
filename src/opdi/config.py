@@ -1722,18 +1722,21 @@ class SegmentationConfig:
     link_vfast_kt: float = 650.0
     """Fastest plausible ground speed, for ``link_min_stop_minutes`` (knots)."""
 
-    link_old_edge_climb: bool = False
+    link_old_edge_climb: bool = True
     """Whether an old edge below ``link_cruise_floor_ft`` can still link when it is
     climbing past ``link_edge_vert_rate_fpm``. A NULL vertical rate does not pass.
 
-    Set apart from ``link_new_edge_descent`` because the study decides them apart."""
+    On by default: an aircraft lost while still climbing is outbound, so the next
+    sighting is the same flight. Set apart from ``link_new_edge_descent`` because the
+    study decides them apart."""
 
     link_new_edge_descent: bool = False
     """Whether a new edge below ``link_cruise_floor_ft`` can still link when it is
     descending past ``link_edge_vert_rate_fpm``. A NULL vertical rate does not pass, and
     a new edge the low-altitude gap breaks at splits whatever this says.
 
-    Set apart from ``link_old_edge_climb`` because the study decides them apart."""
+    Off by default: a descending new edge failed the study's limit, so a flight first
+    seen on approach stays a new track. Set apart from ``link_old_edge_climb`` because the study decides them apart."""
 
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""

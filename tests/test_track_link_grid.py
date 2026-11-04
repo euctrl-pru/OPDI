@@ -80,6 +80,7 @@ P = SegmentationParams(
     link_cruise_floor_ft=25000.0,
     link_min_implied_speed_kt=315.0,
     link_max_gap_minutes=360.0,
+    link_old_edge_climb=False,
 )
 CRUISE_M = 11000.0
 LOW_M = 5000.0 / FT_PER_M
@@ -2279,6 +2280,8 @@ def test_the_grid_base_does_not_follow_the_shipped_defaults():
         "link_cruise_floor_ft": 25000.0,
         "link_min_implied_speed_kt": 315.0,
         "link_max_gap_minutes": 360.0,
+        "link_old_edge_climb": False,
+        "link_new_edge_descent": False,
     }
     [only] = grid_from_json('{"link_min_speed_ratio": [0.0]}')
     assert (only.link_cruise_floor_ft, only.link_max_gap_minutes) == (25000.0, 360.0)

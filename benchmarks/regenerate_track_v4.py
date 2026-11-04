@@ -21,7 +21,8 @@ staleness check reads the manifest beside the file):
 
   * ``final_grid`` -- the final cruise-link grid over 2026-06-14 and
     2025-06-14: implied speed {315, 400} kt, speed ratio {0.0, 0.85}, minimum
-    stop {0, 20, 35} min, maximum gap {360, 480, 600} min, cruise floor 18000 ft.
+    stop {0, 20, 35} min, maximum gap {360, 480, 600} min, cruise floor 18000 ft,
+    with the shipped edges: ``link_old_edge_climb`` on, ``link_new_edge_descent`` off.
   * ``final_edges`` -- the one point 400 kt / 0.0 / 0 / 600 min / 18000 ft with
     ``link_old_edge_climb`` and ``link_new_edge_descent`` each off and on, four points.
   * ``stage2`` -- the chosen point run through the real pipeline and scored:
@@ -210,6 +211,8 @@ def jobs() -> list:
                 "link_min_stop_minutes": [0.0, 20.0, 35.0],
                 "link_max_gap_minutes": [360, 480, 600],
                 "link_cruise_floor_ft": [18000],
+                "link_old_edge_climb": [True],
+                "link_new_edge_descent": [False],
             })],
             outputs={n: n for n in _grid_outputs(DAYS) + _reasons_outputs(DAYS)},
             optional=_reasons_outputs(DAYS),

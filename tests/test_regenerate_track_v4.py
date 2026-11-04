@@ -55,6 +55,8 @@ def test_final_grid_arguments():
     assert grid["link_min_speed_ratio"] == [0.0, 0.85]
     assert grid["link_min_stop_minutes"] == [0.0, 20.0, 35.0]
     assert grid["link_max_gap_minutes"] == [360, 480, 600]
+    assert grid["link_old_edge_climb"] == [True]
+    assert grid["link_new_edge_descent"] == [False]
     assert args[args.index("--days") + 1:args.index("--grid-json")] == [
         "2026-06-14", "2025-06-14"]
 

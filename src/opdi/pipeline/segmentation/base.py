@@ -144,11 +144,13 @@ class SegmentationParams:
     #: ``0.0`` turns this test off.
     link_min_stop_minutes: float = 0.0
     link_vfast_kt: float = 650.0
-    #: Let an old edge below the floor pass when it is climbing. Off keeps the floor as
-    #: the only test there. The study decides this apart from the new edge's setting.
-    link_old_edge_climb: bool = False
-    #: Let a new edge below the floor pass when it is descending. Off keeps the floor as
-    #: the only test there. The study decides this apart from the old edge's setting.
+    #: Let an old edge below the floor pass when it is climbing. On by default: an
+    #: aircraft lost while still climbing is outbound. Off keeps the floor as the only
+    #: test there. The study decides this apart from the new edge's setting.
+    link_old_edge_climb: bool = True
+    #: Let a new edge below the floor pass when it is descending. Off by default: a
+    #: descending new edge failed the study's limit. On would let the vertical rate
+    #: through where the floor alone stops it. Decided apart from the old edge's setting.
     link_new_edge_descent: bool = False
     # A5-A7 knobs; unused by the gap family.
     ground_dwell_minutes: float = 5.0
