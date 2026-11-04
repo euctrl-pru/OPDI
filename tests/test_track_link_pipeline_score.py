@@ -5,7 +5,9 @@ distance over a hole is known exactly from its length.
 """
 import datetime as dt
 import math
+from dataclasses import replace
 
+import events_gt
 import pandas as pd
 import pytest
 from conftest import _EPOCH, make_track
@@ -354,6 +356,39 @@ def test_the_level_off_family_is_reported_on_its_own_row(spark):
     assert _family(rows, "level")["segments_across_a_hole"] == 0
 
 
+def test_the_any_row_counts_a_track_damaged_in_either_family_once(spark):
+    holes = _holes(
+        spark,
+        ("T1", "abc123", 2 * HOUR, 4 * HOUR),
+        ("T2", "abc123", 2 * HOUR, 4 * HOUR),
+        ("T3", "abc123", 2 * HOUR, 4 * HOUR),
+        ("T4", "abc123", 2 * HOUR, 4 * HOUR),
+    )
+    events = _events(
+        spark,
+        # T1 in one family, T2 in the other, T3 in both, T4 in neither.
+        ("T1", "level-start", HOUR),
+        ("T1", "level-end", 5 * HOUR),
+        ("T2", "level-off-climb-start", HOUR),
+        ("T2", "level-off-climb-end", 5 * HOUR),
+        ("T3", "level-start", HOUR),
+        ("T3", "level-end", 5 * HOUR),
+        ("T3", "level-off-climb-start", HOUR),
+        ("T3", "level-off-climb-end", 5 * HOUR),
+    )
+    rows = s.level_across_holes(events, holes)
+
+    assert _family(rows, "level")["tracks_with_a_segment_across_a_hole"] == 2
+    assert _family(rows, "level_off")["tracks_with_a_segment_across_a_hole"] == 2
+    row = _family(rows, "any")
+    assert row["scored_holes"] == 4
+    assert row["scored_tracks"] == 4
+    assert row["segments_across_a_hole"] == 4
+    assert row["holes_inside_a_segment"] == 3
+    assert row["tracks_with_a_segment_across_a_hole"] == 3
+    assert row["share_of_tracks"] == 0.75
+
+
 def test_with_no_holes_the_share_is_empty_rather_than_a_division_error(spark):
     holes = _holes(spark, ("T1", "abc123", HOUR, 2 * HOUR)).limit(0)
     events = _events(spark, ("T1", "level-start", HOUR))
@@ -447,14 +482,51 @@ def test_the_stored_distance_is_checked_against_the_recomputed_one(spark):
         "milestone_id string, type string, value double",
     )
     good = s.stored_distance_check(tracks, events, measurements)
-    assert good == {"tracks_checked_against_stored_distance": 1, "tracks_off_stored_distance_by_over_1_nm": 0}
+    assert good == {
+        "scored_tracks": 1,
+        "tracks_checked_against_stored_distance": 1,
+        "tracks_off_stored_distance_by_over_1_nm": 0,
+        "stored_distance_verdict": "agrees",
+    }
 
     wrong = spark.createDataFrame(
         [(event_id, "Distance flown (NM)", flown - 500.0)],
         "milestone_id string, type string, value double",
     )
     bad = s.stored_distance_check(tracks, events, wrong)
-    assert bad == {"tracks_checked_against_stored_distance": 1, "tracks_off_stored_distance_by_over_1_nm": 1}
+    assert bad["tracks_off_stored_distance_by_over_1_nm"] == 1
+    assert bad["stored_distance_verdict"] == "differs"
+
+
+def test_no_track_checked_against_the_stored_distance_does_not_read_as_clean(spark):
+    tracks = make_track(spark, _cruise([(0, 600), (2 * HOUR, 2 * HOUR + 600)]))
+    events = _events(spark, ("T1", "first_seen", 0))
+    nothing = spark.createDataFrame([], "milestone_id string, type string, value double")
+
+    got = s.stored_distance_check(tracks, events, nothing)
+
+    assert got == {
+        "scored_tracks": 1,
+        "tracks_checked_against_stored_distance": 0,
+        "tracks_off_stored_distance_by_over_1_nm": None,
+        "stored_distance_verdict": "not_checked",
+    }
+
+
+def test_some_tracks_unchecked_is_said_even_when_those_checked_agree(spark):
+    tracks = make_track(spark, _cruise([(0, 600)])).union(
+        make_track(spark, _cruise([(0, 600)], track_id="T2"))
+    )
+    flown = 600 / 3600.0 * CRUISE_KT
+    events = _events(spark, ("T1", "last_seen", 600))
+    stored = spark.createDataFrame(
+        [("T1|last_seen|600", "Distance flown (NM)", flown)],
+        "milestone_id string, type string, value double",
+    )
+    got = s.stored_distance_check(tracks, events, stored)
+    assert got["scored_tracks"] == 2
+    assert got["tracks_checked_against_stored_distance"] == 1
+    assert got["stored_distance_verdict"] == "some_tracks_not_checked"
 
 
 # --- nothing else moved -----------------------------------------------------
@@ -541,6 +613,89 @@ def test_a_hole_that_can_be_one_flight_on_another_airframe_excuses_nothing(spark
     assert got["passed"] is False
 
 
+def _one_hole(gap_end=2 * HOUR):
+    return _cruise([(0, 40 * 60), (gap_end, gap_end + 40 * 60)])
+
+
+def test_the_arm_agrees_with_the_rule_it_ran(spark):
+    samples = make_track(spark, _one_hole())
+    arm = assign_track_id(samples, cruise_linked(), P)
+
+    got = s.partition_row(samples, arm, P, "2024-06-01")
+
+    assert got["arm_tracks"] == 1
+    assert got["resegmented_tracks"] == 1
+    assert got["arm_tracks_not_resegmented"] == 0
+    assert got["resegmented_tracks_not_in_arm"] == 0
+    assert got["passed"] is True
+
+
+def test_a_flag_differing_from_the_arms_settings_fails_the_check(spark):
+    # The arm linked an 80 min hole. Told the limit was 60 min, the two rules agree with
+    # each other perfectly, and only the arm's own table can show which rule it ran.
+    samples = make_track(spark, _one_hole())
+    arm = assign_track_id(samples, cruise_linked(), P)
+    flag = replace(P, link_max_gap_minutes=60.0)
+
+    got = s.partition_row(samples, arm, flag, "2024-06-01")
+
+    assert got["added_boundaries"] == 0
+    assert got["removed_elsewhere"] == 0
+    assert got["arm_tracks_not_resegmented"] == 1
+    assert got["resegmented_tracks_not_in_arm"] == 2
+    assert got["passed"] is False
+
+
+def test_an_arm_stricter_than_the_flag_fails_the_check_too(spark):
+    samples = make_track(spark, _one_hole())
+    arm = assign_track_id(samples, cruise_linked(), replace(P, link_max_gap_minutes=60.0))
+
+    got = s.partition_row(samples, arm, P, "2024-06-01")
+
+    assert got["arm_tracks_not_resegmented"] == 2
+    assert got["resegmented_tracks_not_in_arm"] == 1
+    assert got["passed"] is False
+
+
+def test_tracks_differing_only_after_midnight_are_seen(spark):
+    # Both start on the day, so their starts agree. Only the end shows the difference.
+    samples = make_track(spark, _one_hole())
+    linked = assign_track_id(samples, cruise_linked(), P)
+    cut_short = linked.filter(F.col("event_time") < F.lit(_at(2 * HOUR)))
+
+    got = s.arm_agreement(cut_short, linked, "2024-06-01")
+
+    assert got["arm_tracks_not_resegmented"] == 1
+    assert got["resegmented_tracks_not_in_arm"] == 1
+
+
+def test_only_tracks_starting_on_the_day_are_compared(spark):
+    # Starts on 2024-06-02. The arm built 2024-06-01 and could never have claimed it.
+    samples = make_track(spark, _cruise([(0, 600)]) + _cruise([(24 * HOUR, 24 * HOUR + 600)]))
+    resegmented = assign_track_id(samples, debounced(), P)
+    arm = resegmented.filter(F.col("event_time") < F.lit(_at(HOUR)))
+
+    got = s.arm_agreement(arm, resegmented, "2024-06-01")
+
+    assert got["arm_tracks"] == 1
+    assert got["resegmented_tracks"] == 1
+    assert got["arm_tracks_not_resegmented"] == 0
+    assert got["resegmented_tracks_not_in_arm"] == 0
+
+
+def test_the_input_is_cut_to_the_window_the_arm_read(spark):
+    samples = make_track(spark, _cruise([(0, 600)]))
+    # _EPOCH is noon on 2024-06-01. The lookback at the default link settings is 7 h.
+    kept = s.arm_read_window(samples, "2024-06-01", P)
+    assert kept.count() == samples.count()
+    assert s.arm_read_window(samples, "2024-06-03", P).count() == 0
+    assert s.arm_read_window(samples, "2024-05-29", P).count() == 0
+    # Noon is 12 h before the next day: outside its 7 h lookback, inside a 13 h one.
+    wider = replace(P, link_max_gap_minutes=720.0)
+    assert s.arm_read_window(samples, "2024-06-02", P).count() == 0
+    assert s.arm_read_window(samples, "2024-06-02", wider).count() == samples.count()
+
+
 def test_movements_within_a_tenth_of_a_percent_pass():
     assert s.movement_row("all", 10000, 10000, 9990)["passed"] is True
     assert s.movement_row("all", 10000, 10000, 9989)["passed"] is False
@@ -605,6 +760,83 @@ def test_movements_are_counted_for_the_scored_flights_only(spark):
     assert by_name["all"]["cruise_linked_matched"] == 1
     assert by_name["all"]["passed"] is False
     assert by_name["ATOT"]["passed"] is True
+
+
+def _movement_truth(spark, *rows):
+    """``(milestone, off_block_s, movement_s)`` of airframe abc123, callsign DLH1."""
+    return spark.createDataFrame(
+        [("abc123", "DLH1", dt.date(2024, 6, 1), _at(aobt), m, _at(t)) for m, aobt, t in rows],
+        "icao24 string, callsign string, day date, gt_aobt timestamp, milestone string, "
+        "gt_time timestamp",
+    )
+
+
+def _detections(spark, *rows):
+    """``(milestone, seconds)`` detections of airframe abc123, callsign DLH1."""
+    return spark.createDataFrame(
+        [("abc123", "DLH1", dt.date(2024, 6, 1), m, _at(t)) for m, t in rows],
+        "icao24 string, callsign string, day date, milestone string, event_time timestamp",
+    )
+
+
+def test_a_lost_second_leg_of_one_callsign_is_seen(spark):
+    # Keyed without off-block, these two legs are one truth row and either detection
+    # answers for both, so the loss of a leg cannot show.
+    truth = _movement_truth(spark, ("ATOT", 0, 600), ("ATOT", 6 * HOUR, 6 * HOUR + 600))
+    both = _detections(spark, ("ATOT", 610), ("ATOT", 6 * HOUR + 610))
+    first_only = _detections(spark, ("ATOT", 610))
+
+    row = next(r for r in s.movement_rows(truth, both, first_only) if r["movement"] == "all")
+
+    assert row["apdf_movements"] == 2
+    assert row["debounced_matched"] == 2
+    assert row["cruise_linked_matched"] == 1
+    assert row["passed"] is False
+
+
+def test_a_detection_hours_from_the_movement_is_not_a_match(spark):
+    truth = _movement_truth(spark, ("ATOT", 0, 600), ("ALDT", 0, 2 * HOUR))
+    near = _detections(spark, ("ATOT", 610), ("ALDT", 2 * HOUR + 10))
+    far = _detections(spark, ("ATOT", 610), ("ALDT", 8 * HOUR))
+
+    by_name = {r["movement"]: r for r in s.movement_rows(truth, near, far)}
+
+    assert by_name["ALDT"]["debounced_matched"] == 1
+    assert by_name["ALDT"]["cruise_linked_matched"] == 0
+    assert by_name["ALDT"]["passed"] is False
+    assert by_name["all"]["passed"] is False
+
+
+def test_the_match_limit_is_inclusive_either_side_of_the_movement(spark):
+    limit = int(s.MOVEMENT_MATCH_MINUTES * 60)
+    truth = _movement_truth(spark, ("ATOT", 0, 2 * HOUR), ("ALDT", 0, 4 * HOUR))
+    at_limit = _detections(spark, ("ATOT", 2 * HOUR - limit), ("ALDT", 4 * HOUR + limit))
+    beyond = _detections(spark, ("ATOT", 2 * HOUR - limit - 1), ("ALDT", 4 * HOUR + limit))
+
+    by_name = {r["movement"]: r for r in s.movement_rows(truth, at_limit, beyond)}
+
+    assert by_name["ATOT"]["debounced_matched"] == 1
+    assert by_name["ATOT"]["cruise_linked_matched"] == 0
+    assert by_name["ALDT"]["cruise_linked_matched"] == 1
+
+
+def test_several_detections_of_one_movement_count_once(spark):
+    truth = _movement_truth(spark, ("ATOT", 0, 600))
+    twice = _detections(spark, ("ATOT", 610), ("ATOT", 620))
+    row = next(r for r in s.movement_rows(truth, twice, twice) if r["movement"] == "ATOT")
+    assert row["apdf_movements"] == 1
+    assert row["debounced_matched"] == 1
+
+
+def test_provenance_names_every_truth_source_the_job_reads():
+    tables = s._input_tables("202606")
+    base = events_gt.REFERENCE_BASE
+    assert f"{base}/flights_202606.parquet" in tables
+    # Either can be read, as load_apdf falls back from one to the other.
+    assert f"{base}/apdf_full_202606.parquet" in tables
+    assert f"{base}/apdf_202606.parquet" in tables
+    assert any(t.endswith("/oa_airports") for t in tables)
+    assert any(t.endswith("/input/osn_statevectors_v2") for t in tables)
 
 
 def test_a_join_that_matches_nothing_is_refused_rather_than_reported(spark):
@@ -725,6 +957,10 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
     assert list(pd.DataFrame(written["link_both_ends.csv"])["cruise_linked_both_right"]) == [1, 1]
     assert written["link_partition_check.csv"][0]["passed"] is True
     assert written["link_partition_check.csv"][0]["removed_at_a_linked_hole"] == 1
+    assert written["link_partition_check.csv"][0]["arm_tracks"] == 1
+    assert written["link_partition_check.csv"][0]["arm_tracks_not_resegmented"] == 0
+    assert list(written)[0] == "link_partition_check.csv"
+    assert _family(written["link_level_across_hole.csv"], "any")["share_of_tracks"] == 1.0
     level = _family(written["link_level_across_hole.csv"], "level")
     assert level["segments_across_a_hole"] == 1
     assert level["share_of_tracks"] == 1.0
@@ -732,7 +968,9 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
     assert distance["holes_compared"] == 1
     assert abs(distance["median_difference_nm"]) < 1e-3
     # The stored distance in this fixture is zero, and the recomputed one is not.
+    assert distance["scored_tracks"] == 1
     assert distance["tracks_off_stored_distance_by_over_1_nm"] == 1
+    assert distance["stored_distance_verdict"] == "differs"
     assert {r["movement"] for r in written["link_movements.csv"]} == {"ATOT", "ALDT", "all"}
     assert {r["type"] for r in written["link_events.csv"]} == {"level-start", "level-end", "last_seen"}
 

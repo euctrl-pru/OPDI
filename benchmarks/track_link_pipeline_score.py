@@ -29,7 +29,8 @@ that do not are counted in the level table, not hidden.
     start and the first at or after it is an end. A start somewhere before and an end
     somewhere after is not enough, as that holds for nearly any track with two
     segments. ``level-off-*`` is the same question for the other level family and has
-    its own row. The share of tracks is what the paper's withdrawal condition reads.
+    its own row, and ``any`` counts a track damaged in either once. The share of tracks
+    on the ``any`` row is what the paper's withdrawal condition reads.
 
 ``link_distance_across_hole.csv``
     Whether ``cumulative_distance_nm`` carries across a hole as the great circle
@@ -42,13 +43,22 @@ that do not are counted in the level table, not hidden.
     with one shows as a large difference and is flagged.
 
 ``link_partition_check.csv``
-    Nothing else moved. The shared state vectors are segmented under both rules. Every
-    A9 boundary missing from A10 must be a hole the rule links, and A10 must add none.
+    Nothing else moved. The shared state vectors, cut to the window the A10 arm read,
+    are segmented under both rules. Every A9 boundary missing from A10 must be a hole the
+    rule links, and A10 must add none. Those two rules are applied here with the
+    parameters given, so they alone could pass for a rule the arm never ran. So the arm's
+    own tracks of the day must also be the re-segmented ones, by first and last sample,
+    in both directions, and ``passed`` needs that too.
 
 ``link_movements.csv``
-    APDF movements (ATOT, ALDT) of the scored flights with a detection in each arm,
-    through the existing path: ``events_gt`` truth, ``event_bench.detected_events`` and
-    ``events_score.align``. The ``all`` row is the gate: no more than 0.1% lower.
+    APDF movements (ATOT, ALDT) of the scored flights with a detection in each arm within
+    ``MOVEMENT_MATCH_MINUTES``, from ``events_gt`` truth and
+    ``event_bench.detected_events``. The ``all`` row is the gate: no more than 0.1% lower.
+    Scored per truth row with off-block in the key, and not through
+    ``events_score.align``, which keeps one row per airframe, callsign, day and milestone.
+    That makes two legs of one callsign one row, which either leg's detection answers at
+    any time of day, and about 3% of the flights inside 2026-06-14 are such extra legs,
+    thirty times the limit.
 
 Verdicts on the withdrawal conditions are the reader's: this writes the numbers. A
 failed check is a result, so it does not stop the run.
@@ -58,11 +68,17 @@ failed check is a result, so it does not stop the run.
     .venv310/bin/python -u benchmarks/track_link_pipeline_score.py \\
         --day 2026-06-14 --results-dir $OPDI_PAPER_DIR/data
 
-Pass the ``--link-params-json`` the arm was run with, if any: the partition check
-applies the rule again and must apply the same one.
+Pass the ``--link-params-json`` the arm was run with, if any. The partition check applies
+the rule again, and fails if the arm's tracks show it was run with something else.
+
+``--truth`` is read on the driver, so it decides the flight-list truth and which flights
+are scored. It does not reach the APDF bridge: executors cannot read the driver's files,
+so ``events_gt`` bridges from its S3 mirror, and a flight in ``--truth`` with no row in
+that mirror has no movement to count. Provenance names both.
 """
 
 import argparse
+import datetime as dt
 import json
 import sys
 from pathlib import Path
@@ -77,6 +93,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
 import adsc_flight_list_truth as flight_list  # noqa: E402
+import events_gt  # noqa: E402
 import events_score  # noqa: E402
 import provenance  # noqa: E402
 from run_track_link_day import (  # noqa: E402
@@ -98,6 +115,7 @@ from opdi.pipeline.segmentation.methods import (  # noqa: E402
     link_feature_columns,
     linkable,
 )
+from opdi.pipeline.tracks import TrackProcessor, required_lookback_hours  # noqa: E402
 
 OUTPUTS = (
     "link_flight_list.csv",
@@ -111,6 +129,13 @@ OUTPUTS = (
 
 #: How far the movement count of A10 may fall below A9's. The spec's limit.
 MOVEMENT_FALL_LIMIT = 0.001
+
+#: How far from the truth movement a detection may be and still be that movement, in
+#: minutes, either side. A detection hours away belongs to another leg.
+MOVEMENT_MATCH_MINUTES = 30.0
+
+#: One truth movement. Off-block keeps two legs of one callsign apart.
+_MOVEMENT_KEY = ["icao24", "callsign", "gt_aobt", "milestone"]
 
 #: The milestones that are movements. Block times are not: APDF counts a movement once.
 MOVEMENTS = ("ATOT", "ALDT")
@@ -150,11 +175,21 @@ _NOTES = (
 )
 
 
-def _input_tables() -> List[str]:
-    """Every arm table the job reads. A prefix over both would hide which one moved."""
+def _input_tables(month: str) -> List[str]:
+    """Every table the job reads. A prefix over several would hide which one moved.
+
+    Both APDF names are listed because ``load_apdf`` falls back from one to the other, so
+    the one with no objects recorded is the one that was not read.
+    """
     per_arm = ("osn_tracks_clean", "opdi_flight_list", "opdi_flight_events", "opdi_measurements")
-    return [arm_path(ARMS[0], "osn_statevectors_v2")] + [
-        arm_path(arm, table) for arm in ARMS for table in per_arm
+    base = events_gt.REFERENCE_BASE
+    return [
+        arm_path(ARMS[0], "osn_statevectors_v2"),
+        *[arm_path(arm, table) for arm in ARMS for table in per_arm],
+        f"{REFERENCE_WAREHOUSE}/oa_airports",
+        f"{base}/flights_{month}.parquet",
+        f"{base}/apdf_full_{month}.parquet",
+        f"{base}/apdf_{month}.parquet",
     ]
 
 
@@ -334,7 +369,7 @@ def compare_events(
 
 
 def level_across_holes(events: DataFrame, holes: DataFrame) -> List[Dict]:
-    """One row per level family: how many segments span a hole, and on how many tracks.
+    """A row per level family and an ``any`` row: segments spanning a hole, and on what tracks.
 
     Two events can share an instant, as a one-sample segment does, and then the segment
     closes on the old edge and opens on the new one rather than spanning. Ordering on
@@ -366,9 +401,16 @@ def level_across_holes(events: DataFrame, holes: DataFrame) -> List[Dict]:
         .collect()
     )
 
+    def hole(r) -> tuple:
+        return r["track_id"], r["t_old_edge"], r["t_new_edge"]
+
     rows = []
-    for name in ("level", "level_off"):
-        scored = [r for r in per_hole if r["family"] == name]
+    for name, members in (
+        ("level", ("level",)),
+        ("level_off", ("level_off",)),
+        ("any", ("level", "level_off")),
+    ):
+        scored = [r for r in per_hole if r["family"] in members]
         spanned = [
             r
             for r in scored
@@ -382,15 +424,15 @@ def level_across_holes(events: DataFrame, holes: DataFrame) -> List[Dict]:
         rows.append(
             {
                 "family": name,
-                "scored_holes": len(scored),
+                "scored_holes": len({hole(r) for r in scored}),
                 "scored_tracks": len(tracks),
                 "segments_across_a_hole": len(
                     {
-                        (r["track_id"], r["before"]["event_time"], r["after"]["event_time"])
+                        (r["family"], r["track_id"], r["before"]["event_time"], r["after"]["event_time"])
                         for r in spanned
                     }
                 ),
-                "holes_inside_a_segment": len(spanned),
+                "holes_inside_a_segment": len({hole(r) for r in spanned}),
                 "tracks_with_a_segment_across_a_hole": len(damaged),
                 "share_of_tracks": len(damaged) / len(tracks) if tracks else None,
             }
@@ -460,13 +502,12 @@ def summarise_distance(per_hole: pd.DataFrame, holes_scored: int) -> Dict:
     }
 
 
-def stored_distance_check(
-    tracks: DataFrame, events: DataFrame, measurements: DataFrame
-) -> Dict[str, int]:
+def stored_distance_check(tracks: DataFrame, events: DataFrame, measurements: DataFrame) -> Dict:
     """Does the rerun reach the value step 04 stored at each track's ``last_seen``?
 
     This is what ties :func:`distance_across_holes` to the published measurement, which
-    has no value at the hole itself.
+    has no value at the hole itself. No track checked is not a clean result, so the off
+    count is then empty, and ``stored_distance_verdict`` says which case this is.
     """
     rerun = (
         add_distance_measure(tracks.select("track_id", "event_time", "lat", "lon"))
@@ -489,9 +530,21 @@ def stored_distance_check(
         F.count(F.lit(1)).alias("n"),
         F.coalesce(F.sum(F.when(off, 1).otherwise(0)), F.lit(0)).alias("off"),
     ).first()
+    scored_tracks = tracks.select("track_id").distinct().count()
+    checked = row["n"]
+    if checked == 0:
+        verdict = "not_checked"
+    elif row["off"] > 0:
+        verdict = "differs"
+    elif checked < scored_tracks:
+        verdict = "some_tracks_not_checked"
+    else:
+        verdict = "agrees"
     return {
-        "tracks_checked_against_stored_distance": row["n"],
-        "tracks_off_stored_distance_by_over_1_nm": row["off"],
+        "scored_tracks": scored_tracks,
+        "tracks_checked_against_stored_distance": checked,
+        "tracks_off_stored_distance_by_over_1_nm": row["off"] if checked else None,
+        "stored_distance_verdict": verdict,
     }
 
 
@@ -543,6 +596,58 @@ def partition_check(
     }
 
 
+def arm_read_window(samples: DataFrame, day: str, p: SegmentationParams) -> DataFrame:
+    """*samples* cut to what step 02 reads for *day* under ``cruise_linked``.
+
+    See ``TrackProcessor.process_day``. A sample outside it could end a track later than
+    the arm could have seen, and read as a disagreement.
+    """
+    start = dt.datetime.fromisoformat(day)
+    read_start = start - dt.timedelta(hours=required_lookback_hours("cruise_linked", p))
+    read_end = start + dt.timedelta(days=1, hours=TrackProcessor.DEFAULT_LOOKAHEAD_HOURS)
+    return samples.filter(
+        (F.col("event_time") >= F.to_timestamp(F.lit(read_start.isoformat(" "))))
+        & (F.col("event_time") < F.to_timestamp(F.lit(read_end.isoformat(" "))))
+    )
+
+
+def _track_extents(tracks: DataFrame) -> DataFrame:
+    """``icao24`` and the first and last sample of each track."""
+    return tracks.groupBy(F.lower("icao24").alias("icao24"), "track_id").agg(
+        F.min(F.to_timestamp("event_time")).alias("t_first"),
+        F.max(F.to_timestamp("event_time")).alias("t_last"),
+    )
+
+
+def arm_agreement(arm_tracks: DataFrame, resegmented: DataFrame, day: str) -> Dict[str, int]:
+    """Whether an arm's own tracks of *day* are what the rule gives now, in both directions.
+
+    Ids are not compared, as a track is known by its airframe and extent. The last sample
+    is there because a hole after midnight changes no start on the day.
+    """
+    key = ["icao24", "t_first", "t_last"]
+    on_the_day = F.to_date("t_first") == F.lit(day).cast("date")
+    arm = _track_extents(arm_tracks).filter(on_the_day).select(*key).cache()
+    rule = _track_extents(resegmented).filter(on_the_day).select(*key).cache()
+    return {
+        "arm_tracks": arm.count(),
+        "resegmented_tracks": rule.count(),
+        "arm_tracks_not_resegmented": arm.join(rule, on=key, how="left_anti").count(),
+        "resegmented_tracks_not_in_arm": rule.join(arm, on=key, how="left_anti").count(),
+    }
+
+
+def partition_row(
+    samples: DataFrame, arm_tracks: DataFrame, p: SegmentationParams, day: str
+) -> Dict:
+    """The table's row: the two rules on *samples*, and the A10 arm against its rule."""
+    linked = assign_track_id(samples, cruise_linked(), p).cache()
+    rules = partition_check(samples, assign_track_id(samples, debounced(), p), linked, p)
+    arm = arm_agreement(arm_tracks, linked, day)
+    agrees = arm["arm_tracks_not_resegmented"] == 0 and arm["resegmented_tracks_not_in_arm"] == 0
+    return {**rules, **arm, "passed": rules["passed"] and agrees}
+
+
 def movement_row(
     movement: str, apdf_movements: int, split_matched: int, linked_matched: int
 ) -> Dict:
@@ -563,7 +668,7 @@ def scored_movements(spark, milestones: DataFrame, scored: pd.DataFrame) -> Data
 
     Matched as ``events_gt.bridge`` carries a flight: airframe, ICAO callsign and
     off-block, the last of which keeps two legs of one callsign apart. A flight with no
-    callsign cannot reach ``events_score.align`` and is left out here.
+    callsign has nothing to match a detection on, and is left out here.
     """
     named = scored.dropna(subset=["callsign"])
     flights = _with_parsed_times(
@@ -578,11 +683,39 @@ def scored_movements(spark, milestones: DataFrame, scored: pd.DataFrame) -> Data
     )
 
 
+def matched_movements(truth: DataFrame, detected: DataFrame) -> DataFrame:
+    """``milestone``, ``n_truth`` and ``n_detected``, counted per truth row.
+
+    A truth row is matched by any detection of its airframe, callsign and milestone within
+    ``MOVEMENT_MATCH_MINUTES``. The time decides, so the day of the track is not needed.
+    """
+    rows = truth.select(*_MOVEMENT_KEY, "gt_time").dropDuplicates(_MOVEMENT_KEY)
+    apart_s = F.abs(F.col("event_time").cast("double") - F.col("gt_time").cast("double"))
+    hits = (
+        rows.join(
+            detected.select("icao24", "callsign", "milestone", "event_time"),
+            on=["icao24", "callsign", "milestone"],
+        )
+        .filter(apart_s <= MOVEMENT_MATCH_MINUTES * 60.0)
+        .select(*_MOVEMENT_KEY)
+        .distinct()
+        .withColumn("_matched", F.lit(1))
+    )
+    return (
+        rows.join(hits, on=_MOVEMENT_KEY, how="left")
+        .groupBy("milestone")
+        .agg(
+            F.count(F.lit(1)).alias("n_truth"),
+            F.count("_matched").alias("n_detected"),
+        )
+    )
+
+
 def movement_rows(truth: DataFrame, split: DataFrame, linked: DataFrame) -> List[Dict]:
     """A row per milestone and an ``all`` row, which is the gate."""
 
     def matched(detected: DataFrame) -> Dict[str, tuple]:
-        scored = events_score.score(events_score.align(truth, detected))
+        scored = matched_movements(truth, detected)
         events_score.guard_not_all_zero(scored)
         return {r["milestone"]: (r["n_truth"], r["n_detected"]) for r in scored.collect()}
 
@@ -650,6 +783,20 @@ def score_day(
         arm: read(arm, "opdi_flight_events").select("id", "flight_id", "type", "event_time")
         for arm in ARMS
     }
+
+    # First, as it reads the state vectors, the table a short bucket gives up soonest.
+    samples = arm_read_window(
+        read(split_name, "osn_statevectors_v2").select(
+            "event_time", "icao24", "lat", "lon", "baro_altitude", "velocity", "vert_rate", "callsign"
+        ),
+        day,
+        p,
+    ).cache()
+    write(
+        "link_partition_check.csv", [partition_row(samples, tracks[linked_name], p, day)]
+    )
+    samples.unpersist()
+
     flights = scored_flights_frame(spark, truth).cache()
     holes = linked_holes(tracks[linked_name], p).cache()
     holes_in_flights = scored_holes(holes, flights).cache()
@@ -698,27 +845,6 @@ def score_day(
         ],
     )
 
-    # Nothing else moved. One frame under both rules.
-    samples = (
-        read(split_name, "osn_statevectors_v2")
-        .select(
-            "event_time", "icao24", "lat", "lon", "baro_altitude", "velocity", "vert_rate", "callsign"
-        )
-        .cache()
-    )
-    write(
-        "link_partition_check.csv",
-        [
-            partition_check(
-                samples,
-                assign_track_id(samples, debounced(), p),
-                assign_track_id(samples, cruise_linked(), p),
-                p,
-            )
-        ],
-    )
-    samples.unpersist()
-
     write(
         "link_movements.csv",
         movement_rows(
@@ -732,7 +858,12 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--day", required=True, help="YYYY-MM-DD")
-    ap.add_argument("--truth", default=None, help="default: reference/flights_<YYYYMM>.parquet")
+    ap.add_argument(
+        "--truth",
+        default=None,
+        help="flight-list truth and which flights are scored, read on the driver. The APDF "
+        "bridge stays on events_gt's S3 mirror. Default: reference/flights_<YYYYMM>.parquet",
+    )
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument(
@@ -746,7 +877,6 @@ def main() -> int:
     configs = {arm: build_config(arm, link_params) for arm in ARMS}
     p = SegmentationParams.from_config(configs["cruise_linked"])
 
-    import events_gt
     import osn_sample
     from event_bench import detected_events, milestone_map
     from osn_sample import build_spark, load_dotenv
@@ -778,7 +908,7 @@ def main() -> int:
                 "link_params": link_params,
             },
             notes=_NOTES,
-            input_tables=_input_tables(),
+            input_tables=_input_tables(month),
         )
         print(f"\nwrote {args.results_dir / name}\n{table.to_string(index=False)}", flush=True)
 
