@@ -45,8 +45,13 @@ def _lon(nm):
 
 
 def _flight(start_s, cruise_min, start_nm=0.0, climb_min=5, descent_min=5,
-            callsign="DLH1", step_s=60, key="F1", icao24="abc123"):
-    """Samples of one flight, its truth row, and when its cruise starts and ends."""
+            callsign="DLH1", step_s=60, key="F1", icao24="abc123", low_m=LOW_M,
+            low_fpm=0.0):
+    """Samples of one flight, its truth row, and when its cruise starts and ends.
+
+    ``low_fpm`` is the rate of climb and of descent, level by default, and a flight
+    with no rate has no edge for the low-edge control families to cut at.
+    """
     first_cruise = start_s + climb_min * 60
     last_cruise = first_cruise + cruise_min * 60
     end = last_cruise + descent_min * 60
@@ -61,9 +66,11 @@ def _flight(start_s, cruise_min, start_nm=0.0, climb_min=5, descent_min=5,
                 "callsign": callsign,
                 "lat": 0.0,
                 "lon": _lon(start_nm + flown_min * CRUISE_KT / 60.0),
-                "baro_altitude": CRUISE_M if in_cruise else LOW_M,
+                "baro_altitude": CRUISE_M if in_cruise else low_m,
                 "velocity": CRUISE_KT / KT_PER_MPS,
-                "vert_rate": 0.0,
+                "vert_rate": (
+                    0.0 if in_cruise else (low_fpm if t < first_cruise else -low_fpm) / FPM_PER_MPS
+                ),
             }
         )
     truth = {
@@ -693,6 +700,213 @@ def test_the_funnel_accounts_for_every_positive_attempt(spark):
     assert funnel["positive_excluded_too_short"] == 1        # 20, clean
     assert funnel["positive_controls"] == 1                  # 60, clean
     assert positive_controls(tracks, truth, FLOOR_FT, gaps_min=gaps).count() == 1
+
+
+# --- the low-edge families ----------------------------------------------------
+
+
+DIRECTIONAL = SegmentationParams(link_directional_edges=True)
+#: Above the low-altitude gap's limit, so that rule stays out of these fixtures.
+CLIMB_M = 9000.0 / FT_PER_M
+CLIMB_FPM = 1500.0
+
+
+def _low_edge_pair(spark, cruise_1=120, cruise_2=120, turnaround_min=30, **flight_2):
+    """Two flights with a real climb and descent, the second carrying on from the first."""
+    s1, t1, first_1, last_1 = _flight(
+        0, cruise_1, key="F1", low_m=CLIMB_M, low_fpm=CLIMB_FPM
+    )
+    start_2 = last_1 + 5 * 60 + turnaround_min * 60
+    s2, t2, first_2, last_2 = _flight(
+        start_2, cruise_2, start_nm=cruise_1 * CRUISE_KT / 60.0, key="F2",
+        low_m=CLIMB_M, low_fpm=CLIMB_FPM, **flight_2,
+    )
+    return (
+        make_track(spark, s1 + s2), _truth(spark, [t1, t2]),
+        {"first_1": first_1, "last_1": last_1, "first_2": first_2, "last_2": last_2,
+         "land_1": last_1 + 5 * 60, "off_2": start_2},
+    )
+
+
+def _family(controls, family):
+    return [r for r in controls.collect() if r["control_family"] == family]
+
+
+def test_fixtures_with_no_climb_or_descent_rate_give_only_the_cruise_family(spark):
+    tracks, truth, _, _ = _pair(spark)
+    controls = negative_controls(tracks, truth, FLOOR_FT, p=DIRECTIONAL).collect()
+    assert controls
+    assert {r["control_family"] for r in controls} == {"cruise_cruise"}
+
+
+def test_cruise_descent_cuts_at_the_old_cruise_and_the_new_descent(spark):
+    tracks, truth, t = _low_edge_pair(spark)
+    rows = _family(negative_controls(tracks, truth, FLOOR_FT, p=DIRECTIONAL), "cruise_descent")
+    by_depth = {r["depth_min"]: r for r in rows}
+    assert set(by_depth) == {0.0, 30.0, 60.0, 120.0}
+    base, deep = by_depth[0.0], by_depth[60.0]
+    assert base["t_old_edge"] == _at(t["last_1"])
+    assert base["t_new_edge"] == _at(t["last_2"] + 60)
+    assert deep["t_old_edge"] == _at(t["last_1"] - 3600)
+    assert deep["old_depth_min"] == 60.0
+    assert deep["new_depth_min"] is None
+    assert base["alt_before_ft"] >= FLOOR_FT > base["alt_after_ft"]
+    assert base["vr_after_fpm"] == pytest.approx(-CLIMB_FPM)
+
+
+def test_climb_cruise_cuts_at_the_old_climb_and_the_new_cruise(spark):
+    tracks, truth, t = _low_edge_pair(spark)
+    rows = _family(negative_controls(tracks, truth, FLOOR_FT, p=DIRECTIONAL), "climb_cruise")
+    by_depth = {r["depth_min"]: r for r in rows}
+    assert set(by_depth) == {0.0, 30.0, 60.0, 120.0}
+    base, deep = by_depth[0.0], by_depth[60.0]
+    assert base["t_old_edge"] == _at(t["first_1"] - 60)
+    assert base["t_new_edge"] == _at(t["first_2"])
+    assert deep["t_new_edge"] == _at(t["first_2"] + 3600)
+    assert deep["new_depth_min"] == 60.0
+    assert deep["old_depth_min"] is None
+    assert base["alt_after_ft"] >= FLOOR_FT > base["alt_before_ft"]
+    assert base["vr_before_fpm"] == pytest.approx(CLIMB_FPM)
+
+
+def test_climb_descent_is_one_control_a_pair_with_no_depth(spark):
+    tracks, truth, t = _low_edge_pair(spark)
+    rows = _family(negative_controls(tracks, truth, FLOOR_FT, p=DIRECTIONAL), "climb_descent")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["t_old_edge"] == _at(t["first_1"] - 60)
+    assert row["t_new_edge"] == _at(t["last_2"] + 60)
+    assert row["depth_min"] is None
+    assert row["old_depth_min"] is None and row["new_depth_min"] is None
+    assert row["pair_id"] == "F1|F2"
+    assert row["gap_stratum"] == "240-360"
+    assert row["same_callsign"] is True
+    assert row["expected"] == "split"
+
+
+@pytest.mark.parametrize("family", ["cruise_descent", "climb_cruise", "climb_descent"])
+def test_each_family_hides_a_landing_and_only_direction_can_link_it(spark, family):
+    """The landing and the next take-off lie inside, and the speed test cannot see them.
+
+    Without direction these edges fail the floor, so they test nothing. With it the
+    rule links across a stop, which is the false join these families exist to count.
+    """
+    tracks, truth, t = _low_edge_pair(spark)
+    controls = negative_controls(tracks, truth, FLOOR_FT, p=DIRECTIONAL)
+    controls = controls.filter(F.col("control_family") == family)
+    # The deepest cut reads the same whichever side moved, so read the base and deep.
+    rows = _linked(controls, DIRECTIONAL).collect()
+    assert rows
+    for row in rows:
+        assert row["t_old_edge"] < _at(t["land_1"]) < _at(t["off_2"]) < row["t_new_edge"]
+    assert all(row["_linked"] for row in rows)
+    assert not any(r["_linked"] for r in _linked(controls, P).collect())
+
+
+def test_the_low_edge_is_the_last_climbing_sample_not_merely_the_last_below_the_floor(spark):
+    """A level-off under the floor says nothing about direction, so the cut moves back."""
+    s1, t1, first_1, _ = _flight(0, 120, key="F1", low_m=CLIMB_M, low_fpm=CLIMB_FPM)
+    for sample in s1:
+        if sample["t"] >= first_1 - 120 and sample["t"] < first_1:
+            sample["vert_rate"] = 500.0 / FPM_PER_MPS   # the threshold is strict
+    s2, t2, _, _ = _flight(s1[-1]["t"] + 1800, 120, key="F2", low_m=CLIMB_M, low_fpm=CLIMB_FPM)
+    rows = _family(
+        negative_controls(make_track(spark, s1 + s2), _truth(spark, [t1, t2]), FLOOR_FT, p=DIRECTIONAL),
+        "climb_descent",
+    )
+    assert rows[0]["t_old_edge"] == _at(first_1 - 180)
+
+
+def test_a_null_vertical_rate_is_no_edge(spark):
+    s1, t1, _, _ = _flight(0, 120, key="F1", low_m=CLIMB_M, low_fpm=CLIMB_FPM)
+    for sample in s1:
+        sample["vert_rate"] = None
+    s2, t2, _, _ = _flight(s1[-1]["t"] + 1800, 120, key="F2", low_m=CLIMB_M, low_fpm=CLIMB_FPM)
+    tracks, truth = make_track(spark, s1 + s2), _truth(spark, [t1, t2])
+    controls = negative_controls(tracks, truth, FLOOR_FT, p=DIRECTIONAL)
+    assert not _family(controls, "climb_descent")
+    assert not _family(controls, "climb_cruise")
+    assert _family(controls, "cruise_descent")
+
+
+def test_a_low_edge_control_of_30_min_or_less_is_excluded(spark):
+    tracks, truth, _ = _low_edge_pair(spark, cruise_1=5, cruise_2=5, turnaround_min=2)
+    controls = negative_controls(tracks, truth, FLOOR_FT, depths_min=(0,), p=DIRECTIONAL)
+    assert controls.count() == 0
+    funnel = control_funnel(tracks, truth, FLOOR_FT, depths_min=(0,), gaps_min=(60,), p=DIRECTIONAL)
+    assert funnel["climb_descent_excluded_too_short"] == 1
+    assert funnel["climb_descent_controls"] == 0
+
+
+def test_the_funnel_accounts_for_every_family_and_keeps_the_cruise_counts_apart(spark):
+    tracks, truth, _ = _low_edge_pair(spark)
+    funnel = control_funnel(tracks, truth, FLOOR_FT, gaps_min=(60,), p=DIRECTIONAL)
+    assert funnel["negative_attempts"] == 4     # cruise_cruise, one per depth
+    for family, attempts in (("cruise_descent", 4), ("climb_cruise", 4), ("climb_descent", 1)):
+        assert funnel[f"{family}_attempts"] == attempts
+        assert funnel[f"{family}_attempts"] == sum(
+            funnel[f"{family}_{fate}"]
+            for fate in (
+                "dropped_no_low_edge", "dropped_outside_cruise", "dropped_for_depth",
+                "repeated_holes_dropped", "excluded_too_short", "controls",
+            )
+        )
+    assert funnel["climb_descent_controls"] == 1
+    controls = negative_controls(tracks, truth, FLOOR_FT, p=DIRECTIONAL)
+    counts = {
+        r["control_family"]: r["count"] for r in controls.groupBy("control_family").count().collect()
+    }
+    assert counts["cruise_descent"] == funnel["cruise_descent_controls"]
+    assert counts["climb_cruise"] == funnel["climb_cruise_controls"]
+    assert counts["cruise_cruise"] == funnel["negative_controls"]
+
+
+def test_a_flight_with_no_low_edge_is_counted_as_such(spark):
+    s1, t1, _, _ = _flight(0, 120, key="F1")     # level at every sample
+    s2, t2, _, _ = _flight(s1[-1]["t"] + 1800, 120, key="F2", low_m=CLIMB_M, low_fpm=CLIMB_FPM)
+    tracks, truth = make_track(spark, s1 + s2), _truth(spark, [t1, t2])
+    funnel = control_funnel(tracks, truth, FLOOR_FT, depths_min=(0,), gaps_min=(60,), p=DIRECTIONAL)
+    assert funnel["climb_descent_dropped_no_low_edge"] == 1
+    assert funnel["climb_cruise_dropped_no_low_edge"] == 1
+    assert funnel["cruise_descent_controls"] == 1
+
+
+def test_a_low_edge_positive_control_deletes_the_whole_cruise_and_links_only_by_direction(spark):
+    samples, truth_row, first, last = _flight(0, 180, low_m=CLIMB_M, low_fpm=CLIMB_FPM)
+    tracks, truth = make_track(spark, samples), _truth(spark, [truth_row])
+    controls = positive_controls(tracks, truth, FLOOR_FT, gaps_min=(60,), p=DIRECTIONAL)
+    rows = _family(controls, "low_edge")
+    assert len(rows) == 1
+    assert rows[0]["t_old_edge"] == _at(first - 60)
+    assert rows[0]["t_new_edge"] == _at(last + 60)
+    assert rows[0]["requested_gap_min"] is None
+    assert rows[0]["expected"] == "link"
+    assert {r["control_family"] for r in controls.collect()} == {"cruise_cruise", "low_edge"}
+
+    low_edge = controls.filter(F.col("control_family") == "low_edge")
+    assert _linked(low_edge, DIRECTIONAL).first()["_linked"] is True
+    assert _linked(low_edge, P).first()["_linked"] is False
+
+
+def test_the_funnel_counts_the_low_edge_positive_controls(spark):
+    climbing, t_climbing, _, _ = _flight(
+        0, 180, key="GOOD", icao24="aaa001", low_m=CLIMB_M, low_fpm=CLIMB_FPM
+    )
+    level, t_level, _, _ = _flight(0, 180, key="LEVEL", icao24="aaa002")
+    short, t_short, _, _ = _flight(
+        0, 10, key="SHORT", icao24="aaa003", low_m=CLIMB_M, low_fpm=CLIMB_FPM
+    )
+    never, t_never, _, _ = _flight(0, 180, key="NEVER", icao24="aaa004")
+    for sample in never:
+        sample["baro_altitude"] = LOW_M
+    tracks = make_track(spark, climbing + level + short + never)
+    truth = _truth(spark, [t_climbing, t_level, t_short, t_never])
+    funnel = control_funnel(tracks, truth, FLOOR_FT, depths_min=(0,), gaps_min=(60,), p=DIRECTIONAL)
+    assert funnel["positive_low_edge_attempts"] == 4
+    assert funnel["positive_low_edge_dropped_no_cruise_sample"] == 1
+    assert funnel["positive_low_edge_dropped_no_low_edge"] == 1
+    assert funnel["positive_low_edge_excluded_too_short"] == 1
+    assert funnel["positive_low_edge_controls"] == 1
 
 
 # --- rule of three ----------------------------------------------------------

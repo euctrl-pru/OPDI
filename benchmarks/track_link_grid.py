@@ -7,34 +7,40 @@ decision is applied to real reception holes and to the holes of
 over the days, the pick is the most flights crossing the European box in one track, which
 is the owner's goal, then the most flights in one track overall, then the more
 conservative settings: the higher ``link_min_implied_speed_kt``, the shorter
-``link_max_gap_minutes``, the higher ``link_min_speed_ratio``, and the higher
-``link_min_stop_minutes``. The limits are:
+``link_max_gap_minutes``, the higher ``link_min_speed_ratio``, the higher
+``link_min_stop_minutes``, and direction off before on. The limits are:
 
   negative controls   the upper bound on the false-join rate is at most 1%, over the
-                      controls whose gap the point allows and whose realised depth is
-                      at least 30 min on one side. A base cut is too easy, as speed
-                      rejects nearly all of it, and a gap over the point's
-                      ``link_max_gap_minutes`` tests nothing, so counting either as a
-                      pass would dilute the bound and give short-gap points an easier
-                      limit. Both have columns of their own. The bound is per control,
-                      but depths of one pair are not independent, so the count of
-                      pairs with a false join is reported beside it.
+                      controls of every family whose gap the point allows. For
+                      ``cruise_cruise`` the realised depth must also be at least 30 min
+                      on one side. A base cut is too easy, as speed rejects nearly all
+                      of it, and a gap over the point's ``link_max_gap_minutes`` tests
+                      nothing, so counting either as a pass would dilute the bound and
+                      give short-gap points an easier limit. Both have columns of their
+                      own. The low-edge families always count at a point with
+                      ``link_directional_edges`` on, whatever their depth. With it off
+                      they fail the floor by construction and test nothing, for the
+                      same reason, so they are kept apart there too. The bound is per
+                      control, but depths of one pair are not independent, so the count
+                      of pairs with a false join is reported beside it.
   same or blank       the same bound is at most 5% among the controls the callsign
   callsign            test cannot reject, in the same population as the 1% limit, and
                       for the same reason. Those too shallow have columns of their
                       own. Under 60 reads ``insufficient``: it does not fail the point,
                       and it marks the choice provisional. This is a count and not a
                       reading of the bound, which sits just under 5% at 59.
-  real holes          false joins are at most 1% of the holes the point links that
-                      have a known label. Only a linked hole counts: there both edges
-                      are at cruise, which is what makes a landing or take-off inside
-                      it the proof of a stop. Unknown labels are reported, not scored.
+  real holes          false joins are at most 0.1% of the holes the point links that
+                      have a known label. It was 1%, tightened after round 3 showed 1%
+                      could not separate settings. Only a linked hole counts: there each
+                      edge is at cruise, or climbing, or descending, which is what makes
+                      a landing or take-off inside it the proof of a stop. Unknown
+                      labels are reported, not scored.
 
 A point with nothing to measure it on is not within the limits. If no point passes,
 none is recommended, and ``link_recommended.csv`` names the point with the lowest
 bound, labelled not recommended, for Stage 2 to run at.
 
-**Three reports beside the choice.** None of them touches a limit.
+**Four reports beside the choice.** None of them touches a limit.
 
   why holes stay split  ``link_reasons_{day}.csv`` and ``link_reasons_pooled.csv``, for
                         the real holes truth calls ``true_link``, whatever the rule
@@ -52,11 +58,17 @@ bound, labelled not recommended, for Stage 2 to run at.
                         it: an ident ``oa_airports`` does not place counts as outside.
   the callsign test     ``negative_limit_false_joins_no_callsign`` counts what the 1%
                         limit's controls would do without that test, with its bound.
+  how the edge was read ``linked_edge_read_through_blank`` and ``linked_by_direction``
+                        count linked holes whose position came from past a blank sample,
+                        or whose edge is below the floor, and ``false_joined_*`` those
+                        of them labelled false joins. ``link_controls_*.csv`` has each
+                        control family on rows of its own.
 
 **Why 54 points do not need 54 segmentations.** A10 breaks where A9 breaks, except at
 a gap over ``gap_minutes`` that links. Nothing else about the rule depends on a link:
 a callsign break is evaluated over the whole airframe and is not "recent" across such
-a gap, and a low-altitude break cannot fire where the new edge must be at cruise. So
+a gap, and a low-altitude break cannot fire where a hole links: the new edge is at cruise,
+or ``link_checks`` refuses one that sample is below ``low_alt_ft``. So
 a flight's tracks under a point are its A9 tracks minus the holes linked inside it,
 and ``test_counting_from_decisions_agrees_with_really_re_segmenting`` holds this
 against A10 really being run. A hole counts for a flight only with both edges inside
@@ -69,8 +81,8 @@ westbound. Truth is European, so most of the world's holes stay ``unknown``.
 
 **Cost.** One day is about 150M rows, and the day's frames are each built once. The
 heavy steps are the whole-day feature windows of the real holes; the controls and
-funnel, which together make about 26 passes over the samples inside truth flights, so
-those samples are cached first; and the two-callsign counts, which segment the whole
+funnel, which together make some dozens of passes over the samples inside truth flights,
+as each family makes its own cuts, so those samples are cached first; and the two-callsign counts, which segment the whole
 day under both arms, once per day, for the chosen point only. Each point then runs
 about seven small jobs over small cached frames, and the reasons two per day over
 frames kept until the days are pooled. Elapsed time per stage is printed.
@@ -86,6 +98,9 @@ before the next day starts.
 
 Settings it does not name keep their defaults. Those that shape the cuts and features
 (:data:`ONE_VALUE_PER_RUN`) may take only one value, so vary them across runs.
+``link_directional_edges`` takes ``true`` and ``false``:
+
+    --grid-json '{"link_directional_edges": [false, true], "link_max_gap_minutes": [360]}'
 
 ``--reasons-params-json`` names the one point the reasons are read at, in place of the
 chosen one, and need not be in the grid:
@@ -118,6 +133,7 @@ from pyspark.storagelevel import StorageLevel
 import provenance
 from track_fragmentation import measure
 from track_link_controls import (
+    LOW_EDGE_FAMILIES,
     control_funnel,
     flight_samples,
     label_real_holes,
@@ -150,19 +166,26 @@ GRID = {
 }
 
 #: Settings the cuts and features are made with, once per run, so they cannot vary
-#: inside one. ``link_cruise_floor_ft`` is both a threshold and where controls are cut.
+#: inside one. ``link_cruise_floor_ft`` is both a threshold and where controls are cut,
+#: and ``link_edge_vert_rate_fpm`` both a threshold and what a low edge is cut at.
 ONE_VALUE_PER_RUN = (
     "link_cruise_floor_ft",
+    "link_edge_vert_rate_fpm",
     "link_callsign_lookahead_minutes",
     "link_callsign_lookback_minutes",
     "link_edge_position_minutes",
 )
 
+#: Link settings that are a switch, which ``--grid-json`` gives as ``true`` or ``false``.
+SWITCHES = ("link_directional_edges",)
+
 NEGATIVE_UPPER_LIMIT = 0.01
 SAME_CALLSIGN_UPPER_LIMIT = 0.05
-REAL_HOLE_FALSE_JOIN_LIMIT = 0.01
+#: Of the holes a point links that have a known label.
+REAL_FALSE_JOIN_LIMIT = 0.001
 SAME_CALLSIGN_MIN_CONTROLS = 60
-#: The realised depth, on at least one side, that puts a control under the 1% limit.
+#: The realised depth, on at least one side, that puts a ``cruise_cruise`` control
+#: under the 1% limit.
 NEGATIVE_LIMIT_MIN_DEPTH_MIN = 30.0
 
 #: What each grid row sums, so that pooling recomputes every rate and bound from
@@ -179,6 +202,10 @@ COUNT_FIELDS = (
     "linked_true_link",
     "linked_false_join",
     "linked_unknown",
+    "linked_edge_read_through_blank",
+    "false_joined_edge_read_through_blank",
+    "linked_by_direction",
+    "false_joined_by_direction",
     "negative_controls",
     "negative_pairs",
     "negative_false_joins",
@@ -190,6 +217,9 @@ COUNT_FIELDS = (
     "negative_shallow_controls",
     "negative_shallow_false_joins",
     "negative_over_gap_controls",
+    "negative_low_edge_controls",
+    "negative_low_edge_false_joins",
+    "negative_low_edge_untested_controls",
     "same_callsign_controls",
     "same_callsign_false_joins",
     "same_callsign_blank",
@@ -198,6 +228,9 @@ COUNT_FIELDS = (
     "positive_controls",
     "positive_within_gap",
     "positive_linked",
+    "positive_low_edge_controls",
+    "positive_low_edge_within_gap",
+    "positive_low_edge_linked",
     "crossing_flights",
     "crossing_flights_in_one_track",
     "crossing_tracks",
@@ -211,7 +244,7 @@ COUNT_FIELDS = (
 )
 
 _STRATUM_KEYS = (
-    "point_id", "kind", "gap_stratum", "depth_min", "requested_gap_min",
+    "point_id", "kind", "control_family", "gap_stratum", "depth_min", "requested_gap_min",
     "same_callsign", "within_link_max_gap",
 )
 
@@ -272,7 +305,10 @@ def grid_from_json(text: str) -> List[SegmentationParams]:
     for name, values in settings.items():
         if name not in _link_fields():
             raise ValueError(f"{name} is not a link setting; choose from {_link_fields()}")
-        if (
+        if name in SWITCHES:
+            if not isinstance(values, list) or not values or not all(isinstance(v, bool) for v in values):
+                raise ValueError(f"{name} needs a non-empty list of true or false, got {values!r}")
+        elif (
             not isinstance(values, list)
             or not values
             or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)
@@ -283,7 +319,12 @@ def grid_from_json(text: str) -> List[SegmentationParams]:
                 f"{name} shapes the cuts and features, which are made once per run; "
                 f"give it one value and run again for another, got {values!r}"
             )
-    return _product({name: [float(v) for v in values] for name, values in settings.items()})
+    return _product(
+        {
+            name: values if name in SWITCHES else [float(v) for v in values]
+            for name, values in settings.items()
+        }
+    )
 
 
 def reasons_params_from_json(text: str, grid: List[SegmentationParams]) -> SegmentationParams:
@@ -351,14 +392,28 @@ def _sum_when(condition: Column) -> Column:
 
 
 def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
-    """All labelled holes, and those *p* links by label. See the module docstring."""
+    """All labelled holes, and those *p* links by label. See the module docstring.
+
+    The last four split out two ways a link rests on less than a plain cruise edge. A
+    position read through a blank sample shows as ``position_gap_min`` differing from
+    ``gap_min``. An edge below the floor can only have passed by direction, given a link.
+    """
     linked, label = _linked(p), F.col("label")
+    false_join = label == "false_join"
+    read_through_blank = F.col("position_gap_min") != F.col("gap_min")
+    by_direction = (F.col("alt_before_ft") < p.link_cruise_floor_ft) | (
+        F.col("alt_after_ft") < p.link_cruise_floor_ft
+    )
     row = holes.agg(
         F.count(F.lit(1)).alias("real_holes"),
         _sum_when(linked).alias("real_holes_linked"),
         _sum_when(linked & (label == "true_link")).alias("linked_true_link"),
         _sum_when(linked & (label == "false_join")).alias("linked_false_join"),
         _sum_when(linked & (label == "unknown")).alias("linked_unknown"),
+        _sum_when(linked & read_through_blank).alias("linked_edge_read_through_blank"),
+        _sum_when(linked & false_join & read_through_blank).alias("false_joined_edge_read_through_blank"),
+        _sum_when(linked & by_direction).alias("linked_by_direction"),
+        _sum_when(linked & false_join & by_direction).alias("false_joined_by_direction"),
     ).first()
     return row.asDict()
 
@@ -367,15 +422,29 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
     """Negative controls: all, those under the 1% limit, and those kept out of it.
 
     Every control is exactly one of ``negative_limit_controls``,
-    ``negative_shallow_controls`` (the gap is allowed, the depth too small) or
-    ``negative_over_gap_controls``. The same or blank callsign group is drawn from the
-    controls under the limit, with its shallow controls counted apart.
+    ``negative_shallow_controls`` (``cruise_cruise``, the gap is allowed, the depth too
+    small), ``negative_over_gap_controls`` or ``negative_low_edge_untested_controls``
+    (a low-edge family, the gap allowed, at a point with direction off). The same or
+    blank callsign group is drawn from the controls under the limit, with its shallow
+    controls counted apart.
+
+    With direction off a low edge cannot link, since the cuts are below the floor. So
+    those controls are no evidence about the point, and counted they would let a point
+    over the limit on ``cruise_cruise`` pass on rejections that test nothing.
+    ``negative_low_edge_controls`` are those under the limit, with their false joins.
     """
     linked = _linked(p)
     within_gap = F.col("gap_min") <= p.link_max_gap_minutes
-    deep = F.greatest("old_depth_min", "new_depth_min") >= NEGATIVE_LIMIT_MIN_DEPTH_MIN
-    under_limit = within_gap & deep
-    shallow = within_gap & ~deep
+    cruise_cruise = F.col("control_family") == "cruise_cruise"
+    low_edge = ~cruise_cruise
+    # `greatest` skips a NULL, so one side's depth is enough, as it is meant to be.
+    deep = F.coalesce(
+        F.greatest("old_depth_min", "new_depth_min") >= NEGATIVE_LIMIT_MIN_DEPTH_MIN, F.lit(False)
+    )
+    low_edge_counts = low_edge & F.lit(p.link_directional_edges)
+    under_limit = within_gap & ((cruise_cruise & deep) | low_edge_counts)
+    shallow = within_gap & cruise_cruise & ~deep
+    untested = within_gap & low_edge & ~F.lit(p.link_directional_edges)
     same = F.col("same_callsign") & under_limit
     same_shallow = F.col("same_callsign") & shallow
     blank = F.col("cs_before").isNull() | F.col("cs_after").isNull()
@@ -395,6 +464,9 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
         _sum_when(shallow).alias("negative_shallow_controls"),
         _sum_when(shallow & linked).alias("negative_shallow_false_joins"),
         _sum_when(~within_gap).alias("negative_over_gap_controls"),
+        _sum_when(under_limit & low_edge).alias("negative_low_edge_controls"),
+        _sum_when(under_limit & low_edge & linked).alias("negative_low_edge_false_joins"),
+        _sum_when(untested).alias("negative_low_edge_untested_controls"),
         _sum_when(same).alias("same_callsign_controls"),
         _sum_when(same & linked).alias("same_callsign_false_joins"),
         _sum_when(same & blank).alias("same_callsign_blank"),
@@ -405,11 +477,21 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
 
 
 def positive_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int]:
-    """Positive controls, those the point allows, and those it links."""
+    """Positive controls, those the point allows, and those it links, per kind of edge.
+
+    The ``low_edge`` family apart, because with direction off it is missed entirely,
+    and that says nothing about how the rule does on a cruise.
+    """
+    linked = _linked(p)
+    within_gap = F.col("gap_min") <= p.link_max_gap_minutes
+    low_edge = F.col("control_family") == "low_edge"
     row = controls.agg(
-        F.count(F.lit(1)).alias("positive_controls"),
-        _sum_when(F.col("gap_min") <= p.link_max_gap_minutes).alias("positive_within_gap"),
-        _sum_when(_linked(p)).alias("positive_linked"),
+        _sum_when(~low_edge).alias("positive_controls"),
+        _sum_when(~low_edge & within_gap).alias("positive_within_gap"),
+        _sum_when(~low_edge & linked).alias("positive_linked"),
+        _sum_when(low_edge).alias("positive_low_edge_controls"),
+        _sum_when(low_edge & within_gap).alias("positive_low_edge_within_gap"),
+        _sum_when(low_edge & linked).alias("positive_low_edge_linked"),
     ).first()
     return row.asDict()
 
@@ -422,7 +504,7 @@ def _finish_stratum(row: Dict) -> Dict:
 
 
 def strata_counts(controls: DataFrame, kind: str, p: SegmentationParams, point_id: int) -> List[Dict]:
-    """Controls per stratum at one point. ``wrong`` is the decision that was not wanted.
+    """Controls per family and stratum at one point. ``wrong`` is the decision not wanted.
 
     For a ``negative`` control that is a link, for a ``positive`` one no link. Controls
     over the point's ``link_max_gap_minutes`` have ``within_link_max_gap`` false, which
@@ -433,9 +515,9 @@ def strata_counts(controls: DataFrame, kind: str, p: SegmentationParams, point_i
     size = "depth_min" if kind == "negative" else "requested_gap_min"
     rows = (
         controls.withColumn("within_link_max_gap", within_gap)
-        .groupBy(size, "gap_stratum", "same_callsign", "within_link_max_gap")
+        .groupBy("control_family", size, "gap_stratum", "same_callsign", "within_link_max_gap")
         .agg(F.count(F.lit(1)).alias("n"), _sum_when(~wanted).alias("wrong"))
-        .orderBy(size, "gap_stratum", "same_callsign", "within_link_max_gap")
+        .orderBy("control_family", size, "gap_stratum", "same_callsign", "within_link_max_gap")
         .collect()
     )
     return [
@@ -443,6 +525,7 @@ def strata_counts(controls: DataFrame, kind: str, p: SegmentationParams, point_i
             {
                 "point_id": point_id,
                 "kind": kind,
+                "control_family": r["control_family"],
                 "gap_stratum": r["gap_stratum"],
                 "depth_min": r[size] if kind == "negative" else None,
                 "requested_gap_min": r[size] if kind == "positive" else None,
@@ -642,13 +725,13 @@ def reason_counts(holes: DataFrame, p: SegmentationParams) -> List[Dict]:
 
 
 def positive_reason_counts(controls: DataFrame, p: SegmentationParams) -> List[Dict]:
-    """Positive controls *p* misses, per requested length and first failed test."""
+    """Positive controls *p* misses, per family, requested length and first failed test."""
     rows = (
         controls.withColumn("first_failed_test", _first_failed_test(_checks(p)))
         .filter(F.col("first_failed_test") != "linked")
-        .groupBy("requested_gap_min", "first_failed_test")
+        .groupBy("control_family", "requested_gap_min", "first_failed_test")
         .agg(F.count(F.lit(1)).alias("positive_missed_by_test"))
-        .orderBy("requested_gap_min", "first_failed_test")
+        .orderBy("control_family", "requested_gap_min", "first_failed_test")
         .collect()
     )
     return [r.asDict() for r in rows]
@@ -678,7 +761,7 @@ def with_verdicts(row: Dict) -> Dict:
     else:
         same_status = "over_limit"
     negative_ok = negative_upper is not None and negative_upper <= NEGATIVE_UPPER_LIMIT
-    real_ok = real_rate is not None and real_rate <= REAL_HOLE_FALSE_JOIN_LIMIT
+    real_ok = real_rate is not None and real_rate <= REAL_FALSE_JOIN_LIMIT
     missed = row["positive_within_gap"] - row["positive_linked"]
 
     population_shares = {}
@@ -715,6 +798,10 @@ def with_verdicts(row: Dict) -> Dict:
         "same_callsign_upper_95": same_upper,
         "same_callsign_blank_share": _share(row["same_callsign_blank"], same_n),
         "positive_missed_share": _share(missed, row["positive_within_gap"]),
+        "positive_low_edge_missed_share": _share(
+            row["positive_low_edge_within_gap"] - row["positive_low_edge_linked"],
+            row["positive_low_edge_within_gap"],
+        ),
         **population_shares,
         "negative_within_limit": negative_ok,
         "same_callsign_status": same_status,
@@ -731,9 +818,10 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
     the rule exists for, then the most flights in one track overall. A tie then goes
     to the more conservative settings, as a wrongly glued flight is worse than a split
     one: the higher ``link_min_implied_speed_kt``, the shorter ``link_max_gap_minutes``,
-    the higher ``link_min_speed_ratio``, then the higher ``link_min_stop_minutes``. The
-    last two are there because the grid lists each off setting first, so without them a
-    tie would fall to the point with those checks off. The false-join bound is not
+    the higher ``link_min_speed_ratio``, the higher ``link_min_stop_minutes``, then
+    ``link_directional_edges`` off. The ratio and stop are there because the grid lists
+    each off setting first, so without them a tie would fall to the point with those
+    checks off. A tie that far means direction linked nothing more. The false-join bound is not
     compared here, because a point inside the limits has already met it. The first point
     takes any tie left, so the pick is deterministic.
     """
@@ -749,6 +837,7 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
             r["link_max_gap_minutes"],
             -r["link_min_speed_ratio"],
             -r["link_min_stop_minutes"],
+            r["link_directional_edges"],
             r["point_id"],
         ),
     )
@@ -873,14 +962,18 @@ class DayFeatures:
             frame.unpersist()
 
 
+def _controls_per_family(controls: DataFrame) -> Dict[str, int]:
+    return {r["control_family"]: r["count"] for r in controls.groupBy("control_family").count().collect()}
+
+
 def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -> DayFeatures:
     """Label the day's holes, make its controls and count each flight's A9 tracks.
 
     *p* gives what the features depend on, which a grid holds constant. Real holes need
     the whole day and are read once. Everything scored against truth needs only the
     airframes truth names, and the controls need only the samples inside its flights.
-    Those are cached first, because the controls and the funnel pass over them about
-    26 times.
+    Those are cached first, because the controls and the funnel pass over them some
+    dozens of times.
     """
     tracks = tracks.select(*_TRACK_COLUMNS)
     floor_ft = p.link_cruise_floor_ft
@@ -914,10 +1007,17 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
     with _timed("positive controls"):
         positive = _keep(positive_controls(airframes, truth, floor_ft, p=p, samples=samples))
     with _timed("control funnel"):
+        negative_scored = _controls_per_family(negative)
+        positive_scored = _controls_per_family(positive)
         funnel = {
             **control_funnel(airframes, truth, floor_ft, p=p, samples=samples),
-            "negative_controls_scored": negative.count(),
-            "positive_controls_scored": positive.count(),
+            "negative_controls_scored": negative_scored.get("cruise_cruise", 0),
+            **{
+                f"{family}_controls_scored": negative_scored.get(family, 0)
+                for family in LOW_EDGE_FAMILIES
+            },
+            "positive_controls_scored": positive_scored.get("cruise_cruise", 0),
+            "positive_low_edge_controls_scored": positive_scored.get("low_edge", 0),
         }
     holes_in_flights = _keep(holes_inside_flights(holes, truth))
     reasons = ReasonFrames(_keep(true_link_holes(holes, truth)), positive)
@@ -974,7 +1074,7 @@ def write_reasons(
         (
             "link_positive_reasons",
             lambda frames: positive_reason_counts(frames.positive, p),
-            ("requested_gap_min", "first_failed_test"),
+            ("control_family", "requested_gap_min", "first_failed_test"),
             ("positive_missed_by_test",),
         ),
     )

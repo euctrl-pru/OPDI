@@ -24,11 +24,28 @@ control records the depth it reached, one that overshoots by more than
 ``DEPTH_TOLERANCE_MIN`` is dropped, and one hole is counted once per pair. Otherwise
 one hole at several depths would tighten the upper bound without new evidence.
 
+**Those controls have both edges at or above the floor, so they cannot test an edge
+below it**, which ``link_directional_edges`` lets through. ``control_family`` says which
+kind a control is. ``cruise_cruise`` is the one above, and three more hide the same
+landing behind an edge below the floor. An edge in a climb is the first flight's last
+sample below the floor climbing past ``link_edge_vert_rate_fpm`` before its cruise, and
+an edge in a descent the second flight's first such sample descending after its cruise,
+because those are the samples the directional test accepts:
+
+  ``cruise_descent``  the first flight's cruise, at the usual depths, then the second's descent
+  ``climb_cruise``    the first flight's climb, then the second's cruise, at the usual depths
+  ``climb_descent``   the first flight's climb, then the second's descent, with no depth
+
+A depth is NULL on a side that has none. Such a control is A to B then B to C with a
+plausible speed by construction, since it spans the whole of a flight's cruise.
+
 **Positive controls** remove the middle of one truth flight's cruise, and no link is
 a missed link. Removal never reaches beyond the requested length, since a hole a
 sample longer than ``link_max_gap_minutes`` would count against the rule at the
 longest gap for a reason that has nothing to do with the flight. A control whose
-cut meets a real hole, and so cannot have that length, is dropped.
+cut meets a real hole, and so cannot have that length, is dropped. The ``low_edge``
+family removes the whole cruise instead, from the climb's edge to the descent's, which
+measures the links direction misses. It has no ``requested_gap_min``.
 
 **A control is scored by the rule's own expressions.** Generators only pick samples
 around a cut, then call ``link_feature_columns`` on a window partitioned by
@@ -53,13 +70,14 @@ This module reads no storage. Callers hand it frames: samples with the raw
 ``track_truth.load_flight_intervals``.
 """
 import math
+from functools import reduce
 from typing import Dict, Iterable, Optional
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
 from opdi.pipeline.segmentation import SegmentationParams
-from opdi.pipeline.segmentation.base import FT_PER_M, KT_PER_MPS
+from opdi.pipeline.segmentation.base import FPM_PER_MPS, FT_PER_M, KT_PER_MPS
 from opdi.pipeline.segmentation.methods import LINK_EDGE_SAMPLES, link_feature_columns
 
 __all__ = [
@@ -70,6 +88,8 @@ __all__ = [
     "positive_controls",
     "control_funnel",
     "rule_of_three_upper",
+    "NEGATIVE_FAMILIES",
+    "LOW_EDGE_FAMILIES",
 ]
 
 #: How far a positive control's hole may fall short of the requested length, in
@@ -119,8 +139,9 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
 
     ``false_join`` means a truth landing or take-off of that airframe falls inside the
     hole. Either one proves a stop, given what is being labelled: a linked hole has
-    both edges at cruise, so an aircraft cannot have touched the ground between them
-    and still be one flight. ``true_link`` means the hole lies within one flight's
+    each edge at cruise, or climbing after a take-off, or descending before a landing,
+    so an aircraft cannot have touched the ground between them and still be one
+    flight. ``true_link`` means the hole lies within one flight's
     ``[t_off, t_land]`` with no such event inside. Anything else is ``unknown``.
     Matched on ``icao24`` and time only.
 
@@ -234,8 +255,30 @@ def _deep_cuts(samples: DataFrame, floor_ft: float, depths: DataFrame) -> tuple:
     return old_cut, new_cut
 
 
+def _low_edges(samples: DataFrame, floor_ft: float, p) -> DataFrame:
+    """Each flight's ``t_climb_edge`` and ``t_descent_edge``, NULL where it has none.
+
+    The samples below the floor that the directional test can accept: past
+    ``link_edge_vert_rate_fpm``, strictly, as that test is. A NULL vertical rate is no
+    direction, so a flight whose rates were never received has no such edge. One nearest
+    its cruise, so the hole hides as little else as it can.
+    """
+    vert_rate_fpm = F.col("vert_rate") * FPM_PER_MPS
+    below = F.col("_alt_ft") < floor_ft
+    climbing = below & (vert_rate_fpm > p.link_edge_vert_rate_fpm) & (F.col("_ts") < F.col("_first_cruise"))
+    descending = below & (vert_rate_fpm < -p.link_edge_vert_rate_fpm) & (F.col("_ts") > F.col("_last_cruise"))
+    return (
+        _edges_of_cruise(samples, floor_ft)
+        .groupBy("flight_key")
+        .agg(
+            F.max(F.when(climbing, F.col("_ts"))).alias("t_climb_edge"),
+            F.min(F.when(descending, F.col("_ts"))).alias("t_descent_edge"),
+        )
+    )
+
+
 _CUT_COLUMNS = (
-    "control_id", "pair_id", "flight_before", "flight_after", "t_old_edge", "t_new_edge",
+    "control_id", "control_family", "pair_id", "flight_before", "flight_after", "t_old_edge", "t_new_edge",
     "depth_min", "old_depth_min", "new_depth_min", "requested_gap_min",
 )
 
@@ -368,36 +411,76 @@ def _flight_pairs(samples: DataFrame, truth: DataFrame, floor_ft: float) -> Data
     )
 
 
-def _negative_attempts(samples: DataFrame, pairs: DataFrame, floor_ft: float, depths_min, p) -> DataFrame:
-    """Each usable pair at each depth, with the ``fate`` of that attempt.
+#: The negative families: ``(control_family, old edge in a climb, new edge in a descent)``.
+NEGATIVE_FAMILIES = (
+    ("cruise_cruise", False, False),
+    ("cruise_descent", False, True),
+    ("climb_cruise", True, False),
+    ("climb_descent", True, True),
+)
+#: The families beside ``cruise_cruise``, each with an edge below the floor.
+LOW_EDGE_FAMILIES = tuple(family for family, *_ in NEGATIVE_FAMILIES if family != "cruise_cruise")
 
-    In order: ``outside_cruise``, a side has no cut at this depth; ``depth_missed``, a
+
+def _negative_attempts(samples: DataFrame, pairs: DataFrame, floor_ft: float, depths_min, p) -> DataFrame:
+    """Each usable pair at each depth and family, with the ``fate`` of that attempt.
+
+    In order: ``no_low_edge``, the side below the floor has no edge in that direction;
+    ``outside_cruise``, a side in cruise has no cut at this depth; ``depth_missed``, a
     side overshot the depth by more than :data:`DEPTH_TOLERANCE_MIN`; ``repeated_hole``,
     a shallower depth of this pair already gives these two edges; ``too_short``, not
-    over ``gap_minutes``; otherwise ``control``.
+    over ``gap_minutes``; otherwise ``control``. ``climb_descent`` has no depth, so one
+    attempt per pair.
     """
     depths = _minutes_frame(samples, depths_min, "depth_min")
     old_cut, new_cut = _deep_cuts(samples, floor_ft, depths)
+    old_cut = old_cut.withColumnRenamed("flight_key", "flight_before")
+    new_cut = new_cut.withColumnRenamed("flight_key", "flight_after")
+    low_edges = _low_edges(samples, floor_ft, p)
+    climb_edge = low_edges.select(
+        F.col("flight_key").alias("flight_before"), F.col("t_climb_edge").alias("t_old_edge")
+    )
+    descent_edge = low_edges.select(
+        F.col("flight_key").alias("flight_after"), F.col("t_descent_edge").alias("t_new_edge")
+    )
+
+    usable = pairs.filter(F.col("pair_fate") == "usable")
+    at_depths = usable.crossJoin(depths)
+    attempts = []
+    for family, old_low, new_low in NEGATIVE_FAMILIES:
+        attempt = usable if old_low and new_low else at_depths
+        attempt = (
+            attempt.join(climb_edge, on="flight_before", how="left")
+            if old_low
+            else attempt.join(old_cut, on=["flight_before", "depth_min"], how="left")
+        )
+        attempt = (
+            attempt.join(descent_edge, on="flight_after", how="left")
+            if new_low
+            else attempt.join(new_cut, on=["flight_after", "depth_min"], how="left")
+        )
+        no_low_edge = F.lit(False)
+        if old_low:
+            no_low_edge = no_low_edge | F.col("t_old_edge").isNull()
+        if new_low:
+            no_low_edge = no_low_edge | F.col("t_new_edge").isNull()
+        attempts.append(
+            attempt.withColumn("control_family", F.lit(family)).withColumn("_no_low_edge", no_low_edge)
+        )
+    attempts = reduce(lambda a, b: a.unionByName(b, allowMissingColumns=True), attempts)
+
+    # A side with no depth reads NULL here, which never overshoots.
     overshoot = (F.col("old_depth_min") - F.col("depth_min") > DEPTH_TOLERANCE_MIN) | (
         F.col("new_depth_min") - F.col("depth_min") > DEPTH_TOLERANCE_MIN
     )
-    same_hole = Window.partitionBy("pair_id", "t_old_edge", "t_new_edge", "_reached").orderBy("depth_min")
+    same_hole = Window.partitionBy(
+        "control_family", "pair_id", "t_old_edge", "t_new_edge", "_reached"
+    ).orderBy("depth_min")
     return (
-        pairs.filter(F.col("pair_fate") == "usable")
-        .crossJoin(depths)
-        .join(
-            old_cut.withColumnRenamed("flight_key", "flight_before"),
-            on=["flight_before", "depth_min"],
-            how="left",
-        )
-        .join(
-            new_cut.withColumnRenamed("flight_key", "flight_after"),
-            on=["flight_after", "depth_min"],
-            how="left",
-        )
-        .withColumn(
+        attempts.withColumn(
             "_reached",
-            F.when(F.col("t_old_edge").isNull() | F.col("t_new_edge").isNull(), "outside_cruise")
+            F.when(F.col("_no_low_edge"), "no_low_edge")
+            .when(F.col("t_old_edge").isNull() | F.col("t_new_edge").isNull(), "outside_cruise")
             .when(overshoot, "depth_missed")
             .otherwise("cut"),
         )
@@ -409,7 +492,9 @@ def _negative_attempts(samples: DataFrame, pairs: DataFrame, floor_ft: float, de
             .when(_hole_min() <= p.gap_minutes, "too_short")
             .otherwise("control"),
         )
-        .withColumn("control_id", F.concat_ws("|", F.lit("negative"), "pair_id", "depth_min"))
+        .withColumn(
+            "control_id", F.concat_ws("|", F.lit("negative"), "control_family", "pair_id", "depth_min")
+        )
         .withColumn("requested_gap_min", F.lit(None).cast("double"))
         .select(*_CUT_COLUMNS, "fate")
     )
@@ -420,7 +505,9 @@ def _positive_attempts(samples: DataFrame, truth: DataFrame, floor_ft: float, ga
 
     In order: ``no_cruise_sample``; ``outside_cruise``, the cruise is shorter than the
     hole; ``gap_tolerance``, a real hole at the cut leaves it over
-    :data:`POSITIVE_GAP_TOLERANCE_MIN` short; ``too_short``; otherwise ``control``.
+    :data:`POSITIVE_GAP_TOLERANCE_MIN` short; ``too_short``; otherwise ``control``. The
+    ``low_edge`` family, once per flight: ``no_cruise_sample``; ``no_low_edge``, it lacks
+    a climb or a descent edge; ``too_short``; otherwise ``control``.
     """
     gaps = _minutes_frame(samples, gaps_min, "requested_gap_min")
     cruising = _flights_in_cruise(samples, floor_ft).withColumn("_cruises", F.lit(True))
@@ -444,11 +531,23 @@ def _positive_attempts(samples: DataFrame, truth: DataFrame, floor_ft: float, ga
         .groupBy("flight_key", "requested_gap_min")
         .agg(F.max("_ts").alias("t_new_edge"))
     )
-    return (
-        truth.select("flight_key")
-        .distinct()
-        .crossJoin(gaps)
-        .join(cruising, on="flight_key", how="left")
+    flights = truth.select("flight_key").distinct().join(cruising, on="flight_key", how="left")
+    low_edge = (
+        flights.join(_low_edges(samples, floor_ft, p), on="flight_key", how="left")
+        .withColumn("t_old_edge", F.col("t_climb_edge"))
+        .withColumn("t_new_edge", F.col("t_descent_edge"))
+        .withColumn("control_family", F.lit("low_edge"))
+        .withColumn("requested_gap_min", F.lit(None).cast("double"))
+        .withColumn(
+            "fate",
+            F.when(F.col("_cruises").isNull(), "no_cruise_sample")
+            .when(F.col("t_old_edge").isNull() | F.col("t_new_edge").isNull(), "no_low_edge")
+            .when(_hole_min() <= p.gap_minutes, "too_short")
+            .otherwise("control"),
+        )
+    )
+    within_cruise = (
+        flights.crossJoin(gaps)
         .join(old_cut, on=["flight_key", "requested_gap_min"], how="left")
         .join(new_cut, on=["flight_key", "requested_gap_min"], how="left")
         .withColumn(
@@ -463,10 +562,17 @@ def _positive_attempts(samples: DataFrame, truth: DataFrame, floor_ft: float, ga
             .when(_hole_min() <= p.gap_minutes, "too_short")
             .otherwise("control"),
         )
+        .withColumn("control_family", F.lit("cruise_cruise"))
+    )
+    keep = ["flight_key", "control_family", "requested_gap_min", "t_old_edge", "t_new_edge", "fate"]
+    return (
+        within_cruise.select(*keep)
+        .unionByName(low_edge.select(*keep))
         .withColumn("flight_before", F.col("flight_key"))
         .withColumn("flight_after", F.col("flight_key"))
         .withColumn(
-            "control_id", F.concat_ws("|", F.lit("positive"), "flight_key", "requested_gap_min")
+            "control_id",
+            F.concat_ws("|", F.lit("positive"), "control_family", "flight_key", "requested_gap_min"),
         )
         .withColumn("pair_id", F.lit(None).cast("string"))
         .withColumn("depth_min", F.lit(None).cast("double"))
@@ -484,12 +590,14 @@ def negative_controls(
     p: SegmentationParams = _DEFAULT_PARAMS,
     samples: Optional[DataFrame] = None,
 ) -> DataFrame:
-    """A real landing hidden in a hole, at most one row per pair and distinct hole.
+    """A real landing hidden in a hole, at most one row per family, pair and distinct hole.
 
-    ``expected`` is ``split``. ``depth_min`` is the depth asked for, ``old_depth_min``
-    and ``new_depth_min`` the depths reached, and ``pair_id`` names the flight pair, so
-    a caller can count per pair as well as per control. ``p`` supplies the callsign
-    settings the features read; pass the same one given to
+    ``expected`` is ``split``. ``control_family`` says where the edges were cut.
+    ``depth_min`` is the depth asked for, ``old_depth_min`` and ``new_depth_min`` the
+    depths reached, each NULL on a side with no depth, and ``pair_id`` names the flight
+    pair, so a caller can count per pair as well as per control. ``p`` supplies the
+    callsign settings the features read and the vertical rate that defines a climb or
+    descent edge; pass the same one given to
     :func:`real_hole_candidates`. ``samples`` is :func:`flight_samples` already made,
     in which case ``tracks`` is not read.
     """
@@ -507,14 +615,15 @@ def positive_controls(
     p: SegmentationParams = _DEFAULT_PARAMS,
     samples: Optional[DataFrame] = None,
 ) -> DataFrame:
-    """The middle of one flight's cruise removed, one row per flight and length.
+    """One flight's cruise cut, one row per flight and length, and one for ``low_edge``.
 
-    ``expected`` is ``link``. The hole is centred between the flight's first and last
+    ``expected`` is ``link``. In ``control_family`` ``cruise_cruise`` the hole is centred between the flight's first and last
     samples at or above the floor, and starts at the last such sample at or before
     where it should. ``requested_gap_min`` says which length was asked for, as
     ``gap_stratum`` merges 60 and 120. The columns of the negative controls' depth and
     pair are NULL. A flight whose cruise is shorter than the hole has no control at
-    that length. ``p`` and ``samples`` are as in :func:`negative_controls`.
+    that length. ``low_edge`` removes the whole cruise, and only those edges say how
+    long that is. ``p`` and ``samples`` are as in :func:`negative_controls`.
     """
     samples = flight_samples(tracks, truth) if samples is None else samples
     attempts = _positive_attempts(samples, truth, floor_ft, gaps_min, p)
@@ -523,6 +632,14 @@ def positive_controls(
 
 def _counts(frame: DataFrame, column: str) -> Dict[str, int]:
     return {r[column]: r["count"] for r in frame.groupBy(column).count().collect()}
+
+
+def _fates_by_family(attempts: DataFrame) -> Dict[str, Dict[str, int]]:
+    """``{control_family: {fate: attempts}}``, every family of *attempts* present or not."""
+    fates: Dict[str, Dict[str, int]] = {}
+    for row in attempts.groupBy("control_family", "fate").count().collect():
+        fates.setdefault(row["control_family"], {})[row["fate"]] = row["count"]
+    return fates
 
 
 def control_funnel(
@@ -539,15 +656,33 @@ def control_funnel(
     Pair counts are per flight pair; attempts are a usable pair at one depth, or a
     flight at one length. Two identities hold, and the study can assert them:
     ``considered = overlap + no cruise + usable pairs``, and each ``attempts`` count is
-    the sum of the counts beneath it. Costs several passes over the input, so a caller
-    with a real day caches ``truth`` and passes ``samples``, as in
-    :func:`negative_controls`.
+    the sum of the counts beneath it. ``negative_*`` past the pairs and ``positive_*``
+    are ``cruise_cruise``, and each other family has its own keys. Costs several passes
+    over the input, so a caller with a real day caches ``truth`` and passes ``samples``,
+    as in :func:`negative_controls`.
     """
     samples = flight_samples(tracks, truth) if samples is None else samples
     pairs = _flight_pairs(samples, truth, floor_ft)
     pair_fates = _counts(pairs, "pair_fate")
-    negative = _counts(_negative_attempts(samples, pairs, floor_ft, depths_min, p), "fate")
-    positive = _counts(_positive_attempts(samples, truth, floor_ft, gaps_min, p), "fate")
+    negative_fates = _fates_by_family(_negative_attempts(samples, pairs, floor_ft, depths_min, p))
+    positive_fates = _fates_by_family(_positive_attempts(samples, truth, floor_ft, gaps_min, p))
+    negative = negative_fates.get("cruise_cruise", {})
+    positive = positive_fates.get("cruise_cruise", {})
+    low_edge = positive_fates.get("low_edge", {})
+    low_edge_negative = {}
+    for family in LOW_EDGE_FAMILIES:
+        fates = negative_fates.get(family, {})
+        low_edge_negative.update(
+            {
+                f"{family}_attempts": sum(fates.values()),
+                f"{family}_dropped_no_low_edge": fates.get("no_low_edge", 0),
+                f"{family}_dropped_outside_cruise": fates.get("outside_cruise", 0),
+                f"{family}_dropped_for_depth": fates.get("depth_missed", 0),
+                f"{family}_repeated_holes_dropped": fates.get("repeated_hole", 0),
+                f"{family}_excluded_too_short": fates.get("too_short", 0),
+                f"{family}_controls": fates.get("control", 0),
+            }
+        )
     return {
         "negative_pairs_considered": sum(pair_fates.values()),
         "negative_pairs_lost_to_overlap": pair_fates.get("overlap", 0),
@@ -559,12 +694,18 @@ def control_funnel(
         "negative_repeated_holes_dropped": negative.get("repeated_hole", 0),
         "negative_excluded_too_short": negative.get("too_short", 0),
         "negative_controls": negative.get("control", 0),
+        **low_edge_negative,
         "positive_attempts": sum(positive.values()),
         "positive_dropped_no_cruise_sample": positive.get("no_cruise_sample", 0),
         "positive_dropped_outside_cruise": positive.get("outside_cruise", 0),
         "positive_dropped_by_gap_tolerance": positive.get("gap_tolerance", 0),
         "positive_excluded_too_short": positive.get("too_short", 0),
         "positive_controls": positive.get("control", 0),
+        "positive_low_edge_attempts": sum(low_edge.values()),
+        "positive_low_edge_dropped_no_cruise_sample": low_edge.get("no_cruise_sample", 0),
+        "positive_low_edge_dropped_no_low_edge": low_edge.get("no_low_edge", 0),
+        "positive_low_edge_excluded_too_short": low_edge.get("too_short", 0),
+        "positive_low_edge_controls": low_edge.get("control", 0),
     }
 
 
