@@ -22,8 +22,8 @@ staleness check reads the manifest beside the file):
   * ``final_grid`` -- the final cruise-link grid over 2026-06-14 and
     2025-06-14: implied speed {315, 400} kt, speed ratio {0.0, 0.85}, minimum
     stop {0, 20, 35} min, maximum gap {360, 480, 600} min, cruise floor 18000 ft.
-  * ``final_direction`` -- the one point 400 kt / 0.0 / 0 / 600 min / 18000 ft
-    with directional edges off and on.
+  * ``final_edges`` -- the one point 400 kt / 0.0 / 0 / 600 min / 18000 ft with
+    ``link_old_edge_climb`` and ``link_new_edge_descent`` each off and on, four points.
   * ``stage2`` -- the chosen point run through the real pipeline and scored:
     flight list, events, level and distance across the hole, movements.
 
@@ -219,7 +219,7 @@ def jobs() -> list:
                   "reports read at it.",
         ),
         Job(
-            name="final_direction",
+            name="final_edges",
             script="benchmarks/track_link_grid.py",
             args=["--days", *DAYS, "--grid-json", json.dumps({
                 "link_min_implied_speed_kt": [400],
@@ -233,7 +233,8 @@ def jobs() -> list:
             outputs={n: n for n in ("link_grid_pooled.csv",
                                     "link_controls_pooled.csv")},
             code_paths=CORE,
-            notes="The chosen point with directional edges off and on.",
+            notes="The chosen point with climb edges and descent edges each "
+                  "off and on.",
         ),
         Job(
             name="stage2",

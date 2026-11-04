@@ -7,6 +7,7 @@ limit tests hand ``with_verdicts`` plain counts, which is all the verdicts read.
 import csv
 import datetime as dt
 from dataclasses import replace
+from functools import reduce
 import json
 import math
 import re
@@ -96,7 +97,8 @@ _FEATURE_SCHEMA = [
     StructField("spd_before_kt", DoubleType(), True),
     StructField("cs_before", StringType(), True),
     StructField("cs_after", StringType(), True),
-    StructField("alt_new_edge_ft", DoubleType(), True),
+    StructField("alt_before_read_past_blank", BooleanType(), True),
+    StructField("alt_after_read_past_blank", BooleanType(), True),
     StructField("vr_before_samples", DoubleType(), True),
     StructField("vr_after_samples", DoubleType(), True),
 ]
@@ -150,14 +152,15 @@ def _truth(spark, *flights):
 def _feature_row(
     gap_min=120.0, speed_kt=480.0, cs_before="DLH1", cs_after="DLH1", spd_before_kt=480.0,
     alt_before_ft=36000.0, alt_after_ft=36000.0, vr_before_fpm=0.0, vr_after_fpm=0.0,
-    position_gap_min=None,
+    position_gap_min=None, alt_before_read_past_blank=False, alt_after_read_past_blank=False,
 ):
     """A hole's features, linkable at the defaults unless the arguments say otherwise."""
     position_gap_min = gap_min if position_gap_min is None else position_gap_min
     return (
         "abc123", gap_min, position_gap_min, speed_kt * position_gap_min / 60.0,
         alt_before_ft, alt_after_ft, vr_before_fpm, vr_after_fpm,
-        spd_before_kt, cs_before, cs_after, alt_after_ft, 5.0, 5.0,
+        spd_before_kt, cs_before, cs_after,
+        alt_before_read_past_blank, alt_after_read_past_blank, 5.0, 5.0,
     )
 
 
@@ -479,6 +482,16 @@ def test_the_false_join_rate_counts_only_holes_the_point_links(spark):
         "linked_by_direction": 0,
         "false_joined_by_direction": 0,
         "linked_by_direction_labelled": 0,
+        "linked_by_climb": 0,
+        "false_joined_by_climb": 0,
+        "linked_by_climb_labelled": 0,
+        "linked_by_descent": 0,
+        "false_joined_by_descent": 0,
+        "linked_by_descent_labelled": 0,
+        "linked_altitude_read_past_blank_old": 0,
+        "false_joined_altitude_read_past_blank_old": 0,
+        "linked_altitude_read_past_blank_new": 0,
+        "false_joined_altitude_read_past_blank_new": 0,
         "false_joined_near_edge": 0,
     }
     row = _counts(**counts)
@@ -861,6 +874,22 @@ def test_a_tie_on_every_other_setting_goes_to_direction_off():
     assert pick_recommended(rows)["point_id"] == 0
 
 
+def test_a_tie_goes_to_fewer_flags_on():
+    """The count decides, so one flag on beats both whichever flag it is."""
+    def flags(point_id, climb, descent):
+        return _counts(
+            point_id=point_id, link_old_edge_climb=climb, link_new_edge_descent=descent,
+            negative_low_edge_controls=1000,
+        )
+
+    assert pick_recommended([flags(0, True, True), flags(1, True, False)])["point_id"] == 1
+    assert pick_recommended([flags(0, True, True), flags(1, False, True)])["point_id"] == 1
+    assert pick_recommended([flags(0, True, False), flags(1, False, False)])["point_id"] == 1
+    # One on each way has nothing left to choose them by but the first point.
+    assert pick_recommended([flags(0, True, False), flags(1, False, True)])["point_id"] == 0
+    assert pick_recommended([flags(0, False, True), flags(1, True, False)])["point_id"] == 0
+
+
 def test_an_exact_tie_goes_to_the_first_point():
     """The bound is no longer a tie-break: it is a limit, and the pick stays deterministic."""
     rows = [
@@ -1103,6 +1132,77 @@ def _low_edge_frame(spark, family, features, n=1):
     return _negatives(spark, rows, family=family)
 
 
+_CLIMB_ON = replace(P, link_old_edge_climb=True)
+_DESCENT_ON = replace(P, link_new_edge_descent=True)
+#: What each family's edges look like, so each links wherever its edges are allowed.
+_FAMILY_EDGES = {
+    "cruise_descent": _DESCENT,
+    "climb_cruise": _CLIMB,
+    "climb_descent": {**_CLIMB, **_DESCENT},
+}
+
+
+def _one_of_each_low_edge_family(spark):
+    return reduce(
+        lambda a, b: a.unionByName(b),
+        [_low_edge_frame(spark, family, edges) for family, edges in _FAMILY_EDGES.items()],
+    )
+
+
+def test_climb_on_counts_only_climb_cruise(spark):
+    counts = negative_counts(_one_of_each_low_edge_family(spark), _CLIMB_ON)
+    assert counts["negative_low_edge_controls"] == 1
+    assert counts["negative_low_edge_false_joins"] == 1
+    assert counts["negative_limit_controls"] == 1
+    assert counts["negative_low_edge_untested_controls"] == 2
+
+
+def test_descent_on_counts_only_cruise_descent(spark):
+    counts = negative_counts(_one_of_each_low_edge_family(spark), _DESCENT_ON)
+    assert counts["negative_low_edge_controls"] == 1
+    assert counts["negative_low_edge_false_joins"] == 1
+    assert counts["negative_limit_controls"] == 1
+    assert counts["negative_low_edge_untested_controls"] == 2
+
+
+def test_both_on_counts_all_three_families(spark):
+    counts = negative_counts(_one_of_each_low_edge_family(spark), DIRECTIONAL)
+    assert counts["negative_low_edge_controls"] == 3
+    assert counts["negative_low_edge_false_joins"] == 3
+    assert counts["negative_low_edge_untested_controls"] == 0
+
+
+def test_a_family_a_setting_cannot_link_is_kept_out_of_its_strata(spark):
+    """The strata and the negative reasons must say what the limit read."""
+    controls = _one_of_each_low_edge_family(spark)
+    strata = strata_counts(controls, "negative", _CLIMB_ON, 0)
+    assert {s["control_family"] for s in strata if s["counts_toward_limit"]} == {"climb_cruise"}
+    assert {s["control_family"] for s in strata if not s["counts_toward_limit"]} == {
+        "cruise_descent", "climb_descent",
+    }
+
+
+def test_a_bad_climb_family_fails_a_climb_setting_only(spark):
+    """400 clean descent controls alone bound under 1%, and five bad climbs do not."""
+    bad_climb = _low_edge_frame(spark, "climb_cruise", _CLIMB, n=5)
+    clean_descent = _low_edge_frame(spark, "cruise_descent", {**_DESCENT, "speed_kt": 100.0}, n=400)
+    controls = bad_climb.unionByName(clean_descent)
+
+    def row(p):
+        return _counts(
+            **negative_counts(controls, p),
+            link_old_edge_climb=p.link_old_edge_climb,
+            link_new_edge_descent=p.link_new_edge_descent,
+        )
+
+    assert row(_CLIMB_ON)["negative_low_edge_within_limit"] is False
+    assert row(_CLIMB_ON)["within_limits"] is False
+    assert row(_DESCENT_ON)["negative_low_edge_within_limit"] is True
+    assert row(_DESCENT_ON)["within_limits"] is True
+    assert row(DIRECTIONAL)["negative_low_edge_within_limit"] is False
+    assert row(DIRECTIONAL)["within_limits"] is False
+
+
 def test_low_edge_controls_count_at_any_depth_where_the_point_can_link_them(spark):
     """Shallow cruise_cruise is kept apart, and a low-edge family has no such filter."""
     shallow = _negatives(spark, [("S", _feature_row(), 0.0, 0.0)])
@@ -1299,6 +1399,74 @@ def test_real_hole_counts_read_the_labelled_links_by_direction_and_near_events(s
     assert counts["linked_by_direction_labelled"] == 2
     assert counts["false_joined_by_direction"] == 1
     assert counts["false_joined_near_edge"] == 1       # the unlinked one is no false join
+
+
+def test_real_hole_counts_say_which_edge_was_below_the_floor(spark):
+    """A hole low on both sides counts under each, and once in the total the limit reads."""
+    holes = _real_holes(
+        spark,
+        [
+            ("true_link", _feature_row(**_CLIMB)),
+            ("false_join", _feature_row(**_CLIMB)),
+            ("unknown", _feature_row(**_CLIMB)),
+            ("true_link", _feature_row(**_DESCENT)),
+            ("false_join", _feature_row(**_CLIMB, **_DESCENT)),
+            ("true_link", _feature_row()),
+        ],
+    )
+    counts = real_hole_counts(holes, DIRECTIONAL)
+    assert counts["linked_by_climb"] == 4
+    assert counts["false_joined_by_climb"] == 2
+    assert counts["linked_by_climb_labelled"] == 3
+    assert counts["linked_by_descent"] == 2
+    assert counts["false_joined_by_descent"] == 1
+    assert counts["linked_by_descent_labelled"] == 2
+    assert counts["linked_by_direction"] == 5
+    assert counts["false_joined_by_direction"] == 2
+    assert counts["linked_by_direction_labelled"] == 4
+
+
+def test_real_hole_counts_only_count_what_the_setting_links(spark):
+    holes = _real_holes(
+        spark, [("true_link", _feature_row(**_CLIMB)), ("true_link", _feature_row(**_DESCENT))]
+    )
+    climb_on = real_hole_counts(holes, _CLIMB_ON)
+    assert (climb_on["linked_by_climb"], climb_on["linked_by_descent"]) == (1, 0)
+    descent_on = real_hole_counts(holes, _DESCENT_ON)
+    assert (descent_on["linked_by_climb"], descent_on["linked_by_descent"]) == (0, 1)
+
+
+def test_real_hole_counts_say_which_links_rest_on_altitude_past_a_blank(spark):
+    holes = _real_holes(
+        spark,
+        [
+            ("true_link", _feature_row(alt_before_read_past_blank=True)),
+            ("false_join", _feature_row(alt_before_read_past_blank=True)),
+            ("false_join", _feature_row(alt_after_read_past_blank=True)),
+            ("true_link", _feature_row()),
+            # Not linked, so not a link resting on anything.
+            ("false_join", _feature_row(speed_kt=100.0, alt_before_read_past_blank=True)),
+        ],
+    )
+    counts = real_hole_counts(holes, P)
+    assert counts["linked_altitude_read_past_blank_old"] == 2
+    assert counts["false_joined_altitude_read_past_blank_old"] == 1
+    assert counts["linked_altitude_read_past_blank_new"] == 1
+    assert counts["false_joined_altitude_read_past_blank_new"] == 1
+
+
+def test_the_new_counts_are_reported_and_no_limit_reads_them():
+    new = [
+        "linked_by_climb", "false_joined_by_climb", "linked_by_climb_labelled",
+        "linked_by_descent", "false_joined_by_descent", "linked_by_descent_labelled",
+        "linked_altitude_read_past_blank_old", "linked_altitude_read_past_blank_new",
+        "false_joined_altitude_read_past_blank_old", "false_joined_altitude_read_past_blank_new",
+    ]
+    assert set(new) <= set(COUNT_FIELDS)
+    clean = with_verdicts(_on())
+    bad = with_verdicts(_on(**{name: 400 for name in new}))
+    assert bad["within_limits"] is clean["within_limits"]
+    assert bad["provisional"] is clean["provisional"]
 
 
 def test_a_false_join_near_an_edge_is_reported_and_decides_nothing():

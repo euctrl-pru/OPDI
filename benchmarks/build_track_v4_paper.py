@@ -437,8 +437,8 @@ def build_context(data):
         low_floor_ratio_rate=pct(num(r100_ratio, "linked_false_join"), labelled(r100_ratio), 2),
     )
 
-    direction = read_csv(data, "final_direction/link_grid_pooled.csv")
-    d_on = one(direction, link_directional_edges="True")
+    direction = read_csv(data, "final_edges/link_grid_pooled.csv")
+    d_on = one(direction, link_old_edge_climb="True", link_new_edge_descent="True")
     c.update(
         dir_crossing=pct(num(d_on, "crossing_flights_in_one_track"), cf),
         dir_false=n(num(d_on, "false_joined_by_direction")),
@@ -586,7 +586,7 @@ def build_context(data):
 
     # --- provenance ---
     shas = set()
-    for job in ("final_grid", "final_direction", "stage2"):
+    for job in ("final_grid", "final_edges", "stage2"):
         path = data / job / "_manifest.json"
         if not path.is_file():
             raise MissingValue(f"missing {path}")

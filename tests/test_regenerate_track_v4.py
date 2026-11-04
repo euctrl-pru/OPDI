@@ -31,7 +31,7 @@ def test_no_two_jobs_stage_one_file():
 def test_each_job_has_its_own_manifest_directory():
     dirs = [j.data for j in R.jobs()]
     assert len(dirs) == len(set(dirs))
-    assert {d.name for d in dirs} == {"final_grid", "final_direction", "stage2"}
+    assert {d.name for d in dirs} == {"final_grid", "final_edges", "stage2"}
 
 
 def test_the_day_run_is_a_prerequisite_not_a_job():
@@ -59,13 +59,25 @@ def test_final_grid_arguments():
         "2026-06-14", "2025-06-14"]
 
 
-def test_final_direction_arguments():
-    args = _job("final_direction").args
+def test_final_edges_arguments():
+    args = _job("final_edges").args
     grid = json.loads(args[args.index("--grid-json") + 1])
-    assert grid["link_old_edge_climb"] == [False, True]
-    assert grid["link_new_edge_descent"] == [False, True]
-    assert grid["link_cruise_floor_ft"] == [18000]
-    assert grid["link_max_gap_minutes"] == [600]
+    assert grid == {
+        "link_min_implied_speed_kt": [400],
+        "link_min_speed_ratio": [0.0],
+        "link_min_stop_minutes": [0.0],
+        "link_max_gap_minutes": [600],
+        "link_cruise_floor_ft": [18000],
+        "link_old_edge_climb": [False, True],
+        "link_new_edge_descent": [False, True],
+    }
+
+
+def test_final_edges_stages_into_its_own_directory_and_says_what_it_varies():
+    job = _job("final_edges")
+    assert job.data == R.DATA / "final_edges"
+    assert "directional" not in job.notes
+    assert "final_direction" not in R.__doc__
 
 
 def test_stage2_arguments():
@@ -129,5 +141,5 @@ def test_the_paper_inputs_are_declared():
     names = set(_job("final_grid").outputs)
     for stem in ("link_reasons", "link_positive_reasons", "link_negative_reasons"):
         assert f"{stem}_pooled.csv" in names
-    assert set(_job("final_direction").outputs) == {
+    assert set(_job("final_edges").outputs) == {
         "link_grid_pooled.csv", "link_controls_pooled.csv"}

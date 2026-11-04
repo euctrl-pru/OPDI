@@ -112,9 +112,12 @@ def _recommended():
 
 
 def _skip_until_the_grid_is_rerun():
-    """The read-through count over all holes is staged only by a run after it was added."""
+    """The read-through count over all holes is staged only by a run after it was added,
+    and ``final_edges`` only by a run after the flags were split."""
     if "real_holes_edge_read_through_blank" not in _recommended():
         pytest.skip("the staged final grid predates real_holes_edge_read_through_blank")
+    if not (PAPER / "data" / "final_edges" / "link_grid_pooled.csv").is_file():
+        pytest.skip("final_edges is not staged yet")
 
 
 @needs_paper

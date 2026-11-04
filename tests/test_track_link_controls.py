@@ -7,9 +7,11 @@ still, so the distance over any cut is exactly the cruise flown beyond it.
 import datetime as dt
 from dataclasses import replace
 import math
+import re
 
 import pytest
 from conftest import _EPOCH, make_track
+from pyspark.sql import Window
 from pyspark.sql import functions as F
 from track_link_controls import (
     DEPTH_TOLERANCE_MIN,
@@ -128,6 +130,38 @@ def _holes(spark, *holes, **columns):
 
 
 # --- real holes -------------------------------------------------------------
+
+
+def test_real_holes_and_controls_read_each_edge_once(spark):
+    """Column by column it is seven, which made the study 3.2x slower on a local run."""
+    tracks, truth, _, _ = _pair(spark)
+    for frame in (
+        real_hole_candidates(tracks, P),
+        negative_controls(tracks, truth, FLOOR_FT, depths_min=(0,)),
+        positive_controls(tracks, truth, FLOOR_FT, gaps_min=(60,)),
+    ):
+        plan = _plan(frame)
+        assert len(re.findall(r"\bcollect_list\(", plan)) == 2, plan
+
+
+def test_real_holes_hold_what_the_separate_columns_give(spark):
+    """A blank first sample after the hole, so the values are not all read at the edge."""
+    samples = _flight(0, 30)[0] + [
+        {**s, "baro_altitude": None} if i < 2 else s
+        for i, s in enumerate(_flight(4 * 3600, 30)[0])
+    ]
+    tracks = make_track(spark, samples)
+    window = Window.partitionBy("icao24").orderBy("_ts")
+    apart = (
+        tracks.withColumn("_ts", F.to_timestamp("event_time"))
+        .withColumn("_alt_ft", F.col("baro_altitude") * FT_PER_M)
+        .withColumn("_spd_kt", F.col("velocity") * KT_PER_MPS)
+        .select(*[c.alias(name) for name, c in link_feature_columns(P, window).items()])
+        .filter(F.col("gap_min") > P.gap_minutes)
+    )
+    together = real_hole_candidates(tracks, P).select(*apart.columns)
+    assert together.collect() == apart.collect()
+    assert together.count() == 1
 
 
 def test_real_hole_candidates_finds_each_gap_over_the_gap_threshold(spark):

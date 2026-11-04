@@ -48,9 +48,9 @@ on every long gap, as it would under the floor; and a gap over
 
 from functools import reduce
 from operator import and_
-from typing import Callable, Dict, Mapping
+from typing import Callable, Dict, Mapping, Sequence
 
-from pyspark.sql import Column, Window
+from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 from pyspark.sql.window import WindowSpec
 
@@ -80,6 +80,7 @@ __all__ = [
     "stable_callsign",
     "debounced_callsign_change",
     "link_feature_columns",
+    "select_link_features",
     "link_checks",
     "linkable",
     "cruise_linked",
@@ -726,13 +727,31 @@ def _edge_summary(frame: Column, latest_first: bool) -> Column:
     Sorted on the whole sample because samples can share a second, and a frame holds
     those in no fixed order: two days' reads must keep the same five of them.
     ``latest_first`` is for the old edge, where the nearest sample is the latest.
+
+    NaN is no value, as NULL is not. Spark orders NaN above every number, so it passes
+    ``>=`` and ``>``, and one in a mean makes the mean NaN.
+
+    ``alt_read_past_blank`` says no altitude in the edge's own second was there to read
+    and one further off was, which :func:`link_checks` does not look at and the study
+    counts. By the second because samples in one second have no order, so that a blank
+    twin of a good sample does not count.
     """
+
+    def has_value(value: Column) -> Column:
+        return value.isNotNull() & ~F.isnan(value)
 
     def over_sorted(samples: Column) -> Column:
         def values(field: str) -> Column:
             read = F.transform(samples, lambda sample: sample.getField(field))
-            present = F.filter(read, lambda value: value.isNotNull())
+            present = F.filter(read, has_value)
             return F.slice(present, 1, LINK_EDGE_SAMPLES).alias(field)
+
+        edge_second = F.element_at(samples, 1).getField("s")
+        altitude_at_the_edge = F.exists(
+            samples,
+            lambda sample: (sample.getField("s") == edge_second)
+            & has_value(sample.getField("alt_ft")),
+        ).alias("altitude_at_the_edge")
 
         def over_values(v: Column) -> Column:
             return F.struct(
@@ -740,9 +759,15 @@ def _edge_summary(frame: Column, latest_first: bool) -> Column:
                 _mean(v.getField("vr_fpm")).alias("mean_vr_fpm"),
                 F.size(v.getField("vr_fpm")).cast("long").alias("vr_samples"),
                 _mean(v.getField("spd_kt")).alias("mean_spd_kt"),
+                (
+                    (F.size(v.getField("alt_ft")) > 0) & ~v.getField("altitude_at_the_edge")
+                ).alias("alt_read_past_blank"),
             )
 
-        return _once(F.struct(values("alt_ft"), values("vr_fpm"), values("spd_kt")), over_values)
+        return _once(
+            F.struct(values("alt_ft"), values("vr_fpm"), values("spd_kt"), altitude_at_the_edge),
+            over_values,
+        )
 
     return _once(F.sort_array(frame, asc=not latest_first), over_sorted)
 
@@ -783,13 +808,38 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     return _features_from(_link_reads(p, window))
 
 
+def select_link_features(
+    frame: DataFrame, p, window: WindowSpec | None = None, keep: Sequence = ()
+) -> DataFrame:
+    """*frame* reduced to *keep* and :func:`link_feature_columns`, with each read done once.
+
+    The same values, at about a third of the cost on a local run: selected column by
+    column, every feature taken from an edge's read is that read again. A study that keeps
+    the features of a day wants this.
+
+    Raises:
+        ValueError: see :func:`link_feature_columns`.
+    """
+    reads = _link_reads(p, window)
+    read = "_link_read"
+    selected = frame.select(
+        *keep, F.struct(*[column.alias(name) for name, column in reads.items()]).alias(read)
+    )
+    features = _features_from({name: F.col(read).getField(name) for name in reads})
+    return selected.select(
+        *[column for column in selected.columns if column != read],
+        *[column.alias(name) for name, column in features.items()],
+    )
+
+
 def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     """The window reads behind :func:`link_feature_columns`, each a separate column.
 
     Spark evaluates every copy of a window expression, so several features taken from
     one read cost several reads. Selecting a feature each is what a caller of
     :func:`link_feature_columns` wants; :func:`cruise_linked`, which runs on every
-    sample of every day, puts these in one struct to read each just once.
+    sample of every day, and :func:`select_link_features` put these in one struct to read
+    each just once.
 
     Raises:
         ValueError: see :func:`link_feature_columns`.
@@ -898,9 +948,6 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
         "positions": positions,
         "before_edge": before_edge,
         "after_edge": after_edge,
-        # What `legacy_low_altitude_gap` reads at this sample, which the minimum over
-        # the edge cannot stand in for: only with descent on can a link reach that low.
-        "alt_new_edge_ft": altitude_ft(),
         "cs_before": F.when(
             seen_recently,
             F.last(stable_callsign(p, w), ignorenulls=True).over(back),
@@ -919,7 +966,9 @@ def _features_from(reads: Mapping[str, Column]) -> Dict[str, Column]:
         "gc_nm": positions.getField("gc_nm"),
         "alt_before_ft": before.getField("min_alt_ft"),
         "alt_after_ft": after.getField("min_alt_ft"),
-        "alt_new_edge_ft": reads["alt_new_edge_ft"],
+        # Reported by the study. Whether the altitude above is older than the edge.
+        "alt_before_read_past_blank": before.getField("alt_read_past_blank"),
+        "alt_after_read_past_blank": after.getField("alt_read_past_blank"),
         "vr_before_fpm": before.getField("mean_vr_fpm"),
         "vr_after_fpm": after.getField("mean_vr_fpm"),
         # How many rates those two means rest on. Only the direction test reads these.
@@ -959,9 +1008,11 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     settings because the study decides them separately. The direction is the evidence
     there, so a NULL vertical rate does not pass, unlike in the descend-then-climb test,
     and the mean must rest on at least :data:`LINK_DIRECTION_MIN_RATES` rates in that
-    edge's values. A new edge the low-altitude gap breaks at does not pass either: the
+    edge's values. A new edge the low-altitude gap can break at does not pass either: the
     rule splits there whatever this says, and the study, which reads this verdict
-    instead of re-segmenting, must not count it as a link.
+    instead of re-segmenting, must not count it as a link. That reads the lowest of the
+    edge's values, not the first sample's, so a blank first sample cannot slip past a low
+    value right behind it: the rule then splits too, on this test.
 
     ``link_min_speed_ratio`` is uninformative at a climb edge: the speed before the gap
     is low there, which makes the ratio easy, and it says nothing of the speed in
@@ -1003,12 +1054,11 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
                 implied_kt >= p.link_min_implied_speed_kt,
             ).otherwise(slow_for_this_flight_passes)
     if p.link_new_edge_descent:
-        low_altitude_gap_breaks = F.coalesce(f["alt_new_edge_ft"] < p.low_alt_ft, F.lit(False))
         new_edge_passes = new_edge_passes | (
             (f["alt_after_ft"] < p.link_cruise_floor_ft)
+            & (f["alt_after_ft"] >= p.low_alt_ft)
             & (f["vr_after_fpm"] < -p.link_edge_vert_rate_fpm)
             & (f["vr_after_samples"] >= LINK_DIRECTION_MIN_RATES)
-            & ~low_altitude_gap_breaks
         )
 
     tests = {

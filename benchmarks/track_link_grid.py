@@ -8,7 +8,8 @@ over the days, the pick is the most flights crossing the European box in one tra
 is the owner's goal, then the most flights in one track overall, then the more
 conservative settings: the higher ``link_min_implied_speed_kt``, the shorter
 ``link_max_gap_minutes``, the higher ``link_min_speed_ratio``, the higher
-``link_min_stop_minutes``, and direction off before on. The limits are:
+``link_min_stop_minutes``, and fewer of ``link_old_edge_climb`` and
+``link_new_edge_descent`` on. The limits are:
 
   negative controls   the upper bound on the false-join rate is at most 1%, over the
                       controls of every family whose gap the point allows. For
@@ -17,15 +18,19 @@ conservative settings: the higher ``link_min_implied_speed_kt``, the shorter
                       of it, and a gap over the point's ``link_max_gap_minutes`` tests
                       nothing, so counting either as a pass would dilute the bound and
                       give short-gap points an easier limit. Both have columns of their
-                      own. The low-edge families always count at a point with
-                      ``link_old_edge_climb`` or ``link_new_edge_descent`` on, whatever their depth. With it off
-                      they fail the floor by construction and test nothing, for the
-                      same reason, so they are kept apart there too. The bound is per
+                      own. A low-edge family counts where the point allows its edges,
+                      whatever its depth: ``climb_cruise`` with ``link_old_edge_climb``
+                      on, ``cruise_descent`` with ``link_new_edge_descent`` on, and
+                      ``climb_descent`` with both. Elsewhere it fails the floor by
+                      construction and tests nothing, for the same reason, so it is
+                      kept apart there too. The bound is per
                       control, but depths of one pair are not independent, so the count
                       of pairs with a false join is reported beside it.
-  low edges alone     with direction on, three more, all required, because
+  low edges alone     with either flag on, three more, all required, because
                       ``cruise_cruise`` dominates the pooled numbers and a bad rate
-                      among direction's own decisions would pass under them. The
+                      among direction's own decisions would pass under them. These read
+                      only the families the flags allow, so a bad family fails only the
+                      settings that can link it. The
                       low-edge families' bound is at most 1%, among allowed gaps, and
                       with none it fails. Their same or blank callsign controls' bound
                       is at most 5%. False joins are at most 0.1% of the labelled real
@@ -72,8 +77,15 @@ recommended, for Stage 2 to run at.
                         limit's controls would do without that test, with its bound.
   how the edge was read ``linked_edge_read_through_blank`` and ``linked_by_direction``
                         count linked holes whose position came from past a blank sample,
-                        or whose edge is below the floor, and ``false_joined_*`` those
-                        of them labelled false joins. ``false_joined_near_edge`` counts
+                        or with an edge below the floor, and ``false_joined_*`` those
+                        of them labelled false joins. ``linked_by_climb*`` and
+                        ``linked_by_descent*`` split the second by edge, so a hole low on
+                        both sides counts in each and once in ``linked_by_direction*``,
+                        which is what the limit reads.
+                        ``linked_altitude_read_past_blank_old`` and ``_new`` count linked
+                        holes whose nearest altitude on that side is not in the edge's
+                        own second, so a link resting on older evidence, with
+                        ``false_joined_*`` beside them. ``false_joined_near_edge`` counts
                         linked false joins whose event is within 5 min of an edge, where
                         truth's time may be the difference. ``link_controls_*.csv`` has
                         each control family on rows of its own, and
@@ -88,7 +100,7 @@ recommended, for Stage 2 to run at.
 a gap over ``gap_minutes`` that links. Nothing else about the rule depends on a link:
 a callsign break is evaluated over the whole airframe and is not "recent" across such
 a gap, and a low-altitude break cannot fire where a hole links: the new edge is at cruise,
-or ``link_checks`` refuses one that sample is below ``low_alt_ft``. So
+or ``link_checks`` refuses one with a value below ``low_alt_ft``. So
 a flight's tracks under a point are its A9 tracks minus the holes linked inside it,
 and ``test_counting_from_decisions_agrees_with_really_re_segmenting`` holds this
 against A10 really being run. A hole counts for a flight only with both edges inside
@@ -139,7 +151,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from functools import reduce
-from operator import and_
+from operator import and_, or_
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
@@ -212,7 +224,7 @@ SWITCHES = ("link_old_edge_climb", "link_new_edge_descent")
 NEGATIVE_UPPER_LIMIT = 0.01
 SAME_CALLSIGN_UPPER_LIMIT = 0.05
 #: Of the holes a point links that have a known label. Applies to all of them, and
-#: with direction on to those linked with an edge below the floor as well.
+#: with either flag on to those linked with an edge below the floor as well.
 REAL_FALSE_JOIN_LIMIT = 0.001
 #: Labelled links by direction under this read ``insufficient``: at 0.1%, fewer than
 #: this cannot show much beyond whether there happens to be one false join.
@@ -242,6 +254,16 @@ COUNT_FIELDS = (
     "linked_by_direction",
     "false_joined_by_direction",
     "linked_by_direction_labelled",
+    "linked_by_climb",
+    "false_joined_by_climb",
+    "linked_by_climb_labelled",
+    "linked_by_descent",
+    "false_joined_by_descent",
+    "linked_by_descent_labelled",
+    "linked_altitude_read_past_blank_old",
+    "false_joined_altitude_read_past_blank_old",
+    "linked_altitude_read_past_blank_new",
+    "false_joined_altitude_read_past_blank_new",
     "false_joined_near_edge",
     "negative_controls",
     "negative_pairs",
@@ -431,6 +453,24 @@ def _sum_when(condition: Column) -> Column:
     return F.coalesce(F.sum(F.when(condition, 1).otherwise(0)), F.lit(0))
 
 
+def _low_edge_allowed(p: SegmentationParams) -> Column:
+    """Whether a control is of a low-edge family whose edges *p* allows.
+
+    Each flag lets through one edge, so a family with a low edge the point does not
+    allow fails the floor by construction, and is no evidence about the point.
+    """
+    allowed = {
+        "climb_cruise": p.link_old_edge_climb,
+        "cruise_descent": p.link_new_edge_descent,
+        "climb_descent": p.link_old_edge_climb and p.link_new_edge_descent,
+    }
+    return reduce(
+        or_,
+        [F.col("control_family") == family for family, on in allowed.items() if on],
+        F.lit(False),
+    )
+
+
 def _counts_toward_limit(p: SegmentationParams) -> Column:
     """Whether a negative control is one the 1% limit reads at *p*. See the module docstring."""
     within_gap = F.col("gap_min") <= p.link_max_gap_minutes
@@ -439,27 +479,32 @@ def _counts_toward_limit(p: SegmentationParams) -> Column:
         F.greatest("old_depth_min", "new_depth_min") >= NEGATIVE_LIMIT_MIN_DEPTH_MIN, F.lit(False)
     )
     cruise_cruise = F.col("control_family") == "cruise_cruise"
-    return within_gap & ((cruise_cruise & deep) | (~cruise_cruise & F.lit(p.link_old_edge_climb or p.link_new_edge_descent)))
+    return within_gap & ((cruise_cruise & deep) | _low_edge_allowed(p))
 
 
 def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
     """All labelled holes, and those *p* links by label. See the module docstring.
 
-    The last four split out two ways a link rests on less than a plain cruise edge. A
+    The rest split out the ways a link rests on less than a plain cruise edge. A
     position read through a blank sample shows as ``position_gap_min`` differing from
     ``gap_min``. ``real_holes_edge_read_through_blank`` counts that over every hole and
     ``linked_edge_read_through_blank`` over those *p* links, so the two are different
     populations; a hole with no position in reach is NULL there and counts in neither.
     An edge below the floor can only have passed by direction, given a link.
-    ``linked_by_direction_labelled`` is what the direction limit divides by, and
-    ``false_joined_near_edge`` is reported only.
+    ``linked_by_direction_labelled`` is what the direction limit divides by, and it counts
+    a hole low on both sides once where the ``by_climb`` and ``by_descent`` columns each
+    count it. Those and ``false_joined_near_edge`` and the altitude read past a blank are
+    reported only.
     """
     linked, label = _linked(p), F.col("label")
     false_join = label == "false_join"
     read_through_blank = F.col("position_gap_min") != F.col("gap_min")
-    by_direction = (F.col("alt_before_ft") < p.link_cruise_floor_ft) | (
-        F.col("alt_after_ft") < p.link_cruise_floor_ft
-    )
+    by_climb = F.col("alt_before_ft") < p.link_cruise_floor_ft
+    by_descent = F.col("alt_after_ft") < p.link_cruise_floor_ft
+    by_direction = by_climb | by_descent
+    labelled = label.isin("true_link", "false_join")
+    past_blank_old = F.col("alt_before_read_past_blank")
+    past_blank_new = F.col("alt_after_read_past_blank")
     row = holes.agg(
         F.count(F.lit(1)).alias("real_holes"),
         _sum_when(linked).alias("real_holes_linked"),
@@ -471,8 +516,20 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
         _sum_when(linked & false_join & read_through_blank).alias("false_joined_edge_read_through_blank"),
         _sum_when(linked & by_direction).alias("linked_by_direction"),
         _sum_when(linked & false_join & by_direction).alias("false_joined_by_direction"),
-        _sum_when(linked & by_direction & label.isin("true_link", "false_join")).alias(
-            "linked_by_direction_labelled"
+        _sum_when(linked & by_direction & labelled).alias("linked_by_direction_labelled"),
+        _sum_when(linked & by_climb).alias("linked_by_climb"),
+        _sum_when(linked & false_join & by_climb).alias("false_joined_by_climb"),
+        _sum_when(linked & by_climb & labelled).alias("linked_by_climb_labelled"),
+        _sum_when(linked & by_descent).alias("linked_by_descent"),
+        _sum_when(linked & false_join & by_descent).alias("false_joined_by_descent"),
+        _sum_when(linked & by_descent & labelled).alias("linked_by_descent_labelled"),
+        _sum_when(linked & past_blank_old).alias("linked_altitude_read_past_blank_old"),
+        _sum_when(linked & false_join & past_blank_old).alias(
+            "false_joined_altitude_read_past_blank_old"
+        ),
+        _sum_when(linked & past_blank_new).alias("linked_altitude_read_past_blank_new"),
+        _sum_when(linked & false_join & past_blank_new).alias(
+            "false_joined_altitude_read_past_blank_new"
         ),
         _sum_when(linked & false_join & F.col("event_near_edge")).alias("false_joined_near_edge"),
     ).first()
@@ -485,12 +542,12 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
     Every control is exactly one of ``negative_limit_controls``,
     ``negative_shallow_controls`` (``cruise_cruise``, the gap is allowed, the depth too
     small), ``negative_over_gap_controls`` or ``negative_low_edge_untested_controls``
-    (a low-edge family, the gap allowed, at a point with direction off). The same or
-    blank callsign group is drawn from the controls under the limit, with its shallow
+    (a low-edge family, the gap allowed, whose edges the point does not allow). The same
+    or blank callsign group is drawn from the controls under the limit, with its shallow
     controls counted apart.
 
-    With direction off a low edge cannot link, since the cuts are below the floor. So
-    those controls are no evidence about the point, and counted they would let a point
+    A low edge the point does not allow cannot link, since the cuts are below the floor.
+    So those controls are no evidence about the point, and counted they would let a point
     over the limit on ``cruise_cruise`` pass on rejections that test nothing.
     ``negative_low_edge_controls`` are those under the limit, with their false joins.
     """
@@ -500,7 +557,7 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
     low_edge = ~cruise_cruise
     under_limit = _counts_toward_limit(p)
     shallow = within_gap & cruise_cruise & ~under_limit
-    untested = within_gap & low_edge & ~F.lit(p.link_old_edge_climb or p.link_new_edge_descent)
+    untested = within_gap & low_edge & ~_low_edge_allowed(p)
     same = F.col("same_callsign") & under_limit
     same_shallow = F.col("same_callsign") & shallow
     same_low_edge = same & low_edge
@@ -538,8 +595,9 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
 def positive_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int]:
     """Positive controls, those the point allows, and those it links, per kind of edge.
 
-    The ``low_edge`` family apart, because with direction off it is missed entirely,
-    and that says nothing about how the rule does on a cruise.
+    The ``low_edge`` family apart, because it has a low edge on both sides, so unless
+    both flags are on it is missed entirely, and that says nothing about how the rule
+    does on a cruise.
     """
     linked = _linked(p)
     within_gap = F.col("gap_min") <= p.link_max_gap_minutes
@@ -836,10 +894,10 @@ def _share(part: int, whole: int) -> Optional[float]:
 
 
 def _direction_verdicts(row: Dict) -> Dict:
-    """The limits a direction-on point must also meet on its own evidence.
+    """The limits a point with either flag on must also meet on its own evidence.
 
-    ``negative_low_edge_within_limit`` is ``None`` with direction off, and the two
-    statuses read ``not_applicable``: those points cannot link a low edge.
+    ``negative_low_edge_within_limit`` is ``None`` with both off, and the two statuses
+    read ``not_applicable``: those points cannot link a low edge.
     """
     low_n = row["negative_low_edge_controls"]
     low_upper = rule_of_three_upper(row["negative_low_edge_false_joins"], low_n)
@@ -974,10 +1032,11 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
     the rule exists for, then the most flights in one track overall. A tie then goes
     to the more conservative settings, as a wrongly glued flight is worse than a split
     one: the higher ``link_min_implied_speed_kt``, the shorter ``link_max_gap_minutes``,
-    the higher ``link_min_speed_ratio``, the higher ``link_min_stop_minutes``, then
-    ``link_old_edge_climb`` or ``link_new_edge_descent`` off. The ratio and stop are there because the grid lists
-    each off setting first, so without them a tie would fall to the point with those
-    checks off. A tie that far means direction linked nothing more. The false-join bound is not
+    the higher ``link_min_speed_ratio``, the higher ``link_min_stop_minutes``, then fewer
+    of ``link_old_edge_climb`` and ``link_new_edge_descent`` on. The ratio and stop are
+    there because the grid lists each off setting first, so without them a tie would fall
+    to the point with those checks off. A tie that far means direction linked nothing
+    more. The false-join bound is not
     compared here, because a point inside the limits has already met it. The first point
     takes any tie left, so the pick is deterministic.
     """
@@ -993,8 +1052,7 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
             r["link_max_gap_minutes"],
             -r["link_min_speed_ratio"],
             -r["link_min_stop_minutes"],
-            r["link_old_edge_climb"],
-            r["link_new_edge_descent"],
+            r["link_old_edge_climb"] + r["link_new_edge_descent"],
             r["point_id"],
         ),
     )
@@ -1004,7 +1062,7 @@ def lowest_bound_point(rows: List[Dict]) -> Optional[Dict]:
     """The row with the lowest ``cruise_cruise`` bound, or ``None`` with no such controls.
 
     Where Stage 2 runs if nothing is recommended. Read on the one population all points
-    share: the pooled bound has low-edge controls in it only with direction on, so
+    share: the pooled bound has low-edge controls in it only with a flag on, so
     comparing it would favour a point for having a bigger denominator. A tie goes to the
     most flights in one track, which leaves Stage 2 the most linked tracks to examine.
     """

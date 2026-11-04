@@ -33,6 +33,7 @@ from opdi.pipeline.segmentation.methods import (
     debounced_callsign_change,
     link_checks,
     link_feature_columns,
+    select_link_features,
     linkable,
     recommended,
     stable_callsign,
@@ -577,11 +578,18 @@ def test_linkable_agrees_with_the_rule_when_the_new_edge_is_low(spark):
     samples = _hole_samples(after=low_descent)
     assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == 2
 
-    row = _hole_row(spark, samples)
-    assert row["alt_new_edge_ft"] == pytest.approx(3000.0)
-    assert _decide(
-        spark, _DIRECTIONAL, alt_after_ft=3000.0, alt_new_edge_ft=3000.0, vr_after_fpm=-1500.0
-    ) is False
+    assert _hole_row(spark, samples)["alt_after_ft"] == pytest.approx(3000.0)
+    assert _decide(spark, _DIRECTIONAL, alt_after_ft=3000.0, vr_after_fpm=-1500.0) is False
+
+
+def test_the_descent_guard_reads_past_a_blank_first_sample(spark):
+    """The low-altitude gap sees nothing on a blank sample, so the guard has to read on."""
+    low = {"baro_altitude": 3000.0 / FT_PER_M, "vert_rate": -1500.0 / FPM_PER_MPS}
+    samples = _piece(-45, 0.0)
+    samples += _piece(191 * 60, _lon(1530.0), n=1, baro_altitude=None, vert_rate=low["vert_rate"])
+    samples += _piece(191 * 60 + 5, _lon(1530.0), n=9, **low)
+    assert n_tracks(make_track(spark, samples), _DESCENT_ONLY) == 2
+    assert _hole_row(spark, samples)["alt_after_ft"] == pytest.approx(3000.0)
 
 
 def _with_rates(rates, samples):
@@ -728,6 +736,24 @@ def test_the_rule_reads_each_edge_position_once(spark):
     frame = _engine_frame(_hole(spark))
     plan = _plan(frame.withColumn("_brk", cruise_linked().break_expr(P)))
     assert len(re.findall(r"\bfirst\(", plan)) <= 3, plan
+
+
+@pytest.mark.parametrize("name", list(_single_read_fixtures()))
+def test_selecting_the_features_together_gives_the_separate_columns(spark, name):
+    frame = _engine_frame(make_track(spark, _single_read_fixtures()[name]))
+    apart = frame.select(
+        "event_time", *[c.alias(k) for k, c in link_feature_columns(P).items()]
+    ).orderBy("event_time")
+    together = select_link_features(frame, P, keep=["event_time"])
+    assert together.columns == apart.columns
+    assert together.orderBy("event_time").collect() == apart.collect()
+
+
+def test_selecting_the_features_together_reads_each_edge_once(spark):
+    """Column by column it is seven, which made the study 3.2x slower on a local run."""
+    frame = _engine_frame(_hole(spark))
+    plan = _plan(select_link_features(frame, P))
+    assert len(re.findall(r"\bcollect_list\(", plan)) == 2, plan
 
 
 def test_the_features_read_each_edge_position_once_per_column(spark):
@@ -995,6 +1021,97 @@ def test_no_rate_in_the_window_stays_neutral(spark):
     assert row["vr_after_samples"] == 0
 
 
+def test_a_rate_past_the_window_is_not_read(spark):
+    """Five minutes on each side. Read, these two would be a descent then a climb, and split."""
+    down, up = -1500.0 / FPM_PER_MPS, 1500.0 / FPM_PER_MPS
+    new_edge = 191 * 60
+    samples = _piece(-320, 0.0, n=3, vert_rate=down)
+    samples += _piece(-300, 0.0, n=61, vert_rate=None)
+    samples += _piece(new_edge, _lon(1530.0), n=61, vert_rate=None)
+    samples += _piece(new_edge + 305, _lon(1530.0), n=3, vert_rate=up)
+    assert n_tracks(make_track(spark, samples)) == 1
+    row = _hole_row(spark, samples)
+    assert row["vr_before_samples"] == 0
+    assert row["vr_after_samples"] == 0
+
+
+def test_an_old_edge_blank_for_285_s_with_cruise_before_it_links(spark):
+    """Deliberate: inside the window altitude can be nearly five minutes old and still count.
+
+    The report counts these as ``linked_altitude_read_past_blank_old``.
+    """
+    samples = _piece(-345, 0.0, n=12) + _piece(-285, 0.0, n=58, baro_altitude=None)
+    samples += _piece(191 * 60, _lon(1530.0))
+    assert n_tracks(make_track(spark, samples)) == 1
+    row = _hole_row(spark, samples)
+    assert row["alt_before_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
+    assert row["alt_before_read_past_blank"] is True
+    assert row["alt_after_read_past_blank"] is False
+
+
+NAN = float("nan")
+
+
+def test_nan_altitude_everywhere_splits(spark):
+    """NaN passes ``>=`` in Spark, so counted as a value it would link on no altitude at all."""
+    samples = _hole_samples(after={"baro_altitude": NAN})
+    assert n_tracks(make_track(spark, samples)) == 2
+    assert _hole_row(spark, samples)["alt_after_ft"] is None
+
+
+def test_nan_altitudes_do_not_hide_a_low_value(spark):
+    samples = _one_hz_after_hole(8, {"baro_altitude": 3000.0 / FT_PER_M}, baro_altitude=NAN)
+    assert n_tracks(make_track(spark, samples)) == 2
+    row = _hole_row(spark, samples)
+    assert row["alt_after_ft"] == pytest.approx(3000.0)
+    assert row["alt_after_read_past_blank"] is True
+
+
+def test_nan_rates_do_not_pass_a_climb(spark):
+    """NaN passes ``>`` too, and five of them would meet the three-rate requirement."""
+    samples = _hole_samples(before={"baro_altitude": FL200, "vert_rate": NAN})
+    assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == 2
+    row = _hole_row(spark, samples)
+    assert row["vr_before_fpm"] is None
+    assert row["vr_before_samples"] == 0
+
+
+def test_nan_speeds_are_read_past(spark):
+    """One NaN in a mean makes the mean NaN, so it must not take the place of a value."""
+    samples = _piece(-45, 0.0, n=5) + _piece(-20, 0.0, n=5, velocity=NAN)
+    samples += _piece(191 * 60, _lon(1530.0))
+    assert _hole_row(spark, samples)["spd_before_kt"] == pytest.approx(480.0)
+
+
+@pytest.mark.parametrize(
+    "first, expected",
+    [
+        ({}, False),
+        ({"baro_altitude": None}, True),
+        ({"baro_altitude": NAN}, True),
+    ],
+    ids=["value at the edge", "blank at the edge", "nan at the edge"],
+)
+def test_the_new_edge_says_whether_its_altitude_is_the_edge_sample(spark, first, expected):
+    samples = _piece(-45, 0.0) + _piece(3600, _lon(480.0), n=1, **first)
+    samples += _piece(3605, _lon(480.0), n=9)
+    assert _hole_row(spark, samples)["alt_after_read_past_blank"] is expected
+
+
+def test_no_altitude_at_all_is_not_a_read_past_a_blank(spark):
+    """Nothing was read. Such an edge fails its test, so it can never count as a link."""
+    row = _hole_row(spark, _hole_samples(after={"baro_altitude": None}))
+    assert row["alt_after_ft"] is None
+    assert row["alt_after_read_past_blank"] is False
+
+
+def test_a_value_in_the_edges_own_second_is_the_edge_sample(spark):
+    """Two samples in one second have no order, so a blank twin is not a read past a blank."""
+    samples = _piece(-45, 0.0) + _piece(3600, _lon(480.0), n=1, baro_altitude=None)
+    samples += _piece(3600, _lon(480.0), n=10)
+    assert _hole_row(spark, samples)["alt_after_read_past_blank"] is False
+
+
 def test_each_field_finds_its_own_samples(spark):
     """On either side, no sample carries both, so a shared row bound would lose one of them."""
     up = 1500.0 / FPM_PER_MPS
@@ -1100,7 +1217,6 @@ _DOUBLES = {
     "gc_nm": 1530.0,
     "alt_before_ft": 36000.0,
     "alt_after_ft": 36000.0,
-    "alt_new_edge_ft": 36000.0,
     "vr_before_fpm": 0.0,
     "vr_after_fpm": 0.0,
     "vr_before_samples": 5.0,
@@ -1205,7 +1321,6 @@ _GOOD_HOLE = {
     "gc_nm": 1528.0,
     "alt_before_ft": 36000.0,
     "alt_after_ft": 36000.0,
-    "alt_new_edge_ft": 36000.0,
     "vr_before_fpm": 0.0,
     "vr_after_fpm": 0.0,
     "vr_before_samples": 5.0,
@@ -1290,16 +1405,14 @@ _CHECK_CASES = [
     # A missing altitude is not below anything.
     (_DIRECTIONAL, {"alt_before_ft": None, "vr_before_fpm": 1500.0}, ["cruise_at_old_edge"]),
     (_DIRECTIONAL, {"alt_after_ft": None, "vr_after_fpm": -1500.0}, ["cruise_at_new_edge"]),
-    # The low-altitude gap breaks on this sample whatever the verdict, so it cannot read
-    # as linked. Below the limit only at the edge sample, and neutral when it has none.
-    (_DIRECTIONAL, {"alt_after_ft": 4000.0, "alt_new_edge_ft": 4000.0, "vr_after_fpm": -1500.0},
-     ["cruise_at_new_edge"]),
-    (_DIRECTIONAL, {"alt_after_ft": 4000.0, "alt_new_edge_ft": 5000.0, "vr_after_fpm": -1500.0}, []),
-    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "alt_new_edge_ft": None, "vr_after_fpm": -1500.0}, []),
+    # The low-altitude gap can break here whatever the verdict, so it cannot read as
+    # linked. The limit is read on the lowest of the edge's values, and is strict.
+    (_DIRECTIONAL, {"alt_after_ft": 4000.0, "vr_after_fpm": -1500.0}, ["cruise_at_new_edge"]),
+    (_DIRECTIONAL, {"alt_after_ft": 5000.0, "vr_after_fpm": -1500.0}, []),
     # A climb at the old edge and a descent at the new one, which is the whole flight's
     # shape, and descend-then-climb still applies unchanged.
     (_DIRECTIONAL, {"alt_before_ft": 9000.0, "vr_before_fpm": 1500.0,
-                    "alt_after_ft": 9000.0, "alt_new_edge_ft": 9000.0, "vr_after_fpm": -1500.0}, []),
+                    "alt_after_ft": 9000.0, "vr_after_fpm": -1500.0}, []),
     (_DIRECTIONAL, {"vr_before_fpm": -1500.0, "vr_after_fpm": 1500.0}, ["not_descend_then_climb"]),
     # One rate of five cannot carry a direction: three are needed, on that edge's frame.
     (_DIRECTIONAL, {**_CLIMB_EDGE, "vr_before_samples": 3.0}, []),

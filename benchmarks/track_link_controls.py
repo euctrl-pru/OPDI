@@ -3,7 +3,7 @@
 A10 ``cruise_linked`` keeps one ``track_id`` across a reception hole when the two
 edges can be one flight, and no published method says how often that is wrong. This
 module builds what OPDI measures it with. Every row carries the features of
-``methods.link_feature_columns``, so the study applies ``methods.linkable`` for each
+``methods.select_link_features``, so the study applies ``methods.linkable`` for each
 parameter set to one frame and never re-segments.
 
 **Real holes** are every gap over ``gap_minutes`` in an airframe's samples. Network
@@ -50,7 +50,7 @@ family removes the whole cruise instead, from the climb's edge to the descent's,
 measures the links direction misses. It has no ``requested_gap_min``.
 
 **A control is scored by the rule's own expressions.** Generators only pick samples
-around a cut, then call ``link_feature_columns`` on a window partitioned by
+around a cut, then call ``select_link_features`` on a window partitioned by
 ``control_id``. They keep what those expressions can read: the callsign lookback before
 the cut and the lookahead after it, and the edge window on both sides. So a control
 whose edge sample has no position or altitude reads through it, as a real hole does.
@@ -81,7 +81,7 @@ from pyspark.sql import functions as F
 
 from opdi.pipeline.segmentation import SegmentationParams
 from opdi.pipeline.segmentation.base import FPM_PER_MPS, FT_PER_M, KT_PER_MPS
-from opdi.pipeline.segmentation.methods import LINK_EDGE_SAMPLES, link_feature_columns
+from opdi.pipeline.segmentation.methods import select_link_features
 
 __all__ = [
     "flight_samples",
@@ -131,16 +131,15 @@ def real_hole_candidates(tracks: DataFrame, p) -> DataFrame:
     zero minutes after its twin, so the hole is still one row.
     """
     window = Window.partitionBy("icao24").orderBy("_ts")
-    features = link_feature_columns(p, window)
-    return (
-        _with_engine_columns(tracks)
-        .select(
+    return select_link_features(
+        _with_engine_columns(tracks),
+        p,
+        window,
+        keep=[
             F.lag(F.col("_ts")).over(window).alias("t_old_edge"),
             F.col("_ts").alias("t_new_edge"),
-            *[c.alias(name) for name, c in features.items()],
-        )
-        .filter(F.col("gap_min") > p.gap_minutes)
-    )
+        ],
+    ).filter(F.col("gap_min") > p.gap_minutes)
 
 
 def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
@@ -321,44 +320,30 @@ def _score_cuts(samples: DataFrame, cuts: DataFrame, p, expected: str) -> DataFr
     ``cuts`` has the :data:`_CUT_COLUMNS`: the flights on each side, the two edge
     times, and the columns that say what kind of control it is.
     """
-    newest_first = Window.partitionBy("control_id").orderBy(F.col("_ts").desc())
-    oldest_first = Window.partitionBy("control_id").orderBy(F.col("_ts"))
     # Whichever reaches further: the callsign bounds usually do, but nothing ties them
     # to the position window, and a control that lost a position would read as blank.
     lookback_s = max(p.link_callsign_lookback_minutes, p.link_edge_position_minutes) * 60
     lookahead_s = max(p.link_callsign_lookahead_minutes, p.link_edge_position_minutes) * 60
 
-    before = (
-        samples.join(
-            cuts,
-            (F.col("flight_key") == F.col("flight_before"))
-            & (F.col("_ts") <= F.col("t_old_edge")),
-        )
-        .withColumn("_rank", F.row_number().over(newest_first))
-        .filter(
-            (F.col("_rank") <= LINK_EDGE_SAMPLES)
-            | (_seconds("_ts") >= _seconds("t_old_edge") - lookback_s)
-        )
+    before = samples.join(
+        cuts,
+        (F.col("flight_key") == F.col("flight_before"))
+        & (F.col("_ts") <= F.col("t_old_edge"))
+        & (_seconds("_ts") >= _seconds("t_old_edge") - lookback_s),
     )
-    after = (
-        samples.join(
-            cuts,
-            (F.col("flight_key") == F.col("flight_after"))
-            & (F.col("_ts") >= F.col("t_new_edge")),
-        )
-        .withColumn("_rank", F.row_number().over(oldest_first))
-        .filter(
-            (F.col("_rank") <= LINK_EDGE_SAMPLES)
-            | (_seconds("_ts") <= _seconds("t_new_edge") + lookahead_s)
-        )
+    after = samples.join(
+        cuts,
+        (F.col("flight_key") == F.col("flight_after"))
+        & (F.col("_ts") >= F.col("t_new_edge"))
+        & (_seconds("_ts") <= _seconds("t_new_edge") + lookahead_s),
     )
 
-    features = link_feature_columns(p, Window.partitionBy("control_id").orderBy("_ts"))
     return (
-        before.unionByName(after)
-        .select(
-            *[c for c in _CUT_COLUMNS if c not in ("flight_before", "flight_after")], "_ts",
-            *[c.alias(name) for name, c in features.items()],
+        select_link_features(
+            before.unionByName(after),
+            p,
+            Window.partitionBy("control_id").orderBy("_ts"),
+            keep=[*[c for c in _CUT_COLUMNS if c not in ("flight_before", "flight_after")], "_ts"],
         )
         # A sample duplicated at the new edge is zero minutes after its twin.
         .filter((F.col("_ts") == F.col("t_new_edge")) & (F.col("gap_min") > p.gap_minutes))
