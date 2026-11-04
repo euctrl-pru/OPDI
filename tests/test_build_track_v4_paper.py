@@ -120,7 +120,7 @@ def _skip_until_the_grid_is_rerun():
 @needs_paper
 def test_the_report_builds_from_the_staged_csvs():
     _skip_until_the_grid_is_rerun()
-    qmd, page = B.build(PAPER)
+    qmd, page, _md = B.build(PAPER)
     for text in (qmd, page):
         assert "{{" not in text and "}}" not in text
         assert "nan" not in text.lower().split()
@@ -165,3 +165,20 @@ def test_every_value_the_builder_computes_is_used():
     _skip_until_the_grid_is_rerun()
     text = (PAPER / "report_template.md").read_text()
     assert [k for k in B.build_context(PAPER / "data") if "{{ " + k + " }}" not in text] == []
+
+
+def test_col_widths_fit_the_page_and_keep_words_whole():
+    measure = len  # one point per character
+    rows = [["Number", "Description of the thing"], ["1", "a much longer cell " * 10]]
+    w = B.col_widths(rows, 100, measure)
+    assert sum(w) == pytest.approx(100)
+    assert w[0] >= len("Number")
+    assert B.col_widths(rows, 20, measure) == pytest.approx([20 * f / 80 for f in (28, 52)], abs=30)
+    assert sum(B.col_widths(rows, 20, measure)) == pytest.approx(20)
+    assert sum(B.col_widths([["a", "b"]], 500, measure)) == pytest.approx(500)
+
+
+def test_pdf_without_reportlab_says_so(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "reportlab", None)  # makes the import fail
+    with pytest.raises(SystemExit, match="needs reportlab"):
+        B.to_pdf("# x\n\ntext", tmp_path / "x.pdf")

@@ -8,6 +8,7 @@ can never read as a result. It writes:
 
     index.qmd    front matter, the regeneration chunk, then the prose with literal numbers
     index.html   the same prose as one standalone page
+    track-construction-v4.pdf   the same again as an A4 PDF, with --pdf (needs reportlab)
 
 Quarto and R do not run on the study's machine, so ``index.html`` comes from the small
 converter below rather than from a render.
@@ -25,6 +26,7 @@ import math
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import jinja2
@@ -634,8 +636,10 @@ def _cells(line):
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
-def markdown_to_html(md):
-    lines, out, i = md.split("\n"), [], 0
+def blocks(md):
+    """Markdown as ``(kind, data)``: heading (level, text), table (rows, header first),
+    list (ordered?, items), code (text) or para (text)."""
+    lines, i = md.split("\n"), 0
     while i < len(lines):
         line = lines[i]
         if not line.strip():
@@ -647,25 +651,19 @@ def markdown_to_html(md):
                 code.append(lines[i])
                 i += 1
             i += 1
-            out.append(f"<pre><code>{html.escape(chr(10).join(code))}</code></pre>")
+            yield "code", "\n".join(code)
         elif re.match(r"#{1,6} ", line):
             level = len(line) - len(line.lstrip("#"))
-            out.append(f"<h{level}>{inline(line[level:].strip())}</h{level}>")
+            yield "heading", (level, line[level:].strip())
             i += 1
         elif line.startswith("|"):
             block = []
             while i < len(lines) and lines[i].startswith("|"):
                 block.append(lines[i])
                 i += 1
-            head = "".join(f"<th>{inline(c)}</th>" for c in _cells(block[0]))
-            body = "".join(
-                "<tr>" + "".join(f"<td>{inline(c)}</td>" for c in _cells(r)) + "</tr>"
-                for r in block[2:]
-            )
-            out.append(f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead>'
-                       f"<tbody>{body}</tbody></table></div>")
+            yield "table", [_cells(r) for r in block[:1] + block[2:]]
         elif re.match(r"(- |\d+\. )", line):
-            tag = "ul" if line.startswith("- ") else "ol"
+            ordered = not line.startswith("- ")
             items = []
             while i < len(lines) and (re.match(r"(- |\d+\. )", lines[i])
                                       or (items and lines[i].startswith("  "))):
@@ -674,7 +672,7 @@ def markdown_to_html(md):
                 else:
                     items.append(re.sub(r"^(- |\d+\. )", "", lines[i]))
                 i += 1
-            out.append(f"<{tag}>" + "".join(f"<li>{inline(x)}</li>" for x in items) + f"</{tag}>")
+            yield "list", (ordered, items)
         else:
             para = []
             while i < len(lines) and lines[i].strip() and not re.match(
@@ -685,7 +683,27 @@ def markdown_to_html(md):
             if not para:  # a line no branch above took: never loop on it
                 para.append(lines[i].strip())
                 i += 1
-            out.append(f"<p>{inline(' '.join(para))}</p>")
+            yield "para", " ".join(para)
+
+
+def markdown_to_html(md):
+    out = []
+    for kind, d in blocks(md):
+        if kind == "code":
+            out.append(f"<pre><code>{html.escape(d)}</code></pre>")
+        elif kind == "heading":
+            out.append(f"<h{d[0]}>{inline(d[1])}</h{d[0]}>")
+        elif kind == "table":
+            head = "".join(f"<th>{inline(c)}</th>" for c in d[0])
+            body = "".join("<tr>" + "".join(f"<td>{inline(c)}</td>" for c in r) + "</tr>"
+                           for r in d[1:])
+            out.append(f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead>'
+                       f"<tbody>{body}</tbody></table></div>")
+        elif kind == "list":
+            tag = "ol" if d[0] else "ul"
+            out.append(f"<{tag}>" + "".join(f"<li>{inline(x)}</li>" for x in d[1]) + f"</{tag}>")
+        else:
+            out.append(f"<p>{inline(d)}</p>")
     return "\n".join(out)
 
 
@@ -724,6 +742,128 @@ def to_html(md):
         "<code>benchmarks/build_track_v4_paper.py</code>; not a Quarto render.</p>\n"
         f"{markdown_to_html(md)}\n</main>\n</body>\n</html>\n"
     )
+
+
+# --- PDF: the same blocks, laid out with reportlab (imported only for --pdf) ---
+
+FONT_DIRS = ("/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu", "/usr/share/fonts/TTF")
+
+
+def col_widths(rows, total, measure, minimum=28.0):
+    """Column widths summing to ``total`` points. ``measure(text)`` is a string's width.
+
+    A column wants its longest word (so nothing breaks mid-word) at least, and its
+    longest cell at most; the spare width goes to columns in proportion to what they
+    still want, and when even the longest words do not fit, widths shrink pro rata.
+    """
+    ncol = max(len(r) for r in rows)
+    pad = [[(r[c] if c < len(r) else "") for r in rows] for c in range(ncol)]
+    floor = [max([minimum] + [measure(w) for t in col for w in t.split()]) for col in pad]
+    want = [max([f] + [measure(t) for t in col]) for f, col in zip(floor, pad)]
+    if sum(floor) >= total:
+        return [f * total / sum(floor) for f in floor]
+    if sum(want) <= total:
+        return [w + (total - sum(want)) / ncol for w in want]
+    spare = (total - sum(floor)) / sum(w - f for w, f in zip(want, floor))
+    return [f + (w - f) * spare for f, w in zip(floor, want)]
+
+
+def to_pdf(md, out_path):
+    """Write the report as an A4 PDF; reportlab is imported here, not at module load."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.platypus import (ListFlowable, ListItem, Paragraph, Preformatted,
+                                        SimpleDocTemplate, Spacer, Table, TableStyle,
+                                        KeepTogether)
+    except ImportError as e:
+        raise SystemExit(
+            "--pdf needs reportlab, which the project does not depend on: install it into "
+            f"a scratch environment (pip install reportlab) and run again ({e})"
+        )
+    fonts = {"Body": "DejaVuSans.ttf", "Body-Bold": "DejaVuSans-Bold.ttf",
+             "Body-Italic": "DejaVuSans-Oblique.ttf", "Body-BoldItalic": "DejaVuSans-BoldOblique.ttf",
+             "Mono": "DejaVuSansMono.ttf", "Mono-Bold": "DejaVuSansMono-Bold.ttf"}
+    for name, fname in fonts.items():
+        path = next((Path(d) / fname for d in FONT_DIRS if (Path(d) / fname).is_file()), None)
+        if path is None:
+            raise SystemExit(f"--pdf needs the DejaVu font {fname} (looked in {FONT_DIRS})")
+        pdfmetrics.registerFont(TTFont(name, str(path)))
+    pdfmetrics.registerFontFamily("Body", normal="Body", bold="Body-Bold",
+                                  italic="Body-Italic", boldItalic="Body-BoldItalic")
+    pdfmetrics.registerFontFamily("Mono", normal="Mono", bold="Mono-Bold",
+                                  italic="Mono", boldItalic="Mono-Bold")
+
+    ink, muted, accent, band = (colors.HexColor(h) for h in ("#1f2328", "#57606a", "#0a3d7a", "#f0f3f6"))
+    S = lambda name, **kw: ParagraphStyle(name, fontName=kw.pop("fontName", "Body"),
+                                          textColor=kw.pop("textColor", ink), **kw)
+    body = S("body", fontSize=9.5, leading=13.5, spaceAfter=6, alignment=TA_LEFT)
+    cell = S("cell", fontSize=8, leading=10.5)
+    head_cell = S("hcell", fontSize=8, leading=10.5, fontName="Body-Bold", textColor=colors.white)
+    heads = {1: S("h1", fontSize=15, leading=19, fontName="Body-Bold", textColor=accent, spaceBefore=16, spaceAfter=6),
+             2: S("h2", fontSize=12, leading=16, fontName="Body-Bold", textColor=accent, spaceBefore=12, spaceAfter=4),
+             3: S("h3", fontSize=10.5, leading=14, fontName="Body-Bold", spaceBefore=9, spaceAfter=3)}
+    code_style = S("code", fontName="Mono", fontSize=7.5, leading=10, backColor=band,
+                   borderPadding=5, spaceBefore=4, spaceAfter=10)
+
+    def markup(text):  # the HTML inline() writes, in reportlab's dialect
+        text = inline(text)
+        text = re.sub(r"<a href=[^>]*>(.*?)</a>", r"\1", text)
+        text = text.replace("<strong>", "<b>").replace("</strong>", "</b>")
+        return text.replace("<code>", '<font name="Mono" size="8.2">').replace("</code>", "</font>")
+
+    width = A4[0] - 2 * 20 * mm
+
+    def footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Body", 7.5)
+        canvas.setFillColor(muted)
+        canvas.drawString(20 * mm, 11 * mm, f"EUROCONTROL PRU  \u00b7  {TITLE}")
+        canvas.drawRightString(A4[0] - 20 * mm, 11 * mm, f"Page {doc.page}")
+        canvas.setStrokeColor(colors.HexColor("#d0d7de"))
+        canvas.line(20 * mm, 15 * mm, A4[0] - 20 * mm, 15 * mm)
+        canvas.restoreState()
+
+    story = [Paragraph(html.escape(TITLE), S("title", fontSize=22, leading=27, fontName="Body-Bold", textColor=accent, spaceAfter=6)),
+             Paragraph(html.escape(SUBTITLE), S("sub", fontSize=11, leading=15, textColor=muted, spaceAfter=8)),
+             Paragraph(f"EUROCONTROL Performance Review Unit  \u00b7  {date.today():%d %B %Y}",
+                       S("meta", fontSize=9, leading=12, textColor=muted, spaceAfter=4)),
+             Table([[""]], colWidths=[width], rowHeights=[2],
+                   style=[("LINEABOVE", (0, 0), (-1, 0), 1.2, accent)]), Spacer(1, 6)]
+    for kind, d in blocks(md):
+        if kind == "heading":
+            story.append(Paragraph(markup(d[1]), heads[min(d[0], 3)]))
+        elif kind == "para":
+            story.append(Paragraph(markup(d), body))
+        elif kind == "code":
+            story.append(Preformatted(d, code_style))
+        elif kind == "list":
+            items = [ListItem(Paragraph(markup(x), body), leftIndent=14) for x in d[1]]
+            story.append(ListFlowable(items, bulletType="1" if d[0] else "bullet",
+                                      start=1 if d[0] else "\u2022", bulletFontName="Body",
+                                      bulletFontSize=9, leftIndent=14))
+        else:
+            plain = [[re.sub(r"[`*]", "", c) for c in r] for r in d]
+            widths = col_widths(plain, width - 8, lambda t: pdfmetrics.stringWidth(t, "Body-Bold", 8) + 9)
+            data = [[Paragraph(markup(c), head_cell if r == 0 else cell) for c in row]
+                    for r, row in enumerate(d)]
+            story.append(Table(data, colWidths=widths, repeatRows=1, splitByRow=1, hAlign="LEFT", style=TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), accent),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, band]),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#d0d7de")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)])))
+            story.append(Spacer(1, 8))
+    SimpleDocTemplate(str(out_path), pagesize=A4, leftMargin=20 * mm, rightMargin=20 * mm,
+                      topMargin=18 * mm, bottomMargin=22 * mm, title=TITLE,
+                      author="EUROCONTROL Performance Review Unit",
+                      ).build(story, onFirstPage=footer, onLaterPages=footer)
 
 
 REGENERATE_CHUNK = r"""```{r regenerate}
@@ -796,7 +936,7 @@ def to_qmd(md):
 
 
 def build(paper_dir):
-    """``(qmd, html)`` for the paper directory."""
+    """``(qmd, html, md)`` for the paper directory."""
     paper_dir = Path(paper_dir)
     template = paper_dir / "report_template.md"
     if not template.is_file():
@@ -806,16 +946,17 @@ def build(paper_dir):
     if stray:
         raise MissingValue(f"report_template.md states numbers with no source: {stray}")
     md = render(text, build_context(paper_dir / "data"))
-    return to_qmd(md), to_html(md)
+    return to_qmd(md), to_html(md), md
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--paper-dir", default=str(PAPER))
     ap.add_argument("--check", action="store_true", help="fail if index.qmd is out of date; write nothing")
+    ap.add_argument("--pdf", action="store_true", help="also write track-construction-v4.pdf (needs reportlab)")
     args = ap.parse_args(argv)
     paper_dir = Path(args.paper_dir)
-    qmd, page = build(paper_dir)
+    qmd, page, md = build(paper_dir)
     if args.check:
         current = paper_dir / "index.qmd"
         if not current.is_file() or current.read_text() != qmd:
@@ -824,6 +965,9 @@ def main(argv=None):
         return 0
     (paper_dir / "index.qmd").write_text(qmd)
     (paper_dir / "index.html").write_text(page)
+    if args.pdf:
+        to_pdf(md, paper_dir / "track-construction-v4.pdf")
+        print(f"wrote {paper_dir / 'track-construction-v4.pdf'}")
     print(f"wrote {paper_dir / 'index.qmd'} and {paper_dir / 'index.html'}")
     return 0
 
