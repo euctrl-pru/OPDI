@@ -173,7 +173,10 @@ _CODE_PATHS = [
 
 _NOTES = (
     "One day through the real pipeline, one airframe in ten. Flights that take off and "
-    "land on the day; Network Manager and APDF truth, European."
+    "land on the day; Network Manager and APDF truth, European. In "
+    "link_truth_all_flights.csv the landing_on_older, take_off_on_newer and both counts are "
+    "lower bounds, as pieces starting after midnight are not in this one-day run; its labels "
+    "are unaffected."
 )
 
 
@@ -750,11 +753,14 @@ TAKE_OFF_FAMILY = ("ATOT", "AOBT")
 
 
 def load_all_flights(path, airframes) -> pd.DataFrame:
-    """Every NM flight of *airframes*, any day, as ``icao24``, ``t_off``, ``t_on`` (UTC).
+    """Every NM flight of *airframes* in the truth file, as ``icao24``, ``t_off``, ``t_on`` (UTC).
 
     Not :func:`adsc_flight_list_truth.load_truth`, which keeps one day's off-block and
     needs ADEP and ADES: a flight on the next day, or with no aerodrome, still bounds a
     hole.
+
+    "Any day" means any flight in the file, which is one month plus a few hours, so a
+    hole near a month edge can miss a flight in the neighbouring month.
     """
     t = pd.read_parquet(path, columns=["AIRCRAFT_ADDRESS", "AOBT_3", "ARVT_3"]).dropna(
         subset=["AIRCRAFT_ADDRESS", "AOBT_3", "ARVT_3"]
@@ -783,7 +789,10 @@ def label_holes_all_flights(
     flight's block window. ``unknown`` when the airframe is in *nm* and neither holds.
     Detected events never decide the label; they are only counted beside it, as
     ``landing_on_older`` (ALDT or AIBT on the older piece) and ``take_off_on_newer``
-    (ATOT or AOBT on the newer one).
+    (ATOT or AOBT on the newer one). An event counts anywhere on the piece, not only
+    near the hole edge. Pieces are the one day's debounced tracks, so a piece starting
+    after midnight is absent and the three event counts are lower bounds; the labels
+    are unaffected.
     """
     by_nm = {k: g for k, g in nm.groupby("icao24")}
     by_piece = {k: g for k, g in pieces.groupby("icao24")}

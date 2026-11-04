@@ -1074,3 +1074,25 @@ def test_the_summary_has_a_row_per_label_even_when_empty():
         "take_off_on_newer": 2, "both": 1,
     }
     assert rows["false_join"]["holes"] == 0
+
+
+def test_a_block_time_exactly_on_a_hole_edge_is_not_a_false_join():
+    holes = [("a", HOUR, 3 * HOUR)]
+    got = _label(holes, [("a", HOUR, 3 * HOUR)])
+    assert got["label"][0] == "true_link"
+    assert _label(holes, [("a", 0, HOUR), ("a", 3 * HOUR, 5 * HOUR)])["label"][0] == "unknown"
+
+
+def test_load_all_flights_reads_zoned_times_as_utc(tmp_path):
+    path = tmp_path / "f.parquet"
+    pd.DataFrame(
+        {
+            "AIRCRAFT_ADDRESS": [" ABC123 ", "zzz999"],
+            "AOBT_3": pd.to_datetime(["2026-06-14 12:00"]*2).tz_localize("Europe/Paris"),
+            "ARVT_3": pd.to_datetime(["2026-06-14 14:00"]*2).tz_localize("Europe/Paris"),
+        }
+    ).to_parquet(path)
+    got = s.load_all_flights(path, {"abc123"})
+    assert list(got["icao24"]) == ["abc123"]
+    assert got["t_off"][0] == pd.Timestamp("2026-06-14 10:00")
+    assert got["t_on"][0] == pd.Timestamp("2026-06-14 12:00")
