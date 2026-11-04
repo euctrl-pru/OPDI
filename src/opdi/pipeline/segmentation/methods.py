@@ -84,6 +84,7 @@ __all__ = [
     "linkable",
     "cruise_linked",
     "LINK_EDGE_SAMPLES",
+    "LINK_DIRECTION_MIN_RATES",
     "PLACEHOLDER_ICAO24",
     "TRAFFIC_DEFAULT_GAP_MINUTES",
     "ARMS",
@@ -95,6 +96,10 @@ TRAFFIC_DEFAULT_GAP_MINUTES = 10.0
 
 #: Samples on each side of a hole that :func:`link_feature_columns` summarises.
 LINK_EDGE_SAMPLES = 5
+
+#: Vertical rates an edge's frame must hold before its direction counts as evidence.
+#: ``avg`` skips a NULL, so without this one message of five would carry the verdict.
+LINK_DIRECTION_MIN_RATES = 3
 
 #: ``icao24`` values that are not an airframe, so two edges carrying one say
 #: nothing about being one flight.
@@ -813,6 +818,9 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
         "alt_new_edge_ft": altitude_ft(),
         "vr_before_fpm": F.avg(vert_rate_fpm).over(before),
         "vr_after_fpm": F.avg(vert_rate_fpm).over(after),
+        # How many rates those two means rest on. Only the direction test reads these.
+        "vr_before_samples": F.count(vert_rate_fpm).over(before),
+        "vr_after_samples": F.count(vert_rate_fpm).over(after),
         "spd_before_kt": F.avg(speed_kt()).over(before),
         "cs_before": F.when(
             seen_recently,
@@ -847,9 +855,18 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     With ``link_directional_edges``, flights that reappear on approach to their
     destination, or left coverage still climbing, can pass the two edge tests below
     the floor. The direction is the evidence there, so a NULL vertical rate does not
-    pass, unlike in the descend-then-climb test. A new edge the low-altitude gap breaks
-    at does not pass either: the rule splits there whatever this says, and the study,
-    which reads this verdict instead of re-segmenting, must not count it as a link.
+    pass, unlike in the descend-then-climb test, and the mean must rest on at least
+    :data:`LINK_DIRECTION_MIN_RATES` rates in that edge's frame. A new edge the
+    low-altitude gap breaks at does not pass either: the rule splits there whatever
+    this says, and the study, which reads this verdict instead of re-segmenting, must
+    not count it as a link.
+
+    ``link_min_speed_ratio`` is uninformative at a climb edge: the speed before the gap
+    is low there, which makes the ratio easy, and it says nothing of the speed in
+    cruise. So where the old edge passed only by direction the ratio is not read, and
+    ``not_slow_for_this_flight`` falls back to ``link_min_implied_speed_kt`` alone. That
+    adds no evidence, since ``implied_speed_not_too_slow`` requires the same: such a
+    hole has no per-flight speed test at all, and the study should read it so.
     """
     # Guarded because two samples can share a second, and a Spark 4 session raises
     # on a zero divisor. A plain division here would fail the whole job on them.
@@ -864,17 +881,30 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
 
     old_edge_passes = f["alt_before_ft"] >= p.link_cruise_floor_ft
     new_edge_passes = f["alt_after_ft"] >= p.link_cruise_floor_ft
+    slow_for_this_flight_passes = (
+        implied_kt >= p.link_min_speed_ratio * f["spd_before_kt"]
+        if p.link_min_speed_ratio > 0.0
+        else F.lit(True)
+    )
     if p.link_directional_edges:
         # Spelt "below", not left to the OR: a NULL altitude must stay a failure
         # whatever the vertical rate says.
-        old_edge_passes = old_edge_passes | (
+        old_edge_by_direction = (
             (f["alt_before_ft"] < p.link_cruise_floor_ft)
             & (f["vr_before_fpm"] > p.link_edge_vert_rate_fpm)
+            & (f["vr_before_samples"] >= LINK_DIRECTION_MIN_RATES)
         )
+        old_edge_passes = old_edge_passes | old_edge_by_direction
+        if p.link_min_speed_ratio > 0.0:
+            slow_for_this_flight_passes = F.when(
+                F.coalesce(old_edge_by_direction, F.lit(False)),
+                implied_kt >= p.link_min_implied_speed_kt,
+            ).otherwise(slow_for_this_flight_passes)
         low_altitude_gap_breaks = F.coalesce(f["alt_new_edge_ft"] < p.low_alt_ft, F.lit(False))
         new_edge_passes = new_edge_passes | (
             (f["alt_after_ft"] < p.link_cruise_floor_ft)
             & (f["vr_after_fpm"] < -p.link_edge_vert_rate_fpm)
+            & (f["vr_after_samples"] >= LINK_DIRECTION_MIN_RATES)
             & ~low_altitude_gap_breaks
         )
 
@@ -886,11 +916,7 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
         "callsign_agrees": ~F.coalesce(callsign_differs, F.lit(False)),
         "implied_speed_not_too_slow": implied_kt >= p.link_min_implied_speed_kt,
         "implied_speed_not_impossible": implied_kt <= p.link_max_implied_speed_kt,
-        "not_slow_for_this_flight": (
-            implied_kt >= p.link_min_speed_ratio * f["spd_before_kt"]
-            if p.link_min_speed_ratio > 0.0
-            else F.lit(True)
-        ),
+        "not_slow_for_this_flight": slow_for_this_flight_passes,
         "no_time_for_a_stop": (
             f["position_gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0
             < p.link_min_stop_minutes

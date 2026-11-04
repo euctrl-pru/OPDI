@@ -702,6 +702,51 @@ def test_the_funnel_accounts_for_every_positive_attempt(spark):
     assert positive_controls(tracks, truth, FLOOR_FT, gaps_min=gaps).count() == 1
 
 
+# --- how near the edge a false join's event is ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "off_s, near",
+    [
+        (1000 + 299, True),     # just inside the old edge
+        (1000 + 300, True),     # five minutes is inclusive
+        (1000 + 301, False),
+        (5000 - 300, True),     # counted from the new edge as well
+        (5000 - 301, False),
+    ],
+)
+def test_a_false_joins_event_near_an_edge_is_marked(spark, off_s, near):
+    truth = _truth(spark, [{
+        "flight_key": "F1", "icao24": "abc123", "callsign": "DLH1",
+        "t_off": _at(off_s), "t_land": _at(9000),
+    }])
+    row = label_real_holes(_holes(spark, (1000, 5000)), truth).first()
+    assert row["label"] == "false_join"
+    assert row["event_near_edge"] is near
+
+
+def test_a_landing_near_an_edge_is_marked_too(spark):
+    truth = _truth(spark, [{
+        "flight_key": "F1", "icao24": "abc123", "callsign": "DLH1",
+        "t_off": _at(0), "t_land": _at(1060),
+    }])
+    row = label_real_holes(_holes(spark, (1000, 5000)), truth).first()
+    assert (row["label"], row["event_near_edge"]) == ("false_join", True)
+
+
+def test_a_hole_with_no_event_inside_is_not_near_anything(spark):
+    """Never NULL, and an event outside the hole does not count however close it is."""
+    truth = _truth(spark, [{
+        "flight_key": "F1", "icao24": "abc123", "callsign": "DLH1",
+        "t_off": _at(990), "t_land": _at(5010),
+    }])
+    rows = label_real_holes(_holes(spark, (1000, 5000)), truth).collect()
+    assert [(r["label"], r["event_near_edge"]) for r in rows] == [("true_link", False)]
+    no_truth = truth.filter(F.lit(False))
+    rows = label_real_holes(_holes(spark, (1000, 5000)), no_truth).collect()
+    assert [(r["label"], r["event_near_edge"]) for r in rows] == [("unknown", False)]
+
+
 # --- the low-edge families ----------------------------------------------------
 
 

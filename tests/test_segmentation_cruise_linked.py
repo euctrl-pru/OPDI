@@ -570,6 +570,54 @@ def test_linkable_agrees_with_the_rule_when_the_new_edge_is_low(spark):
     ) is False
 
 
+def _with_rates(rates, samples):
+    """Set the vertical rates of *samples*, nearest the hole last on either side."""
+    for sample, rate in zip(samples, rates):
+        sample["vert_rate"] = rate
+    return samples
+
+
+@pytest.mark.parametrize("n_rates, tracks", [(1, 2), (2, 2), (3, 1), (5, 1)])
+def test_a_direction_needs_three_rates_at_the_old_edge(spark, n_rates, tracks):
+    """`avg` skips a NULL, so without the count one message would carry the verdict."""
+    up = 1500.0 / FPM_PER_MPS
+    samples = _hole_samples(before={"baro_altitude": FL200})
+    _with_rates([up] * n_rates + [None] * (5 - n_rates), samples[5:10])
+    assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == tracks
+    assert _hole_row(spark, samples)["vr_before_samples"] == n_rates
+
+
+@pytest.mark.parametrize("n_rates, tracks", [(1, 2), (2, 2), (3, 1), (5, 1)])
+def test_a_direction_needs_three_rates_at_the_new_edge(spark, n_rates, tracks):
+    down = -1500.0 / FPM_PER_MPS
+    samples = _hole_samples(after={"baro_altitude": FL200})
+    _with_rates([down] * n_rates + [None] * (5 - n_rates), samples[10:15])
+    assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == tracks
+    assert _hole_row(spark, samples)["vr_after_samples"] == n_rates
+
+
+def test_rates_outside_the_edge_frame_do_not_count(spark):
+    """The sixth sample from the hole is not in the frame the mean reads."""
+    up = 1500.0 / FPM_PER_MPS
+    samples = _hole_samples(before={"baro_altitude": FL200})
+    _with_rates([None] * 5, samples[5:10])
+    _with_rates([up] * 5, samples[0:5])
+    assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == 2
+
+
+def test_too_few_samples_at_a_low_edge_splits_though_they_all_agree(spark):
+    assert n_tracks(_hole(spark, n_before=2, before=CLIMBING), _DIRECTIONAL) == 2
+    assert n_tracks(_hole(spark, n_before=3, before=CLIMBING), _DIRECTIONAL) == 1
+
+
+def test_the_speed_ratio_is_not_read_at_a_climb_edge(spark):
+    """On real tracks: 367 kt implied is under 0.85 x a 480 kt edge, and the climb edge passes."""
+    nm = 367.0 * 191 / 60
+    on = _DIRECTIONAL_RATIO_ON
+    assert n_tracks(_hole(spark, nm=nm, before=CLIMBING), on) == 1
+    assert n_tracks(_hole(spark, nm=nm), on) == 2
+
+
 def test_short_gaps_behave_as_debounced_with_direction_on(spark):
     samples = _piece(0, 0.0, n=8)
     samples += _piece(20 * 60, 0.1, n=8)
@@ -792,6 +840,8 @@ _DOUBLES = {
     "alt_new_edge_ft": 36000.0,
     "vr_before_fpm": 0.0,
     "vr_after_fpm": 0.0,
+    "vr_before_samples": 5.0,
+    "vr_after_samples": 5.0,
     "spd_before_kt": 480.0,
 }
 _STRINGS = {"cs_before": "DLH1", "cs_after": "DLH1", "icao24": "abc123"}
@@ -895,6 +945,8 @@ _GOOD_HOLE = {
     "alt_new_edge_ft": 36000.0,
     "vr_before_fpm": 0.0,
     "vr_after_fpm": 0.0,
+    "vr_before_samples": 5.0,
+    "vr_after_samples": 5.0,
     "spd_before_kt": 480.0,
     "cs_before": "DLH1",
     "cs_after": "DLH1",
@@ -904,6 +956,8 @@ _GOOD_HOLE = {
 _RATIO_ON = dataclasses.replace(P, link_min_speed_ratio=0.85)
 _STOP_ON = dataclasses.replace(P, link_min_stop_minutes=20.0)
 _DIRECTIONAL = dataclasses.replace(P, link_directional_edges=True)
+_DIRECTIONAL_RATIO_ON = dataclasses.replace(_RATIO_ON, link_directional_edges=True)
+_CLIMB_EDGE = {"alt_before_ft": 20000.0, "vr_before_fpm": 1500.0}
 
 #: ``(settings, what differs from the good hole, the tests that must fail)``.
 _CHECK_CASES = [
@@ -985,6 +1039,28 @@ _CHECK_CASES = [
     (_DIRECTIONAL, {"alt_before_ft": 9000.0, "vr_before_fpm": 1500.0,
                     "alt_after_ft": 9000.0, "alt_new_edge_ft": 9000.0, "vr_after_fpm": -1500.0}, []),
     (_DIRECTIONAL, {"vr_before_fpm": -1500.0, "vr_after_fpm": 1500.0}, ["not_descend_then_climb"]),
+    # One rate of five cannot carry a direction: three are needed, on that edge's frame.
+    (_DIRECTIONAL, {**_CLIMB_EDGE, "vr_before_samples": 3.0}, []),
+    (_DIRECTIONAL, {**_CLIMB_EDGE, "vr_before_samples": 2.0}, ["cruise_at_old_edge"]),
+    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0, "vr_after_samples": 3.0}, []),
+    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0, "vr_after_samples": 2.0},
+     ["cruise_at_new_edge"]),
+    (_DIRECTIONAL, {**_CLIMB_EDGE, "vr_after_samples": 0.0}, []),
+    # At cruise the count does not matter: rates stay neutral there.
+    (_DIRECTIONAL, {"vr_before_samples": 0.0, "vr_after_samples": 0.0}, []),
+    # A climb's speed says nothing about cruise, so the ratio is not read at a climb edge
+    # and the speed floor stands in. 900 kt would fail 0.85 x edge speed at any implied speed.
+    (_DIRECTIONAL_RATIO_ON, {**_CLIMB_EDGE, "spd_before_kt": 900.0}, []),
+    (_DIRECTIONAL_RATIO_ON, {**_CLIMB_EDGE, "spd_before_kt": None}, []),
+    (_DIRECTIONAL_RATIO_ON, {**_CLIMB_EDGE, "gc_nm": 100.0},
+     ["implied_speed_not_too_slow", "not_slow_for_this_flight"]),
+    # An old edge at cruise is still read against its own speed, direction on or not.
+    (_DIRECTIONAL_RATIO_ON, {"spd_before_kt": 900.0}, ["not_slow_for_this_flight"]),
+    (_DIRECTIONAL_RATIO_ON, {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0, "spd_before_kt": 900.0},
+     ["not_slow_for_this_flight"]),
+    # And with direction off, a slow edge below the floor gets no such allowance.
+    (_RATIO_ON, {**_CLIMB_EDGE, "spd_before_kt": 900.0},
+     ["cruise_at_old_edge", "not_slow_for_this_flight"]),
 ]
 
 

@@ -36,8 +36,10 @@ because those are the samples the directional test accepts:
   ``climb_cruise``    the first flight's climb, then the second's cruise, at the usual depths
   ``climb_descent``   the first flight's climb, then the second's descent, with no depth
 
-A depth is NULL on a side that has none. Such a control is A to B then B to C with a
-plausible speed by construction, since it spans the whole of a flight's cruise.
+A depth is NULL on a side that has none. Such a control spans the whole of a flight's
+cruise, so its implied speed is often plausible for A to B then B to C, which is why
+speed alone may not reject it. That is not guaranteed: on an out-and-back the two edges
+are near one airport, the distance is near zero, and speed rejects it easily.
 
 **Positive controls** remove the middle of one truth flight's cruise, and no link is
 a missed link. Removal never reaches beyond the requested length, since a hole a
@@ -58,8 +60,10 @@ reads through it, as a real hole does.
 and is true wherever the callsign test cannot reject, including a blank side. So the
 same-callsign stratum is the one the other tests must decide alone. Controls of
 ``gap_minutes`` or less are excluded, as they are never candidates. Controls over
-360 min keep a stratum of their own: they exceed every ``link_max_gap_minutes`` in
-the study's grid, so they read as correct rejections and must not hide among the rest.
+360 min keep a stratum of their own, which says nothing of whether a point allows them:
+a ``--grid-json`` can set ``link_max_gap_minutes`` above 360, and the rule can then link
+them. Whether a control is over the point's limit, and so a correct rejection that must
+not hide among the rest, is decided per point by the grid from ``gap_min``.
 
 Every reason a control does not exist is counted by :func:`control_funnel`, because
 a rate over the controls that survived says nothing about the ones that did not.
@@ -96,6 +100,11 @@ __all__ = [
 #: minutes. A hole ends on a real sample, so it is short by up to one sample
 #: interval; anything more means a real hole sits at the cut.
 POSITIVE_GAP_TOLERANCE_MIN = 1.0
+
+#: How close to a hole's edge a false join's event counts as near, in minutes. Truth
+#: and ADS-B times differ a little, so an event this close may be the edge's own flight
+#: rather than a stop inside the hole. Reported, and no limit reads it.
+EVENT_NEAR_EDGE_MIN = 5.0
 
 #: How far beyond its requested depth a negative control's cut may land, in minutes.
 #: A cut takes the nearest sample further into cruise, so a real reception hole there
@@ -147,10 +156,23 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
 
     Inside is strict: a hole whose edge is exactly a flight's take-off or landing lies
     within that flight, and the event is not hidden by it.
+
+    ``event_near_edge`` says an event inside the hole is within
+    :data:`EVENT_NEAR_EDGE_MIN` of either edge. The label does not read it.
     """
     key = ["icao24", "t_old_edge", "t_new_edge"]
     old, new = F.col("t_old_edge"), F.col("t_new_edge")
     t_off, t_land = F.col("t_off"), F.col("t_land")
+    near_s = EVENT_NEAR_EDGE_MIN * 60
+
+    def inside(event: Column) -> Column:
+        return (old < event) & (event < new)
+
+    def near_an_edge(event: Column) -> Column:
+        seconds = F.unix_timestamp(event)
+        return inside(event) & (
+            (seconds - F.unix_timestamp(old) <= near_s) | (F.unix_timestamp(new) - seconds <= near_s)
+        )
 
     labels = (
         holes.select(*key)
@@ -159,9 +181,8 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
         .groupBy(*key)
         .agg(
             F.max((t_off <= old) & (new <= t_land)).alias("_within_one"),
-            F.max(
-                ((old < t_off) & (t_off < new)) | ((old < t_land) & (t_land < new))
-            ).alias("_event_inside"),
+            F.max(inside(t_off) | inside(t_land)).alias("_event_inside"),
+            F.max(near_an_edge(t_off) | near_an_edge(t_land)).alias("_event_near_edge"),
         )
         .withColumn(
             "label",
@@ -169,7 +190,8 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
             .when(F.col("_within_one"), "true_link")
             .otherwise("unknown"),
         )
-        .select(*key, "label")
+        .withColumn("event_near_edge", F.coalesce(F.col("_event_near_edge"), F.lit(False)))
+        .select(*key, "label", "event_near_edge")
     )
     return holes.join(labels, on=key, how="inner")
 

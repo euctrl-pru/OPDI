@@ -45,6 +45,7 @@ from track_link_grid import (
     holes_inside_flights,
     lowest_bound_point,
     negative_counts,
+    negative_reason_counts,
     pick_recommended,
     pool_counts,
     pool_rows,
@@ -88,6 +89,8 @@ _FEATURE_SCHEMA = [
     StructField("cs_before", StringType(), True),
     StructField("cs_after", StringType(), True),
     StructField("alt_new_edge_ft", DoubleType(), True),
+    StructField("vr_before_samples", DoubleType(), True),
+    StructField("vr_after_samples", DoubleType(), True),
 ]
 
 
@@ -146,7 +149,7 @@ def _feature_row(
     return (
         "abc123", gap_min, position_gap_min, speed_kt * position_gap_min / 60.0,
         alt_before_ft, alt_after_ft, vr_before_fpm, vr_after_fpm,
-        spd_before_kt, cs_before, cs_after, alt_after_ft,
+        spd_before_kt, cs_before, cs_after, alt_after_ft, 5.0, 5.0,
     )
 
 
@@ -195,7 +198,8 @@ def _positives(spark, rows, family="cruise_cruise"):
 def _real_holes(spark, rows):
     """Labelled holes from ``(label, feature_row)``."""
     schema = StructType([StructField("label", StringType(), True)] + _FEATURE_SCHEMA)
-    return spark.createDataFrame([(label, *features) for label, features in rows], schema)
+    frame = spark.createDataFrame([(label, *features) for label, features in rows], schema)
+    return frame.withColumn("event_near_edge", F.lit(False))
 
 
 def _counts(point_id=0, **overrides):
@@ -463,6 +467,8 @@ def test_the_false_join_rate_counts_only_holes_the_point_links(spark):
         "false_joined_edge_read_through_blank": 0,
         "linked_by_direction": 0,
         "false_joined_by_direction": 0,
+        "linked_by_direction_labelled": 0,
+        "false_joined_near_edge": 0,
     }
     row = _counts(**counts)
     assert row["real_false_join_rate"] == pytest.approx(1 / 3)  # known labels only
@@ -826,18 +832,19 @@ def test_the_gap_outranks_the_checks_that_follow_it():
 
 def test_a_tie_on_every_other_setting_goes_to_direction_off():
     """The more conservative. It falls after the settings above, not before them."""
+    on = dict(link_directional_edges=True, negative_low_edge_controls=1000)
     rows = [
-        _counts(point_id=0, link_directional_edges=True),
+        _counts(point_id=0, **on),
         _counts(point_id=1, link_directional_edges=False),
     ]
     assert pick_recommended(rows)["point_id"] == 1
     rows = [
-        _counts(point_id=0, link_directional_edges=True, link_min_implied_speed_kt=400.0),
+        _counts(point_id=0, link_min_implied_speed_kt=400.0, **on),
         _counts(point_id=1, link_directional_edges=False),
     ]
     assert pick_recommended(rows)["point_id"] == 0
     rows = [
-        _counts(point_id=0, link_directional_edges=True, link_min_stop_minutes=35.0),
+        _counts(point_id=0, link_min_stop_minutes=35.0, **on),
         _counts(point_id=1, link_directional_edges=False),
     ]
     assert pick_recommended(rows)["point_id"] == 0
@@ -907,6 +914,7 @@ def test_pooling_strata_sums_within_each_stratum():
     def stratum(n, wrong, gap_stratum="30-120"):
         return {
             "day": "x", "point_id": 0, "kind": "negative", "control_family": "cruise_cruise",
+            "counts_toward_limit": True,
             "gap_stratum": gap_stratum,
             "depth_min": 0.0, "requested_gap_min": None, "same_callsign": True,
             "within_link_max_gap": True, "n": n, "wrong": wrong,
@@ -1142,6 +1150,242 @@ def test_a_low_edge_false_join_can_take_a_point_over_the_limit(spark):
     counts = negative_counts(cruise.unionByName(low), DIRECTIONAL)
     row = _counts(**counts, link_directional_edges=True)
     assert row["negative_within_limit"] is False
+    assert row["negative_low_edge_within_limit"] is False
+    assert row["within_limits"] is False
+
+
+# --- the limits a direction-on point must also meet on its own evidence --------
+
+
+#: A point with direction on, every limit met on enough evidence.
+_ON = dict(
+    link_directional_edges=True,
+    negative_limit_controls=11000,
+    negative_low_edge_controls=1000,
+    same_callsign_controls=1500,
+    same_callsign_low_edge_controls=500,
+    linked_by_direction_labelled=500,
+)
+
+
+def _on(**overrides):
+    return _counts(**{**_ON, **overrides})
+
+
+def test_a_direction_on_point_with_clean_evidence_passes():
+    row = _on()
+    assert row["within_limits"] is True
+    assert row["provisional"] is False
+    assert row["same_callsign_low_edge_status"] == "within_limit"
+    assert row["real_by_direction_status"] == "within_limit"
+
+
+def test_a_clean_cruise_pool_cannot_hide_a_bad_low_edge_family():
+    """10% of 100 low-edge controls are false joins, in a pool of 100,000 otherwise clean."""
+    row = _on(
+        negative_limit_controls=100000, negative_limit_false_joins=10,
+        negative_low_edge_controls=100, negative_low_edge_false_joins=10,
+    )
+    assert row["negative_false_join_upper_95"] < 0.01
+    assert row["negative_within_limit"] is True
+    assert row["negative_low_edge_upper_95"] > 0.01
+    assert row["negative_low_edge_within_limit"] is False
+    assert row["within_limits"] is False
+
+
+def test_low_edge_controls_too_few_to_bound_fail_and_none_at_all_fail():
+    """A point cannot be shown safe by having nothing to measure it on."""
+    assert _on(negative_low_edge_controls=100)["within_limits"] is False
+    none = _on(negative_low_edge_controls=0)
+    assert none["negative_low_edge_upper_95"] is None
+    assert none["within_limits"] is False
+
+
+def test_a_bad_low_edge_same_callsign_group_fails_alone():
+    row = _on(
+        same_callsign_controls=100000, same_callsign_false_joins=10,
+        same_callsign_low_edge_controls=100, same_callsign_low_edge_false_joins=10,
+        negative_limit_controls=100000, negative_limit_false_joins=10,
+        negative_low_edge_controls=100000, negative_low_edge_false_joins=10,
+    )
+    assert row["same_callsign_status"] == "within_limit"
+    assert row["same_callsign_low_edge_status"] == "over_limit"
+    assert row["within_limits"] is False
+
+
+def test_a_low_edge_same_callsign_group_under_60_is_insufficient_and_provisional():
+    row = _on(same_callsign_low_edge_controls=59, same_callsign_low_edge_false_joins=59)
+    assert row["same_callsign_low_edge_status"] == "insufficient"
+    assert row["provisional"] is True
+    assert row["within_limits"] is True
+    assert _on(same_callsign_low_edge_controls=60)["same_callsign_low_edge_status"] == "within_limit"
+
+
+def test_linking_more_cannot_hide_a_bad_rate_among_direction_links():
+    """1% of 400 links by direction, and the rate over all linked holes is 0.04%."""
+    row = _on(
+        linked_true_link=10396, linked_false_join=4, real_holes_linked=10400,
+        linked_by_direction_labelled=400, false_joined_by_direction=4,
+    )
+    assert row["real_holes_within_limit"] is True
+    assert row["real_by_direction_false_join_rate"] == pytest.approx(0.01)
+    assert row["real_by_direction_status"] == "over_limit"
+    assert row["within_limits"] is False
+
+
+def test_few_labelled_links_by_direction_are_insufficient_and_reported():
+    row = _on(linked_by_direction_labelled=299, false_joined_by_direction=30)
+    assert row["real_by_direction_status"] == "insufficient"
+    assert row["real_by_direction_false_join_rate"] == pytest.approx(30 / 299)
+    assert row["provisional"] is True
+    assert row["real_holes_within_limit"] is True
+    assert row["within_limits"] is True
+    enough = _on(linked_by_direction_labelled=300, false_joined_by_direction=1)
+    assert enough["real_by_direction_status"] == "over_limit"
+    at_limit = _on(linked_by_direction_labelled=1000, false_joined_by_direction=1)
+    assert at_limit["real_by_direction_status"] == "within_limit"
+
+
+def test_the_separate_limits_do_not_apply_with_direction_off():
+    row = _counts()
+    assert row["negative_low_edge_within_limit"] is None
+    assert row["same_callsign_low_edge_status"] == "not_applicable"
+    assert row["real_by_direction_status"] == "not_applicable"
+    assert row["within_limits"] is True
+    assert row["provisional"] is False
+
+
+def test_pooling_recomputes_the_direction_limits_from_summed_counts():
+    day = _on(
+        negative_low_edge_controls=200, negative_limit_controls=10200,
+        same_callsign_low_edge_controls=40, linked_by_direction_labelled=200,
+    )
+    assert day["same_callsign_low_edge_status"] == "insufficient"
+    assert day["real_by_direction_status"] == "insufficient"
+    assert day["negative_low_edge_within_limit"] is False
+    [pooled] = pool_rows([[day], [day]])
+    assert pooled["negative_low_edge_controls"] == 400
+    assert pooled["negative_low_edge_within_limit"] is True
+    assert pooled["same_callsign_low_edge_status"] == "within_limit"
+    assert pooled["real_by_direction_status"] == "within_limit"
+
+
+def test_real_hole_counts_read_the_labelled_links_by_direction_and_near_events(spark):
+    holes = _real_holes(
+        spark,
+        [
+            ("true_link", _feature_row(**_DESCENT)),
+            ("false_join", _feature_row(**_DESCENT)),
+            ("unknown", _feature_row(**_DESCENT)),
+            ("true_link", _feature_row()),
+        ],
+    ).withColumn("event_near_edge", F.col("label") == "false_join")
+    extra = _real_holes(spark, [("false_join", _feature_row(speed_kt=100.0))]).withColumn(
+        "event_near_edge", F.lit(True)
+    )
+    counts = real_hole_counts(holes.unionByName(extra), DIRECTIONAL)
+    assert counts["linked_by_direction"] == 3
+    assert counts["linked_by_direction_labelled"] == 2
+    assert counts["false_joined_by_direction"] == 1
+    assert counts["false_joined_near_edge"] == 1       # the unlinked one is no false join
+
+
+def test_a_false_join_near_an_edge_is_reported_and_decides_nothing():
+    base = _on(linked_true_link=999, linked_false_join=1)
+    near = _on(linked_true_link=999, linked_false_join=1, false_joined_near_edge=1)
+    assert near["false_joined_near_edge"] == 1
+    assert near["within_limits"] is base["within_limits"]
+    assert near["real_false_join_rate"] == base["real_false_join_rate"]
+
+
+def test_low_edge_same_callsign_counts_exclude_the_cruise_family(spark):
+    controls = _negatives(spark, [("C", _feature_row())]).unionByName(
+        _low_edge_frame(spark, "climb_descent", {**_CLIMB, **_DESCENT, "cs_after": "BAW2"})
+    ).unionByName(_low_edge_frame(spark, "climb_cruise", _CLIMB))
+    counts = negative_counts(controls, DIRECTIONAL)
+    assert counts["same_callsign_controls"] == 2
+    assert counts["same_callsign_low_edge_controls"] == 1
+    assert counts["same_callsign_low_edge_false_joins"] == 1
+
+
+def test_the_lowest_bound_is_compared_on_the_population_all_points_share():
+    """Point 1's low-edge controls pull its pooled bound down. On cruise_cruise it is worse."""
+    over = dict(linked_true_link=90, linked_false_join=10)
+    rows = [
+        _counts(point_id=0, negative_limit_controls=1000, negative_limit_false_joins=3, **over),
+        _on(
+            point_id=1, negative_limit_controls=3000, negative_limit_false_joins=5,
+            negative_low_edge_controls=2000, **over,
+        ),
+    ]
+    assert rows[1]["negative_false_join_upper_95"] < rows[0]["negative_false_join_upper_95"]
+    assert rows[1]["negative_cruise_cruise_upper_95"] > rows[0]["negative_cruise_cruise_upper_95"]
+    assert lowest_bound_point(rows)["point_id"] == 0
+
+
+def test_control_rows_say_whether_they_count_toward_the_limit(spark):
+    controls = _negatives(
+        spark,
+        [
+            ("deep", _feature_row()),
+            ("shallow", _feature_row(gap_min=61.0), 0.0, 0.0),
+            ("long", _feature_row(gap_min=400.0)),
+        ],
+    ).unionByName(_low_edge_frame(spark, "climb_descent", {**_CLIMB, **_DESCENT}))
+
+    def toward(p):
+        return {
+            (r["control_family"], r["gap_stratum"], r["depth_min"], r["within_link_max_gap"]):
+                r["counts_toward_limit"]
+            for r in strata_counts(controls, "negative", p, 0)
+        }
+
+    # Fixture depth_min is 0.0 for all, so gap_stratum tells the rows apart.
+    on = toward(DIRECTIONAL)
+    assert {k[0]: v for k, v in on.items() if k[0] != "cruise_cruise"} == {"climb_descent": True}
+    assert toward(P)[("climb_descent", "30-120", 0.0, True)] is False
+    assert on[("cruise_cruise", "over-360", 0.0, False)] is False
+    positive = strata_counts(_positives(spark, [(60.0, _feature_row())]), "positive", P, 0)
+    assert [r["counts_toward_limit"] for r in positive] == [False]
+
+
+def test_a_rows_count_toward_the_limit_adds_up_to_the_limit_population(spark):
+    controls = _negatives(
+        spark, [("deep", _feature_row()), ("shallow", _feature_row(), 0.0, 0.0)]
+    ).unionByName(_low_edge_frame(spark, "climb_cruise", _CLIMB))
+    rows = strata_counts(controls, "negative", DIRECTIONAL, 0)
+    assert sum(r["n"] for r in rows if r["counts_toward_limit"]) == (
+        negative_counts(controls, DIRECTIONAL)["negative_limit_controls"]
+    ) == 2
+
+
+def test_negative_reasons_name_the_first_failed_test_per_family(spark):
+    controls = _negatives(
+        spark,
+        [
+            ("linked", _feature_row()),
+            ("callsign", _feature_row(cs_after="BAW2")),
+            ("slow", _feature_row(speed_kt=100.0)),
+        ],
+    ).unionByName(_low_edge_frame(spark, "climb_cruise", _CLIMB))
+    rows = negative_reason_counts(controls, P)
+    by_key = {(r["control_family"], r["first_failed_test"]): r for r in rows}
+    assert {k: r["controls"] for k, r in by_key.items()} == {
+        ("cruise_cruise", "linked"): 1,
+        ("cruise_cruise", "callsign_agrees"): 1,
+        ("cruise_cruise", "implied_speed_not_too_slow"): 1,
+        ("climb_cruise", "cruise_at_old_edge"): 1,
+    }
+    assert by_key["cruise_cruise", "callsign_agrees"]["false_joins_without_callsign"] == 1
+    assert by_key["cruise_cruise", "linked"]["false_joins_without_callsign"] == 1
+    assert by_key["cruise_cruise", "implied_speed_not_too_slow"]["false_joins_without_callsign"] == 0
+    assert by_key["climb_cruise", "cruise_at_old_edge"]["counts_toward_limit"] is False
+    assert by_key["cruise_cruise", "linked"]["counts_toward_limit"] is True
+    on = {
+        (r["control_family"], r["first_failed_test"]): r["controls"]
+        for r in negative_reason_counts(controls, DIRECTIONAL)
+    }
+    assert on["climb_cruise", "linked"] == 1
 
 
 def test_strata_and_pooled_strata_keep_the_families_apart(spark):
@@ -1282,6 +1526,17 @@ def test_run_study_scores_and_reports_the_families(spark, tmp_path):
         assert int(funnel[f"{family}_controls"]) == int(funnel[f"{family}_controls_scored"]) > 0
     assert int(funnel["negative_controls"]) == int(funnel["negative_controls_scored"])
     assert int(funnel["positive_low_edge_controls"]) == int(funnel["positive_low_edge_controls_scored"]) == 2
+
+    # Too few controls to bound anything, so no point passes. The reasons are read at
+    # the point with the lowest bound on the population both points share.
+    reasons = _read_csv(tmp_path / "link_negative_reasons_pooled.csv")
+    assert {"cruise_cruise"} <= {r["control_family"] for r in reasons}
+    assert set(reasons[0]) >= {
+        "control_family", "counts_toward_limit", "first_failed_test",
+        "controls", "false_joins_without_callsign", "settings_from",
+    }
+    assert (tmp_path / "link_negative_reasons_2026-06-14.csv").is_file()
+    assert {r["counts_toward_limit"] for r in strata} <= {"True", "False"}
 
 
 # --- round 2: which flights count as crossing the box ------------------------

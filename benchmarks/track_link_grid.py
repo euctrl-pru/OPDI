@@ -23,6 +23,17 @@ conservative settings: the higher ``link_min_implied_speed_kt``, the shorter
                       same reason, so they are kept apart there too. The bound is per
                       control, but depths of one pair are not independent, so the count
                       of pairs with a false join is reported beside it.
+  low edges alone     with direction on, three more, all required, because
+                      ``cruise_cruise`` dominates the pooled numbers and a bad rate
+                      among direction's own decisions would pass under them. The
+                      low-edge families' bound is at most 1%, among allowed gaps, and
+                      with none it fails. Their same or blank callsign controls' bound
+                      is at most 5%. False joins are at most 0.1% of the labelled real
+                      holes linked with an edge below the floor. The callsign group
+                      under 60 and the real holes under 300 read ``insufficient``: that
+                      does not fail the point, and it marks the choice provisional,
+                      since a rate means little there. The real-hole rate is still
+                      reported.
   same or blank       the same bound is at most 5% among the controls the callsign
   callsign            test cannot reject, in the same population as the 1% limit, and
                       for the same reason. Those too shallow have columns of their
@@ -38,9 +49,10 @@ conservative settings: the higher ``link_min_implied_speed_kt``, the shorter
 
 A point with nothing to measure it on is not within the limits. If no point passes,
 none is recommended, and ``link_recommended.csv`` names the point with the lowest
-bound, labelled not recommended, for Stage 2 to run at.
+bound on ``cruise_cruise``, the one population all points share, labelled not
+recommended, for Stage 2 to run at.
 
-**Four reports beside the choice.** None of them touches a limit.
+**Five reports beside the choice.** None of them touches a limit.
 
   why holes stay split  ``link_reasons_{day}.csv`` and ``link_reasons_pooled.csv``, for
                         the real holes truth calls ``true_link``, whatever the rule
@@ -61,8 +73,16 @@ bound, labelled not recommended, for Stage 2 to run at.
   how the edge was read ``linked_edge_read_through_blank`` and ``linked_by_direction``
                         count linked holes whose position came from past a blank sample,
                         or whose edge is below the floor, and ``false_joined_*`` those
-                        of them labelled false joins. ``link_controls_*.csv`` has each
-                        control family on rows of its own.
+                        of them labelled false joins. ``false_joined_near_edge`` counts
+                        linked false joins whose event is within 5 min of an edge, where
+                        truth's time may be the difference. ``link_controls_*.csv`` has
+                        each control family on rows of its own, and
+                        ``counts_toward_limit`` says which rows the 1% limit reads.
+  negative reasons      ``link_negative_reasons_{day}.csv`` and ``_pooled.csv``, read at
+                        the same point as the reasons above. One row per family, whether
+                        it counts toward the limit and ``first_failed_test``, with
+                        ``false_joins_without_callsign``: those that link once that one
+                        test is removed.
 
 **Why 54 points do not need 54 segmentations.** A10 breaks where A9 breaks, except at
 a gap over ``gap_minutes`` that links. Nothing else about the rule depends on a link:
@@ -84,7 +104,7 @@ heavy steps are the whole-day feature windows of the real holes; the controls an
 funnel, which together make some dozens of passes over the samples inside truth flights,
 as each family makes its own cuts, so those samples are cached first; and the two-callsign counts, which segment the whole
 day under both arms, once per day, for the chosen point only. Each point then runs
-about seven small jobs over small cached frames, and the reasons two per day over
+about seven small jobs over small cached frames, and the reasons three per day over
 frames kept until the days are pooled. Elapsed time per stage is printed.
 Nothing is written to S3. Results go to a local directory, and each day's are on disk
 before the next day starts.
@@ -181,8 +201,12 @@ SWITCHES = ("link_directional_edges",)
 
 NEGATIVE_UPPER_LIMIT = 0.01
 SAME_CALLSIGN_UPPER_LIMIT = 0.05
-#: Of the holes a point links that have a known label.
+#: Of the holes a point links that have a known label. Applies to all of them, and
+#: with direction on to those linked with an edge below the floor as well.
 REAL_FALSE_JOIN_LIMIT = 0.001
+#: Labelled links by direction under this read ``insufficient``: at 0.1%, fewer than
+#: this cannot show much beyond whether there happens to be one false join.
+REAL_BY_DIRECTION_MIN_LABELLED = 300
 SAME_CALLSIGN_MIN_CONTROLS = 60
 #: The realised depth, on at least one side, that puts a ``cruise_cruise`` control
 #: under the 1% limit.
@@ -206,6 +230,8 @@ COUNT_FIELDS = (
     "false_joined_edge_read_through_blank",
     "linked_by_direction",
     "false_joined_by_direction",
+    "linked_by_direction_labelled",
+    "false_joined_near_edge",
     "negative_controls",
     "negative_pairs",
     "negative_false_joins",
@@ -225,6 +251,8 @@ COUNT_FIELDS = (
     "same_callsign_blank",
     "same_callsign_shallow_controls",
     "same_callsign_shallow_false_joins",
+    "same_callsign_low_edge_controls",
+    "same_callsign_low_edge_false_joins",
     "positive_controls",
     "positive_within_gap",
     "positive_linked",
@@ -244,8 +272,8 @@ COUNT_FIELDS = (
 )
 
 _STRATUM_KEYS = (
-    "point_id", "kind", "control_family", "gap_stratum", "depth_min", "requested_gap_min",
-    "same_callsign", "within_link_max_gap",
+    "point_id", "kind", "control_family", "counts_toward_limit", "gap_stratum", "depth_min",
+    "requested_gap_min", "same_callsign", "within_link_max_gap",
 )
 
 #: Enough to keep the many small per-point jobs from running hundreds of tasks.
@@ -391,12 +419,25 @@ def _sum_when(condition: Column) -> Column:
     return F.coalesce(F.sum(F.when(condition, 1).otherwise(0)), F.lit(0))
 
 
+def _counts_toward_limit(p: SegmentationParams) -> Column:
+    """Whether a negative control is one the 1% limit reads at *p*. See the module docstring."""
+    within_gap = F.col("gap_min") <= p.link_max_gap_minutes
+    # `greatest` skips a NULL, so one side's depth is enough, as it is meant to be.
+    deep = F.coalesce(
+        F.greatest("old_depth_min", "new_depth_min") >= NEGATIVE_LIMIT_MIN_DEPTH_MIN, F.lit(False)
+    )
+    cruise_cruise = F.col("control_family") == "cruise_cruise"
+    return within_gap & ((cruise_cruise & deep) | (~cruise_cruise & F.lit(p.link_directional_edges)))
+
+
 def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
     """All labelled holes, and those *p* links by label. See the module docstring.
 
     The last four split out two ways a link rests on less than a plain cruise edge. A
     position read through a blank sample shows as ``position_gap_min`` differing from
     ``gap_min``. An edge below the floor can only have passed by direction, given a link.
+    ``linked_by_direction_labelled`` is what the direction limit divides by, and
+    ``false_joined_near_edge`` is reported only.
     """
     linked, label = _linked(p), F.col("label")
     false_join = label == "false_join"
@@ -414,6 +455,10 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
         _sum_when(linked & false_join & read_through_blank).alias("false_joined_edge_read_through_blank"),
         _sum_when(linked & by_direction).alias("linked_by_direction"),
         _sum_when(linked & false_join & by_direction).alias("false_joined_by_direction"),
+        _sum_when(linked & by_direction & label.isin("true_link", "false_join")).alias(
+            "linked_by_direction_labelled"
+        ),
+        _sum_when(linked & false_join & F.col("event_near_edge")).alias("false_joined_near_edge"),
     ).first()
     return row.asDict()
 
@@ -437,16 +482,12 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
     within_gap = F.col("gap_min") <= p.link_max_gap_minutes
     cruise_cruise = F.col("control_family") == "cruise_cruise"
     low_edge = ~cruise_cruise
-    # `greatest` skips a NULL, so one side's depth is enough, as it is meant to be.
-    deep = F.coalesce(
-        F.greatest("old_depth_min", "new_depth_min") >= NEGATIVE_LIMIT_MIN_DEPTH_MIN, F.lit(False)
-    )
-    low_edge_counts = low_edge & F.lit(p.link_directional_edges)
-    under_limit = within_gap & ((cruise_cruise & deep) | low_edge_counts)
-    shallow = within_gap & cruise_cruise & ~deep
+    under_limit = _counts_toward_limit(p)
+    shallow = within_gap & cruise_cruise & ~under_limit
     untested = within_gap & low_edge & ~F.lit(p.link_directional_edges)
     same = F.col("same_callsign") & under_limit
     same_shallow = F.col("same_callsign") & shallow
+    same_low_edge = same & low_edge
     blank = F.col("cs_before").isNull() | F.col("cs_after").isNull()
     row = controls.agg(
         F.count(F.lit(1)).alias("negative_controls"),
@@ -472,6 +513,8 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
         _sum_when(same & blank).alias("same_callsign_blank"),
         _sum_when(same_shallow).alias("same_callsign_shallow_controls"),
         _sum_when(same_shallow & linked).alias("same_callsign_shallow_false_joins"),
+        _sum_when(same_low_edge).alias("same_callsign_low_edge_controls"),
+        _sum_when(same_low_edge & linked).alias("same_callsign_low_edge_false_joins"),
     ).first()
     return row.asDict()
 
@@ -509,15 +552,23 @@ def strata_counts(controls: DataFrame, kind: str, p: SegmentationParams, point_i
     For a ``negative`` control that is a link, for a ``positive`` one no link. Controls
     over the point's ``link_max_gap_minutes`` have ``within_link_max_gap`` false, which
     keeps a correct rejection, or a positive control the point never allowed, apart.
+    ``counts_toward_limit`` says whether the 1% limit reads the row, never for a
+    positive control.
     """
     within_gap = F.col("gap_min") <= p.link_max_gap_minutes
     wanted = ~_linked(p) if kind == "negative" else _linked(p)
     size = "depth_min" if kind == "negative" else "requested_gap_min"
+    toward_limit = _counts_toward_limit(p) if kind == "negative" else F.lit(False)
+    keys = (
+        "control_family", "counts_toward_limit", size, "gap_stratum", "same_callsign",
+        "within_link_max_gap",
+    )
     rows = (
         controls.withColumn("within_link_max_gap", within_gap)
-        .groupBy("control_family", size, "gap_stratum", "same_callsign", "within_link_max_gap")
+        .withColumn("counts_toward_limit", toward_limit)
+        .groupBy(*keys)
         .agg(F.count(F.lit(1)).alias("n"), _sum_when(~wanted).alias("wrong"))
-        .orderBy("control_family", size, "gap_stratum", "same_callsign", "within_link_max_gap")
+        .orderBy(*keys)
         .collect()
     )
     return [
@@ -526,6 +577,7 @@ def strata_counts(controls: DataFrame, kind: str, p: SegmentationParams, point_i
                 "point_id": point_id,
                 "kind": kind,
                 "control_family": r["control_family"],
+                "counts_toward_limit": r["counts_toward_limit"],
                 "gap_stratum": r["gap_stratum"],
                 "depth_min": r[size] if kind == "negative" else None,
                 "requested_gap_min": r[size] if kind == "positive" else None,
@@ -737,11 +789,80 @@ def positive_reason_counts(controls: DataFrame, p: SegmentationParams) -> List[D
     return [r.asDict() for r in rows]
 
 
+def negative_reason_counts(controls: DataFrame, p: SegmentationParams) -> List[Dict]:
+    """Negative controls per family and first failed test at *p*, ``linked`` when none fails.
+
+    ``false_joins_without_callsign`` counts those that link once the callsign test alone
+    is removed, so it says how much of each family that one test is holding back.
+    """
+    rows = (
+        controls.withColumn("counts_toward_limit", _counts_toward_limit(p))
+        .withColumn("first_failed_test", _first_failed_test(_checks(p)))
+        .groupBy("control_family", "counts_toward_limit", "first_failed_test")
+        .agg(
+            F.count(F.lit(1)).alias("controls"),
+            _sum_when(_linked_without_callsign(p)).alias("false_joins_without_callsign"),
+        )
+        .orderBy("control_family", "counts_toward_limit", "first_failed_test")
+        .collect()
+    )
+    return [r.asDict() for r in rows]
+
+
 # --- the safety limits and the pick ------------------------------------------
 
 
 def _share(part: int, whole: int) -> Optional[float]:
     return part / whole if whole else None
+
+
+def _direction_verdicts(row: Dict) -> Dict:
+    """The limits a direction-on point must also meet on its own evidence.
+
+    ``negative_low_edge_within_limit`` is ``None`` with direction off, and the two
+    statuses read ``not_applicable``: those points cannot link a low edge.
+    """
+    low_n = row["negative_low_edge_controls"]
+    low_upper = rule_of_three_upper(row["negative_low_edge_false_joins"], low_n)
+    same_n = row["same_callsign_low_edge_controls"]
+    same_upper = rule_of_three_upper(row["same_callsign_low_edge_false_joins"], same_n)
+    labelled = row["linked_by_direction_labelled"]
+    real_rate = _share(row["false_joined_by_direction"], labelled)
+    verdicts = {
+        "negative_low_edge_false_join_rate": _share(row["negative_low_edge_false_joins"], low_n),
+        "negative_low_edge_upper_95": low_upper,
+        "same_callsign_low_edge_false_join_rate": _share(
+            row["same_callsign_low_edge_false_joins"], same_n
+        ),
+        "same_callsign_low_edge_upper_95": same_upper,
+        "real_by_direction_false_join_rate": real_rate,
+    }
+    if not row["link_directional_edges"]:
+        return {
+            **verdicts,
+            "negative_low_edge_within_limit": None,
+            "same_callsign_low_edge_status": "not_applicable",
+            "real_by_direction_status": "not_applicable",
+        }
+
+    if same_n < SAME_CALLSIGN_MIN_CONTROLS:
+        same_status = "insufficient"
+    elif same_upper <= SAME_CALLSIGN_UPPER_LIMIT:
+        same_status = "within_limit"
+    else:
+        same_status = "over_limit"
+    if labelled < REAL_BY_DIRECTION_MIN_LABELLED:
+        real_status = "insufficient"
+    elif real_rate <= REAL_FALSE_JOIN_LIMIT:
+        real_status = "within_limit"
+    else:
+        real_status = "over_limit"
+    return {
+        **verdicts,
+        "negative_low_edge_within_limit": low_upper is not None and low_upper <= NEGATIVE_UPPER_LIMIT,
+        "same_callsign_low_edge_status": same_status,
+        "real_by_direction_status": real_status,
+    }
 
 
 def with_verdicts(row: Dict) -> Dict:
@@ -763,6 +884,14 @@ def with_verdicts(row: Dict) -> Dict:
     negative_ok = negative_upper is not None and negative_upper <= NEGATIVE_UPPER_LIMIT
     real_ok = real_rate is not None and real_rate <= REAL_FALSE_JOIN_LIMIT
     missed = row["positive_within_gap"] - row["positive_linked"]
+    direction = _direction_verdicts(row)
+    direction_ok = (
+        direction["negative_low_edge_within_limit"] is not False
+        and direction["same_callsign_low_edge_status"] != "over_limit"
+        and direction["real_by_direction_status"] != "over_limit"
+    )
+    cruise_cruise_controls = row["negative_limit_controls"] - row["negative_low_edge_controls"]
+    cruise_cruise_false_joins = row["negative_limit_false_joins"] - row["negative_low_edge_false_joins"]
 
     population_shares = {}
     for name in ("crossing", "other"):
@@ -788,6 +917,10 @@ def with_verdicts(row: Dict) -> Dict:
             row["negative_limit_false_joins"], row["negative_limit_controls"]
         ),
         "negative_false_join_upper_95": negative_upper,
+        "negative_cruise_cruise_upper_95": rule_of_three_upper(
+            cruise_cruise_false_joins, cruise_cruise_controls
+        ),
+        **direction,
         "negative_no_callsign_false_join_rate": _share(
             row["negative_limit_false_joins_no_callsign"], row["negative_limit_controls"]
         ),
@@ -806,8 +939,12 @@ def with_verdicts(row: Dict) -> Dict:
         "negative_within_limit": negative_ok,
         "same_callsign_status": same_status,
         "real_holes_within_limit": real_ok,
-        "within_limits": negative_ok and real_ok and same_status != "over_limit",
-        "provisional": same_status == "insufficient",
+        "within_limits": negative_ok and real_ok and same_status != "over_limit" and direction_ok,
+        "provisional": (
+            same_status == "insufficient"
+            or direction["same_callsign_low_edge_status"] == "insufficient"
+            or direction["real_by_direction_status"] == "insufficient"
+        ),
     }
 
 
@@ -844,17 +981,19 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
 
 
 def lowest_bound_point(rows: List[Dict]) -> Optional[Dict]:
-    """The row with the lowest false-join bound, or ``None`` with no controls at all.
+    """The row with the lowest ``cruise_cruise`` bound, or ``None`` with no such controls.
 
-    Where Stage 2 runs if nothing is recommended. A tie goes to the most flights in
-    one track, which leaves Stage 2 the most linked tracks to examine.
+    Where Stage 2 runs if nothing is recommended. Read on the one population all points
+    share: the pooled bound has low-edge controls in it only with direction on, so
+    comparing it would favour a point for having a bigger denominator. A tie goes to the
+    most flights in one track, which leaves Stage 2 the most linked tracks to examine.
     """
-    bounded = [r for r in rows if r["negative_false_join_upper_95"] is not None]
+    bounded = [r for r in rows if r["negative_cruise_cruise_upper_95"] is not None]
     if not bounded:
         return None
     return min(
         bounded,
-        key=lambda r: (r["negative_false_join_upper_95"], -r["flights_in_one_track"], r["point_id"]),
+        key=lambda r: (r["negative_cruise_cruise_upper_95"], -r["flights_in_one_track"], r["point_id"]),
     )
 
 
@@ -938,10 +1077,12 @@ class ReasonFrames:
 
     true_link_holes: DataFrame
     positive: DataFrame
+    negative: DataFrame
 
     def release(self) -> None:
         self.true_link_holes.unpersist()
         self.positive.unpersist()
+        self.negative.unpersist()
 
 
 @dataclass
@@ -958,7 +1099,7 @@ class DayFeatures:
 
     def release(self) -> None:
         """Free all but the :class:`ReasonFrames`, which outlive the day."""
-        for frame in (self.holes, self.negative, self.flights, self.holes_in_flights):
+        for frame in (self.holes, self.flights, self.holes_in_flights):
             frame.unpersist()
 
 
@@ -1020,7 +1161,7 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
             "positive_low_edge_controls_scored": positive_scored.get("low_edge", 0),
         }
     holes_in_flights = _keep(holes_inside_flights(holes, truth))
-    reasons = ReasonFrames(_keep(true_link_holes(holes, truth)), positive)
+    reasons = ReasonFrames(_keep(true_link_holes(holes, truth)), positive, negative)
 
     samples.unpersist()
     truth.unpersist()
@@ -1062,7 +1203,7 @@ def write_reasons(
     settings_from: str,
     stage: Callable[..., None],
 ) -> None:
-    """Stage both reasons reports for each day and pooled, each row naming its settings."""
+    """Stage the reasons reports for each day and pooled, each row naming its settings."""
     settings = {"settings_from": settings_from, **{name: getattr(p, name) for name in _link_fields()}}
     reports = (
         (
@@ -1076,6 +1217,12 @@ def write_reasons(
             lambda frames: positive_reason_counts(frames.positive, p),
             ("control_family", "requested_gap_min", "first_failed_test"),
             ("positive_missed_by_test",),
+        ),
+        (
+            "link_negative_reasons",
+            lambda frames: negative_reason_counts(frames.negative, p),
+            ("control_family", "counts_toward_limit", "first_failed_test"),
+            ("controls", "false_joins_without_callsign"),
         ),
     )
     for stem, count, key_names, count_names in reports:
