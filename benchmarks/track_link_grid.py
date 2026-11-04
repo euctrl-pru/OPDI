@@ -6,11 +6,15 @@ decision is applied to real reception holes and to the holes of
 ``track_link_controls``, and the point with the most truth flights in one track is
 picked among those within three safety limits, on numbers pooled over the days:
 
-  negative controls   the upper bound on the false-join rate is at most 1%, over all
-                      controls. One longer than the point's ``link_max_gap_minutes``
-                      is a correct rejection and counts in that total. The bound is
-                      per control, but depths of one pair are not independent, so
-                      the count of pairs with a false join is reported beside it.
+  negative controls   the upper bound on the false-join rate is at most 1%, over the
+                      controls whose gap the point allows and whose realised depth is
+                      at least 30 min on one side. A base cut is too easy, as speed
+                      rejects nearly all of it, and a gap over the point's
+                      ``link_max_gap_minutes`` tests nothing, so counting either as a
+                      pass would dilute the bound and give short-gap points an easier
+                      limit. Both have columns of their own. The bound is per control,
+                      but depths of one pair are not independent, so the count of
+                      pairs with a false join is reported beside it.
   same or blank       the same bound is at most 5% among the controls the callsign
   callsign            test cannot reject, counting only gaps the point allows. Under
                       60 of them reads ``insufficient``: it does not fail the point,
@@ -39,12 +43,14 @@ the flight's interval: otherwise the flight's samples all lie on one side of it.
 So the scored population is flights that take off and land on the day, which leans
 westbound. Truth is European, so most of the world's holes stay ``unknown``.
 
-**Cost.** One day is about 150M rows. The feature frames are built once per day and
-are small, and each point then runs a few jobs over them, so the grid costs minutes
-per day. The heavy steps are the feature windows over the whole day (once per day)
-and the two-callsign counts, which segment the whole day under both arms, once per
-day, for the chosen point only. Nothing is written to S3. Results go to a local
-directory, and each day's are on disk before the next day starts.
+**Cost.** One day is about 150M rows, and the day's frames are each built once. The
+heavy steps are the whole-day feature windows of the real holes; the controls and
+funnel, which together make about 26 passes over the samples inside truth flights, so
+those samples are cached first; and the two-callsign counts, which segment the whole
+day under both arms, once per day, for the chosen point only. Each point then runs
+about six small jobs over small cached frames. Elapsed time per stage is printed.
+Nothing is written to S3. Results go to a local directory, and each day's are on disk
+before the next day starts.
 
     python benchmarks/track_link_grid.py --days 2026-06-14 2025-06-14 \
         --results-dir benchmarks/out/track_link_grid
@@ -63,6 +69,8 @@ import datetime as dt
 import itertools
 import json
 import sys
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
@@ -73,11 +81,13 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
+from pyspark.storagelevel import StorageLevel
 
 import provenance
 from track_fragmentation import measure
 from track_link_controls import (
     control_funnel,
+    flight_samples,
     label_real_holes,
     negative_controls,
     positive_controls,
@@ -112,6 +122,8 @@ NEGATIVE_UPPER_LIMIT = 0.01
 SAME_CALLSIGN_UPPER_LIMIT = 0.05
 REAL_HOLE_FALSE_JOIN_LIMIT = 0.01
 SAME_CALLSIGN_MIN_CONTROLS = 60
+#: The realised depth, on at least one side, that puts a control under the 1% limit.
+NEGATIVE_LIMIT_MIN_DEPTH_MIN = 30.0
 
 #: What each grid row sums, so that pooling recomputes every rate and bound from
 #: counts rather than averaging the days' rates.
@@ -120,6 +132,8 @@ COUNT_FIELDS = (
     "tracks_on_flights",
     "flights_in_one_track",
     "flights_with_no_track",
+    "base_tracks_on_flights",
+    "base_flights_in_one_track",
     "real_holes",
     "real_holes_linked",
     "linked_true_link",
@@ -127,9 +141,14 @@ COUNT_FIELDS = (
     "linked_unknown",
     "negative_controls",
     "negative_pairs",
-    "negative_within_gap",
     "negative_false_joins",
     "negative_pairs_with_false_join",
+    "negative_limit_controls",
+    "negative_limit_false_joins",
+    "negative_limit_pairs_with_false_join",
+    "negative_shallow_controls",
+    "negative_shallow_false_joins",
+    "negative_over_gap_controls",
     "same_callsign_controls",
     "same_callsign_false_joins",
     "same_callsign_blank",
@@ -249,17 +268,33 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
 
 
 def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int]:
-    """Every negative control, and the same or blank callsign group among allowed gaps."""
+    """Negative controls: all, those under the 1% limit, and those kept out of it.
+
+    Every control is exactly one of ``negative_limit_controls``,
+    ``negative_shallow_controls`` (the gap is allowed, the depth too small) or
+    ``negative_over_gap_controls``. The same or blank callsign group is all depths
+    among allowed gaps.
+    """
     linked = _linked(p)
     within_gap = F.col("gap_min") <= p.link_max_gap_minutes
+    deep = F.greatest("old_depth_min", "new_depth_min") >= NEGATIVE_LIMIT_MIN_DEPTH_MIN
+    under_limit = within_gap & deep
+    shallow = within_gap & ~deep
     same = F.col("same_callsign") & within_gap
     blank = F.col("cs_before").isNull() | F.col("cs_after").isNull()
     row = controls.agg(
         F.count(F.lit(1)).alias("negative_controls"),
         F.countDistinct("pair_id").alias("negative_pairs"),
-        _sum_when(within_gap).alias("negative_within_gap"),
         _sum_when(linked).alias("negative_false_joins"),
         F.countDistinct(F.when(linked, F.col("pair_id"))).alias("negative_pairs_with_false_join"),
+        _sum_when(under_limit).alias("negative_limit_controls"),
+        _sum_when(under_limit & linked).alias("negative_limit_false_joins"),
+        F.countDistinct(F.when(under_limit & linked, F.col("pair_id"))).alias(
+            "negative_limit_pairs_with_false_join"
+        ),
+        _sum_when(shallow).alias("negative_shallow_controls"),
+        _sum_when(shallow & linked).alias("negative_shallow_false_joins"),
+        _sum_when(~within_gap).alias("negative_over_gap_controls"),
         _sum_when(same).alias("same_callsign_controls"),
         _sum_when(same & linked).alias("same_callsign_false_joins"),
         _sum_when(same & blank).alias("same_callsign_blank"),
@@ -361,7 +396,11 @@ def holes_inside_flights(holes: DataFrame, truth: DataFrame) -> DataFrame:
 
 
 def flight_track_counts(flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams) -> Dict[str, int]:
-    """Tracks on truth flights at *p*: each flight's A9 tracks less its linked holes."""
+    """Tracks on truth flights at *p*: each flight's A9 tracks less its linked holes.
+
+    The ``base_`` counts are A9 itself, what the current rule scores, so the gain of
+    every point is in its row.
+    """
     linked = (
         holes_in_flights.filter(_linked(p))
         .groupBy("flight_key")
@@ -376,6 +415,8 @@ def flight_track_counts(flights: DataFrame, holes_in_flights: DataFrame, p: Segm
             F.coalesce(F.sum("_tracks"), F.lit(0)).alias("tracks_on_flights"),
             _sum_when(F.col("_tracks") == 1).alias("flights_in_one_track"),
             _sum_when(F.col("_tracks") == 0).alias("flights_with_no_track"),
+            F.coalesce(F.sum("base_tracks"), F.lit(0)).alias("base_tracks_on_flights"),
+            _sum_when(F.col("base_tracks") == 1).alias("base_flights_in_one_track"),
         )
         .first()
     )
@@ -392,7 +433,9 @@ def _share(part: int, whole: int) -> Optional[float]:
 def with_verdicts(row: Dict) -> Dict:
     """The row's counts, with every rate, bound and safety limit verdict derived."""
     known = row["linked_true_link"] + row["linked_false_join"]
-    negative_upper = rule_of_three_upper(row["negative_false_joins"], row["negative_controls"])
+    negative_upper = rule_of_three_upper(
+        row["negative_limit_false_joins"], row["negative_limit_controls"]
+    )
     same_n = row["same_callsign_controls"]
     same_upper = rule_of_three_upper(row["same_callsign_false_joins"], same_n)
     real_rate = _share(row["linked_false_join"], known)
@@ -411,13 +454,14 @@ def with_verdicts(row: Dict) -> Dict:
         **row,
         "tracks_per_flight": _share(row["tracks_on_flights"], row["flights"]),
         "share_one_track": _share(row["flights_in_one_track"], row["flights"]),
+        "base_tracks_per_flight": _share(row["base_tracks_on_flights"], row["flights"]),
+        "base_share_one_track": _share(row["base_flights_in_one_track"], row["flights"]),
         "linked_unknown_share": _share(row["linked_unknown"], row["real_holes_linked"]),
         "real_false_join_rate": real_rate,
-        "negative_false_join_rate": _share(row["negative_false_joins"], row["negative_controls"]),
-        "negative_false_join_upper_95": negative_upper,
-        "negative_within_gap_upper_95": rule_of_three_upper(
-            row["negative_false_joins"], row["negative_within_gap"]
+        "negative_false_join_rate": _share(
+            row["negative_limit_false_joins"], row["negative_limit_controls"]
         ),
+        "negative_false_join_upper_95": negative_upper,
         "same_callsign_false_join_rate": _share(row["same_callsign_false_joins"], same_n),
         "same_callsign_upper_95": same_upper,
         "same_callsign_blank_share": _share(row["same_callsign_blank"], same_n),
@@ -448,9 +492,8 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
 def lowest_bound_point(rows: List[Dict]) -> Optional[Dict]:
     """The row with the lowest false-join bound, or ``None`` with no controls at all.
 
-    Where Stage 2 runs if nothing is recommended. Bounds share one ``n``, so ties are
-    common; those go to the most flights in one track, which leaves Stage 2 the most
-    linked tracks to examine.
+    Where Stage 2 runs if nothing is recommended. A tie goes to the most flights in
+    one track, which leaves Stage 2 the most linked tracks to examine.
     """
     bounded = [r for r in rows if r["negative_false_join_upper_95"] is not None]
     if not bounded:
@@ -506,6 +549,14 @@ def pool_strata(days: List[List[Dict]]) -> List[Dict]:
 # --- one day -----------------------------------------------------------------
 
 
+@contextmanager
+def _timed(stage: str):
+    """Print how long a stage took, so a real day shows where the time goes."""
+    started = time.perf_counter()
+    yield
+    print(f"{stage}: {time.perf_counter() - started:.0f} s", flush=True)
+
+
 def _keep(frame: DataFrame) -> DataFrame:
     """Build a small frame now and hold it, for the many jobs to come."""
     kept = frame.repartition(_FEATURE_PARTITIONS).persist()
@@ -532,24 +583,45 @@ class DayFeatures:
 def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -> DayFeatures:
     """Label the day's holes, make its controls and count each flight's A9 tracks.
 
-    *p* gives what the features depend on, which a grid holds constant. Holes need the
-    whole day. Everything scored against truth needs only the airframes truth names,
-    and reads them several times, so that part is cached and the rest is read once.
+    *p* gives what the features depend on, which a grid holds constant. Real holes need
+    the whole day and are read once. Everything scored against truth needs only the
+    airframes truth names, and the controls need only the samples inside its flights.
+    Those are cached first, because the controls and the funnel pass over them about
+    26 times.
     """
     tracks = tracks.select(*_TRACK_COLUMNS)
-    truth = _keep(truth.select("flight_key", "icao24", "t_off", "t_land"))
-    samples = tracks.join(truth.select("icao24").distinct(), on="icao24", how="left_semi").persist()
     floor_ft = p.link_cruise_floor_ft
+    with _timed("truth"):
+        truth = _keep(truth.select("flight_key", "icao24", "t_off", "t_land"))
 
-    holes = _keep(label_real_holes(real_hole_candidates(tracks, p), truth))
-    negative = _keep(negative_controls(samples, truth, floor_ft, p=p))
-    positive = _keep(positive_controls(samples, truth, floor_ft, p=p))
-    funnel = {
-        **control_funnel(samples, truth, floor_ft, p=p),
-        "negative_controls_scored": negative.count(),
-        "positive_controls_scored": positive.count(),
-    }
-    flights = _keep(flight_base_tracks(samples, truth, p))
+    with _timed("real holes"):
+        # Kept before labelling, which reads its input twice.
+        candidates = _keep(real_hole_candidates(tracks, p))
+        holes = _keep(label_real_holes(candidates, truth))
+        candidates.unpersist()
+
+    with _timed("samples of truth's airframes"):
+        airframes = tracks.join(
+            truth.select("icao24").distinct(), on="icao24", how="left_semi"
+        ).persist(StorageLevel.MEMORY_AND_DISK)
+        airframes.count()
+    with _timed("A9 tracks per flight"):
+        flights = _keep(flight_base_tracks(airframes, truth, p))
+    with _timed("samples inside flights"):
+        samples = flight_samples(airframes, truth).persist(StorageLevel.MEMORY_AND_DISK)
+        samples.count()
+        airframes.unpersist()
+
+    with _timed("negative controls"):
+        negative = _keep(negative_controls(airframes, truth, floor_ft, p=p, samples=samples))
+    with _timed("positive controls"):
+        positive = _keep(positive_controls(airframes, truth, floor_ft, p=p, samples=samples))
+    with _timed("control funnel"):
+        funnel = {
+            **control_funnel(airframes, truth, floor_ft, p=p, samples=samples),
+            "negative_controls_scored": negative.count(),
+            "positive_controls_scored": positive.count(),
+        }
     holes_in_flights = _keep(holes_inside_flights(holes, truth))
 
     samples.unpersist()
@@ -559,25 +631,27 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
 
 def score_day(day: str, tracks: DataFrame, truth: DataFrame, grid: List[SegmentationParams]) -> tuple:
     """Grid rows, strata rows and the funnel row for one day."""
-    features = build_features(tracks, truth, grid[0])
+    print(f"--- {day}", flush=True)
+    with _timed(f"{day}: features"):
+        features = build_features(tracks, truth, grid[0])
     rows, strata = [], []
-    for point_id, p in enumerate(grid):
-        rows.append(
-            with_verdicts(
-                {
-                    "day": day,
-                    "point_id": point_id,
-                    **{name: getattr(p, name) for name in _link_fields()},
-                    **flight_track_counts(features.flights, features.holes_in_flights, p),
-                    **real_hole_counts(features.holes, p),
-                    **negative_counts(features.negative, p),
-                    **positive_counts(features.positive, p),
-                }
+    with _timed(f"{day}: grid of {len(grid)} points"):
+        for point_id, p in enumerate(grid):
+            rows.append(
+                with_verdicts(
+                    {
+                        "day": day,
+                        "point_id": point_id,
+                        **{name: getattr(p, name) for name in _link_fields()},
+                        **flight_track_counts(features.flights, features.holes_in_flights, p),
+                        **real_hole_counts(features.holes, p),
+                        **negative_counts(features.negative, p),
+                        **positive_counts(features.positive, p),
+                    }
+                )
             )
-        )
-        for kind, controls in (("negative", features.negative), ("positive", features.positive)):
-            strata += [{"day": day, **s} for s in strata_counts(controls, kind, p, point_id)]
-        print(f"{day}: point {point_id + 1} of {len(grid)}", flush=True)
+            for kind, controls in (("negative", features.negative), ("positive", features.positive)):
+                strata += [{"day": day, **s} for s in strata_counts(controls, kind, p, point_id)]
     funnel = {"day": day, **features.funnel}
     features.release()
     return rows, strata, funnel
@@ -654,13 +728,23 @@ def run_study(
     if "point_id" in choice:
         totals: Dict[str, int] = {}
         for day in days:
-            counts = two_callsign_counts(load_tracks(day), grid[choice["point_id"]])
+            with _timed(f"{day}: two-callsign counts"):
+                counts = two_callsign_counts(load_tracks(day), grid[choice["point_id"]])
             print(f"{day}: {counts}", flush=True)
             for name, value in counts.items():
                 totals[name] = totals.get(name, 0) + value
         choice = {**choice, **totals}
         stage("link_recommended.csv", [choice])
     return choice
+
+
+def read_tracks(spark, source: str, day: str) -> DataFrame:
+    """One ``dof`` partition of a tracks table: the tracks that start on *day*."""
+    return (
+        spark.read.parquet(source)
+        .filter(F.col("dof").cast("date") == F.lit(day).cast("date"))
+        .withColumn("icao24", F.lower("icao24"))
+    )
 
 
 def main() -> int:
@@ -687,13 +771,6 @@ def main() -> int:
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
-    def load_tracks(day: str) -> DataFrame:
-        return (
-            spark.read.parquet(args.source)
-            .filter(F.col("dof").cast("date") == F.lit(day).cast("date"))
-            .withColumn("icao24", F.lower("icao24"))
-        )
-
     def load_truth(day: str) -> DataFrame:
         return load_flight_intervals(
             spark, truth_months(day), [day], reference_base=args.reference_base
@@ -701,7 +778,8 @@ def main() -> int:
 
     try:
         run_study(
-            args.days, grid, load_tracks, load_truth, args.results_dir,
+            args.days, grid, lambda day: read_tracks(spark, args.source, day), load_truth,
+            args.results_dir,
             argv=sys.argv[1:],
             input_tables=[f"{args.source}/dof={day}" for day in args.days],
             reference_base=args.reference_base,

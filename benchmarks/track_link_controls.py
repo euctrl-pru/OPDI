@@ -61,6 +61,7 @@ from opdi.pipeline.segmentation.base import FT_PER_M, KT_PER_MPS
 from opdi.pipeline.segmentation.methods import LINK_EDGE_SAMPLES, link_feature_columns
 
 __all__ = [
+    "flight_samples",
     "real_hole_candidates",
     "label_real_holes",
     "negative_controls",
@@ -150,11 +151,13 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
     return holes.join(labels, on=key, how="inner")
 
 
-def _flight_samples(tracks: DataFrame, truth: DataFrame) -> DataFrame:
+def flight_samples(tracks: DataFrame, truth: DataFrame) -> DataFrame:
     """Each sample inside a truth flight's interval, under that flight's key.
 
     Airframe and time, as ``track_truth.overlap_join``, which cannot be used here
-    because its fixed output drops the columns the features need.
+    because its fixed output drops the columns the features need. Every generator
+    starts from this, so a caller making several on a real day caches it once and
+    hands it to them as ``samples``.
     """
     flights = truth.select(
         F.col("flight_key"),
@@ -475,6 +478,7 @@ def negative_controls(
     floor_ft: float,
     depths_min=(0, 30, 60, 120),
     p: SegmentationParams = _DEFAULT_PARAMS,
+    samples: Optional[DataFrame] = None,
 ) -> DataFrame:
     """A real landing hidden in a hole, at most one row per pair and distinct hole.
 
@@ -482,9 +486,10 @@ def negative_controls(
     and ``new_depth_min`` the depths reached, and ``pair_id`` names the flight pair, so
     a caller can count per pair as well as per control. ``p`` supplies the callsign
     settings the features read; pass the same one given to
-    :func:`real_hole_candidates`.
+    :func:`real_hole_candidates`. ``samples`` is :func:`flight_samples` already made,
+    in which case ``tracks`` is not read.
     """
-    samples = _flight_samples(tracks, truth)
+    samples = flight_samples(tracks, truth) if samples is None else samples
     pairs = _flight_pairs(samples, truth, floor_ft)
     attempts = _negative_attempts(samples, pairs, floor_ft, depths_min, p)
     return _score_cuts(samples, attempts.filter(F.col("fate") == "control"), p, expected="split")
@@ -496,6 +501,7 @@ def positive_controls(
     floor_ft: float,
     gaps_min=(60, 120, 180, 360),
     p: SegmentationParams = _DEFAULT_PARAMS,
+    samples: Optional[DataFrame] = None,
 ) -> DataFrame:
     """The middle of one flight's cruise removed, one row per flight and length.
 
@@ -504,9 +510,9 @@ def positive_controls(
     where it should. ``requested_gap_min`` says which length was asked for, as
     ``gap_stratum`` merges 60 and 120. The columns of the negative controls' depth and
     pair are NULL. A flight whose cruise is shorter than the hole has no control at
-    that length. ``p`` is as in :func:`negative_controls`.
+    that length. ``p`` and ``samples`` are as in :func:`negative_controls`.
     """
-    samples = _flight_samples(tracks, truth)
+    samples = flight_samples(tracks, truth) if samples is None else samples
     attempts = _positive_attempts(samples, truth, floor_ft, gaps_min, p)
     return _score_cuts(samples, attempts.filter(F.col("fate") == "control"), p, expected="link")
 
@@ -522,6 +528,7 @@ def control_funnel(
     depths_min=(0, 30, 60, 120),
     gaps_min=(60, 120, 180, 360),
     p: SegmentationParams = _DEFAULT_PARAMS,
+    samples: Optional[DataFrame] = None,
 ) -> Dict[str, int]:
     """Where every candidate control went, from the same frames the generators use.
 
@@ -529,9 +536,10 @@ def control_funnel(
     flight at one length. Two identities hold, and the study can assert them:
     ``considered = overlap + no cruise + usable pairs``, and each ``attempts`` count is
     the sum of the counts beneath it. Costs several passes over the input, so a caller
-    with a real day caches ``tracks`` and ``truth`` first.
+    with a real day caches ``truth`` and passes ``samples``, as in
+    :func:`negative_controls`.
     """
-    samples = _flight_samples(tracks, truth)
+    samples = flight_samples(tracks, truth) if samples is None else samples
     pairs = _flight_pairs(samples, truth, floor_ft)
     pair_fates = _counts(pairs, "pair_fate")
     negative = _counts(_negative_attempts(samples, pairs, floor_ft, depths_min, p), "fate")
