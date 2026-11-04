@@ -45,11 +45,14 @@ from opdi.utils.storage import StorageManager
 RESEARCH = "s3a://eurocontrol/opdi/research"
 
 
-def measure(sv, arm: str, hold: float):
-    params = SegmentationParams.from_config(
-        SegmentationConfig(callsign_min_persistence_seconds=hold)
-    )
-    tracked = assign_track_id(sv, ARMS[arm](), params)
+def measure(sv, arm: str, hold: float, params: SegmentationParams = None):
+    """The counts for one arm. ``params`` defaults to the config at this ``hold``."""
+    if params is None:
+        params = SegmentationParams.from_config(
+            SegmentationConfig(callsign_min_persistence_seconds=hold)
+        )
+    # Held, because each count below would otherwise redo the whole segmentation.
+    tracked = assign_track_id(sv, ARMS[arm](), params).persist()
 
     real = F.when(F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
                   F.trim(F.col("callsign")))
@@ -89,7 +92,7 @@ def measure(sv, arm: str, hold: float):
         cs_span.groupBy("track_id").agg(F.count(F.lit(1)).alias("n_cs"))
         .filter(F.col("n_cs") > 1).count()
     )
-    return {
+    counts = {
         "arm": arm,
         "hold_s": hold,
         "tracks": tracked.select("track_id").distinct().count(),
@@ -101,6 +104,8 @@ def measure(sv, arm: str, hold: float):
         # The guard. Must stay near recommended value.
         "tracks_2plus_persisted_callsigns": merged_persisted,
     }
+    tracked.unpersist()
+    return counts
 
 
 def main() -> None:
