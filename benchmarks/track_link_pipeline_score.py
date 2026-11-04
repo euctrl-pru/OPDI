@@ -1,0 +1,845 @@
+#!/usr/bin/env python
+"""Did keeping one track across a hole help the flight list, and what did it damage?
+
+Stage 2 of the ``cruise_linked`` study (spec 2026-11-03). One sampled day went
+through the real pipeline for both arms (``run_track_link_day.py``); this scores
+them against each other. Tables are read and nothing is written to S3.
+
+**Who is scored.** Flights that take off and land on the day, from Network Manager,
+on the sampled airframes. Only one day was built, so the arms differ at both ends of
+it: A10 moves an overnight piece to the day its track started, and picks up pieces
+after midnight that A9 gives to the next day. Flights inside the day are complete in
+both. A hole counts as scored when both edges lie inside such a flight; the holes
+that do not are counted in the level table, not hidden.
+
+``link_flight_list.csv``, ``link_both_ends.csv``
+    The owner's goal. ``adsc_flight_list_truth``'s scorer, per flight and paired, so
+    the result is a count of flights that changed answer. ``both_ends`` also has a
+    row for the flights crossing the European box, ``crosses_the_box``, which is the
+    population the rule is for.
+
+``link_events.csv``
+    Events per type in each arm, on airframes with at least one linked track, inside
+    a scored flight give or take the flight list's slack. A linked track is one whose
+    ``track_id`` under A10 spans a gap over ``gap_minutes``. Detectors have never seen
+    such a track, and this is the first look at what they make of one.
+
+``link_level_across_hole.csv``
+    A level segment across a hole: the last level event at or before the hole is a
+    start and the first at or after it is an end. A start somewhere before and an end
+    somewhere after is not enough, as that holds for nearly any track with two
+    segments. ``level-off-*`` is the same question for the other level family and has
+    its own row. The share of tracks is what the paper's withdrawal condition reads.
+
+``link_distance_across_hole.csv``
+    Whether ``cumulative_distance_nm`` carries across a hole as the great circle
+    between its edges. ``opdi_measurements`` holds that value only at events, and no
+    event sits on a hole's edge, so it cannot answer hole by hole. The jump is taken
+    instead from ``events.add_distance_measure`` rerun on the arm's cleaned table,
+    which is what step 04 ran on it, and the rerun is checked against the stored value
+    at each track's ``last_seen``. Edges are the nearest samples with a position. A
+    masked edge keeps its row and that function reads it as zero distance, so a hole
+    with one shows as a large difference and is flagged.
+
+``link_partition_check.csv``
+    Nothing else moved. The shared state vectors are segmented under both rules. Every
+    A9 boundary missing from A10 must be a hole the rule links, and A10 must add none.
+
+``link_movements.csv``
+    APDF movements (ATOT, ALDT) of the scored flights with a detection in each arm,
+    through the existing path: ``events_gt`` truth, ``event_bench.detected_events`` and
+    ``events_score.align``. The ``all`` row is the gate: no more than 0.1% lower.
+
+Verdicts on the withdrawal conditions are the reader's: this writes the numbers. A
+failed check is a result, so it does not stop the run.
+
+    export PYSPARK_DRIVER_PYTHON=$PWD/.venv310/bin/python
+    unset PYSPARK_PYTHON    # executors use the opdi-spark image's python
+    .venv310/bin/python -u benchmarks/track_link_pipeline_score.py \\
+        --day 2026-06-14 --results-dir $OPDI_PAPER_DIR/data
+
+Pass the ``--link-params-json`` the arm was run with, if any: the partition check
+applies the rule again and must apply the same one.
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+import pandas as pd
+from pyspark.sql import Column, DataFrame, Window
+from pyspark.sql import functions as F
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "benchmarks"))
+
+import adsc_flight_list_truth as flight_list  # noqa: E402
+import events_score  # noqa: E402
+import provenance  # noqa: E402
+from run_track_link_day import (  # noqa: E402
+    ARMS,
+    REFERENCE_WAREHOUSE,
+    SHARED_INPUTS,
+    arm_path,
+    build_config,
+)
+from track_link_controls import real_hole_candidates  # noqa: E402
+from track_link_grid import holes_inside_flights  # noqa: E402
+
+from opdi.pipeline.events import add_distance_measure  # noqa: E402
+from opdi.pipeline.flights import haversine_nm  # noqa: E402
+from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
+from opdi.pipeline.segmentation.methods import (  # noqa: E402
+    cruise_linked,
+    debounced,
+    link_feature_columns,
+    linkable,
+)
+
+OUTPUTS = (
+    "link_flight_list.csv",
+    "link_both_ends.csv",
+    "link_events.csv",
+    "link_level_across_hole.csv",
+    "link_distance_across_hole.csv",
+    "link_partition_check.csv",
+    "link_movements.csv",
+)
+
+#: How far the movement count of A10 may fall below A9's. The spec's limit.
+MOVEMENT_FALL_LIMIT = 0.001
+
+#: The milestones that are movements. Block times are not: APDF counts a movement once.
+MOVEMENTS = ("ATOT", "ALDT")
+
+#: A difference this size means distance was lost or invented, not rounded.
+DISTANCE_TOLERANCE_NM = 1.0
+
+#: The measurement type holding ``cumulative_distance_nm``. See ``events.py``.
+DISTANCE_MEASUREMENT = "Distance flown (NM)"
+
+_CROSSING_FLOWS = ("europe_to_outside", "outside_to_europe")
+
+#: The paired scorer's generic arm names, and this study's.
+_ARM_WORDS = {"base": "debounced", "merged": "cruise_linked"}
+
+_HOLE_KEY = ["track_id", "t_old_edge", "t_new_edge"]
+
+_CODE_PATHS = [
+    "benchmarks/track_link_pipeline_score.py",
+    "benchmarks/adsc_flight_list_truth.py",
+    "benchmarks/run_track_link_day.py",
+    "benchmarks/track_link_controls.py",
+    "benchmarks/track_link_grid.py",
+    "benchmarks/events_gt.py",
+    "benchmarks/events_score.py",
+    "benchmarks/event_bench.py",
+    "src/opdi/pipeline/events.py",
+    "src/opdi/pipeline/flights.py",
+    "src/opdi/pipeline/segmentation/__init__.py",
+    "src/opdi/pipeline/segmentation/base.py",
+    "src/opdi/pipeline/segmentation/methods.py",
+]
+
+_NOTES = (
+    "One day through the real pipeline, one airframe in ten. Flights that take off and "
+    "land on the day; Network Manager and APDF truth, European."
+)
+
+
+def _input_tables() -> List[str]:
+    """Every arm table the job reads. A prefix over both would hide which one moved."""
+    per_arm = ("osn_tracks_clean", "opdi_flight_list", "opdi_flight_events", "opdi_measurements")
+    return [arm_path(ARMS[0], "osn_statevectors_v2")] + [
+        arm_path(arm, table) for arm in ARMS for table in per_arm
+    ]
+
+
+# --- who is scored -----------------------------------------------------------
+
+
+def inside_the_day(truth: pd.DataFrame, day: str) -> pd.DataFrame:
+    """The flights with both ``t_off`` and ``t_on`` on *day*."""
+    on_day = (truth["t_off"].dt.strftime("%Y-%m-%d") == day) & (
+        truth["t_on"].dt.strftime("%Y-%m-%d") == day
+    )
+    return truth[on_day].reset_index(drop=True)
+
+
+def scored_flights_frame(spark, truth: pd.DataFrame) -> DataFrame:
+    """Truth flights as a frame of ``flight_key``, ``icao24``, ``t_off``, ``t_land``.
+
+    Sent as text and parsed in the session's zone, because a naive ``datetime`` handed
+    to ``createDataFrame`` is read in the driver's zone instead.
+    """
+    return _with_parsed_times(
+        spark.createDataFrame(
+            [
+                (int(r.flight_key), r.icao24, _stamp(r.t_off), _stamp(r.t_on))
+                for r in truth.itertuples()
+            ],
+            "flight_key long, icao24 string, t_off string, t_land string",
+        ),
+        "t_off",
+        "t_land",
+    )
+
+
+def _stamp(value) -> str:
+    return value.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def _with_parsed_times(frame: DataFrame, *columns) -> DataFrame:
+    for name in columns:
+        frame = frame.withColumn(name, F.to_timestamp(name))
+    return frame
+
+
+def linked_holes(tracks: DataFrame, p: SegmentationParams) -> DataFrame:
+    """One row per gap over ``p.gap_minutes`` inside one ``track_id``."""
+    window = Window.partitionBy("track_id").orderBy("event_time")
+    return (
+        tracks.select("track_id", F.lower("icao24").alias("icao24"), "event_time")
+        .withColumn("t_old_edge", F.lag("event_time").over(window))
+        .withColumn(
+            "gap_min",
+            (F.unix_timestamp("event_time") - F.unix_timestamp("t_old_edge")) / 60.0,
+        )
+        .filter(F.col("gap_min") > p.gap_minutes)
+        .select(
+            "track_id", "icao24", "t_old_edge", F.col("event_time").alias("t_new_edge"), "gap_min"
+        )
+    )
+
+
+def scored_holes(holes: DataFrame, flights: DataFrame) -> DataFrame:
+    """The holes with both edges inside a scored flight, once each."""
+    return holes_inside_flights(holes, flights).drop("flight_key").dropDuplicates(_HOLE_KEY)
+
+
+# --- the flight list ---------------------------------------------------------
+
+
+def _plain_arm_names(table: pd.DataFrame) -> pd.DataFrame:
+    """The scorer's generic arm names, replaced by this study's."""
+    renamed = {}
+    for column in table.columns:
+        prefix, _, rest = column.partition("_")
+        if prefix in _ARM_WORDS and rest:
+            renamed[column] = f"{_ARM_WORDS[prefix]}_{rest}"
+    return table.rename(columns=renamed)
+
+
+def score_flight_list(
+    truth: pd.DataFrame, split: pd.DataFrame, linked: pd.DataFrame
+) -> tuple:
+    """``(per view and end, both ends on one row)``, from the paired scorer.
+
+    ``match_one_record`` is an upper bound, fair only for both ends on one row, so it
+    feeds that table alone. The sides use the two views a consumer could apply.
+    """
+    pairs = pd.concat(
+        [
+            flight_list.pair_table(truth, match(truth, split), match(truth, linked), view)
+            for view, match in (
+                ("callsign", flight_list.match_callsign),
+                ("overlap", flight_list.match_overlap),
+            )
+        ],
+        ignore_index=True,
+    )
+
+    def both_ends(flights: pd.DataFrame) -> pd.DataFrame:
+        return flight_list.both_ends_table(
+            flights,
+            flight_list.match_one_record(flights, split),
+            flight_list.match_one_record(flights, linked),
+            flight_list.rows_per_flight(flights, split),
+            flight_list.rows_per_flight(flights, linked),
+        )
+
+    crossing = truth[truth["flow"].isin(_CROSSING_FLOWS)].reset_index(drop=True)
+    tables = [both_ends(truth)]
+    if len(crossing):
+        tables.append(both_ends(crossing.assign(flow="crosses_the_box")))
+    both = pd.concat(tables, ignore_index=True)
+    return _plain_arm_names(pairs), _plain_arm_names(both)
+
+
+def _flight_list_rows(table: DataFrame) -> pd.DataFrame:
+    return table.select(
+        F.lower("icao24").alias("icao24"),
+        F.trim("flt_id").alias("callsign"),
+        "adep",
+        "ades",
+        "first_seen",
+        "last_seen",
+    ).toPandas()
+
+
+# --- detector damage ---------------------------------------------------------
+
+
+def _seconds(column: str) -> Column:
+    return F.unix_timestamp(F.col(column))
+
+
+def compare_events(
+    split_events: DataFrame,
+    split_tracks: DataFrame,
+    linked_events: DataFrame,
+    linked_tracks: DataFrame,
+    holes: DataFrame,
+    flights: DataFrame,
+) -> List[Dict]:
+    """Events per type in each arm, on the airframes of *holes*, inside *flights*.
+
+    With the flight list's slack, since a track starts and ends with reception. A semi
+    join, so an event in the slack of two flights counts once.
+    """
+    airframes = holes.select("icao24").distinct()
+    slack_s = flight_list.OVERLAP_SLACK.total_seconds()
+    windows = F.broadcast(
+        flights.select(F.col("icao24").alias("_flight_icao24"), "t_off", "t_land")
+    )
+
+    def counted(events: DataFrame, tracks: DataFrame) -> Dict[str, int]:
+        scored = (
+            events.withColumnRenamed("flight_id", "track_id")
+            .join(tracks.select("track_id", "icao24").distinct(), on="track_id")
+            .join(airframes, on="icao24", how="left_semi")
+            .join(
+                windows,
+                (F.col("icao24") == F.col("_flight_icao24"))
+                & (_seconds("event_time") >= _seconds("t_off") - slack_s)
+                & (_seconds("event_time") <= _seconds("t_land") + slack_s),
+                "left_semi",
+            )
+        )
+        return {r["type"]: r["count"] for r in scored.groupBy("type").count().collect()}
+
+    split, linked = counted(split_events, split_tracks), counted(linked_events, linked_tracks)
+    return [
+        {
+            "type": kind,
+            "debounced_events": split.get(kind, 0),
+            "cruise_linked_events": linked.get(kind, 0),
+            "change": linked.get(kind, 0) - split.get(kind, 0),
+        }
+        for kind in sorted(set(split) | set(linked))
+    ]
+
+
+def level_across_holes(events: DataFrame, holes: DataFrame) -> List[Dict]:
+    """One row per level family: how many segments span a hole, and on how many tracks.
+
+    Two events can share an instant, as a one-sample segment does, and then the segment
+    closes on the old edge and opens on the new one rather than spanning. Ordering on
+    ``(time, is_end)`` says so: the maximum before takes the end, the minimum after takes
+    the start.
+    """
+    family = (
+        F.when(F.col("type").isin("level-start", "level-end"), "level")
+        .when(F.col("type").rlike("^level-off-.*-(start|end)$"), "level_off")
+    )
+    marks = events.select(
+        F.col("flight_id").alias("track_id"),
+        family.alias("family"),
+        "event_time",
+        F.col("type").endswith("-end").alias("is_end"),
+    ).filter(F.col("family").isNotNull())
+
+    mark = F.struct(F.col("event_time"), F.col("is_end"))
+    families = holes.sparkSession.createDataFrame([("level",), ("level_off",)], ["family"])
+    per_hole = (
+        holes.select(*_HOLE_KEY)
+        .crossJoin(F.broadcast(families))
+        .join(marks, on=["track_id", "family"], how="left")
+        .groupBy(*_HOLE_KEY, "family")
+        .agg(
+            F.max(F.when(F.col("event_time") <= F.col("t_old_edge"), mark)).alias("before"),
+            F.min(F.when(F.col("event_time") >= F.col("t_new_edge"), mark)).alias("after"),
+        )
+        .collect()
+    )
+
+    rows = []
+    for name in ("level", "level_off"):
+        scored = [r for r in per_hole if r["family"] == name]
+        spanned = [
+            r
+            for r in scored
+            if r["before"] is not None
+            and r["after"] is not None
+            and not r["before"]["is_end"]
+            and r["after"]["is_end"]
+        ]
+        tracks = {r["track_id"] for r in scored}
+        damaged = {r["track_id"] for r in spanned}
+        rows.append(
+            {
+                "family": name,
+                "scored_holes": len(scored),
+                "scored_tracks": len(tracks),
+                "segments_across_a_hole": len(
+                    {
+                        (r["track_id"], r["before"]["event_time"], r["after"]["event_time"])
+                        for r in spanned
+                    }
+                ),
+                "holes_inside_a_segment": len(spanned),
+                "tracks_with_a_segment_across_a_hole": len(damaged),
+                "share_of_tracks": len(damaged) / len(tracks) if tracks else None,
+            }
+        )
+    return rows
+
+
+def distance_across_holes(tracks: DataFrame, holes: DataFrame) -> DataFrame:
+    """Per hole, the jump in cumulative distance and the great circle between its edges.
+
+    The edges are the nearest samples with a position either side. ``edge_masked`` says
+    one of them is not the sample next to the hole. A hole with no position left on one
+    side has no row, since there is no great circle to compare with.
+    """
+    window = Window.partitionBy("track_id").orderBy("event_time")
+    positioned = (
+        add_distance_measure(tracks.select("track_id", "event_time", "lat", "lon"))
+        .filter(F.col("lat").isNotNull() & F.col("lon").isNotNull())
+        .withColumn("_prev_time", F.lag("event_time").over(window))
+        .withColumn("_prev_lat", F.lag("lat").over(window))
+        .withColumn("_prev_lon", F.lag("lon").over(window))
+        .withColumn("_prev_distance", F.lag("cumulative_distance_nm").over(window))
+    )
+    return (
+        positioned.join(holes.select(*_HOLE_KEY, "gap_min"), on="track_id")
+        # No sample lies inside a hole, so exactly the first positioned sample at or after
+        # the new edge has its previous one at or before the old edge.
+        .filter(
+            (F.col("event_time") >= F.col("t_new_edge"))
+            & (F.col("_prev_time") <= F.col("t_old_edge"))
+        )
+        .withColumn("jump_nm", F.col("cumulative_distance_nm") - F.col("_prev_distance"))
+        .withColumn(
+            "great_circle_nm",
+            haversine_nm(F.col("_prev_lat"), F.col("_prev_lon"), F.col("lat"), F.col("lon")),
+        )
+        .select(
+            *_HOLE_KEY,
+            "gap_min",
+            "jump_nm",
+            "great_circle_nm",
+            (F.col("jump_nm") - F.col("great_circle_nm")).alias("difference_nm"),
+            (
+                (F.col("_prev_time") != F.col("t_old_edge"))
+                | (F.col("event_time") != F.col("t_new_edge"))
+            ).alias("edge_masked"),
+        )
+    )
+
+
+def summarise_distance(per_hole: pd.DataFrame, holes_scored: int) -> Dict:
+    """Median and 95th percentile of the difference, and how many holes are off."""
+    difference = per_hole["difference_nm"].astype(float)
+
+    def quantile(series: pd.Series, q: float) -> Optional[float]:
+        return float(series.quantile(q)) if len(series) else None
+
+    return {
+        "holes_scored": holes_scored,
+        "holes_compared": len(per_hole),
+        "holes_with_no_position_on_one_side": holes_scored - len(per_hole),
+        "median_difference_nm": quantile(difference, 0.5),
+        "p95_difference_nm": quantile(difference, 0.95),
+        "p95_absolute_difference_nm": quantile(difference.abs(), 0.95),
+        "holes_off_by_over_1_nm": int((difference.abs() > DISTANCE_TOLERANCE_NM).sum()),
+        "holes_with_a_masked_edge": int(per_hole["edge_masked"].sum()),
+    }
+
+
+def stored_distance_check(
+    tracks: DataFrame, events: DataFrame, measurements: DataFrame
+) -> Dict[str, int]:
+    """Does the rerun reach the value step 04 stored at each track's ``last_seen``?
+
+    This is what ties :func:`distance_across_holes` to the published measurement, which
+    has no value at the hole itself.
+    """
+    rerun = (
+        add_distance_measure(tracks.select("track_id", "event_time", "lat", "lon"))
+        .groupBy("track_id")
+        .agg(F.max("cumulative_distance_nm").alias("_rerun_nm"))
+    )
+    stored = (
+        events.filter(F.col("type") == "last_seen")
+        .select(F.col("id").alias("milestone_id"), F.col("flight_id").alias("track_id"))
+        .join(
+            measurements.filter(F.col("type") == DISTANCE_MEASUREMENT).select(
+                "milestone_id", F.col("value").alias("_stored_nm")
+            ),
+            on="milestone_id",
+        )
+    )
+    joined = stored.join(rerun, on="track_id")
+    off = F.abs(F.col("_stored_nm") - F.col("_rerun_nm")) > DISTANCE_TOLERANCE_NM
+    row = joined.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.coalesce(F.sum(F.when(off, 1).otherwise(0)), F.lit(0)).alias("off"),
+    ).first()
+    return {
+        "tracks_checked_against_stored_distance": row["n"],
+        "tracks_off_stored_distance_by_over_1_nm": row["off"],
+    }
+
+
+# --- nothing else moved ------------------------------------------------------
+
+
+def _boundaries(tracks: DataFrame) -> DataFrame:
+    """``icao24`` and ``t_boundary``, the start of each track but an airframe's first."""
+    starts = tracks.groupBy(F.lower("icao24").alias("icao24"), "track_id").agg(
+        F.min(F.to_timestamp("event_time")).alias("t_boundary")
+    )
+    return (
+        starts.withColumn("_first", F.min("t_boundary").over(Window.partitionBy("icao24")))
+        .filter(F.col("t_boundary") > F.col("_first"))
+        .select("icao24", "t_boundary")
+    )
+
+
+def partition_check(
+    samples: DataFrame, split: DataFrame, linked: DataFrame, p: SegmentationParams
+) -> Dict:
+    """Compare where the two rules cut one input.
+
+    *split* and *linked* are *samples* segmented by A9 and A10. A boundary A10 removed
+    must be a hole the rule's own :func:`linkable` accepts at *p*, and A10 must add none.
+    """
+    features = {name: F.col(name) for name in link_feature_columns(p)}
+    linkable_holes = (
+        real_hole_candidates(samples, p)
+        .filter(linkable(features, p))
+        .select(F.lower("icao24").alias("icao24"), F.col("t_new_edge").alias("t_boundary"))
+        .distinct()
+    )
+    key = ["icao24", "t_boundary"]
+    before = _boundaries(split).cache()
+    after = _boundaries(linked).cache()
+    removed = before.join(after, on=key, how="left_anti").cache()
+    removed_n = removed.count()
+    elsewhere_n = removed.join(linkable_holes, on=key, how="left_anti").count()
+    added_n = after.join(before, on=key, how="left_anti").count()
+    return {
+        "debounced_boundaries": before.count(),
+        "cruise_linked_boundaries": after.count(),
+        "removed_boundaries": removed_n,
+        "removed_at_a_linked_hole": removed_n - elsewhere_n,
+        "removed_elsewhere": elsewhere_n,
+        "added_boundaries": added_n,
+        "passed": elsewhere_n == 0 and added_n == 0,
+    }
+
+
+def movement_row(
+    movement: str, apdf_movements: int, split_matched: int, linked_matched: int
+) -> Dict:
+    """One line of the movement table. A10 may fall by ``MOVEMENT_FALL_LIMIT`` at most."""
+    fall = (split_matched - linked_matched) / split_matched if split_matched else None
+    return {
+        "movement": movement,
+        "apdf_movements": apdf_movements,
+        "debounced_matched": split_matched,
+        "cruise_linked_matched": linked_matched,
+        "fall_share": fall,
+        "passed": linked_matched >= split_matched * (1.0 - MOVEMENT_FALL_LIMIT),
+    }
+
+
+def scored_movements(spark, milestones: DataFrame, scored: pd.DataFrame) -> DataFrame:
+    """The ATOT and ALDT truth rows of the scored flights.
+
+    Matched as ``events_gt.bridge`` carries a flight: airframe, ICAO callsign and
+    off-block, the last of which keeps two legs of one callsign apart. A flight with no
+    callsign cannot reach ``events_score.align`` and is left out here.
+    """
+    named = scored.dropna(subset=["callsign"])
+    flights = _with_parsed_times(
+        spark.createDataFrame(
+            [(r.icao24, r.callsign, _stamp(r.t_off)) for r in named.itertuples()],
+            "icao24 string, callsign string, gt_aobt string",
+        ),
+        "gt_aobt",
+    )
+    return milestones.filter(F.col("milestone").isin(list(MOVEMENTS))).join(
+        F.broadcast(flights), on=["icao24", "callsign", "gt_aobt"], how="left_semi"
+    )
+
+
+def movement_rows(truth: DataFrame, split: DataFrame, linked: DataFrame) -> List[Dict]:
+    """A row per milestone and an ``all`` row, which is the gate."""
+
+    def matched(detected: DataFrame) -> Dict[str, tuple]:
+        scored = events_score.score(events_score.align(truth, detected))
+        events_score.guard_not_all_zero(scored)
+        return {r["milestone"]: (r["n_truth"], r["n_detected"]) for r in scored.collect()}
+
+    before, after = matched(split), matched(linked)
+    if not before:
+        raise SystemExit(
+            "No APDF movement reached a scored flight: an identity-join failure, not a "
+            "result. Check the airframe, callsign and off-block of the two sides."
+        )
+    rows = [
+        movement_row(m, before[m][0], before[m][1], after[m][1]) for m in MOVEMENTS if m in before
+    ]
+    rows.append(
+        movement_row(
+            "all",
+            sum(r["apdf_movements"] for r in rows),
+            sum(r["debounced_matched"] for r in rows),
+            sum(r["cruise_linked_matched"] for r in rows),
+        )
+    )
+    return rows
+
+
+# --- the job -----------------------------------------------------------------
+
+
+def one_day(table: DataFrame, name: str, day: str) -> DataFrame:
+    """*table* with lower-case columns, cut to *day*'s ``dof``. Shared inputs have none.
+
+    The flight list writes upper-case columns and the event tables lower-case.
+    """
+    table = table.toDF(*[c.lower() for c in table.columns])
+    if name in SHARED_INPUTS:
+        return table
+    return table.filter(F.col("dof").cast("date") == F.lit(day).cast("date"))
+
+
+def score_day(
+    spark,
+    day: str,
+    read: Callable[[str, str], DataFrame],
+    truth: pd.DataFrame,
+    p: SegmentationParams,
+    apdf: DataFrame,
+    detected: Dict[str, DataFrame],
+    write: Callable[[str, List[Dict]], None],
+) -> None:
+    """Every table in :data:`OUTPUTS`, written as each is ready.
+
+    ``read(arm, table)`` gives an arm's table for the day, ``truth`` the labelled flights
+    inside the day, ``apdf`` the long-form milestones of ``events_gt``, and ``detected``
+    each arm's ``event_bench.detected_events``.
+    """
+    if truth.empty:
+        raise SystemExit(f"no truth flights inside {day}: nothing can be scored")
+
+    split_name, linked_name = ARMS
+    tracks = {
+        arm: read(arm, "osn_tracks_clean")
+        .select("track_id", F.lower("icao24").alias("icao24"), "event_time", "lat", "lon")
+        .cache()
+        for arm in ARMS
+    }
+    events = {
+        arm: read(arm, "opdi_flight_events").select("id", "flight_id", "type", "event_time")
+        for arm in ARMS
+    }
+    flights = scored_flights_frame(spark, truth).cache()
+    holes = linked_holes(tracks[linked_name], p).cache()
+    holes_in_flights = scored_holes(holes, flights).cache()
+
+    # The owner's goal.
+    pairs, both = score_flight_list(
+        truth,
+        _flight_list_rows(read(split_name, "opdi_flight_list")),
+        _flight_list_rows(read(linked_name, "opdi_flight_list")),
+    )
+    write("link_flight_list.csv", pairs.to_dict("records"))
+    write("link_both_ends.csv", both.to_dict("records"))
+
+    # Detector damage.
+    write(
+        "link_events.csv",
+        compare_events(
+            events[split_name], tracks[split_name], events[linked_name], tracks[linked_name],
+            holes, flights,
+        ),
+    )
+    linked_everywhere = {
+        "linked_holes_anywhere": holes.count(),
+        "linked_tracks_anywhere": holes.select("track_id").distinct().count(),
+    }
+    write(
+        "link_level_across_hole.csv",
+        [
+            {**row, **linked_everywhere}
+            for row in level_across_holes(events[linked_name], holes_in_flights)
+        ],
+    )
+    scored_tracks = tracks[linked_name].join(
+        holes_in_flights.select("track_id").distinct(), on="track_id", how="left_semi"
+    )
+    per_hole = distance_across_holes(scored_tracks, holes_in_flights).toPandas()
+    write(
+        "link_distance_across_hole.csv",
+        [
+            {
+                **summarise_distance(per_hole, holes_in_flights.count()),
+                **stored_distance_check(
+                    scored_tracks, events[linked_name], read(linked_name, "opdi_measurements")
+                ),
+            }
+        ],
+    )
+
+    # Nothing else moved. One frame under both rules.
+    samples = (
+        read(split_name, "osn_statevectors_v2")
+        .select(
+            "event_time", "icao24", "lat", "lon", "baro_altitude", "velocity", "vert_rate", "callsign"
+        )
+        .cache()
+    )
+    write(
+        "link_partition_check.csv",
+        [
+            partition_check(
+                samples,
+                assign_track_id(samples, debounced(), p),
+                assign_track_id(samples, cruise_linked(), p),
+                p,
+            )
+        ],
+    )
+    samples.unpersist()
+
+    write(
+        "link_movements.csv",
+        movement_rows(
+            scored_movements(spark, apdf, truth), detected[split_name], detected[linked_name]
+        ),
+    )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--day", required=True, help="YYYY-MM-DD")
+    ap.add_argument("--truth", default=None, help="default: reference/flights_<YYYYMM>.parquet")
+    ap.add_argument("--results-dir", type=Path, required=True)
+    ap.add_argument("--executors", type=int, default=8)
+    ap.add_argument(
+        "--link-params-json", default=None, help="the overrides the arm was run with, if any"
+    )
+    args = ap.parse_args()
+
+    month = args.day[:7].replace("-", "")
+    truth_path = args.truth or str(REPO / f"reference/flights_{month}.parquet")
+    link_params = json.loads(args.link_params_json) if args.link_params_json else None
+    configs = {arm: build_config(arm, link_params) for arm in ARMS}
+    p = SegmentationParams.from_config(configs["cruise_linked"])
+
+    import events_gt
+    import osn_sample
+    from event_bench import detected_events, milestone_map
+    from osn_sample import build_spark, load_dotenv
+
+    from opdi.coverage import EUROPE_BBOX
+    from opdi.utils.storage import StorageManager
+
+    load_dotenv()
+    osn_sample.RESEARCH_EXECUTORS = args.executors
+    spark = build_spark(4, "8g", distributed=True)
+    spark.sparkContext.setLogLevel("ERROR")
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    events_gt.assert_utc_session(spark)
+
+    def read(arm: str, table: str) -> DataFrame:
+        return one_day(spark.read.parquet(arm_path(arm, table)), table, args.day)
+
+    def write(name: str, rows: List[Dict]) -> None:
+        table = pd.DataFrame(rows)
+        table.to_csv(args.results_dir / name, index=False)
+        provenance.record(
+            args.results_dir, name, "benchmarks/track_link_pipeline_score.py", sys.argv[1:],
+            _CODE_PATHS,
+            inputs={
+                "day": args.day,
+                "truth_flights": len(truth),
+                "truth": truth_path,
+                "truth_sha256_16": provenance.file_hash(Path(truth_path)),
+                "link_params": link_params,
+            },
+            notes=_NOTES,
+            input_tables=_input_tables(),
+        )
+        print(f"\nwrote {args.results_dir / name}\n{table.to_string(index=False)}", flush=True)
+
+    args.results_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        airframes = [
+            r[0]
+            for r in read("debounced", "osn_tracks_clean")
+            .select(F.lower("icao24"))
+            .distinct()
+            .collect()
+        ]
+        min_lon, min_lat, max_lon, max_lat = EUROPE_BBOX
+        in_box = {
+            r[0]
+            for r in spark.read.parquet(f"{REFERENCE_WAREHOUSE}/oa_airports")
+            .where(
+                F.col("longitude_deg").between(min_lon, max_lon)
+                & F.col("latitude_deg").between(min_lat, max_lat)
+            )
+            .select("ident")
+            .collect()
+        }
+        truth = inside_the_day(
+            flight_list.label_far_end(
+                flight_list.load_truth(truth_path, args.day, airframes), in_box
+            ),
+            args.day,
+        )
+        print(f"truth flights inside {args.day}: {len(truth):,}")
+        print(truth["flow"].value_counts().to_string(), flush=True)
+
+        bridged = events_gt.bridge(
+            events_gt.load_apdf(spark, month), events_gt.load_flights(spark, month)
+        ).cache()
+        relative = len(REFERENCE_WAREHOUSE) + 1
+        detected = {
+            arm: detected_events(
+                spark,
+                arm_path(arm, "opdi_flight_events"),
+                storage=StorageManager(spark, configs[arm]),
+                identity="flight_list",
+                flight_list=arm_path(arm, "opdi_flight_list")[relative:],
+                mapping=milestone_map(configs[arm].events),
+            )
+            for arm in ARMS
+        }
+        score_day(
+            spark,
+            args.day,
+            read,
+            truth,
+            p,
+            events_gt.milestones(bridged, [args.day]),
+            detected,
+            write,
+        )
+    finally:
+        spark.stop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
