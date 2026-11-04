@@ -18,7 +18,7 @@ conservative settings: the higher ``link_min_implied_speed_kt``, the shorter
                       nothing, so counting either as a pass would dilute the bound and
                       give short-gap points an easier limit. Both have columns of their
                       own. The low-edge families always count at a point with
-                      ``link_directional_edges`` on, whatever their depth. With it off
+                      ``link_old_edge_climb`` or ``link_new_edge_descent`` on, whatever their depth. With it off
                       they fail the floor by construction and test nothing, for the
                       same reason, so they are kept apart there too. The bound is per
                       control, but depths of one pair are not independent, so the count
@@ -119,9 +119,9 @@ before the next day starts.
 Settings it does not name keep ``GRID_BASE``, the pre-study settings, not the shipped
 defaults. Those that shape the cuts and features
 (:data:`ONE_VALUE_PER_RUN`) may take only one value, so vary them across runs.
-``link_directional_edges`` takes ``true`` and ``false``:
+``link_old_edge_climb`` and ``link_new_edge_descent`` take ``true`` and ``false``:
 
-    --grid-json '{"link_directional_edges": [false, true], "link_max_gap_minutes": [360]}'
+    --grid-json '{"link_old_edge_climb": [false, true], "link_max_gap_minutes": [360]}'
 
 ``--reasons-params-json`` names the one point the reasons are read at, in place of the
 chosen one, and need not be in the grid:
@@ -207,7 +207,7 @@ ONE_VALUE_PER_RUN = (
 )
 
 #: Link settings that are a switch, which ``--grid-json`` gives as ``true`` or ``false``.
-SWITCHES = ("link_directional_edges",)
+SWITCHES = ("link_old_edge_climb", "link_new_edge_descent")
 
 NEGATIVE_UPPER_LIMIT = 0.01
 SAME_CALLSIGN_UPPER_LIMIT = 0.05
@@ -439,7 +439,7 @@ def _counts_toward_limit(p: SegmentationParams) -> Column:
         F.greatest("old_depth_min", "new_depth_min") >= NEGATIVE_LIMIT_MIN_DEPTH_MIN, F.lit(False)
     )
     cruise_cruise = F.col("control_family") == "cruise_cruise"
-    return within_gap & ((cruise_cruise & deep) | (~cruise_cruise & F.lit(p.link_directional_edges)))
+    return within_gap & ((cruise_cruise & deep) | (~cruise_cruise & F.lit(p.link_old_edge_climb or p.link_new_edge_descent)))
 
 
 def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
@@ -500,7 +500,7 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
     low_edge = ~cruise_cruise
     under_limit = _counts_toward_limit(p)
     shallow = within_gap & cruise_cruise & ~under_limit
-    untested = within_gap & low_edge & ~F.lit(p.link_directional_edges)
+    untested = within_gap & low_edge & ~F.lit(p.link_old_edge_climb or p.link_new_edge_descent)
     same = F.col("same_callsign") & under_limit
     same_shallow = F.col("same_callsign") & shallow
     same_low_edge = same & low_edge
@@ -856,7 +856,7 @@ def _direction_verdicts(row: Dict) -> Dict:
         "same_callsign_low_edge_upper_95": same_upper,
         "real_by_direction_false_join_rate": real_rate,
     }
-    if not row["link_directional_edges"]:
+    if not (row["link_old_edge_climb"] or row["link_new_edge_descent"]):
         return {
             **verdicts,
             "negative_low_edge_within_limit": None,
@@ -975,7 +975,7 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
     to the more conservative settings, as a wrongly glued flight is worse than a split
     one: the higher ``link_min_implied_speed_kt``, the shorter ``link_max_gap_minutes``,
     the higher ``link_min_speed_ratio``, the higher ``link_min_stop_minutes``, then
-    ``link_directional_edges`` off. The ratio and stop are there because the grid lists
+    ``link_old_edge_climb`` or ``link_new_edge_descent`` off. The ratio and stop are there because the grid lists
     each off setting first, so without them a tie would fall to the point with those
     checks off. A tie that far means direction linked nothing more. The false-join bound is not
     compared here, because a point inside the limits has already met it. The first point
@@ -993,7 +993,8 @@ def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
             r["link_max_gap_minutes"],
             -r["link_min_speed_ratio"],
             -r["link_min_stop_minutes"],
-            r["link_directional_edges"],
+            r["link_old_edge_climb"],
+            r["link_new_edge_descent"],
             r["point_id"],
         ),
     )

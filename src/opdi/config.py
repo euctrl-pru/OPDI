@@ -1693,8 +1693,10 @@ class SegmentationConfig:
     position (minutes), because a position message often arrives after altitude and
     speed. No position inside this span means split.
 
-    It also bounds the edge's altitude, vertical rate and speed samples: of the
-    ``LINK_EDGE_SAMPLES`` rows at an edge, those further away than this do not count.
+    It also bounds the edge's altitude, vertical rate and speed: each reads its
+    nearest ``LINK_EDGE_SAMPLES`` values inside this span, past any blank samples.
+    Altitude arrives in a later message as position does. No altitude inside it means
+    split; no vertical rate inside it is neutral at cruise.
 
     Must be below ``low_alt_gap_minutes``, or the read could cross a low-altitude
     split into another flight; A10 raises otherwise. ``process_day`` reads at least
@@ -1720,15 +1722,18 @@ class SegmentationConfig:
     link_vfast_kt: float = 650.0
     """Fastest plausible ground speed, for ``link_min_stop_minutes`` (knots)."""
 
-    link_directional_edges: bool = False
-    """Whether an edge below ``link_cruise_floor_ft`` can still link when its
-    direction fits one flight: the old edge climbing, or the new edge descending,
-    past ``link_edge_vert_rate_fpm``. A NULL vertical rate does not pass.
+    link_old_edge_climb: bool = False
+    """Whether an old edge below ``link_cruise_floor_ft`` can still link when it is
+    climbing past ``link_edge_vert_rate_fpm``. A NULL vertical rate does not pass.
 
-    Flights often reappear on approach to their destination, so a lower floor does
-    not reach them. In the study's third round, at a floor of 18,000 ft, 858 holes
-    inside one crossing flight failed only the new edge and 113 only the old edge,
-    against 6,450 crossing flights, and a floor of 10,000 ft barely changed that."""
+    Set apart from ``link_new_edge_descent`` because the study decides them apart."""
+
+    link_new_edge_descent: bool = False
+    """Whether a new edge below ``link_cruise_floor_ft`` can still link when it is
+    descending past ``link_edge_vert_rate_fpm``. A NULL vertical rate does not pass, and
+    a new edge the low-altitude gap breaks at splits whatever this says.
+
+    Set apart from ``link_old_edge_climb`` because the study decides them apart."""
 
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""

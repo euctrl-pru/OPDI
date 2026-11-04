@@ -94,12 +94,13 @@ __all__ = [
 #: its only use, because it is the one number an A3 sweep would want to vary.
 TRAFFIC_DEFAULT_GAP_MINUTES = 10.0
 
-#: Samples on each side of a hole that :func:`link_feature_columns` summarises, at
-#: most: those further than ``link_edge_position_minutes`` from the edge do not count.
+#: Values of each field on each side of a hole that :func:`link_feature_columns`
+#: summarises, at most: the nearest that carry one, within ``link_edge_position_minutes``.
 LINK_EDGE_SAMPLES = 5
 
-#: Vertical rates an edge's frame must hold before its direction counts as evidence.
-#: ``avg`` skips a NULL, so without this one message of five would carry the verdict.
+#: Vertical rates an edge must hold before its direction counts as evidence: without
+#: this one message would carry the verdict. Reading past blank samples does not change
+#: that, since a rate can still be the only one in the window.
 LINK_DIRECTION_MIN_RATES = 3
 
 #: ``icao24`` values that are not an airframe, so two edges carrying one say
@@ -714,35 +715,36 @@ def _mean(values: Column) -> Column:
     )
 
 
-def _edge_summary(frame: Column, edge_s: Column, span_s: int) -> Column:
-    """What one edge's samples say, ignoring those over *span_s* seconds from the edge.
+def _edge_summary(frame: Column, latest_first: bool) -> Column:
+    """What one edge's samples say: each field's nearest ``LINK_EDGE_SAMPLES`` values.
 
-    *frame* is one window read of an array of samples. An aggregate over a window
-    cannot see the row the frame belongs to, so the bound cannot go in a ``when``
-    inside it. Reading the array and filtering it can, and that also makes every field
-    below one read rather than one each.
+    *frame* is one window read of an array of samples, which the frame has bounded in
+    time. Taking every field from it keeps this to one read rather than one each.
+    Altitude and vertical rate arrive in separate messages, so a sample without one
+    says nothing and each field looks past those to its own nearest values.
+
+    Sorted on the whole sample because samples can share a second, and a frame holds
+    those in no fixed order: two days' reads must keep the same five of them.
+    ``latest_first`` is for the old edge, where the nearest sample is the latest.
     """
 
-    def over_kept(kept: Column) -> Column:
+    def over_sorted(samples: Column) -> Column:
         def values(field: str) -> Column:
-            read = F.transform(kept, lambda sample: sample.getField(field))
-            return F.filter(read, lambda value: value.isNotNull())
+            read = F.transform(samples, lambda sample: sample.getField(field))
+            present = F.filter(read, lambda value: value.isNotNull())
+            return F.slice(present, 1, LINK_EDGE_SAMPLES).alias(field)
 
-        return F.struct(
-            F.array_min(values("alt_ft")).alias("min_alt_ft"),
-            _mean(values("vr_fpm")).alias("mean_vr_fpm"),
-            F.size(values("vr_fpm")).cast("long").alias("vr_samples"),
-            _mean(values("spd_kt")).alias("mean_spd_kt"),
-        )
+        def over_values(v: Column) -> Column:
+            return F.struct(
+                F.array_min(v.getField("alt_ft")).alias("min_alt_ft"),
+                _mean(v.getField("vr_fpm")).alias("mean_vr_fpm"),
+                F.size(v.getField("vr_fpm")).cast("long").alias("vr_samples"),
+                _mean(v.getField("spd_kt")).alias("mean_spd_kt"),
+            )
 
-    def over_read(read: Column) -> Column:
-        kept = F.filter(
-            read.getField("frame"),
-            lambda sample: F.abs(sample.getField("s") - read.getField("edge_s")) <= span_s,
-        )
-        return _once(kept, over_kept)
+        return _once(F.struct(values("alt_ft"), values("vr_fpm"), values("spd_kt")), over_values)
 
-    return _once(F.struct(frame.alias("frame"), edge_s.alias("edge_s")), over_read)
+    return _once(F.sort_array(frame, asc=not latest_first), over_sorted)
 
 
 def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Column]:
@@ -759,12 +761,12 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     two edge positions, which can be further apart: see ``position`` in
     :func:`_link_reads`.
 
-    The altitude, vertical rate, speed and rate-count features read at most
-    :data:`LINK_EDGE_SAMPLES` rows, and of those only the samples within
-    ``link_edge_position_minutes`` of the edge. Five rows alone have no bound in time,
-    so at a sparse edge they reach across an earlier break into another flight, and
-    a row can fall inside one day's read and outside the next day's. The bound makes
-    two days' reads of a hole agree: on the lookback side this is prevented, since
+    The altitude, vertical rate, speed and rate-count features read each field's
+    nearest :data:`LINK_EDGE_SAMPLES` values within ``link_edge_position_minutes`` of
+    the edge, past any blank samples. A row count alone has no bound in time, so at a
+    sparse edge it reaches across an earlier break into another flight, and a row can
+    fall inside one day's read and outside the next day's. The bound makes two days'
+    reads of a hole agree: on the lookback side this is prevented, since
     ``process_day`` reads at least that far behind the old edge. Past the new edge it
     is detected, not prevented: see the truncation warning in ``process_day``.
 
@@ -799,8 +801,6 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
             f"could cross a low-altitude split into another flight"
         )
     w = segment_window() if window is None else window
-    before = w.rowsBetween(-LINK_EDGE_SAMPLES, -1)
-    after = w.rowsBetween(0, LINK_EDGE_SAMPLES - 1)
     # Same partition, ordered by a number, because a range frame needs one.
     seconds = w.orderBy(F.unix_timestamp(F.col("_ts")))
     lookahead = seconds.rangeBetween(0, int(p.link_callsign_lookahead_minutes * 60))
@@ -872,11 +872,20 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
         vert_rate_fpm.cast("double").alias("vr_fpm"),
         speed_kt().cast("double").alias("spd_kt"),
     )
-    before_edge = _edge_summary(
-        F.collect_list(edge_sample).over(before), F.unix_timestamp(old_edge_ts), span_s
-    )
+    # Each edge reads a time-bounded frame, once. The old edge is the row before this
+    # one, which a range frame cannot start from, so every row summarises the span up to
+    # itself and the next row reads that with `lag`. The summary is what is carried on,
+    # rather than the array, because a frame holds about 60 samples at 5 s cadence and
+    # up to 300 at 1 Hz, and every window operator above this one would sort them.
+    before_edge = F.lag(
+        _edge_summary(
+            F.collect_list(edge_sample).over(seconds.rangeBetween(-span_s, 0)),
+            latest_first=True,
+        )
+    ).over(w)
     after_edge = _edge_summary(
-        F.collect_list(edge_sample).over(after), F.unix_timestamp(F.col("_ts")), span_s
+        F.collect_list(edge_sample).over(seconds.rangeBetween(0, span_s)),
+        latest_first=False,
     )
 
     return {
@@ -890,7 +899,7 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
         "before_edge": before_edge,
         "after_edge": after_edge,
         # What `legacy_low_altitude_gap` reads at this sample, which the minimum over
-        # the edge cannot stand in for: only with direction on can a link reach that low.
+        # the edge cannot stand in for: only with descent on can a link reach that low.
         "alt_new_edge_ft": altitude_ft(),
         "cs_before": F.when(
             seen_recently,
@@ -944,14 +953,15 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     tests pass outright at their ``0.0`` off setting, so a missing speed cannot
     fail a test that is switched off.
 
-    With ``link_directional_edges``, flights that reappear on approach to their
-    destination, or left coverage still climbing, can pass the two edge tests below
-    the floor. The direction is the evidence there, so a NULL vertical rate does not
-    pass, unlike in the descend-then-climb test, and the mean must rest on at least
-    :data:`LINK_DIRECTION_MIN_RATES` rates in that edge's frame. A new edge the
-    low-altitude gap breaks at does not pass either: the rule splits there whatever
-    this says, and the study, which reads this verdict instead of re-segmenting, must
-    not count it as a link.
+    With ``link_old_edge_climb``, a flight that left coverage still climbing can pass
+    the old edge's test below the floor, and with ``link_new_edge_descent`` one that
+    reappears on approach to its destination can pass the new edge's. They are separate
+    settings because the study decides them separately. The direction is the evidence
+    there, so a NULL vertical rate does not pass, unlike in the descend-then-climb test,
+    and the mean must rest on at least :data:`LINK_DIRECTION_MIN_RATES` rates in that
+    edge's values. A new edge the low-altitude gap breaks at does not pass either: the
+    rule splits there whatever this says, and the study, which reads this verdict
+    instead of re-segmenting, must not count it as a link.
 
     ``link_min_speed_ratio`` is uninformative at a climb edge: the speed before the gap
     is low there, which makes the ratio easy, and it says nothing of the speed in
@@ -978,9 +988,9 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
         if p.link_min_speed_ratio > 0.0
         else F.lit(True)
     )
-    if p.link_directional_edges:
-        # Spelt "below", not left to the OR: a NULL altitude must stay a failure
-        # whatever the vertical rate says.
+    # Spelt "below", not left to the OR: a NULL altitude must stay a failure whatever
+    # the vertical rate says.
+    if p.link_old_edge_climb:
         old_edge_by_direction = (
             (f["alt_before_ft"] < p.link_cruise_floor_ft)
             & (f["vr_before_fpm"] > p.link_edge_vert_rate_fpm)
@@ -992,6 +1002,7 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
                 F.coalesce(old_edge_by_direction, F.lit(False)),
                 implied_kt >= p.link_min_implied_speed_kt,
             ).otherwise(slow_for_this_flight_passes)
+    if p.link_new_edge_descent:
         low_altitude_gap_breaks = F.coalesce(f["alt_new_edge_ft"] < p.low_alt_ft, F.lit(False))
         new_edge_passes = new_edge_passes | (
             (f["alt_after_ft"] < p.link_cruise_floor_ft)
@@ -1033,7 +1044,8 @@ def cruise_linked() -> BreakRule:
     airframes with ADS-C: 1,204 of 1,334 flights crossing the European box have a
     gap over 30 min, median 191 min. Only the general gap rule changes. A short
     gap at low altitude still breaks, and a callsign change still breaks.
-    ``link_directional_edges`` widens what counts as an edge: see :func:`link_checks`.
+    ``link_old_edge_climb`` and ``link_new_edge_descent`` widen what counts as an edge:
+    see :func:`link_checks`.
 
     Research only. Making this ``standard`` would be another silent ``track_id``
     boundary. ``process_day`` reads further back under this arm, or a piece after

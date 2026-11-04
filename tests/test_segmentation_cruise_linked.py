@@ -47,6 +47,10 @@ P = SegmentationParams(
     link_max_gap_minutes=360.0,
 )
 SHIPPED = SegmentationParams()
+_BOTH_DIRECTIONS = {"link_old_edge_climb": True, "link_new_edge_descent": True}
+_DIRECTIONAL = dataclasses.replace(P, **_BOTH_DIRECTIONS)
+_CLIMB_ONLY = dataclasses.replace(P, link_old_edge_climb=True)
+_DESCENT_ONLY = dataclasses.replace(P, link_new_edge_descent=True)
 
 CRUISE_M = 11000.0
 EDGE_MPS = 480.0 / KT_PER_MPS
@@ -523,7 +527,9 @@ DESCENDING = {"baro_altitude": FL200, "vert_rate": -1500.0 / FPM_PER_MPS}
 def test_directional_edges_are_off_by_default():
     for cls in (SegmentationParams, SegmentationConfig):
         defaults = {f.name: f.default for f in dataclasses.fields(cls)}
-        assert defaults["link_directional_edges"] is False, cls.__name__
+        assert defaults["link_old_edge_climb"] is False, cls.__name__
+        assert defaults["link_new_edge_descent"] is False, cls.__name__
+        assert "link_directional_edges" not in defaults, cls.__name__
 
 
 def test_a_flight_reappearing_on_approach_links_only_with_direction_on(spark):
@@ -589,8 +595,8 @@ def _with_rates(rates, samples):
 def test_a_direction_needs_three_rates_at_the_old_edge(spark, n_rates, tracks):
     """`avg` skips a NULL, so without the count one message would carry the verdict."""
     up = 1500.0 / FPM_PER_MPS
-    samples = _hole_samples(before={"baro_altitude": FL200})
-    _with_rates([up] * n_rates + [None] * (5 - n_rates), samples[5:10])
+    samples = _hole_samples(before={"baro_altitude": FL200, "vert_rate": None})
+    _with_rates([up] * n_rates, samples[5:10])
     assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == tracks
     assert _hole_row(spark, samples)["vr_before_samples"] == n_rates
 
@@ -598,19 +604,21 @@ def test_a_direction_needs_three_rates_at_the_old_edge(spark, n_rates, tracks):
 @pytest.mark.parametrize("n_rates, tracks", [(1, 2), (2, 2), (3, 1), (5, 1)])
 def test_a_direction_needs_three_rates_at_the_new_edge(spark, n_rates, tracks):
     down = -1500.0 / FPM_PER_MPS
-    samples = _hole_samples(after={"baro_altitude": FL200})
-    _with_rates([down] * n_rates + [None] * (5 - n_rates), samples[10:15])
+    samples = _hole_samples(after={"baro_altitude": FL200, "vert_rate": None})
+    _with_rates([down] * n_rates, samples[10:15])
     assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == tracks
     assert _hole_row(spark, samples)["vr_after_samples"] == n_rates
 
 
-def test_rates_outside_the_edge_frame_do_not_count(spark):
-    """The sixth sample from the hole is not in the frame the mean reads."""
+def test_rates_further_than_the_nearest_five_do_not_count(spark):
+    """Level at the five nearest, climbing before them: the edge is not climbing."""
     up = 1500.0 / FPM_PER_MPS
     samples = _hole_samples(before={"baro_altitude": FL200})
-    _with_rates([None] * 5, samples[5:10])
     _with_rates([up] * 5, samples[0:5])
     assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == 2
+    row = _hole_row(spark, samples)
+    assert row["vr_before_fpm"] == 0.0
+    assert row["vr_before_samples"] == 5
 
 
 def test_too_few_samples_at_a_low_edge_splits_though_they_all_agree(spark):
@@ -920,6 +928,169 @@ def test_a_caller_window_scopes_every_feature(spark):
     assert (edge["cs_before"], edge["cs_after"]) == ("AFR7", None)
 
 
+# --- edge values read past blank samples --------------------------------------
+
+
+def _one_hz_after_hole(n_blank, then, **blank):
+    """Cruise, a hole, then *n_blank* samples a second with *blank* set, then *then* a second."""
+    samples = _piece(-45, 0.0)
+    samples += _piece(3600, _lon(480.0), n=n_blank, step_s=1, **blank)
+    samples += _piece(3600 + n_blank, _lon(480.0), step_s=1, **then)
+    return samples
+
+
+def test_altitude_is_read_past_blank_samples(spark):
+    """Altitude arrives in a later message, as position does. Five rows hold only blanks."""
+    samples = _one_hz_after_hole(8, {}, baro_altitude=None)
+    assert n_tracks(make_track(spark, samples)) == 1
+    assert _hole_row(spark, samples)["alt_after_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
+
+
+def test_altitude_is_read_past_blank_samples_at_the_old_edge(spark):
+    samples = _piece(-69, 0.0, n=10) + _piece(-20, 0.0, n=21, step_s=1, baro_altitude=None)
+    samples += _piece(3600, _lon(480.0))
+    assert n_tracks(make_track(spark, samples)) == 1
+    assert _hole_row(spark, samples)["alt_before_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
+
+
+def test_a_low_value_after_blanks_still_counts(spark):
+    """It is the nearest value there is, so blanks ahead of it must not hide it."""
+    samples = _one_hz_after_hole(8, {"baro_altitude": 3000.0 / FT_PER_M}, baro_altitude=None)
+    assert n_tracks(make_track(spark, samples)) == 2
+    assert _hole_row(spark, samples)["alt_after_ft"] == pytest.approx(3000.0)
+
+
+@pytest.mark.parametrize("blank_s, tracks", [(300, 1), (305, 2)])
+def test_no_altitude_in_the_window_splits(spark, blank_s, tracks):
+    """Blank until *blank_s* after the new edge, at 5 s. The bound is inclusive."""
+    new_edge = 3600
+    samples = _piece(-45, 0.0)
+    samples += _piece(new_edge, _lon(480.0), n=blank_s // 5, baro_altitude=None)
+    samples += _piece(new_edge + blank_s, _lon(480.0), n=5)
+    assert n_tracks(make_track(spark, samples)) == tracks
+    row = _hole_row(spark, samples)
+    if tracks == 2:
+        assert row["alt_after_ft"] is None
+
+
+@pytest.mark.parametrize("blank_s, tracks", [(300, 1), (305, 2)])
+def test_no_altitude_in_the_window_splits_at_the_old_edge(spark, blank_s, tracks):
+    samples = _piece(-blank_s - 20, 0.0, n=5)
+    samples += _piece(-blank_s + 5, 0.0, n=blank_s // 5, baro_altitude=None)
+    samples += _piece(3600, _lon(480.0))
+    assert n_tracks(make_track(spark, samples)) == tracks
+    row = _hole_row(spark, samples)
+    if tracks == 2:
+        assert row["alt_before_ft"] is None
+
+
+def test_no_rate_in_the_window_stays_neutral(spark):
+    samples = _hole_samples(
+        before={"vert_rate": None}, after={"vert_rate": None}
+    )
+    assert n_tracks(make_track(spark, samples)) == 1
+    row = _hole_row(spark, samples)
+    assert row["vr_before_fpm"] is None
+    assert row["vr_before_samples"] == 0
+    assert row["vr_after_samples"] == 0
+
+
+def test_each_field_finds_its_own_samples(spark):
+    """On either side, no sample carries both, so a shared row bound would lose one of them."""
+    up = 1500.0 / FPM_PER_MPS
+    alt_ft = 30000.0
+    only_rate = {"baro_altitude": None, "vert_rate": up, "velocity": None}
+    only_alt = {"baro_altitude": alt_ft / FT_PER_M, "vert_rate": None, "velocity": None}
+    only_speed = {"baro_altitude": None, "vert_rate": None}
+    def side(order):
+        return [dict(fields) for fields in order for _ in range(5)]
+
+    near_first = side([only_rate, only_alt, only_speed])
+    new_edge = 3600
+    after = [
+        {**s, "t": new_edge + i, "lat": 0.0, "lon": _lon(480.0), "callsign": "DLH1"}
+        for i, s in enumerate(near_first)
+    ]
+    for s in after:
+        s.setdefault("velocity", EDGE_MPS)
+    before = [
+        {**s, "t": -i, "lat": 0.0, "lon": 0.0, "callsign": "DLH1"}
+        for i, s in enumerate(near_first)
+    ]
+    for s in before:
+        s.setdefault("velocity", EDGE_MPS)
+    samples = sorted(before, key=lambda s: s["t"]) + after
+    row = _hole_row(spark, samples)
+    assert row["alt_before_ft"] == pytest.approx(alt_ft)
+    assert row["alt_after_ft"] == pytest.approx(alt_ft)
+    assert row["vr_before_fpm"] == pytest.approx(1500.0)
+    assert row["vr_before_samples"] == 5
+    assert row["vr_after_fpm"] == pytest.approx(1500.0)
+    assert row["vr_after_samples"] == 5
+    assert row["spd_before_kt"] == pytest.approx(480.0)
+    assert n_tracks(make_track(spark, samples)) == 1
+
+
+def test_only_the_nearest_five_values_of_a_field_count(spark):
+    """Blanks, then five at cruise, then one low: the low one is the sixth value, not the sixth row."""
+    samples = _piece(-45, 0.0)
+    samples += _piece(3600, _lon(480.0), n=8, step_s=1, baro_altitude=None)
+    samples += _piece(3608, _lon(480.0), n=5, step_s=1)
+    samples += _piece(3613, _lon(480.0), n=1, baro_altitude=3000.0 / FT_PER_M)
+    assert n_tracks(make_track(spark, samples)) == 1
+    assert _hole_row(spark, samples)["alt_after_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
+
+    samples[10 + 12]["baro_altitude"] = 3000.0 / FT_PER_M     # now the fifth value
+    assert n_tracks(make_track(spark, samples)) == 2
+
+
+def test_samples_in_one_second_are_ordered_by_value_not_by_arrival(spark):
+    """Six values in the old edge's last second, in two arrival orders, read the same."""
+    low = 20000.0 / FT_PER_M
+    tied = [{"baro_altitude": CRUISE_M}] * 5 + [{"baro_altitude": low}]
+    base = _piece(0, 0.0, n=1)[0]
+    new_piece = _piece(3600, _lon(480.0))
+    forward = [{**base, **t} for t in tied] + new_piece
+    backward = [{**base, **t} for t in reversed(tied)] + new_piece
+    # The highest five, in any arrival order: a slice in arrival order would read the low one.
+    assert _hole_row(spark, forward)["alt_before_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
+    assert _hole_row(spark, backward)["alt_before_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
+
+
+# --- climb and descent are separate settings ------------------------------------
+
+FT_9000 = 9000.0 / FT_PER_M
+LOW_CLIMB = {"baro_altitude": FT_9000, "vert_rate": 1500.0 / FPM_PER_MPS}
+LOW_DESCENT = {"baro_altitude": FT_9000, "vert_rate": -1500.0 / FPM_PER_MPS}
+
+
+def test_climb_edge_links_only_when_on(spark):
+    df = _hole(spark, before=LOW_CLIMB)
+    assert n_tracks(df) == 2
+    assert n_tracks(df, _DESCENT_ONLY) == 2
+    assert n_tracks(df, _CLIMB_ONLY) == 1
+
+
+def test_descent_edge_links_only_when_on(spark):
+    df = _hole(spark, after=LOW_DESCENT)
+    assert n_tracks(df) == 2
+    assert n_tracks(df, _CLIMB_ONLY) == 2
+    assert n_tracks(df, _DESCENT_ONLY) == 1
+
+
+def test_climb_on_does_not_allow_a_descent_edge(spark):
+    assert n_tracks(_hole(spark, before=LOW_CLIMB, after=LOW_DESCENT), _CLIMB_ONLY) == 2
+    assert n_tracks(_hole(spark, before=LOW_CLIMB, after=LOW_DESCENT), _DESCENT_ONLY) == 2
+    assert n_tracks(_hole(spark, before=LOW_CLIMB, after=LOW_DESCENT), _DIRECTIONAL) == 1
+
+
+@pytest.mark.parametrize("p", [_CLIMB_ONLY, _DIRECTIONAL], ids=["climb", "both"])
+def test_a_low_new_edge_still_splits_with_climb_on(spark, p):
+    """Below 5,000 ft after the hole: the unchanged low-altitude rule breaks there."""
+    low = {"baro_altitude": 3000.0 / FT_PER_M, "vert_rate": -1500.0 / FPM_PER_MPS}
+    assert n_tracks(_hole(spark, before=LOW_CLIMB, after=low), p) == 2
+
+
 # --- `linkable`, as a pure function of the features ---------------------------
 
 
@@ -1047,8 +1218,7 @@ _GOOD_HOLE = {
 
 _RATIO_ON = dataclasses.replace(P, link_min_speed_ratio=0.85)
 _STOP_ON = dataclasses.replace(P, link_min_stop_minutes=20.0)
-_DIRECTIONAL = dataclasses.replace(P, link_directional_edges=True)
-_DIRECTIONAL_RATIO_ON = dataclasses.replace(_RATIO_ON, link_directional_edges=True)
+_DIRECTIONAL_RATIO_ON = dataclasses.replace(_RATIO_ON, **_BOTH_DIRECTIONS)
 _CLIMB_EDGE = {"alt_before_ft": 20000.0, "vr_before_fpm": 1500.0}
 
 #: ``(settings, what differs from the good hole, the tests that must fail)``.

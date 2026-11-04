@@ -25,7 +25,7 @@ control records the depth it reached, one that overshoots by more than
 one hole at several depths would tighten the upper bound without new evidence.
 
 **Those controls have both edges at or above the floor, so they cannot test an edge
-below it**, which ``link_directional_edges`` lets through. ``control_family`` says which
+below it**, which ``link_old_edge_climb`` or ``link_new_edge_descent`` lets through. ``control_family`` says which
 kind a control is. ``cruise_cruise`` is the one above, and three more hide the same
 landing behind an edge below the floor. An edge in a climb is the first flight's last
 sample below the floor climbing past ``link_edge_vert_rate_fpm`` before its cruise, and
@@ -51,10 +51,9 @@ measures the links direction misses. It has no ``requested_gap_min``.
 
 **A control is scored by the rule's own expressions.** Generators only pick samples
 around a cut, then call ``link_feature_columns`` on a window partitioned by
-``control_id``. They keep what those expressions can read: ``LINK_EDGE_SAMPLES`` rows
-each side, the callsign lookback before the cut and the lookahead after it, and the
-edge position window on both sides. So a control whose edge sample has no position
-reads through it, as a real hole does.
+``control_id``. They keep what those expressions can read: the callsign lookback before
+the cut and the lookahead after it, and the edge window on both sides. So a control
+whose edge sample has no position or altitude reads through it, as a real hole does.
 
 ``same_callsign`` compares the callsigns the rule itself sees, not Network Manager's,
 and is true wherever the callsign test cannot reject, including a blank side. So the

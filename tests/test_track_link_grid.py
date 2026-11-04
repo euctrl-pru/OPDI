@@ -220,7 +220,8 @@ def _counts(point_id=0, **overrides):
         link_max_gap_minutes=360.0,
         link_min_speed_ratio=0.0,
         link_min_stop_minutes=0.0,
-        link_directional_edges=False,
+        link_old_edge_climb=False,
+        link_new_edge_descent=False,
         flights=100,
         tracks_on_flights=110,
         flights_in_one_track=90,
@@ -289,8 +290,8 @@ def test_grid_json_holds_one_value_of_a_setting_the_features_depend_on():
         # Where the low-edge controls are cut depends on what counts as climbing.
         '{"link_edge_vert_rate_fpm": [300, 500]}',
         # A number is not a switch, and a switch is not a number.
-        '{"link_directional_edges": [1]}',
-        '{"link_directional_edges": []}',
+        '{"link_old_edge_climb": [1]}',
+        '{"link_new_edge_descent": []}',
         '{"link_min_speed_ratio": [true]}',
     ],
 )
@@ -300,19 +301,20 @@ def test_grid_json_refuses_what_it_cannot_honour(text):
 
 
 def test_grid_json_varies_direction_as_a_true_or_false():
-    grid = grid_from_json('{"link_directional_edges": [false, true], "link_max_gap_minutes": [120]}')
-    assert [p.link_directional_edges for p in grid] == [False, True]
-    assert all(type(p.link_directional_edges) is bool for p in grid)
+    grid = grid_from_json('{"link_old_edge_climb": [false, true], "link_max_gap_minutes": [120]}')
+    assert [p.link_old_edge_climb for p in grid] == [False, True]
+    assert all(type(p.link_old_edge_climb) is bool for p in grid)
 
 
 def test_the_vertical_rate_threshold_is_one_value_per_run():
     assert "link_edge_vert_rate_fpm" in ONE_VALUE_PER_RUN
-    assert "link_directional_edges" not in ONE_VALUE_PER_RUN
+    assert "link_old_edge_climb" not in ONE_VALUE_PER_RUN
+    assert "link_new_edge_descent" not in ONE_VALUE_PER_RUN
 
 
 def test_reasons_params_json_reads_direction():
-    point = reasons_params_from_json('{"link_directional_edges": true}', [P])
-    assert point.link_directional_edges is True
+    point = reasons_params_from_json('{"link_old_edge_climb": true}', [P])
+    assert point.link_old_edge_climb is True
 
 
 def test_truth_months_reach_the_neighbouring_month_at_an_edge():
@@ -841,20 +843,20 @@ def test_the_gap_outranks_the_checks_that_follow_it():
 
 def test_a_tie_on_every_other_setting_goes_to_direction_off():
     """The more conservative. It falls after the settings above, not before them."""
-    on = dict(link_directional_edges=True, negative_low_edge_controls=1000)
+    on = dict(link_old_edge_climb=True, link_new_edge_descent=True, negative_low_edge_controls=1000)
     rows = [
         _counts(point_id=0, **on),
-        _counts(point_id=1, link_directional_edges=False),
+        _counts(point_id=1, link_old_edge_climb=False, link_new_edge_descent=False),
     ]
     assert pick_recommended(rows)["point_id"] == 1
     rows = [
         _counts(point_id=0, link_min_implied_speed_kt=400.0, **on),
-        _counts(point_id=1, link_directional_edges=False),
+        _counts(point_id=1, link_old_edge_climb=False, link_new_edge_descent=False),
     ]
     assert pick_recommended(rows)["point_id"] == 0
     rows = [
         _counts(point_id=0, link_min_stop_minutes=35.0, **on),
-        _counts(point_id=1, link_directional_edges=False),
+        _counts(point_id=1, link_old_edge_climb=False, link_new_edge_descent=False),
     ]
     assert pick_recommended(rows)["point_id"] == 0
 
@@ -1086,7 +1088,7 @@ def test_run_study_writes_every_output_with_provenance(spark, tmp_path, capsys):
 # --- round 4: edges below the floor -------------------------------------------
 
 
-DIRECTIONAL = replace(P, link_directional_edges=True)
+DIRECTIONAL = replace(P, link_old_edge_climb=True, link_new_edge_descent=True)
 _CLIMB = dict(alt_before_ft=20000.0, vr_before_fpm=1500.0)
 _DESCENT = dict(alt_after_ft=20000.0, vr_after_fpm=-1500.0)
 _LOW_DEPTHS = {
@@ -1157,7 +1159,7 @@ def test_a_low_edge_false_join_can_take_a_point_over_the_limit(spark):
     low = _low_edge_frame(spark, "cruise_descent", _DESCENT, n=5)
     cruise = _negatives(spark, [(f"C{i}", _feature_row(speed_kt=100.0)) for i in range(5)])
     counts = negative_counts(cruise.unionByName(low), DIRECTIONAL)
-    row = _counts(**counts, link_directional_edges=True)
+    row = _counts(**counts, link_old_edge_climb=True, link_new_edge_descent=True)
     assert row["negative_within_limit"] is False
     assert row["negative_low_edge_within_limit"] is False
     assert row["within_limits"] is False
@@ -1168,7 +1170,7 @@ def test_a_low_edge_false_join_can_take_a_point_over_the_limit(spark):
 
 #: A point with direction on, every limit met on enough evidence.
 _ON = dict(
-    link_directional_edges=True,
+    link_old_edge_climb=True, link_new_edge_descent=True,
     negative_limit_controls=11000,
     negative_low_edge_controls=1000,
     same_callsign_controls=1500,
@@ -1523,7 +1525,7 @@ def test_run_study_scores_and_reports_the_families(spark, tmp_path):
     assert wrong("1", "climb_descent") == 1
 
     pooled = _read_csv(tmp_path / "link_grid_pooled.csv")
-    assert [r["link_directional_edges"] for r in pooled] == ["False", "True"]
+    assert [r["link_old_edge_climb"] for r in pooled] == ["False", "True"]
     assert int(pooled[0]["negative_low_edge_untested_controls"]) > 0
     assert int(pooled[1]["negative_low_edge_untested_controls"]) == 0
     assert int(pooled[1]["negative_limit_controls"]) > int(pooled[0]["negative_limit_controls"])

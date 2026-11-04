@@ -767,7 +767,7 @@ def test_a_hole_with_no_event_inside_is_not_near_anything(spark):
 # --- the low-edge families ----------------------------------------------------
 
 
-DIRECTIONAL = replace(P, link_directional_edges=True)
+DIRECTIONAL = replace(P, link_old_edge_climb=True, link_new_edge_descent=True)
 #: Above the low-altitude gap's limit, so that rule stays out of these fixtures.
 CLIMB_M = 9000.0 / FT_PER_M
 CLIMB_FPM = 1500.0

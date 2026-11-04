@@ -481,6 +481,46 @@ def test_a_low_sample_across_an_earlier_break_cannot_lose_a_piece(spark):
     assert _claimed_by_day(sv, D, 11, p).count() == 0
 
 
+@pytest.mark.parametrize(
+    "last_altitude_before_edge_min, tracks",
+    [
+        (4, 1),     # inside the window, so both reads hold it and link
+        (70, 2),    # past it, and past D's read: neither may use it, so both split
+    ],
+)
+def test_two_days_decide_alike_with_blank_altitudes(spark, last_altitude_before_edge_min, tracks):
+    """Old edge 14:00 on D-1, a 600 min hole, new edge at midnight, altitude blank at both edges.
+
+    D-1's read starts 13:00 the day before D's does, so at 70 min a read past blanks with
+    no time bound holds the 12:50 altitude in D-1's read and nothing in D's. D-1 would then
+    link what D splits, and the piece after the hole would be claimed by both or neither.
+    """
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    p = SegmentationParams()
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    old_edge = D_MINUS_1 + hours(14)
+    last_altitude = old_edge - dt.timedelta(minutes=last_altitude_before_edge_min)
+    assert required_lookback_hours("cruise_linked", p) == 11
+
+    blank = {"lon": 0.0, "callsign": "DLH1", "baro_altitude": None}
+    samples = _every(last_altitude - hours(0, 10), last_altitude, 1, lon=0.0, callsign="DLH1")
+    samples += _every(last_altitude + hours(0, 1), old_edge, 1, **blank)
+    new_piece = _every(D, D + hours(0, 3), 1, lon=_lon_after(600), callsign="DLH1", baro_altitude=None)
+    new_piece += _every(D + hours(0, 4), D + hours(0, 9), 1, lon=_lon_after(604), callsign="DLH1")
+    samples += new_piece
+
+    _assert_claimed_once(spark, samples, p)
+
+    sv = make_track(spark, samples)
+    linked = tracks == 1
+    assert _claimed_by_day(sv, D, 11, p).count() == (0 if linked else len(new_piece))
+    assert _claimed_by_day(sv, D_MINUS_1, 11, p).count() == (
+        len(samples) if linked else len(samples) - len(new_piece)
+    )
+
+
 # --- the truncation warning, under an arm that links across holes -------------
 
 

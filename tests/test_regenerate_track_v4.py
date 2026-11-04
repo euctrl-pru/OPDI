@@ -62,7 +62,8 @@ def test_final_grid_arguments():
 def test_final_direction_arguments():
     args = _job("final_direction").args
     grid = json.loads(args[args.index("--grid-json") + 1])
-    assert grid["link_directional_edges"] == [False, True]
+    assert grid["link_old_edge_climb"] == [False, True]
+    assert grid["link_new_edge_descent"] == [False, True]
     assert grid["link_cruise_floor_ft"] == [18000]
     assert grid["link_max_gap_minutes"] == [600]
 

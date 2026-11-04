@@ -131,8 +131,8 @@ class SegmentationParams:
     #: How far from each edge of a hole to read through blank samples for a
     #: position, because a position message often arrives after altitude and speed.
     #: None inside it means split. Also bounds the edge's altitude, vertical rate and
-    #: speed samples: of the ``LINK_EDGE_SAMPLES`` rows at an edge, those further away
-    #: than this do not count. ``process_day`` reads at least this far behind the old
+    #: speed: each reads its nearest ``LINK_EDGE_SAMPLES`` values inside this span,
+    #: past any blank samples. ``process_day`` reads at least this far behind the old
     #: edge: see ``tracks.required_lookback_hours``.
     link_edge_position_minutes: float = 5.0
     #: 400 kt rejects nearly all hidden landings at small cost; chosen by the
@@ -144,9 +144,12 @@ class SegmentationParams:
     #: ``0.0`` turns this test off.
     link_min_stop_minutes: float = 0.0
     link_vfast_kt: float = 650.0
-    #: Let an edge below the floor pass when its direction fits one flight: the old
-    #: edge climbing, or the new edge descending. Off keeps the floor as the only test.
-    link_directional_edges: bool = False
+    #: Let an old edge below the floor pass when it is climbing. Off keeps the floor as
+    #: the only test there. The study decides this apart from the new edge's setting.
+    link_old_edge_climb: bool = False
+    #: Let a new edge below the floor pass when it is descending. Off keeps the floor as
+    #: the only test there. The study decides this apart from the old edge's setting.
+    link_new_edge_descent: bool = False
     # A5-A7 knobs; unused by the gap family.
     ground_dwell_minutes: float = 5.0
     turnaround_max_height_ft: float = 1000.0
