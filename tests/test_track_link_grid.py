@@ -508,6 +508,50 @@ def test_shallow_and_over_gap_controls_cannot_lift_a_point_over_or_under_the_lim
     assert shallow_join["negative_within_limit"] is True
 
 
+def test_the_same_callsign_group_is_the_population_of_the_1_percent_limit(spark):
+    controls = _negatives(
+        spark,
+        [
+            # Under the limit: one falsely joined, one a blank, one rejected by speed.
+            ("A", _feature_row(), 60.0, 60.0),
+            ("B", _feature_row(cs_before=None, speed_kt=100.0), 1.0, 30.0),
+            ("C", _feature_row(speed_kt=100.0), 40.0, 40.0),
+            # Under the limit, but the callsign test can reject it.
+            ("D", _feature_row(cs_after="BAW2"), 60.0, 60.0),
+            # Same callsign, too shallow: counted apart, one falsely joined.
+            ("E", _feature_row(), 0.0, 2.0),
+            ("F", _feature_row(speed_kt=100.0), 29.9, 29.9),
+            # Same callsign and deep, but over this point's gap.
+            ("G", _feature_row(gap_min=300.0), 60.0, 60.0),
+        ],
+    )
+    counts = negative_counts(controls, SegmentationParams(link_max_gap_minutes=240.0))
+
+    assert counts["same_callsign_controls"] == 3
+    assert counts["same_callsign_false_joins"] == 1
+    assert counts["same_callsign_blank"] == 1
+    assert counts["same_callsign_shallow_controls"] == 2
+    assert counts["same_callsign_shallow_false_joins"] == 1
+
+    row = _counts(**counts)
+    assert row["same_callsign_upper_95"] == pytest.approx(rule_of_three_upper(1, 3))
+    assert row["same_callsign_blank_share"] == pytest.approx(1 / 3)
+
+
+def test_shallow_controls_cannot_make_the_same_callsign_group_sufficient_or_fail_it():
+    # 59 under the limit stays insufficient, however many shallow ones sit beside it.
+    thin = _counts(same_callsign_controls=59, same_callsign_shallow_controls=5000)
+    assert thin["same_callsign_status"] == "insufficient"
+    assert thin["provisional"] is True
+    # A shallow false join is reported, and is not in this bound.
+    joined = _counts(
+        same_callsign_controls=100, same_callsign_shallow_controls=100,
+        same_callsign_shallow_false_joins=50,
+    )
+    assert joined["same_callsign_upper_95"] == pytest.approx(rule_of_three_upper(0, 100))
+    assert joined["same_callsign_status"] == "within_limit"
+
+
 def test_strata_show_correct_rejections_apart(spark):
     controls = _negatives(
         spark, [("A", _feature_row(gap_min=100.0)), ("B", _feature_row(gap_min=200.0))]

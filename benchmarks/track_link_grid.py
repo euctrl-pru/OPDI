@@ -16,8 +16,9 @@ picked among those within three safety limits, on numbers pooled over the days:
                       but depths of one pair are not independent, so the count of
                       pairs with a false join is reported beside it.
   same or blank       the same bound is at most 5% among the controls the callsign
-  callsign            test cannot reject, counting only gaps the point allows. Under
-                      60 of them reads ``insufficient``: it does not fail the point,
+  callsign            test cannot reject, in the same population as the 1% limit, and
+                      for the same reason. Those too shallow have columns of their
+                      own. Under 60 reads ``insufficient``: it does not fail the point,
                       and it marks the choice provisional. This is a count and not a
                       reading of the bound, which sits just under 5% at 59.
   real holes          false joins are at most 1% of the holes the point links that
@@ -152,6 +153,8 @@ COUNT_FIELDS = (
     "same_callsign_controls",
     "same_callsign_false_joins",
     "same_callsign_blank",
+    "same_callsign_shallow_controls",
+    "same_callsign_shallow_false_joins",
     "positive_controls",
     "positive_within_gap",
     "positive_linked",
@@ -272,15 +275,16 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
 
     Every control is exactly one of ``negative_limit_controls``,
     ``negative_shallow_controls`` (the gap is allowed, the depth too small) or
-    ``negative_over_gap_controls``. The same or blank callsign group is all depths
-    among allowed gaps.
+    ``negative_over_gap_controls``. The same or blank callsign group is drawn from the
+    controls under the limit, with its shallow controls counted apart.
     """
     linked = _linked(p)
     within_gap = F.col("gap_min") <= p.link_max_gap_minutes
     deep = F.greatest("old_depth_min", "new_depth_min") >= NEGATIVE_LIMIT_MIN_DEPTH_MIN
     under_limit = within_gap & deep
     shallow = within_gap & ~deep
-    same = F.col("same_callsign") & within_gap
+    same = F.col("same_callsign") & under_limit
+    same_shallow = F.col("same_callsign") & shallow
     blank = F.col("cs_before").isNull() | F.col("cs_after").isNull()
     row = controls.agg(
         F.count(F.lit(1)).alias("negative_controls"),
@@ -298,6 +302,8 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
         _sum_when(same).alias("same_callsign_controls"),
         _sum_when(same & linked).alias("same_callsign_false_joins"),
         _sum_when(same & blank).alias("same_callsign_blank"),
+        _sum_when(same_shallow).alias("same_callsign_shallow_controls"),
+        _sum_when(same_shallow & linked).alias("same_callsign_shallow_false_joins"),
     ).first()
     return row.asDict()
 
