@@ -48,7 +48,7 @@ on every long gap, as it would under the floor; and a gap over
 
 from functools import reduce
 from operator import and_
-from typing import Dict, Mapping
+from typing import Callable, Dict, Mapping
 
 from pyspark.sql import Column, Window
 from pyspark.sql import functions as F
@@ -695,6 +695,11 @@ def debounced() -> BreakRule:
     )
 
 
+def _once(value: Column, fn: Callable[[Column], Column]) -> Column:
+    """``fn(value)``, with *value* evaluated once however often ``fn`` refers to it."""
+    return F.element_at(F.transform(F.array(value), fn), 1)
+
+
 def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     """What :func:`linkable` sees of a hole, evaluated at the first sample after it.
 
@@ -712,7 +717,18 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     the frame needs the arm contract's ``_ts`` and the ``_alt_ft`` and ``_spd_kt``
     behind the accessors. A frame near a group's edge just holds fewer rows, and
     the edge is decided from those.
+
+    Raises:
+        ValueError: ``link_edge_position_minutes`` is not below
+            ``low_alt_gap_minutes``. The read through blank samples could then cross a
+            gap the low-altitude rule splits at, and take a position from another flight.
     """
+    if p.link_edge_position_minutes >= p.low_alt_gap_minutes:
+        raise ValueError(
+            f"link_edge_position_minutes={p.link_edge_position_minutes} must be below "
+            f"low_alt_gap_minutes={p.low_alt_gap_minutes}: the read through blank samples "
+            f"could cross a low-altitude split into another flight"
+        )
     w = segment_window() if window is None else window
     before = w.rowsBetween(-LINK_EDGE_SAMPLES, -1)
     after = w.rowsBetween(0, LINK_EDGE_SAMPLES - 1)
@@ -744,6 +760,10 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     # one, which a range frame cannot start from, so it reuses the growing `back`
     # frame and bounds the age afterwards, as the callsign does. The new edge is a
     # bounded forward frame because a shrinking one would be quadratic.
+    #
+    # Spark evaluates every copy of a window expression, and the two features below
+    # read these positions many times over. So the frames are read once into one
+    # struct, and a lambda over a one-element array is what lets the rest refer to it.
     position = F.when(
         F.col("lat").isNotNull() & F.col("lon").isNotNull(),
         F.struct(
@@ -751,12 +771,31 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
         ),
     )
     span_s = int(p.link_edge_position_minutes * 60)
-    last_position = F.last(position, ignorenulls=True).over(back)
-    old_position = F.when(
-        F.unix_timestamp(old_edge_ts) - F.unix_timestamp(last_position.getField("ts")) <= span_s,
-        last_position,
+    edges = F.struct(
+        old_edge_ts.alias("old_edge_ts"),
+        F.last(position, ignorenulls=True).over(back).alias("old"),
+        F.first(position, ignorenulls=True).over(seconds.rangeBetween(0, span_s)).alias("new"),
     )
-    new_position = F.first(position, ignorenulls=True).over(seconds.rangeBetween(0, span_s))
+
+    def between_positions(e: Column) -> Column:
+        last_position, new = e.getField("old"), e.getField("new")
+        old = F.when(
+            F.unix_timestamp(e.getField("old_edge_ts"))
+            - F.unix_timestamp(last_position.getField("ts"))
+            <= span_s,
+            last_position,
+        )
+        return F.struct(
+            (
+                (F.unix_timestamp(new.getField("ts")) - F.unix_timestamp(old.getField("ts")))
+                / 60.0
+            ).alias("position_gap_min"),
+            haversine_nm(
+                old.getField("lat"), old.getField("lon"), new.getField("lat"), new.getField("lon")
+            ).alias("gc_nm"),
+        )
+
+    positions = _once(edges, between_positions)
 
     return {
         # Computed here rather than read from `gap_minutes()`, which is the
@@ -765,19 +804,13 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
             F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(F.lag(F.col("_ts")).over(w))
         )
         / 60.0,
-        "position_gap_min": (
-            F.unix_timestamp(new_position.getField("ts"))
-            - F.unix_timestamp(old_position.getField("ts"))
-        )
-        / 60.0,
-        "gc_nm": haversine_nm(
-            old_position.getField("lat"),
-            old_position.getField("lon"),
-            new_position.getField("lat"),
-            new_position.getField("lon"),
-        ),
+        "position_gap_min": positions.getField("position_gap_min"),
+        "gc_nm": positions.getField("gc_nm"),
         "alt_before_ft": F.min(altitude_ft()).over(before),
         "alt_after_ft": F.min(altitude_ft()).over(after),
+        # What `legacy_low_altitude_gap` reads at this sample, which the minimum above
+        # cannot stand in for: only with direction on can a link reach that low.
+        "alt_new_edge_ft": altitude_ft(),
         "vr_before_fpm": F.avg(vert_rate_fpm).over(before),
         "vr_after_fpm": F.avg(vert_rate_fpm).over(after),
         "spd_before_kt": F.avg(speed_kt()).over(before),
@@ -810,6 +843,13 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     a blank callsign agrees with anything; and the edge speed and time-budget
     tests pass outright at their ``0.0`` off setting, so a missing speed cannot
     fail a test that is switched off.
+
+    With ``link_directional_edges``, flights that reappear on approach to their
+    destination, or left coverage still climbing, can pass the two edge tests below
+    the floor. The direction is the evidence there, so a NULL vertical rate does not
+    pass, unlike in the descend-then-climb test. A new edge the low-altitude gap breaks
+    at does not pass either: the rule splits there whatever this says, and the study,
+    which reads this verdict instead of re-segmenting, must not count it as a link.
     """
     # Guarded because two samples can share a second, and a Spark 4 session raises
     # on a zero divisor. A plain division here would fail the whole job on them.
@@ -822,10 +862,26 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     )
     callsign_differs = f["cs_before"] != f["cs_after"]
 
+    old_edge_passes = f["alt_before_ft"] >= p.link_cruise_floor_ft
+    new_edge_passes = f["alt_after_ft"] >= p.link_cruise_floor_ft
+    if p.link_directional_edges:
+        # Spelt "below", not left to the OR: a NULL altitude must stay a failure
+        # whatever the vertical rate says.
+        old_edge_passes = old_edge_passes | (
+            (f["alt_before_ft"] < p.link_cruise_floor_ft)
+            & (f["vr_before_fpm"] > p.link_edge_vert_rate_fpm)
+        )
+        low_altitude_gap_breaks = F.coalesce(f["alt_new_edge_ft"] < p.low_alt_ft, F.lit(False))
+        new_edge_passes = new_edge_passes | (
+            (f["alt_after_ft"] < p.link_cruise_floor_ft)
+            & (f["vr_after_fpm"] < -p.link_edge_vert_rate_fpm)
+            & ~low_altitude_gap_breaks
+        )
+
     tests = {
         "gap_not_too_long": f["gap_min"] <= p.link_max_gap_minutes,
-        "cruise_at_old_edge": f["alt_before_ft"] >= p.link_cruise_floor_ft,
-        "cruise_at_new_edge": f["alt_after_ft"] >= p.link_cruise_floor_ft,
+        "cruise_at_old_edge": old_edge_passes,
+        "cruise_at_new_edge": new_edge_passes,
         "not_descend_then_climb": ~F.coalesce(descend_then_climb, F.lit(False)),
         "callsign_agrees": ~F.coalesce(callsign_differs, F.lit(False)),
         "implied_speed_not_too_slow": implied_kt >= p.link_min_implied_speed_kt,
@@ -859,6 +915,7 @@ def cruise_linked() -> BreakRule:
     airframes with ADS-C: 1,204 of 1,334 flights crossing the European box have a
     gap over 30 min, median 191 min. Only the general gap rule changes. A short
     gap at low altitude still breaks, and a callsign change still breaks.
+    ``link_directional_edges`` widens what counts as an edge: see :func:`link_checks`.
 
     Research only. Making this ``standard`` would be another silent ``track_id``
     boundary. ``process_day`` reads further back under this arm, or a piece after
@@ -866,7 +923,13 @@ def cruise_linked() -> BreakRule:
     """
 
     def expr(p):
-        linked = linkable(link_feature_columns(p), p)
+        # `linkable` refers to some features several times, so through `_once` each
+        # window expression is evaluated once for the whole verdict.
+        features = link_feature_columns(p)
+        linked = _once(
+            F.struct(*[column.alias(name) for name, column in features.items()]),
+            lambda row: linkable({name: row.getField(name) for name in features}, p),
+        )
         return F.coalesce(
             debounced_callsign_change(p)
             | legacy_low_altitude_gap(p)

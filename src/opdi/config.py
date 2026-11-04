@@ -1686,8 +1686,9 @@ class SegmentationConfig:
     on 2026-06-14, 1,073 of 7,355 cruise holes had none at the edge sample itself.
     No position inside this span means split.
 
-    ``process_day`` reads at least this far behind the old edge: see
-    ``tracks.required_lookback_hours``."""
+    Must be below ``low_alt_gap_minutes``, or the read could cross a low-altitude
+    split into another flight; A10 raises otherwise. ``process_day`` reads at least
+    this far behind the old edge: see ``tracks.required_lookback_hours``."""
 
     link_min_implied_speed_kt: float = 315.0
     """Slowest great-circle speed across a hole A10 can link (knots)."""
@@ -1705,6 +1706,16 @@ class SegmentationConfig:
 
     link_vfast_kt: float = 650.0
     """Fastest plausible ground speed, for ``link_min_stop_minutes`` (knots)."""
+
+    link_directional_edges: bool = False
+    """Whether an edge below ``link_cruise_floor_ft`` can still link when its
+    direction fits one flight: the old edge climbing, or the new edge descending,
+    past ``link_edge_vert_rate_fpm``. A NULL vertical rate does not pass.
+
+    Flights often reappear on approach to their destination, so a lower floor does
+    not reach them. In the study's third round, at a floor of 18,000 ft, 858 holes
+    inside one crossing flight failed only the new edge and 113 only the old edge,
+    against 6,450 crossing flights, and a floor of 10,000 ft barely changed that."""
 
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""

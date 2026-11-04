@@ -392,8 +392,9 @@ def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookbac
 @pytest.mark.parametrize(
     "settings, position_min_before_edge",
     [
-        # The position window reaches past the callsign lookback.
-        ({"link_edge_position_minutes": 90.0}, 90),
+        # The position window reaches past the callsign lookback. It must stay under
+        # the low-altitude gap, so that gap is raised with it.
+        ({"link_edge_position_minutes": 90.0, "low_alt_gap_minutes": 120.0}, 90),
         # No callsign lookback at all, which must not take the position's read with it.
         ({"link_callsign_lookback_minutes": 0.0}, 5),
     ],
@@ -470,6 +471,27 @@ def test_the_margin_follows_the_longest_linkable_hole(spark, capsys):
     )
     assert "WARNING" not in out
     assert "covered every track" in out
+
+
+@pytest.mark.parametrize(
+    "lookahead_min, edge_min, warned",
+    [
+        (10.0, 5.0, True),      # 175 + 10 reaches the track, 3 h short of the read end
+        (3.0, 8.0, True),       # 175 + 8: the longer of the two is the one added
+        (3.0, 1.0, False),      # 175 + 3 does not
+    ],
+)
+def test_the_margin_adds_what_the_decision_reads_past_the_new_edge(
+    spark, capsys, lookahead_min, edge_min, warned
+):
+    """The hole's verdict also reads samples after its new edge, which must be in the read."""
+    out = _warning_from_process_day(
+        capsys, _straddling_read_end(spark), "cruise_linked",
+        link_max_gap_minutes=175.0,
+        link_callsign_lookahead_minutes=lookahead_min,
+        link_edge_position_minutes=edge_min,
+    )
+    assert ("WARNING: 1 track(s)" in out) is warned
 
 
 def test_other_arms_keep_the_60_second_margin(spark, capsys):

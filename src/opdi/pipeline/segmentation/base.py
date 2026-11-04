@@ -136,6 +136,9 @@ class SegmentationParams:
     #: ``0.0`` turns this test off.
     link_min_stop_minutes: float = 0.0
     link_vfast_kt: float = 650.0
+    #: Let an edge below the floor pass when its direction fits one flight: the old
+    #: edge climbing, or the new edge descending. Off keeps the floor as the only test.
+    link_directional_edges: bool = False
     # A5-A7 knobs; unused by the gap family.
     ground_dwell_minutes: float = 5.0
     turnaround_max_height_ft: float = 1000.0

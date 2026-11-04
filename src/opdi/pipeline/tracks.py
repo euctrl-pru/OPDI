@@ -100,7 +100,8 @@ def tracks_touching_window_end(df, read_end, margin_seconds=60):
     being trusted. A healthy run returns zero; a non-zero count means
     ``lookahead_hours`` is too short for this traffic.
 
-    ``process_day`` widens the margin to ``link_max_gap_minutes`` under
+    ``process_day`` widens the margin to ``link_max_gap_minutes`` plus the longer of
+    ``link_callsign_lookahead_minutes`` and ``link_edge_position_minutes`` under
     ``cruise_linked``. There a hole can straddle ``read_end``, which leaves the last
     read sample far from the edge while the rest of the track waits beyond it.
     """
@@ -774,7 +775,17 @@ class TrackProcessor:
         written = self.storage.read_table("osn_tracks").filter(
             col("dof") == lit(day)
         )
-        margin_seconds = params.link_max_gap_minutes * 60 if links_across_holes else 60
+        # Under a link the last sample can be a whole hole short of the read end, and
+        # the verdict on that hole also reads this far past its new edge.
+        margin_seconds = (
+            (
+                params.link_max_gap_minutes
+                + max(params.link_callsign_lookahead_minutes, params.link_edge_position_minutes)
+            )
+            * 60
+            if links_across_holes
+            else 60
+        )
         n_truncated = tracks_touching_window_end(
             written, read_end, margin_seconds=margin_seconds
         ).count()

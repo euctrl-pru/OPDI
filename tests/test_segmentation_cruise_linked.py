@@ -8,6 +8,7 @@ tests below drive ``linkable`` with literals.
 """
 import dataclasses
 import math
+import re
 
 import pytest
 from conftest import make_track
@@ -15,9 +16,14 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 from opdi.config import SegmentationConfig
-from opdi.pipeline.flights import EARTH_R_NM
+from opdi.pipeline.flights import EARTH_R_NM, haversine_nm
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
-from opdi.pipeline.segmentation.base import FPM_PER_MPS, FT_PER_M, KT_PER_MPS
+from opdi.pipeline.segmentation.base import (
+    FPM_PER_MPS,
+    FT_PER_M,
+    KT_PER_MPS,
+    segment_window,
+)
 from opdi.pipeline.segmentation.methods import (
     ARMS,
     LINK_EDGE_SAMPLES,
@@ -399,6 +405,14 @@ def test_the_antimeridian_is_still_crossed_the_short_way_through_blank_edges(spa
     assert n_tracks(make_track(spark, samples)) == 1
 
 
+@pytest.mark.parametrize("missing", ["lat", "lon"])
+def test_half_a_position_at_the_old_edge_does_not_count(spark, missing):
+    """The sample before it holds the full pair, and that is the one read."""
+    samples = _before_hole(0)
+    samples[11][missing] = None
+    assert _hole_row(spark, samples)["position_gap_min"] == pytest.approx(61.0)
+
+
 def test_too_few_edge_samples_still_decides(spark):
     assert n_tracks(_hole(spark, n_before=1)) == 1
     assert n_tracks(_hole(spark, n_before=1, before={"baro_altitude": 3000.0})) == 2
@@ -488,6 +502,194 @@ def test_the_arm_is_registered_as_a9_is():
     assert rule.group_cols == a9.group_cols == ["icao24"]
     assert rule.month_suffix is a9.month_suffix is False
     assert rule.id_from_start_time is a9.id_from_start_time is True
+
+
+# --- direction at an edge below the floor -------------------------------------
+
+
+FL200 = 20000.0 / FT_PER_M
+CLIMBING = {"baro_altitude": FL200, "vert_rate": 1500.0 / FPM_PER_MPS}
+DESCENDING = {"baro_altitude": FL200, "vert_rate": -1500.0 / FPM_PER_MPS}
+
+
+def test_directional_edges_are_off_by_default():
+    for cls in (SegmentationParams, SegmentationConfig):
+        defaults = {f.name: f.default for f in dataclasses.fields(cls)}
+        assert defaults["link_directional_edges"] is False, cls.__name__
+
+
+def test_a_flight_reappearing_on_approach_links_only_with_direction_on(spark):
+    df = _hole(spark, after=DESCENDING)
+    assert n_tracks(df) == 2
+    assert n_tracks(df, _DIRECTIONAL) == 1
+
+
+def test_a_flight_leaving_coverage_in_its_climb_links_only_with_direction_on(spark):
+    df = _hole(spark, before=CLIMBING)
+    assert n_tracks(df) == 2
+    assert n_tracks(df, _DIRECTIONAL) == 1
+
+
+def test_climb_at_the_old_edge_and_descent_at_the_new_one_link_together(spark):
+    assert n_tracks(_hole(spark, before=CLIMBING, after=DESCENDING), _DIRECTIONAL) == 1
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_a_null_vertical_rate_does_not_pass_the_alternative(spark, side):
+    """Neutral at cruise, but below the floor it was the only evidence."""
+    low = {"baro_altitude": FL200, "vert_rate": None}
+    assert n_tracks(_hole(spark, **{side: low}), _DIRECTIONAL) == 2
+
+
+def test_a_climb_at_the_new_edge_splits(spark):
+    assert n_tracks(_hole(spark, after=CLIMBING), _DIRECTIONAL) == 2
+
+
+def test_a_descent_at_the_old_edge_splits(spark):
+    assert n_tracks(_hole(spark, before=DESCENDING), _DIRECTIONAL) == 2
+
+
+def test_descend_then_climb_still_splits_with_direction_on(spark):
+    fl300 = 30000.0 / FT_PER_M
+    down = {"baro_altitude": fl300, "vert_rate": -1500.0 / FPM_PER_MPS}
+    up = {"baro_altitude": fl300, "vert_rate": 1500.0 / FPM_PER_MPS}
+    assert n_tracks(_hole(spark, before=down, after=up), _DIRECTIONAL) == 2
+
+
+def test_linkable_agrees_with_the_rule_when_the_new_edge_is_low(spark):
+    """The low-altitude gap keeps breaking. If `linkable` said yes here, the study would
+    count a link that the rule does not make."""
+    low_descent = {"baro_altitude": 3000.0 / FT_PER_M, "vert_rate": -1500.0 / FPM_PER_MPS}
+    samples = _hole_samples(after=low_descent)
+    assert n_tracks(make_track(spark, samples), _DIRECTIONAL) == 2
+
+    row = _hole_row(spark, samples)
+    assert row["alt_new_edge_ft"] == pytest.approx(3000.0)
+    assert _decide(
+        spark, _DIRECTIONAL, alt_after_ft=3000.0, alt_new_edge_ft=3000.0, vr_after_fpm=-1500.0
+    ) is False
+
+
+def test_short_gaps_behave_as_debounced_with_direction_on(spark):
+    samples = _piece(0, 0.0, n=8)
+    samples += _piece(20 * 60, 0.1, n=8)
+    samples += _piece(40 * 60, 0.2, n=8, baro_altitude=1000.0, vert_rate=-5.0)
+    df = make_track(spark, samples)
+    assert _partition(df, cruise_linked(), _DIRECTIONAL) == _partition(df, debounced())
+
+
+# --- each edge position is read once ------------------------------------------
+
+
+def _unshared_position_features(p):
+    """The two position features as they were written before the single read."""
+    w = segment_window()
+    back = w.rowsBetween(Window.unboundedPreceding, -1)
+    seconds = w.orderBy(F.unix_timestamp(F.col("_ts")))
+    position = F.when(
+        F.col("lat").isNotNull() & F.col("lon").isNotNull(),
+        F.struct(
+            F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")
+        ),
+    )
+    span_s = int(p.link_edge_position_minutes * 60)
+    old_edge_ts = F.lag(F.col("_ts")).over(w)
+    last_position = F.last(position, ignorenulls=True).over(back)
+    old_position = F.when(
+        F.unix_timestamp(old_edge_ts) - F.unix_timestamp(last_position.getField("ts")) <= span_s,
+        last_position,
+    )
+    new_position = F.first(position, ignorenulls=True).over(seconds.rangeBetween(0, span_s))
+    return {
+        "position_gap_min": (
+            F.unix_timestamp(new_position.getField("ts"))
+            - F.unix_timestamp(old_position.getField("ts"))
+        )
+        / 60.0,
+        "gc_nm": haversine_nm(
+            old_position.getField("lat"),
+            old_position.getField("lon"),
+            new_position.getField("lat"),
+            new_position.getField("lon"),
+        ),
+    }
+
+
+def _single_read_fixtures():
+    half = _after_hole(0)
+    half[10]["lat"] = None
+    old_half = _before_hole(0)
+    old_half[11]["lon"] = None
+    twin = _hole_samples()
+    twin.insert(1, dict(twin[0]))
+    return {
+        "plain": _hole_samples(),
+        "after, read through": _after_hole(3),
+        "before, read through": _before_hole(3),
+        "after, too far": _after_hole(6, nm=480.0),
+        "before, too far": _before_hole(6, nm=480.0),
+        "half after": half,
+        "half before": old_half,
+        "no position at all": [{**s, "lat": None, "lon": None} for s in _hole_samples()],
+        "two in one second": twin,
+    }
+
+
+@pytest.mark.parametrize("name", list(_single_read_fixtures()))
+def test_the_single_read_gives_the_values_of_the_separate_reads(spark, name):
+    frame = _engine_frame(make_track(spark, _single_read_fixtures()[name]))
+    new = link_feature_columns(P)
+    old = _unshared_position_features(P)
+    rows = frame.select(
+        "event_time",
+        *[new[k].alias(f"new_{k}") for k in old],
+        *[old[k].alias(f"old_{k}") for k in old],
+    ).orderBy("event_time").collect()
+    assert any(r["old_position_gap_min"] is not None for r in rows) or name == "no position at all"
+    for r in rows:
+        assert r["new_position_gap_min"] == r["old_position_gap_min"]
+        assert r["new_gc_nm"] == r["old_gc_nm"]
+
+
+def _plan(df):
+    return df._jdf.queryExecution().executedPlan().toString()
+
+
+def test_the_rule_reads_each_edge_position_once(spark):
+    """Spark evaluates each copy of a window expression, so this is the cost of the rule.
+
+    ``first`` is the count to pin because only the new edge's position multiplies it.
+    It was 17: here it is that one read, the callsign after the hole, and the debounce.
+    """
+    frame = _engine_frame(_hole(spark))
+    plan = _plan(frame.withColumn("_brk", cruise_linked().break_expr(P)))
+    assert len(re.findall(r"\bfirst\(", plan)) <= 3, plan
+
+
+def test_the_features_read_each_edge_position_once_per_column(spark):
+    """It was 8: here it is one read for each of the two position columns, and the callsign."""
+    frame = _engine_frame(_hole(spark))
+    features = link_feature_columns(P)
+    plan = _plan(frame.select(*[c.alias(k) for k, c in features.items()]))
+    assert len(re.findall(r"\bfirst\(", plan)) <= 3, plan
+
+
+# --- settings that cannot be honoured -------------------------------------------
+
+
+@pytest.mark.parametrize("minutes", [15.0, 20.0])
+def test_a_position_window_reaching_the_low_altitude_gap_raises(minutes):
+    """It could read through a break the low-altitude rule makes, into another flight."""
+    p = dataclasses.replace(P, link_edge_position_minutes=minutes)
+    with pytest.raises(ValueError, match="link_edge_position_minutes"):
+        link_feature_columns(p)
+    with pytest.raises(ValueError, match="link_edge_position_minutes"):
+        cruise_linked().break_expr(p)
+
+
+def test_a_position_window_just_under_the_low_altitude_gap_is_taken(spark):
+    p = dataclasses.replace(P, link_edge_position_minutes=14.0)
+    assert n_tracks(_hole(spark), p) == 1
 
 
 # --- the features -----------------------------------------------------------
@@ -587,6 +789,7 @@ _DOUBLES = {
     "gc_nm": 1530.0,
     "alt_before_ft": 36000.0,
     "alt_after_ft": 36000.0,
+    "alt_new_edge_ft": 36000.0,
     "vr_before_fpm": 0.0,
     "vr_after_fpm": 0.0,
     "spd_before_kt": 480.0,
@@ -689,6 +892,7 @@ _GOOD_HOLE = {
     "gc_nm": 1528.0,
     "alt_before_ft": 36000.0,
     "alt_after_ft": 36000.0,
+    "alt_new_edge_ft": 36000.0,
     "vr_before_fpm": 0.0,
     "vr_after_fpm": 0.0,
     "spd_before_kt": 480.0,
@@ -699,6 +903,7 @@ _GOOD_HOLE = {
 
 _RATIO_ON = dataclasses.replace(P, link_min_speed_ratio=0.85)
 _STOP_ON = dataclasses.replace(P, link_min_stop_minutes=20.0)
+_DIRECTIONAL = dataclasses.replace(P, link_directional_edges=True)
 
 #: ``(settings, what differs from the good hole, the tests that must fail)``.
 _CHECK_CASES = [
@@ -750,6 +955,36 @@ _CHECK_CASES = [
     ]),
     # Several at once: every failing test says so.
     (P, {"alt_after_ft": 20000.0, "cs_after": "BAW2"}, ["cruise_at_new_edge", "callsign_agrees"]),
+    # Off, direction buys nothing, and the edge feature it would read is not needed.
+    (P, {"alt_before_ft": 20000.0, "vr_before_fpm": 1500.0}, ["cruise_at_old_edge"]),
+    (P, {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0}, ["cruise_at_new_edge"]),
+    # On, an edge below the floor passes only by the direction that fits one flight.
+    (_DIRECTIONAL, {}, []),
+    (_DIRECTIONAL, {"alt_before_ft": 20000.0, "vr_before_fpm": 1500.0}, []),
+    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0}, []),
+    (_DIRECTIONAL, {"alt_before_ft": 20000.0, "vr_before_fpm": 500.0}, ["cruise_at_old_edge"]),
+    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "vr_after_fpm": -500.0}, ["cruise_at_new_edge"]),
+    (_DIRECTIONAL, {"alt_before_ft": 20000.0, "vr_before_fpm": -1500.0}, ["cruise_at_old_edge"]),
+    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "vr_after_fpm": 1500.0}, ["cruise_at_new_edge"]),
+    # The direction is the evidence here, so its absence is not neutral.
+    (_DIRECTIONAL, {"alt_before_ft": 20000.0, "vr_before_fpm": None}, ["cruise_at_old_edge"]),
+    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "vr_after_fpm": None}, ["cruise_at_new_edge"]),
+    # At cruise it stays neutral, as it always was.
+    (_DIRECTIONAL, {"vr_before_fpm": None, "vr_after_fpm": None}, []),
+    # A missing altitude is not below anything.
+    (_DIRECTIONAL, {"alt_before_ft": None, "vr_before_fpm": 1500.0}, ["cruise_at_old_edge"]),
+    (_DIRECTIONAL, {"alt_after_ft": None, "vr_after_fpm": -1500.0}, ["cruise_at_new_edge"]),
+    # The low-altitude gap breaks on this sample whatever the verdict, so it cannot read
+    # as linked. Below the limit only at the edge sample, and neutral when it has none.
+    (_DIRECTIONAL, {"alt_after_ft": 4000.0, "alt_new_edge_ft": 4000.0, "vr_after_fpm": -1500.0},
+     ["cruise_at_new_edge"]),
+    (_DIRECTIONAL, {"alt_after_ft": 4000.0, "alt_new_edge_ft": 5000.0, "vr_after_fpm": -1500.0}, []),
+    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "alt_new_edge_ft": None, "vr_after_fpm": -1500.0}, []),
+    # A climb at the old edge and a descent at the new one, which is the whole flight's
+    # shape, and descend-then-climb still applies unchanged.
+    (_DIRECTIONAL, {"alt_before_ft": 9000.0, "vr_before_fpm": 1500.0,
+                    "alt_after_ft": 9000.0, "alt_new_edge_ft": 9000.0, "vr_after_fpm": -1500.0}, []),
+    (_DIRECTIONAL, {"vr_before_fpm": -1500.0, "vr_after_fpm": 1500.0}, ["not_descend_then_climb"]),
 ]
 
 
