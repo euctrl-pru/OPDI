@@ -6,6 +6,7 @@ limit tests hand ``with_verdicts`` plain counts, which is all the verdicts read.
 """
 import csv
 import datetime as dt
+from dataclasses import replace
 import json
 import math
 import re
@@ -41,6 +42,7 @@ from track_link_grid import (
     flight_base_tracks,
     flight_track_counts,
     grid_from_json,
+    GRID_BASE,
     grid_points,
     holes_inside_flights,
     lowest_bound_point,
@@ -71,7 +73,13 @@ from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.base import FPM_PER_MPS, FT_PER_M, KT_PER_MPS
 from opdi.pipeline.segmentation.methods import cruise_linked, debounced
 
-P = SegmentationParams()
+#: These tests were written at the pre-study settings (the grid's base), so they pass
+#: them explicitly; the shipped defaults are pinned in test_segmentation_cruise_linked.
+P = SegmentationParams(
+    link_cruise_floor_ft=25000.0,
+    link_min_implied_speed_kt=315.0,
+    link_max_gap_minutes=360.0,
+)
 CRUISE_M = 11000.0
 LOW_M = 5000.0 / FT_PER_M
 CRUISE_KT = 480.0
@@ -244,7 +252,7 @@ def test_the_grid_has_54_points():
 
 def test_grid_points_leave_every_other_setting_at_its_default():
     for p in grid_points():
-        assert p.link_cruise_floor_ft == P.link_cruise_floor_ft
+        assert p.link_cruise_floor_ft == GRID_BASE["link_cruise_floor_ft"]
         assert p.link_max_implied_speed_kt == P.link_max_implied_speed_kt
         assert p.callsign_min_persistence_seconds == P.callsign_min_persistence_seconds
 
@@ -393,8 +401,8 @@ def test_a_flight_with_no_track_stays_in_the_denominator(spark):
     "p",
     [
         P,  # F1 links
-        SegmentationParams(link_max_gap_minutes=120.0),  # F1's hole is too long
-        SegmentationParams(link_min_implied_speed_kt=500.0),  # F1 is too slow
+        replace(P, link_max_gap_minutes=120.0),  # F1's hole is too long
+        replace(P, link_min_implied_speed_kt=500.0),  # F1 is too slow
     ],
 )
 def test_counting_from_decisions_agrees_with_really_re_segmenting(spark, p):
@@ -513,7 +521,7 @@ def test_a_stratum_counts_only_gaps_the_point_allows(spark):
         spark,
         [("A", _feature_row(gap_min=100.0)), ("B", _feature_row(gap_min=200.0)), ("C", _feature_row(gap_min=300.0))],
     )
-    p = SegmentationParams(link_max_gap_minutes=120.0)
+    p = replace(P, link_max_gap_minutes=120.0)
     counts = negative_counts(controls, p)
     # Over the point's limit they cannot link, so they test nothing here.
     assert counts["negative_controls"] == 3
@@ -540,7 +548,7 @@ def test_the_limit_counts_only_allowed_gaps_at_a_realised_depth_of_30_min(spark)
             ("F", _feature_row(gap_min=300.0), 60.0, 60.0),
         ],
     )
-    counts = negative_counts(controls, SegmentationParams(link_max_gap_minutes=240.0))
+    counts = negative_counts(controls, replace(P, link_max_gap_minutes=240.0))
 
     assert counts["negative_limit_controls"] == 3
     assert counts["negative_limit_false_joins"] == 1
@@ -590,7 +598,7 @@ def test_the_same_callsign_group_is_the_population_of_the_1_percent_limit(spark)
             ("G", _feature_row(gap_min=300.0), 60.0, 60.0),
         ],
     )
-    counts = negative_counts(controls, SegmentationParams(link_max_gap_minutes=240.0))
+    counts = negative_counts(controls, replace(P, link_max_gap_minutes=240.0))
 
     assert counts["same_callsign_controls"] == 3
     assert counts["same_callsign_false_joins"] == 1
@@ -621,7 +629,7 @@ def test_strata_show_correct_rejections_apart(spark):
     controls = _negatives(
         spark, [("A", _feature_row(gap_min=100.0)), ("B", _feature_row(gap_min=200.0))]
     )
-    p = SegmentationParams(link_max_gap_minutes=120.0)
+    p = replace(P, link_max_gap_minutes=120.0)
     rows = {r["gap_stratum"]: r for r in strata_counts(controls, "negative", p, point_id=7)}
     assert rows["30-120"]["within_link_max_gap"] is True
     assert (rows["30-120"]["n"], rows["30-120"]["wrong"]) == (1, 1)
@@ -648,7 +656,7 @@ def test_positive_counts_separate_what_the_point_allows(spark):
             (180.0, _feature_row(gap_min=180.0)),
         ],
     )
-    counts = positive_counts(controls, SegmentationParams(link_max_gap_minutes=120.0))
+    counts = positive_counts(controls, replace(P, link_max_gap_minutes=120.0))
     assert counts == {
         "positive_controls": 3, "positive_within_gap": 2, "positive_linked": 1,
         "positive_low_edge_controls": 0, "positive_low_edge_within_gap": 0,
@@ -982,7 +990,7 @@ def test_controls_read_cached_samples_and_not_the_tracks(spark):
 def test_measure_reads_the_parameters_it_is_given(spark):
     tracks = make_track(spark, _leg(0, 30) + _leg(30 * 60 + 120 * 60, 30, start_nm=240 + 960))
     assert measure(tracks, "cruise_linked", 30.0)["tracks"] == 1
-    tighter = SegmentationParams(link_max_gap_minutes=60.0)
+    tighter = replace(P, link_max_gap_minutes=60.0)
     assert measure(tracks, "cruise_linked", 30.0, params=tighter)["tracks"] == 2
 
 
@@ -1009,7 +1017,7 @@ def _study_day_with_a_pair(spark):
 def test_run_study_writes_every_output_with_provenance(spark, tmp_path, capsys):
     """Two identical fixture days, a two-point grid. Nothing reaches S3."""
     tracks, truth = _study_day_with_a_pair(spark)
-    grid = [SegmentationParams(link_max_gap_minutes=120.0), P]
+    grid = [replace(P, link_max_gap_minutes=120.0), P]
 
     run_study(
         ["2026-06-14", "2025-06-14"], grid,
@@ -1077,7 +1085,7 @@ def test_run_study_writes_every_output_with_provenance(spark, tmp_path, capsys):
 # --- round 4: edges below the floor -------------------------------------------
 
 
-DIRECTIONAL = SegmentationParams(link_directional_edges=True)
+DIRECTIONAL = replace(P, link_directional_edges=True)
 _CLIMB = dict(alt_before_ft=20000.0, vr_before_fpm=1500.0)
 _DESCENT = dict(alt_after_ft=20000.0, vr_after_fpm=-1500.0)
 _LOW_DEPTHS = {
@@ -1702,7 +1710,7 @@ def test_a_hole_falls_in_one_length_band(spark, gap_min, band):
 
 def test_reasons_read_the_settings_they_are_given(spark):
     holes = _reason_holes(spark, [("other", _feature_row(gap_min=200.0))])
-    [row] = reason_counts(holes, SegmentationParams(link_max_gap_minutes=120.0))
+    [row] = reason_counts(holes, replace(P, link_max_gap_minutes=120.0))
     assert (row["first_failed_test"], row["holes"], row["only_failed_test_holes"]) == ("gap_not_too_long", 1, 1)
 
 
@@ -1829,11 +1837,11 @@ def test_false_joins_without_the_callsign_test_are_reported_and_not_limited():
 
 def test_reasons_params_json_keeps_unnamed_settings_at_their_defaults():
     p = reasons_params_from_json('{"link_max_gap_minutes": 240, "link_min_speed_ratio": 0.85}', [P])
-    assert p == SegmentationParams(link_max_gap_minutes=240.0, link_min_speed_ratio=0.85)
+    assert p == replace(P, link_max_gap_minutes=240.0, link_min_speed_ratio=0.85)
 
 
 def test_reasons_params_json_takes_what_the_features_were_made_with_from_the_grid():
-    grid = [SegmentationParams(link_cruise_floor_ft=30000.0)]
+    grid = [replace(P, link_cruise_floor_ft=30000.0)]
     assert reasons_params_from_json('{"link_max_gap_minutes": 240}', grid).link_cruise_floor_ft == 30000.0
     assert reasons_params_from_json('{"link_cruise_floor_ft": 30000}', grid).link_cruise_floor_ft == 30000.0
 
@@ -1862,7 +1870,7 @@ def test_reasons_params_json_refuses_what_it_cannot_honour(text):
 def test_run_study_writes_the_reasons_at_the_chosen_point_and_pools_them(spark, tmp_path):
     tracks, truth = _study_day_with_a_pair(spark)
     truth = _with_crossing(spark, truth, "F1")
-    grid = [SegmentationParams(link_max_gap_minutes=120.0), P]
+    grid = [replace(P, link_max_gap_minutes=120.0), P]
 
     run_study(
         ["2026-06-14", "2025-06-14"], grid,
@@ -1906,7 +1914,7 @@ def test_run_study_writes_the_reasons_at_the_chosen_point_and_pools_them(spark, 
 
 def test_run_study_reads_the_reasons_at_settings_it_is_given(spark, tmp_path):
     tracks, truth = _study_day_with_a_pair(spark)
-    grid = [SegmentationParams(link_max_gap_minutes=120.0)]
+    grid = [replace(P, link_max_gap_minutes=120.0)]
 
     run_study(
         ["2026-06-14"], grid,
@@ -1944,3 +1952,16 @@ def test_a_day_with_no_true_link_holes_still_writes_its_reasons_header(spark, tm
                 reader = csv.DictReader(fh)
                 assert list(reader) == []
                 assert "first_failed_test" in reader.fieldnames
+
+
+def test_the_grid_base_does_not_follow_the_shipped_defaults():
+    """The study's points are fixed by GRID_BASE, whatever the defaults become."""
+    assert GRID_BASE == {
+        "link_cruise_floor_ft": 25000.0,
+        "link_min_implied_speed_kt": 315.0,
+        "link_max_gap_minutes": 360.0,
+    }
+    [only] = grid_from_json('{"link_min_speed_ratio": [0.0]}')
+    assert (only.link_cruise_floor_ft, only.link_max_gap_minutes) == (25000.0, 360.0)
+    [over] = grid_from_json('{"link_max_gap_minutes": [600]}')
+    assert over.link_max_gap_minutes == 600.0

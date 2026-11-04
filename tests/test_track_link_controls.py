@@ -5,6 +5,7 @@ east, and a low descent, with one sample a minute. The climb and descent stand
 still, so the distance over any cut is exactly the cruise flown beyond it.
 """
 import datetime as dt
+from dataclasses import replace
 import math
 
 import pytest
@@ -29,7 +30,13 @@ from opdi.pipeline.segmentation.methods import (
     linkable,
 )
 
-P = SegmentationParams()
+#: These tests were written at the pre-study settings (the grid's base), so they pass
+#: them explicitly; the shipped defaults are pinned in test_segmentation_cruise_linked.
+P = SegmentationParams(
+    link_cruise_floor_ft=25000.0,
+    link_min_implied_speed_kt=315.0,
+    link_max_gap_minutes=360.0,
+)
 FLOOR_FT = 25000.0
 CRUISE_M = 11000.0
 LOW_M = 5000.0 / FT_PER_M
@@ -542,7 +549,8 @@ def test_a_control_with_blank_edges_scores_as_the_same_hole_left_in_the_data(spa
 def test_controls_keep_the_position_window_whatever_the_callsign_bounds(spark):
     """With 10 s samples, five rows are 50 s. Callsign bounds of 30 s reach no further,
     so only the position window can keep the samples 3 min from the cut."""
-    p = SegmentationParams(
+    p = replace(
+        P,
         link_callsign_lookback_minutes=0.5, link_callsign_lookahead_minutes=0.5
     )
     tracks, truth, _, _ = _pair_with_blank_edges(spark, step_s=10, blank_s=170)
@@ -750,7 +758,7 @@ def test_a_hole_with_no_event_inside_is_not_near_anything(spark):
 # --- the low-edge families ----------------------------------------------------
 
 
-DIRECTIONAL = SegmentationParams(link_directional_edges=True)
+DIRECTIONAL = replace(P, link_directional_edges=True)
 #: Above the low-altitude gap's limit, so that rule stays out of these fixtures.
 CLIMB_M = 9000.0 / FT_PER_M
 CLIMB_FPM = 1500.0

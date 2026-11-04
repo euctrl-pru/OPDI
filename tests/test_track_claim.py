@@ -16,6 +16,7 @@ to cover the whole duration of a track that starts on D, because that is the onl
 direction in which being too short silently truncates.
 """
 import datetime as dt
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -140,6 +141,20 @@ def test_a_run_whose_lookahead_was_enough_reports_nothing(spark):
 
 # --- the lookback, under an arm that links across holes -----------------------
 
+def _pre_study():
+    """The settings these fixtures were sized for: a 6 h gap limit, so a 7 h read."""
+    from opdi.pipeline.segmentation import SegmentationParams
+
+    return SegmentationParams(
+        link_max_gap_minutes=360.0,
+        link_cruise_floor_ft=25000.0,
+        link_min_implied_speed_kt=315.0,
+    )
+
+
+PRE_STUDY = _pre_study()
+
+
 def _processor_capturing_windows(method, **segmentation):
     """A TrackProcessor with no IO, recording the windows `process_day` reads."""
     from opdi.config import SegmentationConfig
@@ -165,7 +180,7 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
     from opdi.pipeline.tracks import required_lookback_hours
 
     p = SegmentationParams()
-    assert required_lookback_hours("cruise_linked", p) == 7
+    assert required_lookback_hours("cruise_linked", p) == 11
     assert required_lookback_hours("debounced", p) == 3
     assert required_lookback_hours("standard", p) == 3
     assert required_lookback_hours("legacy", p) == 3
@@ -176,17 +191,25 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
     p241 = SegmentationParams(link_max_gap_minutes=241.0)
     assert required_lookback_hours("cruise_linked", p241) == 6
     # The callsign lookback is added on top, also rounded up, with a floor at 3.
-    p90 = SegmentationParams(link_callsign_lookback_minutes=90.0)
+    p90 = SegmentationParams(
+        link_max_gap_minutes=360.0, link_callsign_lookback_minutes=90.0
+    )
     assert required_lookback_hours("cruise_linked", p90) == 8
     short = SegmentationParams(link_max_gap_minutes=60.0)
     assert required_lookback_hours("cruise_linked", short) == 3
     # The read behind the old edge is the longer of the callsign and position reads.
-    far_position = SegmentationParams(link_edge_position_minutes=90.0)
+    far_position = SegmentationParams(
+        link_max_gap_minutes=360.0, link_edge_position_minutes=90.0
+    )
     assert required_lookback_hours("cruise_linked", far_position) == 8
-    no_callsign = SegmentationParams(link_callsign_lookback_minutes=0.0)
+    no_callsign = SegmentationParams(
+        link_max_gap_minutes=360.0, link_callsign_lookback_minutes=0.0
+    )
     assert required_lookback_hours("cruise_linked", no_callsign) == 7
     neither = SegmentationParams(
-        link_callsign_lookback_minutes=0.0, link_edge_position_minutes=0.0
+        link_max_gap_minutes=360.0,
+        link_callsign_lookback_minutes=0.0,
+        link_edge_position_minutes=0.0,
     )
     assert required_lookback_hours("cruise_linked", neither) == 6
     assert required_lookback_hours("debounced", far_position) == 3
@@ -197,11 +220,11 @@ def test_process_day_reads_the_lookback_its_arm_requires(spark):
 
     linked = _processor_capturing_windows("cruise_linked")
     linked.process_day(day)
-    assert linked.windows[0][0] == "2024-06-01 17:00:00"
+    assert linked.windows[0][0] == "2024-06-01 13:00:00"
 
     wider = _processor_capturing_windows("cruise_linked")
-    wider.process_day(day, lookback_hours=9)
-    assert wider.windows[0][0] == "2024-06-01 15:00:00"
+    wider.process_day(day, lookback_hours=13)
+    assert wider.windows[0][0] == "2024-06-01 11:00:00"
 
     default = _processor_capturing_windows("standard")
     default.process_day(day)
@@ -210,8 +233,8 @@ def test_process_day_reads_the_lookback_its_arm_requires(spark):
 
 def test_too_short_an_explicit_lookback_raises(spark):
     processor = _processor_capturing_windows("cruise_linked")
-    with pytest.raises(ValueError, match="lookback_hours=6.*7"):
-        processor.process_day(dt.date(2024, 6, 2), lookback_hours=6)
+    with pytest.raises(ValueError, match="lookback_hours=10.*11"):
+        processor.process_day(dt.date(2024, 6, 2), lookback_hours=10)
     assert processor.windows == []
 
 
@@ -232,7 +255,7 @@ def _claimed_by_day(sv, day_start, lookback_hours, p=None):
         (F.col("event_time") >= F.lit(day_start - dt.timedelta(hours=lookback_hours)))
         & (F.col("event_time") < F.lit(day_end + dt.timedelta(hours=24)))
     )
-    tracks = assign_track_id(read, cruise_linked(), p or SegmentationParams())
+    tracks = assign_track_id(read, cruise_linked(), p or PRE_STUDY)
     return keep_tracks_starting_in(tracks, day_start, day_end)
 
 
@@ -263,7 +286,7 @@ def test_a_piece_after_midnight_is_claimed_once(spark):
     ]
     sv = make_track(spark, samples)
 
-    hours = required_lookback_hours("cruise_linked", SegmentationParams())
+    hours = required_lookback_hours("cruise_linked", PRE_STUDY)
     claims = [
         r["last_contact"]
         for day in (d_minus_1, d)
@@ -309,7 +332,7 @@ def _assert_claimed_once(spark, samples):
     from opdi.pipeline.tracks import required_lookback_hours
 
     sv = make_track(spark, samples)
-    hours = required_lookback_hours("cruise_linked", SegmentationParams())
+    hours = required_lookback_hours("cruise_linked", PRE_STUDY)
     claims = [
         r["last_contact"]
         for day in (D_MINUS_1, D)
@@ -365,7 +388,7 @@ def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookbac
     from opdi.pipeline.segmentation import SegmentationParams
     from opdi.pipeline.tracks import required_lookback_hours
 
-    p = SegmentationParams()
+    p = PRE_STUDY
     hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
     blank = {"lat": None, "lon": None}
     samples = _every(D_MINUS_1 + hours(17, 30), D_MINUS_1 + hours(17, 55), 5, lon=0.0, callsign="DLH1")
@@ -410,7 +433,7 @@ def test_the_old_edge_position_is_always_inside_the_read(
     from opdi.pipeline.segmentation import SegmentationParams
     from opdi.pipeline.tracks import required_lookback_hours
 
-    p = SegmentationParams(**settings)
+    p = replace(PRE_STUDY, **settings)
     hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
     old_edge = D_MINUS_1 + hours(18)
     position_at = old_edge - dt.timedelta(minutes=position_min_before_edge)

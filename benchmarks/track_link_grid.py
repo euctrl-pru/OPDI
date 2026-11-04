@@ -185,6 +185,15 @@ GRID = {
     "link_max_gap_minutes": (120.0, 240.0, 360.0),
 }
 
+#: The settings the grid was designed and first run at, held here so that changing a
+#: shipped default cannot move the study: points are this base with the grid's values on
+#: top. ``--grid-json`` still overrides any of them.
+GRID_BASE = {
+    "link_cruise_floor_ft": 25000.0,
+    "link_min_implied_speed_kt": 315.0,
+    "link_max_gap_minutes": 360.0,
+}
+
 #: Settings the cuts and features are made with, once per run, so they cannot vary
 #: inside one. ``link_cruise_floor_ft`` is both a threshold and where controls are cut,
 #: and ``link_edge_vert_rate_fpm`` both a threshold and what a low edge is cut at.
@@ -307,13 +316,13 @@ _NOTES = (
 def _product(settings: Dict[str, Sequence[float]]) -> List[SegmentationParams]:
     names = list(settings)
     return [
-        replace(SegmentationParams(), **dict(zip(names, values)))
+        replace(SegmentationParams(), **{**GRID_BASE, **dict(zip(names, values))})
         for values in itertools.product(*settings.values())
     ]
 
 
 def grid_points() -> List[SegmentationParams]:
-    """The study's 54 points. Every setting outside the grid stays at its default."""
+    """The study's 54 points. Every setting outside the grid stays at ``GRID_BASE`` or its default."""
     return _product(GRID)
 
 

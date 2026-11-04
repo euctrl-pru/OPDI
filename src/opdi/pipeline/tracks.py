@@ -724,7 +724,7 @@ class TrackProcessor:
         The lookback defaults to ``required_lookback_hours``: 3 h, or under
         ``cruise_linked`` ``max(3, ceil(link_max_gap_minutes / 60) +
         ceil(max(link_callsign_lookback_minutes, link_edge_position_minutes) / 60))``,
-        which is 7 h at the defaults.
+        which is 11 h at the defaults.
 
         Raises:
             ValueError: ``lookback_hours`` is below that under ``cruise_linked``.

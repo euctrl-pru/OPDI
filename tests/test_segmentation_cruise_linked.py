@@ -38,7 +38,15 @@ from opdi.pipeline.segmentation.methods import (
     stable_callsign,
 )
 
-P = SegmentationParams()
+#: The rule's behaviour tests below were written at the pre-study settings, so they
+#: pass those explicitly; ``test_defaults_are_on_both_config_classes`` pins the shipped
+#: ones. A test that means the shipped defaults uses ``SHIPPED``.
+P = SegmentationParams(
+    link_cruise_floor_ft=25000.0,
+    link_min_implied_speed_kt=315.0,
+    link_max_gap_minutes=360.0,
+)
+SHIPPED = SegmentationParams()
 
 CRUISE_M = 11000.0
 EDGE_MPS = 480.0 / KT_PER_MPS
@@ -476,13 +484,13 @@ def test_the_extracted_expressions_never_null(spark):
 
 def test_defaults_are_on_both_config_classes():
     expected = {
-        "link_max_gap_minutes": 360.0,
-        "link_cruise_floor_ft": 25000.0,
+        "link_max_gap_minutes": 600.0,
+        "link_cruise_floor_ft": 18000.0,
         "link_edge_vert_rate_fpm": 500.0,
         "link_callsign_lookahead_minutes": 10.0,
         "link_callsign_lookback_minutes": 60.0,
         "link_edge_position_minutes": 5.0,
-        "link_min_implied_speed_kt": 315.0,
+        "link_min_implied_speed_kt": 400.0,
         "link_max_implied_speed_kt": 750.0,
         "link_min_speed_ratio": 0.0,
         "link_min_stop_minutes": 0.0,
@@ -1081,3 +1089,24 @@ def test_link_checks_name_each_failing_test_and_linkable_is_their_and(spark, p, 
     assert all(v is True or v is False for v in verdicts.values()), verdicts
     assert [name for name, ok in verdicts.items() if not ok] == failing
     assert row["linked"] is (not failing)
+
+
+# --- the shipped defaults (chosen by the track-construction-v4 study) -------
+
+
+def test_shipped_defaults_link_what_the_pre_study_settings_split(spark):
+    """A 20,000 ft edge clears the 18,000 ft floor; an 8 h hole is inside 10 h."""
+    fl200 = 20000.0 / FT_PER_M
+    df = _hole(spark, before={"baro_altitude": fl200})
+    assert n_tracks(df, P) == 2
+    assert n_tracks(df, SHIPPED) == 1
+    long_hole = _hole(spark, gap_min=480.0, nm=480.0 * 8)
+    assert n_tracks(long_hole, P) == 2
+    assert n_tracks(long_hole, SHIPPED) == 1
+
+
+def test_shipped_default_speed_floor_is_400_kt(spark):
+    """350 kt across the hole linked at 315 kt; it is a split at 400 kt."""
+    df = _hole(spark, nm=350.0 * 191 / 60)
+    assert n_tracks(df, P) == 1
+    assert n_tracks(df, SHIPPED) == 2

@@ -19,7 +19,13 @@ from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.base import KT_PER_MPS
 from opdi.pipeline.segmentation.methods import cruise_linked, debounced
 
-P = SegmentationParams()
+#: These tests were written at the pre-study settings (the grid's base), so they pass
+#: them explicitly; the shipped defaults are pinned in test_segmentation_cruise_linked.
+P = SegmentationParams(
+    link_cruise_floor_ft=25000.0,
+    link_min_implied_speed_kt=315.0,
+    link_max_gap_minutes=360.0,
+)
 CRUISE_KT = 480.0
 CRUISE_M = 11000.0
 HOUR = 3600

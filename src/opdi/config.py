@@ -1655,14 +1655,20 @@ class SegmentationConfig:
     this release uses -- so set ``method="recommended"`` (which ignores this
     field) rather than zeroing it if you need the A8 ``track_id``."""
 
-    link_max_gap_minutes: float = 360.0
+    link_max_gap_minutes: float = 600.0
     """Longest reception hole the ``cruise_linked`` arm (A10) can link (minutes).
+
+    10 h, chosen by the track-construction-v4 study: it covers the longest oceanic
+    holes measured.
 
     Also sets how far back ``process_day`` must read under that arm: see
     ``tracks.required_lookback_hours``."""
 
-    link_cruise_floor_ft: float = 25000.0
-    """Lowest altitude at either edge of a hole A10 can link (feet)."""
+    link_cruise_floor_ft: float = 18000.0
+    """Lowest altitude at either edge of a hole A10 can link (feet).
+
+    18,000 ft, chosen by the track-construction-v4 study: the altitude above which
+    aircraft are clearly en route rather than near an airport."""
 
     link_edge_vert_rate_fpm: float = 500.0
     """Mean edge vertical rate past which a hole reads as descend-then-climb (ft/min)."""
@@ -1690,8 +1696,11 @@ class SegmentationConfig:
     split into another flight; A10 raises otherwise. ``process_day`` reads at least
     this far behind the old edge: see ``tracks.required_lookback_hours``."""
 
-    link_min_implied_speed_kt: float = 315.0
-    """Slowest great-circle speed across a hole A10 can link (knots)."""
+    link_min_implied_speed_kt: float = 400.0
+    """Slowest great-circle speed across a hole A10 can link (knots).
+
+    400 kt, chosen by the track-construction-v4 study: it rejects nearly all hidden
+    landings at small cost."""
 
     link_max_implied_speed_kt: float = 750.0
     """Fastest great-circle speed across a hole A10 can link (knots). Above this
