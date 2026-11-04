@@ -15,6 +15,7 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 from track_link_controls import (
     DEPTH_TOLERANCE_MIN,
+    _with_engine_columns,
     control_funnel,
     label_real_holes,
     negative_controls,
@@ -130,6 +131,42 @@ def _holes(spark, *holes, **columns):
 
 
 # --- real holes -------------------------------------------------------------
+
+
+def test_nan_is_null_in_what_the_generators_compare(spark):
+    samples = _flight(0, 30)[0]
+    samples[0].update(baro_altitude=float("nan"), velocity=float("nan"), vert_rate=float("nan"))
+    row = _with_engine_columns(make_track(spark, samples)).orderBy("event_time").first()
+    assert row["_alt_ft"] is None
+    assert row["_spd_kt"] is None
+    assert row["vert_rate"] is None
+
+
+def test_a_nan_altitude_does_not_open_a_cruise(spark):
+    """NaN passes ``>=``, so a flight with no altitude at all would read as in cruise."""
+    samples, flight, _, _ = _flight(0, 240)
+    for sample in samples:
+        sample["baro_altitude"] = float("nan")
+    funnel = control_funnel(make_track(spark, samples), _truth(spark, [flight]), FLOOR_FT, p=P)
+    assert funnel["positive_controls"] == 0
+    assert funnel["positive_dropped_no_cruise_sample"] == 4
+
+
+def test_a_nan_rate_is_no_climb_edge(spark):
+    """NaN passes ``>``, so it would cut a climb control at a sample with no direction."""
+    def climb_controls(rate_of_climb_samples):
+        s1, t1, _, last_1 = _flight(0, 180, key="F1", low_fpm=1500.0)
+        for sample in s1:
+            if sample["baro_altitude"] == LOW_M:
+                sample["vert_rate"] = rate_of_climb_samples
+        s2, t2, _, _ = _flight(last_1 + 55 * 60, 180, start_nm=1440.0, key="F2", low_fpm=1500.0)
+        controls = negative_controls(
+            make_track(spark, s1 + s2), _truth(spark, [t1, t2]), FLOOR_FT, depths_min=(0,), p=P
+        )
+        return len(_family(controls, "climb_cruise"))
+
+    assert climb_controls(1500.0 / FPM_PER_MPS) == 1
+    assert climb_controls(float("nan")) == 0
 
 
 def test_real_holes_and_controls_read_each_edge_once(spark):

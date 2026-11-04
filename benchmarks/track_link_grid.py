@@ -32,13 +32,16 @@ conservative settings: the higher ``link_min_implied_speed_kt``, the shorter
                       only the families the flags allow, so a bad family fails only the
                       settings that can link it. The
                       low-edge families' bound is at most 1%, among allowed gaps, and
-                      with none it fails. Their same or blank callsign controls' bound
+                      with none it fails. That holds for them pooled and for each one
+                      alone, so at both flags on a bad family cannot pass diluted by the
+                      other two. Their same or blank callsign controls' bound
                       is at most 5%. False joins are at most 0.1% of the labelled real
-                      holes linked with an edge below the floor. The callsign group
-                      under 60 and the real holes under 300 read ``insufficient``: that
-                      does not fail the point, and it marks the choice provisional,
-                      since a rate means little there. The real-hole rate is still
-                      reported.
+                      holes linked with an edge below the floor, of those linked with
+                      the old edge below it, and of those with the new edge below it.
+                      A rate over that is ``over_limit`` at any sample size. Within it
+                      and under 300 labelled reads ``insufficient``, as does the callsign
+                      group under 60: that does not fail the point, and it marks the
+                      choice provisional, since passing means little there.
   same or blank       the same bound is at most 5% among the controls the callsign
   callsign            test cannot reject, in the same population as the 1% limit, and
                       for the same reason. Those too shallow have columns of their
@@ -80,8 +83,8 @@ recommended, for Stage 2 to run at.
                         or with an edge below the floor, and ``false_joined_*`` those
                         of them labelled false joins. ``linked_by_climb*`` and
                         ``linked_by_descent*`` split the second by edge, so a hole low on
-                        both sides counts in each and once in ``linked_by_direction*``,
-                        which is what the limit reads.
+                        both sides counts in each and once in ``linked_by_direction*``.
+                        These three are the exception here: the limits above read them.
                         ``linked_altitude_read_past_blank_old`` and ``_new`` count linked
                         holes whose nearest altitude on that side is not in the edge's
                         own second, so a link resting on older evidence, with
@@ -226,8 +229,9 @@ SAME_CALLSIGN_UPPER_LIMIT = 0.05
 #: Of the holes a point links that have a known label. Applies to all of them, and
 #: with either flag on to those linked with an edge below the floor as well.
 REAL_FALSE_JOIN_LIMIT = 0.001
-#: Labelled links by direction under this read ``insufficient``: at 0.1%, fewer than
-#: this cannot show much beyond whether there happens to be one false join.
+#: Labelled links by direction under this, within the limit, read ``insufficient``: at
+#: 0.1%, fewer than this cannot show much beyond whether there happens to be one false
+#: join. Over the limit they fail whatever their number.
 REAL_BY_DIRECTION_MIN_LABELLED = 300
 SAME_CALLSIGN_MIN_CONTROLS = 60
 #: The realised depth, on at least one side, that puts a ``cruise_cruise`` control
@@ -279,6 +283,12 @@ COUNT_FIELDS = (
     "negative_low_edge_controls",
     "negative_low_edge_false_joins",
     "negative_low_edge_untested_controls",
+    "negative_climb_cruise_controls",
+    "negative_climb_cruise_false_joins",
+    "negative_cruise_descent_controls",
+    "negative_cruise_descent_false_joins",
+    "negative_climb_descent_controls",
+    "negative_climb_descent_false_joins",
     "same_callsign_controls",
     "same_callsign_false_joins",
     "same_callsign_blank",
@@ -453,22 +463,24 @@ def _sum_when(condition: Column) -> Column:
     return F.coalesce(F.sum(F.when(condition, 1).otherwise(0)), F.lit(0))
 
 
+def _families_allowed(climb: bool, descent: bool) -> List[str]:
+    """The low-edge families whose edges these flags allow."""
+    allowed = {
+        "climb_cruise": climb,
+        "cruise_descent": descent,
+        "climb_descent": climb and descent,
+    }
+    return [family for family in LOW_EDGE_FAMILIES if allowed[family]]
+
+
 def _low_edge_allowed(p: SegmentationParams) -> Column:
     """Whether a control is of a low-edge family whose edges *p* allows.
 
     Each flag lets through one edge, so a family with a low edge the point does not
     allow fails the floor by construction, and is no evidence about the point.
     """
-    allowed = {
-        "climb_cruise": p.link_old_edge_climb,
-        "cruise_descent": p.link_new_edge_descent,
-        "climb_descent": p.link_old_edge_climb and p.link_new_edge_descent,
-    }
-    return reduce(
-        or_,
-        [F.col("control_family") == family for family, on in allowed.items() if on],
-        F.lit(False),
-    )
+    families = _families_allowed(p.link_old_edge_climb, p.link_new_edge_descent)
+    return reduce(or_, [F.col("control_family") == family for family in families], F.lit(False))
 
 
 def _counts_toward_limit(p: SegmentationParams) -> Column:
@@ -493,8 +505,8 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
     An edge below the floor can only have passed by direction, given a link.
     ``linked_by_direction_labelled`` is what the direction limit divides by, and it counts
     a hole low on both sides once where the ``by_climb`` and ``by_descent`` columns each
-    count it. Those and ``false_joined_near_edge`` and the altitude read past a blank are
-    reported only.
+    count it, and the limits read all three. ``false_joined_near_edge`` and the altitude
+    read past a blank are reported only.
     """
     linked, label = _linked(p), F.col("label")
     false_join = label == "false_join"
@@ -549,7 +561,8 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
     A low edge the point does not allow cannot link, since the cuts are below the floor.
     So those controls are no evidence about the point, and counted they would let a point
     over the limit on ``cruise_cruise`` pass on rejections that test nothing.
-    ``negative_low_edge_controls`` are those under the limit, with their false joins.
+    ``negative_low_edge_controls`` are those under the limit, with their false joins, and
+    ``negative_{family}_*`` the same for each family alone.
     """
     linked = _linked(p)
     within_gap = F.col("gap_min") <= p.link_max_gap_minutes
@@ -562,6 +575,13 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
     same_shallow = F.col("same_callsign") & shallow
     same_low_edge = same & low_edge
     blank = F.col("cs_before").isNull() | F.col("cs_after").isNull()
+    per_family = []
+    for family in LOW_EDGE_FAMILIES:
+        counted = under_limit & (F.col("control_family") == family)
+        per_family += [
+            _sum_when(counted).alias(f"negative_{family}_controls"),
+            _sum_when(counted & linked).alias(f"negative_{family}_false_joins"),
+        ]
     row = controls.agg(
         F.count(F.lit(1)).alias("negative_controls"),
         F.countDistinct("pair_id").alias("negative_pairs"),
@@ -588,6 +608,7 @@ def negative_counts(controls: DataFrame, p: SegmentationParams) -> Dict[str, int
         _sum_when(same_shallow & linked).alias("same_callsign_shallow_false_joins"),
         _sum_when(same_low_edge).alias("same_callsign_low_edge_controls"),
         _sum_when(same_low_edge & linked).alias("same_callsign_low_edge_false_joins"),
+        *per_family,
     ).first()
     return row.asDict()
 
@@ -893,12 +914,33 @@ def _share(part: int, whole: int) -> Optional[float]:
     return part / whole if whole else None
 
 
+def _real_status(false_joined: int, labelled: int) -> str:
+    """Over the limit fails at any sample size. Only a rate within it can be too few to trust."""
+    if labelled and false_joined / labelled > REAL_FALSE_JOIN_LIMIT:
+        return "over_limit"
+    if labelled < REAL_BY_DIRECTION_MIN_LABELLED:
+        return "insufficient"
+    return "within_limit"
+
+
 def _direction_verdicts(row: Dict) -> Dict:
     """The limits a point with either flag on must also meet on its own evidence.
 
-    ``negative_low_edge_within_limit`` is ``None`` with both off, and the two statuses
-    read ``not_applicable``: those points cannot link a low edge.
+    ``negative_low_edge_within_limit`` is ``None`` with both off, and the statuses read
+    ``not_applicable``: those points cannot link a low edge. A family or an edge the flags
+    do not allow reads the same, on its own columns.
     """
+    climb, descent = row["link_old_edge_climb"], row["link_new_edge_descent"]
+    allowed = _families_allowed(climb, descent)
+    family_verdicts = {}
+    for family in LOW_EDGE_FAMILIES:
+        upper = rule_of_three_upper(
+            row[f"negative_{family}_false_joins"], row[f"negative_{family}_controls"]
+        )
+        family_verdicts[f"negative_{family}_upper_95"] = upper
+        family_verdicts[f"negative_{family}_within_limit"] = (
+            upper is not None and upper <= NEGATIVE_UPPER_LIMIT if family in allowed else None
+        )
     low_n = row["negative_low_edge_controls"]
     low_upper = rule_of_three_upper(row["negative_low_edge_false_joins"], low_n)
     same_n = row["same_callsign_low_edge_controls"]
@@ -906,6 +948,7 @@ def _direction_verdicts(row: Dict) -> Dict:
     labelled = row["linked_by_direction_labelled"]
     real_rate = _share(row["false_joined_by_direction"], labelled)
     verdicts = {
+        **family_verdicts,
         "negative_low_edge_false_join_rate": _share(row["negative_low_edge_false_joins"], low_n),
         "negative_low_edge_upper_95": low_upper,
         "same_callsign_low_edge_false_join_rate": _share(
@@ -913,8 +956,24 @@ def _direction_verdicts(row: Dict) -> Dict:
         ),
         "same_callsign_low_edge_upper_95": same_upper,
         "real_by_direction_false_join_rate": real_rate,
+        "real_by_climb_false_join_rate": _share(
+            row["false_joined_by_climb"], row["linked_by_climb_labelled"]
+        ),
+        "real_by_descent_false_join_rate": _share(
+            row["false_joined_by_descent"], row["linked_by_descent_labelled"]
+        ),
+        "real_by_climb_status": (
+            _real_status(row["false_joined_by_climb"], row["linked_by_climb_labelled"])
+            if climb
+            else "not_applicable"
+        ),
+        "real_by_descent_status": (
+            _real_status(row["false_joined_by_descent"], row["linked_by_descent_labelled"])
+            if descent
+            else "not_applicable"
+        ),
     }
-    if not (row["link_old_edge_climb"] or row["link_new_edge_descent"]):
+    if not (climb or descent):
         return {
             **verdicts,
             "negative_low_edge_within_limit": None,
@@ -928,17 +987,11 @@ def _direction_verdicts(row: Dict) -> Dict:
         same_status = "within_limit"
     else:
         same_status = "over_limit"
-    if labelled < REAL_BY_DIRECTION_MIN_LABELLED:
-        real_status = "insufficient"
-    elif real_rate <= REAL_FALSE_JOIN_LIMIT:
-        real_status = "within_limit"
-    else:
-        real_status = "over_limit"
     return {
         **verdicts,
         "negative_low_edge_within_limit": low_upper is not None and low_upper <= NEGATIVE_UPPER_LIMIT,
         "same_callsign_low_edge_status": same_status,
-        "real_by_direction_status": real_status,
+        "real_by_direction_status": _real_status(row["false_joined_by_direction"], labelled),
     }
 
 
@@ -962,10 +1015,17 @@ def with_verdicts(row: Dict) -> Dict:
     real_ok = real_rate is not None and real_rate <= REAL_FALSE_JOIN_LIMIT
     missed = row["positive_within_gap"] - row["positive_linked"]
     direction = _direction_verdicts(row)
+    real_statuses = [
+        direction[f"real_by_{way}_status"] for way in ("direction", "climb", "descent")
+    ]
     direction_ok = (
         direction["negative_low_edge_within_limit"] is not False
+        and all(
+            direction[f"negative_{family}_within_limit"] is not False
+            for family in LOW_EDGE_FAMILIES
+        )
         and direction["same_callsign_low_edge_status"] != "over_limit"
-        and direction["real_by_direction_status"] != "over_limit"
+        and "over_limit" not in real_statuses
     )
     cruise_cruise_controls = row["negative_limit_controls"] - row["negative_low_edge_controls"]
     cruise_cruise_false_joins = row["negative_limit_false_joins"] - row["negative_low_edge_false_joins"]
@@ -1020,7 +1080,7 @@ def with_verdicts(row: Dict) -> Dict:
         "provisional": (
             same_status == "insufficient"
             or direction["same_callsign_low_edge_status"] == "insufficient"
-            or direction["real_by_direction_status"] == "insufficient"
+            or "insufficient" in real_statuses
         ),
     }
 

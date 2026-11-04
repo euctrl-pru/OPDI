@@ -213,6 +213,15 @@ def _real_holes(spark, rows):
     return frame.withColumn("event_near_edge", F.lit(False))
 
 
+#: Each low-edge family clean, on enough controls to bound under 1% alone.
+_FAMILIES_CLEAN = dict(
+    negative_low_edge_controls=1000,
+    negative_climb_cruise_controls=400,
+    negative_cruise_descent_controls=300,
+    negative_climb_descent_controls=300,
+)
+
+
 def _counts(point_id=0, **overrides):
     """A row of raw counts that passes every limit, unless overridden."""
     counts = {name: 0 for name in COUNT_FIELDS}
@@ -856,7 +865,7 @@ def test_the_gap_outranks_the_checks_that_follow_it():
 
 def test_a_tie_on_every_other_setting_goes_to_direction_off():
     """The more conservative. It falls after the settings above, not before them."""
-    on = dict(link_old_edge_climb=True, link_new_edge_descent=True, negative_low_edge_controls=1000)
+    on = dict(link_old_edge_climb=True, link_new_edge_descent=True, **_FAMILIES_CLEAN)
     rows = [
         _counts(point_id=0, **on),
         _counts(point_id=1, link_old_edge_climb=False, link_new_edge_descent=False),
@@ -879,7 +888,7 @@ def test_a_tie_goes_to_fewer_flags_on():
     def flags(point_id, climb, descent):
         return _counts(
             point_id=point_id, link_old_edge_climb=climb, link_new_edge_descent=descent,
-            negative_low_edge_controls=1000,
+            **_FAMILIES_CLEAN,
         )
 
     assert pick_recommended([flags(0, True, True), flags(1, True, False)])["point_id"] == 1
@@ -1272,10 +1281,12 @@ def test_a_low_edge_false_join_can_take_a_point_over_the_limit(spark):
 _ON = dict(
     link_old_edge_climb=True, link_new_edge_descent=True,
     negative_limit_controls=11000,
-    negative_low_edge_controls=1000,
+    **_FAMILIES_CLEAN,
     same_callsign_controls=1500,
     same_callsign_low_edge_controls=500,
     linked_by_direction_labelled=500,
+    linked_by_climb_labelled=500,
+    linked_by_descent_labelled=500,
 )
 
 
@@ -1345,9 +1356,9 @@ def test_linking_more_cannot_hide_a_bad_rate_among_direction_links():
 
 
 def test_few_labelled_links_by_direction_are_insufficient_and_reported():
-    row = _on(linked_by_direction_labelled=299, false_joined_by_direction=30)
+    row = _on(linked_by_direction_labelled=299, false_joined_by_direction=0)
     assert row["real_by_direction_status"] == "insufficient"
-    assert row["real_by_direction_false_join_rate"] == pytest.approx(30 / 299)
+    assert row["real_by_direction_false_join_rate"] == 0.0
     assert row["provisional"] is True
     assert row["real_holes_within_limit"] is True
     assert row["within_limits"] is True
@@ -1455,10 +1466,121 @@ def test_real_hole_counts_say_which_links_rest_on_altitude_past_a_blank(spark):
     assert counts["false_joined_altitude_read_past_blank_new"] == 1
 
 
-def test_the_new_counts_are_reported_and_no_limit_reads_them():
+_DESCENT_ONLY_ROW = dict(link_old_edge_climb=False, link_new_edge_descent=True)
+_CLIMB_ONLY_ROW = dict(link_old_edge_climb=True, link_new_edge_descent=False)
+
+
+@pytest.mark.parametrize(
+    "false_joined, labelled, status, passes, provisional",
+    [
+        (2, 125, "over_limit", False, None),
+        (1, 186, "over_limit", False, None),
+        (0, 186, "insufficient", True, True),
+        (1, 1500, "within_limit", True, False),
+    ],
+)
+@pytest.mark.parametrize(
+    "way, flags",
+    [
+        ("direction", dict(link_old_edge_climb=True, link_new_edge_descent=True)),
+        ("climb", _CLIMB_ONLY_ROW),
+        ("descent", _DESCENT_ONLY_ROW),
+    ],
+)
+def test_a_real_hole_rate_over_the_limit_fails_at_any_sample_size(
+    way, flags, false_joined, labelled, status, passes, provisional
+):
+    """Under 300 read ``insufficient`` whatever the rate, so 1.6% could pass unnoticed."""
+    enough = dict(
+        linked_by_direction_labelled=1500, linked_by_climb_labelled=1500,
+        linked_by_descent_labelled=1500,
+    )
+    row = _on(
+        **{
+            **flags,
+            **enough,
+            f"linked_by_{way}_labelled": labelled,
+            f"false_joined_by_{way}": false_joined,
+        }
+    )
+    assert row[f"real_by_{way}_status"] == status
+    assert row[f"real_by_{way}_false_join_rate"] == pytest.approx(false_joined / labelled)
+    assert row["within_limits"] is passes
+    if provisional is not None:
+        assert row["provisional"] is provisional
+
+
+def test_an_edge_the_setting_does_not_allow_has_no_real_hole_verdict():
+    row = _on(**_DESCENT_ONLY_ROW, linked_by_climb_labelled=100, false_joined_by_climb=50)
+    assert row["real_by_climb_status"] == "not_applicable"
+    assert row["within_limits"] is True
+    both_off = _counts()
+    assert both_off["real_by_climb_status"] == "not_applicable"
+    assert both_off["real_by_descent_status"] == "not_applicable"
+
+
+def test_a_bad_family_cannot_pass_diluted_at_both_on():
+    """6 of 300 alone fails. Pooled to 6 of 1,500 it is under 1%, so only its own check sees it."""
+    climb_alone = _on(
+        **_CLIMB_ONLY_ROW,
+        negative_low_edge_controls=300, negative_low_edge_false_joins=6,
+        negative_climb_cruise_controls=300, negative_climb_cruise_false_joins=6,
+        negative_limit_controls=10300, negative_limit_false_joins=6,
+    )
+    assert climb_alone["negative_low_edge_within_limit"] is False
+    assert climb_alone["within_limits"] is False
+
+    both = _on(
+        negative_low_edge_controls=1500, negative_low_edge_false_joins=6,
+        negative_climb_cruise_controls=300, negative_climb_cruise_false_joins=6,
+        negative_cruise_descent_controls=600,
+        negative_climb_descent_controls=600,
+        negative_limit_controls=11500, negative_limit_false_joins=6,
+    )
+    assert both["negative_low_edge_within_limit"] is True      # the pool alone would pass
+    assert both["negative_climb_cruise_within_limit"] is False
+    assert both["negative_cruise_descent_within_limit"] is True
+    assert both["within_limits"] is False
+
+
+def test_a_family_with_too_few_controls_fails_a_setting_that_allows_it():
+    row = _on(
+        negative_climb_descent_controls=10,
+        negative_cruise_descent_controls=590,
+    )
+    assert row["negative_low_edge_within_limit"] is True
+    assert row["negative_climb_descent_within_limit"] is False
+    assert row["within_limits"] is False
+
+
+def test_a_family_a_setting_does_not_allow_is_not_checked():
+    row = _on(
+        **_CLIMB_ONLY_ROW,
+        negative_low_edge_controls=400,
+        negative_climb_cruise_controls=400,
+        negative_cruise_descent_controls=0,
+        negative_climb_descent_controls=0,
+    )
+    assert row["negative_cruise_descent_within_limit"] is None
+    assert row["negative_climb_descent_within_limit"] is None
+    assert row["within_limits"] is True
+
+
+def test_the_family_counts_come_from_the_controls_and_pool(spark):
+    counts = negative_counts(_one_of_each_low_edge_family(spark), DIRECTIONAL)
+    for family in _FAMILY_EDGES:
+        assert counts[f"negative_{family}_controls"] == 1
+        assert counts[f"negative_{family}_false_joins"] == 1
+    off = negative_counts(_one_of_each_low_edge_family(spark), _CLIMB_ON)
+    assert off["negative_climb_cruise_controls"] == 1
+    assert off["negative_cruise_descent_controls"] == 0
+    day = _on(negative_climb_cruise_controls=200)
+    assert pool_rows([[day], [day]])[0]["negative_climb_cruise_controls"] == 400
+
+
+def test_the_reported_counts_are_reported_and_no_limit_reads_them():
     new = [
-        "linked_by_climb", "false_joined_by_climb", "linked_by_climb_labelled",
-        "linked_by_descent", "false_joined_by_descent", "linked_by_descent_labelled",
+        "linked_by_climb", "linked_by_descent",
         "linked_altitude_read_past_blank_old", "linked_altitude_read_past_blank_new",
         "false_joined_altitude_read_past_blank_old", "false_joined_altitude_read_past_blank_new",
     ]

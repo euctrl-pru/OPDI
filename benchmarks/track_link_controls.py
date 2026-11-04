@@ -37,9 +37,11 @@ because those are the samples the directional test accepts:
   ``climb_descent``   the first flight's climb, then the second's descent, with no depth
 
 A depth is NULL on a side that has none. Such a control spans the whole of a flight's
-cruise, so its implied speed is often plausible for A to B then B to C, which is why
-speed alone may not reject it. That is not guaranteed: on an out-and-back the two edges
-are near one airport, the distance is near zero, and speed rejects it easily.
+cruise as well as the stop, so nothing here says what its implied speed is. The time on
+the ground lowers it, and on an out-and-back the two edges are near one airport and the
+distance is near zero, so speed rejects those easily. On a long A to B then B to C with
+a short stop it can be plausible. How often is a measurement and not an assumption:
+``link_negative_reasons`` read at a point with the flags on says which test rejects them.
 
 **Positive controls** remove the middle of one truth flight's cruise, and no link is
 a missed link. Removal never reaches beyond the requested length, since a hole a
@@ -114,12 +116,22 @@ DEPTH_TOLERANCE_MIN = 5.0
 _DEFAULT_PARAMS = SegmentationParams()
 
 
+def _without_nan(column: str) -> Column:
+    return F.nanvl(F.col(column), F.lit(None).cast("double"))
+
+
 def _with_engine_columns(samples: DataFrame) -> DataFrame:
-    """Add the columns the rule's expressions read, as ``assign_track_id`` does."""
+    """Add the columns the rule's expressions read, as ``assign_track_id`` does.
+
+    NaN becomes NULL here, once, for what the generators compare. Spark orders NaN above
+    every number, so a NaN altitude would pass as at the floor and open a cruise, and a NaN
+    rate as a climb. The rule treats NaN as no value at an edge, and so must they.
+    """
     return (
         samples.withColumn("_ts", F.to_timestamp("event_time"))
-        .withColumn("_alt_ft", F.col("baro_altitude") * FT_PER_M)
-        .withColumn("_spd_kt", F.col("velocity") * KT_PER_MPS)
+        .withColumn("vert_rate", _without_nan("vert_rate"))
+        .withColumn("_alt_ft", _without_nan("baro_altitude") * FT_PER_M)
+        .withColumn("_spd_kt", _without_nan("velocity") * KT_PER_MPS)
     )
 
 
