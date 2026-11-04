@@ -691,7 +691,7 @@ def test_only_tracks_starting_on_the_day_are_compared(spark):
 
 def test_the_input_is_cut_to_the_window_the_arm_read(spark):
     samples = make_track(spark, _cruise([(0, 600)]))
-    # _EPOCH is noon on 2024-06-01. The lookback at the default link settings is 7 h.
+    # _EPOCH is noon on 2024-06-01. The lookback at the pre-study settings is 7 h.
     kept = s.arm_read_window(samples, "2024-06-01", P)
     assert kept.count() == samples.count()
     assert s.arm_read_window(samples, "2024-06-03", P).count() == 0
@@ -942,6 +942,15 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
         "icao24 string, callsign string, day date, milestone string, event_time timestamp",
     )
 
+    nm_path = tmp_path / "flights.parquet"
+    pd.DataFrame(
+        {
+            "AIRCRAFT_ADDRESS": ["ABC123"],
+            "AOBT_3": pd.to_datetime([_at(-600)], utc=True),
+            "ARVT_3": pd.to_datetime([_at(2 * HOUR + 50 * 60)], utc=True),
+        }
+    ).to_parquet(nm_path)
+
     written = {}
 
     def write(name, rows):
@@ -956,6 +965,7 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
         apdf=apdf,
         detected={"debounced": detection, "cruise_linked": detection},
         write=write,
+        truth_path=str(nm_path),
     )
 
     assert set(written) == set(s.OUTPUTS)
@@ -977,6 +987,8 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
     assert distance["scored_tracks"] == 1
     assert distance["tracks_off_stored_distance_by_over_1_nm"] == 1
     assert distance["stored_distance_verdict"] == "differs"
+    labels = {r["label"]: r for r in written["link_truth_all_flights.csv"]}
+    assert labels["true_link"]["holes"] == 1
     assert {r["movement"] for r in written["link_movements.csv"]} == {"ATOT", "ALDT", "all"}
     assert {r["type"] for r in written["link_events.csv"]} == {"level-start", "level-end", "last_seen"}
 
@@ -991,4 +1003,74 @@ def test_a_day_with_no_scored_flights_is_refused(spark):
         }
     )
     with pytest.raises(SystemExit, match="no truth flights"):
-        s.score_day(spark, "2024-06-01", read=None, truth=truth, p=P, apdf=None, detected=None, write=None)
+        s.score_day(spark, "2024-06-01", read=None, truth=truth, p=P, apdf=None, detected=None, write=None, truth_path=None)
+
+
+# --- every Network Manager flight --------------------------------------------
+
+
+def _label(holes, nm, pieces=(), events=()):
+    def frame(rows, cols):
+        return pd.DataFrame(
+            [(a, *[pd.Timestamp(_at(x)) if isinstance(x, (int, float)) else x for x in r]) for a, *r in rows],
+            columns=cols,
+        )
+
+    return s.label_holes_all_flights(
+        frame(holes, ["icao24", "t_old_edge", "t_new_edge"]),
+        frame(nm, ["icao24", "t_off", "t_on"]),
+        frame(pieces, ["icao24", "t_start", "t_end"]),
+        pd.DataFrame(events, columns=["icao24", "milestone", "event_time"]).assign(
+            event_time=lambda d: [pd.Timestamp(_at(t)) for t in d["event_time"]]
+        ),
+    )
+
+
+def test_a_hole_with_a_block_time_inside_it_is_a_false_join():
+    holes = [("a", HOUR, 3 * HOUR)]
+    assert _label(holes, [("a", 0, 2 * HOUR)])["label"][0] == "false_join"  # on-block inside
+    assert _label(holes, [("a", 2 * HOUR, 5 * HOUR)])["label"][0] == "false_join"  # off-block
+
+
+def test_a_hole_within_one_block_window_is_a_true_link():
+    assert _label([("a", HOUR, 3 * HOUR)], [("a", 0, 4 * HOUR)])["label"][0] == "true_link"
+
+
+def test_flights_elsewhere_make_the_hole_unknown_and_no_flights_not_in_truth():
+    nm = [("a", 10 * HOUR, 12 * HOUR)]
+    holes = [("a", HOUR, 3 * HOUR), ("b", HOUR, 3 * HOUR)]
+    assert list(_label(holes, nm)["label"]) == ["unknown", "airframe_not_in_truth"]
+
+
+def test_a_flight_on_another_day_still_counts():
+    nm = [("a", 30 * HOUR, 32 * HOUR), ("a", 2 * HOUR - 60, 2 * HOUR + 60)]
+    assert _label([("a", HOUR, 3 * HOUR)], nm)["label"][0] == "false_join"
+
+
+def test_block_events_alone_never_make_a_hole_a_false_join():
+    events = [("a", "AIBT", 0.5 * HOUR), ("a", "AOBT", 3.5 * HOUR)]
+    pieces = [("a", 0, HOUR), ("a", 3 * HOUR, 4 * HOUR)]
+    got = _label([("a", HOUR, 3 * HOUR)], [("a", 0, 5 * HOUR)], pieces, events)
+    assert got["label"][0] == "true_link"
+    assert got["landing_on_older"][0] and got["take_off_on_newer"][0]
+
+
+def test_events_are_counted_on_the_piece_they_sit_on():
+    pieces = [("a", 0, HOUR), ("a", 3 * HOUR, 4 * HOUR)]
+    events = [("a", "ALDT", 3.5 * HOUR), ("a", "ATOT", 0.5 * HOUR)]  # wrong pieces
+    got = _label([("a", HOUR, 3 * HOUR)], [("a", 0, 5 * HOUR)], pieces, events)
+    assert not got["landing_on_older"][0] and not got["take_off_on_newer"][0]
+
+
+def test_the_summary_has_a_row_per_label_even_when_empty():
+    labelled = pd.DataFrame(
+        {"label": ["true_link", "true_link"], "landing_on_older": [True, False],
+         "take_off_on_newer": [True, True]}
+    )
+    rows = {r["label"]: r for r in s.summarise_hole_labels(labelled)}
+    assert list(rows) == list(s.HOLE_LABELS)
+    assert rows["true_link"] == {
+        "label": "true_link", "holes": 2, "landing_on_older": 1,
+        "take_off_on_newer": 2, "both": 1,
+    }
+    assert rows["false_join"]["holes"] == 0

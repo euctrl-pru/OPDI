@@ -1835,7 +1835,7 @@ def test_false_joins_without_the_callsign_test_are_reported_and_not_limited():
 # --- round 2: the settings the reasons are read at ---------------------------
 
 
-def test_reasons_params_json_keeps_unnamed_settings_at_their_defaults():
+def test_reasons_params_json_keeps_unnamed_settings_at_the_grid_base():
     p = reasons_params_from_json('{"link_max_gap_minutes": 240, "link_min_speed_ratio": 0.85}', [P])
     assert p == replace(P, link_max_gap_minutes=240.0, link_min_speed_ratio=0.85)
 

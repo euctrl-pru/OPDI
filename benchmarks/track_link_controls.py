@@ -111,6 +111,7 @@ EVENT_NEAR_EDGE_MIN = 5.0
 #: pushes it on; past this it is no longer the depth it would be reported under.
 DEPTH_TOLERANCE_MIN = 5.0
 
+# The edge-direction settings read from ``p`` must match the ``floor_ft`` passed alongside it.
 _DEFAULT_PARAMS = SegmentationParams()
 
 

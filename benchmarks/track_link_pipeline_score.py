@@ -78,6 +78,7 @@ that mirror has no movement to count. Provenance names both.
 """
 
 import argparse
+import dataclasses
 import datetime as dt
 import json
 import sys
@@ -125,6 +126,7 @@ OUTPUTS = (
     "link_distance_across_hole.csv",
     "link_partition_check.csv",
     "link_movements.csv",
+    "link_truth_all_flights.csv",
 )
 
 #: How far the movement count of A10 may fall below A9's. The spec's limit.
@@ -739,6 +741,132 @@ def movement_rows(truth: DataFrame, split: DataFrame, linked: DataFrame) -> List
     return rows
 
 
+# --- holes against every Network Manager flight -------------------------------
+
+HOLE_LABELS = ("false_join", "true_link", "unknown", "airframe_not_in_truth")
+
+LANDING_FAMILY = ("ALDT", "AIBT")
+TAKE_OFF_FAMILY = ("ATOT", "AOBT")
+
+
+def load_all_flights(path, airframes) -> pd.DataFrame:
+    """Every NM flight of *airframes*, any day, as ``icao24``, ``t_off``, ``t_on`` (UTC).
+
+    Not :func:`adsc_flight_list_truth.load_truth`, which keeps one day's off-block and
+    needs ADEP and ADES: a flight on the next day, or with no aerodrome, still bounds a
+    hole.
+    """
+    t = pd.read_parquet(path, columns=["AIRCRAFT_ADDRESS", "AOBT_3", "ARVT_3"]).dropna(
+        subset=["AIRCRAFT_ADDRESS", "AOBT_3", "ARVT_3"]
+    )
+    t = pd.DataFrame(
+        {
+            "icao24": t["AIRCRAFT_ADDRESS"].str.lower().str.strip(),
+            "t_off": pd.to_datetime(t["AOBT_3"], utc=True).dt.tz_localize(None),
+            "t_on": pd.to_datetime(t["ARVT_3"], utc=True).dt.tz_localize(None),
+        }
+    )
+    return t[t["icao24"].isin(set(airframes))].reset_index(drop=True)
+
+
+def label_holes_all_flights(
+    holes: pd.DataFrame, nm: pd.DataFrame, pieces: pd.DataFrame, events: pd.DataFrame
+) -> pd.DataFrame:
+    """Each hole against every flight of its airframe in *nm*, whatever the day.
+
+    ``holes``: ``icao24, t_old_edge, t_new_edge``. ``nm``: ``icao24, t_off, t_on``.
+    ``pieces``: the debounced tracks, ``icao24, t_start, t_end``. ``events``: the
+    debounced arm's detected events, ``icao24, milestone, event_time``.
+
+    ``false_join`` when an off-block or on-block of the airframe falls strictly inside the
+    hole: the aircraft was parked there. ``true_link`` when the hole lies within one
+    flight's block window. ``unknown`` when the airframe is in *nm* and neither holds.
+    Detected events never decide the label; they are only counted beside it, as
+    ``landing_on_older`` (ALDT or AIBT on the older piece) and ``take_off_on_newer``
+    (ATOT or AOBT on the newer one).
+    """
+    by_nm = {k: g for k, g in nm.groupby("icao24")}
+    by_piece = {k: g for k, g in pieces.groupby("icao24")}
+    by_event = {k: g for k, g in events.groupby("icao24")}
+
+    def has(icao24, milestones, start, end) -> bool:
+        e = by_event.get(icao24)
+        if e is None:
+            return False
+        return bool(
+            (
+                e["milestone"].isin(milestones)
+                & (e["event_time"] >= start)
+                & (e["event_time"] <= end)
+            ).any()
+        )
+
+    def on_piece(icao24, edge, milestones) -> bool:
+        p = by_piece.get(icao24)
+        if p is None:
+            return False
+        containing = p[(p["t_start"] <= edge) & (p["t_end"] >= edge)]
+        return any(has(icao24, milestones, r.t_start, r.t_end) for r in containing.itertuples())
+
+    rows = []
+    for h in holes.itertuples():
+        flights = by_nm.get(h.icao24)
+        if flights is None:
+            label = "airframe_not_in_truth"
+        else:
+            parked = (
+                ((flights["t_off"] > h.t_old_edge) & (flights["t_off"] < h.t_new_edge))
+                | ((flights["t_on"] > h.t_old_edge) & (flights["t_on"] < h.t_new_edge))
+            ).any()
+            within = (
+                (flights["t_off"] <= h.t_old_edge) & (flights["t_on"] >= h.t_new_edge)
+            ).any()
+            label = "false_join" if parked else "true_link" if within else "unknown"
+        rows.append(
+            {
+                "label": label,
+                "landing_on_older": on_piece(h.icao24, h.t_old_edge, LANDING_FAMILY),
+                "take_off_on_newer": on_piece(h.icao24, h.t_new_edge, TAKE_OFF_FAMILY),
+            }
+        )
+    return pd.DataFrame(rows, columns=["label", "landing_on_older", "take_off_on_newer"])
+
+
+def summarise_hole_labels(labelled: pd.DataFrame) -> List[Dict]:
+    """One row per label, always all four, with the counts of events on the pieces."""
+    out = []
+    for label in HOLE_LABELS:
+        g = labelled[labelled["label"] == label]
+        out.append(
+            {
+                "label": label,
+                "holes": len(g),
+                "landing_on_older": int(g["landing_on_older"].sum()),
+                "take_off_on_newer": int(g["take_off_on_newer"].sum()),
+                "both": int((g["landing_on_older"] & g["take_off_on_newer"]).sum()),
+            }
+        )
+    return out
+
+
+def truth_all_flights_rows(
+    holes: DataFrame, tracks: DataFrame, events: pd.DataFrame, truth_path
+) -> List[Dict]:
+    """The rows of ``link_truth_all_flights.csv``.
+
+    *holes* are the linked arm's, *tracks* the debounced arm's ``osn_tracks_clean`` and
+    *events* its detected events as a pandas frame of ``icao24, milestone, event_time``.
+    """
+    hole_rows = holes.select("icao24", "t_old_edge", "t_new_edge").toPandas()
+    pieces = (
+        tracks.groupBy("track_id", "icao24")
+        .agg(F.min("event_time").alias("t_start"), F.max("event_time").alias("t_end"))
+        .toPandas()
+    )
+    nm = load_all_flights(truth_path, set(hole_rows["icao24"]))
+    return summarise_hole_labels(label_holes_all_flights(hole_rows, nm, pieces, events))
+
+
 # --- the job -----------------------------------------------------------------
 
 
@@ -762,6 +890,7 @@ def score_day(
     apdf: DataFrame,
     detected: Dict[str, DataFrame],
     write: Callable[[str, List[Dict]], None],
+    truth_path: str,
 ) -> None:
     """Every table in :data:`OUTPUTS`, written as each is ready.
 
@@ -846,6 +975,16 @@ def score_day(
     )
 
     write(
+        "link_truth_all_flights.csv",
+        truth_all_flights_rows(
+            holes,
+            tracks[split_name],
+            detected[split_name].select("icao24", "milestone", "event_time").toPandas(),
+            truth_path,
+        ),
+    )
+
+    write(
         "link_movements.csv",
         movement_rows(
             scored_movements(spark, apdf, truth), detected[split_name], detected[linked_name]
@@ -906,6 +1045,9 @@ def main() -> int:
                 "truth": truth_path,
                 "truth_sha256_16": provenance.file_hash(Path(truth_path)),
                 "link_params": link_params,
+                "link_settings": {
+                    k: v for k, v in dataclasses.asdict(p).items() if k.startswith("link_")
+                },
             },
             notes=_NOTES,
             input_tables=_input_tables(month),
@@ -965,6 +1107,7 @@ def main() -> int:
             events_gt.milestones(bridged, [args.day]),
             detected,
             write,
+            truth_path,
         )
     finally:
         spark.stop()

@@ -119,6 +119,7 @@ STAGE2_OUTPUTS = [
     "link_flight_list.csv", "link_both_ends.csv", "link_events.csv",
     "link_level_across_hole.csv", "link_distance_across_hole.csv",
     "link_partition_check.csv", "link_movements.csv",
+    "link_truth_all_flights.csv",
 ]
 
 

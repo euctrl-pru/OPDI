@@ -116,7 +116,8 @@ before the next day starts.
 
     --grid-json '{"link_min_implied_speed_kt": [300, 350], "link_max_gap_minutes": [360]}'
 
-Settings it does not name keep their defaults. Those that shape the cuts and features
+Settings it does not name keep ``GRID_BASE``, the pre-study settings, not the shipped
+defaults. Those that shape the cuts and features
 (:data:`ONE_VALUE_PER_RUN`) may take only one value, so vary them across runs.
 ``link_directional_edges`` takes ``true`` and ``false``:
 
@@ -367,7 +368,8 @@ def grid_from_json(text: str) -> List[SegmentationParams]:
 def reasons_params_from_json(text: str, grid: List[SegmentationParams]) -> SegmentationParams:
     """The one point of ``--reasons-params-json``, ``{setting: value}``.
 
-    Validated as :func:`grid_from_json` is, and for the same reason. The features are
+    Settings it does not name keep ``GRID_BASE``, the pre-study settings, not the shipped
+    defaults. Validated as :func:`grid_from_json` is, and for the same reason. The features are
     made once, with the grid's :data:`ONE_VALUE_PER_RUN`, so the point takes those from
     the grid, and asking for another value raises rather than reading the wrong features.
     """
