@@ -1680,6 +1680,15 @@ class SegmentationConfig:
     piece after the hole would be claimed by neither day. It adds to the lookback
     ``process_day`` requires: see ``tracks.required_lookback_hours``."""
 
+    link_edge_position_minutes: float = 5.0
+    """How far from each edge of a hole A10 reads through blank samples for a
+    position (minutes). A position message often arrives after altitude and speed:
+    on 2026-06-14, 1,073 of 7,355 cruise holes had none at the edge sample itself.
+    No position inside this span means split.
+
+    The read behind the old edge is covered by the lookback ``process_day`` requires
+    only while this stays within ``link_callsign_lookback_minutes``."""
+
     link_min_implied_speed_kt: float = 315.0
     """Slowest great-circle speed across a hole A10 can link (knots)."""
 

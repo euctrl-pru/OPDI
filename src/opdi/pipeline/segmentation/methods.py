@@ -701,8 +701,12 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     Every value is computed on every row, gap or no gap, and carries no verdict:
     the study applies many parameter sets to one cached frame, so nothing here may
     read a threshold the grid varies. The only parameters reached are the callsign
-    lookahead and lookback and, through :func:`stable_callsign`, the debounce it
-    shares with A9.
+    lookahead and lookback, the edge position window and, through
+    :func:`stable_callsign`, the debounce it shares with A9.
+
+    ``gap_min`` is the silence between samples, which is what the 30 minute split
+    sees. ``position_gap_min`` and ``gc_nm`` are the time and distance between the
+    two edge positions, which can be further apart: see ``position`` below.
 
     ``window`` defaults to the engine's :func:`segment_window`. Whichever is used,
     the frame needs the arm contract's ``_ts`` and the ``_alt_ft`` and ``_spd_kt``
@@ -731,6 +735,29 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
         F.unix_timestamp(old_edge_ts) - F.unix_timestamp(last_seen_ts)
     ) / 60.0 <= p.link_callsign_lookback_minutes
 
+    # The position at each edge, read through blank samples. A position message
+    # often arrives after altitude and speed, so the first sample after a hole has
+    # none in about one cruise hole in seven, and that alone must not read as a stop.
+    # The struct makes both coordinates and the time come from one sample: a row with
+    # a lat and no lon is not a position, and coalescing each one apart could pair
+    # coordinates from two samples seconds apart. The old edge is the row before this
+    # one, which a range frame cannot start from, so it reuses the growing `back`
+    # frame and bounds the age afterwards, as the callsign does. The new edge is a
+    # bounded forward frame because a shrinking one would be quadratic.
+    position = F.when(
+        F.col("lat").isNotNull() & F.col("lon").isNotNull(),
+        F.struct(
+            F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")
+        ),
+    )
+    span_s = int(p.link_edge_position_minutes * 60)
+    last_position = F.last(position, ignorenulls=True).over(back)
+    old_position = F.when(
+        F.unix_timestamp(old_edge_ts) - F.unix_timestamp(last_position.getField("ts")) <= span_s,
+        last_position,
+    )
+    new_position = F.first(position, ignorenulls=True).over(seconds.rangeBetween(0, span_s))
+
     return {
         # Computed here rather than read from `gap_minutes()`, which is the
         # engine's gap and so wrong under a caller's window.
@@ -738,11 +765,16 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
             F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(F.lag(F.col("_ts")).over(w))
         )
         / 60.0,
+        "position_gap_min": (
+            F.unix_timestamp(new_position.getField("ts"))
+            - F.unix_timestamp(old_position.getField("ts"))
+        )
+        / 60.0,
         "gc_nm": haversine_nm(
-            F.lag(F.col("lat")).over(w),
-            F.lag(F.col("lon")).over(w),
-            F.col("lat"),
-            F.col("lon"),
+            old_position.getField("lat"),
+            old_position.getField("lon"),
+            new_position.getField("lat"),
+            new_position.getField("lon"),
         ),
         "alt_before_ft": F.min(altitude_ft()).over(before),
         "alt_after_ft": F.min(altitude_ft()).over(after),
@@ -764,7 +796,14 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     A pure function of the features and the thresholds, so the study can score a
     parameter set without re-segmenting, and can say which test stopped a hole.
     A wrongly glued flight is worse than a split one, so a NULL in a required input
-    fails its test; the ``coalesce`` on every entry is what enforces that.
+    fails its test; the ``coalesce`` on every entry is what enforces that. So a hole
+    with no position inside the window on either side splits.
+
+    Speed and time budget divide the distance by ``position_gap_min``, the time
+    between the samples the positions came from: using the sample gap would credit
+    the aircraft with distance it flew while its position was blank. The length limit
+    reads ``gap_min``, since that is the silence the 30 minute split sees and blank
+    positions at an edge do not make a hole longer.
 
     Three tests are neutral on NULL rather than failing closed, each for a reason:
     vertical rate arrives in separate ADS-B messages, so its absence says nothing;
@@ -774,7 +813,9 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     """
     # Guarded because two samples can share a second, and a Spark 4 session raises
     # on a zero divisor. A plain division here would fail the whole job on them.
-    implied_kt = F.when(f["gap_min"] > 0.0, f["gc_nm"] / (f["gap_min"] / 60.0))
+    implied_kt = F.when(
+        f["position_gap_min"] > 0.0, f["gc_nm"] / (f["position_gap_min"] / 60.0)
+    )
 
     descend_then_climb = (f["vr_before_fpm"] < -p.link_edge_vert_rate_fpm) & (
         f["vr_after_fpm"] > p.link_edge_vert_rate_fpm
@@ -795,7 +836,8 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
             else F.lit(True)
         ),
         "no_time_for_a_stop": (
-            f["gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0 < p.link_min_stop_minutes
+            f["position_gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0
+            < p.link_min_stop_minutes
             if p.link_min_stop_minutes > 0.0
             else F.lit(True)
         ),

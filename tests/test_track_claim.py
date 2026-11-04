@@ -345,6 +345,41 @@ def test_the_furthest_evidence_a_hole_can_use_is_inside_the_read(spark):
     _assert_claimed_once(spark, samples)
 
 
+def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookback(spark):
+    """The longest hole, ending at midnight, with the old edge's position 5 min behind it.
+
+    Old edge 18:00, its last position 17:55, new edge 00:00, its first position 00:05.
+    D's 7 h read begins at 17:00, so both reads see that position, link, and D claims
+    nothing. The 60 min callsign lookback in the requirement is what leaves that room.
+    """
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    p = SegmentationParams()
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    blank = {"lat": None, "lon": None}
+    samples = _every(D_MINUS_1 + hours(17, 30), D_MINUS_1 + hours(17, 55), 5, lon=0.0, callsign="DLH1")
+    samples += _every(D_MINUS_1 + hours(17, 56), D_MINUS_1 + hours(18), 1, callsign="DLH1", **blank)
+    samples += _every(D, D + hours(0, 4), 1, callsign="DLH1", **blank)
+    samples += _every(D + hours(0, 5), D + hours(0, 20), 5, lon=_lon_after(370), callsign="DLH1")
+
+    assert p.link_edge_position_minutes <= p.link_callsign_lookback_minutes
+    lookback = required_lookback_hours("cruise_linked", p)
+    assert lookback == 7
+    _assert_claimed_once(spark, samples)
+
+    sv = make_track(spark, samples)
+    assert _claimed_by_day(sv, D_MINUS_1, lookback).select("track_id").distinct().count() == 1
+    assert _claimed_by_day(sv, D, lookback).count() == 0
+
+    # An hour short, D's read starts at the old edge and misses the position, so D
+    # takes the new piece for a new track while D-1 claims it too. This is what the
+    # lookback prevents, so the assertions above are not passing by accident.
+    assert _claimed_by_day(sv, D, lookback - 1).count() == len(
+        _every(D, D + hours(0, 4), 1) + _every(D + hours(0, 5), D + hours(0, 20), 5)
+    )
+
+
 # --- the truncation warning, under an arm that links across holes -------------
 
 

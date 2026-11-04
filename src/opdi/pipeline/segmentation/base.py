@@ -124,6 +124,11 @@ class SegmentationParams:
     #: ``process_day`` reads this far behind the old edge, so two days' reads see
     #: the same evidence: see ``tracks.required_lookback_hours``.
     link_callsign_lookback_minutes: float = 60.0
+    #: How far from each edge of a hole to read through blank samples for a
+    #: position, because a position message often arrives after altitude and speed.
+    #: None inside it means split. Keep it within the callsign lookback, which is
+    #: what ``process_day``'s lookback leaves room for.
+    link_edge_position_minutes: float = 5.0
     link_min_implied_speed_kt: float = 315.0
     link_max_implied_speed_kt: float = 750.0
     #: ``0.0`` turns this test off.

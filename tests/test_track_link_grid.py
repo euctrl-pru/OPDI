@@ -76,6 +76,7 @@ CRUISE_KT = 480.0
 _FEATURE_SCHEMA = [
     StructField("icao24", StringType(), True),
     StructField("gap_min", DoubleType(), True),
+    StructField("position_gap_min", DoubleType(), True),
     StructField("gc_nm", DoubleType(), True),
     StructField("alt_before_ft", DoubleType(), True),
     StructField("alt_after_ft", DoubleType(), True),
@@ -135,7 +136,7 @@ def _truth(spark, *flights):
 def _feature_row(gap_min=120.0, speed_kt=480.0, cs_before="DLH1", cs_after="DLH1", spd_before_kt=480.0):
     """A hole's features, linkable at the defaults unless the arguments say otherwise."""
     return (
-        "abc123", gap_min, speed_kt * gap_min / 60.0, 36000.0, 36000.0, 0.0, 0.0,
+        "abc123", gap_min, gap_min, speed_kt * gap_min / 60.0, 36000.0, 36000.0, 0.0, 0.0,
         spd_before_kt, cs_before, cs_after,
     )
 
@@ -194,6 +195,8 @@ def _counts(point_id=0, **overrides):
     counts.update(
         day="pooled",
         point_id=point_id,
+        link_min_implied_speed_kt=315.0,
+        link_max_gap_minutes=360.0,
         flights=100,
         tracks_on_flights=110,
         flights_in_one_track=90,
@@ -258,6 +261,7 @@ def test_grid_json_holds_one_value_of_a_setting_the_features_depend_on():
         '{"link_cruise_floor_ft": [25000, 30000]}',
         '{"link_callsign_lookahead_minutes": [5, 10]}',
         '{"link_callsign_lookback_minutes": [30, 60]}',
+        '{"link_edge_position_minutes": [5, 10]}',
     ],
 )
 def test_grid_json_refuses_what_it_cannot_honour(text):
@@ -696,23 +700,60 @@ def test_no_evidence_is_not_within_limits():
 # --- the pick ----------------------------------------------------------------
 
 
-def test_the_most_flights_in_one_track_wins_among_passing_points():
+def test_the_most_crossing_flights_in_one_track_wins_among_passing_points():
     rows = [
-        # The lower bound, but fewer flights: the bound is a limit, not the objective.
-        _counts(point_id=0, flights_in_one_track=80),
-        _counts(point_id=1, flights_in_one_track=90, negative_limit_false_joins=1),
+        # The most flights overall, and the lowest bound, but fewer of the flights the
+        # rule is for: neither of those is the objective.
+        _counts(point_id=0, crossing_flights_in_one_track=70, flights_in_one_track=99),
+        _counts(
+            point_id=1, crossing_flights_in_one_track=80, flights_in_one_track=90,
+            negative_limit_false_joins=1,
+        ),
         # The most of all, but over the limit, so it cannot be chosen.
-        _counts(point_id=2, flights_in_one_track=99, linked_true_link=90, linked_false_join=10),
+        _counts(
+            point_id=2, crossing_flights_in_one_track=90,
+            linked_true_link=90, linked_false_join=10,
+        ),
     ]
     assert pick_recommended(rows)["point_id"] == 1
 
 
-def test_a_tie_goes_to_the_lower_bound():
+def test_a_tie_on_crossing_flights_goes_to_the_most_flights_overall():
     rows = [
-        _counts(point_id=0, negative_limit_false_joins=2),
-        _counts(point_id=1, negative_limit_false_joins=1),
+        # More conservative on both settings, which only counts after this.
+        _counts(
+            point_id=0, crossing_flights_in_one_track=80, flights_in_one_track=85,
+            link_min_implied_speed_kt=400.0, link_max_gap_minutes=120.0,
+        ),
+        _counts(point_id=1, crossing_flights_in_one_track=80, flights_in_one_track=90),
     ]
     assert pick_recommended(rows)["point_id"] == 1
+
+
+def test_a_tie_on_flights_goes_to_the_higher_speed_floor():
+    rows = [
+        # The shorter gap too, which only counts after the speed floor.
+        _counts(point_id=0, link_min_implied_speed_kt=250.0, link_max_gap_minutes=120.0),
+        _counts(point_id=1, link_min_implied_speed_kt=315.0, link_max_gap_minutes=360.0),
+    ]
+    assert pick_recommended(rows)["point_id"] == 1
+
+
+def test_a_tie_on_the_speed_floor_goes_to_the_shorter_gap():
+    rows = [
+        _counts(point_id=0, link_max_gap_minutes=360.0),
+        _counts(point_id=1, link_max_gap_minutes=240.0),
+    ]
+    assert pick_recommended(rows)["point_id"] == 1
+
+
+def test_an_exact_tie_goes_to_the_first_point():
+    """The bound is no longer a tie-break: it is a limit, and the pick stays deterministic."""
+    rows = [
+        _counts(point_id=1, negative_limit_false_joins=1),
+        _counts(point_id=0, negative_limit_false_joins=2),
+    ]
+    assert pick_recommended(rows)["point_id"] == 0
 
 
 def test_no_passing_point_returns_none_and_names_the_lowest_bound():

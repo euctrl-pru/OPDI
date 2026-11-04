@@ -3,8 +3,11 @@
 
 Stage 1 of the ``cruise_linked`` study (spec 2026-11-03). Each grid point's link
 decision is applied to real reception holes and to the holes of
-``track_link_controls``, and the point with the most truth flights in one track is
-picked among those within three safety limits, on numbers pooled over the days:
+``track_link_controls``. Among the points within three safety limits, on numbers pooled
+over the days, the pick is the most flights crossing the European box in one track, which
+is the owner's goal, then the most flights in one track overall, then the more
+conservative settings: the higher ``link_min_implied_speed_kt``, then the shorter
+``link_max_gap_minutes``. The limits are:
 
   negative controls   the upper bound on the false-join rate is at most 1%, over the
                       controls whose gap the point allows and whose realised depth is
@@ -151,6 +154,7 @@ ONE_VALUE_PER_RUN = (
     "link_cruise_floor_ft",
     "link_callsign_lookahead_minutes",
     "link_callsign_lookback_minutes",
+    "link_edge_position_minutes",
 )
 
 NEGATIVE_UPPER_LIMIT = 0.01
@@ -720,17 +724,28 @@ def with_verdicts(row: Dict) -> Dict:
 
 
 def pick_recommended(rows: List[Dict]) -> Optional[Dict]:
-    """The row within the limits with the most flights in one track, or ``None``.
+    """The row within the limits that best serves the owner's goal, or ``None``.
 
-    A tie goes to the lower false-join bound, as a wrongly glued flight is worse than
-    a split one, and then to the first point, so the pick is deterministic.
+    The most flights crossing the European box in one track, as those are the flights
+    the rule exists for, then the most flights in one track overall. A tie then goes
+    to the more conservative settings, as a wrongly glued flight is worse than a split
+    one: the higher ``link_min_implied_speed_kt``, then the shorter
+    ``link_max_gap_minutes``. The false-join bound is not compared here, because a point
+    inside the limits has already met it. The first point takes any tie left, so the
+    pick is deterministic.
     """
     passing = [r for r in rows if r["within_limits"]]
     if not passing:
         return None
     return min(
         passing,
-        key=lambda r: (-r["flights_in_one_track"], r["negative_false_join_upper_95"], r["point_id"]),
+        key=lambda r: (
+            -r["crossing_flights_in_one_track"],
+            -r["flights_in_one_track"],
+            -r["link_min_implied_speed_kt"],
+            r["link_max_gap_minutes"],
+            r["point_id"],
+        ),
     )
 
 

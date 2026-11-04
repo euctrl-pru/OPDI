@@ -33,7 +33,9 @@ cut meets a real hole, and so cannot have that length, is dropped.
 **A control is scored by the rule's own expressions.** Generators only pick samples
 around a cut, then call ``link_feature_columns`` on a window partitioned by
 ``control_id``. They keep what those expressions can read: ``LINK_EDGE_SAMPLES`` rows
-each side, the callsign lookback before the cut, and the lookahead after it.
+each side, the callsign lookback before the cut and the lookahead after it, and the
+edge position window on both sides. So a control whose edge sample has no position
+reads through it, as a real hole does.
 
 ``same_callsign`` compares the callsigns the rule itself sees, not Network Manager's,
 and is true wherever the callsign test cannot reject, including a blank side. So the
@@ -256,8 +258,10 @@ def _score_cuts(samples: DataFrame, cuts: DataFrame, p, expected: str) -> DataFr
     """
     newest_first = Window.partitionBy("control_id").orderBy(F.col("_ts").desc())
     oldest_first = Window.partitionBy("control_id").orderBy(F.col("_ts"))
-    lookback_s = p.link_callsign_lookback_minutes * 60
-    lookahead_s = p.link_callsign_lookahead_minutes * 60
+    # Whichever reaches further: the callsign bounds usually do, but nothing ties them
+    # to the position window, and a control that lost a position would read as blank.
+    lookback_s = max(p.link_callsign_lookback_minutes, p.link_edge_position_minutes) * 60
+    lookahead_s = max(p.link_callsign_lookahead_minutes, p.link_edge_position_minutes) * 60
 
     before = (
         samples.join(

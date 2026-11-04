@@ -129,7 +129,8 @@ def required_lookback_hours(method: str, p) -> int:
     ``link_callsign_lookback_minutes`` is added because the decision also reads the
     callsign up to that long behind the old edge. Every day's read must hold that
     evidence, or two days decide one hole differently and a piece can be claimed by
-    no day at all.
+    no day at all. The edge position read behind the old edge sits inside the same
+    allowance, as ``link_edge_position_minutes`` is far shorter than that lookback.
     """
     if _resolve_segmentation_method(method) == "cruise_linked":
         return max(

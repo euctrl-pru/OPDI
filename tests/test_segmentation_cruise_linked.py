@@ -277,9 +277,10 @@ def test_placeholder_address_splits(spark):
     assert n_tracks(make_track(spark, samples)) == 2
 
 
-def test_null_edge_position_fails_closed(spark):
+def test_no_position_within_the_window_fails_closed(spark):
     samples = _hole_samples()
-    samples[9]["lat"] = None     # the old edge
+    for sample in samples[:10]:     # the whole old piece, 45 s of it
+        sample["lat"] = sample["lon"] = None
     df = make_track(spark, samples)
     assert n_tracks(df) == 2
 
@@ -293,6 +294,109 @@ def test_null_edge_position_fails_closed(spark):
     assert all(r["_brk"] is not None for r in rows)
     assert rows[10]["_brk"] is True
     assert rows[0]["_brk"] is False     # the group's first sample has no gap at all
+
+
+# --- edge positions, read through blank samples --------------------------------
+
+
+def _after_hole(blank_min, gap_min=60.0, nm=330.0):
+    """Cruise, then a hole, then a sample a minute whose first *blank_min* have no position."""
+    samples = _piece(-45, 0.0)
+    samples += _piece(gap_min * 60, _lon(nm), n=12, step_s=60)
+    for sample in samples[10 : 10 + blank_min]:
+        sample["lat"] = sample["lon"] = None
+    return samples
+
+
+def _before_hole(blank_min, gap_min=60.0, nm=330.0):
+    """The same at the old edge: a sample a minute, its last *blank_min* with no position."""
+    samples = _piece(-11 * 60, 0.0, n=12, step_s=60)
+    for sample in samples[12 - blank_min :]:
+        sample["lat"] = sample["lon"] = None
+    return samples + _piece(gap_min * 60, _lon(nm))
+
+
+def _hole_row(spark, samples):
+    """The features at the first sample after the only hole."""
+    rows = _with_features(make_track(spark, samples)).orderBy("event_time").collect()
+    return max(rows, key=lambda r: r["gap_min"] or 0.0)
+
+
+@pytest.mark.parametrize("build", [_after_hole, _before_hole])
+def test_a_blank_edge_sample_reads_the_next_position(spark, build):
+    """330 NM over 60 min of samples: the speed must read the times of the positions."""
+    samples = build(1)
+    assert n_tracks(make_track(spark, samples)) == 1
+
+    row = _hole_row(spark, samples)
+    assert row["gap_min"] == pytest.approx(60.0)
+    assert row["position_gap_min"] == pytest.approx(61.0)
+    assert row["gc_nm"] == pytest.approx(330.0, abs=0.01)
+
+
+@pytest.mark.parametrize("build", [_after_hole, _before_hole])
+def test_speed_uses_the_time_of_the_sample_the_position_came_from(spark, build):
+    """Over the 60 min sample gap this is 330 kt and links. Over the 65 min between
+    the positions it is 305 kt, under the 315 kt floor, and splits."""
+    samples = build(5)
+    assert n_tracks(make_track(spark, samples)) == 2
+    assert _hole_row(spark, samples)["position_gap_min"] == pytest.approx(65.0)
+
+
+@pytest.mark.parametrize("build", [_after_hole, _before_hole])
+def test_a_position_past_the_window_does_not_count(spark, build):
+    """Five minutes is inclusive, and the sixth minute's position is not seen."""
+    fast = dict(gap_min=60.0, nm=480.0)
+    assert n_tracks(make_track(spark, build(5, **fast))) == 1
+    assert n_tracks(make_track(spark, build(6, **fast))) == 2
+
+    row = _hole_row(spark, build(6, **fast))
+    assert row["gc_nm"] is None
+    assert row["position_gap_min"] is None
+
+
+def test_the_window_is_a_parameter_and_changes_the_features(spark):
+    wider = dataclasses.replace(P, link_edge_position_minutes=7.0)
+    df = make_track(spark, _after_hole(6, nm=480.0))
+    assert n_tracks(df) == 2
+    assert n_tracks(df, wider) == 1
+
+
+@pytest.mark.parametrize("missing", ["lat", "lon"])
+def test_half_a_position_does_not_count(spark, missing):
+    """The next sample's full pair is read, not the coordinate this one has."""
+    samples = _after_hole(0)
+    samples[10][missing] = None
+    assert _hole_row(spark, samples)["position_gap_min"] == pytest.approx(61.0)
+
+
+def test_both_coordinates_come_from_one_sample(spark):
+    """Samples with only a lat and only a lon must never pair into a position."""
+    samples = _after_hole(0)
+    for i, sample in enumerate(samples[10:]):
+        sample["lat" if i % 2 else "lon"] = None
+    assert n_tracks(make_track(spark, samples)) == 2
+    assert _hole_row(spark, samples)["gc_nm"] is None
+
+
+def test_the_length_limit_reads_the_sample_gap_not_the_position_gap(spark):
+    """The 30 min split sees samples, so the limit does too. Blank edges cannot lengthen it."""
+    samples = _piece(-45, 0.0)
+    samples += _piece(360 * 60, _lon(480.0 * 6), n=12, step_s=60)
+    samples[10]["lat"] = samples[10]["lon"] = None
+    row = _hole_row(spark, samples)
+    assert row["gap_min"] == pytest.approx(360.0)
+    assert row["position_gap_min"] == pytest.approx(361.0)
+    assert n_tracks(make_track(spark, samples)) == 1
+
+
+def test_the_antimeridian_is_still_crossed_the_short_way_through_blank_edges(spark):
+    fl350 = 35000.0 / FT_PER_M
+    samples = _piece(-45, 178.0, baro_altitude=fl350)
+    samples += _piece(31 * 60, -178.0, baro_altitude=fl350)
+    samples[9]["lat"] = samples[9]["lon"] = None
+    samples[10]["lat"] = samples[10]["lon"] = None
+    assert n_tracks(make_track(spark, samples)) == 1
 
 
 def test_too_few_edge_samples_still_decides(spark):
@@ -363,6 +467,7 @@ def test_defaults_are_on_both_config_classes():
         "link_edge_vert_rate_fpm": 500.0,
         "link_callsign_lookahead_minutes": 10.0,
         "link_callsign_lookback_minutes": 60.0,
+        "link_edge_position_minutes": 5.0,
         "link_min_implied_speed_kt": 315.0,
         "link_max_implied_speed_kt": 750.0,
         "link_min_speed_ratio": 0.0,
@@ -397,6 +502,7 @@ def test_features_at_the_first_sample_after_the_hole(spark):
     row = _with_features(df).orderBy("event_time").collect()[10]
 
     assert row["gap_min"] == pytest.approx(191.0)
+    assert row["position_gap_min"] == pytest.approx(191.0)
     assert row["gc_nm"] == pytest.approx(1530.0, abs=0.01)
     assert row["alt_before_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
     assert row["alt_after_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
@@ -477,6 +583,7 @@ def test_a_caller_window_scopes_every_feature(spark):
 
 _DOUBLES = {
     "gap_min": 191.0,
+    "position_gap_min": 191.0,
     "gc_nm": 1530.0,
     "alt_before_ft": 36000.0,
     "alt_after_ft": 36000.0,
@@ -500,12 +607,12 @@ def _decide(spark, p=P, **overrides):
     [
         ({}, True),
         # Gap and implied speed, gap 60 min so implied speed is gc_nm. Inclusive.
-        ({"gap_min": 360.0, "gc_nm": 2880.0}, True),
-        ({"gap_min": 360.5, "gc_nm": 2880.0}, False),
-        ({"gap_min": 60.0, "gc_nm": 315.0}, True),
-        ({"gap_min": 60.0, "gc_nm": 314.9}, False),
-        ({"gap_min": 60.0, "gc_nm": 750.0}, True),
-        ({"gap_min": 60.0, "gc_nm": 750.1}, False),
+        ({"gap_min": 360.0, "position_gap_min": 360.0, "gc_nm": 2880.0}, True),
+        ({"gap_min": 360.5, "position_gap_min": 360.5, "gc_nm": 2880.0}, False),
+        ({"gap_min": 60.0, "position_gap_min": 60.0, "gc_nm": 315.0}, True),
+        ({"gap_min": 60.0, "position_gap_min": 60.0, "gc_nm": 314.9}, False),
+        ({"gap_min": 60.0, "position_gap_min": 60.0, "gc_nm": 750.0}, True),
+        ({"gap_min": 60.0, "position_gap_min": 60.0, "gc_nm": 750.1}, False),
         # Cruise floor, inclusive.
         ({"alt_before_ft": 25000.0}, True),
         ({"alt_before_ft": 24999.0}, False),
@@ -523,14 +630,16 @@ def _decide(spark, p=P, **overrides):
         ({"icao24": "ffffff"}, False),
         ({"icao24": "FFFFFF"}, False),
         # A gap of zero cannot imply a speed, and must not read as linkable.
-        ({"gap_min": 0.0}, False),
+        ({"position_gap_min": 0.0}, False),
     ],
 )
 def test_linkable_on_literal_features(spark, overrides, expected):
     assert _decide(spark, **overrides) is expected
 
 
-@pytest.mark.parametrize("name", ["gap_min", "gc_nm", "alt_before_ft", "alt_after_ft", "icao24"])
+@pytest.mark.parametrize(
+    "name", ["gap_min", "position_gap_min", "gc_nm", "alt_before_ft", "alt_after_ft", "icao24"]
+)
 def test_a_null_required_input_is_not_linkable(spark, name):
     assert _decide(spark, **{name: None}) is False
 
@@ -576,6 +685,7 @@ _CHECK_NAMES = [
 #: A hole every test accepts at the defaults: 191 min at 480 kt.
 _GOOD_HOLE = {
     "gap_min": 191.0,
+    "position_gap_min": 191.0,
     "gc_nm": 1528.0,
     "alt_before_ft": 36000.0,
     "alt_after_ft": 36000.0,
@@ -593,7 +703,13 @@ _STOP_ON = dataclasses.replace(P, link_min_stop_minutes=20.0)
 #: ``(settings, what differs from the good hole, the tests that must fail)``.
 _CHECK_CASES = [
     (P, {}, []),
-    (P, {"gap_min": 400.0, "gc_nm": 3200.0}, ["gap_not_too_long"]),
+    (P, {"gap_min": 400.0, "position_gap_min": 400.0, "gc_nm": 3200.0}, ["gap_not_too_long"]),
+    # The length limit reads the sample gap, and only that.
+    (P, {"gap_min": 360.0, "position_gap_min": 365.0, "gc_nm": 2920.0}, []),
+    (P, {"gap_min": 361.0, "position_gap_min": 361.0, "gc_nm": 2888.0}, ["gap_not_too_long"]),
+    (P, {"gap_min": None}, ["gap_not_too_long"]),
+    # The speed tests read the position gap, and only that: 1,528 NM in 382 min is 240 kt.
+    (P, {"position_gap_min": 382.0}, ["implied_speed_not_too_slow"]),
     (P, {"alt_before_ft": 20000.0}, ["cruise_at_old_edge"]),
     (P, {"alt_before_ft": None}, ["cruise_at_old_edge"]),
     (P, {"alt_after_ft": 20000.0}, ["cruise_at_new_edge"]),
@@ -608,12 +724,8 @@ _CHECK_CASES = [
     (P, {"gc_nm": 5000.0}, ["implied_speed_not_impossible"]),
     (P, {"gc_nm": None}, ["implied_speed_not_too_slow", "implied_speed_not_impossible"]),
     # Two samples in one second: no speed can be implied, and the division is guarded.
-    (P, {"gap_min": 0.0}, ["implied_speed_not_too_slow", "implied_speed_not_impossible"]),
-    (
-        P,
-        {"gap_min": None},
-        ["gap_not_too_long", "implied_speed_not_too_slow", "implied_speed_not_impossible"],
-    ),
+    (P, {"position_gap_min": 0.0}, ["implied_speed_not_too_slow", "implied_speed_not_impossible"]),
+    (P, {"position_gap_min": None}, ["implied_speed_not_too_slow", "implied_speed_not_impossible"]),
     (P, {"icao24": "000000"}, ["real_address"]),
     (P, {"icao24": "FFFFFF"}, ["real_address"]),
     (P, {"icao24": None}, ["real_address"]),
@@ -623,10 +735,17 @@ _CHECK_CASES = [
     (_RATIO_ON, {}, []),
     (_RATIO_ON, {"spd_before_kt": 900.0}, ["not_slow_for_this_flight"]),
     (_RATIO_ON, {"spd_before_kt": None}, ["not_slow_for_this_flight"]),
+    # 1,528 NM in 230 min is 399 kt: over the floor, under 0.85 x 480 kt.
+    (_RATIO_ON, {"position_gap_min": 230.0}, ["not_slow_for_this_flight"]),
     # 191 min at 480 kt takes 141 min at 650 kt, which leaves 50 min for a stop.
     (_STOP_ON, {}, ["no_time_for_a_stop"]),
     (_STOP_ON, {"gc_nm": 1960.0}, []),
+    # The same distance with 215 min between positions leaves 34 min, room for a stop.
+    (_STOP_ON, {"gc_nm": 1960.0, "position_gap_min": 215.0}, ["no_time_for_a_stop"]),
     (_STOP_ON, {"gc_nm": None}, [
+        "implied_speed_not_too_slow", "implied_speed_not_impossible", "no_time_for_a_stop",
+    ]),
+    (_STOP_ON, {"gc_nm": 1960.0, "position_gap_min": None}, [
         "implied_speed_not_too_slow", "implied_speed_not_impossible", "no_time_for_a_stop",
     ]),
     # Several at once: every failing test says so.

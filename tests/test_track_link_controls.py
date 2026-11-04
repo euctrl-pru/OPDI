@@ -492,6 +492,73 @@ def test_controls_keep_enough_samples_when_they_are_sparse(spark):
     assert row["vr_after_fpm"] == pytest.approx(10.0 * FPM_PER_MPS * 3 / 5)
 
 
+def _blank_position(samples, first_s, last_s):
+    for sample in samples:
+        if first_s <= sample["t"] <= last_s:
+            sample["lat"] = sample["lon"] = None
+
+
+def _pair_with_blank_edges(spark, step_s=60, blank_s=60):
+    """Two flights whose cruise edges have no position for *blank_s* either side of the cut."""
+    s1, t1, _, last_1 = _flight(0, 180, key="F1", step_s=step_s)
+    s2, t2, first_2, _ = _flight(
+        last_1 + 55 * 60, 180, start_nm=180 * CRUISE_KT / 60.0, key="F2", step_s=step_s
+    )
+    _blank_position(s1, last_1 - blank_s, last_1)
+    _blank_position(s2, first_2, first_2 + blank_s)
+    return make_track(spark, s1 + s2), _truth(spark, [t1, t2]), last_1, first_2
+
+
+def test_a_negative_control_with_blank_edges_reads_the_positions_beside_them(spark):
+    tracks, truth, _, _ = _pair_with_blank_edges(spark)
+    row = negative_controls(tracks, truth, FLOOR_FT, depths_min=(0,)).collect()[0]
+
+    assert row["gap_min"] == 60.0
+    # The edge and the sample before it are blank, so each position is 2 min from its edge.
+    assert row["position_gap_min"] == 64.0
+    # The second flight's cruise opens where the first's ends: only those 4 min are flown.
+    assert row["gc_nm"] == pytest.approx(4 * CRUISE_KT / 60.0, rel=1e-3)
+
+
+def test_a_control_with_blank_edges_scores_as_the_same_hole_left_in_the_data(spark):
+    tracks, truth, last_1, first_2 = _pair_with_blank_edges(spark)
+    control = negative_controls(tracks, truth, FLOOR_FT, depths_min=(0,)).collect()[0]
+
+    kept = tracks.filter(
+        (F.col("event_time") <= F.lit(_at(last_1))) | (F.col("event_time") >= F.lit(_at(first_2)))
+    )
+    hole = real_hole_candidates(kept, P).collect()[0]
+    for name in link_feature_columns(P):
+        assert control[name] == hole[name], name
+
+
+def test_controls_keep_the_position_window_whatever_the_callsign_bounds(spark):
+    """With 10 s samples, five rows are 50 s. Callsign bounds of 30 s reach no further,
+    so only the position window can keep the samples 3 min from the cut."""
+    p = SegmentationParams(
+        link_callsign_lookback_minutes=0.5, link_callsign_lookahead_minutes=0.5
+    )
+    tracks, truth, _, _ = _pair_with_blank_edges(spark, step_s=10, blank_s=170)
+    row = negative_controls(tracks, truth, FLOOR_FT, p=p, depths_min=(0,)).collect()[0]
+    assert row["position_gap_min"] == pytest.approx(60.0 + 2 * 3.0)
+    assert row["gc_nm"] is not None
+
+
+def test_a_positive_control_with_a_blank_edge_still_links(spark):
+    samples, truth, first, last = _flight(0, 240)
+    middle = (first + last) // 2
+    _blank_position(samples, middle - 60 * 60, middle - 60 * 60)   # the old edge
+    _blank_position(samples, middle + 60 * 60, middle + 60 * 60)   # the new edge
+    row = _linked(
+        positive_controls(make_track(spark, samples), _truth(spark, [truth]), FLOOR_FT, gaps_min=(120,))
+    ).collect()[0]
+
+    assert row["gap_min"] == 120.0
+    assert row["position_gap_min"] == 122.0
+    assert row["gc_nm"] == pytest.approx(976.0, rel=1e-3)
+    assert row["_linked"] is True
+
+
 def _plan(df):
     return df._jdf.queryExecution().executedPlan().toString()
 
