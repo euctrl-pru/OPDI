@@ -11,6 +11,8 @@ import pytest
 from conftest import _EPOCH, make_track
 from pyspark.sql import functions as F
 from track_link_controls import (
+    DEPTH_TOLERANCE_MIN,
+    control_funnel,
     label_real_holes,
     negative_controls,
     positive_controls,
@@ -172,18 +174,32 @@ def test_a_hole_with_no_truth_is_unknown(spark):
     assert [r["label"] for r in rows] == ["unknown"]
 
 
-def test_a_landing_with_no_later_takeoff_is_unknown(spark):
-    """The flight may have landed, or truth may simply not hold the rest of it."""
+def test_a_landing_alone_is_a_false_join(spark):
+    """Both edges are at cruise, so a landing between them is a stop, whatever followed."""
     only = _flight(0, 60)[1]  # lands at 70 min
     rows = label_real_holes(_holes(spark, (1800, 3 * 3600)), _truth(spark, [only])).collect()
-    assert [r["label"] for r in rows] == ["unknown"]
+    assert [r["label"] for r in rows] == ["false_join"]
 
 
-def test_a_takeoff_followed_by_a_landing_inside_a_hole_is_not_a_false_join(spark):
-    """Spec: a landing and a *later* take-off. This order proves no stop between edges."""
+def test_a_takeoff_alone_is_a_false_join(spark):
+    later = _flight(3600, 300)[1]
+    rows = label_real_holes(_holes(spark, (0, 2 * 3600)), _truth(spark, [later])).collect()
+    assert [r["label"] for r in rows] == ["false_join"]
+
+
+def test_a_whole_flight_inside_a_hole_is_a_false_join(spark):
+    """Take-off then landing, both between the edges: a flight neither edge belongs to."""
     whole = _flight(3600, 60)[1]
     rows = label_real_holes(_holes(spark, (0, 3 * 3600)), _truth(spark, [whole])).collect()
-    assert [r["label"] for r in rows] == ["unknown"]
+    assert [r["label"] for r in rows] == ["false_join"]
+
+
+def test_a_hole_edge_on_the_flights_own_event_lies_within_it(spark):
+    flight = _flight(0, 300)[1]  # 0 to 310 min
+    rows = label_real_holes(
+        _holes(spark, (0, 3600), (3600, 310 * 60)), _truth(spark, [flight])
+    ).collect()
+    assert [r["label"] for r in rows] == ["true_link", "true_link"]
 
 
 def test_a_false_join_outranks_a_containing_flight(spark):
@@ -318,6 +334,76 @@ def test_a_continuing_flight_control_can_pass_the_speed_test(spark):
     assert row["_linked"] is True  # a false join, and the study counts it as one
 
 
+def test_the_deep_cut_records_the_depth_it_reached(spark):
+    tracks, truth, last_1, first_2 = _pair(spark)
+    # A short real hole on the old side only, within the tolerance.
+    holed = tracks.filter(~F.col("event_time").between(_at(last_1 - 33 * 60 + 1), _at(last_1 - 27 * 60)))
+    row = negative_controls(holed, truth, FLOOR_FT, depths_min=(30,)).collect()[0]
+
+    assert row["depth_min"] == 30
+    assert row["old_depth_min"] == 33
+    assert row["new_depth_min"] == 30
+    assert row["t_old_edge"] == _at(last_1 - 33 * 60)
+    assert row["pair_id"] == "F1|F2"
+
+
+def test_a_real_hole_under_a_deep_cut_drops_it_rather_than_moving_it(spark):
+    """Three depths would all land on one sample 200 min in, one hole counted thrice."""
+    tracks, truth, last_1, _ = _pair(spark, cruise_1=300, cruise_2=300)
+    holed = tracks.filter(
+        ~F.col("event_time").between(_at(last_1 - 200 * 60 + 1), _at(last_1 - 25 * 60))
+    )
+    depths = (0, 30, 60, 120)
+
+    assert sorted(_rows_by_depth(negative_controls(holed, truth, FLOOR_FT, depths_min=depths))) == [0]
+    funnel = control_funnel(holed, truth, FLOOR_FT, depths_min=depths, gaps_min=(60,))
+    assert funnel["negative_cuts_dropped_for_depth"] == 3
+
+
+def test_the_depth_tolerance_is_inclusive(spark):
+    tracks, truth, _, first_2 = _pair(spark)
+    limit = int(DEPTH_TOLERANCE_MIN)
+
+    def kept(reach_min):
+        holed = tracks.filter(
+            ~F.col("event_time").between(_at(first_2 + 25 * 60), _at(first_2 + reach_min * 60 - 1))
+        )
+        return negative_controls(holed, truth, FLOOR_FT, depths_min=(30,)).count()
+
+    assert kept(30 + limit) == 1
+    assert kept(30 + limit + 1) == 0
+
+
+def test_one_hole_reached_from_two_depths_is_one_control(spark):
+    tracks, truth, last_1, first_2 = _pair(spark)
+    holed = tracks.filter(
+        ~F.col("event_time").between(_at(last_1 - 34 * 60 + 1), _at(last_1 - 29 * 60))
+        & ~F.col("event_time").between(_at(first_2 + 29 * 60), _at(first_2 + 34 * 60 - 1))
+    )
+    rows = negative_controls(holed, truth, FLOOR_FT, depths_min=(30, 32)).collect()
+
+    assert [r["depth_min"] for r in rows] == [30]  # the shallower request names it
+    assert (rows[0]["old_depth_min"], rows[0]["new_depth_min"]) == (34, 34)
+
+
+def test_interleaved_airframes_pair_only_with_themselves(spark):
+    """Every other flight in time belongs to another airframe, and they never overlap."""
+    f1, tf1, _, _ = _flight(0, 60, key="F1", icao24="abc123")
+    g1, tg1, _, _ = _flight(2 * 3600, 60, key="G1", icao24="def456")
+    f2, tf2, _, _ = _flight(4 * 3600, 60, key="F2", icao24="abc123")
+    g2, tg2, _, _ = _flight(6 * 3600, 60, key="G2", icao24="def456")
+    tracks = make_track(spark, f1 + g1 + f2 + g2)
+    truth = _truth(spark, [tf1, tg1, tf2, tg2])
+
+    rows = negative_controls(tracks, truth, FLOOR_FT, depths_min=(0,)).collect()
+
+    assert {(r["pair_id"], r["icao24"]) for r in rows} == {
+        ("F1|F2", "abc123"),
+        ("G1|G2", "def456"),
+    }
+    assert {r["gap_min"] for r in rows} == {180.0}
+
+
 def test_gap_strata_are_the_specs(spark):
     def stratum(base_gap_min):
         tracks, truth, _, _ = _pair(spark, base_gap_min=base_gap_min)
@@ -406,6 +492,16 @@ def test_controls_keep_enough_samples_when_they_are_sparse(spark):
     assert row["vr_after_fpm"] == pytest.approx(10.0 * FPM_PER_MPS * 3 / 5)
 
 
+def _plan(df):
+    return df._jdf.queryExecution().executedPlan().toString()
+
+
+def test_minutes_are_broadcast_so_no_cartesian_product_is_planned(spark):
+    tracks, truth, _, _ = _pair(spark)
+    assert "CartesianProduct" not in _plan(negative_controls(tracks, truth, FLOOR_FT))
+    assert "CartesianProduct" not in _plan(positive_controls(tracks, truth, FLOOR_FT))
+
+
 # --- positive controls ------------------------------------------------------
 
 
@@ -418,7 +514,8 @@ def test_positive_control_has_a_hole_of_the_requested_length(spark):
     assert [r["gap_min"] for r in controls] == [60.0, 120.0]
     assert [r["requested_gap_min"] for r in controls] == [60, 120]
     assert [r["expected"] for r in controls] == ["link", "link"]
-    assert all(r["depth_min"] is None for r in controls)
+    assert all(r["depth_min"] is None and r["pair_id"] is None for r in controls)
+    assert all(r["old_depth_min"] is None and r["new_depth_min"] is None for r in controls)
     assert controls[0]["control_id"] != controls[1]["control_id"]
     # The middle of the cruise, starting at the floor.
     middle = (first + last) / 2
@@ -467,6 +564,68 @@ def test_a_real_hole_at_the_cut_gives_no_control_of_the_wrong_length(spark):
         make_track(spark, samples), _truth(spark, [truth]), FLOOR_FT, gaps_min=(60,)
     )
     assert controls.count() == 0
+
+
+# --- the funnel -------------------------------------------------------------
+
+
+def test_the_funnel_accounts_for_every_negative_pair_and_attempt(spark):
+    # abc123: a usable pair with one of each fate, then a pair that overlaps.
+    s1, t1, _, last_1 = _flight(0, 180, key="F1")
+    s2, t2, first_2, last_2 = _flight(last_1 + 25 * 60, 90, key="F2")
+    s3, t3, _, _ = _flight(last_2, 60, key="F3")
+    # def456: a pair whose second flight never reaches the floor.
+    g1, tg1, _, _ = _flight(0, 60, key="G1", icao24="def456")
+    g2, tg2, _, _ = _flight(4 * 3600, 60, key="G2", icao24="def456")
+    for sample in g2:
+        sample["baro_altitude"] = LOW_M
+    tracks = make_track(spark, s1 + s2 + s3 + g1 + g2)
+    truth = _truth(spark, [t1, t2, t3, tg1, tg2])
+    holed = tracks.filter(
+        # One hole reached from depths 30 and 32.
+        ~F.col("event_time").between(_at(last_1 - 34 * 60 + 1), _at(last_1 - 29 * 60))
+        & ~F.col("event_time").between(_at(first_2 + 29 * 60), _at(first_2 + 34 * 60 - 1))
+        # A hole that pushes depth 60 ten minutes too far.
+        & ~F.col("event_time").between(_at(last_1 - 70 * 60 + 1), _at(last_1 - 55 * 60))
+    )
+    depths = (0, 30, 32, 60, 120)  # base gap 30: too short; 120: past F2's 90 min cruise
+
+    funnel = control_funnel(holed, truth, FLOOR_FT, depths_min=depths, gaps_min=(60,))
+
+    assert funnel["negative_pairs_considered"] == 3
+    assert funnel["negative_pairs_lost_to_overlap"] == 1
+    assert funnel["negative_pairs_lost_to_no_cruise_sample"] == 1
+    assert funnel["negative_pairs_usable"] == 1
+    assert funnel["negative_attempts"] == 5
+    assert funnel["negative_excluded_too_short"] == 1
+    assert funnel["negative_cuts_dropped_outside_cruise"] == 1
+    assert funnel["negative_cuts_dropped_for_depth"] == 1
+    assert funnel["negative_repeated_holes_dropped"] == 1
+    assert funnel["negative_controls"] == 1
+    assert negative_controls(holed, truth, FLOOR_FT, depths_min=depths).count() == 1
+
+
+def test_the_funnel_accounts_for_every_positive_attempt(spark):
+    clean, t_clean, _, _ = _flight(0, 240, key="CLEAN", icao24="aaa001")
+    holed, t_holed, first, last = _flight(0, 240, key="HOLED", icao24="aaa002")
+    middle = (first + last) / 2
+    holed = [s for s in holed if not middle - 40 * 60 < s["t"] < middle + 40 * 60]
+    low, t_low, _, _ = _flight(0, 240, key="LOW", icao24="aaa003")
+    for sample in low:
+        sample["baro_altitude"] = LOW_M
+    tracks = make_track(spark, clean + holed + low)
+    truth = _truth(spark, [t_clean, t_holed, t_low])
+    gaps = (20, 60, 400)
+
+    funnel = control_funnel(tracks, truth, FLOOR_FT, depths_min=(0,), gaps_min=gaps)
+
+    assert funnel["positive_attempts"] == 9
+    assert funnel["positive_dropped_no_cruise_sample"] == 3
+    assert funnel["positive_dropped_outside_cruise"] == 2   # 400 min, clean and holed
+    assert funnel["positive_dropped_by_gap_tolerance"] == 2  # 20 and 60, holed
+    assert funnel["positive_excluded_too_short"] == 1        # 20, clean
+    assert funnel["positive_controls"] == 1                  # 60, clean
+    assert positive_controls(tracks, truth, FLOOR_FT, gaps_min=gaps).count() == 1
 
 
 # --- rule of three ----------------------------------------------------------

@@ -19,6 +19,10 @@ the cruise floor in the first flight and the first in the second. That alone is 
 easy: both edges are near one airport, so the implied speed rejects nearly all of
 it. Deep cuts move further into cruise by the same time on each side, which gives
 the case that matters: A to B then B to C, with cruise edges and a plausible speed.
+A real reception hole under a cut moves the edge beyond the depth asked for, so each
+control records the depth it reached, one that overshoots by more than
+``DEPTH_TOLERANCE_MIN`` is dropped, and one hole is counted once per pair. Otherwise
+one hole at several depths would tighten the upper bound without new evidence.
 
 **Positive controls** remove the middle of one truth flight's cruise, and no link is
 a missed link. Removal never reaches beyond the requested length, since a hole a
@@ -38,13 +42,16 @@ same-callsign stratum is the one the other tests must decide alone. Controls of
 360 min keep a stratum of their own: they exceed every ``link_max_gap_minutes`` in
 the study's grid, so they read as correct rejections and must not hide among the rest.
 
+Every reason a control does not exist is counted by :func:`control_funnel`, because
+a rate over the controls that survived says nothing about the ones that did not.
+
 This module reads no storage. Callers hand it frames: samples with the raw
 ``osn_tracks`` columns (``icao24``, ``event_time``, ``lat``, ``lon``,
 ``baro_altitude``, ``velocity``, ``vert_rate``, ``callsign``), and truth from
 ``track_truth.load_flight_intervals``.
 """
 import math
-from typing import Iterable, Optional
+from typing import Dict, Iterable, Optional
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
@@ -58,6 +65,7 @@ __all__ = [
     "label_real_holes",
     "negative_controls",
     "positive_controls",
+    "control_funnel",
     "rule_of_three_upper",
 ]
 
@@ -65,6 +73,11 @@ __all__ = [
 #: minutes. A hole ends on a real sample, so it is short by up to one sample
 #: interval; anything more means a real hole sits at the cut.
 POSITIVE_GAP_TOLERANCE_MIN = 1.0
+
+#: How far beyond its requested depth a negative control's cut may land, in minutes.
+#: A cut takes the nearest sample further into cruise, so a real reception hole there
+#: pushes it on; past this it is no longer the depth it would be reported under.
+DEPTH_TOLERANCE_MIN = 5.0
 
 _DEFAULT_PARAMS = SegmentationParams()
 
@@ -101,16 +114,15 @@ def real_hole_candidates(tracks: DataFrame, p) -> DataFrame:
 def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
     """Add ``label``: ``true_link``, ``false_join`` or ``unknown``. One row per hole.
 
-    ``true_link`` means the hole lies within one flight's ``[t_off, t_land]``, and
-    ``false_join`` that a truth landing and a later take-off of that airframe fall
-    inside it. Anything else is ``unknown``, including a landing alone, since truth
-    may not hold what came next. Where overlapping truth satisfies both, a false
-    join wins, because hiding one is the worse error. Matched on ``icao24`` and time
-    only.
+    ``false_join`` means a truth landing or take-off of that airframe falls inside the
+    hole. Either one proves a stop, given what is being labelled: a linked hole has
+    both edges at cruise, so an aircraft cannot have touched the ground between them
+    and still be one flight. ``true_link`` means the hole lies within one flight's
+    ``[t_off, t_land]`` with no such event inside. Anything else is ``unknown``.
+    Matched on ``icao24`` and time only.
 
-    A landing is followed by a take-off exactly when the earliest landing in the
-    hole precedes the latest take-off in it, so no join of flights to flights is
-    needed.
+    Inside is strict: a hole whose edge is exactly a flight's take-off or landing lies
+    within that flight, and the event is not hidden by it.
     """
     key = ["icao24", "t_old_edge", "t_new_edge"]
     old, new = F.col("t_old_edge"), F.col("t_new_edge")
@@ -122,14 +134,15 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
         .join(truth.select("icao24", "t_off", "t_land"), on="icao24", how="left")
         .groupBy(*key)
         .agg(
-            F.max((t_off <= old) & (new <= t_land)).alias("_inside_one"),
-            F.min(F.when(t_land.between(old, new), t_land)).alias("_first_landing"),
-            F.max(F.when(t_off.between(old, new), t_off)).alias("_last_takeoff"),
+            F.max((t_off <= old) & (new <= t_land)).alias("_within_one"),
+            F.max(
+                ((old < t_off) & (t_off < new)) | ((old < t_land) & (t_land < new))
+            ).alias("_event_inside"),
         )
         .withColumn(
             "label",
-            F.when(F.col("_first_landing") < F.col("_last_takeoff"), "false_join")
-            .when(F.col("_inside_one"), "true_link")
+            F.when(F.col("_event_inside"), "false_join")
+            .when(F.col("_within_one"), "true_link")
             .otherwise("unknown"),
         )
         .select(*key, "label")
@@ -180,6 +193,8 @@ def _deep_cuts(samples: DataFrame, floor_ft: float, depths: DataFrame) -> tuple:
     the last such sample, or starts at the first. A dip below the floor ends it, and
     a sample with no altitude does not, since ``linkable``'s altitude test ignores a
     NULL too. A flight without enough cruise for a depth has no cut at that depth.
+    Each cut carries the depth it reached, which a real hole can put beyond the one
+    asked for.
     """
     flight = Window.partitionBy("flight_key")
     below = F.col("_alt_ft") < floor_ft
@@ -200,12 +215,24 @@ def _deep_cuts(samples: DataFrame, floor_ft: float, depths: DataFrame) -> tuple:
     old_cut = with_runs.filter(
         (_seconds("_ts") <= _seconds("_last_cruise") - depth_s)
         & (F.col("_dip_before_last").isNull() | (F.col("_ts") > F.col("_dip_before_last")))
-    ).groupBy("flight_key", "depth_min").agg(F.max("_ts").alias("t_old_edge"))
+    ).groupBy("flight_key", "depth_min", "_last_cruise").agg(F.max("_ts").alias("t_old_edge"))
     new_cut = with_runs.filter(
         (_seconds("_ts") >= _seconds("_first_cruise") + depth_s)
         & (F.col("_dip_after_first").isNull() | (F.col("_ts") < F.col("_dip_after_first")))
-    ).groupBy("flight_key", "depth_min").agg(F.min("_ts").alias("t_new_edge"))
+    ).groupBy("flight_key", "depth_min", "_first_cruise").agg(F.min("_ts").alias("t_new_edge"))
+    old_cut = old_cut.withColumn(
+        "old_depth_min", (_seconds("_last_cruise") - _seconds("t_old_edge")) / 60.0
+    ).drop("_last_cruise")
+    new_cut = new_cut.withColumn(
+        "new_depth_min", (_seconds("t_new_edge") - _seconds("_first_cruise")) / 60.0
+    ).drop("_first_cruise")
     return old_cut, new_cut
+
+
+_CUT_COLUMNS = (
+    "control_id", "pair_id", "flight_before", "flight_after", "t_old_edge", "t_new_edge",
+    "depth_min", "old_depth_min", "new_depth_min", "requested_gap_min",
+)
 
 
 def _gap_stratum(gap_min: Column) -> Column:
@@ -221,8 +248,8 @@ def _gap_stratum(gap_min: Column) -> Column:
 def _score_cuts(samples: DataFrame, cuts: DataFrame, p, expected: str) -> DataFrame:
     """One row per cut: the samples around it, scored by the rule's own expressions.
 
-    ``cuts`` has ``control_id``, ``depth_min``, ``requested_gap_min``, the two edge
-    times, and the flights on each side as ``flight_before`` and ``flight_after``.
+    ``cuts`` has the :data:`_CUT_COLUMNS`: the flights on each side, the two edge
+    times, and the columns that say what kind of control it is.
     """
     newest_first = Window.partitionBy("control_id").orderBy(F.col("_ts").desc())
     oldest_first = Window.partitionBy("control_id").orderBy(F.col("_ts"))
@@ -258,7 +285,7 @@ def _score_cuts(samples: DataFrame, cuts: DataFrame, p, expected: str) -> DataFr
     return (
         before.unionByName(after)
         .select(
-            "control_id", "depth_min", "requested_gap_min", "t_old_edge", "t_new_edge", "_ts",
+            *[c for c in _CUT_COLUMNS if c not in ("flight_before", "flight_after")], "_ts",
             *[c.alias(name) for name, c in features.items()],
         )
         # A sample duplicated at the new edge is zero minutes after its twin.
@@ -274,70 +301,122 @@ def _score_cuts(samples: DataFrame, cuts: DataFrame, p, expected: str) -> DataFr
 
 
 def _minutes_frame(samples: DataFrame, values: Iterable[float], name: str) -> DataFrame:
-    """A one-column frame of the given minutes, in the session of *samples*."""
-    spark = samples.sparkSession
-    return spark.createDataFrame([(float(v),) for v in values], [name])
+    """A one-column frame of the given minutes, in the session of *samples*.
 
-
-def negative_controls(
-    tracks: DataFrame,
-    truth: DataFrame,
-    floor_ft: float,
-    depths_min=(0, 30, 60, 120),
-    p: SegmentationParams = _DEFAULT_PARAMS,
-) -> DataFrame:
-    """A real landing hidden in a hole, one row per consecutive flight pair and depth.
-
-    ``expected`` is ``split``. A pair whose truth intervals overlap is not a landing
-    followed by a take-off, so it gives no control. ``p`` supplies the callsign
-    settings the features read; pass the same one given to
-    :func:`real_hole_candidates`.
+    Broadcast because it gets cross-joined with every sample at the floor, and a frame
+    built from a list has no size estimate, so Spark would plan a ``CartesianProduct``.
     """
-    samples = _flight_samples(tracks, truth)
-    old_cut, new_cut = _deep_cuts(samples, floor_ft, _minutes_frame(samples, depths_min, "depth_min"))
+    spark = samples.sparkSession
+    return F.broadcast(spark.createDataFrame([(float(v),) for v in values], [name]))
 
+
+def _hole_min() -> Column:
+    return (_seconds("t_new_edge") - _seconds("t_old_edge")) / 60.0
+
+
+def _flights_in_cruise(samples: DataFrame, floor_ft: float) -> DataFrame:
+    """``flight_key`` of each flight with a sample at or above the floor."""
+    return samples.filter(F.col("_alt_ft") >= floor_ft).select("flight_key").distinct()
+
+
+def _flight_pairs(samples: DataFrame, truth: DataFrame, floor_ft: float) -> DataFrame:
+    """Consecutive truth flights of one airframe, each with a ``pair_fate``.
+
+    ``overlap`` means the intervals overlap, so this is not a landing followed by a
+    take-off. ``no_cruise_sample`` means a flight has no sample at the floor to cut at.
+    """
     by_airframe = Window.partitionBy("icao24").orderBy("t_off", "t_land")
+    cruising = _flights_in_cruise(samples, floor_ft).withColumn("_cruises", F.lit(True))
     pairs = (
         truth.select("flight_key", "icao24", "t_off", "t_land")
         .distinct()
         .withColumn("flight_after", F.lead("flight_key").over(by_airframe))
         .withColumn("_next_off", F.lead("t_off").over(by_airframe))
-        .filter(F.col("t_land") <= F.col("_next_off"))
-        .select(F.col("flight_key").alias("flight_before"), "flight_after")
+        .filter(F.col("flight_after").isNotNull())
+        .withColumnRenamed("flight_key", "flight_before")
     )
-    cuts = (
-        pairs.join(old_cut.withColumnRenamed("flight_key", "flight_before"), on="flight_before")
+    return (
+        pairs.join(
+            cruising.select(
+                F.col("flight_key").alias("flight_before"), F.col("_cruises").alias("_cruises_1")
+            ),
+            on="flight_before",
+            how="left",
+        )
+        .join(
+            cruising.select(
+                F.col("flight_key").alias("flight_after"), F.col("_cruises").alias("_cruises_2")
+            ),
+            on="flight_after",
+            how="left",
+        )
+        .withColumn("pair_id", F.concat_ws("|", "flight_before", "flight_after"))
+        .withColumn(
+            "pair_fate",
+            F.when(F.col("t_land") > F.col("_next_off"), "overlap")
+            .when(F.col("_cruises_1").isNull() | F.col("_cruises_2").isNull(), "no_cruise_sample")
+            .otherwise("usable"),
+        )
+        .select("pair_id", "flight_before", "flight_after", "pair_fate")
+    )
+
+
+def _negative_attempts(samples: DataFrame, pairs: DataFrame, floor_ft: float, depths_min, p) -> DataFrame:
+    """Each usable pair at each depth, with the ``fate`` of that attempt.
+
+    In order: ``outside_cruise``, a side has no cut at this depth; ``depth_missed``, a
+    side overshot the depth by more than :data:`DEPTH_TOLERANCE_MIN`; ``repeated_hole``,
+    a shallower depth of this pair already gives these two edges; ``too_short``, not
+    over ``gap_minutes``; otherwise ``control``.
+    """
+    depths = _minutes_frame(samples, depths_min, "depth_min")
+    old_cut, new_cut = _deep_cuts(samples, floor_ft, depths)
+    overshoot = (F.col("old_depth_min") - F.col("depth_min") > DEPTH_TOLERANCE_MIN) | (
+        F.col("new_depth_min") - F.col("depth_min") > DEPTH_TOLERANCE_MIN
+    )
+    same_hole = Window.partitionBy("pair_id", "t_old_edge", "t_new_edge", "_reached").orderBy("depth_min")
+    return (
+        pairs.filter(F.col("pair_fate") == "usable")
+        .crossJoin(depths)
+        .join(
+            old_cut.withColumnRenamed("flight_key", "flight_before"),
+            on=["flight_before", "depth_min"],
+            how="left",
+        )
         .join(
             new_cut.withColumnRenamed("flight_key", "flight_after"),
             on=["flight_after", "depth_min"],
+            how="left",
         )
         .withColumn(
-            "control_id",
-            F.concat_ws("|", F.lit("negative"), "flight_before", "flight_after", "depth_min"),
+            "_reached",
+            F.when(F.col("t_old_edge").isNull() | F.col("t_new_edge").isNull(), "outside_cruise")
+            .when(overshoot, "depth_missed")
+            .otherwise("cut"),
         )
+        .withColumn("_repeat", F.row_number().over(same_hole))
+        .withColumn(
+            "fate",
+            F.when(F.col("_reached") != "cut", F.col("_reached"))
+            .when(F.col("_repeat") > 1, "repeated_hole")
+            .when(_hole_min() <= p.gap_minutes, "too_short")
+            .otherwise("control"),
+        )
+        .withColumn("control_id", F.concat_ws("|", F.lit("negative"), "pair_id", "depth_min"))
         .withColumn("requested_gap_min", F.lit(None).cast("double"))
+        .select(*_CUT_COLUMNS, "fate")
     )
-    return _score_cuts(samples, cuts, p, expected="split")
 
 
-def positive_controls(
-    tracks: DataFrame,
-    truth: DataFrame,
-    floor_ft: float,
-    gaps_min=(60, 120, 180, 360),
-    p: SegmentationParams = _DEFAULT_PARAMS,
-) -> DataFrame:
-    """The middle of one flight's cruise removed, one row per flight and length.
+def _positive_attempts(samples: DataFrame, truth: DataFrame, floor_ft: float, gaps_min, p) -> DataFrame:
+    """Each truth flight at each requested length, with the ``fate`` of that attempt.
 
-    ``expected`` is ``link``. The hole is centred between the flight's first and last
-    samples at or above the floor, and starts at the last such sample at or before
-    where it should. ``requested_gap_min`` says which length was asked for, as
-    ``gap_stratum`` merges 60 and 120, and ``depth_min`` is NULL. A flight whose
-    cruise is shorter than the hole has no control at that length. ``p`` is as in
-    :func:`negative_controls`.
+    In order: ``no_cruise_sample``; ``outside_cruise``, the cruise is shorter than the
+    hole; ``gap_tolerance``, a real hole at the cut leaves it over
+    :data:`POSITIVE_GAP_TOLERANCE_MIN` short; ``too_short``; otherwise ``control``.
     """
-    samples = _flight_samples(tracks, truth)
     gaps = _minutes_frame(samples, gaps_min, "requested_gap_min")
+    cruising = _flights_in_cruise(samples, floor_ft).withColumn("_cruises", F.lit(True))
 
     centre_s = (_seconds("_first_cruise") + _seconds("_last_cruise")) / 2.0
     old_cut = (
@@ -355,23 +434,126 @@ def positive_controls(
             (F.col("_ts") > F.col("t_old_edge"))
             & (_seconds("_ts") <= _seconds("t_old_edge") + F.col("requested_gap_min") * 60.0)
         )
-        .groupBy("flight_key", "requested_gap_min", "t_old_edge")
+        .groupBy("flight_key", "requested_gap_min")
         .agg(F.max("_ts").alias("t_new_edge"))
     )
-    short_by_min = (
-        F.col("requested_gap_min") - (_seconds("t_new_edge") - _seconds("t_old_edge")) / 60.0
-    )
-    cuts = (
-        new_cut.filter(short_by_min <= POSITIVE_GAP_TOLERANCE_MIN)
-        .withColumnRenamed("flight_key", "flight_before")
-        .withColumn("flight_after", F.col("flight_before"))
+    return (
+        truth.select("flight_key")
+        .distinct()
+        .crossJoin(gaps)
+        .join(cruising, on="flight_key", how="left")
+        .join(old_cut, on=["flight_key", "requested_gap_min"], how="left")
+        .join(new_cut, on=["flight_key", "requested_gap_min"], how="left")
         .withColumn(
-            "control_id",
-            F.concat_ws("|", F.lit("positive"), "flight_before", "requested_gap_min"),
+            "fate",
+            F.when(F.col("_cruises").isNull(), "no_cruise_sample")
+            .when(F.col("t_old_edge").isNull(), "outside_cruise")
+            .when(
+                F.col("t_new_edge").isNull()
+                | (F.col("requested_gap_min") - _hole_min() > POSITIVE_GAP_TOLERANCE_MIN),
+                "gap_tolerance",
+            )
+            .when(_hole_min() <= p.gap_minutes, "too_short")
+            .otherwise("control"),
         )
+        .withColumn("flight_before", F.col("flight_key"))
+        .withColumn("flight_after", F.col("flight_key"))
+        .withColumn(
+            "control_id", F.concat_ws("|", F.lit("positive"), "flight_key", "requested_gap_min")
+        )
+        .withColumn("pair_id", F.lit(None).cast("string"))
         .withColumn("depth_min", F.lit(None).cast("double"))
+        .withColumn("old_depth_min", F.lit(None).cast("double"))
+        .withColumn("new_depth_min", F.lit(None).cast("double"))
+        .select(*_CUT_COLUMNS, "fate")
     )
-    return _score_cuts(samples, cuts, p, expected="link")
+
+
+def negative_controls(
+    tracks: DataFrame,
+    truth: DataFrame,
+    floor_ft: float,
+    depths_min=(0, 30, 60, 120),
+    p: SegmentationParams = _DEFAULT_PARAMS,
+) -> DataFrame:
+    """A real landing hidden in a hole, at most one row per pair and distinct hole.
+
+    ``expected`` is ``split``. ``depth_min`` is the depth asked for, ``old_depth_min``
+    and ``new_depth_min`` the depths reached, and ``pair_id`` names the flight pair, so
+    a caller can count per pair as well as per control. ``p`` supplies the callsign
+    settings the features read; pass the same one given to
+    :func:`real_hole_candidates`.
+    """
+    samples = _flight_samples(tracks, truth)
+    pairs = _flight_pairs(samples, truth, floor_ft)
+    attempts = _negative_attempts(samples, pairs, floor_ft, depths_min, p)
+    return _score_cuts(samples, attempts.filter(F.col("fate") == "control"), p, expected="split")
+
+
+def positive_controls(
+    tracks: DataFrame,
+    truth: DataFrame,
+    floor_ft: float,
+    gaps_min=(60, 120, 180, 360),
+    p: SegmentationParams = _DEFAULT_PARAMS,
+) -> DataFrame:
+    """The middle of one flight's cruise removed, one row per flight and length.
+
+    ``expected`` is ``link``. The hole is centred between the flight's first and last
+    samples at or above the floor, and starts at the last such sample at or before
+    where it should. ``requested_gap_min`` says which length was asked for, as
+    ``gap_stratum`` merges 60 and 120. The columns of the negative controls' depth and
+    pair are NULL. A flight whose cruise is shorter than the hole has no control at
+    that length. ``p`` is as in :func:`negative_controls`.
+    """
+    samples = _flight_samples(tracks, truth)
+    attempts = _positive_attempts(samples, truth, floor_ft, gaps_min, p)
+    return _score_cuts(samples, attempts.filter(F.col("fate") == "control"), p, expected="link")
+
+
+def _counts(frame: DataFrame, column: str) -> Dict[str, int]:
+    return {r[column]: r["count"] for r in frame.groupBy(column).count().collect()}
+
+
+def control_funnel(
+    tracks: DataFrame,
+    truth: DataFrame,
+    floor_ft: float,
+    depths_min=(0, 30, 60, 120),
+    gaps_min=(60, 120, 180, 360),
+    p: SegmentationParams = _DEFAULT_PARAMS,
+) -> Dict[str, int]:
+    """Where every candidate control went, from the same frames the generators use.
+
+    Pair counts are per flight pair; attempts are a usable pair at one depth, or a
+    flight at one length. Two identities hold, and the study can assert them:
+    ``considered = overlap + no cruise + usable pairs``, and each ``attempts`` count is
+    the sum of the counts beneath it. Costs several passes over the input, so a caller
+    with a real day caches ``tracks`` and ``truth`` first.
+    """
+    samples = _flight_samples(tracks, truth)
+    pairs = _flight_pairs(samples, truth, floor_ft)
+    pair_fates = _counts(pairs, "pair_fate")
+    negative = _counts(_negative_attempts(samples, pairs, floor_ft, depths_min, p), "fate")
+    positive = _counts(_positive_attempts(samples, truth, floor_ft, gaps_min, p), "fate")
+    return {
+        "negative_pairs_considered": sum(pair_fates.values()),
+        "negative_pairs_lost_to_overlap": pair_fates.get("overlap", 0),
+        "negative_pairs_lost_to_no_cruise_sample": pair_fates.get("no_cruise_sample", 0),
+        "negative_pairs_usable": pair_fates.get("usable", 0),
+        "negative_attempts": sum(negative.values()),
+        "negative_cuts_dropped_outside_cruise": negative.get("outside_cruise", 0),
+        "negative_cuts_dropped_for_depth": negative.get("depth_missed", 0),
+        "negative_repeated_holes_dropped": negative.get("repeated_hole", 0),
+        "negative_excluded_too_short": negative.get("too_short", 0),
+        "negative_controls": negative.get("control", 0),
+        "positive_attempts": sum(positive.values()),
+        "positive_dropped_no_cruise_sample": positive.get("no_cruise_sample", 0),
+        "positive_dropped_outside_cruise": positive.get("outside_cruise", 0),
+        "positive_dropped_by_gap_tolerance": positive.get("gap_tolerance", 0),
+        "positive_excluded_too_short": positive.get("too_short", 0),
+        "positive_controls": positive.get("control", 0),
+    }
 
 
 def _binomial_cdf(k: int, n: int, prob: float) -> float:
