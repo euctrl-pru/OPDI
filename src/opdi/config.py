@@ -1680,11 +1680,13 @@ class SegmentationConfig:
     """How long before a hole's old edge a callsign may last have been seen and
     still count against the one after the hole (minutes). Older counts as blank.
 
-    The bound is what makes the decision independent of the read window. Without
-    it, one day's read could see an old callsign and split a hole while the next
-    day's read, starting later, could not see it and link the same hole, and the
+    The bound is what keeps the decision from depending on where the read starts.
+    Without it, one day's read could see an old callsign and split a hole while the
+    next day's read, starting later, could not see it and link the same hole, and the
     piece after the hole would be claimed by neither day. It adds to the lookback
-    ``process_day`` requires: see ``tracks.required_lookback_hours``."""
+    ``process_day`` requires: see ``tracks.required_lookback_hours``. So two reads
+    disagreeing is prevented on the lookback side and detected on the lookahead side:
+    evidence past the read's end is not guarded, and ``process_day`` warns instead."""
 
     link_edge_position_minutes: float = 5.0
     """How far from each edge of a hole A10 reads through blank samples for a

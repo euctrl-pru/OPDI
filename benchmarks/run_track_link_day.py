@@ -104,6 +104,7 @@ FLOOR_GB = 3.0
 
 _ORIG_S3_PATH = None
 _ORIG_WRITE = None
+_ORIG_DROP = None
 
 
 def arm_path(arm: str, table: str) -> str:
@@ -194,12 +195,14 @@ def build_config(arm: str, link_params=None, executors: int = 8) -> OPDIConfig:
 
 def redirect_arm(arm: str) -> None:
     """Resolve derived and shared tables to research; pass reference through."""
-    global _ORIG_S3_PATH, _ORIG_WRITE
+    global _ORIG_S3_PATH, _ORIG_WRITE, _ORIG_DROP
     if _ORIG_S3_PATH is None:
         _ORIG_S3_PATH = StorageManager._s3_path
     if _ORIG_WRITE is None:
         _ORIG_WRITE = StorageManager.write_table
-    orig_path, orig_write = _ORIG_S3_PATH, _ORIG_WRITE
+    if _ORIG_DROP is None:
+        _ORIG_DROP = StorageManager.drop_partitions
+    orig_path, orig_write, orig_drop = _ORIG_S3_PATH, _ORIG_WRITE, _ORIG_DROP
 
     def _s3_path(self, table_name):
         if table_name in PASSTHROUGH:
@@ -218,19 +221,29 @@ def redirect_arm(arm: str) -> None:
         return orig_write(self, df, table_name, mode, partition_by,
                           partition_values)
 
+    def drop_partitions(self, table_name, column, values):
+        # Deleting is writing. A passthrough table resolves to the reference warehouse,
+        # so without this a re-run would delete reference data, not research data.
+        guard_write_path(_s3_path(self, table_name))
+        return orig_drop(self, table_name, column, values)
+
     StorageManager._s3_path = _s3_path
     StorageManager.write_table = write_table
+    StorageManager.drop_partitions = drop_partitions
 
 
 def restore() -> None:
     """Undo the patch. Idempotent."""
-    global _ORIG_S3_PATH, _ORIG_WRITE
+    global _ORIG_S3_PATH, _ORIG_WRITE, _ORIG_DROP
     if _ORIG_S3_PATH is not None:
         StorageManager._s3_path = _ORIG_S3_PATH
         _ORIG_S3_PATH = None
     if _ORIG_WRITE is not None:
         StorageManager.write_table = _ORIG_WRITE
         _ORIG_WRITE = None
+    if _ORIG_DROP is not None:
+        StorageManager.drop_partitions = _ORIG_DROP
+        _ORIG_DROP = None
 
 
 def run_arm(arm: str, day: date, executors: int, steps=STEPS,

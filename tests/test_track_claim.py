@@ -327,16 +327,15 @@ def _lon_after(gap_minutes):
     return 480.0 * gap_minutes / 60 / 60.04
 
 
-def _assert_claimed_once(spark, samples):
-    from opdi.pipeline.segmentation import SegmentationParams
+def _assert_claimed_once(spark, samples, p=PRE_STUDY):
     from opdi.pipeline.tracks import required_lookback_hours
 
     sv = make_track(spark, samples)
-    hours = required_lookback_hours("cruise_linked", PRE_STUDY)
+    hours = required_lookback_hours("cruise_linked", p)
     claims = [
         r["last_contact"]
         for day in (D_MINUS_1, D)
-        for r in _claimed_by_day(sv, day, hours).select("last_contact").collect()
+        for r in _claimed_by_day(sv, day, hours, p).select("last_contact").collect()
     ]
     assert sorted(claims) == sorted(s["t"] for s in samples)
 
@@ -452,6 +451,36 @@ def test_the_old_edge_position_is_always_inside_the_read(
     assert _claimed_by_day(sv, D, lookback - 1, p).count() == len(new_piece)
 
 
+def test_a_low_sample_across_an_earlier_break_cannot_lose_a_piece(spark):
+    """At the shipped settings: 3,000 ft at 11:00, cruise at 14:00, a 590 min hole, cruise at 00:00.
+
+    The five rows before the long hole reach across the earlier break, into the 3,000 ft
+    samples. Row frames alone, D-1's read sees those and splits, while D's read, starting
+    at 13:00, sees only cruise and links. The track then starts on D-1, so D claims
+    nothing, and the ten samples after the hole are published by neither day.
+    """
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    p = SegmentationParams()
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    samples = _every(D_MINUS_1 + hours(11), D_MINUS_1 + hours(11, 2), 1,
+                     lon=0.0, callsign="DLH1", baro_altitude=914.4)
+    samples += _every(D_MINUS_1 + hours(14), D_MINUS_1 + hours(14, 10), 5, lon=0.0, callsign="DLH1")
+    samples += _every(D, D + hours(0, 9), 1, lon=_lon_after(590), callsign="DLH1")
+    assert len(samples) == 16
+    assert required_lookback_hours("cruise_linked", p) == 11
+
+    _assert_claimed_once(spark, samples, p)
+
+    # Both reads link the long hole, so D-1 holds the low piece and the whole linked track.
+    sv = make_track(spark, samples)
+    claimed = _claimed_by_day(sv, D_MINUS_1, 11, p)
+    assert claimed.count() == 16
+    assert claimed.select("track_id").distinct().count() == 2
+    assert _claimed_by_day(sv, D, 11, p).count() == 0
+
+
 # --- the truncation warning, under an arm that links across holes -------------
 
 
@@ -523,3 +552,24 @@ def test_other_arms_keep_the_60_second_margin(spark, capsys):
     )
     assert "WARNING" not in out
     assert "covered every track" in out
+
+
+def test_the_wide_margin_says_the_track_may_simply_be_long(spark, capsys):
+    """Ten hours of margin catches healthy long tracks too, so it must not claim a loss."""
+    out = _warning_from_process_day(
+        capsys, _straddling_read_end(spark), "cruise_linked"
+    )
+    assert "Their tails may be missing, or the track is simply long" in out
+
+
+def test_other_arms_still_say_the_tail_may_be_missing(spark, capsys):
+    from pyspark.sql.functions import lit
+
+    written = make_track(
+        spark,
+        [{"t": _t(D_MINUS_1 + dt.timedelta(hours=47, minutes=59, seconds=30)), "track_id": "a"}],
+    ).withColumn("dof", lit(D_MINUS_1.date()))
+    out = _warning_from_process_day(capsys, written, "debounced")
+    assert "WARNING: 1 track(s)" in out
+    assert "Their tails may be missing and no other day will claim them" in out
+    assert "simply long" not in out

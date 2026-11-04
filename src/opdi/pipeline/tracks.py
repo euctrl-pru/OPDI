@@ -729,8 +729,11 @@ class TrackProcessor:
         Raises:
             ValueError: ``lookback_hours`` is below that under ``cruise_linked``.
                 Two days could then decide one hole differently, and samples after
-                midnight would be claimed twice or not at all. Other arms decide
-                breaks locally, so their explicit value is taken as given.
+                midnight would be claimed twice or not at all. That disagreement is
+                prevented on the lookback side, by this check, and detected on the
+                lookahead side, by the truncation warning below: a hole or its evidence
+                past the read's end is reported, not avoided. Other arms decide breaks
+                locally, so their explicit value is taken as given.
         """
         from opdi.pipeline.segmentation import SegmentationParams
 
@@ -790,11 +793,17 @@ class TrackProcessor:
             written, read_end, margin_seconds=margin_seconds
         ).count()
         if n_truncated:
+            # The margin under a link is hours wide, so a healthy track ending inside
+            # it is ordinary rather than a loss.
+            consequence = (
+                "Their tails may be missing, or the track is simply long"
+                if links_across_holes
+                else "Their tails may be missing and no other day will claim them"
+            )
             print(
                 f"  WARNING: {n_truncated} track(s) starting on {day} ended within "
                 f"{margin_seconds:.0f} s of the end of the read window "
-                f"({read_end:{fmt}}). Their tails may be missing and no other "
-                f"day will claim them. Re-run this day with a larger "
+                f"({read_end:{fmt}}). {consequence}. Re-run this day with a larger "
                 f"lookahead_hours (currently {lookahead})."
             )
         else:

@@ -468,6 +468,7 @@ def test_the_false_join_rate_counts_only_holes_the_point_links(spark):
     assert counts == {
         "real_holes": 6,
         "real_holes_linked": 4,
+        "real_holes_edge_read_through_blank": 0,
         "linked_true_link": 2,
         "linked_false_join": 1,
         "linked_unknown": 1,
@@ -1706,6 +1707,32 @@ def test_a_hole_falls_in_one_length_band(spark, gap_min, band):
     [row] = reason_counts(holes, P)
     assert row["gap_band"] == band
     assert row["first_failed_test"] == ("gap_not_too_long" if gap_min > 360.0 else "linked")
+
+
+def test_the_first_band_starts_where_a_hole_does(spark):
+    holes = _reason_holes(spark, [("other", _feature_row(gap_min=50.0))])
+    [row] = reason_counts(holes, replace(P, gap_minutes=45.0))
+    assert row["gap_band"] == "45-60"
+
+
+def test_the_read_through_count_covers_every_hole_and_the_linked_one_its_links(spark):
+    """Linked holes and all holes are different populations, so both are stated."""
+    no_position = list(_feature_row())
+    no_position[2:4] = [None, None]
+    holes = _real_holes(
+        spark,
+        [
+            ("true_link", _feature_row(position_gap_min=123.0)),
+            # Read past a blank, but too long to link.
+            ("unknown", _feature_row(gap_min=400.0, position_gap_min=403.0)),
+            ("unknown", _feature_row(gap_min=400.0)),
+            ("unknown", tuple(no_position)),
+        ],
+    )
+    counts = real_hole_counts(holes, P)
+    assert counts["real_holes"] == 4
+    assert counts["real_holes_edge_read_through_blank"] == 2
+    assert counts["linked_edge_read_through_blank"] == 1
 
 
 def test_reasons_read_the_settings_they_are_given(spark):

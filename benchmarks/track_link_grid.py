@@ -233,6 +233,7 @@ COUNT_FIELDS = (
     "base_flights_in_one_track",
     "real_holes",
     "real_holes_linked",
+    "real_holes_edge_read_through_blank",
     "linked_true_link",
     "linked_false_join",
     "linked_unknown",
@@ -446,7 +447,10 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
 
     The last four split out two ways a link rests on less than a plain cruise edge. A
     position read through a blank sample shows as ``position_gap_min`` differing from
-    ``gap_min``. An edge below the floor can only have passed by direction, given a link.
+    ``gap_min``. ``real_holes_edge_read_through_blank`` counts that over every hole and
+    ``linked_edge_read_through_blank`` over those *p* links, so the two are different
+    populations; a hole with no position in reach is NULL there and counts in neither.
+    An edge below the floor can only have passed by direction, given a link.
     ``linked_by_direction_labelled`` is what the direction limit divides by, and
     ``false_joined_near_edge`` is reported only.
     """
@@ -459,6 +463,7 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
     row = holes.agg(
         F.count(F.lit(1)).alias("real_holes"),
         _sum_when(linked).alias("real_holes_linked"),
+        _sum_when(read_through_blank).alias("real_holes_edge_read_through_blank"),
         _sum_when(linked & (label == "true_link")).alias("linked_true_link"),
         _sum_when(linked & (label == "false_join")).alias("linked_false_join"),
         _sum_when(linked & (label == "unknown")).alias("linked_unknown"),
@@ -757,10 +762,13 @@ def true_link_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
     )
 
 
-def _gap_band(gap_min: Column) -> Column:
-    """The length bands of the reasons. Upper edges belong to the lower one."""
+def _gap_band(gap_min: Column, p: SegmentationParams) -> Column:
+    """The length bands of the reasons. Upper edges belong to the lower one.
+
+    The first starts where a hole does, at ``p.gap_minutes``.
+    """
     return (
-        F.when(gap_min <= 60.0, "30-60")
+        F.when(gap_min <= 60.0, f"{p.gap_minutes:g}-60")
         .when(gap_min <= 120.0, "60-120")
         .when(gap_min <= 240.0, "120-240")
         .when(gap_min <= 360.0, "240-360")
@@ -777,7 +785,7 @@ def reason_counts(holes: DataFrame, p: SegmentationParams) -> List[Dict]:
     checks = _checks(p)
     failed = sum(F.when(check, 0).otherwise(1) for check in checks.values())
     rows = (
-        holes.withColumn("gap_band", _gap_band(F.col("gap_min")))
+        holes.withColumn("gap_band", _gap_band(F.col("gap_min"), p))
         .withColumn("first_failed_test", _first_failed_test(checks))
         .groupBy("population", "gap_band", "first_failed_test")
         .agg(F.count(F.lit(1)).alias("holes"), _sum_when(failed == 1).alias("only_failed_test_holes"))

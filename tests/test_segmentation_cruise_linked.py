@@ -730,6 +730,90 @@ def test_the_features_read_each_edge_position_once_per_column(spark):
     assert len(re.findall(r"\bfirst\(", plan)) <= 3, plan
 
 
+# --- the edge frames are bounded in time as well as in rows ---------------------
+
+#: A sample that would fail both edge tests and move every other edge feature.
+_ODD_SAMPLE = {"baro_altitude": 914.4, "velocity": 50.0, "vert_rate": -20.0}
+
+
+def _with_odd_sample_before(seconds_before_old_edge):
+    samples = _piece(-4 * 30, 0.0, n=5, step_s=30)[1:]
+    return (
+        _piece(-seconds_before_old_edge, 0.0, n=1, **_ODD_SAMPLE)
+        + samples
+        + _piece(60 * 60, _lon(480.0), n=10)
+    )
+
+
+def _with_odd_sample_after(seconds_after_new_edge):
+    new_edge = 60 * 60
+    return (
+        _piece(-45, 0.0)
+        + _piece(new_edge, _lon(480.0), n=4, step_s=30)
+        + _piece(new_edge + seconds_after_new_edge, _lon(480.0 + 1.0), n=1, **_ODD_SAMPLE)
+    )
+
+
+def test_a_low_sample_older_than_the_window_does_not_fail_the_old_edge(spark):
+    """Five rows can reach back past an earlier break, into another flight."""
+    samples = _with_odd_sample_before(5 * 60 + 1)
+    row = _hole_row(spark, samples)
+    assert row["alt_before_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
+    assert row["vr_before_fpm"] == 0.0
+    assert row["vr_before_samples"] == 4
+    assert row["spd_before_kt"] == pytest.approx(480.0)
+    assert n_tracks(make_track(spark, samples), SHIPPED) == 1
+
+
+def test_a_low_sample_inside_the_window_still_fails_the_old_edge(spark):
+    """The bound is inclusive, as the position's is. Nothing younger gets away."""
+    samples = _with_odd_sample_before(5 * 60)
+    row = _hole_row(spark, samples)
+    assert row["alt_before_ft"] == pytest.approx(3000.0, abs=0.01)
+    assert row["vr_before_samples"] == 5
+    assert row["vr_before_fpm"] == pytest.approx(-20.0 * FPM_PER_MPS / 5)
+    assert row["spd_before_kt"] < 480.0
+    assert n_tracks(make_track(spark, samples), SHIPPED) == 2
+
+
+def test_a_low_sample_past_the_window_does_not_fail_the_new_edge(spark):
+    samples = _with_odd_sample_after(5 * 60 + 1)
+    row = _hole_row(spark, samples)
+    assert row["alt_after_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
+    assert row["vr_after_fpm"] == 0.0
+    assert row["vr_after_samples"] == 4
+    assert n_tracks(make_track(spark, samples), SHIPPED) == 1
+
+
+def test_a_low_sample_inside_the_window_still_fails_the_new_edge(spark):
+    samples = _with_odd_sample_after(5 * 60)
+    row = _hole_row(spark, samples)
+    assert row["alt_after_ft"] == pytest.approx(3000.0, abs=0.01)
+    assert row["vr_after_samples"] == 5
+    assert n_tracks(make_track(spark, samples), SHIPPED) == 2
+
+
+def test_the_window_follows_the_setting(spark):
+    """Widened, the same sample is inside it again, so nothing is hard-wired to 5 min."""
+    samples = _with_odd_sample_before(6 * 60)
+    frame = _engine_frame(make_track(spark, samples))
+    for minutes, expected in ((5.0, CRUISE_M * FT_PER_M), (7.0, 3000.0)):
+        p = dataclasses.replace(SHIPPED, link_edge_position_minutes=minutes)
+        features = link_feature_columns(p)
+        rows = frame.select(
+            features["gap_min"].alias("gap_min"), features["alt_before_ft"].alias("alt")
+        ).collect()
+        row = max(rows, key=lambda r: r["gap_min"] or 0.0)
+        assert row["alt"] == pytest.approx(expected, abs=0.01)
+
+
+def test_the_edge_samples_are_read_once_per_frame(spark):
+    """Spark evaluates each copy of a window expression, and these run on every row."""
+    frame = _engine_frame(_hole(spark))
+    plan = _plan(frame.withColumn("_brk", cruise_linked().break_expr(P)))
+    assert len(re.findall(r"\bcollect_list\(", plan)) <= 2, plan
+
+
 # --- settings that cannot be honoured -------------------------------------------
 
 

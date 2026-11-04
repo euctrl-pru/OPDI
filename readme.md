@@ -322,6 +322,45 @@ truth. A worldwide run is a wider *pipeline* output, not a benchmarked one; a
 paper or dashboard using it must say so rather than carrying European
 accuracy figures across.
 
+## `cruise_linked` track segmentation (A10)
+
+**Off by default.** `standard` still points to `debounced` (A9), and nothing
+published uses this rule. `cruise_linked` is A9 with one change: a reception gap
+over 30 minutes does not end a track when the evidence at its two edges fits one
+continuous flight (both edges at cruise, a plausible implied speed, an agreeing
+callsign, no descent then climb). No sample is invented: the hole stays empty and
+only the identity changes. A callsign change and a short gap at low altitude still
+split.
+
+Select it in code:
+
+```python
+config = OPDIConfig.for_environment("opensky")
+config.segmentation.method = "cruise_linked"
+```
+
+What differs from the other rules when you run it:
+
+- **`process_day` reads 11 hours back at the defaults, not 3**, because a piece
+  after midnight can belong to a track whose old piece ended up to
+  `link_max_gap_minutes` earlier, and the decision also reads evidence behind that
+  edge. See `tracks.required_lookback_hours`.
+- **A shorter explicit `lookback_hours` raises `ValueError`.** Two days could
+  otherwise decide one hole differently, and samples after midnight would be
+  claimed twice or by neither.
+- **The truncation warning is wider and noisier.** Its margin grows from 60 s to
+  `link_max_gap_minutes` plus the longer of `link_callsign_lookahead_minutes` and
+  `link_edge_position_minutes`, because a hole can straddle the end of the read.
+  A track named there may have lost its tail, or may simply be long. Past the end
+  of the read a wrong decision is detected like this, not prevented.
+
+**Promoting it would be a further silent `track_id` boundary**, after those at A8
+and A9: a join across it returns nothing rather than an error, and `osn_tracks` has
+no version column to say which rule produced a row. It is not recommended as the
+default yet, because level segments and cumulative distance both break across a
+linked hole. The evidence is in
+`opdi-portal/papers/track-construction-v4/`.
+
 ## Building a flight list
 
 Step 03 turns tracks into a flight list: one row per flight with a departure

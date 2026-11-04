@@ -489,10 +489,19 @@ def test_a_control_keeps_the_callsign_evidence_the_rule_reads(
     assert (control["cs_before"], control["cs_after"]) == (cs_before, cs_after)
 
 
-def test_controls_keep_enough_samples_when_they_are_sparse(spark):
-    """Five samples an edge, even if they reach beyond the callsign bounds."""
-    s1, t1, _, last_1 = _flight(0, 900, step_s=20 * 60, key="F1")
-    s2, t2, _, _ = _flight(last_1 + 55 * 60, 900, step_s=20 * 60, key="F2")
+@pytest.mark.parametrize(
+    "step_s, rates_counted",
+    [
+        # Five samples inside the edge window, three of them at 10 m/s: 1,181 ft/min.
+        (60, 5),
+        # 20 min apart, only the edge sample is inside it, whatever five rows reach.
+        (20 * 60, 1),
+    ],
+)
+def test_controls_summarise_the_samples_inside_the_edge_window(spark, step_s, rates_counted):
+    """At most five samples an edge, and none further than the window from it."""
+    s1, t1, _, last_1 = _flight(0, 900, step_s=step_s, key="F1")
+    s2, t2, _, _ = _flight(last_1 + 55 * 60, 900, step_s=step_s, key="F2")
     for sample in s1 + s2:
         sample["baro_altitude"] = CRUISE_M
     for sample in s2[:3]:
@@ -501,9 +510,9 @@ def test_controls_keep_enough_samples_when_they_are_sparse(spark):
     row = negative_controls(
         tracks, _truth(spark, [t1, t2]), FLOOR_FT, depths_min=(0,)
     ).collect()[0]
-    # Three of five samples at 10 m/s is 1,181 ft/min; with only the lookahead's
-    # single sample kept it would read 1,969 ft/min.
-    assert row["vr_after_fpm"] == pytest.approx(10.0 * FPM_PER_MPS * 3 / 5)
+    at_10_mps = min(3, rates_counted)
+    assert row["vr_after_samples"] == rates_counted
+    assert row["vr_after_fpm"] == pytest.approx(10.0 * FPM_PER_MPS * at_10_mps / rates_counted)
 
 
 def _blank_position(samples, first_s, last_s):

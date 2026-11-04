@@ -107,13 +107,49 @@ def test_the_template_states_no_number_without_a_source():
     assert B.literal_numbers((PAPER / "report_template.md").read_text()) == []
 
 
+def _recommended():
+    return B.one(B.read_csv(PAPER / "data", "final_grid/link_recommended.csv"), status="recommended")
+
+
+def _skip_until_the_grid_is_rerun():
+    """The read-through count over all holes is staged only by a run after it was added."""
+    if "real_holes_edge_read_through_blank" not in _recommended():
+        pytest.skip("the staged final grid predates real_holes_edge_read_through_blank")
+
+
 @needs_paper
 def test_the_report_builds_from_the_staged_csvs():
+    _skip_until_the_grid_is_rerun()
     qmd, page = B.build(PAPER)
     for text in (qmd, page):
         assert "{{" not in text and "}}" not in text
         assert "nan" not in text.lower().split()
-    assert "68.8%" in page and "25.3%" in page
+    rec = _recommended()
+    flights = B.num(rec, "crossing_flights")
+    assert B.pct(B.num(rec, "crossing_flights_in_one_track"), flights) in page
+    assert B.pct(B.num(rec, "base_crossing_flights_in_one_track"), flights) in page
+
+
+def test_a_grid_without_the_read_through_count_stops_the_build_and_names_it():
+    """Until the re-run this is what the staged CSVs give, and a gap must not read as a result."""
+    with pytest.raises(B.MissingValue, match="real_holes_edge_read_through_blank"):
+        B.blank_edge_values({"real_holes": "228655"})
+
+
+def test_the_share_of_holes_read_through_a_blank_is_of_all_holes():
+    values = B.blank_edge_values(
+        {"real_holes_edge_read_through_blank": "25", "real_holes": "100"}
+    )
+    assert values == {"blank_edge_holes": "25", "blank_edge_share": "25.0%"}
+
+
+@needs_paper
+def test_the_low_edge_count_is_of_tests_the_setting_allows():
+    _skip_until_the_grid_is_rerun()
+    rec = _recommended()
+    assert B.build_context(PAPER / "data")["low_edge_tests"] == B.n(
+        B.num(rec, "negative_low_edge_untested_controls")
+    )
 
 
 @needs_paper
@@ -126,5 +162,6 @@ def test_the_words_the_owner_ruled_out_stay_out():
 
 @needs_paper
 def test_every_value_the_builder_computes_is_used():
+    _skip_until_the_grid_is_rerun()
     text = (PAPER / "report_template.md").read_text()
     assert [k for k in B.build_context(PAPER / "data") if "{{ " + k + " }}" not in text] == []

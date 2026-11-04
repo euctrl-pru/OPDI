@@ -94,7 +94,8 @@ __all__ = [
 #: its only use, because it is the one number an A3 sweep would want to vary.
 TRAFFIC_DEFAULT_GAP_MINUTES = 10.0
 
-#: Samples on each side of a hole that :func:`link_feature_columns` summarises.
+#: Samples on each side of a hole that :func:`link_feature_columns` summarises, at
+#: most: those further than ``link_edge_position_minutes`` from the edge do not count.
 LINK_EDGE_SAMPLES = 5
 
 #: Vertical rates an edge's frame must hold before its direction counts as evidence.
@@ -705,6 +706,45 @@ def _once(value: Column, fn: Callable[[Column], Column]) -> Column:
     return F.element_at(F.transform(F.array(value), fn), 1)
 
 
+def _mean(values: Column) -> Column:
+    """The mean of an array with no NULL in it, NULL when empty, as ``avg`` would give."""
+    return F.when(
+        F.size(values) > 0,
+        F.aggregate(values, F.lit(0.0), lambda total, value: total + value) / F.size(values),
+    )
+
+
+def _edge_summary(frame: Column, edge_s: Column, span_s: int) -> Column:
+    """What one edge's samples say, ignoring those over *span_s* seconds from the edge.
+
+    *frame* is one window read of an array of samples. An aggregate over a window
+    cannot see the row the frame belongs to, so the bound cannot go in a ``when``
+    inside it. Reading the array and filtering it can, and that also makes every field
+    below one read rather than one each.
+    """
+
+    def over_kept(kept: Column) -> Column:
+        def values(field: str) -> Column:
+            read = F.transform(kept, lambda sample: sample.getField(field))
+            return F.filter(read, lambda value: value.isNotNull())
+
+        return F.struct(
+            F.array_min(values("alt_ft")).alias("min_alt_ft"),
+            _mean(values("vr_fpm")).alias("mean_vr_fpm"),
+            F.size(values("vr_fpm")).cast("long").alias("vr_samples"),
+            _mean(values("spd_kt")).alias("mean_spd_kt"),
+        )
+
+    def over_read(read: Column) -> Column:
+        kept = F.filter(
+            read.getField("frame"),
+            lambda sample: F.abs(sample.getField("s") - read.getField("edge_s")) <= span_s,
+        )
+        return _once(kept, over_kept)
+
+    return _once(F.struct(frame.alias("frame"), edge_s.alias("edge_s")), over_read)
+
+
 def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     """What :func:`linkable` sees of a hole, evaluated at the first sample after it.
 
@@ -716,7 +756,17 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
 
     ``gap_min`` is the silence between samples, which is what the 30 minute split
     sees. ``position_gap_min`` and ``gc_nm`` are the time and distance between the
-    two edge positions, which can be further apart: see ``position`` below.
+    two edge positions, which can be further apart: see ``position`` in
+    :func:`_link_reads`.
+
+    The altitude, vertical rate, speed and rate-count features read at most
+    :data:`LINK_EDGE_SAMPLES` rows, and of those only the samples within
+    ``link_edge_position_minutes`` of the edge. Five rows alone have no bound in time,
+    so at a sparse edge they reach across an earlier break into another flight, and
+    a row can fall inside one day's read and outside the next day's. The bound makes
+    two days' reads of a hole agree: on the lookback side this is prevented, since
+    ``process_day`` reads at least that far behind the old edge. Past the new edge it
+    is detected, not prevented: see the truncation warning in ``process_day``.
 
     ``window`` defaults to the engine's :func:`segment_window`. Whichever is used,
     the frame needs the arm contract's ``_ts`` and the ``_alt_ft`` and ``_spd_kt``
@@ -727,6 +777,20 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
         ValueError: ``link_edge_position_minutes`` is not below
             ``low_alt_gap_minutes``. The read through blank samples could then cross a
             gap the low-altitude rule splits at, and take a position from another flight.
+    """
+    return _features_from(_link_reads(p, window))
+
+
+def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
+    """The window reads behind :func:`link_feature_columns`, each a separate column.
+
+    Spark evaluates every copy of a window expression, so several features taken from
+    one read cost several reads. Selecting a feature each is what a caller of
+    :func:`link_feature_columns` wants; :func:`cruise_linked`, which runs on every
+    sample of every day, puts these in one struct to read each just once.
+
+    Raises:
+        ValueError: see :func:`link_feature_columns`.
     """
     if p.link_edge_position_minutes >= p.low_alt_gap_minutes:
         raise ValueError(
@@ -741,11 +805,12 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
     seconds = w.orderBy(F.unix_timestamp(F.col("_ts")))
     lookahead = seconds.rangeBetween(0, int(p.link_callsign_lookahead_minutes * 60))
     vert_rate_fpm = F.col("vert_rate") * FPM_PER_MPS
+    span_s = int(p.link_edge_position_minutes * 60)
 
     # The callsign before the hole, and whether it is recent enough to count. The
     # bound is measured back from the old edge, and `process_day` reads at least
-    # that far behind it, so two days' reads of one hole see the same evidence.
-    # Unbounded, one read could see an old callsign and split where the next day's
+    # that far behind it, so two days' reads of one hole see the same evidence behind
+    # it. Unbounded, one read could see an old callsign and split where the next day's
     # read could not and link, and the piece after the hole would be published by
     # neither day.
     back = w.rowsBetween(Window.unboundedPreceding, -1)
@@ -775,7 +840,6 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
             F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")
         ),
     )
-    span_s = int(p.link_edge_position_minutes * 60)
     edges = F.struct(
         old_edge_ts.alias("old_edge_ts"),
         F.last(position, ignorenulls=True).over(back).alias("old"),
@@ -802,6 +866,19 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
 
     positions = _once(edges, between_positions)
 
+    edge_sample = F.struct(
+        F.unix_timestamp(F.col("_ts")).alias("s"),
+        altitude_ft().cast("double").alias("alt_ft"),
+        vert_rate_fpm.cast("double").alias("vr_fpm"),
+        speed_kt().cast("double").alias("spd_kt"),
+    )
+    before_edge = _edge_summary(
+        F.collect_list(edge_sample).over(before), F.unix_timestamp(old_edge_ts), span_s
+    )
+    after_edge = _edge_summary(
+        F.collect_list(edge_sample).over(after), F.unix_timestamp(F.col("_ts")), span_s
+    )
+
     return {
         # Computed here rather than read from `gap_minutes()`, which is the
         # engine's gap and so wrong under a caller's window.
@@ -809,25 +886,40 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
             F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(F.lag(F.col("_ts")).over(w))
         )
         / 60.0,
-        "position_gap_min": positions.getField("position_gap_min"),
-        "gc_nm": positions.getField("gc_nm"),
-        "alt_before_ft": F.min(altitude_ft()).over(before),
-        "alt_after_ft": F.min(altitude_ft()).over(after),
-        # What `legacy_low_altitude_gap` reads at this sample, which the minimum above
-        # cannot stand in for: only with direction on can a link reach that low.
+        "positions": positions,
+        "before_edge": before_edge,
+        "after_edge": after_edge,
+        # What `legacy_low_altitude_gap` reads at this sample, which the minimum over
+        # the edge cannot stand in for: only with direction on can a link reach that low.
         "alt_new_edge_ft": altitude_ft(),
-        "vr_before_fpm": F.avg(vert_rate_fpm).over(before),
-        "vr_after_fpm": F.avg(vert_rate_fpm).over(after),
-        # How many rates those two means rest on. Only the direction test reads these.
-        "vr_before_samples": F.count(vert_rate_fpm).over(before),
-        "vr_after_samples": F.count(vert_rate_fpm).over(after),
-        "spd_before_kt": F.avg(speed_kt()).over(before),
         "cs_before": F.when(
             seen_recently,
             F.last(stable_callsign(p, w), ignorenulls=True).over(back),
         ),
         "cs_after": F.first(real, ignorenulls=True).over(lookahead),
         "icao24": F.col("icao24"),
+    }
+
+
+def _features_from(reads: Mapping[str, Column]) -> Dict[str, Column]:
+    """The named features of :func:`link_feature_columns`, out of :func:`_link_reads`."""
+    positions, before, after = reads["positions"], reads["before_edge"], reads["after_edge"]
+    return {
+        "gap_min": reads["gap_min"],
+        "position_gap_min": positions.getField("position_gap_min"),
+        "gc_nm": positions.getField("gc_nm"),
+        "alt_before_ft": before.getField("min_alt_ft"),
+        "alt_after_ft": after.getField("min_alt_ft"),
+        "alt_new_edge_ft": reads["alt_new_edge_ft"],
+        "vr_before_fpm": before.getField("mean_vr_fpm"),
+        "vr_after_fpm": after.getField("mean_vr_fpm"),
+        # How many rates those two means rest on. Only the direction test reads these.
+        "vr_before_samples": before.getField("vr_samples"),
+        "vr_after_samples": after.getField("vr_samples"),
+        "spd_before_kt": before.getField("mean_spd_kt"),
+        "cs_before": reads["cs_before"],
+        "cs_after": reads["cs_after"],
+        "icao24": reads["icao24"],
     }
 
 
@@ -949,12 +1041,15 @@ def cruise_linked() -> BreakRule:
     """
 
     def expr(p):
-        # `linkable` refers to some features several times, so through `_once` each
-        # window expression is evaluated once for the whole verdict.
-        features = link_feature_columns(p)
+        # `linkable` refers to some features several times, and several features come
+        # from one read, so through `_once` each window expression is evaluated once for
+        # the whole verdict.
+        reads = _link_reads(p)
         linked = _once(
-            F.struct(*[column.alias(name) for name, column in features.items()]),
-            lambda row: linkable({name: row.getField(name) for name in features}, p),
+            F.struct(*[column.alias(name) for name, column in reads.items()]),
+            lambda row: linkable(
+                _features_from({name: row.getField(name) for name in reads}), p
+            ),
         )
         return F.coalesce(
             debounced_callsign_change(p)

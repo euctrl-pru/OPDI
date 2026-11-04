@@ -3,6 +3,7 @@
 import dataclasses
 import re
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -113,6 +114,34 @@ def test_writing_a_passthrough_table_is_refused():
     r.redirect_arm("debounced")
     with pytest.raises(AssertionError, match="a10"):
         StorageManager.write_table(_manager(), None, "oa_airports", "overwrite")
+
+
+def test_dropping_partitions_of_a_passthrough_table_is_refused():
+    """It resolves to the reference warehouse, so a drop there would delete reference data."""
+    r.redirect_arm("debounced")
+    sm = _manager()
+    sm._delete_partition_paths = MagicMock()
+    for table in r.PASSTHROUGH:
+        with pytest.raises(AssertionError, match="a10"):
+            sm.drop_partitions(table, "dof", ["2026-06-14"])
+    sm._delete_partition_paths.assert_not_called()
+
+
+def test_dropping_partitions_of_a_derived_table_stays_under_a10():
+    r.redirect_arm("cruise_linked")
+    sm = _manager()
+    sm._delete_partition_paths = MagicMock()
+    assert sm.drop_partitions("osn_tracks", "dof", ["2026-06-14"]) == 1
+    path = sm._delete_partition_paths.call_args.args[0]
+    assert path == "s3a://eurocontrol/opdi-world/research/a10/cruise_linked/osn_tracks"
+
+
+def test_restore_undoes_the_drop_guard():
+    original = StorageManager.drop_partitions
+    r.redirect_arm("debounced")
+    assert StorageManager.drop_partitions is not original
+    r.restore()
+    assert StorageManager.drop_partitions is original
 
 
 def test_the_sample_is_stable_and_about_a_tenth(spark):

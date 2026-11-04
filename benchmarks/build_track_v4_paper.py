@@ -44,11 +44,6 @@ SUBTITLE = (
 )
 DESCRIPTION = TITLE
 
-#: The one figure the study recorded but never staged as a CSV: a one-off check of
-#: 2026-06-14 written down in the study's ledger. The prose says so where it uses it.
-UNSTAGED_BLANK_EDGE_HOLES = 1073
-UNSTAGED_CRUISE_HOLES = 7355
-
 #: Numbers the prose may state without a placeholder: definitions and limits of the
 #: study and figures quoted from the literature review, never measurements.
 ALLOWED_LITERALS = {
@@ -165,6 +160,18 @@ def settings_row(label, r):
         pct(missed, num(r, "positive_within_gap")),
         "yes" if r["within_limits"] == "True" else "no",
     ]
+
+
+def blank_edge_values(rec):
+    """How often an edge's position is read past a blank, over all holes and over linked.
+
+    The two are different populations, which the prose must say.
+    """
+    blank, holes = num(rec, "real_holes_edge_read_through_blank"), num(rec, "real_holes")
+    return {
+        "blank_edge_holes": n(blank),
+        "blank_edge_share": pct(blank, holes),
+    }
 
 
 def build_context(data):
@@ -284,11 +291,8 @@ def build_context(data):
     if sum(num(r, "n") for r in controls) != limit_n:
         raise MissingValue("the controls table does not add up to the limit's count")
 
-    # All other hidden-landing tests have an edge below the floor by construction.
-    neg_reasons = read_csv(data, "final_grid/link_negative_reasons_pooled.csv")
-    low = [r for r in neg_reasons
-           if r["control_family"] in ("climb_cruise", "climb_descent", "cruise_descent")]
-    c["low_edge_tests"] = n(sum(num(r, "controls") for r in low))
+    # Of those within the longest hole allowed, as the direction-aware count later is.
+    c["low_edge_tests"] = n(num(rec, "negative_low_edge_untested_controls"))
 
     # --- the settings table ---
     c["table_settings"] = table(
@@ -409,9 +413,7 @@ def build_context(data):
     if num(r180, "crossing_flights_in_one_track") != num(rec, "crossing_flights_in_one_track"):
         raise MissingValue("the earlier 18,000 ft run no longer matches the final one")
     c.update(
-        blank_edge_holes=n(UNSTAGED_BLANK_EDGE_HOLES),
-        cruise_holes=n(UNSTAGED_CRUISE_HOLES),
-        blank_edge_share=pct(UNSTAGED_BLANK_EDGE_HOLES, UNSTAGED_CRUISE_HOLES, 0),
+        **blank_edge_values(rec),
         floor_high_ft=n(num(b360, "link_cruise_floor_ft")),
         floor_low_ft=n(num(r100, "link_cruise_floor_ft")),
         gap_short_min=n(360),
@@ -448,6 +450,8 @@ def build_context(data):
         dir_same_tests=n(num(d_on, "same_callsign_low_edge_controls")),
         dir_same_joined=n(num(d_on, "same_callsign_low_edge_false_joins")),
     )
+    if num(d_on, "negative_low_edge_controls") != num(rec, "negative_low_edge_untested_controls"):
+        raise MissingValue("the direction run's low-edge tests differ from the final grid's")
     if d_on["within_limits"] != "False":
         raise MissingValue("direction-aware edges now pass their limits: the prose needs rewriting")
 
