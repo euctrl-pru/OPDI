@@ -19,6 +19,7 @@ converter below rather than from a render.
 """
 
 import argparse
+import ast
 import csv
 import html
 import json
@@ -49,13 +50,13 @@ DESCRIPTION = TITLE
 #: Numbers the prose may state without a placeholder: definitions and limits of the
 #: study and figures quoted from the literature review, never measurements.
 ALLOWED_LITERALS = {
-    "3",     # hours a day's run reads back under the other rules; rates a climb edge needs
-    "5",     # samples at an edge; the 5% limit
+    "3",     # hours a day's run reads back under the other rules
+    "5",     # the 5% limit
     "10",    # public practice, minutes
     "30",    # the current rule's gap, minutes; public practice
     "0.5",   # OpenSky's rejoin tolerance, degrees
     "2021",  # year of that paper
-    "1",     # the 1% limit
+    "1",     # the 1% limit; the 1 NM tolerance on distance
     "0.1",   # the 0.1% limit
     "300",   # labelled holes a low-edge limit wants
     "95",    # the confidence of the upper bounds; share of holes in a percentile
@@ -71,6 +72,13 @@ TEST_NAMES = {
     "not_descend_then_climb": "Descent then climb",
 }
 
+
+#: Constants of the rule and the study the prose states, and the file that defines each.
+CODE_CONSTANTS = {
+    "edge_samples": ("LINK_EDGE_SAMPLES", "src/opdi/pipeline/segmentation/methods.py"),
+    "min_rates": ("LINK_DIRECTION_MIN_RATES", "src/opdi/pipeline/segmentation/methods.py"),
+    "near_edge_min": ("EVENT_NEAR_EDGE_MIN", "benchmarks/track_link_controls.py"),
+}
 
 FAMILY_NAMES = {"cruise_cruise": "cruise edges", "climb_cruise": "a climbing edge"}
 
@@ -167,6 +175,36 @@ def settings_row(label, r):
     ]
 
 
+def code_constant(name, relative):
+    """A module-level number, read from the source and not imported.
+
+    Those modules import pyspark, which the scratch environment that writes the PDF does
+    not have. A test holds each value to the real import.
+    """
+    path = REPO / relative
+    if not path.is_file():
+        raise MissingValue(f"missing {path}")
+    for node in ast.parse(path.read_text()).body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)):
+            return node.value.value
+    raise MissingValue(f"no constant {name} in {path}")
+
+
+def chance_all_in_one_drawn(events, side, total):
+    """Chance all *events* land on a side of *side* of *total*, each case taken once."""
+    if events > total or total <= 0:
+        raise MissingValue(f"no chance for {events} events among {total}")
+    return math.comb(int(side), int(events)) / math.comb(int(total), int(events))
+
+
+def chance_all_in_one_repeated(events, side, total):
+    """The same for rare events among so many tests that drawing them again changes nothing."""
+    if total <= 0:
+        raise MissingValue(f"no chance for {events} events among {total}")
+    return (float(side) / float(total)) ** int(events)
+
+
 def upper_95(events, trials):
     """One-sided 95% upper bound on a rate, as the study computes it (Clopper-Pearson).
 
@@ -237,7 +275,7 @@ def blank_edge_values(rec):
 def build_context(data):
     """Every placeholder of the report, as formatted strings."""
     data = Path(data)
-    c = {}
+    c = {key: n(code_constant(*where_from)) for key, where_from in CODE_CONSTANTS.items()}
 
     # --- the chosen settings, over both days ---
     rec = one(read_csv(data, "final_grid/link_recommended.csv"))
@@ -534,7 +572,15 @@ def build_context(data):
         return f"{100.0 * (num(row, 'crossing_flights_in_one_track') - num(off, 'crossing_flights_in_one_track')) / cf:.1f}"
 
     climb_lab, descent_lab = num(climb, "linked_by_climb_labelled"), num(descent, "linked_by_descent_labelled")
+    climb_tests = num(climb, "negative_climb_cruise_controls")
+    descent_tests = num(descent, "negative_cruise_descent_controls")
+    if num(climb, "false_joined_by_climb") != 0 or num(descent, "negative_cruise_descent_false_joins") != 0:
+        raise MissingValue("the false joins no longer all fall on one side: the prose needs rewriting")
     c.update(
+        low_labelled=n(climb_lab + descent_lab),
+        low_hidden_tests=n(climb_tests + descent_tests),
+        chance_real=f"{chance_all_in_one_drawn(num(descent, 'false_joined_by_descent'), descent_lab, climb_lab + descent_lab):.3f}",
+        chance_hidden=f"{chance_all_in_one_repeated(num(climb, 'negative_climb_cruise_false_joins'), climb_tests, climb_tests + descent_tests):.3f}",
         off_crossing=pct(num(off, "crossing_flights_in_one_track"), cf),
         off_linked=n(num(off, "real_holes_linked")),
         off_false=n(num(off, "linked_false_join")),

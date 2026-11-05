@@ -213,6 +213,51 @@ def test_the_bound_is_the_one_the_study_computes():
         == pytest.approx(B.num(rec, "same_callsign_low_edge_upper_95"), rel=1e-6)
 
 
+def test_the_chances_of_all_falling_on_one_side():
+    assert f"{B.chance_all_in_one_drawn(3, 119, 304):.3f}" == "0.059"
+    assert f"{B.chance_all_in_one_repeated(6, 82974, 162317):.3f}" == "0.018"
+    with pytest.raises(B.MissingValue):
+        B.chance_all_in_one_drawn(3, 1, 0)
+    with pytest.raises(B.MissingValue):
+        B.chance_all_in_one_repeated(3, 1, 0)
+
+
+def test_the_constants_read_from_source_are_the_real_ones():
+    from opdi.pipeline.segmentation import methods
+
+    for name, relative in B.CODE_CONSTANTS.values():
+        if "segmentation" in relative:
+            assert B.code_constant(name, relative) == getattr(methods, name)
+    import track_link_controls
+
+    assert B.code_constant("EVENT_NEAR_EDGE_MIN", "benchmarks/track_link_controls.py") \
+        == track_link_controls.EVENT_NEAR_EDGE_MIN
+
+
+def test_a_constant_gone_from_the_source_stops_the_build():
+    with pytest.raises(B.MissingValue, match="NOPE"):
+        B.code_constant("NOPE", "src/opdi/pipeline/segmentation/methods.py")
+
+
+@needs_paper
+def test_the_chances_come_from_the_staged_counts():
+    _skip_until_the_grid_is_rerun()
+    c = B.build_context(PAPER / "data")
+    assert (c["chance_real"], c["chance_hidden"]) == ("0.059", "0.018")
+    assert (c["low_labelled"], c["low_hidden_tests"]) == ("304", "162,317")
+
+
+@needs_paper
+def test_the_literals_three_and_five_keep_one_meaning_each():
+    text = re.sub(r"\{\{.*?\}\}", " ", (PAPER / "report_template.md").read_text())
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"`[^`]*`", " ", text)
+    assert re.findall(r"(?<![\w.,])3(?![\d,.]*\d)", text) == ["3"]
+    assert "rather than 3," in text
+    fives = re.findall(r"(?<![\w.,])5(?![\d,.]*\d)(.?)", text)
+    assert fives and set(fives) == {"%"}
+
+
 @needs_paper
 def test_the_words_the_owner_ruled_out_stay_out():
     text = re.sub(r"\{\{.*?\}\}", " ", (PAPER / "report_template.md").read_text()).lower()

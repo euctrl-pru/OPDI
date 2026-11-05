@@ -356,6 +356,9 @@ What differs from the other rules when you run it:
 - **A shorter explicit `lookback_hours` raises `ValueError`.** Two days could
   otherwise decide one hole differently, and samples after midnight would be
   claimed twice or by neither.
+- **Segmentation is slower.** Each edge's frame spans `link_edge_position_minutes`,
+  so at 5 s cadence it reads up to 60 samples per row. On the study's pipeline day,
+  steps 02 to 04b under this rule took about 27 minutes on a 10% sample.
 - **The truncation warning is wider and noisier.** Its margin grows from 60 s to
   `link_max_gap_minutes` plus the longer of `link_callsign_lookahead_minutes` and
   `link_edge_position_minutes`, because a hole can straddle the end of the read.

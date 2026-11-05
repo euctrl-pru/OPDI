@@ -521,6 +521,33 @@ def test_two_days_decide_alike_with_blank_altitudes(spark, last_altitude_before_
     )
 
 
+def test_a_low_climbing_old_edge_before_midnight_is_claimed_once(spark):
+    """Old edge 23:58 on D-1 at 8,000 ft and climbing, a 600 min hole, new edge at cruise on D.
+
+    The rule accepts a climbing old edge at any altitude, so this links, and the piece on
+    D belongs to the track D-1 owns. Both reads must hold the climb to agree on that.
+    """
+    from opdi.pipeline.segmentation import SegmentationParams
+
+    p = SegmentationParams()
+    old_edge = D - dt.timedelta(minutes=2)
+    climb = [
+        {**CRUISE, "lon": 0.0, "callsign": "DLH1", "t": _t(old_edge - dt.timedelta(minutes=m)),
+         "baro_altitude": (8000.0 - 1000.0 * m) * 0.3048, "vert_rate": 1000.0 / 196.850394}
+        for m in range(5, -1, -1)
+    ]
+    new_edge = old_edge + dt.timedelta(minutes=600)
+    new_piece = _every(new_edge, new_edge + dt.timedelta(minutes=10), 1,
+                       lon=_lon_after(600), callsign="DLH1")
+    samples = climb + new_piece
+
+    _assert_claimed_once(spark, samples, p)
+
+    sv = make_track(spark, samples)
+    assert _claimed_by_day(sv, D, 11, p).count() == 0
+    assert _claimed_by_day(sv, D_MINUS_1, 11, p).count() == len(samples)
+
+
 # --- the truncation warning, under an arm that links across holes -------------
 
 
