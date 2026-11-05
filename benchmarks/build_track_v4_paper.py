@@ -49,7 +49,7 @@ DESCRIPTION = TITLE
 #: Numbers the prose may state without a placeholder: definitions and limits of the
 #: study and figures quoted from the literature review, never measurements.
 ALLOWED_LITERALS = {
-    "3",     # hours a day's run reads back under the other rules
+    "3",     # hours a day's run reads back under the other rules; rates a climb edge needs
     "5",     # samples at an edge; the 5% limit
     "10",    # public practice, minutes
     "30",    # the current rule's gap, minutes; public practice
@@ -57,7 +57,7 @@ ALLOWED_LITERALS = {
     "2021",  # year of that paper
     "1",     # the 1% limit
     "0.1",   # the 0.1% limit
-    "300",   # labelled holes the direction limit wants
+    "300",   # labelled holes a low-edge limit wants
     "95",    # the confidence of the upper bounds; share of holes in a percentile
 }
 
@@ -70,6 +70,9 @@ TEST_NAMES = {
     "implied_speed_not_impossible": "Implied speed impossible",
     "not_descend_then_climb": "Descent then climb",
 }
+
+
+FAMILY_NAMES = {"cruise_cruise": "cruise edges", "climb_cruise": "a climbing edge"}
 
 
 class MissingValue(SystemExit):
@@ -164,6 +167,61 @@ def settings_row(label, r):
     ]
 
 
+def upper_95(events, trials):
+    """One-sided 95% upper bound on a rate, as the study computes it (Clopper-Pearson).
+
+    The study's own lives beside Spark imports the builder does not need. A test holds
+    this one to the values in the staged CSVs, so the two cannot drift.
+    """
+    events, trials = int(events), int(trials)
+    if trials <= 0:
+        raise MissingValue(f"no upper bound on {events} of {trials}")
+
+    def at_most_events(rate):
+        term = (1.0 - rate) ** trials
+        total = term
+        for i in range(events):
+            term *= (trials - i) / (i + 1) * rate / (1.0 - rate)
+            total += term
+        return total
+
+    low, high = 0.0, 1.0
+    for _ in range(100):
+        mid = (low + high) / 2.0
+        if at_most_events(mid) > 0.05:
+            low = mid
+        else:
+            high = mid
+    return high
+
+
+def edge_rows(rows):
+    """The four settings of the two edge flags, each named, each required to exist."""
+    return {
+        name: one(rows, link_old_edge_climb=climb, link_new_edge_descent=descent)
+        for name, climb, descent in (("off", "False", "False"), ("climb", "True", "False"),
+                                     ("descent", "False", "True"), ("both", "True", "True"))
+    }
+
+
+def check_edge_decision(rec, edges):
+    """Stop if the staged data no longer says what the prose says about the two flags."""
+    if rec.get("status") != "recommended_provisional" or rec.get("provisional") != "True":
+        raise MissingValue(f"the pick is {rec.get('status')}, not provisional: the prose needs rewriting")
+    if rec.get("link_old_edge_climb") != "True" or rec.get("link_new_edge_descent") != "False":
+        raise MissingValue("the pick is not climb on, descent off: the prose needs rewriting")
+    verdicts = {name: r.get("within_limits") for name, r in edges.items()}
+    if verdicts != {"off": "True", "climb": "True", "descent": "False", "both": "False"}:
+        raise MissingValue(f"the edge settings now read {verdicts}: the prose needs rewriting")
+    if edges["descent"].get("real_by_descent_status") != "over_limit":
+        raise MissingValue("descent edges no longer fail their own limit: the prose needs rewriting")
+    if edges["climb"].get("real_by_climb_status") != "insufficient":
+        raise MissingValue("climb edges are no longer short of labelled holes: the prose needs rewriting")
+    for column in ("crossing_flights_in_one_track", "linked_false_join", "negative_limit_false_joins"):
+        if num(rec, column) != num(edges["climb"], column):
+            raise MissingValue(f"final_grid and final_edges differ on {column}")
+
+
 def blank_edge_values(rec):
     """How often an edge's position is read past a blank, over all holes and over linked.
 
@@ -182,7 +240,10 @@ def build_context(data):
     c = {}
 
     # --- the chosen settings, over both days ---
-    rec = one(read_csv(data, "final_grid/link_recommended.csv"), status="recommended")
+    rec = one(read_csv(data, "final_grid/link_recommended.csv"))
+    edge_grid = read_csv(data, "final_edges/link_grid_pooled.csv")
+    edges = edge_rows(edge_grid)
+    check_edge_decision(rec, edges)
     grid = read_csv(data, "final_grid/link_grid_pooled.csv")
     if not same(rec["point_id"], setting(grid, 400, 600)["point_id"]):
         raise MissingValue("the recommended row is not 400 kt, 600 min: the prose needs rewriting")
@@ -289,6 +350,8 @@ def build_context(data):
         smallest_same_n=n(num(smallest, "n")),
         smallest_same_upper=pct(num(smallest, "wrong_upper_95"), 1, 0),
         smallest_same_band=smallest["gap_stratum"],
+        smallest_same_depth=n(num(smallest, "depth_min")),
+        smallest_same_family=FAMILY_NAMES[smallest["control_family"]],
     )
     if sum(num(r, "n") for r in controls) != limit_n:
         raise MissingValue("the controls table does not add up to the limit's count")
@@ -308,6 +371,9 @@ def build_context(data):
     )
     s315_600, s315_480 = setting(grid, 315, 600), setting(grid, 315, 480)
     s_ratio = setting(grid, 400, 600, ratio=0.85)
+    s315_ratio = setting(grid, 315, 600, ratio=0.85)
+    if s315_480["within_limits"] != "False" or s315_ratio["within_limits"] != "True":
+        raise MissingValue("the nearest alternatives changed sides of the limits: the prose needs rewriting")
     s_stop35, s_stop20 = setting(grid, 400, 600, stop=35), setting(grid, 400, 600, stop=20)
     c.update(
         s315_600_crossing=pct(num(s315_600, "crossing_flights_in_one_track"), cf),
@@ -320,9 +386,15 @@ def build_context(data):
         crossing_tie_gap=n(num(rec, "crossing_flights_in_one_track")
                            - num(s315_480, "crossing_flights_in_one_track")),
         s315_480_false=n(num(s315_480, "linked_false_join")),
+        s315_480_labelled=n(labelled(s315_480)),
+        s315_480_rate=pct(num(s315_480, "linked_false_join"), labelled(s315_480), 3),
+        s315_600_labelled=n(labelled(s315_600)),
+        ratio315_crossing_n=n(num(s315_ratio, "crossing_flights_in_one_track")),
+        ratio315_false=n(num(s315_ratio, "linked_false_join")),
+        ratio315_hidden=n(num(s315_ratio, "negative_limit_false_joins")),
+        ratio315_missed=pct(num(s315_ratio, "positive_within_gap") - num(s315_ratio, "positive_linked"),
+                            num(s315_ratio, "positive_within_gap")),
         s315_480_hidden=n(num(s315_480, "negative_limit_false_joins")),
-        s315_480_missed=pct(num(s315_480, "positive_within_gap") - num(s315_480, "positive_linked"),
-                            num(s315_480, "positive_within_gap")),
         ratio_value="0.85",
         ratio_crossing=pct(num(s_ratio, "crossing_flights_in_one_track"), cf),
         ratio_false=n(num(s_ratio, "linked_false_join")),
@@ -331,6 +403,9 @@ def build_context(data):
         stop35_crossing=pct(num(s_stop35, "crossing_flights_in_one_track"), cf),
         stop20_crossing=pct(num(s_stop20, "crossing_flights_in_one_track"), cf),
         stop35_false=n(num(s_stop35, "linked_false_join")),
+        stop35_hidden=n(num(s_stop35, "negative_limit_false_joins")),
+        hidden_at_480=n(num(setting(grid, 400, 480), "negative_limit_false_joins")),
+        hidden_at_360=n(num(setting(grid, 400, 360), "negative_limit_false_joins")),
     )
 
     # --- what keeps holes split ---
@@ -365,6 +440,13 @@ def build_context(data):
     c.update(
         crossing_holes_linked=n(reason_total("crosses_box", "linked", "holes")),
         crossing_holes_split=n(split_total("crosses_box")),
+        old_edge_holes=n(reason_total("crosses_box", "cruise_at_old_edge", "holes")),
+        old_edge_share=pct(reason_total("crosses_box", "cruise_at_old_edge", "holes"),
+                           split_total("crosses_box")),
+        speed_holes=n(reason_total("crosses_box", "implied_speed_not_too_slow", "holes")),
+        speed_share=pct(reason_total("crosses_box", "implied_speed_not_too_slow", "holes"),
+                        split_total("crosses_box")),
+        speed_only=n(reason_total("crosses_box", "implied_speed_not_too_slow", "only_failed_test_holes")),
         new_edge_holes=n(reason_total("crosses_box", "cruise_at_new_edge", "holes")),
         new_edge_only=n(reason_total("crosses_box", "cruise_at_new_edge", "only_failed_test_holes")),
         new_edge_share=pct(reason_total("crosses_box", "cruise_at_new_edge", "holes"),
@@ -412,8 +494,10 @@ def build_context(data):
     b360, b600 = setting(fl250, 400, 360), setting(fl250, 400, 600)
     r180 = setting(fl180, 400, 600)
     r100, r100_ratio = setting(fl100, 400, 600), setting(fl100, 400, 600, ratio=0.85)
-    if num(r180, "crossing_flights_in_one_track") != num(rec, "crossing_flights_in_one_track"):
-        raise MissingValue("the earlier 18,000 ft run no longer matches the final one")
+    # Those three predate reading altitude past a blank. Holding the earlier 18,000 ft run
+    # to the first edge row's flight count keeps them comparable on the population at least.
+    if num(r180, "crossing_flights") != num(edges["off"], "crossing_flights"):
+        raise MissingValue("the earlier 18,000 ft run covers different flights from the final one")
     c.update(
         **blank_edge_values(rec),
         floor_high_ft=n(num(b360, "link_cruise_floor_ft")),
@@ -427,6 +511,10 @@ def build_context(data):
         final_blank_linked=n(num(rec, "linked_edge_read_through_blank")),
         final_blank_share=pct(num(rec, "linked_edge_read_through_blank"), linked),
         high_floor_long_crossing=pct(num(b600, "crossing_flights_in_one_track"), cf),
+        early_crossing=pct(num(r180, "crossing_flights_in_one_track"), cf),
+        early_linked=n(num(r180, "real_holes_linked")),
+        early_false=n(num(r180, "linked_false_join")),
+        early_labelled=n(labelled(r180)),
         low_floor_crossing=pct(num(r100, "crossing_flights_in_one_track"), cf),
         low_floor_false=n(num(r100, "linked_false_join")),
         low_floor_labelled=n(labelled(r100)),
@@ -437,25 +525,118 @@ def build_context(data):
         low_floor_ratio_rate=pct(num(r100_ratio, "linked_false_join"), labelled(r100_ratio), 2),
     )
 
-    direction = read_csv(data, "final_edges/link_grid_pooled.csv")
-    d_on = one(direction, link_old_edge_climb="True", link_new_edge_descent="True")
+    # --- the two edge settings ---
+    off, climb, descent, both_on = edges["off"], edges["climb"], edges["descent"], edges["both"]
+    if num(climb, "negative_low_edge_untested_controls") != num(rec, "negative_low_edge_untested_controls"):
+        raise MissingValue("final_edges and final_grid differ on the low-edge tests")
+
+    def points(row):
+        return f"{100.0 * (num(row, 'crossing_flights_in_one_track') - num(off, 'crossing_flights_in_one_track')) / cf:.1f}"
+
+    climb_lab, descent_lab = num(climb, "linked_by_climb_labelled"), num(descent, "linked_by_descent_labelled")
     c.update(
-        dir_crossing=pct(num(d_on, "crossing_flights_in_one_track"), cf),
-        dir_false=n(num(d_on, "false_joined_by_direction")),
-        dir_labelled=n(num(d_on, "linked_by_direction_labelled")),
-        dir_rate=pct(num(d_on, "false_joined_by_direction"), num(d_on, "linked_by_direction_labelled")),
-        dir_all_false=n(num(d_on, "linked_false_join")),
-        dir_all_labelled=n(labelled(d_on)),
-        dir_all_rate=pct(num(d_on, "linked_false_join"), labelled(d_on), 3),
-        dir_tests=n(num(d_on, "negative_low_edge_controls")),
-        dir_tests_joined=n(num(d_on, "negative_low_edge_false_joins")),
-        dir_same_tests=n(num(d_on, "same_callsign_low_edge_controls")),
-        dir_same_joined=n(num(d_on, "same_callsign_low_edge_false_joins")),
+        off_crossing=pct(num(off, "crossing_flights_in_one_track"), cf),
+        off_linked=n(num(off, "real_holes_linked")),
+        off_false=n(num(off, "linked_false_join")),
+        off_labelled=n(labelled(off)),
+        climb_points=points(climb),
+        climb_linked=n(num(climb, "linked_by_climb")),
+        climb_false=n(num(climb, "false_joined_by_climb")),
+        climb_labelled=n(climb_lab),
+        climb_unknown_share=pct(num(climb, "linked_by_climb") - climb_lab, num(climb, "linked_by_climb")),
+        climb_upper=pct(upper_95(num(climb, "false_joined_by_climb"), climb_lab), 1),
+        climb_hidden=n(num(climb, "negative_climb_cruise_false_joins")),
+        climb_hidden_tests=n(num(climb, "negative_climb_cruise_controls")),
+        climb_same_joined=n(num(climb, "same_callsign_low_edge_false_joins")),
+        climb_same_tests=n(num(climb, "same_callsign_low_edge_controls")),
+        hidden_pairs=n(num(climb, "negative_limit_pairs_with_false_join")),
+        cruise_hidden=n(num(off, "negative_limit_false_joins")),
+        cruise_hidden_tests=n(num(off, "negative_limit_controls")),
+        descent_crossing=pct(num(descent, "crossing_flights_in_one_track"), cf),
+        descent_points=points(descent),
+        descent_false=n(num(descent, "false_joined_by_descent")),
+        descent_labelled=n(descent_lab),
+        descent_rate=pct(num(descent, "false_joined_by_descent"), descent_lab),
+        descent_one_rate=pct(1, descent_lab, 2),
+        descent_near_edge=n(num(descent, "false_joined_near_edge") - num(off, "false_joined_near_edge")),
+        descent_hidden=n(num(descent, "negative_cruise_descent_false_joins")),
+        descent_hidden_tests=n(num(descent, "negative_cruise_descent_controls")),
+        both_crossing=pct(num(both_on, "crossing_flights_in_one_track"), cf),
+        both_extra_flights=n(num(both_on, "crossing_flights_in_one_track") - num(climb, "crossing_flights_in_one_track")),
+        both_false=n(num(both_on, "linked_false_join")),
+        both_labelled=n(labelled(both_on)),
+        both_rate=pct(num(both_on, "linked_false_join"), labelled(both_on), 3),
+        low_cut_tests=n(num(climb, "positive_low_edge_within_gap")),
+        low_cut_chosen=n(num(climb, "positive_low_edge_linked")),
+        low_cut_both=n(num(both_on, "positive_low_edge_linked")),
+        alt_old=n(num(rec, "linked_altitude_read_past_blank_old")),
+        alt_old_share=pct(num(rec, "linked_altitude_read_past_blank_old"), linked),
+        alt_old_false=n(num(rec, "false_joined_altitude_read_past_blank_old")),
+        alt_new=n(num(rec, "linked_altitude_read_past_blank_new")),
+        alt_new_share=pct(num(rec, "linked_altitude_read_past_blank_new"), linked),
+        alt_new_false=n(num(rec, "false_joined_altitude_read_past_blank_new")),
     )
-    if num(d_on, "negative_low_edge_controls") != num(rec, "negative_low_edge_untested_controls"):
-        raise MissingValue("the direction run's low-edge tests differ from the final grid's")
-    if d_on["within_limits"] != "False":
-        raise MissingValue("direction-aware edges now pass their limits: the prose needs rewriting")
+
+    def edge_setting_row(label, row, only_false, only_labelled):
+        only = f"{n(num(row, only_false))} of {n(num(row, only_labelled))}" if only_false else "none"
+        return [
+            label,
+            pct(num(row, "crossing_flights_in_one_track"), cf),
+            pct(num(row, "flights_in_one_track"), fl),
+            only,
+            f"{n(num(row, 'linked_false_join'))} of {n(labelled(row))} "
+            f"({pct(num(row, 'linked_false_join'), labelled(row), 3)})",
+            f"{n(num(row, 'negative_limit_false_joins'))} of {n(num(row, 'negative_limit_controls'))}",
+            "yes, provisional" if row["within_limits"] == "True" and row["provisional"] == "True"
+            else "yes" if row["within_limits"] == "True" else "no",
+        ]
+
+    c["table_edges"] = table(
+        ["Edges below the floor allowed", "Crossing flights in one track", "All flights in one track",
+         "Real false joins among holes linked only that way, of checkable",
+         "Real false joins overall, of checkable", "Hidden landings joined", "Within limits"],
+        [
+            edge_setting_row("Neither", off, None, None),
+            edge_setting_row("**Old edge climbing (chosen)**", climb,
+                             "false_joined_by_climb", "linked_by_climb_labelled"),
+            edge_setting_row("New edge descending", descent,
+                             "false_joined_by_descent", "linked_by_descent_labelled"),
+            edge_setting_row("Both", both_on, "false_joined_by_direction", "linked_by_direction_labelled"),
+        ],
+    )
+
+    # Hidden landings by family: each is counted at the setting that first allows it.
+    edge_controls = read_csv(data, "final_edges/link_controls_pooled.csv")
+
+    def family_row(label, row, family, total_column, joined_column, status):
+        cuts = where(edge_controls, point_id=row["point_id"], kind="negative",
+                     control_family=family, counts_toward_limit="True")
+        tests = sum(num(r, "n") for r in cuts)
+        joined = sum(num(r, "wrong") for r in cuts)
+        hard = [r for r in cuts if r["same_callsign"] == "True"]
+        hard_tests = sum(num(r, "n") for r in hard)
+        hard_joined = sum(num(r, "wrong") for r in hard)
+        if tests != num(row, total_column) or joined != num(row, joined_column):
+            raise MissingValue(f"the {family} tests do not add up to the grid's count")
+        return [
+            label, n(tests), n(joined), pct(upper_95(joined, tests), 1, 3),
+            n(hard_tests), n(hard_joined), pct(upper_95(hard_joined, hard_tests), 1, 2), status,
+        ]
+
+    c["table_hidden_families"] = table(
+        ["Edges either side of the cut", "Tests", "Joined", "At most, 95%",
+         "Same or blank callsign: tests", "Joined", "At most, 95%", "In the chosen rule"],
+        [
+            family_row("Cruise, then cruise", off, "cruise_cruise", "negative_limit_controls",
+                       "negative_limit_false_joins", "yes"),
+            family_row("Climb, then cruise", climb, "climb_cruise", "negative_climb_cruise_controls",
+                       "negative_climb_cruise_false_joins", "yes"),
+            family_row("Cruise, then descent", descent, "cruise_descent", "negative_cruise_descent_controls",
+                       "negative_cruise_descent_false_joins", "no"),
+            family_row("Climb, then descent", both_on, "climb_descent", "negative_climb_descent_controls",
+                       "negative_climb_descent_false_joins", "no"),
+        ],
+    )
 
     # --- the real pipeline day ---
     both = read_csv(data, "stage2/link_both_ends.csv")
@@ -501,6 +682,10 @@ def build_context(data):
         intra_n=n(num(intra, "n")),
         intra_ades_right_to_wrong=n(num(one(callsign, flow="intra_europe", side="ades"), "right_to_wrong")),
         intra_ades_wrong_to_right=n(num(one(callsign, flow="intra_europe", side="ades"), "wrong_to_right")),
+        cross_ades_right_to_wrong=n(sum(num(r, "right_to_wrong") for r in where(callsign, side="ades")
+                                        if r["flow"] in ("europe_to_outside", "outside_to_europe"))),
+        cross_ades_wrong_to_right=n(sum(num(r, "wrong_to_right") for r in where(callsign, side="ades")
+                                        if r["flow"] in ("europe_to_outside", "outside_to_europe"))),
     )
 
     part = one(read_csv(data, "stage2/link_partition_check.csv"))
@@ -537,6 +722,16 @@ def build_context(data):
         ev_aibt=event_change("AIBT"),
         ev_fl245=event_change("xing-fl245"),
         ev_fl100=event_change("xing-fl100"),
+        ev_fl50=event_change("xing-fl50"),
+        ev_entry_taxiway=event_change("entry-taxiway"),
+        ev_exit_taxiway=event_change("exit-taxiway"),
+        ev_entry_apron=event_change("entry-apron"),
+        ev_exit_apron=event_change("exit-apron"),
+        ev_entry_parking=event_change("entry-parking_position"),
+        ev_exit_parking=event_change("exit-parking_position"),
+        ev_vacated=event_change("runway-vacated"),
+        ev_level_off_start=event_change("level-off-descent-start"),
+        ev_level_off_end=event_change("level-off-descent-end"),
     )
 
     truth = read_csv(data, "stage2/link_truth_all_flights.csv")

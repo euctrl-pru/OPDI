@@ -108,7 +108,7 @@ def test_the_template_states_no_number_without_a_source():
 
 
 def _recommended():
-    return B.one(B.read_csv(PAPER / "data", "final_grid/link_recommended.csv"), status="recommended")
+    return B.one(B.read_csv(PAPER / "data", "final_grid/link_recommended.csv"))
 
 
 def _skip_until_the_grid_is_rerun():
@@ -153,6 +153,64 @@ def test_the_low_edge_count_is_of_tests_the_setting_allows():
     assert B.build_context(PAPER / "data")["low_edge_tests"] == B.n(
         B.num(rec, "negative_low_edge_untested_controls")
     )
+
+
+def _edges(**verdicts):
+    base = {"off": "True", "climb": "True", "descent": "False", "both": "False", **verdicts}
+    rows = {k: {"within_limits": v, "crossing_flights_in_one_track": "1", "linked_false_join": "1",
+                "negative_limit_false_joins": "1", "real_by_climb_status": "insufficient",
+                "real_by_descent_status": "over_limit"} for k, v in base.items()}
+    return rows
+
+
+_PICK = {"status": "recommended_provisional", "provisional": "True", "link_old_edge_climb": "True",
+         "link_new_edge_descent": "False", "crossing_flights_in_one_track": "1",
+         "linked_false_join": "1", "negative_limit_false_joins": "1"}
+
+
+def test_the_edge_decision_holds_on_what_the_prose_says():
+    B.check_edge_decision(_PICK, _edges())
+
+
+@pytest.mark.parametrize("name", ["descent", "both"])
+def test_a_rejected_edge_setting_passing_stops_the_build(name):
+    with pytest.raises(B.MissingValue, match="rewriting"):
+        B.check_edge_decision(_PICK, _edges(**{name: "True"}))
+
+
+@pytest.mark.parametrize("change", [
+    {"status": "recommended"}, {"provisional": "False"}, {"link_old_edge_climb": "False"},
+    {"link_new_edge_descent": "True"},
+])
+def test_a_different_pick_stops_the_build(change):
+    with pytest.raises(B.MissingValue, match="rewriting"):
+        B.check_edge_decision({**_PICK, **change}, _edges())
+
+
+def test_each_edge_setting_must_have_its_own_row():
+    rows = [{"link_old_edge_climb": a, "link_new_edge_descent": b, "id": a + b}
+            for a in ("True", "False") for b in ("True", "False")]
+    assert B.edge_rows(rows)["climb"]["id"] == "TrueFalse"
+    with pytest.raises(B.MissingValue):
+        B.edge_rows(rows[:3])
+
+
+def test_the_bound_on_none_of_n_has_its_closed_form():
+    assert B.upper_95(0, 185) == pytest.approx(1 - 0.05 ** (1 / 185), rel=1e-9)
+    with pytest.raises(B.MissingValue):
+        B.upper_95(0, 0)
+
+
+@needs_paper
+def test_the_bound_is_the_one_the_study_computes():
+    _skip_until_the_grid_is_rerun()
+    rec = _recommended()
+    assert B.upper_95(num := B.num(rec, "negative_limit_false_joins"), B.num(rec, "negative_limit_controls")) \
+        == pytest.approx(B.num(rec, "negative_false_join_upper_95"), rel=1e-6)
+    assert num > 0
+    assert B.upper_95(B.num(rec, "same_callsign_low_edge_false_joins"),
+                      B.num(rec, "same_callsign_low_edge_controls")) \
+        == pytest.approx(B.num(rec, "same_callsign_low_edge_upper_95"), rel=1e-6)
 
 
 @needs_paper

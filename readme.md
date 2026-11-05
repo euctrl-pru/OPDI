@@ -327,17 +327,18 @@ accuracy figures across.
 **Off by default.** `standard` still points to `debounced` (A9), and nothing
 published uses this rule. `cruise_linked` is A9 with one change: a reception gap
 over 30 minutes does not end a track when the evidence at its two edges fits one
-continuous flight (both edges at cruise, a plausible implied speed, an agreeing
-callsign, no descent then climb). No sample is invented: the hole stays empty and
+continuous flight (both edges at cruise or the old edge still climbing, a plausible
+implied speed, an agreeing callsign, no descent then climb). No sample is invented: the hole stays empty and
 only the identity changes. A callsign change and a short gap at low altitude still
 split.
 
 Each edge's altitude, vertical rate and speed read their own nearest five values
 within `link_edge_position_minutes`, past any blank samples, because altitude often
-arrives in a later message. No altitude in that span means split. Two settings, both
-off by default, let an edge below the cruise floor link on its direction:
-`link_old_edge_climb` for an old edge still climbing and `link_new_edge_descent` for
-a new edge descending.
+arrives in a later message. No altitude in that span means split. Two settings let
+an edge below the cruise floor link on its direction. `link_old_edge_climb`, for an
+old edge still climbing, is on by default, provisionally: 0 false joins in 185
+checkable holes, under the 300 the study wanted. `link_new_edge_descent`, for a new
+edge descending, is off by default because it failed its own limit, 3 of 119.
 
 Select it in code:
 
