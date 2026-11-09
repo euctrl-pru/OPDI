@@ -1304,6 +1304,34 @@ class EventConfig:
     filter is a proxy for the same thing and leaks both ways: at 30 minutes it
     discards 4,364 real departures and still keeps hour-long circuits."""
 
+    # ----- holes inside a track (cruise-linked tracks) ------------------
+    track_hole_seconds: float = 1800.0
+    """A silence longer than this inside one track is a *hole*.
+
+    The ``cruise_linked`` track rule keeps one ``track_id`` across a reception
+    gap, so a track can hold hours in which nothing was received. No detector
+    pairs or interpolates samples across a hole: level segments and crossings
+    are found per *piece* -- the samples between two holes -- see
+    ``pipeline/holes.py``.
+
+    Equal to ``SegmentationConfig.gap_minutes`` on purpose, and a test holds the
+    two together. Earlier track rules break at every gap over that threshold, so
+    their tracks hold no hole and their events are unchanged."""
+
+    distance_from_last_known_position: bool = True
+    """Measure cumulative distance from the last *known* position.
+
+    Cleaning blanks a position it cannot trust and keeps the row. The released
+    distance (``distance_v0.0.2``) took each sample against the row before it,
+    so a blank position zeroed both the segment into it and the segment out of
+    it. On 2026-06-14, 23% of cleaned positions were blank and tracks came out
+    14% short in total. Reading the last known position instead closes that,
+    and across a hole it adds the straight line between the hole's edges -- a
+    lower bound on what was flown, and the only figure the data supports.
+
+    On: ``distance_v0.0.3``. Off, as under :meth:`legacy`: the released
+    ``distance_v0.0.2``, defect included, so a past month reproduces."""
+
     # ----- one variable per purpose (v0.3.0) ----------------------------
     merge_duplicate_milestones: Optional[bool] = None
     """Publish one event type per operational question rather than two.
@@ -1556,6 +1584,7 @@ class EventConfig:
             level_anchor="phase",
             airport_gate_above_field=False,
             airport_admit_on_ground=False,
+            distance_from_last_known_position=False,
             events_version="events_v0.0.2",
         )
 

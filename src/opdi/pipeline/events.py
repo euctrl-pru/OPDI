@@ -53,6 +53,7 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
 from opdi.pipeline.flights import bearing_deg, haversine_nm, resolve_flight_id
+from opdi.pipeline.holes import PIECE, add_piece
 from opdi.pipeline.level_segments import LEVEL_ARMS, classify_level_offs
 from opdi.pipeline.ground import block_times, movement_window
 from opdi.pipeline.runway_ops import go_arounds, runway_milestones, runway_traversals
@@ -189,6 +190,25 @@ def _smooth_phase(df: DataFrame, twindow_seconds: float) -> DataFrame:
     return df.drop(*[f"_n_{p}" for p in phases], "_n_max")
 
 
+def _not_across_a_hole(crossings: DataFrame, config: EventConfig) -> DataFrame:
+    """Drop a crossing interpolated between the two edges of a hole.
+
+    A crossing is placed between the pair of samples that straddles the
+    threshold, and ``bracket_seconds`` is how far apart that pair is. When the
+    pair is the two edges of a hole, the aircraft did cross -- but hours of
+    silence lie between them and the instant and position would be invented.
+    No sample pair inside a piece is further apart than the hole threshold, so
+    a track without a hole loses nothing.
+
+    ``crossing_seq`` is numbered before this and keeps its gap: the dropped
+    crossing happened, it just cannot be placed.
+    """
+    limit_s = float(config.track_hole_seconds)
+    return crossings.filter(
+        F.coalesce(col("bracket_seconds") <= lit(limit_s), lit(True))
+    )
+
+
 def calculate_threshold_crossing_events(
     sdf_input: DataFrame, config: Optional[EventConfig] = None
 ) -> DataFrame:
@@ -214,6 +234,8 @@ def calculate_threshold_crossing_events(
         config,
         interpolate_cols=("lat", "lon", "cumulative_distance_nm", "cumulative_time_s"),
     )
+
+    crossings = _not_across_a_hole(crossings, config)
 
     fl = col("threshold").cast("int").cast("string")
     return crossings.select(
@@ -634,6 +656,7 @@ def calculate_ring_crossing_events(
     # Bearing is computed *from* the interpolated crossing position, not
     # interpolated alongside it: a bearing is circular, and averaging 359 and 1
     # gives 180. From the aerodrome outwards, matching APDF's C40_BEARING.
+    crossings = _not_across_a_hole(crossings, config)
     crossings = crossings.withColumn(
         "bearing_deg",
         bearing_deg(col("apt_lat"), col("apt_lon"), col("lat"), col("lon")),
@@ -692,7 +715,11 @@ def calculate_horizontal_segment_events(
     # Carried only when the caller attached them, so the detector stays a pure
     # column-in/column-out function and can be tested without storage.
     elevations = [c for c in ("elev_adep_ft", "elev_ades_ft") if c in sdf_input.columns]
-    df = sdf_input.select(*wanted, *elevations)
+    # The piece index, where the caller attached one (see ``pipeline/holes.py``).
+    # A level segment is then bounded by the hole it meets, and a caller that
+    # attaches none gets the published behaviour unchanged.
+    pieces = [PIECE] if PIECE in sdf_input.columns else []
+    df = sdf_input.select(*wanted, *elevations, *pieces)
     use_agl = config.phase_ground_above_field and len(elevations) == 2
 
     # Convert units: meters -> feet, m/s -> ft/min, m/s -> knots
@@ -785,12 +812,17 @@ def calculate_horizontal_segment_events(
     df = df.select(
         "track_id", "lat", "lon", "event_time", "cumulative_distance_nm",
         "cumulative_time_s", "altitude_ft", "roc_ft_min", "speed_kt", "flight_phase",
+        *pieces,
     )
 
     df.cache()
 
-    # Detect phase transitions
-    window_phase = Window.partitionBy("track_id").orderBy("event_time")
+    # Detect phase transitions. The neighbouring phase is looked for inside the
+    # sample's own piece: across a hole there is no neighbour, so a segment in
+    # progress ends at the last sample before the hole and a new one starts at
+    # the first sample after it. The per-flight quantities below -- the first
+    # and last cruise sample -- stay per track.
+    window_phase = Window.partitionBy("track_id", *pieces).orderBy("event_time")
     window_cumulative = (
         Window.partitionBy("track_id")
         .orderBy("event_time")
@@ -829,7 +861,7 @@ def calculate_horizontal_segment_events(
         known = when(col("flight_phase").isNotNull(), col("flight_phase"))
         back = window_phase.rowsBetween(Window.unboundedPreceding, -1)
         forward = (
-            Window.partitionBy("track_id")
+            Window.partitionBy("track_id", *pieces)
             .orderBy(col("event_time").desc())
             .rowsBetween(Window.unboundedPreceding, -1)
         )
@@ -1140,19 +1172,44 @@ def add_time_measure(sdf_input: DataFrame) -> DataFrame:
     return sdf_input.drop("min_event_time")
 
 
-def add_distance_measure(df: DataFrame) -> DataFrame:
+#: The cumulative distance measured from the last known position.
+DISTANCE_VERSION = "distance_v0.0.3"
+#: The released measurement, in which a blank position zeroes two segments.
+LEGACY_DISTANCE_VERSION = "distance_v0.0.2"
+
+
+def distance_version(config: EventConfig) -> str:
+    """The ``version`` a distance measurement carries under *config*."""
+    if config.distance_from_last_known_position:
+        return DISTANCE_VERSION
+    return LEGACY_DISTANCE_VERSION
+
+
+def add_distance_measure(df: DataFrame, last_known_position: bool = True) -> DataFrame:
     """
     Calculate segment and cumulative distance (NM) using Haversine formula.
 
     Uses native PySpark functions for distributed computation.
 
+    Each sample is measured against the last sample that *has* a position.
+    Cleaning blanks positions it cannot trust and keeps the rows, so measuring
+    against the row before -- what ``last_known_position=False`` reproduces,
+    and what ``distance_v0.0.2`` published -- lost the segment either side of
+    every blank. A sample with no position of its own adds nothing; the next
+    known position then covers the whole stretch in one segment. Across a hole
+    that segment is the straight line between its edges.
+
     Args:
         df: DataFrame with lat, lon, track_id, event_time columns.
+        last_known_position: measure from the last known position (default),
+            or from the previous row as the released measurement did.
 
     Returns:
         DataFrame with segment_distance_nm and cumulative_distance_nm.
     """
     window_lag = Window.partitionBy("track_id").orderBy("event_time")
+    if last_known_position:
+        return _distance_from_last_known_position(df, window_lag)
     window_cumsum = (
         Window.partitionBy("track_id")
         .orderBy("event_time")
@@ -1181,6 +1238,33 @@ def add_distance_measure(df: DataFrame) -> DataFrame:
     df = df.drop("lat_rad", "lon_rad", "prev_lat_rad", "prev_lon_rad", "a", "c", "distance_km")
 
     return df
+
+
+def _distance_from_last_known_position(df: DataFrame, ordered) -> DataFrame:
+    """:func:`add_distance_measure` against the last sample holding a position.
+
+    Both coordinates must come from one sample: a latitude from one row and a
+    longitude from another is not a place the aircraft was.
+    """
+    known = when(col("lat").isNotNull() & col("lon").isNotNull(), struct("lat", "lon"))
+    before = ordered.rowsBetween(Window.unboundedPreceding, -1)
+    running = ordered.rowsBetween(Window.unboundedPreceding, 0)
+    df = df.withColumn("_prev_pos", F.last(known, ignorenulls=True).over(before))
+
+    lat, lon = F.radians(col("lat")), F.radians(col("lon"))
+    prev_lat = F.radians(col("_prev_pos.lat"))
+    prev_lon = F.radians(col("_prev_pos.lon"))
+    a = (
+        F.sin((lat - prev_lat) / 2) ** 2
+        + F.cos(prev_lat) * F.cos(lat) * F.sin((lon - prev_lon) / 2) ** 2
+    )
+    distance_km = 6371 * 2 * F.atan2(F.sqrt(a), F.sqrt(1 - a))
+    # NULL -- no position here, or none yet behind it -- adds nothing. The same
+    # arithmetic as the released measure, so a track with every position known
+    # comes out identical.
+    df = df.withColumn("segment_distance_nm", F.coalesce(distance_km / 1.852, lit(0.0)))
+    df = df.withColumn("cumulative_distance_nm", f_sum("segment_distance_nm").over(running))
+    return df.drop("_prev_pos")
 
 
 # ======================================================================
@@ -1411,8 +1495,14 @@ class FlightEventProcessor:
             calc_hexaero: Whether to calculate airport events.
             calc_seen: Whether to calculate first/last seen events.
         """
-        sdf_input = add_distance_measure(sdf_input)
+        sdf_input = add_distance_measure(
+            sdf_input, self.events.distance_from_last_known_position
+        )
         sdf_input = add_time_measure(sdf_input)
+        # Which piece of its track each sample belongs to: 0 throughout for a
+        # track with no hole. Read by the detectors that pair or interpolate
+        # samples, so that none does it across a hole.
+        sdf_input = add_piece(sdf_input, self.events.track_hole_seconds)
         sdf_input.cache()
 
         # One aerodrome join for the whole step; see _with_aerodrome_geometry.
@@ -1445,7 +1535,12 @@ class FlightEventProcessor:
         # windowed pass over the month's state vectors, done twice per rung.
         tops = None
         if calc_vertical and (self.events.emit_level_offs or self.events.emit_pru_tops):
-            segments = LEVEL_ARMS[self.events.level_method](geo, self.events)
+            # Per piece: a level segment cannot run through a hole. The piece
+            # is dropped again because a segment belongs to its track, which
+            # is what the tops and the level-off classification join on.
+            segments = LEVEL_ARMS[self.events.level_method](
+                geo, self.events, partition_cols=("track_id", PIECE)
+            ).drop(PIECE)
             segments.cache()
             if self.events.emit_pru_tops or (
                 self.events.emit_level_offs and self.events.level_anchor == "pru"
@@ -1612,7 +1707,7 @@ class FlightEventProcessor:
         # Write measurements (distance + time)
         df_dist = (
             df_events.withColumn("type", lit("Distance flown (NM)"))
-            .withColumn("version", lit("distance_v0.0.2"))
+            .withColumn("version", lit(distance_version(self.events)))
             .withColumn("id", self._measurement_id(batch_id, "_d_"))
             .select(
                 col("id"),
