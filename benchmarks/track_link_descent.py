@@ -67,7 +67,7 @@ _CODE_PATHS = [
 
 HOLE_COLUMNS = [
     "icao24", "track_id", "t_old_edge", "t_new_edge", "gap_min", "population", "label",
-    "event_near_edge", "descent_edge", "alt_after_ft", "vr_after_fpm", "vr_after_samples",
+    "event_near_edge", "event_outside_box_inside", "descent_edge", "alt_after_ft", "vr_after_fpm", "vr_after_samples",
     "alt_before_ft", "vr_before_fpm", "implied_kt", "cs_before", "cs_after", "callsign_state",
     "other_checks_pass",
 ]

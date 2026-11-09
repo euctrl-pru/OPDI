@@ -177,7 +177,8 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
     aircraft still airborne on descent, which labelled three linked holes false joins.
     When *truth* carries ``adep_in_box`` and ``ades_in_box`` (``with_population``),
     a take-off or landing outside the box neither makes a false join nor counts as
-    near an edge; a hole with no other evidence then reads ``unknown``. Without the
+    near an edge; a hole with no other evidence then reads ``unknown``, and
+    ``event_outside_box_inside`` says such an event lay inside it. Without the
     columns every event counts, as before.
     """
     key = ["icao24", "t_old_edge", "t_new_edge"]
@@ -191,6 +192,12 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
 
     def inside(event: Column) -> Column:
         return (old < event) & (event < new)
+
+    outside_inside = (
+        (inside(F.col("t_off")) & ~F.col("adep_in_box")) | (inside(F.col("t_land")) & ~F.col("ades_in_box"))
+        if flagged
+        else F.lit(False)
+    )
 
     def near_an_edge(event: Column) -> Column:
         seconds = F.unix_timestamp(event)
@@ -207,6 +214,7 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
             F.max((F.col("t_off") <= old) & (new <= F.col("t_land"))).alias("_within_one"),
             F.max(inside(t_off) | inside(t_land)).alias("_event_inside"),
             F.max(near_an_edge(t_off) | near_an_edge(t_land)).alias("_event_near_edge"),
+            F.max(outside_inside).alias("_outside_inside"),
         )
         .withColumn(
             "label",
@@ -215,7 +223,8 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
             .otherwise("unknown"),
         )
         .withColumn("event_near_edge", F.coalesce(F.col("_event_near_edge"), F.lit(False)))
-        .select(*key, "label", "event_near_edge")
+        .withColumn("event_outside_box_inside", F.coalesce(F.col("_outside_inside"), F.lit(False)))
+        .select(*key, "label", "event_near_edge", "event_outside_box_inside")
     )
     return holes.join(labels, on=key, how="inner")
 

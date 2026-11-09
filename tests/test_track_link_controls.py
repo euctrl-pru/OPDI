@@ -1084,6 +1084,8 @@ def test_a_landing_outside_the_box_inside_a_hole_is_no_false_join(spark):
     ).collect()
     assert [r["label"] for r in rows] == ["unknown"]
     assert rows[0]["event_near_edge"] is False
+    # Said, so the study can count how many labels the flag changed.
+    assert rows[0]["event_outside_box_inside"] is True
 
 
 def test_a_landing_inside_the_box_inside_a_hole_is_still_a_false_join(spark):
@@ -1091,6 +1093,7 @@ def test_a_landing_inside_the_box_inside_a_hole_is_still_a_false_join(spark):
     hole = (1800, 60 * 60 + 5 * 60 + 600)
     rows = label_real_holes(_holes(spark, hole), spark.createDataFrame([flight])).collect()
     assert [r["label"] for r in rows] == ["false_join"]
+    assert rows[0]["event_outside_box_inside"] is False
 
 
 def test_without_the_flags_every_event_counts(spark):
@@ -1098,3 +1101,4 @@ def test_without_the_flags_every_event_counts(spark):
     hole = (1800, 60 * 60 + 5 * 60 + 600)
     rows = label_real_holes(_holes(spark, hole), _truth(spark, [flight])).collect()
     assert [r["label"] for r in rows] == ["false_join"]
+    assert rows[0]["event_outside_box_inside"] is False
