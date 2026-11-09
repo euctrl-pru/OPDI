@@ -170,11 +170,24 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
 
     ``event_near_edge`` says an event inside the hole is within
     :data:`EVENT_NEAR_EDGE_MIN` of either edge. The label does not read it.
+
+    **An event at an aerodrome outside the European box is not evidence.** Network
+    Manager's times there are estimates, and on the study days three estimated
+    arrivals at Seoul fell one to six minutes before an ADS-B sample showing the
+    aircraft still airborne on descent, which labelled three linked holes false joins.
+    When *truth* carries ``adep_in_box`` and ``ades_in_box`` (``with_population``),
+    a take-off or landing outside the box neither makes a false join nor counts as
+    near an edge; a hole with no other evidence then reads ``unknown``. Without the
+    columns every event counts, as before.
     """
     key = ["icao24", "t_old_edge", "t_new_edge"]
     old, new = F.col("t_old_edge"), F.col("t_new_edge")
-    t_off, t_land = F.col("t_off"), F.col("t_land")
     near_s = EVENT_NEAR_EDGE_MIN * 60
+    flagged = {"adep_in_box", "ades_in_box"} <= set(truth.columns)
+    # An event outside the box becomes NULL, which is inside nothing and near nothing.
+    t_off = F.when(F.col("adep_in_box"), F.col("t_off")) if flagged else F.col("t_off")
+    t_land = F.when(F.col("ades_in_box"), F.col("t_land")) if flagged else F.col("t_land")
+    columns = ["icao24", "t_off", "t_land"] + (["adep_in_box", "ades_in_box"] if flagged else [])
 
     def inside(event: Column) -> Column:
         return (old < event) & (event < new)
@@ -188,10 +201,10 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
     labels = (
         holes.select(*key)
         .distinct()
-        .join(truth.select("icao24", "t_off", "t_land"), on="icao24", how="left")
+        .join(truth.select(*columns), on="icao24", how="left")
         .groupBy(*key)
         .agg(
-            F.max((t_off <= old) & (new <= t_land)).alias("_within_one"),
+            F.max((F.col("t_off") <= old) & (new <= F.col("t_land"))).alias("_within_one"),
             F.max(inside(t_off) | inside(t_land)).alias("_event_inside"),
             F.max(near_an_edge(t_off) | near_an_edge(t_land)).alias("_event_near_edge"),
         )

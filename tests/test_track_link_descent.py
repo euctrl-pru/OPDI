@@ -167,6 +167,15 @@ def test_only_holes_the_rule_would_link_count():
     assert scored.loc["none"]["real_false_joins"] == 0
 
 
+def test_a_control_the_other_checks_reject_still_counts_as_not_joined():
+    holes = [_hole("true_link") for _ in range(60)]
+    controls = [_control(False, passes=False) for _ in range(320)] + [_control(False, edge=False)]
+    scored = d.score_candidates(*_frames(holes, controls)).set_index("candidate")
+    assert scored.loc["none"]["controls"] == 320
+    assert scored.loc["none"]["controls_joined"] == 0
+    assert bool(scored.loc["none"]["within_limits"]) is True
+
+
 def test_a_candidate_leaving_under_50_checkable_holes_is_not_adoptable():
     holes = [_hole("true_link") for _ in range(40)]
     scored = d.score_candidates(*_frames(holes, [_control(False) for _ in range(320)])).set_index("candidate")

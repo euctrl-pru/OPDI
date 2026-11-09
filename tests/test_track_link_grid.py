@@ -2287,3 +2287,15 @@ def test_the_grid_base_does_not_follow_the_shipped_defaults():
     assert (only.link_cruise_floor_ft, only.link_max_gap_minutes) == (25000.0, 360.0)
     [over] = grid_from_json('{"link_max_gap_minutes": [600]}')
     assert over.link_max_gap_minutes == 600.0
+
+
+def test_population_says_which_end_is_inside_the_box(spark):
+    """The labeller needs each end on its own: an event at an aerodrome outside the box
+    is an estimated time, not evidence."""
+    truth = spark.createDataFrame(
+        [(1, "EDDF", "KJFK"), (2, "KJFK", "EGLL"), (3, "ZZZZ", None)],
+        "flight_key int, gt_adep string, gt_ades string",
+    )
+    got = {r["flight_key"]: (r["adep_in_box"], r["ades_in_box"])
+           for r in with_population(truth, _airport_table(spark)).collect()}
+    assert got == {1: (True, False), 2: (False, True), 3: (False, False)}

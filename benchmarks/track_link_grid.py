@@ -767,6 +767,10 @@ def flight_track_counts(flights: DataFrame, holes_in_flights: DataFrame, p: Segm
 def with_population(truth: DataFrame, airports: DataFrame) -> DataFrame:
     """Add ``crosses_box``: exactly one of ADEP and ADES is inside ``EUROPE_BBOX``.
 
+    Also ``adep_in_box`` and ``ades_in_box`` on their own, which
+    ``track_link_controls.label_real_holes`` reads: an event at an aerodrome outside
+    the box is an estimated time, not evidence of a stop.
+
     The Spark form of ``adsc_flight_list_truth.label_far_end``, whose two crossing flows
     this is. An ident ``airports`` does not place counts as outside, which is where NM's
     ZZZZ and AFIL go. Trimmed, as that function's reader trims and
@@ -786,10 +790,9 @@ def with_population(truth: DataFrame, airports: DataFrame) -> DataFrame:
 
     return (
         inside(inside(truth, "gt_adep", "_adep_in_box"), "gt_ades", "_ades_in_box")
-        .withColumn(
-            "crosses_box",
-            F.coalesce(F.col("_adep_in_box"), F.lit(False)) != F.coalesce(F.col("_ades_in_box"), F.lit(False)),
-        )
+        .withColumn("adep_in_box", F.coalesce(F.col("_adep_in_box"), F.lit(False)))
+        .withColumn("ades_in_box", F.coalesce(F.col("_ades_in_box"), F.lit(False)))
+        .withColumn("crosses_box", F.col("adep_in_box") != F.col("ades_in_box"))
         .drop("_adep_in_box", "_ades_in_box")
     )
 

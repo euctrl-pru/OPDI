@@ -230,15 +230,15 @@ def score_candidates(holes, controls):
 
     *holes* and *controls* are the exported CSVs as DataFrames (one day or several
     concatenated). A hole counts only where the rule with descent on would link it:
-    ``descent_edge`` and ``other_checks_pass``; likewise a control counts only where its
-    edge is a descent edge the other checks accept, since that is where the candidate
-    decides anything.
+    ``descent_edge`` and ``other_checks_pass``. A control counts wherever its edge is a
+    descent edge, whatever the other checks say: a hidden landing the speed check
+    rejects is a hidden landing the rule did not join, which is the limit's question.
     """
     import pandas as pd
     from track_link_controls import rule_of_three_upper
 
     linked = holes[_truthy(holes["descent_edge"]) & _truthy(holes["other_checks_pass"])]
-    exposed = controls[_truthy(controls["descent_edge"]) & _truthy(controls["other_checks_pass"])]
+    exposed = controls[_truthy(controls["descent_edge"])]
     rows = []
     for candidate in COMBINATIONS:
         h = linked[_passes(linked, candidate)]

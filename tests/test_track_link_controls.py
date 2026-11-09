@@ -1067,3 +1067,34 @@ def test_rule_of_three_refuses_impossible_counts():
         rule_of_three_upper(3, 2)
     with pytest.raises(ValueError):
         rule_of_three_upper(-1, 2)
+
+
+# --- an event outside the box is not evidence ------------------------------------------
+
+
+def test_a_landing_outside_the_box_inside_a_hole_is_no_false_join(spark):
+    """Network Manager's arrival time at an aerodrome outside its area is an estimate.
+    On the study days three such estimates fell minutes before an ADS-B sample showing
+    the aircraft still airborne, and labelled a linked hole a false join. With the flag,
+    the hole reads unknown: no evidence either way."""
+    flight = dict(_flight(0, 60, key="F1")[1], adep_in_box=True, ades_in_box=False)
+    hole = (1800, 60 * 60 + 5 * 60 + 600)   # the landing, at 65 min, lies inside
+    rows = label_real_holes(
+        _holes(spark, hole), spark.createDataFrame([flight])
+    ).collect()
+    assert [r["label"] for r in rows] == ["unknown"]
+    assert rows[0]["event_near_edge"] is False
+
+
+def test_a_landing_inside_the_box_inside_a_hole_is_still_a_false_join(spark):
+    flight = dict(_flight(0, 60, key="F1")[1], adep_in_box=False, ades_in_box=True)
+    hole = (1800, 60 * 60 + 5 * 60 + 600)
+    rows = label_real_holes(_holes(spark, hole), spark.createDataFrame([flight])).collect()
+    assert [r["label"] for r in rows] == ["false_join"]
+
+
+def test_without_the_flags_every_event_counts(spark):
+    flight = _flight(0, 60, key="F1")[1]
+    hole = (1800, 60 * 60 + 5 * 60 + 600)
+    rows = label_real_holes(_holes(spark, hole), _truth(spark, [flight])).collect()
+    assert [r["label"] for r in rows] == ["false_join"]
