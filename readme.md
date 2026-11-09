@@ -324,13 +324,18 @@ accuracy figures across.
 
 ## `cruise_linked` track segmentation (A10)
 
-**Off by default.** `standard` still points to `debounced` (A9), and nothing
-published uses this rule. `cruise_linked` is A9 with one change: a reception gap
-over 30 minutes does not end a track when the evidence at its two edges fits one
-continuous flight (both edges at cruise or the old edge still climbing, a plausible
-implied speed, an agreeing callsign, no descent then climb). No sample is invented: the hole stays empty and
+**The default.** `standard` points to `cruise_linked` since the track-construction-v5
+study; before that it pointed to `debounced` (A9), which stays selectable by name.
+`cruise_linked` is A9 with one change: a reception gap over 30 minutes does not end
+a track when the evidence at its two edges fits one continuous flight (both edges at
+cruise or the old edge still climbing, a plausible implied speed, an agreeing
+callsign, no descent then climb). No sample is invented: the hole stays empty and
 only the identity changes. A callsign change and a short gap at low altitude still
-split.
+split. A track can therefore hold a *hole*, hours in which nothing was received;
+the event detectors that pair or interpolate samples (level segments, flight-level
+and ring crossings) work per *piece* between holes, and cumulative distance adds
+the straight line across one (`EventConfig.track_hole_seconds`,
+`pipeline/holes.py`).
 
 Each edge's altitude, vertical rate and speed read their own nearest five values
 within `link_edge_position_minutes`, past any blank samples, because altitude often
@@ -340,11 +345,11 @@ old edge still climbing, is on by default, provisionally: 0 false joins in 185
 checkable holes, under the 300 the study wanted. `link_new_edge_descent`, for a new
 edge descending, is off by default because it failed its own limit, 3 of 119.
 
-Select it in code:
+To run the previous rule instead:
 
 ```python
 config = OPDIConfig.for_environment("opensky")
-config.segmentation.method = "cruise_linked"
+config.segmentation.method = "debounced"   # A9; "recommended" is A8, "legacy" the pre-2026-08-27 rule
 ```
 
 What differs from the other rules when you run it:
@@ -365,12 +370,10 @@ What differs from the other rules when you run it:
   A track named there may have lost its tail, or may simply be long. Past the end
   of the read a wrong decision is detected like this, not prevented.
 
-**Promoting it would be a further silent `track_id` boundary**, after those at A8
-and A9: a join across it returns nothing rather than an error, and `osn_tracks` has
-no version column to say which rule produced a row. It is not recommended as the
-default yet, because level segments and cumulative distance both break across a
-linked hole. The evidence is in
-`opdi-portal/papers/track-construction-v4/`.
+**Its promotion is a further silent `track_id` boundary**, after those at A8 and
+A9: a join across it returns nothing rather than an error, and `osn_tracks` has no
+version column to say which rule produced a row. The evidence is in
+`opdi-portal/papers/track-construction-v5/` (and v4, which it supersedes).
 
 ## Building a flight list
 

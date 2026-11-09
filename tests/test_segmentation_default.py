@@ -27,14 +27,34 @@ def test_legacy_is_still_reachable():
     assert "legacy" in ARMS
 
 
-def test_standard_resolves_to_the_debounced_rule():
-    """`standard` is a pointer to the current production arm. As of this release
-    it resolves to `debounced` (A9); if it ever stops resolving to the arm the
-    study measured, the shipped algorithm and the published evidence part
-    company. A9 keeps A8's airframe grouping and suffix-free id shape."""
-    rule = ARMS["debounced"]()
+def test_standard_resolves_to_cruise_linked():
+    """`standard` is a pointer to the current production arm. It resolves to
+    `cruise_linked` (A10); if it ever stops resolving to the arm the study
+    measured, the shipped algorithm and the published evidence part company.
+    A10 keeps A8's airframe grouping and suffix-free id shape."""
+    from opdi.pipeline.tracks import _resolve_segmentation_method
+
+    assert _resolve_segmentation_method("standard") == "cruise_linked"
+    rule = ARMS["cruise_linked"]()
     assert rule.group_cols == ["icao24"]
     assert rule.month_suffix is False
+
+
+def test_debounced_by_name_is_still_a9_with_a_3h_lookback():
+    """A9 stays reachable for reproducing the data it built, with the read it had."""
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import _resolve_segmentation_method, required_lookback_hours
+
+    assert _resolve_segmentation_method("debounced") == "debounced"
+    assert required_lookback_hours("debounced", SegmentationParams()) == 3
+
+
+def test_the_default_run_reads_11_hours_back():
+    from opdi.pipeline.segmentation import SegmentationParams
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    p = SegmentationParams.from_config(OPDIConfig.for_environment("opensky").segmentation)
+    assert required_lookback_hours("standard", p) == 11
 
 
 def test_a8_stays_reachable_under_its_own_name():

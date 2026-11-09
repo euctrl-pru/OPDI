@@ -113,8 +113,14 @@ def tracks_touching_window_end(df, read_end, margin_seconds=60):
 
 
 def _resolve_segmentation_method(method: str) -> str:
-    """The arm a configured method names: ``standard`` is a pointer, not an arm."""
-    return "debounced" if method == "standard" else method
+    """The arm a configured method names: ``standard`` is a pointer, not an arm.
+
+    It resolves to ``cruise_linked`` (A10) since the track-construction-v5 study,
+    to ``debounced`` (A9) before that, and to ``recommended`` (A8) from
+    2026-08-27 until A9; see ``SegmentationConfig.method``. Each earlier arm
+    stays reachable under its own name.
+    """
+    return "cruise_linked" if method == "standard" else method
 
 
 def required_lookback_hours(method: str, p) -> int:
@@ -127,18 +133,24 @@ def required_lookback_hours(method: str, p) -> int:
     misses the old piece, the day sees a new track and claims it, while the day
     before claims the same samples inside the linked track, under another id.
 
-    The longer of ``link_callsign_lookback_minutes`` and
-    ``link_edge_position_minutes`` is added because the decision also reads the
-    callsign and the position that far behind the old edge. Every day's read must
-    hold that evidence, or two days decide one hole differently and a piece can be
-    claimed by no day at all. Taking the longer rather than assuming the callsign's
-    covers it means neither setting can move the position outside the read.
+    The longest of ``link_callsign_lookback_minutes``,
+    ``link_edge_position_minutes`` and the callsign persistence hold is added
+    because the decision also reads the callsign and the position that far behind
+    the old edge, and the callsign guard remembers a callsign for the longest
+    linkable hole plus the hold (``methods.callsign_memory_minutes``). Every day's
+    read must hold that evidence, or two days decide one hole differently and a
+    piece can be claimed by no day at all. Taking the longest rather than assuming
+    the callsign's covers it means no setting can move the evidence outside the read.
     """
     if _resolve_segmentation_method(method) == "cruise_linked":
+        behind_the_edge = max(
+            p.link_callsign_lookback_minutes,
+            p.link_edge_position_minutes,
+            p.callsign_min_persistence_seconds / 60.0,
+        )
         return max(
             TrackProcessor.DEFAULT_LOOKBACK_HOURS,
-            math.ceil(p.link_max_gap_minutes / 60)
-            + math.ceil(max(p.link_callsign_lookback_minutes, p.link_edge_position_minutes) / 60),
+            math.ceil(p.link_max_gap_minutes / 60) + math.ceil(behind_the_edge / 60),
         )
     return TrackProcessor.DEFAULT_LOOKBACK_HOURS
 
@@ -165,11 +177,12 @@ class TrackProcessor:
 
     So the algorithm is selected by ``config.segmentation.method``. ``legacy``
     reproduces the published ids byte for byte and remains selectable;
-    ``standard`` is the study's recommendation and, as of this release, the
-    default -- it now resolves to ``debounced`` (A9), the callsign-flicker-aware
-    arm, having resolved to ``recommended`` (A8) before it. All delegate to
-    ``pipeline/segmentation``, so production runs the code the study measured
-    rather than a second implementation of the same prose.
+    ``standard`` is the study's recommendation and the default -- it resolves
+    to ``cruise_linked`` (A10), which keeps one track across an en-route
+    reception hole, having resolved to ``debounced`` (A9) and before that to
+    ``recommended`` (A8). All delegate to ``pipeline/segmentation``, so
+    production runs the code the study measured rather than a second
+    implementation of the same prose.
     """
 
     def __init__(
@@ -298,7 +311,8 @@ class TrackProcessor:
         ``standard`` -- the track-construction study's recommendation, delegated
         to ``pipeline.segmentation`` so production runs the benchmarked code.
         Grouping is on ``icao24`` alone, a genuine non-blank callsign change is
-        an additional break, and the id has no year/month suffix.
+        an additional break, a reception hole whose edges fit one flight is not
+        a break, and the id has no year/month suffix.
 
         The legacy branch below is left exactly as it was written, including its
         own column names and comments: it is what reproduces the published ids,
@@ -394,10 +408,10 @@ class TrackProcessor:
         # recommends -- not an arm itself. Two names because they answer
         # different questions: inside the study an arm is one candidate among
         # several, while a deployment wants to name the segmentation it runs
-        # without implying a comparison it is not making. As of this release
-        # "standard" resolves to "debounced" (A9); before it it resolved to
-        # "recommended" (A8). Both stay reachable under their own names -- A8 as
-        # "recommended" for reproducing data published before this release.
+        # without implying a comparison it is not making. "standard" resolves
+        # to "cruise_linked" (A10); before the v5 study it resolved to
+        # "debounced" (A9), and before 2026-08-27 to "recommended" (A8). Each
+        # stays reachable under its own name for reproducing the data it built.
         # Every other arm name is accepted too, which is what lets the benchmark
         # drive the real pipeline instead of a harness that only resembles it.
         resolved = _resolve_segmentation_method(method)

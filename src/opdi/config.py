@@ -1620,36 +1620,37 @@ class SegmentationConfig:
     with ``_{year}_{month}``.
 
     ``"standard"`` is a pointer to whatever arm this release recommends for
-    production; it is not itself an arm. As of this release it resolves to
-    ``"debounced"`` (A9): group on the airframe alone, split when the last
-    *non-blank* callsign genuinely changes, **but** ignore a callsign change
-    unless the new value persists for ``callsign_min_persistence_seconds``
-    (30 s) before the next transition -- so a callsign that flickers to a
-    garbled value and back does not split one flight into several. Until this
-    release ``"standard"`` resolved to ``"recommended"`` (A8), the same rule
-    without the persistence guard; A8 measured 23.1% of its track boundaries as
-    flicker artefacts, and the guard removes them for ~19% fewer tracks,
-    merge-neutral. A8 stays reachable under its own name ``"recommended"`` for
-    anyone reproducing data published between 2026-08-27 and this release.
+    production; it is not itself an arm. It resolves to ``"cruise_linked"``
+    (A10): group on the airframe alone; split when the last *non-blank*
+    callsign genuinely changes, ignoring a change unless the new value persists
+    for ``callsign_min_persistence_seconds`` (30 s), so a callsign that flickers
+    to a garbled value and back does not split one flight; split on a gap over
+    ``gap_minutes`` **unless** the two edges of the gap fit one continuous
+    flight, read from the ``link_*`` fields below, so a flight crossing an
+    en-route reception hole keeps one ``track_id``. A10 also forgets a callsign
+    not heard for longer than ``link_max_gap_minutes``, so two days' reads judge
+    a flicker after a hole alike (``methods.callsign_memory_minutes``).
 
-    ``"cruise_linked"`` (A10) is A9 with one change: a gap over ``gap_minutes``
-    does not split a track when its two edges look like one flight, read from the
-    ``link_*`` fields below. So a flight crossing an en-route reception hole keeps
-    one ``track_id``. **It is not the default**, ``"standard"`` does not resolve to
-    it, and it is selected only by naming it. Selecting it creates another silent
-    ``track_id`` boundary: a consumer joining across it gets an empty join rather
-    than an error, and nothing in the data says which rule produced a row. Under
-    it ``process_day`` reads further back and refuses a shorter explicit lookback;
-    see ``tracks.required_lookback_hours``.
+    The earlier arms stay reachable under their own names, for reproducing the
+    data each built: ``"debounced"`` (A9) is A10 without the link -- every gap
+    over ``gap_minutes`` splits -- and was ``"standard"`` from the A9 release
+    until the track-construction-v5 study; ``"recommended"`` (A8) is A9 without
+    the persistence guard and was ``"standard"`` from 2026-08-27 until the A9
+    release. A8 measured 23.1% of its track boundaries as flicker artefacts; the
+    guard removes them for ~19% fewer tracks, merge-neutral.
+
+    Under A10 ``process_day`` reads further back (11 h at the defaults, not 3)
+    and refuses a shorter explicit lookback; see ``tracks.required_lookback_hours``.
+    Event detectors work per *piece* across the holes a track now holds; see
+    ``EventConfig.track_hole_seconds``.
 
     .. warning::
 
-       **This changes ``track_id`` for all data produced from this release
-       forward**, in shape as well as value -- there is no ``_{year}_{month}``
-       suffix, and the debounce further changes which samples share an id
-       relative to A8. A consumer joining on ``track_id`` across either
-       boundary gets an empty join rather than an error, which reads as missing
-       data.
+       **Each change of ``"standard"`` changed ``track_id`` for all data produced
+       from then on**: no ``_{year}_{month}`` suffix since A8, the debounce since
+       A9, and since A10 one id where there were two across a linked hole. A
+       consumer joining on ``track_id`` across any of these boundaries gets an
+       empty join rather than an error, which reads as missing data.
 
        **Nothing in the published data says which rule produced a row.**
        ``osn_tracks`` carries no version column, so the only way to tell is to
@@ -1753,7 +1754,9 @@ class SegmentationConfig:
 
     link_old_edge_climb: bool = True
     """Whether an old edge below ``link_cruise_floor_ft`` can still link when it is
-    climbing past ``link_edge_vert_rate_fpm``. A NULL vertical rate does not pass.
+    climbing past ``link_edge_vert_rate_fpm``: the mean of the edge's nearest vertical
+    rates, resting on at least ``methods.LINK_DIRECTION_MIN_RATES`` (3) of them. A
+    NULL vertical rate does not count, and fewer than three do not pass.
 
     On by default: an aircraft lost while still climbing is outbound, so the next
     sighting is the same flight. Set apart from ``link_new_edge_descent`` because the

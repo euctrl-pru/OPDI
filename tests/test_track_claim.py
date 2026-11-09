@@ -182,7 +182,7 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
     p = SegmentationParams()
     assert required_lookback_hours("cruise_linked", p) == 11
     assert required_lookback_hours("debounced", p) == 3
-    assert required_lookback_hours("standard", p) == 3
+    assert required_lookback_hours("standard", p) == 11   # standard is cruise_linked
     assert required_lookback_hours("legacy", p) == 3
 
     p120 = SegmentationParams(link_max_gap_minutes=120.0)
@@ -211,7 +211,9 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
         link_callsign_lookback_minutes=0.0,
         link_edge_position_minutes=0.0,
     )
-    assert required_lookback_hours("cruise_linked", neither) == 6
+    # The callsign guard's memory is the longest hole plus the 30 s hold, so even
+    # with nothing else read behind the edge a part-hour is added for it.
+    assert required_lookback_hours("cruise_linked", neither) == 7
     assert required_lookback_hours("debounced", far_position) == 3
 
 
@@ -226,9 +228,15 @@ def test_process_day_reads_the_lookback_its_arm_requires(spark):
     wider.process_day(day, lookback_hours=13)
     assert wider.windows[0][0] == "2024-06-01 11:00:00"
 
+    # The default run reads 11 hours back: `standard` is `cruise_linked`.
     default = _processor_capturing_windows("standard")
     default.process_day(day)
-    assert default.windows[0][0] == "2024-06-01 21:00:00"
+    assert default.windows[0][0] == "2024-06-01 13:00:00"
+
+    # `debounced` by name keeps A9's three hours.
+    previous = _processor_capturing_windows("debounced")
+    previous.process_day(day)
+    assert previous.windows[0][0] == "2024-06-01 21:00:00"
 
 
 def test_too_short_an_explicit_lookback_raises(spark):
@@ -640,3 +648,130 @@ def test_other_arms_still_say_the_tail_may_be_missing(spark, capsys):
     assert "WARNING: 1 track(s)" in out
     assert "Their tails may be missing and no other day will claim them" in out
     assert "simply long" not in out
+
+
+# --- the callsign guard remembers only what every day's read holds -------------------
+#
+# A9's flicker guard asks whether a new callsign persists, against the callsign it saw
+# before -- however long ago. One day's read can still hold a callsign that the next
+# day's read starts after, and the two then disagree about a break after midnight.
+# Under ``cruise_linked`` a hole hides the callsign for hours, which makes that easy to
+# reach. A10 therefore forgets a callsign not heard for longer than the longest hole it
+# can link, which every day's read covers.
+
+
+def _shipped():
+    from opdi.pipeline.segmentation import SegmentationParams
+
+    return SegmentationParams()
+
+
+def _old_piece_then_a_long_hole():
+    """DLH1 until 12:50 on D-1, no callsign to 14:10, then a 595 min hole to 00:05 on D.
+
+    Day D reads from 13:00 on D-1, so it never sees DLH1.
+    """
+    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)   # noqa: E731
+    old = _every(D_MINUS_1 + h(12, 30), D_MINUS_1 + h(12, 50), 5, lon=0.0, callsign="DLH1")
+    old += _every(D_MINUS_1 + h(12, 55), D_MINUS_1 + h(14, 10), 5, lon=0.0, callsign="")
+    return old, _lon_after(595)
+
+
+def _after(seconds_from, seconds_to, step_s, lon, callsign):
+    """Cruise samples from 00:05:00 on D plus *seconds_from*, every *step_s* seconds."""
+    start = D + dt.timedelta(minutes=5)
+    return _every(
+        start + dt.timedelta(seconds=seconds_from),
+        start + dt.timedelta(seconds=seconds_to),
+        step_s / 60.0,
+        lon=lon,
+        callsign=callsign,
+    )
+
+
+def test_a_flicker_as_the_first_callsign_after_a_hole_is_claimed_once(spark):
+    """After the hole: one garbled sample, then DLH1 again.
+
+    D-1 still held DLH1 from before the hole and saw a flicker; D saw the garble as the
+    first callsign there is, and broke at the revert. The samples after it were written
+    by both days.
+    """
+    old, lon = _old_piece_then_a_long_hole()
+    new = _after(0, 0, 5, lon, "DLH7X") + _after(5, 60, 5, lon, "DLH1")
+    new += _after(120, 900, 60, lon, "DLH1")
+    _assert_claimed_once(spark, old + new, _shipped())
+
+
+def test_a_callsign_that_flickers_in_its_first_seconds_after_a_hole_is_claimed_once(spark):
+    """After the hole: KLM2 for 20 s, one garbled sample, KLM2 again.
+
+    D-1 broke at the second KLM2 run and kept what was before it; D saw no change and
+    left the track to D-1. The samples from the second run on were written by neither.
+    """
+    old, lon = _old_piece_then_a_long_hole()
+    new = _after(0, 15, 5, lon, "KLM2") + _after(20, 20, 5, lon, "KLM7X")
+    new += _after(25, 60, 5, lon, "KLM2") + _after(120, 900, 60, lon, "KLM2")
+    _assert_claimed_once(spark, old + new, _shipped())
+
+
+def test_a_callsign_both_reads_hold_still_hides_a_flicker_after_a_hole(spark):
+    """DLH1 until 14:10, no callsign to 15:20, a 525 min hole, a garble, DLH1 again.
+
+    The callsign is over an hour before the hole, so the hole links on a blank; it is
+    inside the memory and inside both reads, so the garble is a flicker in both.
+    """
+    from opdi.pipeline.segmentation import assign_track_id
+    from opdi.pipeline.segmentation.methods import cruise_linked
+
+    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)   # noqa: E731
+    old = _every(D_MINUS_1 + h(13, 30), D_MINUS_1 + h(14, 10), 5, lon=0.0, callsign="DLH1")
+    old += _every(D_MINUS_1 + h(14, 15), D_MINUS_1 + h(15, 20), 5, lon=0.0, callsign="")
+    lon = _lon_after(525)
+    new = _after(0, 0, 5, lon, "DLH7X") + _after(5, 60, 5, lon, "DLH1")
+    samples = old + new
+    _assert_claimed_once(spark, samples, _shipped())
+    tracks = assign_track_id(make_track(spark, samples), cruise_linked(), _shipped())
+    assert tracks.select("track_id").distinct().count() == 1
+
+
+@pytest.mark.parametrize("overrides", [
+    {},
+    {"link_max_gap_minutes": 120.0},
+    {"link_max_gap_minutes": 241.0},
+    {"link_callsign_lookback_minutes": 0.0, "link_edge_position_minutes": 0.0},
+    {"link_max_gap_minutes": 900.0, "link_callsign_lookback_minutes": 5.0},
+])
+def test_the_callsign_memory_is_inside_every_days_read(overrides):
+    """The memory, plus the 30 s a callsign needs to persist, never reaches past the read."""
+    from opdi.pipeline.segmentation.methods import callsign_memory_minutes
+    from opdi.pipeline.tracks import required_lookback_hours
+
+    p = replace(_shipped(), **overrides)
+    reach = callsign_memory_minutes(p) + p.callsign_min_persistence_seconds / 60.0
+    assert reach <= required_lookback_hours("cruise_linked", p) * 60
+
+
+def test_debounced_by_name_keeps_its_published_memory(spark):
+    """A9 is a published rule and stays as it was: it remembers a callsign without limit.
+
+    Eleven hours of samples with no callsign, then a garble and the old callsign again.
+    A9 still calls the garble a flicker; A10 has forgotten the old callsign and splits.
+    """
+    from opdi.pipeline.segmentation import assign_track_id
+    from opdi.pipeline.segmentation.methods import cruise_linked, debounced
+
+    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)   # noqa: E731
+    samples = _every(D_MINUS_1 + h(1), D_MINUS_1 + h(1, 30), 10, lon=0.0, callsign="DLH1")
+    samples += _every(D_MINUS_1 + h(1, 40), D_MINUS_1 + h(12, 30), 10, lon=0.0, callsign="")
+    samples += _every(D_MINUS_1 + h(12, 31), D_MINUS_1 + h(12, 31), 1, lon=0.0, callsign="DLH7X")
+    samples += _every(
+        D_MINUS_1 + h(12, 31) + dt.timedelta(seconds=5), D_MINUS_1 + h(12, 40), 1,
+        lon=0.0, callsign="DLH1",
+    )
+    sv = make_track(spark, samples)
+
+    def tracks(rule):
+        return assign_track_id(sv, rule(), _shipped()).select("track_id").distinct().count()
+
+    assert tracks(debounced) == 1
+    assert tracks(cruise_linked) == 2

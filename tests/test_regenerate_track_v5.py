@@ -39,10 +39,12 @@ def test_the_paper_dir_is_overridable():
     assert "OPDI_PAPER_DIR" in Path(R.__file__).read_text()
 
 
-def test_two_days_runs_the_shipped_setting_with_climb_off_and_on():
+def test_two_days_runs_the_shipped_setting_with_each_edge_allowance_off_and_on():
     args = _job("two_days").args
     grid = _json_after(args, "--grid-json")
-    assert grid == {**{k: [v] for k, v in SHIPPED.items()}, "link_old_edge_climb": [False, True]}
+    assert grid == {**{k: [v] for k, v in SHIPPED.items()},
+                    "link_old_edge_climb": [False, True],
+                    "link_new_edge_descent": [False, True]}
     assert args[args.index("--days") + 1:args.index("--grid-json")] == [
         "2026-06-14", "2025-06-14"]
 

@@ -77,6 +77,7 @@ __all__ = [
     "vertical_profile",
     "recommended",
     "debounced",
+    "callsign_memory_minutes",
     "stable_callsign",
     "debounced_callsign_change",
     "link_feature_columns",
@@ -532,21 +533,44 @@ def _real_callsign() -> Column:
     )
 
 
-def stable_callsign(p, window: WindowSpec | None = None) -> Column:
+def callsign_memory_minutes(p) -> float:
+    """How long A10 remembers a callsign it has not heard again.
+
+    A9 remembers one without limit, and that is a read-window dependence: a day's
+    run reads a bounded stretch before the day, so one day can still hold a
+    callsign the next day's read begins after, and the two then judge the same
+    flicker differently -- a piece written twice, or by no day. Under A9 that
+    takes three hours of samples with no callsign; under A10 a linked hole hides
+    the callsign for hours, so A10 forgets a callsign older than the longest hole
+    it can link. Every day reads at least that far back plus the callsign
+    lookback (``tracks.required_lookback_hours``), so both reads hold whatever
+    counts. ``debounced`` by name keeps its published behaviour.
+    """
+    return float(p.link_max_gap_minutes)
+
+
+def stable_callsign(p, memory_minutes: float | None = None) -> Column:
     """The debounced callsign: the last value that persisted, carried forward.
 
-    NULL until a group's first real callsign. ``window`` defaults to the engine's
-    :func:`~opdi.pipeline.segmentation.base.segment_window`; it exists so a caller
-    scoring synthetic holes gets the same value per control, and its partition is
-    kept while its ordering is replaced for the reversed frame below.
+    NULL until a group's first real callsign. With ``memory_minutes``, a previous
+    callsign heard longer ago than that counts as none, so the next one is a
+    group's first run again: see :func:`callsign_memory_minutes`.
     """
-    w = segment_window() if window is None else window
+    w = segment_window()
     back = w.rowsBetween(Window.unboundedPreceding, -1)
     real = _real_callsign()
     # The previous real callsign. Used here to find where a new run of a real
     # value *starts* -- it is deliberately not used as the comparison value
     # itself; see the block in `debounced_callsign_change`.
     prev_real = F.last(real, ignorenulls=True).over(back)
+    if memory_minutes is not None:
+        prev_real_ts = F.last(
+            F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
+        ).over(back)
+        remembered = (
+            F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
+        ) / 60.0 <= float(memory_minutes)
+        prev_real = F.when(remembered, prev_real)
 
     hold = float(p.callsign_min_persistence_seconds)
     if hold <= 0.0:
@@ -629,8 +653,11 @@ def stable_callsign(p, window: WindowSpec | None = None) -> Column:
     )
 
 
-def debounced_callsign_change(p) -> Column:
-    """A9's callsign break: the stable callsign changed, recently. Never NULL."""
+def debounced_callsign_change(p, memory_minutes: float | None = None) -> Column:
+    """A9's callsign break: the stable callsign changed, recently. Never NULL.
+
+    ``memory_minutes`` is passed on to :func:`stable_callsign`; A9 passes none.
+    """
     w = segment_window()
     back = w.rowsBetween(Window.unboundedPreceding, -1)
     real = _real_callsign()
@@ -642,7 +669,7 @@ def debounced_callsign_change(p) -> Column:
         F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
     ) / 60.0 < lookback_minutes(p)
 
-    stable = stable_callsign(p)
+    stable = stable_callsign(p, memory_minutes)
 
     # **Persisted against persisted, not persisted against previous-real.**
     # A flicker trips the rule twice -- once on the X->Y excursion and again
@@ -724,8 +751,8 @@ def _edge_summary(frame: Column, latest_first: bool) -> Column:
     Altitude and vertical rate arrive in separate messages, so a sample without one
     says nothing and each field looks past those to its own nearest values.
 
-    Sorted on the whole sample because samples can share a second, and a frame holds
-    those in no fixed order: two days' reads must keep the same five of them.
+    Sorted on the whole sample, the instant at full resolution first, so the nearest
+    samples are the nearest in time and two days' reads keep the same five of them.
     ``latest_first`` is for the old edge, where the nearest sample is the latest.
 
     NaN is no value, as NULL is not. Spark orders NaN above every number, so it passes
@@ -885,7 +912,8 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     # read these positions many times over. So the frames are read once into one
     # struct, and a lambda over a one-element array is what lets the rest refer to it.
     position = F.when(
-        F.col("lat").isNotNull() & F.col("lon").isNotNull(),
+        F.col("lat").isNotNull() & F.col("lon").isNotNull()
+        & ~F.isnan(F.col("lat")) & ~F.isnan(F.col("lon")),
         F.struct(
             F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")
         ),
@@ -916,7 +944,12 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
 
     positions = _once(edges, between_positions)
 
+    # The instant at full resolution comes first, so the nearest samples are the
+    # nearest in time, as for every `lag` in the arm. Ordered on `s` alone, two
+    # samples inside one second -- ADS-C can report so -- would be ordered by the
+    # altitude being judged.
     edge_sample = F.struct(
+        F.unix_micros(F.col("_ts")).alias("us"),
         F.unix_timestamp(F.col("_ts")).alias("s"),
         altitude_ft().cast("double").alias("alt_ft"),
         vert_rate_fpm.cast("double").alias("vr_fpm"),
@@ -941,17 +974,15 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     return {
         # Computed here rather than read from `gap_minutes()`, which is the
         # engine's gap and so wrong under a caller's window.
-        "gap_min": (
-            F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(F.lag(F.col("_ts")).over(w))
-        )
-        / 60.0,
+        "gap_min": (F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(old_edge_ts)) / 60.0,
         "positions": positions,
         "before_edge": before_edge,
         "after_edge": after_edge,
-        "cs_before": F.when(
-            seen_recently,
-            F.last(stable_callsign(p, w), ignorenulls=True).over(back),
-        ),
+        # The last real callsign, not the debounced one: a run that ends at a hole
+        # always persists, since its next transition lies beyond the hole, so at a
+        # hole the two are the same value. A garbled last sample before a hole is
+        # therefore the callsign before it, and the hole splits.
+        "cs_before": F.when(seen_recently, F.last(real, ignorenulls=True).over(back)),
         "cs_after": F.first(real, ignorenulls=True).over(lookahead),
         "icao24": F.col("icao24"),
     }
@@ -1097,9 +1128,12 @@ def cruise_linked() -> BreakRule:
     ``link_old_edge_climb`` and ``link_new_edge_descent`` widen what counts as an edge:
     see :func:`link_checks`.
 
-    Research only. Making this ``standard`` would be another silent ``track_id``
-    boundary. ``process_day`` reads further back under this arm, or a piece after
-    midnight would be claimed twice: see ``tracks.required_lookback_hours``.
+    The default since the track-construction-v5 study: ``standard`` resolves to
+    it. That is a ``track_id`` boundary like A8's and A9's before it, silent to a
+    joiner. ``process_day`` reads further back under this arm, or a piece after
+    midnight would be claimed twice: see ``tracks.required_lookback_hours``. The
+    callsign guard it shares with A9 forgets a callsign older than the longest
+    linkable hole, for the same reason: see :func:`callsign_memory_minutes`.
     """
 
     def expr(p):
@@ -1114,7 +1148,7 @@ def cruise_linked() -> BreakRule:
             ),
         )
         return F.coalesce(
-            debounced_callsign_change(p)
+            debounced_callsign_change(p, callsign_memory_minutes(p))
             | legacy_low_altitude_gap(p)
             | (legacy_general_gap(p) & ~linked),
             F.lit(False),

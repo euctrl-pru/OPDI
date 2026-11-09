@@ -15,10 +15,11 @@ list and the paper differ.
 
 Two jobs, each staging into its own subdirectory of ``data/``:
 
-  * ``two_days`` -- the shipped setting over 2026-06-14 and 2025-06-14, with
-    ``link_old_edge_climb`` off and on, against Network Manager truth: how many
-    flights end up in one track, and how many links join two flights. The
-    reasons reports are read at the shipped setting.
+  * ``two_days`` -- the shipped setting over 2026-06-14 and 2025-06-14, and the
+    same with ``link_old_edge_climb`` and ``link_new_edge_descent`` each off and
+    on, against Network Manager truth: how many flights end up in one track, and
+    how many links join two flights. The reasons reports are read at the shipped
+    setting.
   * ``pipeline_day`` -- both rules through the real pipeline for 2026-06-14 on
     one airframe in ten, scored: flight list, events, level segments and
     distance at a hole, distance on tracks without a hole, movements, and
@@ -86,15 +87,16 @@ def jobs() -> list:
                 "--days", *DAYS,
                 "--grid-json", json.dumps(
                     {**{k: [v] for k, v in SHIPPED.items()},
-                     "link_old_edge_climb": [False, True]}),
+                     "link_old_edge_climb": [False, True],
+                     "link_new_edge_descent": [False, True]}),
                 "--reasons-params-json", json.dumps(SHIPPED),
             ],
             outputs={n: n for n in v4._grid_outputs(DAYS) + v4._reasons_outputs(DAYS)},
             code_paths=v4.CORE,
             data_root=DATA,
             notes="The shipped setting over two days against Network Manager "
-                  "truth, with climb edges off and on; reasons read at the "
-                  "shipped setting.",
+                  "truth, with climb and descent edges each off and on; reasons "
+                  "read at the shipped setting.",
         ),
         v4.Job(
             name="pipeline_day",

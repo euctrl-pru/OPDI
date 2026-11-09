@@ -846,14 +846,15 @@ def render(template_text, context):
         raise MissingValue(f"report_template.md: {e}") from e
 
 
-def literal_numbers(template_text):
+def literal_numbers(template_text, allowed=None):
     """Numbers typed into the prose rather than coming from a placeholder or the allow-list."""
+    allowed = ALLOWED_LITERALS if allowed is None else allowed
     text = re.sub(r"\{\{.*?\}\}", " ", template_text)
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
     text = re.sub(r"`[^`]*`", " ", text)
     text = re.sub(r"\]\([^)]*\)", "]", text)
     found = re.findall(r"(?<![\w.])\d+(?:,\d{3})*(?:\.\d+)?", text)
-    return sorted({t for t in found if t not in ALLOWED_LITERALS})
+    return sorted({t for t in found if t not in allowed})
 
 
 # --- a small Markdown converter: headings, paragraphs, lists, tables, code, bold, links ---
@@ -973,14 +974,35 @@ th { background: var(--band); font-weight: 600; }
 """
 
 
-def to_html(md):
+class Paper:
+    """What differs between the reports this module can build.
+
+    ``build_track_v5_paper.py`` builds its report with the functions below and its own
+    ``Paper``; everything else -- reading CSVs, filling placeholders, HTML, PDF, the
+    Quarto front matter -- is shared.
+    """
+
+    def __init__(self, version, title, subtitle, allowed_literals, context, render_default="run"):
+        self.version = version
+        self.title = title
+        self.subtitle = subtitle
+        self.allowed_literals = allowed_literals
+        self.context = context
+        #: What ``OPDI_RENDER`` means when unset. A superseded paper is frozen: ``skip``.
+        self.render_default = render_default
+        self.builder = f"build_track_{version}_paper.py"
+        self.pdf_name = f"track-construction-{version}.pdf"
+
+
+def to_html(md, paper=None):
+    paper = paper or V4
     return (
         '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f"<title>{html.escape(DESCRIPTION)}</title>\n<style>{CSS}</style>\n</head>\n<body>\n<main>\n"
-        f"<h1>{html.escape(TITLE)}</h1>\n<p class=\"subtitle\">{html.escape(SUBTITLE)}</p>\n"
+        f"<title>{html.escape(paper.title)}</title>\n<style>{CSS}</style>\n</head>\n<body>\n<main>\n"
+        f"<h1>{html.escape(paper.title)}</h1>\n<p class=\"subtitle\">{html.escape(paper.subtitle)}</p>\n"
         '<p class="note">EUROCONTROL Performance Review Unit. Built from the staged CSVs by '
-        "<code>benchmarks/build_track_v4_paper.py</code>; not a Quarto render.</p>\n"
+        f"<code>benchmarks/{paper.builder}</code>; not a Quarto render.</p>\n"
         f"{markdown_to_html(md)}\n</main>\n</body>\n</html>\n"
     )
 
@@ -1009,8 +1031,9 @@ def col_widths(rows, total, measure, minimum=28.0):
     return [f + (w - f) * spare for f, w in zip(floor, want)]
 
 
-def to_pdf(md, out_path):
+def to_pdf(md, out_path, paper=None):
     """Write the report as an A4 PDF; reportlab is imported here, not at module load."""
+    paper = paper or V4
     try:
         from reportlab.lib import colors
         from reportlab.lib.enums import TA_LEFT
@@ -1064,14 +1087,14 @@ def to_pdf(md, out_path):
         canvas.saveState()
         canvas.setFont("Body", 7.5)
         canvas.setFillColor(muted)
-        canvas.drawString(20 * mm, 11 * mm, f"EUROCONTROL PRU  \u00b7  {TITLE}")
+        canvas.drawString(20 * mm, 11 * mm, f"EUROCONTROL PRU  \u00b7  {paper.title}")
         canvas.drawRightString(A4[0] - 20 * mm, 11 * mm, f"Page {doc.page}")
         canvas.setStrokeColor(colors.HexColor("#d0d7de"))
         canvas.line(20 * mm, 15 * mm, A4[0] - 20 * mm, 15 * mm)
         canvas.restoreState()
 
-    story = [Paragraph(html.escape(TITLE), S("title", fontSize=22, leading=27, fontName="Body-Bold", textColor=accent, spaceAfter=6)),
-             Paragraph(html.escape(SUBTITLE), S("sub", fontSize=11, leading=15, textColor=muted, spaceAfter=8)),
+    story = [Paragraph(html.escape(paper.title), S("title", fontSize=22, leading=27, fontName="Body-Bold", textColor=accent, spaceAfter=6)),
+             Paragraph(html.escape(paper.subtitle), S("sub", fontSize=11, leading=15, textColor=muted, spaceAfter=8)),
              Paragraph(f"EUROCONTROL Performance Review Unit  \u00b7  {date.today():%d %B %Y}",
                        S("meta", fontSize=9, leading=12, textColor=muted, spaceAfter=4)),
              Table([[""]], colWidths=[width], rowHeights=[2],
@@ -1102,7 +1125,7 @@ def to_pdf(md, out_path):
                 ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)])))
             story.append(Spacer(1, 8))
     SimpleDocTemplate(str(out_path), pagesize=A4, leftMargin=20 * mm, rightMargin=20 * mm,
-                      topMargin=18 * mm, bottomMargin=22 * mm, title=TITLE,
+                      topMargin=18 * mm, bottomMargin=22 * mm, title=paper.title,
                       author="EUROCONTROL Performance Review Unit",
                       ).build(story, onFirstPage=footer, onLaterPages=footer)
 
@@ -1125,15 +1148,17 @@ REGENERATE_CHUNK = r"""```{r regenerate}
 #
 # OPDI_RENDER selects what happens instead:
 #
-#   run          (default) regenerate anything stale, then render
+#   run          regenerate anything stale, then render
 #   check        fail fast naming every stale job, regenerate nothing
 #   allow-stale  render a draft from whatever is staged, after naming staleness
 #   skip         do not invoke the entrypoint at all
+#
+# Unset, it is "@DEFAULT@".
 REPO   <- Sys.getenv("OPDI_REPO_DIR",
                      normalizePath(file.path(getwd(), "..", "..", "..", "opdi"),
                                    mustWork = FALSE))
 PYTHON <- Sys.getenv("OPDI_PYTHON", file.path(REPO, ".venv310", "bin", "python"))
-MODE   <- Sys.getenv("OPDI_RENDER", "run")
+MODE   <- Sys.getenv("OPDI_RENDER", "@DEFAULT@")
 
 # A missing entrypoint must not read as "nothing to regenerate". Skipping it
 # silently is how a page ends up publishing numbers no command can account for.
@@ -1168,47 +1193,57 @@ if (MODE != "skip") {
 """
 
 
-def to_qmd(md):
+def to_qmd(md, paper=None):
+    paper = paper or V4
+    chunk = REGENERATE_CHUNK.replace("track_v4", f"track_{paper.version}").replace(
+        "@DEFAULT@", paper.render_default
+    )
     return (
-        f'---\ntitle: "{TITLE}"\nsubtitle: "{SUBTITLE}"\n'
+        f'---\ntitle: "{paper.title}"\nsubtitle: "{paper.subtitle}"\n'
         'author: "EUROCONTROL Performance Review Unit"\ndate: last-modified\n---\n\n'
-        f"{REGENERATE_CHUNK}\n{md}"
+        f"{chunk}\n{md}"
     )
 
 
-def build(paper_dir):
+def build(paper_dir, paper=None):
     """``(qmd, html, md)`` for the paper directory."""
+    paper = paper or V4
     paper_dir = Path(paper_dir)
     template = paper_dir / "report_template.md"
     if not template.is_file():
         raise MissingValue(f"missing {template}")
     text = template.read_text()
-    stray = literal_numbers(text)
+    stray = literal_numbers(text, paper.allowed_literals)
     if stray:
         raise MissingValue(f"report_template.md states numbers with no source: {stray}")
-    md = render(text, build_context(paper_dir / "data"))
-    return to_qmd(md), to_html(md), md
+    md = render(text, paper.context(paper_dir / "data"))
+    return to_qmd(md, paper), to_html(md, paper), md
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--paper-dir", default=str(PAPER))
+#: This module's own report.
+V4 = Paper("v4", TITLE, SUBTITLE, ALLOWED_LITERALS, build_context)
+
+
+def main(argv=None, paper=None, paper_dir=PAPER, description=__doc__):
+    paper = paper or V4
+    ap = argparse.ArgumentParser(description=description)
+    ap.add_argument("--paper-dir", default=str(paper_dir))
     ap.add_argument("--check", action="store_true", help="fail if index.qmd is out of date; write nothing")
-    ap.add_argument("--pdf", action="store_true", help="also write track-construction-v4.pdf (needs reportlab)")
+    ap.add_argument("--pdf", action="store_true", help=f"also write {paper.pdf_name} (needs reportlab)")
     args = ap.parse_args(argv)
     paper_dir = Path(args.paper_dir)
-    qmd, page, md = build(paper_dir)
+    qmd, page, md = build(paper_dir, paper)
     if args.check:
         current = paper_dir / "index.qmd"
         if not current.is_file() or current.read_text() != qmd:
-            raise SystemExit(f"{current} is not what the CSVs give: run build_track_v4_paper.py")
+            raise SystemExit(f"{current} is not what the CSVs give: run {paper.builder}")
         print("index.qmd matches the CSVs")
         return 0
     (paper_dir / "index.qmd").write_text(qmd)
     (paper_dir / "index.html").write_text(page)
     if args.pdf:
-        to_pdf(md, paper_dir / "track-construction-v4.pdf")
-        print(f"wrote {paper_dir / 'track-construction-v4.pdf'}")
+        to_pdf(md, paper_dir / paper.pdf_name, paper)
+        print(f"wrote {paper_dir / paper.pdf_name}")
     print(f"wrote {paper_dir / 'index.qmd'} and {paper_dir / 'index.html'}")
     return 0
 

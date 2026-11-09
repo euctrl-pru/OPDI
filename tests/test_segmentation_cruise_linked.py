@@ -1492,3 +1492,41 @@ def test_shipped_default_speed_floor_is_400_kt(spark):
     df = _hole(spark, nm=350.0 * 191 / 60)
     assert n_tracks(df, P) == 1
     assert n_tracks(df, SHIPPED) == 2
+
+
+# --- what the audit of the rule found ----------------------------------------------
+
+
+def test_edge_samples_within_one_second_are_taken_in_time_order(spark):
+    """Two samples 0.6 s apart; the later one is at 17,000 ft, under the floor.
+
+    The five nearest the old edge are those at 0, -1, -2 and -3 s and the *later* of the
+    pair, so the edge reads 17,000 ft and the hole splits. The edge used to order the
+    pair by altitude and keep the earlier, higher one. Sub-second instants exist only
+    with ADS-C merged.
+    """
+    high = 19000.0 / FT_PER_M
+    one = _piece(0, 0.0, n=1)[0]
+    old = [
+        {**one, "t": -3.8, "baro_altitude": high},
+        {**one, "t": -3.2, "baro_altitude": 17000.0 / FT_PER_M},
+    ] + [{**one, "t": float(t), "baro_altitude": high} for t in (-3, -2, -1, 0)]
+    earlier_low = [dict(s) for s in old]
+    earlier_low[0]["baro_altitude"], earlier_low[1]["baro_altitude"] = (
+        earlier_low[1]["baro_altitude"], earlier_low[0]["baro_altitude"])
+    after = _piece(191 * 60, _lon(1530.0))
+    no_climb = dataclasses.replace(SHIPPED, link_old_edge_climb=False)
+
+    assert n_tracks(make_track(spark, old + after), no_climb) == 2
+    # The low sample now the sixth nearest: it is not among the five, and the hole links.
+    assert n_tracks(make_track(spark, earlier_low + after), no_climb) == 1
+
+
+@pytest.mark.parametrize("coordinate", ["lat", "lon"])
+def test_a_nan_position_is_read_past_like_a_blank_one(spark, coordinate):
+    """NaN is no value for altitude, rate and speed, and is none for a position either."""
+    samples = _hole_samples()
+    samples[10][coordinate] = float("nan")
+    assert n_tracks(make_track(spark, samples), SHIPPED) == 1
+    samples[9][coordinate] = float("nan")
+    assert n_tracks(make_track(spark, samples), SHIPPED) == 1
