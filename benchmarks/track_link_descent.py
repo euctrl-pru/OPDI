@@ -184,6 +184,110 @@ def descent_controls(
     return _describe(controls, p).withColumn("joined", joined).select(*CONTROL_COLUMNS)
 
 
+# --- the candidates, scored offline ---------------------------------------------------
+
+#: The extra conditions tried on a hole linked only by descent, fixed in advance so the
+#: data cannot be searched until something fits. Each is a predicate over one exported
+#: row (``pandas`` namespace), and the combinations are conjunctions.
+CANDIDATES = {
+    "C1": lambda r: r["alt_after_ft"] >= DESCENT_FLOOR_FT,
+    "C2": lambda r: r["callsign_state"] == "both_equal",
+    "C3": lambda r: r["gap_min"] <= DESCENT_MAX_GAP_MIN,
+}
+DESCENT_FLOOR_FT = 10000.0
+DESCENT_MAX_GAP_MIN = 360.0
+COMBINATIONS = ["none", "C1", "C2", "C3", "C1+C2", "C1+C3", "C2+C3", "C1+C2+C3"]
+
+#: The limits a candidate has to meet, pooled over the days: no false join among
+#: checkable real holes (0.1% below 1,000 cases means none); hidden landings joined at
+#: most 1% as a 95% upper bound, and at most 5% among the same-callsign ones. Below
+#: ``MIN_CHECKABLE`` checkable holes the result is reported but not a measurement, and a
+#: condition that links fewer than ``MIN_CROSSING_LINKED`` crossing-flight holes is not
+#: worth a setting.
+HIDDEN_LIMIT = 0.01
+SAME_CALLSIGN_LIMIT = 0.05
+MIN_CHECKABLE = 50
+MIN_CROSSING_LINKED = 20
+
+
+def _passes(frame, candidate: str):
+    """Boolean Series: the rows of *frame* a candidate keeps."""
+    import pandas as pd
+
+    keep = pd.Series(True, index=frame.index)
+    if candidate != "none":
+        for name in candidate.split("+"):
+            keep &= frame.apply(CANDIDATES[name], axis=1) if len(frame) else keep
+    return keep
+
+
+def _truthy(series):
+    return series.astype(str).str.lower().isin(["true", "1", "1.0"])
+
+
+def score_candidates(holes, controls):
+    """One row per candidate: the limits' counts over the exported holes and controls.
+
+    *holes* and *controls* are the exported CSVs as DataFrames (one day or several
+    concatenated). A hole counts only where the rule with descent on would link it:
+    ``descent_edge`` and ``other_checks_pass``; likewise a control counts only where its
+    edge is a descent edge the other checks accept, since that is where the candidate
+    decides anything.
+    """
+    import pandas as pd
+    from track_link_controls import rule_of_three_upper
+
+    linked = holes[_truthy(holes["descent_edge"]) & _truthy(holes["other_checks_pass"])]
+    exposed = controls[_truthy(controls["descent_edge"]) & _truthy(controls["other_checks_pass"])]
+    rows = []
+    for candidate in COMBINATIONS:
+        h = linked[_passes(linked, candidate)]
+        c = exposed[_passes(exposed, candidate)]
+        checkable = h[h["label"].isin(["true_link", "false_join"])]
+        false_joins = int((h["label"] == "false_join").sum())
+        joined = int(_truthy(c["joined"]).sum()) if len(c) else 0
+        same = c[_truthy(c["same_callsign"])] if len(c) else c
+        same_joined = int(_truthy(same["joined"]).sum()) if len(same) else 0
+        hidden_upper = rule_of_three_upper(joined, len(c))
+        same_upper = rule_of_three_upper(same_joined, len(same))
+        within = (
+            false_joins == 0
+            and hidden_upper is not None and hidden_upper <= HIDDEN_LIMIT
+            and (same_upper is None or same_upper <= SAME_CALLSIGN_LIMIT)
+        )
+        crossing = int((h["population"] == "crosses_box").sum())
+        rows.append({
+            "candidate": candidate,
+            "conditions": 0 if candidate == "none" else candidate.count("+") + 1,
+            "real_linked": len(h),
+            "real_crossing_linked": crossing,
+            "real_checkable": len(checkable),
+            "real_false_joins": false_joins,
+            "real_unknown": int((h["label"] == "unknown").sum()),
+            "false_join_upper_95": rule_of_three_upper(false_joins, len(checkable)),
+            "controls": len(c),
+            "controls_joined": joined,
+            "controls_joined_upper_95": hidden_upper,
+            "same_callsign_controls": len(same),
+            "same_callsign_joined": same_joined,
+            "same_callsign_upper_95": same_upper,
+            "within_limits": bool(within),
+            "adoptable": bool(within and len(checkable) >= MIN_CHECKABLE
+                              and crossing >= MIN_CROSSING_LINKED),
+        })
+    return pd.DataFrame(rows)
+
+
+def choose(scored) -> Optional[str]:
+    """The adoptable candidate with the fewest conditions; ties go to C2, then C1, then C3."""
+    order = {name: i for i, name in enumerate(["none", "C2", "C1", "C3", "C1+C2", "C2+C3", "C1+C3", "C1+C2+C3"])}
+    good = scored[scored["adoptable"].astype(bool)]
+    if good.empty:
+        return None
+    best = sorted(good.to_dict("records"), key=lambda r: (r["conditions"], order[r["candidate"]]))
+    return best[0]["candidate"]
+
+
 def write_rows(results_dir, name: str, rows: List[Dict], argv: List[str],
                input_tables: List[str], notes: str = "") -> None:
     """Write *rows* as a CSV beside its provenance entry."""
@@ -207,6 +311,31 @@ def _rows(frame: DataFrame) -> List[Dict]:
     ]
 
 
+def score_main(args) -> int:
+    """``--score``: the candidates over every exported day, and the false joins in full."""
+    import pandas as pd
+
+    def staged(stem):
+        files = sorted(Path(args.results_dir).glob(f"{stem}_*.csv"))
+        if not files:
+            raise SystemExit(f"no {stem}_*.csv under {args.results_dir}: run the export first")
+        return pd.concat([pd.read_csv(f) for f in files], ignore_index=True), [f.name for f in files]
+
+    holes, hole_files = staged("descent_holes")
+    controls, control_files = staged("descent_controls")
+    scored = score_candidates(holes, controls)
+    inputs = hole_files + control_files
+    write_rows(args.results_dir, "descent_candidates.csv", scored.to_dict("records"), sys.argv[1:],
+               inputs, notes="Candidates scored over every exported day; see CANDIDATES.")
+    linked = holes[_truthy(holes["descent_edge"]) & _truthy(holes["other_checks_pass"])]
+    false_joins = linked[linked["label"] == "false_join"]
+    write_rows(args.results_dir, "descent_false_joins.csv", false_joins.to_dict("records"), sys.argv[1:],
+               inputs, notes="The false joins among holes linked only by descent, in full.")
+    print(scored.to_string(index=False))
+    print(f"chosen: {choose(scored)}")
+    return 0
+
+
 def main() -> int:
     from track_link_grid import (
         AIRPORTS,
@@ -227,7 +356,11 @@ def main() -> int:
     ap.add_argument("--airports", default=AIRPORTS)
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--executors", type=int, default=8)
+    ap.add_argument("--score", action="store_true",
+                    help="score the candidates on the exported CSVs; no cluster")
     args = ap.parse_args()
+    if args.score:
+        return score_main(args)
     p = SegmentationParams()
 
     import osn_sample

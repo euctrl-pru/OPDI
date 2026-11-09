@@ -119,3 +119,83 @@ def test_the_export_writes_provenance(tmp_path):
     assert entry["argv"] == ["--days", "2026-06-14"]
     assert "benchmarks/track_link_descent.py" in entry["code_paths"]
     assert "src/opdi/pipeline/segmentation/methods.py" in entry["code_paths"]
+
+
+# --- scoring the candidate conditions offline ---------------------------------------
+
+
+def _hole(label, alt=12000.0, state="both_equal", gap=200.0, population="crosses_box",
+          passes=True, edge=True):
+    return {"label": label, "alt_after_ft": alt, "callsign_state": state, "gap_min": gap,
+            "population": population, "other_checks_pass": passes, "descent_edge": edge,
+            "track_id": "t", "t_old_edge": "x", "t_new_edge": "y"}
+
+
+def _control(joined, alt=12000.0, state="both_equal", gap=200.0, same=True, passes=True, edge=True):
+    return {"joined": joined, "alt_after_ft": alt, "callsign_state": state, "gap_min": gap,
+            "same_callsign": same, "other_checks_pass": passes, "descent_edge": edge}
+
+
+def _frames(holes, controls):
+    import pandas as pd
+
+    return pd.DataFrame(holes), pd.DataFrame(controls)
+
+
+def test_candidates_are_scored_from_the_exported_rows():
+    # 60 true links with a callsign on both sides, one false join with a blank one.
+    holes = [_hole("true_link") for _ in range(60)] + [_hole("false_join", state="one_blank")]
+    holes += [_hole("unknown", population="none") for _ in range(10)]
+    # 300 controls: the rule joins the three with a blank callsign; C2 removes them.
+    controls = [_control(False) for _ in range(320)] + [_control(True, state="both_blank") for _ in range(3)]
+    scored = d.score_candidates(*_frames(holes, controls)).set_index("candidate")
+    none, c2 = scored.loc["none"], scored.loc["C2"]
+    assert none["real_checkable"] == 61 and none["real_false_joins"] == 1 and bool(none["within_limits"]) is False
+    assert c2["real_checkable"] == 60 and c2["real_false_joins"] == 0
+    assert c2["controls"] == 320 and c2["controls_joined"] == 0
+    assert bool(c2["within_limits"]) is True
+    assert c2["real_crossing_linked"] == 60 + 10 * 0   # unknown holes are not crossing
+    assert list(scored.index) == ["none", "C1", "C2", "C3", "C1+C2", "C1+C3", "C2+C3", "C1+C2+C3"]
+    assert none["real_unknown"] == 10
+
+
+def test_only_holes_the_rule_would_link_count():
+    # A hole another check rejects, or below 5,000 ft, is not linked by descent at all.
+    holes = [_hole("false_join", passes=False), _hole("false_join", edge=False), _hole("true_link")]
+    scored = d.score_candidates(*_frames(holes, [_control(False)])).set_index("candidate")
+    assert scored.loc["none"]["real_checkable"] == 1
+    assert scored.loc["none"]["real_false_joins"] == 0
+
+
+def test_a_candidate_leaving_under_50_checkable_holes_is_not_adoptable():
+    holes = [_hole("true_link") for _ in range(40)]
+    scored = d.score_candidates(*_frames(holes, [_control(False) for _ in range(320)])).set_index("candidate")
+    assert bool(scored.loc["none"]["within_limits"]) is True
+    assert bool(scored.loc["none"]["adoptable"]) is False
+
+
+def test_a_candidate_linking_too_few_crossing_holes_is_not_adoptable():
+    holes = [_hole("true_link", population="other") for _ in range(60)]
+    scored = d.score_candidates(*_frames(holes, [_control(False) for _ in range(320)])).set_index("candidate")
+    assert bool(scored.loc["none"]["adoptable"]) is False
+
+
+def test_the_chosen_candidate_is_the_one_with_fewest_conditions():
+    holes = [_hole("true_link") for _ in range(60)] + [_hole("false_join", state="one_blank", alt=8000.0)]
+    controls = [_control(False) for _ in range(320)]
+    scored = d.score_candidates(*_frames(holes, controls))
+    # Both C1 and C2 remove the false join; C2 wins the tie.
+    assert d.choose(scored) == "C2"
+    assert d.choose(d.score_candidates(*_frames(
+        [_hole("true_link") for _ in range(60)] + [_hole("false_join")], controls))) is None
+
+
+def test_the_upper_bounds_are_the_studys():
+    from track_link_controls import rule_of_three_upper
+
+    holes = [_hole("true_link") for _ in range(100)]
+    controls = [_control(False) for _ in range(319)] + [_control(True)]
+    scored = d.score_candidates(*_frames(holes, controls)).set_index("candidate")
+    assert scored.loc["none"]["controls_joined_upper_95"] == pytest.approx(rule_of_three_upper(1, 320))
+    assert scored.loc["none"]["false_join_upper_95"] == pytest.approx(rule_of_three_upper(0, 100))
+    assert bool(scored.loc["none"]["within_limits"]) is False   # 1 of 320 joined: upper bound over 1%
