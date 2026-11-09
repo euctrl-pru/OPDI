@@ -288,3 +288,9 @@ def test_pdf_without_reportlab_says_so(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "reportlab", None)  # makes the import fail
     with pytest.raises(SystemExit, match="needs reportlab"):
         B.to_pdf("# x\n\ntext", tmp_path / "x.pdf")
+
+
+def test_version_4_is_frozen():
+    """Superseded by version 5: a render does not re-run the analysis by default."""
+    assert B.V4.render_default == "skip"
+    assert 'Sys.getenv("OPDI_RENDER", "skip")' in B.to_qmd("x\n")

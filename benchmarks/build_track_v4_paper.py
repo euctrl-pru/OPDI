@@ -1220,8 +1220,10 @@ def build(paper_dir, paper=None):
     return to_qmd(md, paper), to_html(md, paper), md
 
 
-#: This module's own report.
-V4 = Paper("v4", TITLE, SUBTITLE, ALLOWED_LITERALS, build_context)
+#: This module's own report. Superseded by version 5 and frozen: a render no longer
+#: runs the analysis unless ``OPDI_RENDER`` asks for it, so the page keeps showing the
+#: numbers version 4 published rather than what the current code would give.
+V4 = Paper("v4", TITLE, SUBTITLE, ALLOWED_LITERALS, build_context, render_default="skip")
 
 
 def main(argv=None, paper=None, paper_dir=PAPER, description=__doc__):
