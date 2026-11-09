@@ -176,3 +176,31 @@ def test_the_bucket_is_checked_before_spark_starts():
 
     src = inspect.getsource(r.run_arm)
     assert src.index("check_free_space") < src.index("create_session")
+
+
+# --- how long each step took --------------------------------------------------
+
+
+def test_a_step_timing_is_written_and_a_rerun_replaces_it(tmp_path):
+    import csv
+
+    path = tmp_path / "data" / "link_step_timings.csv"
+    r.record_timing(path, "debounced", "02", 600.4)
+    r.record_timing(path, "cruise_linked", "02", 900.0)
+    r.record_timing(path, "debounced", "03", 60.0)
+    r.record_timing(path, "debounced", "02", 480.0)
+
+    rows = list(csv.DictReader(path.open()))
+    assert [(x["arm"], x["step"], x["seconds"]) for x in rows] == [
+        ("cruise_linked", "02", "900"),
+        ("debounced", "02", "480"),
+        ("debounced", "03", "60"),
+    ]
+
+
+def test_the_runner_takes_a_timings_file():
+    import inspect
+
+    src = inspect.getsource(r.main)
+    assert "--timings-csv" in src
+    assert "record_timing(" in inspect.getsource(r.run_arm)

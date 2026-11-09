@@ -429,7 +429,9 @@ def test_a_hole_whose_distance_was_lost_shows_as_a_difference(spark):
             sample["lat"] = None
             sample["lon"] = None
     tracks = make_track(spark, samples)
-    rows = s.distance_across_holes(tracks, s.linked_holes(tracks, P)).collect()
+    holes = s.linked_holes(tracks, P)
+    # The released distance (distance_v0.0.2), which is where the loss was.
+    rows = s.distance_across_holes(tracks, holes, last_known_position=False).collect()
 
     assert len(rows) == 1
     row = rows[0]
@@ -437,6 +439,12 @@ def test_a_hole_whose_distance_was_lost_shows_as_a_difference(spark):
     assert row["great_circle_nm"] == pytest.approx(expected, rel=1e-6)
     assert row["jump_nm"] == pytest.approx(0.0, abs=1e-6)
     assert row["difference_nm"] == pytest.approx(-expected, rel=1e-6)
+    assert row["edge_masked"] is True
+
+    # The distance the pipeline computes now reads the last known position.
+    row = s.distance_across_holes(tracks, holes).first()
+    assert row["jump_nm"] == pytest.approx(expected, rel=1e-6)
+    assert row["difference_nm"] == pytest.approx(0.0, abs=1e-3)
     assert row["edge_masked"] is True
 
 
@@ -894,11 +902,17 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
             "dof",
         )
 
-    def flight_list_of(rows):
+    def flight_list_of(tracks, rows):
+        """A row per track, in time order, as the pipeline writes one."""
+        ids = [
+            r["track_id"]
+            for r in tracks.groupBy("track_id").agg(F.min("event_time").alias("a")).orderBy("a").collect()
+        ]
+        assert len(ids) == len(rows)
         return spark.createDataFrame(
-            rows,
-            "ICAO24 string, FLT_ID string, ADEP string, ADES string, first_seen timestamp, "
-            "last_seen timestamp",
+            [(i, *row, "", "") for i, row in zip(ids, rows)],
+            "ID string, ICAO24 string, FLT_ID string, ADEP string, ADES string, "
+            "first_seen timestamp, last_seen timestamp, ADEP_P string, ADES_P string",
         ).withColumn("DOF", F.to_date(F.lit(day)))
 
     start, end = _at(0), _at(2 * HOUR + 40 * 60)
@@ -910,13 +924,14 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
         ("cruise_linked", "opdi_flight_events"): events_of(linked),
         ("cruise_linked", "opdi_measurements"): measurements_of(events_of(linked)),
         ("debounced", "opdi_flight_list"): flight_list_of(
+            split,
             [
                 ("abc123", "DLH1", "EDDF", None, start, _at(40 * 60)),
                 ("abc123", "DLH1", None, "KJFK", _at(2 * HOUR), end),
-            ]
+            ],
         ),
         ("cruise_linked", "opdi_flight_list"): flight_list_of(
-            [("abc123", "DLH1", "EDDF", "KJFK", start, end)]
+            linked, [("abc123", "DLH1", "EDDF", "KJFK", start, end)]
         ),
     }
     truth = pd.DataFrame(
@@ -991,6 +1006,131 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
     assert labels["true_link"]["holes"] == 1
     assert {r["movement"] for r in written["link_movements.csv"]} == {"ATOT", "ALDT", "all"}
     assert {r["type"] for r in written["link_events.csv"]} == {"level-start", "level-end", "last_seen"}
+    assert list(written)[1] == "link_consistency.csv"
+    consistency = written["link_consistency.csv"][0]
+    assert consistency["debounced_rows_without_a_track"] == 0
+    assert consistency["cruise_linked_rows_without_a_track"] == 0
+    assert consistency["unchanged_tracks"] == 0
+    no_hole = written["link_distance_no_hole.csv"][0]
+    assert no_hole["tracks"] == 2
+    assert no_hole["tracks_short_by_over_1_nm"] == 0
+
+    # A flight list left over from other tracks is refused, after saying so in the table.
+    tables[("cruise_linked", "opdi_flight_list")] = tables[
+        ("cruise_linked", "opdi_flight_list")
+    ].withColumn("ID", F.lit("a-track-that-is-gone"))
+    written.clear()
+    with pytest.raises(SystemExit, match="without a track"):
+        s.score_day(
+            spark,
+            day,
+            read=lambda arm, table: s.one_day(tables[(arm, table)], table, day),
+            truth=truth,
+            p=P,
+            apdf=apdf,
+            detected={"debounced": detection, "cruise_linked": detection},
+            write=write,
+            truth_path=str(nm_path),
+        )
+    assert written["link_consistency.csv"][0]["cruise_linked_rows_without_a_track"] == 1
+    assert "link_flight_list.csv" not in written
+
+
+# --- the two arms describe the same tracks ----------------------------------
+
+
+def _flight_list(spark, *rows):
+    """``(id, adep, ades, adep_p, ades_p)`` rows in the shape the scorer reads."""
+    return spark.createDataFrame(
+        list(rows), "id string, adep string, ades string, adep_p string, ades_p string"
+    )
+
+
+def _tracks(spark, *spans):
+    """``(track_id, icao24, start_s, end_s)``: a sample a minute over each span."""
+    samples = [
+        row
+        for track, icao24, start, end in spans
+        for row in _cruise([(start, end)], icao24=icao24, track_id=track)
+    ]
+    return make_track(spark, samples).select("track_id", "icao24", "event_time", "lat", "lon")
+
+
+def test_a_flight_list_row_without_a_track_is_counted(spark):
+    tracks = _tracks(spark, ("T1", "abc123", 0, 600))
+    rows = _flight_list(
+        spark, ("T1", "EDDF", None, "", ""), ("T9", "EGLL", None, "", "")
+    )
+    assert s.rows_without_a_track(rows, tracks) == 1
+
+
+def test_a_named_airport_among_its_own_alternatives_is_counted(spark):
+    rows = _flight_list(
+        spark,
+        ("T1", "EPWA", "EDDF", "EPMO, EPMM", ""),
+        ("T2", "EPMO", "EDDF", "EPMO, EPMM", ""),
+        ("T3", "EGLL", "EDDM", "", "EDMO, EDDM"),
+        ("T4", None, None, None, None),
+    )
+    assert s.named_among_alternatives(rows) == 2
+
+
+def test_tracks_the_same_under_both_rules_are_paired(spark):
+    # Airframe abc123 is split in one arm and whole in the other; def456 is the same.
+    split = _tracks(
+        spark, ("S1", "abc123", 0, 600), ("S2", "abc123", 2 * HOUR, 2 * HOUR + 600),
+        ("S3", "def456", 0, 600),
+    )
+    linked = _tracks(spark, ("L1", "abc123", 0, 600), ("L3", "def456", 0, 600))
+    # L1 here ends at 600 s like S1, so it pairs too: a pair is an airframe and an extent.
+    pairs = {tuple(r) for r in s.unchanged_tracks(split, linked).collect()}
+    assert pairs == {("S1", "L1"), ("S3", "L3")}
+
+
+def test_an_unchanged_track_with_another_airport_or_event_is_counted(spark):
+    split = _tracks(spark, ("S1", "abc123", 0, 600), ("S2", "def456", 0, 600))
+    linked = _tracks(spark, ("L1", "abc123", 0, 600), ("L2", "def456", 0, 600))
+    row = s.unchanged_track_row(
+        s.unchanged_tracks(split, linked),
+        _flight_list(spark, ("S1", "EDDF", "EPMO", "", ""), ("S2", "EGLL", None, "", "")),
+        _flight_list(spark, ("L1", "EDDF", "EPWA", "", ""), ("L2", "EGLL", None, "", "")),
+        _events(spark, ("S1", "take-off", 0), ("S2", "take-off", 0), ("S2", "landing", 600)),
+        _events(spark, ("L1", "take-off", 0), ("L2", "take-off", 0), ("L2", "landing", 540)),
+    )
+    assert row == {
+        "unchanged_tracks": 2,
+        "unchanged_tracks_with_other_airports": 1,
+        "unchanged_tracks_with_other_events": 1,
+    }
+
+
+def test_unchanged_tracks_that_agree_count_nothing(spark):
+    tracks = _tracks(spark, ("S1", "abc123", 0, 600))
+    rows = _flight_list(spark, ("S1", "EDDF", None, "", ""))
+    events = _events(spark, ("S1", "take-off", 0))
+    row = s.unchanged_track_row(s.unchanged_tracks(tracks, tracks), rows, rows, events, events)
+    assert row["unchanged_tracks"] == 1
+    assert row["unchanged_tracks_with_other_airports"] == 0
+    assert row["unchanged_tracks_with_other_events"] == 0
+
+
+def test_distance_on_tracks_without_a_hole_compares_the_two_methods(spark):
+    # Five samples a degree apart on the equator, the middle position blank: the
+    # released method lost the two segments around it.
+    samples = [
+        {"t": i * 60, "lat": 0.0, "lon": float(i), "track_id": "T1"} for i in range(5)
+    ]
+    samples[2]["lat"] = samples[2]["lon"] = None
+    whole = [{"t": i * 60, "lat": 0.0, "lon": float(i), "track_id": "T2"} for i in range(5)]
+    tracks = make_track(spark, samples + whole).select("track_id", "event_time", "lat", "lon")
+    row = s.distance_without_holes(tracks)
+    assert row["tracks"] == 2
+    assert row["released_total_nm"] == pytest.approx(360.0, rel=2e-3)
+    assert row["new_total_nm"] == pytest.approx(480.0, rel=2e-3)
+    assert row["share_of_distance_missing"] == pytest.approx(0.25, rel=2e-3)
+    assert row["tracks_short_by_over_1_nm"] == 1
+    assert row["share_of_tracks_short_by_over_1_nm"] == 0.5
+    assert row["median_short_nm"] == pytest.approx(60.0, rel=2e-3)
 
 
 def test_a_day_with_no_scored_flights_is_refused(spark):

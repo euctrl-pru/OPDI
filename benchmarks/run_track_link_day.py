@@ -44,6 +44,7 @@ import dataclasses
 import json
 import re
 import sys
+import time
 from datetime import date
 from pathlib import Path
 
@@ -246,8 +247,30 @@ def restore() -> None:
         _ORIG_DROP = None
 
 
+def record_timing(path, arm: str, step: str, seconds: float) -> None:
+    """Write how long *step* took for *arm* to the CSV at *path*.
+
+    One row per arm and step: a re-run replaces its own row and leaves the
+    other arm's alone.
+    """
+    import csv
+
+    path = Path(path)
+    rows = {}
+    if path.is_file():
+        with path.open() as fh:
+            rows = {(x["arm"], x["step"]): x["seconds"] for x in csv.DictReader(fh)}
+    rows[(arm, step)] = str(round(seconds))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as fh:
+        out = csv.writer(fh)
+        out.writerow(["arm", "step", "seconds"])
+        for (a, s), value in sorted(rows.items()):
+            out.writerow([a, s, value])
+
+
 def run_arm(arm: str, day: date, executors: int, steps=STEPS,
-            link_params=None) -> None:
+            link_params=None, timings_csv=None) -> None:
     """One arm, one day, through the real per-day entry points."""
     cfg = build_config(arm, link_params, executors)
     seg = cfg.segmentation
@@ -285,7 +308,10 @@ def run_arm(arm: str, day: date, executors: int, steps=STEPS,
         for step in steps:
             print(f"\n{'-' * 72}\n>>> arm {arm}  step {step}  day {day}\n"
                   f"{'-' * 72}", flush=True)
+            started = time.monotonic()
             run_day_step(spark, cfg, step, day, kwargs)
+            if timings_csv:
+                record_timing(timings_csv, arm, step, time.monotonic() - started)
     finally:
         spark.stop()
         restore()
@@ -300,11 +326,14 @@ def main() -> int:
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument("--link-params-json", default=None,
                     help="JSON object of link_* SegmentationConfig overrides")
+    ap.add_argument("--timings-csv", default=None,
+                    help="write each step's duration here (one row per arm and step)")
     args = ap.parse_args()
     link_params = json.loads(args.link_params_json) \
         if args.link_params_json else None
     day = date.fromisoformat(args.day)
-    run_arm(args.arm, day, args.executors, args.steps, link_params)
+    run_arm(args.arm, day, args.executors, args.steps, link_params,
+            timings_csv=args.timings_csv)
     print(f"\nDone. {args.arm} written for {day} under {ARM_PREFIX}")
     return 0
 

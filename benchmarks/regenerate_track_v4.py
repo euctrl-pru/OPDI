@@ -128,9 +128,10 @@ class Job:
     """One analysis step: a command, its outputs, and what it depends on."""
 
     def __init__(self, name, script, args, outputs, code_paths, notes="",
-                 optional=()):
+                 optional=(), data_root=None):
         self.name = name
-        self.data = DATA / name
+        # ``data_root`` lets a later paper reuse this class with its own data.
+        self.data = (data_root or DATA) / name
         self.script = script
         self.args = args
         self.outputs = outputs
@@ -256,8 +257,9 @@ def jobs() -> list:
     ]
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
+def main(all_jobs=None, description=None) -> None:
+    """Run or check the jobs. A later paper passes its own job list and docstring."""
+    ap = argparse.ArgumentParser(description=description or __doc__)
     ap.add_argument("--check", action="store_true",
                     help="report staleness and exit; no cluster needed")
     ap.add_argument("--force", action="store_true", help="re-run every job")
@@ -267,7 +269,7 @@ def main() -> None:
                          "without a cluster")
     args = ap.parse_args()
 
-    todo = jobs()
+    todo = (all_jobs or jobs)()
     if args.only:
         todo = [j for j in todo if j.name in set(args.only)]
 

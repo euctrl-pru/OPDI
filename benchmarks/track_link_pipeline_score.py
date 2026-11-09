@@ -127,6 +127,8 @@ OUTPUTS = (
     "link_partition_check.csv",
     "link_movements.csv",
     "link_truth_all_flights.csv",
+    "link_consistency.csv",
+    "link_distance_no_hole.csv",
 )
 
 #: How far the movement count of A10 may fall below A9's. The spec's limit.
@@ -144,6 +146,9 @@ MOVEMENTS = ("ATOT", "ALDT")
 
 #: A difference this size means distance was lost or invented, not rounded.
 DISTANCE_TOLERANCE_NM = 1.0
+
+#: A track long enough for a share of its distance to mean something.
+LONG_TRACK_NM = 200.0
 
 #: The measurement type holding ``cumulative_distance_nm``. See ``events.py``.
 DISTANCE_MEASUREMENT = "Distance flown (NM)"
@@ -165,6 +170,7 @@ _CODE_PATHS = [
     "benchmarks/events_score.py",
     "benchmarks/event_bench.py",
     "src/opdi/pipeline/events.py",
+    "src/opdi/pipeline/holes.py",
     "src/opdi/pipeline/flights.py",
     "src/opdi/pipeline/segmentation/__init__.py",
     "src/opdi/pipeline/segmentation/base.py",
@@ -445,8 +451,13 @@ def level_across_holes(events: DataFrame, holes: DataFrame) -> List[Dict]:
     return rows
 
 
-def distance_across_holes(tracks: DataFrame, holes: DataFrame) -> DataFrame:
+def distance_across_holes(
+    tracks: DataFrame, holes: DataFrame, last_known_position: bool = True
+) -> DataFrame:
     """Per hole, the jump in cumulative distance and the great circle between its edges.
+
+    ``last_known_position`` is the pipeline's switch between the distance it computes now
+    and the released one, which lost the hole wherever an edge position was blank.
 
     The edges are the nearest samples with a position either side. ``edge_masked`` says
     one of them is not the sample next to the hole. A hole with no position left on one
@@ -454,7 +465,10 @@ def distance_across_holes(tracks: DataFrame, holes: DataFrame) -> DataFrame:
     """
     window = Window.partitionBy("track_id").orderBy("event_time")
     positioned = (
-        add_distance_measure(tracks.select("track_id", "event_time", "lat", "lon"))
+        add_distance_measure(
+            tracks.select("track_id", "event_time", "lat", "lon"),
+            last_known_position=last_known_position,
+        )
         .filter(F.col("lat").isNotNull() & F.col("lon").isNotNull())
         .withColumn("_prev_time", F.lag("event_time").over(window))
         .withColumn("_prev_lat", F.lag("lat").over(window))
@@ -550,6 +564,134 @@ def stored_distance_check(tracks: DataFrame, events: DataFrame, measurements: Da
         "tracks_checked_against_stored_distance": checked,
         "tracks_off_stored_distance_by_over_1_nm": row["off"] if checked else None,
         "stored_distance_verdict": verdict,
+    }
+
+
+def distance_without_holes(tracks: DataFrame) -> Dict:
+    """The released distance against the one from the last known position, per track.
+
+    For tracks that hold no hole, so the difference is the positions cleaning blanked
+    and nothing else. *tracks* is the ``debounced`` arm, where no track has a hole.
+    """
+    samples = tracks.select("track_id", "event_time", "lat", "lon")
+
+    def total(last_known_position: bool, name: str) -> DataFrame:
+        return (
+            add_distance_measure(samples, last_known_position=last_known_position)
+            .groupBy("track_id")
+            .agg(F.max("cumulative_distance_nm").alias(name))
+        )
+
+    per_track = total(False, "released_nm").join(total(True, "new_nm"), on="track_id").toPandas()
+    short = per_track["new_nm"] - per_track["released_nm"]
+    long_tracks = per_track["new_nm"] > LONG_TRACK_NM
+    short_share = (short / per_track["new_nm"])[long_tracks]
+    off = int((short > DISTANCE_TOLERANCE_NM).sum())
+
+    def quantile(series: pd.Series, q: float) -> Optional[float]:
+        return float(series.quantile(q)) if len(series) else None
+
+    return {
+        "tracks": len(per_track),
+        "released_total_nm": float(per_track["released_nm"].sum()),
+        "new_total_nm": float(per_track["new_nm"].sum()),
+        "share_of_distance_missing": float(short.sum() / per_track["new_nm"].sum())
+        if len(per_track) and per_track["new_nm"].sum()
+        else None,
+        "tracks_short_by_over_1_nm": off,
+        "share_of_tracks_short_by_over_1_nm": off / len(per_track) if len(per_track) else None,
+        "median_short_nm": quantile(short, 0.5),
+        "long_tracks": int(long_tracks.sum()),
+        "long_tracks_median_share_missing": quantile(short_share, 0.5),
+        "long_tracks_p90_share_missing": quantile(short_share, 0.9),
+    }
+
+
+# --- the two arms describe the same tracks -----------------------------------
+
+
+def rows_without_a_track(flight_list: DataFrame, tracks: DataFrame) -> int:
+    """Flight-list rows whose ``id`` is no track of the arm.
+
+    Not zero means the flight list was built from other tracks than the arm now holds --
+    a candidate table left over from an earlier run did exactly that -- and nothing
+    scored from it describes the arm.
+    """
+    ids = tracks.select(F.col("track_id").alias("id")).distinct()
+    return flight_list.join(ids, on="id", how="left_anti").count()
+
+
+def named_among_alternatives(flight_list: DataFrame) -> int:
+    """Rows naming an aerodrome that is also in that row's own alternatives."""
+
+    def listed(named: str, alternatives: str) -> Column:
+        return F.coalesce(
+            F.array_contains(F.split(F.col(alternatives), ", "), F.col(named)), F.lit(False)
+        )
+
+    return flight_list.filter(listed("adep", "adep_p") | listed("ades", "ades_p")).count()
+
+
+def unchanged_tracks(split_tracks: DataFrame, linked_tracks: DataFrame) -> DataFrame:
+    """``split_id`` and ``linked_id`` of the tracks that are the same under both rules.
+
+    The same means the same airframe, first sample and last sample. Ids are not compared.
+    """
+    key = ["icao24", "t_first", "t_last"]
+    return (
+        _track_extents(split_tracks)
+        .withColumnRenamed("track_id", "split_id")
+        .join(_track_extents(linked_tracks).withColumnRenamed("track_id", "linked_id"), on=key)
+        .select("split_id", "linked_id")
+    )
+
+
+def unchanged_track_row(
+    pairs: DataFrame,
+    split_flight_list: DataFrame,
+    linked_flight_list: DataFrame,
+    split_events: DataFrame,
+    linked_events: DataFrame,
+) -> Dict:
+    """On tracks the rule did not touch: how many got other airports or other events.
+
+    Both should be zero. The rule changes which samples share a track and nothing else,
+    so a difference here is a step that does not give the same answer twice.
+    """
+
+    def airports(flight_list: DataFrame, key: str, prefix: str) -> DataFrame:
+        return flight_list.select(
+            F.col("id").alias(key),
+            F.col("adep").alias(f"{prefix}_adep"),
+            F.col("ades").alias(f"{prefix}_ades"),
+        )
+
+    def event_set(events: DataFrame, key: str, name: str) -> DataFrame:
+        mark = F.struct(F.col("type"), F.col("event_time"))
+        return events.groupBy(F.col("flight_id").alias(key)).agg(
+            F.sort_array(F.collect_list(mark)).alias(name)
+        )
+
+    joined = (
+        pairs.join(airports(split_flight_list, "split_id", "split"), on="split_id", how="left")
+        .join(airports(linked_flight_list, "linked_id", "linked"), on="linked_id", how="left")
+        .join(event_set(split_events, "split_id", "split_events"), on="split_id", how="left")
+        .join(event_set(linked_events, "linked_id", "linked_events"), on="linked_id", how="left")
+    )
+    other_airports = ~(
+        F.col("split_adep").eqNullSafe(F.col("linked_adep"))
+        & F.col("split_ades").eqNullSafe(F.col("linked_ades"))
+    )
+    other_events = ~F.col("split_events").eqNullSafe(F.col("linked_events"))
+    row = joined.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.coalesce(F.sum(other_airports.cast("int")), F.lit(0)).alias("airports"),
+        F.coalesce(F.sum(other_events.cast("int")), F.lit(0)).alias("events"),
+    ).first()
+    return {
+        "unchanged_tracks": row["n"],
+        "unchanged_tracks_with_other_airports": row["airports"],
+        "unchanged_tracks_with_other_events": row["events"],
     }
 
 
@@ -935,6 +1077,37 @@ def score_day(
     )
     samples.unpersist()
 
+    # Next, as everything below is meaningless when an arm's tables do not belong together.
+    flight_lists = {
+        arm: read(arm, "opdi_flight_list").select("id", "adep", "ades", "adep_p", "ades_p")
+        for arm in ARMS
+    }
+    consistency = {}
+    for arm in ARMS:
+        consistency[f"{arm}_flight_list_rows"] = flight_lists[arm].count()
+        consistency[f"{arm}_rows_without_a_track"] = rows_without_a_track(
+            flight_lists[arm], tracks[arm]
+        )
+        consistency[f"{arm}_named_among_alternatives"] = named_among_alternatives(
+            flight_lists[arm]
+        )
+    consistency.update(
+        unchanged_track_row(
+            unchanged_tracks(tracks[split_name], tracks[linked_name]),
+            flight_lists[split_name],
+            flight_lists[linked_name],
+            events[split_name],
+            events[linked_name],
+        )
+    )
+    write("link_consistency.csv", [consistency])
+    orphans = {arm: consistency[f"{arm}_rows_without_a_track"] for arm in ARMS}
+    if any(orphans.values()):
+        raise SystemExit(
+            f"flight-list rows without a track: {orphans}. The flight list was not built "
+            "from the arm's current tracks; re-run step 03 for that arm."
+        )
+
     flights = scored_flights_frame(spark, truth).cache()
     holes = linked_holes(tracks[linked_name], p).cache()
     holes_in_flights = scored_holes(holes, flights).cache()
@@ -982,6 +1155,7 @@ def score_day(
             }
         ],
     )
+    write("link_distance_no_hole.csv", [distance_without_holes(tracks[split_name])])
 
     write(
         "link_truth_all_flights.csv",
