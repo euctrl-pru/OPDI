@@ -76,7 +76,7 @@ def test_the_report_builds_from_the_staged_data():
     _needs_data()
     qmd, page, md = V4.build(PAPER, B.V5)
     assert "{{" not in md
-    assert "## Summary" in md
+    assert "## 1. Summary" in md
     for required in ("distance_v0.0.3", "`debounced`", "Running time"):
         assert required in md
 
@@ -84,7 +84,8 @@ def test_the_report_builds_from_the_staged_data():
 def test_every_context_value_has_a_placeholder():
     _needs_data()
     text = _template()
-    unused = [k for k in B.build_context(PAPER / "data") if "{{ " + k + " }}" not in text]
+    # A value is used as ``{{ name }}`` or inside a ``{% if name %}`` block.
+    unused = [k for k in B.build_context(PAPER / "data") if k not in text]
     assert unused == []
 
 

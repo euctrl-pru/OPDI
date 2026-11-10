@@ -11,6 +11,7 @@ stops the build. It writes ``index.qmd``, ``index.html`` and, with ``--pdf``,
 """
 
 import csv
+import gzip
 import json
 import math
 import os
@@ -108,6 +109,11 @@ def _minutes(seconds):
     return f"{seconds / 60:.0f} min"
 
 
+def plural(count, noun):
+    """``1 false join``, ``2 false joins``."""
+    return f"{n(count)} {noun}" if int(round(float(count))) == 1 else f"{n(count)} {noun}s"
+
+
 def build_context(data):
     """Every placeholder of the report, as formatted strings."""
     data = Path(data)
@@ -186,6 +192,7 @@ def build_context(data):
     c.update(
         linked_holes=n(linked),
         false_joins=n(num(rec, "linked_false_join")),
+        false_joins_phrase=plural(num(rec, "linked_false_join"), "false join"),
         labelled_holes=n(lab),
         false_join_rate=pct(num(rec, "linked_false_join"), lab, 2),
         unknown_holes=n(num(rec, "linked_unknown")),
@@ -223,9 +230,12 @@ def build_context(data):
         rows = 0
         for day in (c["day_new"], c["day_old"]):
             path = data / "descent" / f"{stem}_{day}.csv"
+            if not path.is_file() and path.with_suffix(".csv.gz").is_file():
+                path = path.with_suffix(".csv.gz")   # the controls are gzipped
             if not path.is_file():
                 raise MissingValue(f"missing {path}")
-            with open(path, newline="") as fh:
+            opener = gzip.open if path.suffix == ".gz" else open
+            with opener(path, "rt", newline="") as fh:
                 day_rows = list(csv.DictReader(fh))
             rows += len(day_rows)
             if stem == "descent_holes":
@@ -283,7 +293,6 @@ def build_context(data):
     kept = one(candidates, candidate=chosen_name) if adopted else none_row
     climb_only = one(grid, link_old_edge_climb="True", link_new_edge_descent="False")
     c.update(
-        descent_linked_before=n(num(none_row, "real_linked")),
         descent_kept=n(num(kept, "real_linked")),
         descent_crossing_kept=n(num(kept, "real_crossing_linked")),
         descent_kept_false=n(num(kept, "real_false_joins")),
@@ -320,7 +329,8 @@ def build_context(data):
     c.update(
         s2_removed_boundaries=n(num(part, "removed_boundaries")),
         s2_removed_at_holes=n(num(part, "removed_at_a_linked_hole")),
-        s2_memory_boundaries=n(num(part, "removed_by_callsign_memory") + num(part, "added_by_callsign_memory")),
+        s2_memory_removed=n(num(part, "removed_by_callsign_memory")),
+        s2_memory_added=n(num(part, "added_by_callsign_memory")),
         s2_boundaries_base=n(num(part, "debounced_boundaries")),
         movements_truth=n(num(moves, "apdf_movements")),
         movements_base=n(base_m),
@@ -333,6 +343,7 @@ def build_context(data):
     compared = num(dist, "holes_compared")
     c.update(
         s2_linked_holes=n(num(level, "linked_holes_anywhere")),
+        s2_scored_holes=n(num(level, "scored_holes")),
         s2_linked_tracks=n(num(level, "linked_tracks_anywhere")),
         level_tracks=n(num(level, "tracks_with_a_segment_across_a_hole")),
         level_scored=n(num(level, "scored_tracks")),
@@ -377,8 +388,27 @@ def build_context(data):
 
     c.update(time_base=_minutes(total("debounced")), time_new=_minutes(total("cruise_linked")))
 
+    truth = read_csv(data, "pipeline_day/link_truth_all_flights.csv")
+    t = {key: one(truth, label=key) for key in ("true_link", "false_join", "unknown", "airframe_not_in_truth")}
+    c.update(
+        truth_holes=n(sum(num(r, "holes") for r in t.values())),
+        truth_true=n(num(t["true_link"], "holes")),
+        truth_false=n(num(t["false_join"], "holes")),
+        truth_unknown=n(num(t["unknown"], "holes")),
+        truth_out=n(num(t["airframe_not_in_truth"], "holes")),
+        truth_true_both=n(num(t["true_link"], "both")),
+    )
+
     events = read_csv(data, "pipeline_day/link_events.csv")
     changed = [r for r in events if num(r, "change") != 0]
+
+    def event_change(kind):
+        return n(-num(one(events, type=kind), "change"))
+
+    c.update(ev_aobt=event_change("AOBT"), ev_aibt=event_change("AIBT"))
+    for kind in ("first_seen", "last_seen", "top-of-climb", "top-of-descent"):
+        if -num(one(events, type=kind), "change") != num(level, "scored_holes"):
+            raise MissingValue(f"{kind} did not fall by the number of scored holes: the prose needs rewriting")
     c["table_events"] = table(
         ["Event type (on aircraft with a linked hole)", "Previous rule", "New rule", "Change"],
         [[f"`{r['type']}`", n(num(r, "debounced_events")), n(num(r, "cruise_linked_events")),
