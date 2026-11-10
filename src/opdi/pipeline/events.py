@@ -19,7 +19,7 @@ Ported from ``OPDI-live/python/v2.0.0/04_opdi_flight_events_etl.py``.
 
 import os
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -107,6 +107,10 @@ TRACK_COLUMNS = [
     "track_id", "lat", "lon", "event_time", "baro_altitude_c",
     "velocity", "vert_rate", "callsign", "icao24", "heading", "h3_res_12",
     "on_ground",
+    # The FIR family joins the resolution-7 cell against the compact airspace
+    # reference; without it here the detector would find no column and emit
+    # nothing, which is the silent failure the comment above describes.
+    "h3_res_7",
 ]
 
 
@@ -1161,6 +1165,48 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
 # Measurement helper functions
 # ======================================================================
 
+#: Measurements read off an event's ``info`` JSON, beside the two every event
+#: gets (distance flown, time passed). One entry is
+#: ``(event type, info field, measurement type, measurement version)``: where the
+#: field is present in a row of that type, one measurement row is written with
+#: the field's value cast to double. This is how a family publishes a
+#: duration or a count as a measurement without its own write path. Families
+#: append to it when they are imported (see ``holding.py``, ``point_merge.py``).
+EXTRA_MEASURES: List[Tuple[str, str, str, str]] = []
+
+
+def extra_measurement_rows(df_events: DataFrame, measurement_id) -> Optional[DataFrame]:
+    """Measurement rows for every ``EXTRA_MEASURES`` entry, or None if none apply.
+
+    ``df_events`` is the stamped event frame (``id_tmp``, ``type``, ``info``,
+    ``dof``); ``measurement_id`` is the processor's id builder taking the
+    suffix. Entry ``i`` uses the suffix ``_m{i}_`` so the ids are stable per
+    entry and distinct from the ``_d_``/``_t_`` pair.
+    """
+    frames = []
+    for i, (event_type, field, measure_type, version) in enumerate(EXTRA_MEASURES):
+        value = F.get_json_object(col("info"), f"$.{field}")
+        frames.append(
+            df_events.filter((col("type") == event_type) & value.isNotNull())
+            .withColumn("type", lit(measure_type))
+            .withColumn("version", lit(version))
+            .withColumn("id", measurement_id(f"_m{i}_"))
+            .select(
+                col("id"),
+                col("id_tmp").alias("milestone_id"),
+                col("type"),
+                value.cast("double").alias("value"),
+                col("version"),
+                col("dof"),
+            )
+        )
+    if not frames:
+        return None
+    out = frames[0]
+    for frame in frames[1:]:
+        out = out.unionByName(frame)
+    return out
+
 def add_time_measure(sdf_input: DataFrame) -> DataFrame:
     """Add cumulative time (seconds from track start) to each state vector."""
     window_spec = Window.partitionBy("track_id").orderBy("event_time")
@@ -1554,7 +1600,13 @@ class FlightEventProcessor:
             nonlocal df_events
             if frame is None:
                 return
-            df_events = frame if df_events is None else df_events.unionByName(frame)
+            # A family may carry its own ``version`` column (holding, point
+            # merge, FIR); the older detectors do not. Missing columns are
+            # filled with NULL so the stamp below can coalesce per row.
+            df_events = (
+                frame if df_events is None
+                else df_events.unionByName(frame, allowMissingColumns=True)
+            )
 
         if calc_horizontal:
             print(f"Calculating horizontal events (phase) for batch: {batch_id}")
@@ -1641,7 +1693,15 @@ class FlightEventProcessor:
         # at cluster scale.
         df_events = merge_milestone_duplicates(df_events, self.events)
         df_events = df_events.withColumn("source", lit("OSN"))
-        df_events = df_events.withColumn("version", lit(self.events.events_version))
+        # Per-family versions: a detector that stamps its own ``version`` keeps
+        # it, everything else gets the shared events version. The published
+        # types therefore stay at ``events_v0.3.0`` while a new family can
+        # carry ``holding_v0.1.0`` and evolve alone.
+        if "version" not in df_events.columns:
+            df_events = df_events.withColumn("version", lit(None).cast("string"))
+        df_events = df_events.withColumn(
+            "version", F.coalesce(col("version"), lit(self.events.events_version))
+        )
 
         df_events = df_events.withColumn("id_tmp", self._event_id(batch_id)).select(
             col("id_tmp"), col("track_id"), col("type"), col("event_time"),
@@ -1734,6 +1794,11 @@ class FlightEventProcessor:
         )
 
         df_measurements = df_dist.unionByName(df_time)
+        extra = extra_measurement_rows(
+            df_events, lambda suffix: self._measurement_id(batch_id, suffix)
+        )
+        if extra is not None:
+            df_measurements = df_measurements.unionByName(extra)
         df_measurements = df_measurements.repartition("dof").orderBy("type", "version")
         # ``opdi_measurements`` had no time column at all -- its schema was
         # id, milestone_id, type, value, version -- so it could not be

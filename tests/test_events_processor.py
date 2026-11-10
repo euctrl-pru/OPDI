@@ -785,3 +785,91 @@ def test_force_recomputes_every_family(spark, stub_storage, monkeypatch):
     assert "_redo = not skip_if_processed" in src
     for family in ("horizontal", "vertical", "hexaero", "seen"):
         assert f'_redo or _batch not in self._load_processed("{family}")' in src, family
+
+
+# --- per-family versions and info-backed measurements ---------------------------
+
+
+def _run_uncached(spark, stub_storage, events: EventConfig):
+    """``_run`` without the memo: these tests monkeypatch a detector, so a
+    cached frame from another test would answer for the wrong code."""
+    config = OPDIConfig()
+    config.events = events
+    with tempfile.TemporaryDirectory() as log_dir:
+        proc = FlightEventProcessor(spark, config, log_dir=log_dir)
+        proc.storage = stub_storage
+        proc._etl_flight_events_and_measures(
+            stub_storage.tracks, batch_id="b_", month=MONTH
+        )
+    events_out = stub_storage.written["opdi_flight_events"]
+    measures_out = stub_storage.written["opdi_measurements"]
+    out = (
+        spark.createDataFrame(events_out.collect(), events_out.schema),
+        spark.createDataFrame(measures_out.collect(), measures_out.schema),
+    )
+    spark.catalog.clearCache()
+    return out
+
+
+def _stub_family(spark, monkeypatch, info: str):
+    """Replace the first_seen/last_seen detector with one ``first_seen`` row that
+    carries its own ``version`` and the given ``info``."""
+    import opdi.pipeline.events as ev
+
+    def fake(sdf_input):
+        first = (
+            sdf_input.orderBy("event_time").limit(1)
+            .select(
+                F.col("track_id"), F.lit("first_seen").alias("type"),
+                F.col("event_time"), F.col("lon"), F.col("lat"),
+                (F.col("baro_altitude_c") * 3.28084).alias("altitude_ft"),
+                F.lit(0.0).alias("cumulative_distance_nm"),
+                F.lit(0).cast("long").alias("cumulative_time_s"),
+                F.lit(info).alias("info"),
+                F.lit("fam_v9.9.9").alias("version"),
+            )
+        )
+        return first
+
+    monkeypatch.setattr(ev, "calculate_firstseen_lastseen_events", fake)
+    monkeypatch.setattr(
+        ev, "EXTRA_MEASURES",
+        [("first_seen", "duration_s", "Test duration (s)", "fam_v9.9.9")],
+    )
+
+
+def test_a_detector_version_survives_stamping(spark, stub_storage, monkeypatch):
+    _stub_family(spark, monkeypatch, '{"duration_s": 42.0}')
+    events, _ = _run_uncached(spark, stub_storage, EventConfig())
+    versions = {r["type"]: r["version"] for r in events.collect()}
+    assert versions["first_seen"] == "fam_v9.9.9"
+    assert versions["level-start"] == EventConfig().events_version
+
+
+def test_an_info_field_listed_in_extra_measures_becomes_a_measurement(
+    spark, stub_storage, monkeypatch
+):
+    _stub_family(spark, monkeypatch, '{"duration_s": 42.0}')
+    events, measures = _run_uncached(spark, stub_storage, EventConfig())
+    event_id = events.filter(F.col("type") == "first_seen").first()["id"]
+    rows = measures.filter(F.col("type") == "Test duration (s)").collect()
+    assert len(rows) == 1
+    assert rows[0]["value"] == 42.0
+    assert rows[0]["version"] == "fam_v9.9.9"
+    assert rows[0]["milestone_id"] == event_id
+    assert rows[0]["id"] == event_id + "_m0"
+    assert str(rows[0]["dof"]) == "2024-06-01"
+
+
+def test_an_event_without_the_listed_field_gets_no_extra_row(
+    spark, stub_storage, monkeypatch
+):
+    _stub_family(spark, monkeypatch, '{"other": 1}')
+    _, measures = _run_uncached(spark, stub_storage, EventConfig())
+    assert measures.filter(F.col("type") == "Test duration (s)").count() == 0
+
+
+def test_track_columns_include_h3_res_7():
+    from opdi.pipeline.events import TRACK_COLUMNS
+
+    assert "h3_res_7" in TRACK_COLUMNS
