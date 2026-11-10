@@ -1401,6 +1401,64 @@ class EventConfig:
     """An episode starting or ending within this of a ``go-around`` on the
     same track is dropped: repeated approaches are not holds."""
 
+    # ----- point merge systems ----------------------------------------------
+    emit_point_merge: bool = True
+    """Emit ``pms-leg-entry``/``pms-leg-exit``/``pms-merge-point`` (version
+    ``pms_v0.1.0``) for arrivals at airports in the curated point-merge table
+    (``reference/data/point_merge_systems.csv``). A sequencing leg is a stretch
+    flown at constant distance from the merge point, inside the published band,
+    moving tangentially, that is followed by a direct to the merge point; see
+    ``pipeline/point_merge.py``."""
+
+    pms_candidate_radius_nm: float = 60.0
+    """Samples farther than this from every merge point of the destination are
+    not looked at (the longest legs in the catalogue sit 46 NM out)."""
+
+    pms_candidate_max_altitude_ft: float = 25000.0
+    """Samples above this are not looked at (legs are flown at FL70 to FL270;
+    the Paris ACC pre-sequencing legs are the highest)."""
+
+    pms_leg_window_seconds: float = 45.0
+    """Half-width of the window the constant-distance test looks over (90 s in
+    all, the shortest leg the ``traffic`` library accepts)."""
+
+    pms_leg_distance_band_nm: float = 1.5
+    """Spread of the distance to the merge point allowed inside the window: a
+    published leg is a polyline of fly-by waypoints, and the sagitta of a 10 NM
+    chord on an 18 NM arc is 0.7 NM, plus RNAV 1 tolerance."""
+
+    pms_leg_distance_margin_nm: float = 2.0
+    """Margin around the catalogue's legs-to-merge-point band."""
+
+    pms_leg_min_bearing_sweep_deg: float = 8.0
+    """Bearing from the merge point must sweep at least this over the window:
+    an aircraft on an 18 NM arc at 250 kt sweeps about 20 degrees in 90 s, so
+    8 tolerates slow aircraft and long arcs while rejecting a stationary hold
+    at the same distance."""
+
+    pms_leg_tangential_min_pct: float = 80.0
+    """Share of window samples whose track is 60 to 120 degrees off the bearing
+    to the merge point (moving along the arc, not toward or away from it)."""
+
+    pms_leg_min_duration_seconds: float = 90.0
+    """Shortest leg run kept (``traffic``'s 90 s)."""
+
+    pms_direct_lookahead_seconds: float = 600.0
+    """A leg counts only if the direct to the merge point follows within this
+    (``traffic`` looks 10 min back from the direct)."""
+
+    pms_direct_align_deg: float = 5.0
+    """Track within this of the bearing to the merge point is "aligned"
+    (``traffic`` uses 1 degree at 1 Hz; OPDI samples every 5 s with integer
+    headings)."""
+
+    pms_direct_min_duration_seconds: float = 60.0
+    """Shortest aligned run that counts as the direct."""
+
+    pms_merge_point_radius_nm: float = 3.0
+    """The track must come within this of the merge point for the direct to
+    count, and ``pms-merge-point`` is emitted at the closest approach."""
+
     distance_from_last_known_position: bool = True
     """Measure cumulative distance from the last *known* position.
 
@@ -1674,6 +1732,7 @@ class EventConfig:
             airport_admit_on_ground=False,
             distance_from_last_known_position=False,
             emit_holding=False,
+            emit_point_merge=False,
             events_version="events_v0.0.2",
         )
 

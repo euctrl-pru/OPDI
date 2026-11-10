@@ -1180,8 +1180,9 @@ def _register_family_measures() -> None:
     family modules, which import ``EventConfig``, never import this module
     at load time."""
     from opdi.pipeline.holding import HOLDING_MEASURES
+    from opdi.pipeline.point_merge import PMS_MEASURES
 
-    for entry in HOLDING_MEASURES:
+    for entry in HOLDING_MEASURES + PMS_MEASURES:
         if entry not in EXTRA_MEASURES:
             EXTRA_MEASURES.append(entry)
 

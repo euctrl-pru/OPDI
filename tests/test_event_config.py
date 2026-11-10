@@ -84,6 +84,7 @@ def test_every_new_behaviour_is_off_under_legacy():
     assert tuple(legacy.ring_radii_nm) == ()
     # The navigation families (2026-11) did not exist either.
     assert legacy.emit_holding is False
+    assert legacy.emit_point_merge is False
 
 
 def test_the_shipped_new_behaviours_are_on():
@@ -106,6 +107,7 @@ def test_the_shipped_new_behaviours_are_on():
     assert e.emit_block_events is True
     assert e.emit_level_offs is True
     assert e.emit_holding is True
+    assert e.emit_point_merge is True
 
 
 def test_version_string_is_new_and_the_published_one_is_untouched():
