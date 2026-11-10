@@ -2312,3 +2312,22 @@ def test_population_says_which_end_is_inside_the_box(spark):
     got = {r["flight_key"]: (r["adep_in_box"], r["ades_in_box"])
            for r in with_population(truth, _airport_table(spark)).collect()}
     assert got == {1: (True, False), 2: (False, True), 3: (False, False)}
+
+
+def test_the_study_carries_the_in_box_flags_to_the_labeller(spark):
+    """`build_features` projects the truth before labelling; the flags must survive it,
+    or every event counts and the grid never sees the correction."""
+    from track_link_grid import build_features
+
+    tracks, truth = _study_day_with_a_pair(spark)
+    # The turnaround between F6 and F7 happens at an aerodrome outside the box.
+    flagged = truth.withColumn("adep_in_box", F.col("flight_key") != "F7").withColumn(
+        "ades_in_box", F.col("flight_key") != "F6"
+    )
+    holes = build_features(tracks, flagged, P).holes.filter(F.col("icao24") == "fff666").collect()
+    assert len(holes) == 1
+    assert holes[0]["label"] == "unknown"
+    assert holes[0]["event_outside_box_inside"] is True
+
+    plain = build_features(tracks, truth, P).holes.filter(F.col("icao24") == "fff666").first()
+    assert plain["label"] == "false_join"

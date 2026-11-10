@@ -1274,7 +1274,10 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
     tracks = tracks.select(*_TRACK_COLUMNS)
     floor_ft = p.link_cruise_floor_ft
     with _timed("truth"):
-        truth = _keep(truth.select("flight_key", "icao24", "t_off", "t_land", "crosses_box"))
+        # The in-box flags travel with the truth when it has them: the labeller reads
+        # them, and an event outside the box is then no evidence of a stop.
+        flags = [c for c in ("adep_in_box", "ades_in_box") if c in truth.columns]
+        truth = _keep(truth.select("flight_key", "icao24", "t_off", "t_land", "crosses_box", *flags))
 
     with _timed("real holes"):
         # Kept before labelling, which reads its input twice.
