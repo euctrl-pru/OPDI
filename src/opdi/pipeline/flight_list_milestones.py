@@ -223,25 +223,23 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
         actual = _as_named(name)
         if actual is None:
             continue
-        # The alternatives list names the aerodromes that were not chosen. A
-        # correction moves the chosen one: the new aerodrome leaves the list and
-        # the overruled one joins it, or the list would name the row's own answer.
+        # The alternatives list names the aerodromes that were not chosen, so it
+        # never names the row's own answer. A correction moves the chosen one:
+        # the new aerodrome leaves the list and the overruled one joins it. The
+        # removal is done on every pass, because this step rewrites every
+        # partition each run and reads lists it corrected before.
         alternatives = _as_named(f"{name}_P")
         if alternatives is not None:
+            final = F.coalesce(value, F.col(actual))
             moved = value.isNotNull() & ~value.eqNullSafe(F.col(actual))
             listed = F.filter(
                 F.split(F.coalesce(F.col(alternatives), F.lit("")), ", "),
-                lambda x: (x != "") & (x != value),
+                lambda x: (x != "") & ~x.eqNullSafe(final),
             )
             with_old = F.when(
-                F.col(actual).isNotNull(), F.concat(listed, F.array(F.col(actual)))
+                moved & F.col(actual).isNotNull(), F.concat(listed, F.array(F.col(actual)))
             ).otherwise(listed)
-            out = out.withColumn(
-                alternatives,
-                F.when(moved, F.array_join(F.array_distinct(with_old), ", ")).otherwise(
-                    F.col(alternatives)
-                ),
-            )
+            out = out.withColumn(alternatives, F.array_join(F.array_distinct(with_old), ", "))
         out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
 
     return out.drop("_g_id", "_dep_apt", "_arr_apt")

@@ -624,6 +624,26 @@ def test_a_corrected_aerodrome_leaves_the_alternatives_and_the_old_one_joins_the
     assert row["ADES"] == "EHAM" and row["ADES_P"] == ""   # unchanged: nothing moved
 
 
+def test_a_second_enrichment_pass_still_removes_the_named_aerodrome_from_its_list(spark):
+    """04b rewrites every partition on every run, so it reads lists it corrected
+    before. A list left naming the row's own aerodrome is cleaned whether or not
+    anything moves this time; the overruled aerodrome it once held cannot be
+    recovered and is not invented."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM",
+             "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
+        .withColumn("ADEP_SOURCE", F.lit("runway_event")) \
+        .withColumn("ADES_SOURCE", F.lit("aerodrome")) \
+        .withColumn("ADEP_P", F.lit("EBBR, LFPO")) \
+        .withColumn("ADES_P", F.lit("EHAM"))
+    ev = _events(spark, [_event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R")])
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["ADEP"] == "EBBR" and row["ADEP_P"] == "LFPO"
+    assert row["ADES"] == "EHAM" and row["ADES_P"] == ""
+
+
 def test_a_track_still_airborne_gets_no_arrival_aerodrome(spark):
     """No landing, no ADES. Leg-specific evidence needs no guard: a departure
     aerodrome is where the take-off happened, an arrival aerodrome where the
