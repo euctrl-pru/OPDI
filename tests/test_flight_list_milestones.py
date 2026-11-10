@@ -601,6 +601,29 @@ def test_a_runway_event_overrules_an_inferred_adep(spark):
     assert row["ADEP_SOURCE"] == "runway_event"
 
 
+def test_a_corrected_aerodrome_leaves_the_alternatives_and_the_old_one_joins_them(spark):
+    """ADEP_P/ADES_P list the aerodromes that were *not* chosen. When the pavement
+    overrules the choice, the new aerodrome leaves that list and the overruled one
+    joins it, so the list never names the row's own answer."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM",
+             "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+        .withColumn("ADES_SOURCE", F.lit("aerodrome")) \
+        .withColumn("ADEP_P", F.lit("EBBR, LFPO")) \
+        .withColumn("ADES_P", F.lit(""))
+    ev = _events(spark, [
+        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+        _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
+    ])
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["ADEP"] == "EBBR"
+    assert row["ADEP_P"] == "LFPO, LFPG"
+    assert row["ADES"] == "EHAM" and row["ADES_P"] == ""   # unchanged: nothing moved
+
+
 def test_a_track_still_airborne_gets_no_arrival_aerodrome(spark):
     """No landing, no ADES. Leg-specific evidence needs no guard: a departure
     aerodrome is where the take-off happened, an arrival aerodrome where the

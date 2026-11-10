@@ -221,8 +221,28 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
             )
     for name, value in (("ADEP", new_adep), ("ADES", new_ades)):
         actual = _as_named(name)
-        if actual is not None:
-            out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
+        if actual is None:
+            continue
+        # The alternatives list names the aerodromes that were not chosen. A
+        # correction moves the chosen one: the new aerodrome leaves the list and
+        # the overruled one joins it, or the list would name the row's own answer.
+        alternatives = _as_named(f"{name}_P")
+        if alternatives is not None:
+            moved = value.isNotNull() & ~value.eqNullSafe(F.col(actual))
+            listed = F.filter(
+                F.split(F.coalesce(F.col(alternatives), F.lit("")), ", "),
+                lambda x: (x != "") & (x != value),
+            )
+            with_old = F.when(
+                F.col(actual).isNotNull(), F.concat(listed, F.array(F.col(actual)))
+            ).otherwise(listed)
+            out = out.withColumn(
+                alternatives,
+                F.when(moved, F.array_join(F.array_distinct(with_old), ", ")).otherwise(
+                    F.col(alternatives)
+                ),
+            )
+        out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
 
     return out.drop("_g_id", "_dep_apt", "_arr_apt")
 

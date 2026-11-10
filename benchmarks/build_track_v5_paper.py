@@ -260,6 +260,7 @@ def build_context(data):
         ),
         descent_relabelled=n(len(relabelled)),
         relabelled_all=n(num(rec, "linked_event_outside_box")),
+        relabelled_other=n(num(rec, "linked_event_outside_box") - len(relabelled)),
         relabelled_gap_range=span("gap_min"),
         relabelled_speed_range=span("implied_kt"),
         table_descent_candidates=table(
@@ -313,11 +314,14 @@ def build_context(data):
     moves = one(read_csv(data, "pipeline_day/link_movements.csv"), movement="all")
     if part["passed"] != "True" or moves["passed"] != "True":
         raise MissingValue("a nothing-else-moved check failed: the prose needs rewriting")
-    if num(part, "removed_elsewhere") != 0 or num(part, "added_boundaries") != 0:
+    if num(part, "removed_elsewhere") != 0 or num(part, "added_elsewhere") != 0:
         raise MissingValue("boundaries moved away from holes: the prose needs rewriting")
     base_m, new_m = num(moves, "debounced_matched"), num(moves, "cruise_linked_matched")
     c.update(
         s2_removed_boundaries=n(num(part, "removed_boundaries")),
+        s2_removed_at_holes=n(num(part, "removed_at_a_linked_hole")),
+        s2_memory_boundaries=n(num(part, "removed_by_callsign_memory") + num(part, "added_by_callsign_memory")),
+        s2_boundaries_base=n(num(part, "debounced_boundaries")),
         movements_truth=n(num(moves, "apdf_movements")),
         movements_base=n(base_m),
         movements_new=n(new_m),

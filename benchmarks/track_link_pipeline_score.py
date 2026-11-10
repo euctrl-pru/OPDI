@@ -110,9 +110,13 @@ from track_link_grid import holes_inside_flights  # noqa: E402
 from opdi.pipeline.events import add_distance_measure  # noqa: E402
 from opdi.pipeline.flights import haversine_nm  # noqa: E402
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
+from opdi.pipeline.segmentation.base import BreakRule  # noqa: E402
 from opdi.pipeline.segmentation.methods import (  # noqa: E402
+    callsign_memory_minutes,
     cruise_linked,
     debounced,
+    debounced_callsign_change,
+    legacy,
     link_feature_columns,
     linkable,
 )
@@ -710,13 +714,32 @@ def _boundaries(tracks: DataFrame) -> DataFrame:
     )
 
 
+def debounced_with_a10_memory() -> BreakRule:
+    """A9 with A10's callsign memory and nothing else: the diagnostic in between.
+
+    A10 differs from A9 in two ways: it links holes, and it forgets a callsign older
+    than the longest linkable hole. A boundary that this rule and A9 disagree on is the
+    memory's; one that A10 removes at a hole :func:`linkable` accepts is the link's.
+    """
+
+    def expr(p):
+        return debounced_callsign_change(p, callsign_memory_minutes(p)) | legacy().break_expr(p)
+
+    return BreakRule(
+        name="debounced_with_memory", group_cols=["icao24"], break_expr=expr,
+        month_suffix=False, id_from_start_time=True,
+    )
+
+
 def partition_check(
     samples: DataFrame, split: DataFrame, linked: DataFrame, p: SegmentationParams
 ) -> Dict:
     """Compare where the two rules cut one input.
 
     *split* and *linked* are *samples* segmented by A9 and A10. A boundary A10 removed
-    must be a hole the rule's own :func:`linkable` accepts at *p*, and A10 must add none.
+    must be a hole the rule's own :func:`linkable` accepts at *p* or one the callsign
+    memory removes, and A10 may add only what the memory adds
+    (:func:`debounced_with_a10_memory`).
     """
     features = {name: F.col(name) for name in link_feature_columns(p)}
     linkable_holes = (
@@ -728,18 +751,27 @@ def partition_check(
     key = ["icao24", "t_boundary"]
     before = _boundaries(split).cache()
     after = _boundaries(linked).cache()
+    memory = _boundaries(assign_track_id(samples, debounced_with_a10_memory(), p)).cache()
     removed = before.join(after, on=key, how="left_anti").cache()
     removed_n = removed.count()
-    elsewhere_n = removed.join(linkable_holes, on=key, how="left_anti").count()
-    added_n = after.join(before, on=key, how="left_anti").count()
+    not_at_hole = removed.join(linkable_holes, on=key, how="left_anti").cache()
+    removed_by_memory_n = not_at_hole.join(memory, on=key, how="left_anti").count()
+    removed_elsewhere_n = not_at_hole.count() - removed_by_memory_n
+    added = after.join(before, on=key, how="left_anti").cache()
+    added_n = added.count()
+    added_by_memory_n = added.join(memory, on=key, how="left_semi").count()
+    added_elsewhere_n = added_n - added_by_memory_n
     return {
         "debounced_boundaries": before.count(),
         "cruise_linked_boundaries": after.count(),
         "removed_boundaries": removed_n,
-        "removed_at_a_linked_hole": removed_n - elsewhere_n,
-        "removed_elsewhere": elsewhere_n,
+        "removed_at_a_linked_hole": removed_n - not_at_hole.count(),
+        "removed_by_callsign_memory": removed_by_memory_n,
+        "removed_elsewhere": removed_elsewhere_n,
         "added_boundaries": added_n,
-        "passed": elsewhere_n == 0 and added_n == 0,
+        "added_by_callsign_memory": added_by_memory_n,
+        "added_elsewhere": added_elsewhere_n,
+        "passed": removed_elsewhere_n == 0 and added_elsewhere_n == 0,
     }
 
 

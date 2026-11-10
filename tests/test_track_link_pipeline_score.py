@@ -599,6 +599,29 @@ def test_a_boundary_removed_at_a_hole_the_rule_rejects_fails_the_check(spark):
     assert got["passed"] is False
 
 
+def test_a_boundary_that_moves_because_of_the_callsign_memory_is_named_as_such(spark):
+    """Eleven hours of samples with no callsign, then a one-sample garble and the old
+    callsign again. A9 remembers the old callsign and sees a flicker; A10 has forgotten
+    it and breaks at the revert. That boundary is the memory's, not a defect."""
+    samples = [{**s, "callsign": "DLH1"} for s in _cruise([(0, 30 * 60)])]
+    samples += [{**s, "callsign": ""} for s in _cruise([(31 * 60, 11 * HOUR + 30 * 60)])]
+    garble = 11 * HOUR + 31 * 60
+    samples += [{**_cruise([(garble, garble)])[0], "callsign": "DLH7X"}]
+    # The revert comes 5 s later, under the 30 s a callsign needs to persist.
+    samples += [{**_cruise([(garble + 5, garble + 5)])[0], "callsign": "DLH1"}]
+    samples += [{**s, "callsign": "DLH1"} for s in _cruise([(garble + 60, garble + 20 * 60)])]
+    frame = make_track(spark, samples)
+    split, linked = _both_rules(frame)
+
+    got = s.partition_check(frame, split, linked, P)
+
+    assert got["debounced_boundaries"] == 0
+    assert got["added_boundaries"] == 1
+    assert got["added_by_callsign_memory"] == 1
+    assert got["added_elsewhere"] == 0
+    assert got["passed"] is True
+
+
 def test_a10_adding_a_boundary_fails_the_check(spark):
     samples = make_track(spark, _cruise([(0, 40 * 60)]))
     split, _ = _both_rules(samples)
@@ -609,6 +632,7 @@ def test_a10_adding_a_boundary_fails_the_check(spark):
 
     assert got["debounced_boundaries"] == 0
     assert got["added_boundaries"] == 1
+    assert got["added_elsewhere"] == 1
     assert got["passed"] is False
 
 
