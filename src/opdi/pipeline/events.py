@@ -1175,6 +1175,20 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
 EXTRA_MEASURES: List[Tuple[str, str, str, str]] = []
 
 
+def _register_family_measures() -> None:
+    """Collect the families' measurement entries. Imported lazily so the
+    family modules, which import ``EventConfig``, never import this module
+    at load time."""
+    from opdi.pipeline.holding import HOLDING_MEASURES
+
+    for entry in HOLDING_MEASURES:
+        if entry not in EXTRA_MEASURES:
+            EXTRA_MEASURES.append(entry)
+
+
+_register_family_measures()
+
+
 def extra_measurement_rows(df_events: DataFrame, measurement_id) -> Optional[DataFrame]:
     """Measurement rows for every ``EXTRA_MEASURES`` entry, or None if none apply.
 

@@ -1318,6 +1318,89 @@ class EventConfig:
     two together. Earlier track rules break at every gap over that threshold, so
     their tracks hold no hole and their events are unchanged."""
 
+    # ----- holding patterns -----------------------------------------------
+    emit_holding: bool = True
+    """Emit ``holding-start``/``holding-end`` (version ``holding_v0.1.0``).
+
+    A hold is a period in which the aircraft turns through at least one
+    near-complete circle in one rotational sense while staying in a small area
+    at roughly one level, above circuit height and at flying speed. Both
+    racetrack holds and single ATC orbits qualify; ``info.pattern`` says which.
+    The rule is the discriminator every published method converges on (the
+    signed cumulative turn), with thresholds taken from Melo 2023, the Boeing
+    holding patent and ICAO Doc 8168 timing; see ``pipeline/holding.py``."""
+
+    holding_window_seconds: float = 360.0
+    """Length of the sliding window the turn is summed over, trailing and
+    leading. One circuit takes 4 to 7 min (ICAO 1 to 1.5 min legs, airliner
+    turn rates of 1 to 2 deg/s), and the open label set this rule is scored
+    against uses 6 min windows."""
+
+    holding_max_sample_gap_seconds: float = 60.0
+    """A heading difference across a longer silence is not a turn: it is
+    nulled, so a gap does not read as a half circle."""
+
+    holding_turn_rate_spike_deg: float = 6.0
+    """Degrees **per second** above which a heading difference is a derivative
+    spike, not a turn (twice the ICAO maximum of 3 deg/s)."""
+
+    holding_turn_rate_min_deg: float = 0.4
+    """Degrees **per second** from which a sample counts as turning (the
+    Boeing patent's direction threshold; airliner hold turns are 1 to 2 deg/s,
+    track jitter at the 5 s cadence is about 0.2 deg/s)."""
+
+    holding_net_turn_min_deg: float = 300.0
+    """Signed turn a window must contain, in magnitude. A circuit is 360;
+    300 tolerates a window straddling a straight leg (vendor rules use 330,
+    Huang et al. 360)."""
+
+    holding_same_sense_min_pct: float = 80.0
+    """``|net turn| / gross turn`` floor: vectoring turns alternate sense and a
+    figure-8 nets to zero, a hold turns one way (Boeing "same rotational
+    sense")."""
+
+    holding_max_displacement_nm: float = 8.0
+    """Great-circle distance between the window's first and last positions: a
+    hold is 8 to 10 NM long, a go-around loop or a vectoring dog-leg is wider
+    (Melo's 2 to 4 NM cylinder)."""
+
+    holding_min_path_nm: float = 15.0
+    """Distance flown in the window: 6 min at 150 kt; rejects slow traffic."""
+
+    holding_max_altitude_range_ft: float = 2500.0
+    """Altitude spread allowed inside one window: two stack steps of 1,000 ft
+    (Melo's 1,000 ft was start-to-end of a whole hold and is too tight for a
+    descending stack)."""
+
+    holding_min_height_ft: float = 2500.0
+    """Height above the flight's aerodrome below which nothing is a hold:
+    aerodrome circuits and go-around patterns live below it."""
+
+    holding_min_speed_kt: float = 140.0
+    """Ground speed floor; helicopters and training circuits are slower."""
+
+    holding_bridge_gap_seconds: float = 120.0
+    """Two flagged stretches closer than this are one episode (Melo)."""
+
+    holding_min_duration_seconds: float = 240.0
+    """Shortest episode kept: one textbook circuit (Melo's 4 min)."""
+
+    holding_min_episode_turn_deg: float = 330.0
+    """Signed turn over the whole episode, in magnitude: at least one
+    near-complete circuit, the airline "completed orbit" criterion."""
+
+    holding_orbit_max_straight_pct: float = 15.0
+    """Share of non-turning samples below which the episode is an orbit
+    rather than a racetrack (a racetrack is 35 to 55% straight)."""
+
+    holding_orbit_max_turn_deg: float = 450.0
+    """Total turn above which an episode is a racetrack even if it has no
+    straight legs (more than one and a quarter circuits)."""
+
+    holding_goaround_exclusion_seconds: float = 180.0
+    """An episode starting or ending within this of a ``go-around`` on the
+    same track is dropped: repeated approaches are not holds."""
+
     distance_from_last_known_position: bool = True
     """Measure cumulative distance from the last *known* position.
 
@@ -1590,6 +1673,7 @@ class EventConfig:
             airport_gate_above_field=False,
             airport_admit_on_ground=False,
             distance_from_last_known_position=False,
+            emit_holding=False,
             events_version="events_v0.0.2",
         )
 
