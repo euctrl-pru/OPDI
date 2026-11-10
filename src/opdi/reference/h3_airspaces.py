@@ -139,12 +139,31 @@ def split_antimeridian(geom):
     return MultiPolygon(out) if len(out) != 1 else out[0]
 
 
+def _latlng_poly(poly: Polygon) -> "h3.LatLngPoly":
+    outer = [(y, x) for x, y, *_ in poly.exterior.coords]
+    holes = [[(y, x) for x, y, *_ in r.coords] for r in poly.interiors]
+    return h3.LatLngPoly(outer, *holes)
+
+
 def compact_cells(geometry_wkt: str, res: int) -> List[Tuple[str, int]]:
-    """Fill a WKT (Multi)Polygon at ``res`` and compact: ``(cell, resolution)`` pairs."""
+    """Fill a WKT (Multi)Polygon at ``res`` and compact: ``(cell, resolution)`` pairs.
+
+    Through h3's integer array API: a worldwide FIR layer is about a hundred
+    million resolution-7 cells before compaction, which as Python strings is
+    tens of gigabytes and the better part of an hour on the driver; as a
+    uint64 array it is under a gigabyte and a few minutes.
+    """
+    import numpy as np
+    from h3.api import numpy_int as h3n
+
     geom = split_antimeridian(shapely.from_wkt(geometry_wkt))
-    cells = polyfill_geojson(shapely.geometry.mapping(geom), res, geo_json_conformant=True)
-    compact = compact_h3_set(cells)
-    return [(c, h3.get_resolution(c)) for c in sorted(compact)]
+    parts = [h3n.polygon_to_cells(_latlng_poly(p), res) for p in _polygons(geom)]
+    if not parts:
+        return []
+    cells = np.unique(np.concatenate(parts))
+    compact = h3n.compact_cells(cells)
+    out = [h3.int_to_str(int(c)) for c in compact]
+    return sorted((c, h3.get_resolution(c)) for c in out)
 
 
 def fill_geometry(geometry_wkt: str, res: int = 7) -> list:
@@ -244,22 +263,44 @@ def overlap_report(cells: pd.DataFrame) -> pd.DataFrame:
     """Pairs of different codes that claim the same full-resolution cell with
     overlapping FL bands, with how many such cells: ``code_a, code_b, cells``.
 
-    Computed at the finest resolution present by uncompacting, so a coarse
-    interior cell of one volume is compared against the fine boundary cells
-    of another.
+    Computed at the finest resolution present by uncompacting every volume to
+    integer cell arrays, so a coarse interior cell of one volume is compared
+    against the fine boundary cells of another. Only cells claimed more than
+    once are looked at further.
     """
+    import numpy as np
+    from h3.api import numpy_int as h3n
+
     if cells.empty:
         return pd.DataFrame(columns=["code_a", "code_b", "cells"])
     res = int(cells["h3_res"].max())
+    volumes = []
+    arrays = []
+    for i, ((code, lo, hi), g) in enumerate(cells.groupby(["code", "min_fl", "max_fl"])):
+        ints = np.array([h3.str_to_int(c) for c in g["h3_cell"]], dtype=np.uint64)
+        full = h3n.uncompact_cells(ints, res)
+        arrays.append(np.stack([full, np.full(len(full), i, dtype=np.uint64)], axis=1))
+        volumes.append((code, int(lo), int(hi)))
+    both = np.concatenate(arrays)
+    cell_ids, counts = np.unique(both[:, 0], return_counts=True)
+    shared = cell_ids[counts > 1]
+    if len(shared) == 0:
+        return pd.DataFrame(columns=["code_a", "code_b", "cells"])
+    hit = both[np.isin(both[:, 0], shared)]
+    # pandas cannot factorise unsigned 64-bit keys; the same bits as signed do.
+    df = pd.DataFrame({"cell": hit[:, 0].view(np.int64), "vol": hit[:, 1].astype(int)})
+    joined = df.merge(df, on="cell", suffixes=("_a", "_b"))
+    joined = joined[joined["vol_a"] < joined["vol_b"]]
     rows = []
-    for (code, lo, hi), g in cells.groupby(["code", "min_fl", "max_fl"]):
-        for c in h3.uncompact_cells(list(g["h3_cell"]), res):
-            rows.append((c, code, int(lo), int(hi)))
-    full = pd.DataFrame(rows, columns=["cell", "code", "lo", "hi"])
-    joined = full.merge(full, on="cell", suffixes=("_a", "_b"))
-    joined = joined[(joined["code_a"] < joined["code_b"])
-                    & (joined["lo_a"] < joined["hi_b"]) & (joined["lo_b"] < joined["hi_a"])]
-    report = joined.groupby(["code_a", "code_b"]).size().reset_index(name="cells")
+    for (va, vb), g in joined.groupby(["vol_a", "vol_b"]):
+        code_a, lo_a, hi_a = volumes[va]
+        code_b, lo_b, hi_b = volumes[vb]
+        if code_a == code_b or not (lo_a < hi_b and lo_b < hi_a):
+            continue
+        a, b = sorted((code_a, code_b))
+        rows.append((a, b, int(len(g))))
+    report = pd.DataFrame(rows, columns=["code_a", "code_b", "cells"])
+    report = report.groupby(["code_a", "code_b"], as_index=False)["cells"].sum()
     return report.sort_values("cells", ascending=False).reset_index(drop=True)
 
 
