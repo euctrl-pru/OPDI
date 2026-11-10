@@ -791,8 +791,9 @@ def test_force_recomputes_every_family(spark, stub_storage, monkeypatch):
 
 
 def _run_uncached(spark, stub_storage, events: EventConfig):
-    """``_run`` without the memo: these tests monkeypatch a detector, so a
-    cached frame from another test would answer for the wrong code."""
+    """``_run`` without the memo, collecting only the rows the family tests
+    read: a whole second pass through step 04 is at the local driver's heap
+    limit, so nothing more than the asserted rows is materialised."""
     config = OPDIConfig()
     config.events = events
     with tempfile.TemporaryDirectory() as log_dir:
@@ -804,44 +805,46 @@ def _run_uncached(spark, stub_storage, events: EventConfig):
     events_out = stub_storage.written["opdi_flight_events"]
     measures_out = stub_storage.written["opdi_measurements"]
     out = (
-        spark.createDataFrame(events_out.collect(), events_out.schema),
-        spark.createDataFrame(measures_out.collect(), measures_out.schema),
+        events_out.filter(F.col("type").isin("first_seen", "level-start")).collect(),
+        measures_out.filter(F.col("type").startswith("Test")).collect(),
     )
     spark.catalog.clearCache()
     return out
 
 
-def _stub_family(spark, monkeypatch, info: str):
-    """Replace the first_seen/last_seen detector with one ``first_seen`` row that
-    carries its own ``version`` and the given ``info``."""
-    import opdi.pipeline.events as ev
+_FAMILY_RUN = {}
 
-    def fake(sdf_input):
-        first = (
-            sdf_input.orderBy("event_time").limit(1)
-            .select(
-                F.col("track_id"), F.lit("first_seen").alias("type"),
-                F.col("event_time"), F.col("lon"), F.col("lat"),
-                (F.col("baro_altitude_c") * 3.28084).alias("altitude_ft"),
-                F.lit(0.0).alias("cumulative_distance_nm"),
-                F.lit(0).cast("long").alias("cumulative_time_s"),
-                F.lit(info).alias("info"),
-                F.lit("fam_v9.9.9").alias("version"),
+
+def _family_run(spark, stub_storage, monkeypatch):
+    """One full step with a stubbed family, shared by the tests below: a second
+    full pass exhausts the local driver heap (see ``_run``)."""
+    if "out" not in _FAMILY_RUN:
+        import opdi.pipeline.events as ev
+
+        real = ev.calculate_firstseen_lastseen_events
+
+        def fake(sdf_input):
+            # The real detector's rows, with the family's own version and an
+            # info field a measurement can be read from.
+            return (
+                real(sdf_input)
+                .withColumn("info", F.lit('{"duration_s": 42.0}'))
+                .withColumn("version", F.lit("fam_v9.9.9"))
             )
-        )
-        return first
 
-    monkeypatch.setattr(ev, "calculate_firstseen_lastseen_events", fake)
-    monkeypatch.setattr(
-        ev, "EXTRA_MEASURES",
-        [("first_seen", "duration_s", "Test duration (s)", "fam_v9.9.9")],
-    )
+        monkeypatch.setattr(ev, "calculate_firstseen_lastseen_events", fake)
+        monkeypatch.setattr(
+            ev, "EXTRA_MEASURES",
+            [("first_seen", "duration_s", "Test duration (s)", "fam_v9.9.9"),
+             ("first_seen", "absent_field", "Test absent", "fam_v9.9.9")],
+        )
+        _FAMILY_RUN["out"] = _run_uncached(spark, stub_storage, EventConfig())
+    return _FAMILY_RUN["out"]
 
 
 def test_a_detector_version_survives_stamping(spark, stub_storage, monkeypatch):
-    _stub_family(spark, monkeypatch, '{"duration_s": 42.0}')
-    events, _ = _run_uncached(spark, stub_storage, EventConfig())
-    versions = {r["type"]: r["version"] for r in events.collect()}
+    events, _ = _family_run(spark, stub_storage, monkeypatch)
+    versions = {r["type"]: r["version"] for r in events}
     assert versions["first_seen"] == "fam_v9.9.9"
     assert versions["level-start"] == EventConfig().events_version
 
@@ -849,24 +852,22 @@ def test_a_detector_version_survives_stamping(spark, stub_storage, monkeypatch):
 def test_an_info_field_listed_in_extra_measures_becomes_a_measurement(
     spark, stub_storage, monkeypatch
 ):
-    _stub_family(spark, monkeypatch, '{"duration_s": 42.0}')
-    events, measures = _run_uncached(spark, stub_storage, EventConfig())
-    event_id = events.filter(F.col("type") == "first_seen").first()["id"]
-    rows = measures.filter(F.col("type") == "Test duration (s)").collect()
-    assert len(rows) == 1
-    assert rows[0]["value"] == 42.0
-    assert rows[0]["version"] == "fam_v9.9.9"
-    assert rows[0]["milestone_id"] == event_id
-    assert rows[0]["id"] == event_id + "_m0"
-    assert str(rows[0]["dof"]) == "2024-06-01"
+    events, measures = _family_run(spark, stub_storage, monkeypatch)
+    event_id = next(r["id"] for r in events if r["type"] == "first_seen")
+    rows = [r for r in measures if r["type"] == "Test duration (s)"]
+    assert len(rows) == 2          # first_seen and last_seen both carry the field
+    row = next(r for r in rows if r["milestone_id"] == event_id)
+    assert row["value"] == 42.0
+    assert row["version"] == "fam_v9.9.9"
+    assert row["id"] == event_id + "_m0"
+    assert str(row["dof"]) == "2024-06-01"
 
 
 def test_an_event_without_the_listed_field_gets_no_extra_row(
     spark, stub_storage, monkeypatch
 ):
-    _stub_family(spark, monkeypatch, '{"other": 1}')
-    _, measures = _run_uncached(spark, stub_storage, EventConfig())
-    assert measures.filter(F.col("type") == "Test duration (s)").count() == 0
+    _, measures = _family_run(spark, stub_storage, monkeypatch)
+    assert not [r for r in measures if r["type"] == "Test absent"]
 
 
 def test_track_columns_include_h3_res_7():
