@@ -163,7 +163,7 @@ def restore() -> None:
 
 
 def run(arm: str, day: date, executors: int, steps, input_source: str, timings_csv=None) -> None:
-    from opdi.utils.spark_session import SparkSessionManager
+    from opdi.utils.spark_helpers import SparkSessionManager
 
     cfg = build_config(arm, executors)
     print("=" * 72)
