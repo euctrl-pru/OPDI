@@ -35,8 +35,8 @@ def test_the_jobs_and_where_they_stage():
             assert (Path(R.REPO) / p).is_file(), f"{job.name}: missing {p}"
 
 
-def test_the_paper_dir_is_overridable():
-    assert "OPDI_PAPER_DIR" in Path(R.__file__).read_text()
+def test_the_paper_dir_is_overridable_by_its_own_variable():
+    assert "OPDI_PAPER_DIR_V5" in Path(R.__file__).read_text()
 
 
 def test_two_days_runs_the_shipped_setting_with_each_edge_allowance_off_and_on():

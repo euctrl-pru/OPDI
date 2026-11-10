@@ -485,6 +485,8 @@ def test_the_false_join_rate_counts_only_holes_the_point_links(spark):
         "real_holes": 6,
         "real_holes_linked": 4,
         "real_holes_edge_read_through_blank": 0,
+        "real_holes_event_outside_box": 0,
+        "linked_event_outside_box": 0,
         "linked_true_link": 2,
         "linked_false_join": 1,
         "linked_unknown": 1,

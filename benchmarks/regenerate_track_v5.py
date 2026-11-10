@@ -43,10 +43,11 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 import provenance  # noqa: E402,F401  (re-exported for the tests and the builder)
 import regenerate_track_v4 as v4  # noqa: E402
 
-#: See ``regenerate_track_v4.PAPER`` for why ``OPDI_PAPER_DIR`` exists.
+#: See ``regenerate_track_v4.PAPER`` for why an override exists. Each paper has
+#: its own variable: one shared name would point every builder at one paper.
 PAPER = Path(
     os.environ.get(
-        "OPDI_PAPER_DIR",
+        "OPDI_PAPER_DIR_V5",
         REPO.parent / "opdi-portal" / "papers" / "track-construction-v5",
     )
 )

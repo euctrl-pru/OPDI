@@ -12,9 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 import build_track_v4_paper as V4  # noqa: E402
 import build_track_v5_paper as B  # noqa: E402
 
-#: The paper directory. ``OPDI_PAPER_DIR`` is what the builder honours, but it names
-#: one paper, so a session testing both builders sets ``OPDI_PAPER_DIR_V5`` here.
-PAPER = Path(os.environ.get("OPDI_PAPER_DIR_V5", str(B.PAPER)))
+#: The paper directory: the builder's own, which ``OPDI_PAPER_DIR_V5`` overrides.
+PAPER = B.PAPER
 
 
 def _template():
