@@ -196,6 +196,12 @@ LADDER = [
     # released measurement lost two segments around every blanked position. No
     # event type or time moves; a level-off's info.distance_nm does.
     ("L15_distance_known_position", {"distance_from_last_known_position": True}),
+    # The three navigation families of 2026-11 (holding, point merge, FIR
+    # crossings), one rung: none of them touches a type the ladder scores, so
+    # splitting them would give three rungs with identical scores.
+    ("L16_navigation_families", {
+        "emit_holding": True, "emit_point_merge": True, "emit_fir_crossings": True,
+    }),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
