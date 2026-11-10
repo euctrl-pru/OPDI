@@ -114,7 +114,12 @@ def test_the_export_writes_provenance(tmp_path):
                  input_tables=["s3a://x/osn_tracks/dof=2026-06-14"])
     with open(tmp_path / "descent_holes_2026-06-14.csv") as fh:
         assert list(csv.DictReader(fh)) == rows
+    d.write_rows(tmp_path, "descent_controls_2026-06-14.csv.gz", rows, argv=[], input_tables=[])
+    import gzip
+    with gzip.open(tmp_path / "descent_controls_2026-06-14.csv.gz", "rt") as fh:
+        assert list(csv.DictReader(fh)) == rows
     manifest = json.loads((tmp_path / "_manifest.json").read_text())
+    assert "descent_controls_2026-06-14.csv.gz" in manifest
     entry = manifest["descent_holes_2026-06-14.csv"]
     assert entry["argv"] == ["--days", "2026-06-14"]
     assert "benchmarks/track_link_descent.py" in entry["code_paths"]

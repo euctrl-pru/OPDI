@@ -19,7 +19,7 @@ Per day it writes:
   ``unknown``), the population of the flight it lies in (``crosses_box``, ``other``,
   or ``none`` when no truth flight holds both edges), the edge features, the callsign
   state, and ``other_checks_pass`` -- every check of the rule except the new edge's.
-* ``descent_controls_{day}.csv`` -- one row per ``cruise_descent`` hidden-landing
+* ``descent_controls_{day}.csv.gz`` -- one row per ``cruise_descent`` hidden-landing
   control (the first flight's cruise cut to the second flight's descent), with the
   same features and ``joined``: whether the rule with descent on links it.
 
@@ -291,10 +291,13 @@ def choose(scored) -> Optional[str]:
 def write_rows(results_dir, name: str, rows: List[Dict], argv: List[str],
                input_tables: List[str], notes: str = "") -> None:
     """Write *rows* as a CSV beside its provenance entry."""
+    import gzip
+
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     columns = list(rows[0].keys()) if rows else []
-    with open(results_dir / name, "w", newline="") as fh:
+    opener = gzip.open if name.endswith(".gz") else open
+    with opener(results_dir / name, "wt", newline="") as fh:
         out = csv.DictWriter(fh, fieldnames=columns)
         out.writeheader()
         out.writerows(rows)
@@ -316,7 +319,7 @@ def score_main(args) -> int:
     import pandas as pd
 
     def staged(stem):
-        files = sorted(Path(args.results_dir).glob(f"{stem}_*.csv"))
+        files = sorted(Path(args.results_dir).glob(f"{stem}_*.csv*"))
         if not files:
             raise SystemExit(f"no {stem}_*.csv under {args.results_dir}: run the export first")
         return pd.concat([pd.read_csv(f) for f in files], ignore_index=True), [f.name for f in files]
@@ -386,7 +389,8 @@ def main() -> int:
                        notes="Real holes whose new edge is below the floor and descending.")
             print(f"{day}: {len(holes)} holes with a descending new edge", flush=True)
             controls = _rows(descent_controls(tracks, truth, p))
-            write_rows(args.results_dir, f"descent_controls_{day}.csv", controls, sys.argv[1:], tables,
+            # Gzipped: eighty thousand rows a day, which pandas reads as it is.
+            write_rows(args.results_dir, f"descent_controls_{day}.csv.gz", controls, sys.argv[1:], tables,
                        notes="cruise_descent hidden-landing controls, with the rule's verdict under descent on.")
             print(f"{day}: {len(controls)} cruise_descent controls", flush=True)
             tracks.unpersist()
