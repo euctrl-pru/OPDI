@@ -1194,37 +1194,42 @@ def _register_family_measures() -> None:
 _register_family_measures()
 
 
-def extra_measurement_rows(df_events: DataFrame, measurement_id) -> Optional[DataFrame]:
+def extra_measurement_rows(df_events: DataFrame) -> Optional[DataFrame]:
     """Measurement rows for every ``EXTRA_MEASURES`` entry, or None if none apply.
 
     ``df_events`` is the stamped event frame (``id_tmp``, ``type``, ``info``,
-    ``dof``); ``measurement_id`` is the processor's id builder taking the
-    suffix. Entry ``i`` uses the suffix ``_m{i}_`` so the ids are stable per
-    entry and distinct from the ``_d_``/``_t_`` pair.
+    ``dof``). The measurement id is the event id plus ``_m{i}`` for entry
+    ``i``: stable per entry and distinct from the ``_d``/``_t`` pair. (The
+    families that use this all run with deterministic event ids; under the
+    legacy, partition-dependent ids they are off.)
+
+    One pass, one reference to ``df_events``: every entry's value is read in a
+    single projection and exploded with its position. Building one filtered
+    copy of the event frame per entry made Spark analyse the whole detector
+    plan once more per entry, which is what exhausted a small driver.
     """
-    frames = []
-    for i, (event_type, field, measure_type, version) in enumerate(EXTRA_MEASURES):
-        value = F.get_json_object(col("info"), f"$.{field}")
-        frames.append(
-            df_events.filter((col("type") == event_type) & value.isNotNull())
-            .withColumn("type", lit(measure_type))
-            .withColumn("version", lit(version))
-            .withColumn("id", measurement_id(f"_m{i}_"))
-            .select(
-                col("id"),
-                col("id_tmp").alias("milestone_id"),
-                col("type"),
-                value.cast("double").alias("value"),
-                col("version"),
-                col("dof"),
-            )
-        )
-    if not frames:
+    if not EXTRA_MEASURES:
         return None
-    out = frames[0]
-    for frame in frames[1:]:
-        out = out.unionByName(frame)
-    return out
+    values = F.array(*[
+        F.when(col("type") == event_type, F.get_json_object(col("info"), f"$.{field}").cast("double"))
+        for event_type, field, _, _ in EXTRA_MEASURES
+    ])
+    types = F.array(*[lit(m) for _, _, m, _ in EXTRA_MEASURES])
+    versions = F.array(*[lit(v) for _, _, _, v in EXTRA_MEASURES])
+    suffixes = F.array(*[lit(f"_m{i}") for i in range(len(EXTRA_MEASURES))])
+    exploded = (
+        df_events.select(col("id_tmp"), col("dof"), F.posexplode(values).alias("_pos", "value"))
+        .filter(col("value").isNotNull())
+    )
+    return exploded.select(
+        F.concat(col("id_tmp"), F.element_at(suffixes, col("_pos") + 1)).alias("id"),
+        col("id_tmp").alias("milestone_id"),
+        F.element_at(types, col("_pos") + 1).alias("type"),
+        col("value"),
+        F.element_at(versions, col("_pos") + 1).alias("version"),
+        col("dof"),
+    )
+
 
 def add_time_measure(sdf_input: DataFrame) -> DataFrame:
     """Add cumulative time (seconds from track start) to each state vector."""
@@ -1834,9 +1839,7 @@ class FlightEventProcessor:
         )
 
         df_measurements = df_dist.unionByName(df_time)
-        extra = extra_measurement_rows(
-            df_events, lambda suffix: self._measurement_id(batch_id, suffix)
-        )
+        extra = extra_measurement_rows(df_events)
         if extra is not None:
             df_measurements = df_measurements.unionByName(extra)
         df_measurements = df_measurements.repartition("dof").orderBy("type", "version")
