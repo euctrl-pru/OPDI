@@ -81,6 +81,7 @@ P = SegmentationParams(
     link_min_implied_speed_kt=315.0,
     link_max_gap_minutes=360.0,
     link_old_edge_climb=False,
+    link_new_edge_descent=False,
 )
 CRUISE_M = 11000.0
 LOW_M = 5000.0 / FT_PER_M
@@ -1411,6 +1412,18 @@ def test_real_hole_counts_read_the_labelled_links_by_direction_and_near_events(s
     assert counts["linked_by_direction_labelled"] == 2
     assert counts["false_joined_by_direction"] == 1
     assert counts["false_joined_near_edge"] == 1       # the unlinked one is no false join
+    assert counts["linked_event_outside_box"] == 0     # no flag column: nothing counted
+
+
+def test_real_hole_counts_say_how_many_links_had_an_event_outside_the_box(spark):
+    holes = _real_holes(
+        spark,
+        [("unknown", _feature_row()), ("unknown", _feature_row()), ("true_link", _feature_row()),
+         ("unknown", _feature_row(speed_kt=100.0))],
+    ).withColumn("event_outside_box_inside", F.col("label") == "unknown")
+    counts = real_hole_counts(holes, DIRECTIONAL)
+    assert counts["real_holes_event_outside_box"] == 3
+    assert counts["linked_event_outside_box"] == 2     # the slow one is not linked
 
 
 def test_real_hole_counts_say_which_edge_was_below_the_floor(spark):

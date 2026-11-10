@@ -65,7 +65,7 @@ SHIPPED = {
     "link_max_gap_minutes": 600,
     "link_cruise_floor_ft": 18000,
     "link_old_edge_climb": True,
-    "link_new_edge_descent": False,
+    "link_new_edge_descent": True,
 }
 
 #: Every table ``track_link_pipeline_score.py`` writes. Kept here as a literal,

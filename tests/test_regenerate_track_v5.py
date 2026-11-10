@@ -13,7 +13,7 @@ SHIPPED = {
     "link_max_gap_minutes": 600,
     "link_cruise_floor_ft": 18000,
     "link_old_edge_climb": True,
-    "link_new_edge_descent": False,
+    "link_new_edge_descent": True,
 }
 
 

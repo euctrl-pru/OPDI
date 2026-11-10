@@ -10,6 +10,7 @@ stops the build. It writes ``index.qmd``, ``index.html`` and, with ``--pdf``,
     python benchmarks/build_track_v5_paper.py [--paper-dir DIR] [--check] [--pdf]
 """
 
+import csv
 import json
 import math
 import os
@@ -63,6 +64,7 @@ ALLOWED_LITERALS = {
     "60",    # the callsign lookback, minutes
     "128",   # the group at which Spark's aggregation falls back to sorting
     "279",   # flight-list rows without a track in version 4's pipeline day
+    "119",   # checkable descent holes version 4 counted its 3 false joins in
     "2026",  # the date of the A8 boundary
     "08", "27",
     "4",     # version 4
@@ -115,8 +117,7 @@ def build_context(data):
     # --- two days against Network Manager ---
     grid = read_csv(data, "two_days/link_grid_pooled.csv")
     rec = _shipped(grid)
-    no_climb = one(grid, link_old_edge_climb="False", link_new_edge_descent="False")
-    descent = one(grid, link_old_edge_climb="False", link_new_edge_descent="True")
+    no_climb = one(grid, link_old_edge_climb="False", link_new_edge_descent=str(descent_shipped()))
     gap = num(rec, "link_max_gap_minutes")
     c.update(
         day_new="2026-06-14",
@@ -179,7 +180,7 @@ def build_context(data):
     lab = labelled(rec)
     linked = num(rec, "real_holes_linked")
     climb_lab = num(rec, "linked_by_climb_labelled")
-    descent_lab = num(descent, "linked_by_descent_labelled")
+    descent_lab = num(rec, "linked_by_descent_labelled")
     same_n = num(rec, "same_callsign_controls")
     positive = num(rec, "positive_within_gap")
     c.update(
@@ -192,7 +193,7 @@ def build_context(data):
         climb_false=n(num(rec, "false_joined_by_climb")),
         climb_labelled=n(climb_lab),
         climb_upper=pct(upper_95(num(rec, "false_joined_by_climb"), climb_lab), 1),
-        descent_false=n(num(descent, "false_joined_by_descent")),
+        descent_false=n(num(rec, "false_joined_by_descent")),
         descent_labelled=n(descent_lab),
         limit_controls=n(num(rec, "negative_limit_controls")),
         limit_joined=n(num(rec, "negative_limit_false_joins")),
@@ -217,7 +218,7 @@ def build_context(data):
             f"the code ships descent {'on' if descent_shipped() else 'off'} but the staged "
             f"candidates say {'adopt ' + chosen_name if adopted else 'adopt nothing'}"
         )
-    exported = {}
+    exported, relabelled = {}, []
     for stem in ("descent_holes", "descent_controls"):
         rows = 0
         for day in (c["day_new"], c["day_old"]):
@@ -225,8 +226,23 @@ def build_context(data):
             if not path.is_file():
                 raise MissingValue(f"missing {path}")
             with open(path, newline="") as fh:
-                rows += sum(1 for _ in fh) - 1
+                day_rows = list(csv.DictReader(fh))
+            rows += len(day_rows)
+            if stem == "descent_holes":
+                relabelled += [
+                    r for r in day_rows
+                    if r["event_outside_box_inside"] == "True" and r["descent_edge"] == "True"
+                    and r["other_checks_pass"] == "True"
+                ]
         exported[stem] = rows
+    if not relabelled:
+        raise MissingValue("no hole linked by descent had an event outside the box: the prose needs rewriting")
+    if any(r["callsign_state"] != "both_equal" for r in relabelled):
+        raise MissingValue("a relabelled descent hole has differing or blank callsigns: the prose needs rewriting")
+
+    def span(column, digits=0):
+        values = sorted(float(r[column]) for r in relabelled)
+        return f"{values[0]:.{digits}f} to {values[-1]:.{digits}f}"
 
     def bound(row, column):
         value = row.get(column)
@@ -238,13 +254,20 @@ def build_context(data):
         descent_floor_ft=n(code_constant("DESCENT_FLOOR_FT", "benchmarks/track_link_descent.py")),
         descent_max_gap_min=n(code_constant("DESCENT_MAX_GAP_MIN", "benchmarks/track_link_descent.py")),
         descent_adopted=adopted,
-        descent_chosen=chosen_name or "none",
+        descent_chosen=(
+            "the descending edge as defined, with no extra condition" if chosen_name == "none"
+            else chosen_name or "none"
+        ),
+        descent_relabelled=n(len(relabelled)),
+        relabelled_all=n(num(rec, "linked_event_outside_box")),
+        relabelled_gap_range=span("gap_min"),
+        relabelled_speed_range=span("implied_kt"),
         table_descent_candidates=table(
             ["Condition", "Holes kept", "On crossing flights", "Checkable", "False joins",
              "Hidden landings joined", "Upper bound, 95%", "Qualifies"],
             [
                 [
-                    "none" if r["candidate"] == "none" else r["candidate"].replace("+", " and "),
+                    "no extra condition" if r["candidate"] == "none" else r["candidate"].replace("+", " and "),
                     n(num(r, "real_linked")), n(num(r, "real_crossing_linked")),
                     n(num(r, "real_checkable")), n(num(r, "real_false_joins")),
                     f"{n(num(r, 'controls_joined'))} of {n(num(r, 'controls'))}",
@@ -261,6 +284,7 @@ def build_context(data):
     c.update(
         descent_linked_before=n(num(none_row, "real_linked")),
         descent_kept=n(num(kept, "real_linked")),
+        descent_crossing_kept=n(num(kept, "real_crossing_linked")),
         descent_kept_false=n(num(kept, "real_false_joins")),
         descent_kept_checkable=n(num(kept, "real_checkable")),
         descent_kept_hidden=n(num(kept, "controls_joined")),

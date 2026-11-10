@@ -1762,13 +1762,22 @@ class SegmentationConfig:
     sighting is the same flight. Set apart from ``link_new_edge_descent`` because the
     study decides them apart."""
 
-    link_new_edge_descent: bool = False
+    link_new_edge_descent: bool = True
     """Whether a new edge below ``link_cruise_floor_ft`` can still link when it is
-    descending past ``link_edge_vert_rate_fpm``. A NULL vertical rate does not pass, and
-    a new edge the low-altitude gap breaks at splits whatever this says.
+    descending past ``link_edge_vert_rate_fpm``, on at least three vertical rates. A
+    NULL vertical rate does not count, and a new edge the low-altitude gap breaks at
+    (below ``low_alt_ft``) splits whatever this says.
 
-    Off by default: a descending new edge failed the study's limit, so a flight first
-    seen on approach stays a new track. Set apart from ``link_old_edge_climb`` because the study decides them apart."""
+    On by default since the track-construction-v5 study. Version 4 switched it off
+    on 3 false joins in 119 checkable holes linked only this way; v5 found all three
+    were Network Manager *estimated* arrival times at Seoul, one to six minutes
+    before an ADS-B sample showing the aircraft still airborne on descent, and the
+    study's labeller no longer takes events outside Europe as evidence. Re-measured:
+    0 false joins in 117 checkable such holes over the two days, 0 of 77,911
+    artificial hidden landings with a descending edge joined (the straight-line speed
+    check rejects them), 1,437 holes linked only this way. Set apart from
+    ``link_old_edge_climb`` because the study decides them apart; ``False``
+    reproduces the version-4 rule."""
 
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""

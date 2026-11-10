@@ -252,6 +252,8 @@ COUNT_FIELDS = (
     "real_holes",
     "real_holes_linked",
     "real_holes_edge_read_through_blank",
+    "real_holes_event_outside_box",
+    "linked_event_outside_box",
     "linked_true_link",
     "linked_false_join",
     "linked_unknown",
@@ -508,9 +510,17 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
     ``linked_by_direction_labelled`` is what the direction limit divides by, and it counts
     a hole low on both sides once where the ``by_climb`` and ``by_descent`` columns each
     count it, and the limits read all three. ``false_joined_near_edge`` and the altitude
-    read past a blank are reported only.
+    read past a blank are reported only. ``real_holes_event_outside_box`` and
+    ``linked_event_outside_box`` count the holes a truth event at an aerodrome outside
+    the box lay inside, which the labeller no longer takes as evidence; zero when the
+    frame has no such column.
     """
     linked, label = _linked(p), F.col("label")
+    outside = (
+        F.coalesce(F.col("event_outside_box_inside"), F.lit(False))
+        if "event_outside_box_inside" in holes.columns
+        else F.lit(False)
+    )
     false_join = label == "false_join"
     read_through_blank = F.col("position_gap_min") != F.col("gap_min")
     by_climb = F.col("alt_before_ft") < p.link_cruise_floor_ft
@@ -523,6 +533,8 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
         F.count(F.lit(1)).alias("real_holes"),
         _sum_when(linked).alias("real_holes_linked"),
         _sum_when(read_through_blank).alias("real_holes_edge_read_through_blank"),
+        _sum_when(outside).alias("real_holes_event_outside_box"),
+        _sum_when(linked & outside).alias("linked_event_outside_box"),
         _sum_when(linked & (label == "true_link")).alias("linked_true_link"),
         _sum_when(linked & (label == "false_join")).alias("linked_false_join"),
         _sum_when(linked & (label == "unknown")).alias("linked_unknown"),

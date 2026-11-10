@@ -47,6 +47,7 @@ P = SegmentationParams(
     link_min_implied_speed_kt=315.0,
     link_max_gap_minutes=360.0,
     link_old_edge_climb=False,
+    link_new_edge_descent=False,
 )
 SHIPPED = SegmentationParams()
 _BOTH_DIRECTIONS = {"link_old_edge_climb": True, "link_new_edge_descent": True}
@@ -526,11 +527,13 @@ CLIMBING = {"baro_altitude": FL200, "vert_rate": 1500.0 / FPM_PER_MPS}
 DESCENDING = {"baro_altitude": FL200, "vert_rate": -1500.0 / FPM_PER_MPS}
 
 
-def test_directional_edges_default_to_climb_on_descent_off():
+def test_both_edge_allowances_are_on_by_default():
+    """Climb since version 4; descent since version 5, which found the three false
+    joins version 4 counted against it were estimated arrival times outside Europe."""
     for cls in (SegmentationParams, SegmentationConfig):
         defaults = {f.name: f.default for f in dataclasses.fields(cls)}
         assert defaults["link_old_edge_climb"] is True, cls.__name__
-        assert defaults["link_new_edge_descent"] is False, cls.__name__
+        assert defaults["link_new_edge_descent"] is True, cls.__name__
         assert "link_directional_edges" not in defaults, cls.__name__
 
 
@@ -541,11 +544,34 @@ def test_a_climbing_old_edge_links_by_default(spark):
                                             link_max_gap_minutes=360.0)) == 1
 
 
-def test_a_descending_new_edge_splits_by_default(spark):
+def test_a_descending_new_edge_links_by_default(spark):
     df = _hole(spark, after=DESCENDING)
     assert n_tracks(df, dataclasses.replace(SHIPPED, link_cruise_floor_ft=25000.0,
                                             link_min_implied_speed_kt=315.0,
-                                            link_max_gap_minutes=360.0)) == 2
+                                            link_max_gap_minutes=360.0)) == 1
+
+
+def test_descent_off_by_name_reproduces_the_version_4_rule(spark):
+    """The allowance is a setting, so the rule version 4 measured stays reachable."""
+    no_descent = dataclasses.replace(SHIPPED, link_new_edge_descent=False)
+    at_12000 = {"baro_altitude": 12000.0 / FT_PER_M, "vert_rate": -1000.0 / FPM_PER_MPS}
+    assert n_tracks(_hole(spark, after=at_12000), SHIPPED) == 1
+    assert n_tracks(_hole(spark, after=at_12000), no_descent) == 2
+    assert _partition(_hole(spark), cruise_linked(), SHIPPED) == _partition(
+        _hole(spark), cruise_linked(), no_descent)
+
+
+def test_a_descending_new_edge_below_the_low_altitude_limit_still_splits(spark):
+    low = {"baro_altitude": 4000.0 / FT_PER_M, "vert_rate": -1000.0 / FPM_PER_MPS}
+    assert n_tracks(_hole(spark, after=low), SHIPPED) == 2
+
+
+def test_two_vertical_rates_do_not_make_a_descent_by_default(spark):
+    samples = _hole_samples(after={"baro_altitude": 12000.0 / FT_PER_M,
+                                   "vert_rate": -1000.0 / FPM_PER_MPS})
+    for s in samples[12:]:
+        s["vert_rate"] = None
+    assert n_tracks(make_track(spark, samples), SHIPPED) == 2
 
 
 def test_a_flight_reappearing_on_approach_links_only_with_direction_on(spark):

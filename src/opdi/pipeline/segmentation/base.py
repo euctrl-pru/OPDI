@@ -148,10 +148,10 @@ class SegmentationParams:
     #: aircraft lost while still climbing is outbound. Off keeps the floor as the only
     #: test there. The study decides this apart from the new edge's setting.
     link_old_edge_climb: bool = True
-    #: Let a new edge below the floor pass when it is descending. Off by default: a
-    #: descending new edge failed the study's limit. On would let the vertical rate
-    #: through where the floor alone stops it. Decided apart from the old edge's setting.
-    link_new_edge_descent: bool = False
+    #: Let a new edge below the floor pass when it is descending. On by default since
+    #: the v5 study: the false joins version 4 counted against it were estimated truth
+    #: times outside Europe. Decided apart from the old edge's setting.
+    link_new_edge_descent: bool = True
     # A5-A7 knobs; unused by the gap family.
     ground_dwell_minutes: float = 5.0
     turnaround_max_height_ft: float = 1000.0

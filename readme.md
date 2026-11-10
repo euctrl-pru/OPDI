@@ -340,10 +340,13 @@ the straight line across one (`EventConfig.track_hole_seconds`,
 Each edge's altitude, vertical rate and speed read their own nearest five values
 within `link_edge_position_minutes`, past any blank samples, because altitude often
 arrives in a later message. No altitude in that span means split. Two settings let
-an edge below the cruise floor link on its direction. `link_old_edge_climb`, for an
-old edge still climbing, is on by default, provisionally: 0 false joins in 185
-checkable holes, under the 300 the study wanted. `link_new_edge_descent`, for a new
-edge descending, is off by default because it failed its own limit, 3 of 119.
+an edge below the cruise floor link on its direction, both on by default and both
+provisional on about a hundred checkable holes each: `link_old_edge_climb`, for an
+old edge still climbing (0 false joins in 185 checkable holes in v4), and
+`link_new_edge_descent`, for a new edge descending. V4 had switched descent off on
+3 false joins in 119; v5 found all three were estimated Network Manager arrival
+times at Seoul, minutes before ADS-B still showed the aircraft airborne, and the
+study's labelling no longer takes events outside Europe as evidence (0 in 117 since).
 
 To run the previous rule instead:
 

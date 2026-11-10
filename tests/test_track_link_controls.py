@@ -40,6 +40,7 @@ P = SegmentationParams(
     link_min_implied_speed_kt=315.0,
     link_max_gap_minutes=360.0,
     link_old_edge_climb=False,
+    link_new_edge_descent=False,
 )
 FLOOR_FT = 25000.0
 CRUISE_M = 11000.0
