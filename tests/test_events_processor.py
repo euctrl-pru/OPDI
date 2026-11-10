@@ -805,7 +805,7 @@ def _run_uncached(spark, stub_storage, events: EventConfig):
     events_out = stub_storage.written["opdi_flight_events"]
     measures_out = stub_storage.written["opdi_measurements"]
     out = (
-        events_out.filter(F.col("type").isin("first_seen", "level-start")).collect(),
+        events_out.filter(F.col("type").isin("first_seen", "level-start", "xing-fir")).collect(),
         measures_out.filter(F.col("type").startswith("Test")).collect(),
     )
     spark.catalog.clearCache()
@@ -815,9 +815,44 @@ def _run_uncached(spark, stub_storage, events: EventConfig):
 _FAMILY_RUN = {}
 
 
+class _WithAirspace:
+    """The session stub plus a two-volume FIR reference and tracks that carry
+    ``h3_res_7``: below 20,000 ft the flight is in cell A (volume AAAA), at
+    cruise in cell B (volume BBBB), so the step must emit two ``xing-fir``."""
+
+    def __init__(self, spark, stub):
+        import h3
+        from opdi.reference.h3_airspaces import AIRSPACE_SCHEMA
+
+        self._stub = stub
+        cell_a = h3.latlng_to_cell(50.9, 4.48, 7)
+        cell_b = h3.latlng_to_cell(50.0, 8.5, 7)
+        self.tracks = stub.tracks.withColumn(
+            "h3_res_7",
+            F.when(F.col("baro_altitude_c") * 3.28084 >= 20000.0, F.lit(cell_b)).otherwise(F.lit(cell_a)),
+        )
+        rows = [("FIR", code, code, "524", "2024-11-28", "2024-12-26", 0, 999, 1e4, cell, 7)
+                for code, cell in (("AAAA", cell_a), ("BBBB", cell_b))]
+        self._fir = spark.createDataFrame(rows, AIRSPACE_SCHEMA)
+        self.written = {}
+
+    def table_exists(self, name):
+        return name == "opdi_h3_airspace_ref" or self._stub.table_exists(name)
+
+    def read_table(self, name):
+        return self._fir if name == "opdi_h3_airspace_ref" else self._stub.read_table(name)
+
+    def write_table(self, df, name, mode="append", partition_by=None, partition_values=None):
+        self.written[name] = df
+
+
+_FAMILY_RUN = {}
+
+
 def _family_run(spark, stub_storage, monkeypatch):
-    """One full step with a stubbed family, shared by the tests below: a second
-    full pass exhausts the local driver heap (see ``_run``)."""
+    """One full step with a stubbed family and the FIR reference, shared by
+    the tests below: a second full pass exhausts the local driver heap (see
+    ``_run``)."""
     if "out" not in _FAMILY_RUN:
         import opdi.pipeline.events as ev
 
@@ -838,7 +873,7 @@ def _family_run(spark, stub_storage, monkeypatch):
             [("first_seen", "duration_s", "Test duration (s)", "fam_v9.9.9"),
              ("first_seen", "absent_field", "Test absent", "fam_v9.9.9")],
         )
-        _FAMILY_RUN["out"] = _run_uncached(spark, stub_storage, EventConfig())
+        _FAMILY_RUN["out"] = _run_uncached(spark, _WithAirspace(spark, stub_storage), EventConfig())
     return _FAMILY_RUN["out"]
 
 
@@ -874,3 +909,22 @@ def test_track_columns_include_h3_res_7():
     from opdi.pipeline.events import TRACK_COLUMNS
 
     assert "h3_res_7" in TRACK_COLUMNS
+
+
+def test_a_full_run_emits_the_fir_family(spark, stub_storage, monkeypatch):
+    events, _ = _family_run(spark, stub_storage, monkeypatch)
+    xings = [r for r in events if r["type"] == "xing-fir"]
+    assert len(xings) == 2
+    assert {r["version"] for r in xings} == {"fir_v0.1.0"}
+    pairs = [(json.loads(r["info"])["fir_from"], json.loads(r["info"])["fir_to"]) for r in xings]
+    assert sorted(pairs) == [("AAAA", "BBBB"), ("BBBB", "AAAA")]
+
+
+def test_the_navigation_group_is_tracked_in_the_progress_log(spark, tmp_path):
+    config = OPDIConfig()
+    proc = FlightEventProcessor(spark, config, log_dir=str(tmp_path))
+    assert "navigation" in proc._log_paths
+    proc._mark_processed("navigation", dt.date(2026, 6, 14))
+    assert dt.date(2026, 6, 14) in [
+        d.date() if hasattr(d, "date") else d for d in proc._load_processed("navigation")
+    ]

@@ -10,6 +10,8 @@ def test_tables_resolve_to_the_right_prefixes():
     assert r.arm_path("off", "opdi_h3_airspace_ref") == f"{r.PREFIX}/ref/opdi_h3_airspace_ref"
     assert r.arm_path("on", "osn_tracks_clean") == f"{r.INPUT_WAREHOUSE}/osn_tracks_clean"
     assert r.arm_path("on", "opdi_flight_list", "a10") == f"{r.A10_ARM}/opdi_flight_list"
+    assert r.arm_path("on", "opdi_flight_list") == f"{r.PREFIX}/shared/opdi_flight_list"
+    assert r.arm_path("off", "opdi_endpoint_candidates") == f"{r.PREFIX}/shared/opdi_endpoint_candidates"
     with pytest.raises(RuntimeError):
         r.arm_path("on", "osn_statevectors_v2")
     with pytest.raises(ValueError):

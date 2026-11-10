@@ -53,7 +53,11 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
 from opdi.pipeline.flights import bearing_deg, haversine_nm, resolve_flight_id
+from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
+from opdi.pipeline.holding import calculate_holding_events
 from opdi.pipeline.holes import PIECE, add_piece
+from opdi.pipeline.point_merge import calculate_point_merge_events
+from opdi.reference.point_merge import point_merge_systems_for_day
 from opdi.pipeline.level_segments import LEVEL_ARMS, classify_level_offs
 from opdi.pipeline.ground import block_times, movement_window
 from opdi.pipeline.runway_ops import go_arounds, runway_milestones, runway_traversals
@@ -1370,6 +1374,7 @@ class FlightEventProcessor:
             "vertical": os.path.join(log_dir, "04_osn-flight_event-vertical-etl-log.parquet"),
             "hexaero": os.path.join(log_dir, "04_osn-flight_event-hexaero_airport-log.parquet"),
             "seen": os.path.join(log_dir, "04_osn-flight_event-first_seen_last_seen-log.parquet"),
+            "navigation": os.path.join(log_dir, "04_osn-flight_event-navigation-log.parquet"),
         }
 
         os.makedirs(log_dir, exist_ok=True)
@@ -1543,6 +1548,7 @@ class FlightEventProcessor:
         calc_horizontal: bool = True,
         calc_hexaero: bool = True,
         calc_seen: bool = True,
+        calc_navigation: bool = True,
     ) -> None:
         """
         Core ETL: calculate events and measurements, write to tables.
@@ -1555,6 +1561,8 @@ class FlightEventProcessor:
             calc_horizontal: Whether to calculate phase events.
             calc_hexaero: Whether to calculate airport events.
             calc_seen: Whether to calculate first/last seen events.
+            calc_navigation: Whether to calculate the holding, point merge
+                and FIR crossing families (each also gated by its emit flag).
         """
         sdf_input = add_distance_measure(
             sdf_input, self.events.distance_from_last_known_position
@@ -1610,6 +1618,9 @@ class FlightEventProcessor:
                 tops.cache()
 
         df_events = None
+        #: The go-around rows, if the runway family computed them: the holding
+        #: family drops an episode next to one.
+        df_go_arounds = None
 
         def add(frame: Optional[DataFrame]) -> None:
             nonlocal df_events
@@ -1684,7 +1695,8 @@ class FlightEventProcessor:
                 # the destination geometry it actually reads and on nothing
                 # else.
                 if "ades_lat" in rwy_sv.columns:
-                    add(go_arounds(rwy_sv, self.events))
+                    df_go_arounds = go_arounds(rwy_sv, self.events)
+                    add(df_go_arounds)
 
             if self.events.emit_block_events:
                 add(calculate_block_events(sdf_input, df_hexaero, self.events))
@@ -1692,6 +1704,19 @@ class FlightEventProcessor:
         if calc_seen:
             print(f"Calculating first_seen/last_seen events for batch: {batch_id}")
             add(calculate_firstseen_lastseen_events(sdf_input))
+
+        if calc_navigation:
+            ev = self.events
+            if ev.emit_holding:
+                print(f"Calculating holding events for batch: {batch_id}")
+                add(calculate_holding_events(geo, ev, go_arounds=df_go_arounds))
+            if ev.emit_point_merge:
+                print(f"Calculating point merge events for batch: {batch_id}")
+                pms_ref = point_merge_systems_for_day(self.spark, day or month)
+                add(calculate_point_merge_events(geo, pms_ref, ev))
+            if ev.emit_fir_crossings:
+                print(f"Calculating FIR crossings for batch: {batch_id}")
+                add(calculate_fir_events(sdf_input, load_fir_reference(self.storage), ev))
 
         if df_events is None:
             return
@@ -1752,7 +1777,7 @@ class FlightEventProcessor:
         # subset would delete the families that were already there. A full
         # rebuild can safely replace the partition; a partial one must add to
         # it.
-        full_rebuild = all([calc_vertical, calc_horizontal, calc_hexaero, calc_seen])
+        full_rebuild = all([calc_vertical, calc_horizontal, calc_hexaero, calc_seen, calc_navigation])
         # A day-scoped batch writes exactly one partition, and it is the day.
         _partition_values = [{"dof": day}] if day is not None else None
         write_mode = "overwrite" if full_rebuild else "append"
@@ -1867,8 +1892,9 @@ class FlightEventProcessor:
         calc_vertical = _redo or _batch not in self._load_processed("vertical")
         calc_hexaero = _redo or _batch not in self._load_processed("hexaero")
         calc_seen = _redo or _batch not in self._load_processed("seen")
+        calc_navigation = _redo or _batch not in self._load_processed("navigation")
 
-        if not any([calc_horizontal, calc_vertical, calc_hexaero, calc_seen]):
+        if not any([calc_horizontal, calc_vertical, calc_hexaero, calc_seen, calc_navigation]):
             if skip_if_processed:
                 print("All events for this month already processed.")
                 return
@@ -1902,6 +1928,7 @@ class FlightEventProcessor:
             calc_horizontal=calc_horizontal,
             calc_hexaero=calc_hexaero,
             calc_seen=calc_seen,
+            calc_navigation=calc_navigation,
         )
 
         # Update progress logs
@@ -1917,6 +1944,8 @@ class FlightEventProcessor:
             self._mark_processed("hexaero", batch)
         if calc_seen:
             self._mark_processed("seen", batch)
+        if calc_navigation:
+            self._mark_processed("navigation", batch)
 
         self.spark.catalog.clearCache()
 

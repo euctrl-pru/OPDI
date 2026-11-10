@@ -3,7 +3,7 @@
 
     export PYSPARK_DRIVER_PYTHON=$PWD/.venv310/bin/python
     unset PYSPARK_PYTHON
-    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --steps 00c
+    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --steps 00c 03
     .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --arm off --steps 04 \\
         --timings-csv <paper>/data/pipeline_day/timings.csv
     .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --arm on --steps 04 \\
@@ -13,9 +13,10 @@ The measurement run of the holding / point merge / FIR study
 (``docs/superpowers/specs/2026-11-10-airspace-events-design.md``). The two
 arms differ in the three ``emit_*`` flags and nothing else.
 
-**Where it reads.** ``osn_tracks_clean`` and ``opdi_flight_list`` for the day
-from the production worldwide warehouse ``s3a://eurocontrol/opdi-world`` (read
-only), or with ``--input a10`` from the v5 study arm
+**Where it reads.** ``osn_tracks_clean`` for the day from the production
+worldwide warehouse ``s3a://eurocontrol/opdi-world`` (read only); that day has
+no flight list, so step 03 builds one under the study prefix (``shared/``).
+With ``--input a10`` both come from the v5 study arm
 ``opdi-world/research/a10/cruise_linked`` (a one-in-ten airframe sample).
 Reference tables are read from ``opdi-world`` and never written.
 
@@ -69,8 +70,13 @@ PASSTHROUGH = (
     "coverage_marker",
 )
 
-#: Read from the chosen input (production day or the v5 arm), never written.
-INPUTS = ("osn_tracks_clean", "osn_tracks", "opdi_flight_list")
+#: The tracks: read from the chosen input (production day or the v5 arm), never written.
+INPUTS = ("osn_tracks_clean", "osn_tracks")
+
+#: The flight list and what step 03 writes beside it. The production day has
+#: no flight list, so with ``--input world`` step 03 builds one under
+#: ``shared/``; with ``--input a10`` the v5 arm's is read.
+FLIGHTS = ("opdi_flight_list", "opdi_endpoint_candidates", "opdi_flight_list_milestones_staging")
 
 #: Written once by step 00c, read by both arms.
 SHARED = ("opdi_h3_airspace_ref",)
@@ -79,7 +85,7 @@ SHARED = ("opdi_h3_airspace_ref",)
 DERIVED = ("opdi_flight_events", "opdi_measurements")
 
 ARMS = ("off", "on")
-STEPS = ("00c", "04")
+STEPS = ("00c", "03", "04")
 NAVIGATION_FLAGS = ("emit_holding", "emit_point_merge", "emit_fir_crossings")
 
 _ORIG = {}
@@ -91,12 +97,14 @@ def arm_path(arm: str, table: str, input_source: str = "world") -> str:
         raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
     if table in INPUTS:
         return f"{A10_ARM}/{table}" if input_source == "a10" else f"{INPUT_WAREHOUSE}/{table}"
+    if table in FLIGHTS:
+        return f"{A10_ARM}/{table}" if input_source == "a10" else f"{PREFIX}/shared/{table}"
     if table in SHARED:
         return f"{PREFIX}/ref/{table}"
     if table in DERIVED:
         return f"{PREFIX}/{arm}/{table}"
     raise RuntimeError(
-        f"unclassified table {table!r}: add it to PASSTHROUGH, INPUTS, SHARED or "
+        f"unclassified table {table!r}: add it to PASSTHROUGH, INPUTS, FLIGHTS, SHARED or "
         f"DERIVED in benchmarks/run_airspace_events_day.py.")
 
 
