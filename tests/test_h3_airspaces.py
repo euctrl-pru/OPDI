@@ -27,6 +27,19 @@ def test_an_antimeridian_polygon_fills_the_right_side():
         assert res <= 4
 
 
+def test_split_antimeridian_drops_the_line_a_cut_can_leave():
+    # A polygon with a spike that touches the dateline only along a line: the
+    # eastern intersection is a LineString, which must not reach MultiPolygon.
+    from shapely.geometry import GeometryCollection, LineString
+
+    g = GeometryCollection([box(170, -5, 179, 5), LineString([(179, -5), (179, 5)])])
+    out = ha.split_antimeridian(g)
+    assert out.geom_type == "Polygon" and out.area > 0
+    ring = Polygon([(170, -5), (180, -5), (-180, -5), (-170, -5), (-170, 5), (-180, 5), (180, 5), (170, 5),
+                    (170, 0), (170, -5)])   # a vertex repeated on the western edge
+    assert ha.split_antimeridian(ring).geom_type == "MultiPolygon"
+
+
 def test_split_antimeridian_leaves_an_ordinary_polygon_alone():
     g = box(0, 50, 2, 52)
     assert ha.split_antimeridian(g).equals(g)

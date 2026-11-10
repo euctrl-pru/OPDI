@@ -108,24 +108,34 @@ def _shift_east(poly: Polygon) -> Polygon:
     return Polygon(shift(poly.exterior), [shift(r) for r in poly.interiors])
 
 
+def _polygons(geom) -> List[Polygon]:
+    """The polygon parts of any geometry, dropping lines and points a cut or a
+    union can leave behind (a boundary that touches the cut line is one)."""
+    if geom is None or geom.is_empty:
+        return []
+    if isinstance(geom, Polygon):
+        return [geom] if geom.area > 0 else []
+    if hasattr(geom, "geoms"):
+        return [p for g in geom.geoms for p in _polygons(g)]
+    return []
+
+
 def split_antimeridian(geom):
     """Split every polygon whose ring jumps across 180 degrees into a western
     and an eastern part, each inside [-180, 180]. Other geometry is returned
     as is. ``h3.polygon_to_cells`` fills the complement of such a ring."""
-    polys = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
     out = []
-    for poly in polys:
+    for poly in _polygons(geom):
         if not _crosses_antimeridian(poly):
             out.append(poly)
             continue
         shifted = _shift_east(poly)
         west = shifted.intersection(box(0, -90, 180, 90))
-        east = shifted.intersection(box(180, -90, 360, 90))
-        east = shapely.affinity.translate(east, xoff=-360.0)
-        for part in (west, east):
-            if part.is_empty:
-                continue
-            out.extend(part.geoms if hasattr(part, "geoms") else [part])
+        east = shapely.affinity.translate(shifted.intersection(box(180, -90, 360, 90)), xoff=-360.0)
+        out.extend(_polygons(west))
+        out.extend(_polygons(east))
+    if not out:
+        return Polygon()
     return MultiPolygon(out) if len(out) != 1 else out[0]
 
 
