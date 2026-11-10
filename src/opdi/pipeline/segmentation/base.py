@@ -56,11 +56,13 @@ __all__ = [
     "lookback_minutes",
     "FT_PER_M",
     "KT_PER_MPS",
+    "FPM_PER_MPS",
 ]
 
 #: Reused from the pipeline's own conversions so the two can never drift.
 FT_PER_M = 3.28084
 KT_PER_MPS = 1.94384
+FPM_PER_MPS = 196.850394
 
 #: Gap in minutes from the previous sample of the same group. Available to every
 #: break expression; the window is applied by :func:`assign_track_id`.
@@ -112,6 +114,44 @@ class SegmentationParams:
     #: ``SegmentationConfig.callsign_min_persistence_seconds``;
     #: ``test_segmentation_base.py`` asserts the two default sets are identical.
     callsign_min_persistence_seconds: float = 30.0
+    # A10 knobs, read only by ``cruise_linked``. Each is one test of ``linkable``
+    # in ``methods.py``. The floor, the minimum implied speed and the maximum gap
+    # were chosen by the track-construction-v4 study; the rest are starting values.
+    #: 10 h covers the longest oceanic reception holes the study measured.
+    link_max_gap_minutes: float = 600.0
+    #: Where aircraft are clearly en route rather than near an airport; chosen by
+    #: the track-construction-v4 study.
+    link_cruise_floor_ft: float = 18000.0
+    link_edge_vert_rate_fpm: float = 500.0
+    link_callsign_lookahead_minutes: float = 10.0
+    #: How old the callsign before a hole may be and still count. Bounded because
+    #: ``process_day`` reads this far behind the old edge, so two days' reads see
+    #: the same evidence: see ``tracks.required_lookback_hours``.
+    link_callsign_lookback_minutes: float = 60.0
+    #: How far from each edge of a hole to read through blank samples for a
+    #: position, because a position message often arrives after altitude and speed.
+    #: None inside it means split. Also bounds the edge's altitude, vertical rate and
+    #: speed: each reads its nearest ``LINK_EDGE_SAMPLES`` values inside this span,
+    #: past any blank samples. ``process_day`` reads at least this far behind the old
+    #: edge: see ``tracks.required_lookback_hours``.
+    link_edge_position_minutes: float = 5.0
+    #: 400 kt rejects nearly all hidden landings at small cost; chosen by the
+    #: track-construction-v4 study.
+    link_min_implied_speed_kt: float = 400.0
+    link_max_implied_speed_kt: float = 750.0
+    #: ``0.0`` turns this test off.
+    link_min_speed_ratio: float = 0.0
+    #: ``0.0`` turns this test off.
+    link_min_stop_minutes: float = 0.0
+    link_vfast_kt: float = 650.0
+    #: Let an old edge below the floor pass when it is climbing. On by default: an
+    #: aircraft lost while still climbing is outbound. Off keeps the floor as the only
+    #: test there. The study decides this apart from the new edge's setting.
+    link_old_edge_climb: bool = True
+    #: Let a new edge below the floor pass when it is descending. On by default since
+    #: the v5 study: the false joins version 4 counted against it were estimated truth
+    #: times outside Europe. Decided apart from the old edge's setting.
+    link_new_edge_descent: bool = True
     # A5-A7 knobs; unused by the gap family.
     ground_dwell_minutes: float = 5.0
     turnaround_max_height_ft: float = 1000.0

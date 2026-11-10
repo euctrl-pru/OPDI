@@ -221,8 +221,33 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
             )
     for name, value in (("ADEP", new_adep), ("ADES", new_ades)):
         actual = _as_named(name)
-        if actual is not None:
-            out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
+        if actual is None:
+            continue
+        # The alternatives list names the aerodromes that were not chosen, so it
+        # never names the row's own answer. A correction moves the chosen one:
+        # the new aerodrome leaves the list and the overruled one joins it. The
+        # removal is done on every pass, because this step rewrites every
+        # partition each run and reads lists it corrected before.
+        alternatives = _as_named(f"{name}_P")
+        if alternatives is not None:
+            final = F.coalesce(value, F.col(actual))
+            moved = value.isNotNull() & ~value.eqNullSafe(F.col(actual))
+            listed = F.filter(
+                F.split(F.coalesce(F.col(alternatives), F.lit("")), ", "),
+                lambda x: (x != "") & ~x.eqNullSafe(final),
+            )
+            with_old = F.when(
+                moved & F.col(actual).isNotNull(), F.concat(listed, F.array(F.col(actual)))
+            ).otherwise(listed)
+            cleaned = F.array_join(F.array_distinct(with_old), ", ")
+            # A NULL list stays NULL unless something moved: it is the published
+            # value on overflight rows and on the empty side of the flight table's
+            # join, and a row this step does not touch must not change.
+            out = out.withColumn(
+                alternatives,
+                F.when(F.col(alternatives).isNull() & ~moved, F.col(alternatives)).otherwise(cleaned),
+            )
+        out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
 
     return out.drop("_g_id", "_dep_apt", "_arr_apt")
 

@@ -1304,6 +1304,39 @@ class EventConfig:
     filter is a proxy for the same thing and leaks both ways: at 30 minutes it
     discards 4,364 real departures and still keeps hour-long circuits."""
 
+    # ----- holes inside a track (cruise-linked tracks) ------------------
+    track_hole_seconds: float = 1800.0
+    """A silence longer than this inside one track is a *hole*.
+
+    The ``cruise_linked`` track rule keeps one ``track_id`` across a reception
+    gap, so a track can hold hours in which nothing was received. No detector
+    pairs or interpolates samples across a hole: level segments and crossings
+    are found per *piece* -- the samples between two holes -- see
+    ``pipeline/holes.py``.
+
+    Equal to ``SegmentationConfig.gap_minutes`` on purpose, and a test holds the
+    two together. Earlier track rules break at every gap over that threshold, so
+    their tracks hold no hole and their events are unchanged."""
+
+    distance_from_last_known_position: bool = True
+    """Measure cumulative distance from the last *known* position.
+
+    Cleaning blanks a position it cannot trust and keeps the row. The released
+    distance (``distance_v0.0.2``) took each sample against the row before it,
+    so a blank position zeroed both the segment into it and the segment out of
+    it. On 2026-06-14, 23% of cleaned positions were blank and tracks came out
+    14% short in total. Reading the last known position instead closes that,
+    and across a hole it adds the straight line between the hole's edges -- a
+    lower bound on what was flown, and the only figure the data supports.
+
+    On: ``distance_v0.0.3``. Off, as under :meth:`legacy`: the released
+    ``distance_v0.0.2``, defect included, so a past month reproduces.
+
+    The change reaches further than the measurement itself: a level segment's
+    ``distance_nm``, and so the ``info`` of the level-off events, is a
+    difference of the cumulative distance, and moves with it on every track
+    with a blanked position. Event types and times do not move."""
+
     # ----- one variable per purpose (v0.3.0) ----------------------------
     merge_duplicate_milestones: Optional[bool] = None
     """Publish one event type per operational question rather than two.
@@ -1556,6 +1589,7 @@ class EventConfig:
             level_anchor="phase",
             airport_gate_above_field=False,
             airport_admit_on_ground=False,
+            distance_from_last_known_position=False,
             events_version="events_v0.0.2",
         )
 
@@ -1591,26 +1625,37 @@ class SegmentationConfig:
     with ``_{year}_{month}``.
 
     ``"standard"`` is a pointer to whatever arm this release recommends for
-    production; it is not itself an arm. As of this release it resolves to
-    ``"debounced"`` (A9): group on the airframe alone, split when the last
-    *non-blank* callsign genuinely changes, **but** ignore a callsign change
-    unless the new value persists for ``callsign_min_persistence_seconds``
-    (30 s) before the next transition -- so a callsign that flickers to a
-    garbled value and back does not split one flight into several. Until this
-    release ``"standard"`` resolved to ``"recommended"`` (A8), the same rule
-    without the persistence guard; A8 measured 23.1% of its track boundaries as
-    flicker artefacts, and the guard removes them for ~19% fewer tracks,
-    merge-neutral. A8 stays reachable under its own name ``"recommended"`` for
-    anyone reproducing data published between 2026-08-27 and this release.
+    production; it is not itself an arm. It resolves to ``"cruise_linked"``
+    (A10): group on the airframe alone; split when the last *non-blank*
+    callsign genuinely changes, ignoring a change unless the new value persists
+    for ``callsign_min_persistence_seconds`` (30 s), so a callsign that flickers
+    to a garbled value and back does not split one flight; split on a gap over
+    ``gap_minutes`` **unless** the two edges of the gap fit one continuous
+    flight, read from the ``link_*`` fields below, so a flight crossing an
+    en-route reception hole keeps one ``track_id``. A10 also forgets a callsign
+    not heard for longer than ``link_max_gap_minutes``, so two days' reads judge
+    a flicker after a hole alike (``methods.callsign_memory_minutes``).
+
+    The earlier arms stay reachable under their own names, for reproducing the
+    data each built: ``"debounced"`` (A9) is A10 without the link -- every gap
+    over ``gap_minutes`` splits -- and was ``"standard"`` from the A9 release
+    until the track-construction-v5 study; ``"recommended"`` (A8) is A9 without
+    the persistence guard and was ``"standard"`` from 2026-08-27 until the A9
+    release. A8 measured 23.1% of its track boundaries as flicker artefacts; the
+    guard removes them for ~19% fewer tracks, merge-neutral.
+
+    Under A10 ``process_day`` reads further back (11 h at the defaults, not 3)
+    and refuses a shorter explicit lookback; see ``tracks.required_lookback_hours``.
+    Event detectors work per *piece* across the holes a track now holds; see
+    ``EventConfig.track_hole_seconds``.
 
     .. warning::
 
-       **This changes ``track_id`` for all data produced from this release
-       forward**, in shape as well as value -- there is no ``_{year}_{month}``
-       suffix, and the debounce further changes which samples share an id
-       relative to A8. A consumer joining on ``track_id`` across either
-       boundary gets an empty join rather than an error, which reads as missing
-       data.
+       **Each change of ``"standard"`` changed ``track_id`` for all data produced
+       from then on**: no ``_{year}_{month}`` suffix since A8, the debounce since
+       A9, and since A10 one id where there were two across a linked hole. A
+       consumer joining on ``track_id`` across any of these boundaries gets an
+       empty join rather than an error, which reads as missing data.
 
        **Nothing in the published data says which rule produced a row.**
        ``osn_tracks`` carries no version column, so the only way to tell is to
@@ -1644,6 +1689,100 @@ class SegmentationConfig:
     `recommended` exactly -- what every dataset published between 2026-08-27 and
     this release uses -- so set ``method="recommended"`` (which ignores this
     field) rather than zeroing it if you need the A8 ``track_id``."""
+
+    link_max_gap_minutes: float = 600.0
+    """Longest reception hole the ``cruise_linked`` arm (A10) can link (minutes).
+
+    10 h, chosen by the track-construction-v4 study: it covers the longest oceanic
+    holes measured.
+
+    Also sets how far back ``process_day`` must read under that arm: see
+    ``tracks.required_lookback_hours``."""
+
+    link_cruise_floor_ft: float = 18000.0
+    """Lowest altitude at either edge of a hole A10 can link (feet).
+
+    18,000 ft, chosen by the track-construction-v4 study: the altitude above which
+    aircraft are clearly en route rather than near an airport."""
+
+    link_edge_vert_rate_fpm: float = 500.0
+    """Mean edge vertical rate past which a hole reads as descend-then-climb (ft/min)."""
+
+    link_callsign_lookahead_minutes: float = 10.0
+    """How far after a hole A10 looks for the first non-blank callsign (minutes)."""
+
+    link_callsign_lookback_minutes: float = 60.0
+    """How long before a hole's old edge a callsign may last have been seen and
+    still count against the one after the hole (minutes). Older counts as blank.
+
+    The bound is what keeps the decision from depending on where the read starts.
+    Without it, one day's read could see an old callsign and split a hole while the
+    next day's read, starting later, could not see it and link the same hole, and the
+    piece after the hole would be claimed by neither day. It adds to the lookback
+    ``process_day`` requires: see ``tracks.required_lookback_hours``. So two reads
+    disagreeing is prevented on the lookback side and detected on the lookahead side:
+    evidence past the read's end is not guarded, and ``process_day`` warns instead."""
+
+    link_edge_position_minutes: float = 5.0
+    """How far from each edge of a hole A10 reads through blank samples for a
+    position (minutes), because a position message often arrives after altitude and
+    speed. No position inside this span means split.
+
+    It also bounds the edge's altitude, vertical rate and speed: each reads its
+    nearest ``LINK_EDGE_SAMPLES`` values inside this span, past any blank samples.
+    Altitude arrives in a later message as position does. No altitude inside it means
+    split; no vertical rate inside it is neutral at cruise.
+
+    Must be below ``low_alt_gap_minutes``, or the read could cross a low-altitude
+    split into another flight; A10 raises otherwise. ``process_day`` reads at least
+    this far behind the old edge: see ``tracks.required_lookback_hours``."""
+
+    link_min_implied_speed_kt: float = 400.0
+    """Slowest great-circle speed across a hole A10 can link (knots).
+
+    400 kt, chosen by the track-construction-v4 study: it rejects nearly all hidden
+    landings at small cost."""
+
+    link_max_implied_speed_kt: float = 750.0
+    """Fastest great-circle speed across a hole A10 can link (knots). Above this
+    is a duplicate address, not wind."""
+
+    link_min_speed_ratio: float = 0.0
+    """Lowest implied speed over edge ground speed A10 can link. ``0.0`` is off."""
+
+    link_min_stop_minutes: float = 0.0
+    """Time left over at ``link_vfast_kt`` that reads as room for a stop (minutes).
+    ``0.0`` is off."""
+
+    link_vfast_kt: float = 650.0
+    """Fastest plausible ground speed, for ``link_min_stop_minutes`` (knots)."""
+
+    link_old_edge_climb: bool = True
+    """Whether an old edge below ``link_cruise_floor_ft`` can still link when it is
+    climbing past ``link_edge_vert_rate_fpm``: the mean of the edge's nearest vertical
+    rates, resting on at least ``methods.LINK_DIRECTION_MIN_RATES`` (3) of them. A
+    NULL vertical rate does not count, and fewer than three do not pass.
+
+    On by default: an aircraft lost while still climbing is outbound, so the next
+    sighting is the same flight. Set apart from ``link_new_edge_descent`` because the
+    study decides them apart."""
+
+    link_new_edge_descent: bool = True
+    """Whether a new edge below ``link_cruise_floor_ft`` can still link when it is
+    descending past ``link_edge_vert_rate_fpm``, on at least three vertical rates. A
+    NULL vertical rate does not count, and a new edge the low-altitude gap breaks at
+    (below ``low_alt_ft``) splits whatever this says.
+
+    On by default since the track-construction-v5 study. Version 4 switched it off
+    on 3 false joins in 119 checkable holes linked only this way; v5 found all three
+    were Network Manager *estimated* arrival times at Seoul, one to six minutes
+    before an ADS-B sample showing the aircraft still airborne on descent, and the
+    study's labeller no longer takes events outside Europe as evidence. Re-measured:
+    0 false joins in 117 checkable such holes over the two days, 0 of 77,911
+    artificial hidden landings with a descending edge joined (the straight-line speed
+    check rejects them), 1,437 holes linked only this way. Set apart from
+    ``link_old_edge_climb`` because the study decides them apart; ``False``
+    reproduces the version-4 rule."""
 
     ground_dwell_minutes: float = 5.0
     """On-ground dwell above which a ground contact is a turnaround (minutes)."""

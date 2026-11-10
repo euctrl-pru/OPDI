@@ -192,6 +192,10 @@ LADDER = [
             "events_version": "events_v0.3.0",
         },
     ),
+    # Cumulative distance from the last known position (distance_v0.0.3): the
+    # released measurement lost two segments around every blanked position. No
+    # event type or time moves; a level-off's info.distance_nm does.
+    ("L15_distance_known_position", {"distance_from_last_known_position": True}),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
@@ -213,6 +217,8 @@ V020_BASE = dict(
 #: `EventConfig()` field for field -- `verify_plan_v4` asserts both rather than
 #: trusting them.
 V4_BASE = dict(
+    # The released distance measured each sample against the row before it.
+    distance_from_last_known_position=False,
     emit_runway_milestones=False,
     # Named rather than left to follow ``emit_runway_milestones``: this dict is
     # a literal reconstruction, and a field that differs from the shipped
@@ -263,6 +269,7 @@ LADDER_V4 = [
         "ring_radii_nm": (40.0, 50.0, 60.0, 100.0, 110.0, 120.0),
         "events_version": "events_v0.3.0",
     }),
+    ("V09_distance_known_position", {"distance_from_last_known_position": True}),
 ]
 
 #: Rungs that are allowed to be config-identical to the rung before them,

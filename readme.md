@@ -322,6 +322,62 @@ truth. A worldwide run is a wider *pipeline* output, not a benchmarked one; a
 paper or dashboard using it must say so rather than carrying European
 accuracy figures across.
 
+## `cruise_linked` track segmentation (A10)
+
+**The default.** `standard` points to `cruise_linked` since the track-construction-v5
+study; before that it pointed to `debounced` (A9), which stays selectable by name.
+`cruise_linked` is A9 with one change: a reception gap over 30 minutes does not end
+a track when the evidence at its two edges fits one continuous flight (both edges at
+cruise or the old edge still climbing, a plausible implied speed, an agreeing
+callsign, no descent then climb). No sample is invented: the hole stays empty and
+only the identity changes. A callsign change and a short gap at low altitude still
+split. A track can therefore hold a *hole*, hours in which nothing was received;
+the event detectors that pair or interpolate samples (level segments, flight-level
+and ring crossings) work per *piece* between holes, and cumulative distance adds
+the straight line across one (`EventConfig.track_hole_seconds`,
+`pipeline/holes.py`).
+
+Each edge's altitude, vertical rate and speed read their own nearest five values
+within `link_edge_position_minutes`, past any blank samples, because altitude often
+arrives in a later message. No altitude in that span means split. Two settings let
+an edge below the cruise floor link on its direction, both on by default and both
+provisional on about a hundred checkable holes each: `link_old_edge_climb`, for an
+old edge still climbing (0 false joins in 185 checkable holes in v4), and
+`link_new_edge_descent`, for a new edge descending. V4 had switched descent off on
+3 false joins in 119; v5 found all three were estimated Network Manager arrival
+times at Seoul, minutes before ADS-B still showed the aircraft airborne, and the
+study's labelling no longer takes events outside Europe as evidence (0 in 117 since).
+
+To run the previous rule instead:
+
+```python
+config = OPDIConfig.for_environment("opensky")
+config.segmentation.method = "debounced"   # A9; "recommended" is A8, "legacy" the pre-2026-08-27 rule
+```
+
+What differs from the other rules when you run it:
+
+- **`process_day` reads 11 hours back at the defaults, not 3**, because a piece
+  after midnight can belong to a track whose old piece ended up to
+  `link_max_gap_minutes` earlier, and the decision also reads evidence behind that
+  edge. See `tracks.required_lookback_hours`.
+- **A shorter explicit `lookback_hours` raises `ValueError`.** Two days could
+  otherwise decide one hole differently, and samples after midnight would be
+  claimed twice or by neither.
+- **Segmentation is slower.** Each edge's frame spans `link_edge_position_minutes`,
+  so at 5 s cadence it reads up to 60 samples per row. On the study's pipeline day,
+  steps 02 to 04b under this rule took about 27 minutes on a 10% sample.
+- **The truncation warning is wider and noisier.** Its margin grows from 60 s to
+  `link_max_gap_minutes` plus the longer of `link_callsign_lookahead_minutes` and
+  `link_edge_position_minutes`, because a hole can straddle the end of the read.
+  A track named there may have lost its tail, or may simply be long. Past the end
+  of the read a wrong decision is detected like this, not prevented.
+
+**Its promotion is a further silent `track_id` boundary**, after those at A8 and
+A9: a join across it returns nothing rather than an error, and `osn_tracks` has no
+version column to say which rule produced a row. The evidence is in
+`opdi-portal/papers/track-construction-v5/` (and v4, which it supersedes).
+
 ## Building a flight list
 
 Step 03 turns tracks into a flight list: one row per flight with a departure

@@ -1105,7 +1105,11 @@ class FlightListProcessor:
         )
         cand = cand.withColumn("_eff", col("dist_nm") + penalty)
 
-        w = Window.partitionBy("track_id", "role").orderBy(col("_eff").asc_nulls_last())
+        # The identifier settles an exact tie, so the same candidates give the
+        # same aerodrome whatever order they are read in.
+        w = Window.partitionBy("track_id", "role").orderBy(
+            col("_eff").asc_nulls_last(), col("apt_ident").asc()
+        )
         best = cand.withColumn("_r", row_number().over(w)).filter(col("_r") == 1)
 
         if mode == "nearest":
@@ -1480,13 +1484,25 @@ class FlightListProcessor:
                 order_col.asc_nulls_last(),
             ]
 
-        window_closest = Window.partitionBy(key_columns).orderBy(*order_by)
+        # Last key: the identifier. Two candidates the keys above cannot
+        # separate -- one aerodrome listed under two identifiers -- must come
+        # out the same way on every run.
+        window_closest = Window.partitionBy(key_columns).orderBy(
+            *order_by, col("apt_ident").asc()
+        )
 
         df_numbered = flight_table.withColumn("row_number", row_number().over(window_closest))
         df_numbered = df_numbered.withColumn("is_most_likely", col("row_number") == 1)
 
+        # The named aerodrome is read off the row ranked first. This was
+        # ``first(apt_ident)``, which returns whichever row the aggregation
+        # meets first: usually the ranked one, but not once a task holds enough
+        # groups for the aggregation to fall back to sorting. About 1% of named
+        # aerodromes were then one of the alternatives.
         result_df = df_numbered.groupBy(key_columns).agg(
-            expr("first(apt_ident) as most_likely_airport"),
+            f_max(when(col("is_most_likely"), col("apt_ident"))).alias(
+                "most_likely_airport"
+            ),
             collect_list(
                 expr("case when not is_most_likely then apt_ident end")
             ).alias("potential_airports"),
@@ -1787,6 +1803,12 @@ class FlightListProcessor:
         processor. ``finally`` clears it, because a day left set would turn a
         later month-scoped call on this same processor into a one-day read
         that reports itself as a month.
+
+        The endpoint candidates are always built again. They are a cache of
+        each track's two end samples, and a day is re-run precisely when its
+        tracks were rebuilt: trusting the "already built" log then leaves
+        candidates for tracks that no longer exist, and the flight list comes
+        out with rows that have no track.
         """
         self._batch_day = day
         try:
@@ -1796,6 +1818,7 @@ class FlightListProcessor:
                 skip_if_processed=skip_if_processed,
                 adep_mode=adep_mode,
                 ades_mode=ades_mode,
+                rebuild_candidates=True,
             )
             self.process_overflights(day, skip_if_processed)
         finally:
@@ -1814,6 +1837,7 @@ class FlightListProcessor:
         sched_penalty_nm: Optional[float] = None,
         table_name: str = "opdi_flight_list",
         write_mode: str = "overwrite",
+        rebuild_candidates: bool = False,
     ) -> None:
         """
         Process Departures/Arrivals/Internal flights for a month.
@@ -1823,6 +1847,8 @@ class FlightListProcessor:
             airports_hex_path: Path to local airport hex zones parquet (optional,
                 falls back to StorageManager table).
             skip_if_processed: Skip if month already processed.
+            rebuild_candidates: Build the endpoint candidates again even where
+                the log says they exist. :meth:`process_day` sets it.
         """
         if skip_if_processed and month in self._load_processed_months(self._dai_log):
             print(f"Month DAI {month} already processed. Skipping.")
@@ -1894,7 +1920,9 @@ class FlightListProcessor:
             # flight list with different thresholds does not invalidate the
             # candidates, which is the entire point of caching them.
             self.build_endpoint_candidates(
-                month, max_radius_nm=d.endpoint_candidate_radius_nm
+                month,
+                max_radius_nm=d.endpoint_candidate_radius_nm,
+                rebuild=rebuild_candidates,
             )
             cand = self._get_data_within_timeframe("opdi_endpoint_candidates", month)
             classified = self.classify_endpoints(

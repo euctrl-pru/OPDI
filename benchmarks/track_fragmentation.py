@@ -33,6 +33,7 @@ script prints is also staged as a CSV, one row per (arm, hold) combination.
 import argparse
 import csv
 from pathlib import Path
+from typing import Optional
 
 from pyspark.sql import functions as F
 
@@ -45,62 +46,69 @@ from opdi.utils.storage import StorageManager
 RESEARCH = "s3a://eurocontrol/opdi/research"
 
 
-def measure(sv, arm: str, hold: float):
-    params = SegmentationParams.from_config(
-        SegmentationConfig(callsign_min_persistence_seconds=hold)
-    )
-    tracked = assign_track_id(sv, ARMS[arm](), params)
+def measure(sv, arm: str, hold: float, params: Optional[SegmentationParams] = None):
+    """The counts for one arm. ``params`` defaults to the config at this ``hold``."""
+    if params is None:
+        params = SegmentationParams.from_config(
+            SegmentationConfig(callsign_min_persistence_seconds=hold)
+        )
+    # Held, because each count below would otherwise redo the whole segmentation.
+    tracked = assign_track_id(sv, ARMS[arm](), params).persist()
 
-    real = F.when(F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
-                  F.trim(F.col("callsign")))
-    per_track = tracked.groupBy("track_id").agg(
-        F.first("icao24", ignorenulls=True).alias("icao24"),
-        # `collect_set` rather than `first`: the guard below needs to know a
-        # track holds two *different* callsigns, which a single value hides.
-        F.collect_set(real).alias("callsigns"),
-    )
-    # A track's representative callsign, for grouping tracks into flights.
-    # `F.get(..., 0)` on the sorted set is null-tolerant -- an all-blank track
-    # yields an empty set and NULL here rather than throwing -- and
-    # deterministic, unlike indexing the unordered `collect_set` directly.
-    # Tracks with no real callsign group under NULL, which is correct: they
-    # cannot be identified as a flight.
-    rep = F.get(F.sort_array(F.col("callsigns")), 0)
-    per_flight = per_track.withColumn("cs", rep).groupBy("icao24", "cs") \
-        .agg(F.count(F.lit(1)).alias("n_tracks"))
+    try:
+        real = F.when(F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
+                      F.trim(F.col("callsign")))
+        per_track = tracked.groupBy("track_id").agg(
+            F.first("icao24", ignorenulls=True).alias("icao24"),
+            # `collect_set` rather than `first`: the guard below needs to know a
+            # track holds two *different* callsigns, which a single value hides.
+            F.collect_set(real).alias("callsigns"),
+        )
+        # A track's representative callsign, for grouping tracks into flights.
+        # `F.get(..., 0)` on the sorted set is null-tolerant -- an all-blank track
+        # yields an empty set and NULL here rather than throwing -- and
+        # deterministic, unlike indexing the unordered `collect_set` directly.
+        # Tracks with no real callsign group under NULL, which is correct: they
+        # cannot be identified as a flight.
+        rep = F.get(F.sort_array(F.col("callsigns")), 0)
+        per_flight = per_track.withColumn("cs", rep).groupBy("icao24", "cs") \
+            .agg(F.count(F.lit(1)).alias("n_tracks"))
 
-    # THE GUARD. A track that swallowed a flicker legitimately contains the
-    # real callsign AND the transient garble, so counting *distinct raw*
-    # callsigns per track cannot tell a suppressed flicker from a genuine merge
-    # of two real flights -- both show set size 2. It must instead count
-    # distinct *persisted* callsigns: a callsign whose samples span at least
-    # `hold` seconds within the track. A garble spans one-to-a-few samples
-    # (< hold); a genuinely merged second flight spans minutes. So this stays
-    # near recommended value if the arm only ever swallows flickers, and rises
-    # to thousands only if it is wrongly fusing distinct flights -- the one
-    # thing the verification must be able to detect.
-    ts = F.unix_timestamp("event_time")
-    cs_span = (
-        tracked.groupBy("track_id", real.alias("cs"))
-        .agg((F.max(ts) - F.min(ts)).alias("span_s"))
-        .filter(F.col("cs").isNotNull() & (F.col("span_s") >= F.lit(hold)))
-    )
-    merged_persisted = (
-        cs_span.groupBy("track_id").agg(F.count(F.lit(1)).alias("n_cs"))
-        .filter(F.col("n_cs") > 1).count()
-    )
-    return {
-        "arm": arm,
-        "hold_s": hold,
-        "tracks": tracked.select("track_id").distinct().count(),
-        "tracks_per_flight": per_flight.agg(F.avg("n_tracks")).collect()[0][0],
-        # Informative, not the guard: flicker-containing tracks show here, so a
-        # rise is expected and correct for the debounced arm.
-        "tracks_2plus_raw_callsigns":
-            per_track.filter(F.size("callsigns") > 1).count(),
-        # The guard. Must stay near recommended value.
-        "tracks_2plus_persisted_callsigns": merged_persisted,
-    }
+        # THE GUARD. A track that swallowed a flicker legitimately contains the
+        # real callsign AND the transient garble, so counting *distinct raw*
+        # callsigns per track cannot tell a suppressed flicker from a genuine merge
+        # of two real flights -- both show set size 2. It must instead count
+        # distinct *persisted* callsigns: a callsign whose samples span at least
+        # `hold` seconds within the track. A garble spans one-to-a-few samples
+        # (< hold); a genuinely merged second flight spans minutes. So this stays
+        # near recommended value if the arm only ever swallows flickers, and rises
+        # to thousands only if it is wrongly fusing distinct flights -- the one
+        # thing the verification must be able to detect.
+        ts = F.unix_timestamp("event_time")
+        cs_span = (
+            tracked.groupBy("track_id", real.alias("cs"))
+            .agg((F.max(ts) - F.min(ts)).alias("span_s"))
+            .filter(F.col("cs").isNotNull() & (F.col("span_s") >= F.lit(hold)))
+        )
+        merged_persisted = (
+            cs_span.groupBy("track_id").agg(F.count(F.lit(1)).alias("n_cs"))
+            .filter(F.col("n_cs") > 1).count()
+        )
+        counts = {
+            "arm": arm,
+            "hold_s": hold,
+            "tracks": tracked.select("track_id").distinct().count(),
+            "tracks_per_flight": per_flight.agg(F.avg("n_tracks")).collect()[0][0],
+            # Informative, not the guard: flicker-containing tracks show here, so a
+            # rise is expected and correct for the debounced arm.
+            "tracks_2plus_raw_callsigns":
+                per_track.filter(F.size("callsigns") > 1).count(),
+            # The guard. Must stay near recommended value.
+            "tracks_2plus_persisted_callsigns": merged_persisted,
+        }
+        return counts
+    finally:
+        tracked.unpersist()
 
 
 def main() -> None:

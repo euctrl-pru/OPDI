@@ -18,7 +18,7 @@ from conftest import make_track
 
 from opdi.config import OPDIConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
-from opdi.pipeline.segmentation.methods import debounced, recommended
+from opdi.pipeline.segmentation.methods import cruise_linked
 from opdi.pipeline.tracks import TrackProcessor
 
 
@@ -61,6 +61,36 @@ FLICKER = (
 )
 
 
+#: One airframe at cruise, 1,530 NM and 191 minutes across a reception hole: 480 kt.
+#: A9 splits it, and A10 keeps it whole. Selecting A10 must need no patching.
+HOLE = (
+    [{"t": i * 5, "baro_altitude": 11000.0, "lat": 0.0, "lon": 0.0,
+      "vert_rate": 0.0, "callsign": "DLH1"} for i in range(10)]
+    + [{"t": 45 + 191 * 60 + i * 5, "baro_altitude": 11000.0, "lat": 0.0, "lon": 25.48,
+        "vert_rate": 0.0, "callsign": "DLH1"} for i in range(10)]
+)
+
+
+def test_cruise_linked_is_selectable_through_the_pipeline(spark, tmp_path):
+    df = make_track(spark, HOLE)
+    processor = _proc(spark, tmp_path, "cruise_linked")
+
+    through_pipeline = processor._add_track_id_segmentation(df, "cruise_linked")
+    assert len(_partition(through_pipeline)) == 1
+    assert _partition(through_pipeline) == _partition(
+        assign_track_id(df, cruise_linked(), SegmentationParams())
+    )
+    assert len(_partition(processor._add_track_id(df))) == 1
+    assert len(_partition(_proc(spark, tmp_path, "debounced")._add_track_id(df))) == 2
+
+
+def test_a_transatlantic_hole_is_one_track_by_default(spark, tmp_path):
+    """The switch has been thrown: `standard` now links across the hole."""
+    df = make_track(spark, HOLE)
+    assert len(_partition(_proc(spark, tmp_path, "standard")._add_track_id(df))) == 1
+    assert len(_partition(_proc(spark, tmp_path)._add_track_id(df))) == 1
+
+
 def test_the_default_is_now_standard(spark, tmp_path):
     """The switch has been thrown: production ids change unless legacy is selected.
 
@@ -89,24 +119,25 @@ def test_standard_changes_the_partition(spark, tmp_path):
 def test_standard_is_the_arm_the_study_benchmarked(spark, tmp_path):
     """Production and the benchmark must be one algorithm, not two.
 
-    As of this release ``standard`` resolves to ``debounced`` (A9), so the arm
-    it must match is ``debounced`` -- with ``SegmentationParams()``, whose
-    persistence default (30 s) is the shipped one. Compared as partitions
-    rather than id strings: the study's harness and the pipeline are entitled to
-    format ids differently, but if they ever group samples differently then the
-    published numbers describe something other than what runs.
+    ``standard`` resolves to ``cruise_linked`` (A10), so the arm it must match
+    is ``cruise_linked`` -- with ``SegmentationParams()``, the shipped settings.
+    Compared as partitions rather than id strings: the study's harness and the
+    pipeline are entitled to format ids differently, but if they ever group
+    samples differently then the published numbers describe something other
+    than what runs.
     """
-    df = make_track(spark, FLICKER)
-    through_pipeline = _proc(spark, tmp_path, "standard")._add_track_id(df)
-    through_study = assign_track_id(df, debounced(), SegmentationParams())
-    assert _partition(through_pipeline) == _partition(through_study)
+    for samples in (FLICKER, HOLE):
+        df = make_track(spark, samples)
+        through_pipeline = _proc(spark, tmp_path, "standard")._add_track_id(df)
+        through_study = assign_track_id(df, cruise_linked(), SegmentationParams())
+        assert _partition(through_pipeline) == _partition(through_study)
 
 
 def test_standard_now_debounces_where_recommended_would_split(spark, tmp_path):
     """The flip is real, not cosmetic: ``standard`` no longer equals A8.
 
     On a sub-30 s callsign flicker A8 (``recommended``) splits one flight into
-    three tracks; the shipped ``standard`` (``debounced`` at 30 s) keeps it
+    three tracks; the shipped ``standard`` (A10, which keeps A9's guard) keeps it
     whole. If ``standard`` ever silently reverted to A8 this partition would
     jump from one group to three.
     """

@@ -141,7 +141,9 @@ def test_the_v4_baseline_is_v0_1_0_and_nothing_else():
     }
 
     assert differing == set(V4_BASE)
-    assert len(V4_BASE) == 9
+    # Nine reconstructed v0.1.0 fields, plus the released distance method
+    # (distance_v0.0.2), which the V09 rung turns off.
+    assert len(V4_BASE) == 10
 
 
 def test_the_last_v4_rung_is_exactly_what_ships():

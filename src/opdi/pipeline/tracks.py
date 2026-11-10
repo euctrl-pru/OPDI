@@ -9,6 +9,7 @@ Transforms raw state vectors into structured flight tracks with:
 - Altitude cleaning
 """
 
+import math
 import os
 from datetime import date, datetime, timedelta
 from typing import List, Optional
@@ -98,12 +99,60 @@ def tracks_touching_window_end(df, read_end, margin_seconds=60):
     Counting them is how the lookahead gets checked against reality instead of
     being trusted. A healthy run returns zero; a non-zero count means
     ``lookahead_hours`` is too short for this traffic.
+
+    ``process_day`` widens the margin to ``link_max_gap_minutes`` plus the longer of
+    ``link_callsign_lookahead_minutes`` and ``link_edge_position_minutes`` under
+    ``cruise_linked``. There a hole can straddle ``read_end``, which leaves the last
+    read sample far from the edge while the rest of the track waits beyond it.
     """
     per_track = df.groupBy("track_id").agg(
         f_max("event_time").alias("_track_last_sample")
     )
     cutoff = lit(read_end) - expr(f"INTERVAL {int(margin_seconds)} SECONDS")
     return per_track.filter(col("_track_last_sample") >= cutoff)
+
+
+def _resolve_segmentation_method(method: str) -> str:
+    """The arm a configured method names: ``standard`` is a pointer, not an arm.
+
+    It resolves to ``cruise_linked`` (A10) since the track-construction-v5 study,
+    to ``debounced`` (A9) before that, and to ``recommended`` (A8) from
+    2026-08-27 until A9; see ``SegmentationConfig.method``. Each earlier arm
+    stays reachable under its own name.
+    """
+    return "cruise_linked" if method == "standard" else method
+
+
+def required_lookback_hours(method: str, p) -> int:
+    """Hours ``process_day`` must read before the day under *method*.
+
+    For most arms a break is a local condition, so any silence longer than the gap
+    rule proves a sample starts a track, and ``DEFAULT_LOOKBACK_HOURS`` is plenty.
+    ``cruise_linked`` breaks that: a piece after midnight may belong to a track
+    whose old piece ended up to ``link_max_gap_minutes`` earlier. If the read window
+    misses the old piece, the day sees a new track and claims it, while the day
+    before claims the same samples inside the linked track, under another id.
+
+    The longest of ``link_callsign_lookback_minutes``,
+    ``link_edge_position_minutes`` and the callsign persistence hold is added
+    because the decision also reads the callsign and the position that far behind
+    the old edge, and the callsign guard remembers a callsign for the longest
+    linkable hole plus the hold (``methods.callsign_memory_minutes``). Every day's
+    read must hold that evidence, or two days decide one hole differently and a
+    piece can be claimed by no day at all. Taking the longest rather than assuming
+    the callsign's covers it means no setting can move the evidence outside the read.
+    """
+    if _resolve_segmentation_method(method) == "cruise_linked":
+        behind_the_edge = max(
+            p.link_callsign_lookback_minutes,
+            p.link_edge_position_minutes,
+            p.callsign_min_persistence_seconds / 60.0,
+        )
+        return max(
+            TrackProcessor.DEFAULT_LOOKBACK_HOURS,
+            math.ceil(p.link_max_gap_minutes / 60) + math.ceil(behind_the_edge / 60),
+        )
+    return TrackProcessor.DEFAULT_LOOKBACK_HOURS
 
 
 class TrackProcessor:
@@ -128,11 +177,12 @@ class TrackProcessor:
 
     So the algorithm is selected by ``config.segmentation.method``. ``legacy``
     reproduces the published ids byte for byte and remains selectable;
-    ``standard`` is the study's recommendation and, as of this release, the
-    default -- it now resolves to ``debounced`` (A9), the callsign-flicker-aware
-    arm, having resolved to ``recommended`` (A8) before it. All delegate to
-    ``pipeline/segmentation``, so production runs the code the study measured
-    rather than a second implementation of the same prose.
+    ``standard`` is the study's recommendation and the default -- it resolves
+    to ``cruise_linked`` (A10), which keeps one track across an en-route
+    reception hole, having resolved to ``debounced`` (A9) and before that to
+    ``recommended`` (A8). All delegate to ``pipeline/segmentation``, so
+    production runs the code the study measured rather than a second
+    implementation of the same prose.
     """
 
     def __init__(
@@ -261,7 +311,8 @@ class TrackProcessor:
         ``standard`` -- the track-construction study's recommendation, delegated
         to ``pipeline.segmentation`` so production runs the benchmarked code.
         Grouping is on ``icao24`` alone, a genuine non-blank callsign change is
-        an additional break, and the id has no year/month suffix.
+        an additional break, a reception hole whose edges fit one flight is not
+        a break, and the id has no year/month suffix.
 
         The legacy branch below is left exactly as it was written, including its
         own column names and comments: it is what reproduces the published ids,
@@ -357,13 +408,13 @@ class TrackProcessor:
         # recommends -- not an arm itself. Two names because they answer
         # different questions: inside the study an arm is one candidate among
         # several, while a deployment wants to name the segmentation it runs
-        # without implying a comparison it is not making. As of this release
-        # "standard" resolves to "debounced" (A9); before it it resolved to
-        # "recommended" (A8). Both stay reachable under their own names -- A8 as
-        # "recommended" for reproducing data published before this release.
+        # without implying a comparison it is not making. "standard" resolves
+        # to "cruise_linked" (A10); before the v5 study it resolved to
+        # "debounced" (A9), and before 2026-08-27 to "recommended" (A8). Each
+        # stays reachable under its own name for reproducing the data it built.
         # Every other arm name is accepted too, which is what lets the benchmark
         # drive the real pipeline instead of a harness that only resembles it.
-        resolved = "debounced" if method == "standard" else method
+        resolved = _resolve_segmentation_method(method)
         if resolved not in ARMS:
             known = sorted(set(ARMS) | {"standard"})
             raise ValueError(
@@ -651,7 +702,8 @@ class TrackProcessor:
     #: Hours read before the day, so a track overlapping midnight can be told
     #: from one that genuinely starts just after it. Only has to exceed the gap
     #: threshold (30 min): a break is a local condition, so three hours of
-    #: silence in front of a sample already proves it starts a track.
+    #: silence in front of a sample already proves it starts a track. Not so
+    #: under ``cruise_linked``, which ``required_lookback_hours`` reads further for.
     DEFAULT_LOOKBACK_HOURS = 3
 
     #: Hours read after the day, so a track starting inside it is complete.
@@ -682,8 +734,34 @@ class TrackProcessor:
 
         A track running past midnight is processed by the day it *started*,
         in full -- that is what the lookahead is for.
+
+        The lookback defaults to ``required_lookback_hours``: 3 h, or under
+        ``cruise_linked`` ``max(3, ceil(link_max_gap_minutes / 60) +
+        ceil(max(link_callsign_lookback_minutes, link_edge_position_minutes) / 60))``,
+        which is 11 h at the defaults.
+
+        Raises:
+            ValueError: ``lookback_hours`` is below that under ``cruise_linked``.
+                Two days could then decide one hole differently, and samples after
+                midnight would be claimed twice or not at all. That disagreement is
+                prevented on the lookback side, by this check, and detected on the
+                lookahead side, by the truncation warning below: a hole or its evidence
+                past the read's end is reported, not avoided. Other arms decide breaks
+                locally, so their explicit value is taken as given.
         """
-        lookback = self.DEFAULT_LOOKBACK_HOURS if lookback_hours is None else lookback_hours
+        from opdi.pipeline.segmentation import SegmentationParams
+
+        method = self.config.segmentation.method
+        params = SegmentationParams.from_config(self.config.segmentation)
+        links_across_holes = _resolve_segmentation_method(method) == "cruise_linked"
+        required = required_lookback_hours(method, params)
+        lookback = required if lookback_hours is None else lookback_hours
+        if links_across_holes and lookback < required:
+            raise ValueError(
+                f"lookback_hours={lookback} under {method!r} is under the {required} "
+                f"hours a linked track can reach back: samples after midnight could "
+                f"be claimed by two days or by none"
+            )
         lookahead = (
             self.DEFAULT_LOOKAHEAD_HOURS if lookahead_hours is None else lookahead_hours
         )
@@ -714,13 +792,32 @@ class TrackProcessor:
         written = self.storage.read_table("osn_tracks").filter(
             col("dof") == lit(day)
         )
-        n_truncated = tracks_touching_window_end(written, read_end).count()
+        # Under a link the last sample can be a whole hole short of the read end, and
+        # the verdict on that hole also reads this far past its new edge.
+        margin_seconds = (
+            (
+                params.link_max_gap_minutes
+                + max(params.link_callsign_lookahead_minutes, params.link_edge_position_minutes)
+            )
+            * 60
+            if links_across_holes
+            else 60
+        )
+        n_truncated = tracks_touching_window_end(
+            written, read_end, margin_seconds=margin_seconds
+        ).count()
         if n_truncated:
+            # The margin under a link is hours wide, so a healthy track ending inside
+            # it is ordinary rather than a loss.
+            consequence = (
+                "Their tails may be missing, or the track is simply long"
+                if links_across_holes
+                else "Their tails may be missing and no other day will claim them"
+            )
             print(
-                f"  WARNING: {n_truncated} track(s) starting on {day} were "
-                f"still transmitting at the end of the read window "
-                f"({read_end:{fmt}}). Their tails are missing and no other "
-                f"day will claim them. Re-run this day with a larger "
+                f"  WARNING: {n_truncated} track(s) starting on {day} ended within "
+                f"{margin_seconds:.0f} s of the end of the read window "
+                f"({read_end:{fmt}}). {consequence}. Re-run this day with a larger "
                 f"lookahead_hours (currently {lookahead})."
             )
         else:
