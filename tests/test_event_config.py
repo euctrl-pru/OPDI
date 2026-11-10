@@ -85,6 +85,7 @@ def test_every_new_behaviour_is_off_under_legacy():
     # The navigation families (2026-11) did not exist either.
     assert legacy.emit_holding is False
     assert legacy.emit_point_merge is False
+    assert legacy.emit_fir_crossings is False
 
 
 def test_the_shipped_new_behaviours_are_on():
@@ -108,6 +109,7 @@ def test_the_shipped_new_behaviours_are_on():
     assert e.emit_level_offs is True
     assert e.emit_holding is True
     assert e.emit_point_merge is True
+    assert e.emit_fir_crossings is True
 
 
 def test_version_string_is_new_and_the_published_one_is_untouched():

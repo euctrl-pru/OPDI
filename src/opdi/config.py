@@ -1459,6 +1459,23 @@ class EventConfig:
     """The track must come within this of the merge point for the direct to
     count, and ``pms-merge-point`` is emitted at the closest approach."""
 
+    # ----- FIR crossings ----------------------------------------------------
+    emit_fir_crossings: bool = True
+    """Emit ``xing-fir`` (version ``fir_v0.1.0``): one event per change of FIR
+    volume along a track, from the compact H3 reference step 00c builds
+    (``opdi_h3_airspace_ref``, FIR layer). The volumes are the Network
+    Manager model: lower FIRs and upper UIRs, so a climb through FL195 or
+    FL245 is a crossing like a lateral one. Every event carries the CFMU AIRAC
+    cycle the definition came from (524 today, valid 2024-11-28 to
+    2024-12-26, the newest public set). See ``pipeline/fir.py``."""
+
+    fir_min_dwell_seconds: float = 60.0
+    """A run of samples in one volume shorter than this is absorbed into the
+    preceding run: a track skimming a boundary at resolution 7 (1.2 km cells)
+    flips cells every few seconds, and each flip would otherwise be two
+    crossings. The persistence idea of the A9 callsign rule, applied to
+    airspace."""
+
     distance_from_last_known_position: bool = True
     """Measure cumulative distance from the last *known* position.
 
@@ -1733,6 +1750,7 @@ class EventConfig:
             distance_from_last_known_position=False,
             emit_holding=False,
             emit_point_merge=False,
+            emit_fir_crossings=False,
             events_version="events_v0.0.2",
         )
 
