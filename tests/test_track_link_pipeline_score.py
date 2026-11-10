@@ -918,7 +918,7 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
             ]
         return spark.createDataFrame(
             rows, "id string, flight_id string, type string, event_time timestamp"
-        ).withColumn("dof", F.to_date(F.lit(day)))
+        ).withColumn("info", F.lit("{}")).withColumn("dof", F.to_date(F.lit(day)))
 
     def measurements_of(events):
         return events.select(
@@ -1128,6 +1128,18 @@ def test_an_unchanged_track_with_another_airport_or_event_is_counted(spark):
         "unchanged_tracks_with_other_airports": 1,
         "unchanged_tracks_with_other_events": 1,
     }
+
+
+def test_an_unchanged_track_whose_events_differ_only_in_info_is_counted(spark):
+    # The event's info carries measured figures (a level-off's distance), which must
+    # agree too: the same track must give the same events in full.
+    split = _tracks(spark, ("S1", "abc123", 0, 600))
+    linked = _tracks(spark, ("L1", "abc123", 0, 600))
+    rows = _flight_list(spark, ("S1", "EDDF", None, "", ""), ("L1", "EDDF", None, "", ""))
+    a = _events(spark, ("S1", "level-off-climb-start", 0)).withColumn("info", F.lit('{"distance_nm": 10}'))
+    b = _events(spark, ("L1", "level-off-climb-start", 0)).withColumn("info", F.lit('{"distance_nm": 12}'))
+    row = s.unchanged_track_row(s.unchanged_tracks(split, linked), rows, rows, a, b)
+    assert row["unchanged_tracks_with_other_events"] == 1
 
 
 def test_unchanged_tracks_that_agree_count_nothing(spark):

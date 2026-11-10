@@ -671,7 +671,12 @@ def unchanged_track_row(
         )
 
     def event_set(events: DataFrame, key: str, name: str) -> DataFrame:
-        mark = F.struct(F.col("type"), F.col("event_time"))
+        # ``info`` too, where the table has it: it carries measured figures such
+        # as a level-off's distance, which must agree as well.
+        fields = [F.col("type"), F.col("event_time")]
+        if "info" in events.columns:
+            fields.append(F.col("info"))
+        mark = F.struct(*fields)
         return events.groupBy(F.col("flight_id").alias(key)).agg(
             F.sort_array(F.collect_list(mark)).alias(name)
         )
@@ -1092,7 +1097,7 @@ def score_day(
         for arm in ARMS
     }
     events = {
-        arm: read(arm, "opdi_flight_events").select("id", "flight_id", "type", "event_time")
+        arm: read(arm, "opdi_flight_events").select("id", "flight_id", "type", "event_time", "info")
         for arm in ARMS
     }
 

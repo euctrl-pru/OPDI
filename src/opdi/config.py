@@ -1330,7 +1330,12 @@ class EventConfig:
     lower bound on what was flown, and the only figure the data supports.
 
     On: ``distance_v0.0.3``. Off, as under :meth:`legacy`: the released
-    ``distance_v0.0.2``, defect included, so a past month reproduces."""
+    ``distance_v0.0.2``, defect included, so a past month reproduces.
+
+    The change reaches further than the measurement itself: a level segment's
+    ``distance_nm``, and so the ``info`` of the level-off events, is a
+    difference of the cumulative distance, and moves with it on every track
+    with a blanked position. Event types and times do not move."""
 
     # ----- one variable per purpose (v0.3.0) ----------------------------
     merge_duplicate_milestones: Optional[bool] = None

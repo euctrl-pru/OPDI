@@ -239,7 +239,14 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
             with_old = F.when(
                 moved & F.col(actual).isNotNull(), F.concat(listed, F.array(F.col(actual)))
             ).otherwise(listed)
-            out = out.withColumn(alternatives, F.array_join(F.array_distinct(with_old), ", "))
+            cleaned = F.array_join(F.array_distinct(with_old), ", ")
+            # A NULL list stays NULL unless something moved: it is the published
+            # value on overflight rows and on the empty side of the flight table's
+            # join, and a row this step does not touch must not change.
+            out = out.withColumn(
+                alternatives,
+                F.when(F.col(alternatives).isNull() & ~moved, F.col(alternatives)).otherwise(cleaned),
+            )
         out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
 
     return out.drop("_g_id", "_dep_apt", "_arr_apt")

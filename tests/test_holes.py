@@ -222,3 +222,26 @@ def test_distance_version_follows_the_method():
     assert LEGACY_DISTANCE_VERSION == "distance_v0.0.2"
     assert distance_version(EventConfig.legacy()) == "distance_v0.0.2"
     assert EventConfig.legacy().distance_from_last_known_position is False
+
+
+def test_level_segment_distance_follows_the_distance_version(spark):
+    """A level segment's ``distance_nm`` (and so the level-off events' ``info``) is a
+    difference of ``cumulative_distance_nm``, which ``distance_v0.0.3`` corrects on
+    every track with a blanked position, hole or not. The events' type and time do
+    not move; the figure in ``info`` does, and the paper says so."""
+    samples = _cruise(0, n=40, lat=0.0)
+    for s in samples[10:30:2]:
+        s["lat"] = s["lon"] = None          # every other position blanked mid-cruise
+    df = make_track(spark, samples)
+
+    def total_distance(last_known_position):
+        measured = (
+            add_distance_measure(df, last_known_position=last_known_position)
+            .withColumn("baro_altitude_c", F.col("baro_altitude"))
+            .withColumn("cumulative_time_s", F.lit(0).cast("long"))
+        )
+        segs = LEVEL_ARMS["pru"](measured, EventConfig()).collect()
+        assert len(segs) == 1
+        return segs[0]["distance_nm"]
+
+    assert total_distance(False) < total_distance(True)

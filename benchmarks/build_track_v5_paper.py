@@ -300,6 +300,8 @@ def build_context(data):
         descent_kept_hidden=n(num(kept, "controls_joined")),
         descent_kept_controls=n(num(kept, "controls")),
         descent_kept_hidden_upper=bound(kept, "controls_joined_upper_95"),
+        descent_kept_upper=bound(kept, "false_join_upper_95"),
+        descent_unknown_share=pct(num(kept, "real_unknown"), num(kept, "real_linked")),
         crossing_no_descent=pct(num(climb_only, "crossing_flights_in_one_track"), cf),
     )
 

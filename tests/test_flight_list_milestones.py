@@ -644,6 +644,25 @@ def test_a_second_enrichment_pass_still_removes_the_named_aerodrome_from_its_lis
     assert row["ADES"] == "EHAM" and row["ADES_P"] == ""
 
 
+def test_a_null_alternatives_list_stays_null_where_nothing_moved(spark):
+    """NULL is the published value of ADEP_P/ADES_P on overflight rows and on the
+    empty side of the flight table's join. Enrichment must not turn it into "" on
+    rows it does not correct; a published column would change on every such row."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None,
+             "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+        .withColumn("ADES_SOURCE", F.lit("undetermined")) \
+        .withColumn("ADEP_P", F.lit(None).cast("string")) \
+        .withColumn("ADES_P", F.lit(None).cast("string"))
+    ev = _events(spark, [_event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R")])
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["ADEP"] == "EBBR" and row["ADEP_P"] is None
+    assert row["ADES"] is None and row["ADES_P"] is None
+
+
 def test_a_track_still_airborne_gets_no_arrival_aerodrome(spark):
     """No landing, no ADES. Leg-specific evidence needs no guard: a departure
     aerodrome is where the take-off happened, an arrival aerodrome where the
