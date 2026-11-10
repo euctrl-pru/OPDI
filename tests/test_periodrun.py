@@ -780,16 +780,14 @@ def test_every_statevector_write_partitions_by_day():
 
 # --- coverage plumbing -------------------------------------------------------
 
-def test_airspaces_are_skipped_worldwide():
-    """00c's sources are PRU Atlas ANSP/FIR parquets, which cover Europe only,
-    and opdi_h3_airspace_ref is read by nothing. Running it worldwide would
-    write a European table into a worldwide warehouse and cost cluster time for
-    a product with no consumer."""
+def test_airspaces_run_under_both_coverages():
+    """00c's FIR layer is worldwide and feeds the xing-fir family, so the
+    substep runs under worldwide coverage as well as European."""
     from opdi.runner import reference_substeps_for_coverage
     from opdi.config import OPDIConfig
     world = reference_substeps_for_coverage(
         OPDIConfig.for_environment("opensky", worldwide=True))
-    assert world["00c"] is False
+    assert world["00c"] is True
     europe = reference_substeps_for_coverage(
         OPDIConfig.for_environment("opensky", worldwide=False))
     assert europe["00c"] is True

@@ -333,17 +333,13 @@ def reference_substeps_for_coverage(config) -> dict:
     """Per-substep run flags dictated by coverage alone, independent of what
     the caller asked for.
 
-    00c's sources are the PRU Atlas ANSP/FIR parquets, which cover Europe
-    only, and ``opdi_h3_airspace_ref`` is read by nothing today. Building it
-    worldwide would write a European table into a worldwide warehouse and
-    cost cluster time for a product with no consumer, so it is forced off
-    whenever ``config.coverage.is_worldwide``. Every other substep is
-    unaffected by coverage.
+    Every substep runs under both coverages. 00c used to be forced off
+    worldwide on the premise that its sources were European; the FIR layer is
+    worldwide (336 NM volumes in AIRAC 524) and is what the ``xing-fir``
+    family reads, so it is built everywhere. The ANSP layer is European and
+    is simply absent elsewhere.
     """
-    return {
-        substep_id: not (substep_id == "00c" and config.coverage.is_worldwide)
-        for substep_id in REFERENCE_SUBSTEPS
-    }
+    return {substep_id: True for substep_id in REFERENCE_SUBSTEPS}
 
 
 def _step_00_reference_data(spark, config, **kwargs):

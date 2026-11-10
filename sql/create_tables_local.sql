@@ -301,17 +301,18 @@ COMMENT 'Hexaero Airport Layouts Iceberg Table. It contains the hex_ids followin
 
 -- 3b. H3 Airspace Reference
 CREATE TABLE IF NOT EXISTS `opdi_local`.`opdi_h3_airspace_ref` (
-    airspace_type STRING COMMENT 'Type of airspace (e.g., flight information region (FIR), Air Navigation Service Provider (ANSP), country (COUNTRY)).',
-    name STRING COMMENT 'The name or designation of the airspace.',
-    code STRING COMMENT 'A (non necessarily unique) identifier or code assigned to the airspace.',
-    airac_cfmu STRING COMMENT 'The AIRAC cycle and CFMU reference indicating the airspace definition update.',
-    validity_start TIMESTAMP COMMENT 'Timestamp indicating the start date and time when this airspace definition is valid.',
-    validity_end TIMESTAMP COMMENT 'Timestamp indicating the end date and time when this airspace definition expires.',
-    min_fl INT COMMENT 'The minimum flight level at which the airspace applies.',
-    max_fl INT COMMENT 'The maximum flight level at which the airspace applies.',
-    h3_res_7 STRING COMMENT 'All H3 indexes at res 7 for each airspace (exploded).',
-    h3_res_7_lat DOUBLE COMMENT 'The latitude of the center of the associated h3_res_7 index.',
-    h3_res_7_lon DOUBLE COMMENT 'The longitude of the center of the associated h3_res_7 index.'
+    airspace_type STRING COMMENT 'Airspace type (ANSP, FIR, COUNTRY)',
+    name STRING COMMENT 'Airspace name',
+    code STRING COMMENT 'Airspace code',
+    airac_cfmu STRING COMMENT 'CFMU AIRAC cycle the polygon was exported in',
+    validity_start TIMESTAMP COMMENT 'Start of that cycle',
+    validity_end TIMESTAMP COMMENT 'End of that cycle',
+    min_fl INT COMMENT 'Lower flight level (inclusive)',
+    max_fl INT COMMENT 'Upper flight level (exclusive)',
+    area_km2 DOUBLE COMMENT 'Polygon area, used to rank overlapping volumes',
+    h3_cell STRING COMMENT 'Compact H3 cell',
+    h3_res INT COMMENT 'Resolution of that cell'
+
 )
 USING iceberg
 PARTITIONED BY (airspace_type)
