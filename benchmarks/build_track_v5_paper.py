@@ -370,6 +370,7 @@ def build_context(data):
         unchanged_tracks=n(num(cons, "unchanged_tracks")),
         unchanged_other_airports=n(num(cons, "unchanged_tracks_with_other_airports")),
         unchanged_other_events=n(num(cons, "unchanged_tracks_with_other_events")),
+        unchanged_other_info=n(num(cons, "unchanged_tracks_with_other_event_info")),
     )
 
     no_hole = one(read_csv(data, "pipeline_day/link_distance_no_hole.csv"))

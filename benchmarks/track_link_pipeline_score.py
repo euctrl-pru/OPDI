@@ -659,8 +659,12 @@ def unchanged_track_row(
 ) -> Dict:
     """On tracks the rule did not touch: how many got other airports or other events.
 
-    Both should be zero. The rule changes which samples share a track and nothing else,
-    so a difference here is a step that does not give the same answer twice.
+    All should be zero. The rule changes which samples share a track and nothing else,
+    so a difference here is a step that does not give the same answer twice. Events are
+    compared twice: by type and time, and again with ``info``, because ``info`` holds
+    order-dependent details -- which of several overlapping layout elements is named
+    at one instant, the sequence number of two crossings in one second -- that differ
+    between two runs of the same code on the same track.
     """
 
     def airports(flight_list: DataFrame, key: str, prefix: str) -> DataFrame:
@@ -670,37 +674,43 @@ def unchanged_track_row(
             F.col("ades").alias(f"{prefix}_ades"),
         )
 
-    def event_set(events: DataFrame, key: str, name: str) -> DataFrame:
-        # ``info`` too, where the table has it: it carries measured figures such
-        # as a level-off's distance, which must agree as well.
-        fields = [F.col("type"), F.col("event_time")]
-        if "info" in events.columns:
-            fields.append(F.col("info"))
-        mark = F.struct(*fields)
+    with_info = "info" in split_events.columns and "info" in linked_events.columns
+
+    def event_set(events: DataFrame, key: str, name: str, info: bool) -> DataFrame:
+        fields = [F.col("type"), F.col("event_time")] + ([F.col("info")] if info else [])
         return events.groupBy(F.col("flight_id").alias(key)).agg(
-            F.sort_array(F.collect_list(mark)).alias(name)
+            F.sort_array(F.collect_list(F.struct(*fields))).alias(name)
         )
 
     joined = (
         pairs.join(airports(split_flight_list, "split_id", "split"), on="split_id", how="left")
         .join(airports(linked_flight_list, "linked_id", "linked"), on="linked_id", how="left")
-        .join(event_set(split_events, "split_id", "split_events"), on="split_id", how="left")
-        .join(event_set(linked_events, "linked_id", "linked_events"), on="linked_id", how="left")
+        .join(event_set(split_events, "split_id", "split_events", False), on="split_id", how="left")
+        .join(event_set(linked_events, "linked_id", "linked_events", False), on="linked_id", how="left")
     )
+    if with_info:
+        joined = joined.join(
+            event_set(split_events, "split_id", "split_full", True), on="split_id", how="left"
+        ).join(event_set(linked_events, "linked_id", "linked_full", True), on="linked_id", how="left")
     other_airports = ~(
         F.col("split_adep").eqNullSafe(F.col("linked_adep"))
         & F.col("split_ades").eqNullSafe(F.col("linked_ades"))
     )
     other_events = ~F.col("split_events").eqNullSafe(F.col("linked_events"))
+    other_info = (
+        ~F.col("split_full").eqNullSafe(F.col("linked_full")) if with_info else F.lit(False)
+    )
     row = joined.agg(
         F.count(F.lit(1)).alias("n"),
         F.coalesce(F.sum(other_airports.cast("int")), F.lit(0)).alias("airports"),
         F.coalesce(F.sum(other_events.cast("int")), F.lit(0)).alias("events"),
+        F.coalesce(F.sum(other_info.cast("int")), F.lit(0)).alias("info"),
     ).first()
     return {
         "unchanged_tracks": row["n"],
         "unchanged_tracks_with_other_airports": row["airports"],
         "unchanged_tracks_with_other_events": row["events"],
+        "unchanged_tracks_with_other_event_info": row["info"],
     }
 
 

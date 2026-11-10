@@ -1127,6 +1127,7 @@ def test_an_unchanged_track_with_another_airport_or_event_is_counted(spark):
         "unchanged_tracks": 2,
         "unchanged_tracks_with_other_airports": 1,
         "unchanged_tracks_with_other_events": 1,
+        "unchanged_tracks_with_other_event_info": 0,   # these fixtures carry no info
     }
 
 
@@ -1139,7 +1140,8 @@ def test_an_unchanged_track_whose_events_differ_only_in_info_is_counted(spark):
     a = _events(spark, ("S1", "level-off-climb-start", 0)).withColumn("info", F.lit('{"distance_nm": 10}'))
     b = _events(spark, ("L1", "level-off-climb-start", 0)).withColumn("info", F.lit('{"distance_nm": 12}'))
     row = s.unchanged_track_row(s.unchanged_tracks(split, linked), rows, rows, a, b)
-    assert row["unchanged_tracks_with_other_events"] == 1
+    assert row["unchanged_tracks_with_other_events"] == 0        # same types and times
+    assert row["unchanged_tracks_with_other_event_info"] == 1    # but not the same info
 
 
 def test_unchanged_tracks_that_agree_count_nothing(spark):
@@ -1150,6 +1152,7 @@ def test_unchanged_tracks_that_agree_count_nothing(spark):
     assert row["unchanged_tracks"] == 1
     assert row["unchanged_tracks_with_other_airports"] == 0
     assert row["unchanged_tracks_with_other_events"] == 0
+    assert row["unchanged_tracks_with_other_event_info"] == 0
 
 
 def test_distance_on_tracks_without_a_hole_compares_the_two_methods(spark):
