@@ -78,6 +78,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 opdi = ["py.typed"]
+"opdi.reference" = ["data/*.csv", "data/*.md"]
 
 [tool.black]
 line-length = 100
