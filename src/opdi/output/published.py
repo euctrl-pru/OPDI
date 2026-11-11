@@ -178,8 +178,9 @@ def build_flight_events(
     """The published flight events from the pipeline's working tables.
 
     Every event becomes one row. Its measurements become columns: an event
-    without a measurement of some kind has NULL in that column, never 0. The
-    flight's columns are then added from the flight list, so each row can be
+    without a measurement of some kind has NULL in that column, never 0, and
+    an event with two values of one kind (which the pipeline does not write)
+    gets the larger. The flight's columns are then added from the flight list, so each row can be
     used on its own.
 
     Args:
@@ -196,9 +197,13 @@ def build_flight_events(
         whose flight is not in ``flight_list`` it is the date stored on the
         event.
     """
+    # One value per event and type. The working table holds one row for
+    # each; should a row ever be written twice with different values, the
+    # largest is taken, so the result does not depend on the order in which
+    # Spark reads the rows.
     measured = measurements.groupBy(F.col("milestone_id").alias("_milestone_id")).agg(
         *[
-            F.first(F.when(F.col("type") == F.lit(c.source), F.col("value")), ignorenulls=True)
+            F.max(F.when(F.col("type") == F.lit(c.source), F.col("value")))
             .cast("double")
             .alias(c.name)
             for c in MEASUREMENT_COLUMNS

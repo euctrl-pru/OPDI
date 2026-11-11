@@ -245,3 +245,21 @@ def test_the_clear_lock_command(spark, tmp_path, monkeypatch, capsys):
     assert o.main(["clear-lock", "--warehouse", wh]) == 0
     assert not lock.exists()
     assert "removed" in capsys.readouterr().out
+
+
+def test_a_measurement_written_twice_gives_the_largest_value(spark, tables):
+    """The choice does not depend on the order Spark reads the rows in."""
+    from opdi.output.published import build_flight_events
+
+    extra = spark.createDataFrame(
+        [("e1_d2", "e1", "Distance flown (NM)", 7.0, "distance_v0.0.3", DAY)],
+        tables["opdi_measurements"].schema,
+    )
+    for measurements in (
+        tables["opdi_measurements"].unionByName(extra),
+        extra.unionByName(tables["opdi_measurements"]),
+    ):
+        rows = build_flight_events(
+            tables["opdi_flight_events"], measurements.coalesce(1), tables["opdi_flight_list"]
+        ).collect()
+        assert {r["event_id"]: r["distance_flown_nm"] for r in rows}["e1"] == 7.0
