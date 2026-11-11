@@ -854,7 +854,44 @@ def test_an_info_field_listed_in_extra_measures_becomes_a_measurement(spark, mon
     assert len(rows) == 1
     row = rows[0]
     assert (row["id"], row["milestone_id"], row["type"], row["value"], row["version"], str(row["dof"])) == (
-        "e1_m0", "e1", "Holding duration (s)", 42.0, "holding_v9", "2024-06-01")
+        "e1" + ev.measurement_suffix("Holding duration (s)"), "e1", "Holding duration (s)", 42.0,
+        "holding_v9", "2024-06-01")
+    assert row["id"].startswith("e1_m") and len(row["id"]) == len("e1_m") + 6
+
+
+def test_measurement_suffixes_are_stable_and_distinct():
+    from opdi.pipeline.events import EXTRA_MEASURES, measurement_suffix
+
+    suffixes = [measurement_suffix(m) for _, _, m, _ in EXTRA_MEASURES]
+    assert len(set(suffixes)) == len(suffixes)
+    assert measurement_suffix("Holding duration (s)") == measurement_suffix("Holding duration (s)")
+
+
+def test_a_navigation_only_top_up_still_computes_go_arounds(spark, stub_storage, monkeypatch):
+    """The holding family drops episodes next to a go-around; a run that
+    computes only the navigation group must still have them."""
+    import opdi.pipeline.events as ev
+
+    seen = {}
+
+    def capture(geo, config, go_arounds=None):
+        seen["go_arounds"] = go_arounds
+        return None
+
+    monkeypatch.setattr(ev, "calculate_holding_events", capture)
+    monkeypatch.setattr(ev, "calculate_point_merge_events", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "calculate_fir_events", lambda *a, **k: None)
+    config = OPDIConfig()
+    with tempfile.TemporaryDirectory() as log_dir:
+        proc = FlightEventProcessor(spark, config, log_dir=log_dir)
+        proc.storage = stub_storage
+        proc._etl_flight_events_and_measures(
+            stub_storage.tracks, batch_id="b_", month=MONTH,
+            calc_vertical=False, calc_horizontal=False, calc_hexaero=False, calc_seen=True,
+            calc_navigation=True,
+        )
+    assert seen["go_arounds"] is not None
+    assert "event_time" in seen["go_arounds"].columns
 
 
 def test_no_extra_measures_means_no_frame(spark, monkeypatch):

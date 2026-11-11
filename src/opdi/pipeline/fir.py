@@ -28,7 +28,8 @@ from opdi.config import EventConfig
 from opdi.pipeline.holding import FT_PER_M
 from opdi.pipeline.holes import PIECE
 
-#: Version stamped on the event (and its two standard measurements).
+#: Version stamped on the event. Its two standard measurements carry the
+#: measurement versions every event's do.
 FIR_VERSION = "fir_v0.1.0"
 
 AIRSPACE_TABLE = "opdi_h3_airspace_ref"
@@ -38,7 +39,7 @@ _RES_MASK = 0xF << _RES_SHIFT
 
 
 def h3_parent_expr(cell_col, res: int):
-    """The lower-case hex index of ``cell_col``'s ancestor at ``res`` (1..7),
+    """The lower-case hex index of ``cell_col``'s ancestor at ``res`` (0..7),
     as a native column expression (no UDF)."""
     idx = F.conv(cell_col, 16, 10).cast("long")
     cleared = idx.bitwiseAND(lit(~_RES_MASK))
@@ -49,18 +50,26 @@ def h3_parent_expr(cell_col, res: int):
 
 
 def load_fir_reference(storage) -> Optional[DataFrame]:
-    """The FIR layer of ``opdi_h3_airspace_ref``, or None when the table is absent."""
+    """The FIR layer of ``opdi_h3_airspace_ref``, or None when the table is
+    absent or still has the earlier port's per-cell schema (``h3_res_7``
+    columns, no ``h3_cell``/``h3_res``): that table was overwritten once per
+    polygon and holds one country, and step 00c must be re-run first."""
     if not storage.table_exists(AIRSPACE_TABLE):
         print(f"{AIRSPACE_TABLE} not found; xing-fir will not be computed.")
         return None
-    return storage.read_table(AIRSPACE_TABLE).filter(col("airspace_type") == "FIR")
+    ref = storage.read_table(AIRSPACE_TABLE)
+    if "h3_cell" not in ref.columns or "h3_res" not in ref.columns:
+        print(f"{AIRSPACE_TABLE} has the pre-2026-11 schema (no h3_cell/h3_res); "
+              "re-run step 00c. xing-fir will not be computed.")
+        return None
+    return ref.filter(col("airspace_type") == "FIR")
 
 
 def attach_fir(df: DataFrame, fir_ref: DataFrame, config: EventConfig) -> DataFrame:
     """Add ``fir_code, fir_band_width, fir_area_km2, airac_cfmu, airac_validity_start,
     airac_validity_end`` per sample (NULL when no volume matches).
 
-    One broadcast left join per resolution from 7 down to 1, each against the
+    One broadcast left join per resolution from 7 down to 0, each against the
     reference rows stored at that resolution and gated on the FL band; the
     candidates are ranked by narrowest band, smallest area, lowest code. A
     sample matched twice at one resolution (two volumes overlapping there) is
@@ -73,7 +82,8 @@ def attach_fir(df: DataFrame, fir_ref: DataFrame, config: EventConfig) -> DataFr
         df = df.withColumn("_fl", col("baro_altitude_c") * FT_PER_M / 100.0)
     candidates = []
     max_res = int(fir_ref.agg(F.max("h3_res")).first()[0] or 7)
-    for r in range(min(max_res, 7), 0, -1):
+    # Down to resolution 0: a compacted ocean FIR stores whole base cells.
+    for r in range(min(max_res, 7), -1, -1):
         ref_r = fir_ref.filter(col("h3_res") == r).select(
             col("h3_cell").alias(f"_c{r}"),
             col("code").alias(f"_code{r}"),
@@ -136,9 +146,13 @@ def _debounced_runs(df: DataFrame, config: EventConfig) -> DataFrame:
     long = (col("_run_last_ts") - col("_run_start_ts")) >= config.fir_min_dwell_seconds
     df = df.withColumn("_long_code", F.when(long, col("fir_code")))
     df = df.withColumn("_long_seen", F.when(long, lit(1)))
-    # A short run takes the code of the last long run before it; a short run
-    # with no long run before it stays NULL (not a crossing).
-    carried = F.last(F.when(long, F.struct(col("fir_code").alias("c"))), ignorenulls=True).over(upto)
+    # A short run takes the code of the last long *known* run before it (a
+    # long stretch with no volume is not a code to inherit); a short run with
+    # none stays NULL (not a crossing).
+    carried = F.last(
+        F.when(long & col("fir_code").isNotNull(), F.struct(col("fir_code").alias("c"))),
+        ignorenulls=True,
+    ).over(upto)
     df = df.withColumn("fir_run", F.when(long, col("fir_code")).otherwise(carried["c"]))
     return df.drop("_start", "_run_start_ts", "_prev_ts", "_run_last_ts", "_long_code", "_long_seen")
 
@@ -163,12 +177,19 @@ def calculate_fir_events(
         df = df.withColumn(PIECE, lit(0))
     df = attach_fir(df, fir_ref, config)
     df = _debounced_runs(df, config)
+    # A crossing is a change between consecutive *known* runs: a stretch with
+    # no volume in between (altitude masked, a gap in the reference) is not a
+    # crossing out and back in, and the time bracket runs from the last sample
+    # that had a volume.
     w = Window.partitionBy("track_id", PIECE).orderBy("_ts")
-    prev_run = F.lag("fir_run").over(w)
+    before = w.rowsBetween(Window.unboundedPreceding, -1)
+    known_ts = F.when(col("fir_run").isNotNull(), col("_ts"))
+    prev_run = F.last("fir_run", ignorenulls=True).over(before)
+    prev_ts = F.last(known_ts, ignorenulls=True).over(before)
     crossing = col("fir_run").isNotNull() & prev_run.isNotNull() & (col("fir_run") != prev_run)
     df = (
         df.withColumn("_prev_run", prev_run)
-        .withColumn("_bracket_s", col("_ts") - F.lag("_ts").over(w))
+        .withColumn("_bracket_s", col("_ts") - prev_ts)
         .withColumn("_crossing", crossing)
         .filter(col("_crossing"))
     )

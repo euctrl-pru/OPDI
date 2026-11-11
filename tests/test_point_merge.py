@@ -131,3 +131,15 @@ def test_blanked_headings_on_the_direct_do_not_lose_the_leg(spark):
     )
     types = sorted(r.type for r in calculate_point_merge_events(sdf, _ref(spark), EventConfig()).collect())
     assert types == ["pms-leg-entry", "pms-leg-exit", "pms-merge-point"]
+
+
+def test_two_merge_points_a_mile_apart_give_one_leg_and_one_merge_point(spark):
+    # The same system twice, its points 0.9 NM apart (Dublin 28L/28R): one
+    # leg pair, one pms-merge-point, no duplicate ids.
+    rows = [("XXXX", "XXXX-28", "MERGE", MP[0], MP[1], 15.0, 17.0, 7000.0, 9000.0, None, None, "test", "high"),
+            ("XXXX", "XXXX-28", "MERGE2", MP[0] + 0.015, MP[1], 15.0, 17.0, 7000.0, 9000.0, None, None, "test", "high")]
+    ref = spark.createDataFrame(rows, PMS_SCHEMA)
+    sdf = _arc_then_direct(spark)
+    out = calculate_point_merge_events(sdf, ref, EventConfig()).collect()
+    assert sorted(r.type for r in out) == ["pms-leg-entry", "pms-leg-exit", "pms-merge-point"]
+    assert len({(r.type, r.event_time) for r in out}) == 3

@@ -143,13 +143,22 @@ def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
         & (col("min_d_ahead") <= config.pms_merge_point_radius_nm)
         & (col("direct_to_distance_nm") >= 2 * config.pms_merge_point_radius_nm)
     )
-    # Two merge points of one airport can sit within a mile of each other
+    # Two merge points of one system can sit within a mile of each other
     # (Dublin's 28L and 28R points): a leg that passes for both is kept once,
-    # for the point the direct came closest to.
-    one = Window.partitionBy("track_id", PIECE, F.floor(col("start_ts") / 60.0)).orderBy(
+    # for the point the track came closest to. Legs of one track are grouped
+    # by time overlap (a new group starts when a leg begins after every
+    # earlier leg has ended), not by start minute, so two runs five seconds
+    # apart across a minute boundary are still one leg.
+    by_start = Window.partitionBy("track_id", PIECE).orderBy("start_ts", "merge_point")
+    prev_max_end = F.max("end_ts").over(by_start.rowsBetween(Window.unboundedPreceding, -1))
+    legs = legs.withColumn("_new_group", F.coalesce(col("start_ts") > prev_max_end, lit(True)))
+    legs = legs.withColumn("_group", F.sum(col("_new_group").cast("int")).over(
+        by_start.rowsBetween(Window.unboundedPreceding, 0)))
+    one = Window.partitionBy("track_id", PIECE, "_group").orderBy(
         col("min_d_ahead").asc(), col("merge_point").asc()
     )
-    legs = legs.withColumn("_rank", F.row_number().over(one)).filter(col("_rank") == 1).drop("_rank")
+    legs = legs.withColumn("_rank", F.row_number().over(one)).filter(col("_rank") == 1).drop(
+        "_rank", "_new_group", "_group")
     seq = Window.partitionBy("track_id").orderBy("start_ts")
     return legs.withColumn("leg_seq", F.row_number().over(seq))
 
@@ -197,7 +206,10 @@ def calculate_point_merge_events(
     legs = legs.withColumn("info", leg_info)
     out = _event(legs, "start", "pms-leg-entry").unionByName(_event(legs, "end", "pms-leg-exit"))
 
-    # Closest approach to each merge point, when inside the radius.
+    # Closest approach to a system's merge points, when inside the radius:
+    # one event per (track, piece, pms_id), for the point come closest to,
+    # since the points of one system can be a mile apart and the same sample
+    # would otherwise give two events with one id.
     closest = df.groupBy(*_KEY, "apt_icao").agg(
         F.min("d_nm").alias("closest_nm"),
         F.min_by("_ts", "d_nm").alias("mp_ts"),
@@ -207,10 +219,12 @@ def calculate_point_merge_events(
         F.min_by("cumulative_distance_nm", "d_nm").alias("mp_dist_nm"),
         F.min_by("cumulative_time_s", "d_nm").alias("mp_cum_s"),
     ).filter(col("closest_nm") <= config.pms_merge_point_radius_nm)
+    one_mp = Window.partitionBy("track_id", PIECE, "pms_id").orderBy(col("closest_nm").asc(), col("merge_point").asc())
+    closest = closest.withColumn("_rank", F.row_number().over(one_mp)).filter(col("_rank") == 1).drop("_rank")
     via = legs.select(*[col(k).alias(f"_l_{k}") for k in _KEY], col("end_ts").alias("_l_end"))
     cond = (
         (col("track_id") == col("_l_track_id")) & (col(PIECE) == col(f"_l_{PIECE}"))
-        & (col("pms_id") == col("_l_pms_id")) & (col("merge_point") == col("_l_merge_point"))
+        & (col("pms_id") == col("_l_pms_id"))
         & (col("mp_ts") >= col("_l_end"))
         & (col("mp_ts") - col("_l_end") <= config.pms_direct_lookahead_seconds)
     )

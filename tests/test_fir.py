@@ -49,7 +49,7 @@ def test_h3_parent_expr_matches_the_library(spark):
     random.seed(1)
     cells = [h3.latlng_to_cell(random.uniform(-80, 80), random.uniform(-180, 180), 7) for _ in range(20)]
     df = spark.createDataFrame([(c,) for c in cells], "cell string")
-    for r in range(1, 8):
+    for r in range(0, 8):
         got = {row.cell: row.p for row in df.withColumn("p", h3_parent_expr(F.col("cell"), r)).collect()}
         assert got == {c: h3.cell_to_parent(c, r) for c in cells}, r
 
@@ -127,7 +127,46 @@ def test_missing_reference_table_skips_the_family(spark):
 
     assert load_fir_reference(NoTable()) is None
 
+    class OldTable:
+        def table_exists(self, name):
+            return True
+
+        def read_table(self, name):
+            return spark.createDataFrame([("FIR", "AAAA", "x")], "airspace_type string, code string, h3_res_7 string")
+
+    assert load_fir_reference(OldTable()) is None
+
 
 def test_off_flag_returns_none(spark):
     sdf = _track(spark, [(60, 0, 0)])
     assert calculate_fir_events(sdf, _ref(spark, TWO), EventConfig(emit_fir_crossings=False)) is None
+
+
+def test_a_volume_stored_at_resolution_zero_is_found(spark):
+    # A whole resolution-0 cell is stored as one row: a sample anywhere inside
+    # it must find the volume (the lookup walks the ancestors down to 0).
+    cell0 = h3.cell_to_parent(h3.latlng_to_cell(51.0, -1.0, 7), 0)
+    rows = [("FIR", "ZZZZ", "ZZZZ", "524", "2024-11-28", "2024-12-26", 0, 999, 1e6, cell0, 0)]
+    ref = spark.createDataFrame(rows, AIRSPACE_SCHEMA)
+    sdf = _track(spark, [(60, 0, 0)], lat0=51.0, lon0=-1.0, hdg0=90.0)
+    out = attach_fir(sdf, ref, EventConfig())
+    assert {r.fir_code for r in out.collect()} == {"ZZZZ"}
+
+
+def test_a_crossing_across_a_long_blank_is_still_a_crossing(spark):
+    # Altitude masked for 90 s while the aircraft crosses: no volume matches
+    # there, yet the flight went from AAAA to BBBB and the event must say so,
+    # with bracket_s measured from the last sample that had a volume.
+    samples = legs_to_samples([(1200, 0, 0)], lat0=51.0, lon0=-1.2, hdg0=90.0, alt_ft=33000.0)
+    for s in samples:
+        if 540 <= s["t"] < 630:
+            s["baro_altitude"] = None
+    sdf = _with_cells(measured(make_track(spark, samples)))
+    rows = calculate_fir_events(sdf, _ref(spark, TWO), EventConfig()).collect()
+    assert len(rows) == 1
+    info = json.loads(rows[0].info)
+    assert (info["fir_from"], info["fir_to"]) == ("AAAA", "BBBB")
+    # The 20 s of AAAA after the blank keep their code (a short run inherits
+    # the last *known* long run, which is AAAA itself), so the bracket is one
+    # or two samples, not the whole blank.
+    assert info["bracket_s"] <= 10

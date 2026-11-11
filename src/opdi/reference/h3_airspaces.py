@@ -347,7 +347,21 @@ class AirspaceH3Generator:
 
     # -- one layer ---------------------------------------------------------
 
+    def _refuse_old_table(self) -> None:
+        """The earlier port's table (per-cell ``h3_res_7`` columns, unpartitioned,
+        one polygon surviving) cannot take a partitioned write of the new
+        columns. Deleting a table is not this step's to do silently: stop and
+        name it."""
+        if not self.storage.table_exists(TABLE):
+            return
+        columns = set(self.storage.read_table(TABLE).columns)
+        if "h3_cell" not in columns:
+            raise RuntimeError(
+                f"{TABLE} exists with the pre-2026-11 schema ({sorted(columns)}); "
+                f"drop it (nothing reads it) and run step 00c again.")
+
     def _write_layer(self, cells: pd.DataFrame, airspace_type: str) -> None:
+        self._refuse_old_table()
         cols = [f.name for f in AIRSPACE_SCHEMA.fields]
         records = [tuple(r[c] for c in cols) for r in cells[cols].to_dict(orient="records")]
         spark_df = self.spark.createDataFrame(records, AIRSPACE_SCHEMA)

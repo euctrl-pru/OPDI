@@ -1194,12 +1194,23 @@ def _register_family_measures() -> None:
 _register_family_measures()
 
 
+def measurement_suffix(measurement_type: str) -> str:
+    """The id suffix of an extra measurement: ``_m`` plus six hex characters of
+    the measurement type's hash. Keyed on the type, not on the position in
+    ``EXTRA_MEASURES``, so adding or reordering an entry cannot renumber ids
+    already published."""
+    import hashlib
+
+    return "_m" + hashlib.sha256(measurement_type.encode("utf-8")).hexdigest()[:6]
+
+
 def extra_measurement_rows(df_events: DataFrame) -> Optional[DataFrame]:
     """Measurement rows for every ``EXTRA_MEASURES`` entry, or None if none apply.
 
     ``df_events`` is the stamped event frame (``id_tmp``, ``type``, ``info``,
-    ``dof``). The measurement id is the event id plus ``_m{i}`` for entry
-    ``i``: stable per entry and distinct from the ``_d``/``_t`` pair. (The
+    ``dof``). The measurement id is the event id plus ``measurement_suffix``
+    of the measurement type: stable per entry and distinct from the
+    ``_d``/``_t`` pair. (The
     families that use this all run with deterministic event ids; under the
     legacy, partition-dependent ids they are off.)
 
@@ -1216,7 +1227,7 @@ def extra_measurement_rows(df_events: DataFrame) -> Optional[DataFrame]:
     ])
     types = F.array(*[lit(m) for _, _, m, _ in EXTRA_MEASURES])
     versions = F.array(*[lit(v) for _, _, _, v in EXTRA_MEASURES])
-    suffixes = F.array(*[lit(f"_m{i}") for i in range(len(EXTRA_MEASURES))])
+    suffixes = F.array(*[lit(measurement_suffix(m)) for _, _, m, _ in EXTRA_MEASURES])
     exploded = (
         df_events.select(col("id_tmp"), col("dof"), F.posexplode(values).alias("_pos", "value"))
         .filter(col("value").isNotNull())
@@ -1705,6 +1716,15 @@ class FlightEventProcessor:
 
             if self.events.emit_block_events:
                 add(calculate_block_events(sdf_input, df_hexaero, self.events))
+
+        if (calc_navigation and not calc_hexaero and df_go_arounds is None
+                and self.events.emit_holding and self.events.emit_runway_milestones):
+            # A navigation-only top-up (the other families already logged for
+            # this day) still needs the go-arounds the holding family excludes
+            # against, or its output would differ from a full rebuild's.
+            rwy_sv = self._with_flight_id(geo)
+            if "ades_lat" in rwy_sv.columns:
+                df_go_arounds = go_arounds(rwy_sv, self.events)
 
         if calc_seen:
             print(f"Calculating first_seen/last_seen events for batch: {batch_id}")

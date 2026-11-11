@@ -110,8 +110,15 @@ def test_overlap_report_names_the_pairs():
 
 
 class _StubStorage:
-    def __init__(self):
+    def __init__(self, existing=None):
         self.writes = []
+        self.existing = existing
+
+    def table_exists(self, name):
+        return self.existing is not None
+
+    def read_table(self, name):
+        return self.existing
 
     def write_table(self, df, table_name, mode="append", partition_by=None, partition_values=None):
         self.writes.append((table_name, mode, partition_by, df))
@@ -147,3 +154,14 @@ def test_worldwide_runs_00c():
 
     world = reference_substeps_for_coverage(OPDIConfig.for_environment("opensky", worldwide=True))
     assert world["00c"] is True
+
+
+def test_the_old_per_cell_table_is_refused_not_overwritten(spark):
+    from opdi.config import OPDIConfig
+
+    old = spark.createDataFrame([("FIR", "AAAA", "x", 50.0, 4.0)],
+                                "airspace_type string, code string, h3_res_7 string, h3_res_7_lat double, h3_res_7_lon double")
+    gen = ha.AirspaceH3Generator(spark, OPDIConfig(), storage=_StubStorage(existing=old))
+    df = pd.DataFrame([_row("AAAAFIR", "A", 0, 195, box(0, 50, 1, 51))])
+    with pytest.raises(RuntimeError, match="pre-2026-11"):
+        gen.process_fir(frames=[df], res=5)
