@@ -102,7 +102,23 @@ line-length = 100
 target-version = "py38"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = ["E", "F", "W", "I", "N", "D", "B", "UP"]
+ignore = [
+    # The flight-list working columns are upper case (ADEP, ADES, DOF), and
+    # the pipeline names its local frames and imports after them.
+    "N803",
+    "N806",
+    "N812",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and study scripts are not documented as an API.
+"tests/**" = ["D", "N802"]
+"benchmarks/**" = ["D"]
+"tools/**" = ["D"]
 
 [tool.mypy]
 python_version = "3.8"
