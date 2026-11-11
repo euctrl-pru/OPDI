@@ -108,28 +108,43 @@ class SparkConfig:
 
     # Driver settings
     driver_cores: str = "1"
+    """Cores of the Spark driver (``spark.driver.cores``)."""
     driver_memory: str = "8G"
+    """Java heap of the driver (``spark.driver.memory``). The period runner reduces it to what
+    the container can hold."""
     driver_max_result_size: str = "6g"
+    """Largest result the driver collects from the executors
+    (``spark.driver.maxResultSize``)."""
 
     # Executor settings
     executor_memory: str = "12G"
+    """Java heap of each executor (``spark.executor.memory``)."""
     executor_memory_overhead: str = "3G"
+    """Memory of each executor outside the heap (``spark.executor.memoryOverhead``)."""
     executor_cores: str = "2"
+    """Cores of each executor (``spark.executor.cores``)."""
     executor_instances: str = "3"
+    """Number of executors (``spark.executor.instances``)."""
 
     # Dynamic allocation
     dynamic_allocation_max_executors: str = "10"
+    """Largest number of executors with dynamic allocation."""
 
     # Network and timeouts
     network_timeout: str = "800s"
+    """Spark network timeout (``spark.network.timeout``)."""
     executor_heartbeat_interval: str = "400s"
+    """Interval of the executors' heartbeats to the driver."""
 
     # Compression
     shuffle_compress: str = "true"
+    """Compress shuffle output (``spark.shuffle.compress``)."""
     shuffle_spill_compress: str = "true"
+    """Compress data spilled to disk during shuffles."""
 
     # UI settings
     ui_show_console_progress: str = "false"
+    """Show the progress bar of Spark stages in the console."""
 
     # Iceberg-specific settings
     iceberg_jar_path: str = (
@@ -148,20 +163,35 @@ class SparkConfig:
 
     # S3 settings (for OpenSky environment)
     s3_endpoint: str = ""
+    """S3 address of the storage (``opensky`` environment). Empty: no S3 access is
+    configured."""
     s3_access_key: str = ""
+    """S3 access key; normally read from ``AWS_ACCESS_KEY_ID`` instead."""
     s3_secret_key: str = ""
+    """S3 secret key; normally read from ``AWS_SECRET_ACCESS_KEY`` instead."""
     spark_packages: str = ""
+    """Maven packages Spark loads at start (``spark.jars.packages``), for S3 access."""
 
     # Kubernetes distributed settings
     k8s_master: str = ""
+    """Address of the Kubernetes API that runs the executors. Empty: Spark runs on the local
+    machine only."""
     k8s_namespace: str = ""
+    """Kubernetes namespace of the executors."""
     k8s_container_image: str = ""
+    """Container image of the executors; it must hold every Python dependency of the package."""
     k8s_driver_host: str = "jupyterlab"
+    """Host name under which the executors reach the driver."""
     k8s_driver_bind_address: str = "0.0.0.0"
+    """Address the driver listens on."""
     k8s_driver_port: str = "7078"
+    """Port of the driver."""
     k8s_driver_block_manager_port: str = "7079"
+    """Port of the driver's block manager."""
     k8s_executor_memory_limit: str = ""
+    """Kubernetes memory limit of each executor."""
     k8s_executor_cores_limit: str = ""
+    """Kubernetes CPU limit of each executor."""
 
     # Feature flags
     enable_hive: bool = True
@@ -421,8 +451,11 @@ class CleaningConfig:
 
     # -- Stage 2: range validity ----------------------------------------
     lat_min: float = -90.0
+    """Lowest valid latitude, in degrees."""
     lat_max: float = 90.0
+    """Highest valid latitude, in degrees."""
     lon_min: float = -180.0
+    """Lowest valid longitude, in degrees."""
     lon_max: float = 180.0
     """Stage 2: possible latitude and longitude ranges, in degrees. A
     coordinate outside them is set to NULL."""
@@ -840,6 +873,8 @@ class EventConfig:
     v0.0.2."""
 
     phase_cruise_speed_kt: float = 600.0
+    """Centre of the "cruise" speed membership, in knots; see
+    :attr:`phase_cruise_speed_sigma_kt`."""
     phase_cruise_speed_sigma_kt: float = 100.0
     """Centre and width, in knots, of the bell-shaped "cruise" speed
     membership (OpenAP values: 600 kt and 100 kt). An aircraft much slower
@@ -1645,15 +1680,25 @@ class OPDIConfig:
     """
 
     project: ProjectConfig = field(default_factory=ProjectConfig)
+    """Where the tables are kept."""
     spark: SparkConfig = field(default_factory=SparkConfig)
+    """The Spark session."""
     h3: H3Config = field(default_factory=H3Config)
+    """The H3 resolutions."""
     ingestion: IngestionConfig = field(default_factory=IngestionConfig)
+    """Sources of the reports and reference data (step 01, part of step 00)."""
     cleaning: CleaningConfig = field(default_factory=CleaningConfig)
+    """Trajectory cleaning (step 02a)."""
     adsc: AdscConfig = field(default_factory=AdscConfig)
+    """ADS-C as a second source (step 01b, off by default)."""
     detection: DetectionConfig = field(default_factory=DetectionConfig)
+    """Departure and destination airports (step 03)."""
     events: EventConfig = field(default_factory=EventConfig)
+    """Flight events and measurements (step 04)."""
     segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
+    """Track building (step 02)."""
     coverage: CoverageConfig = field(default_factory=CoverageConfig)
+    """Worldwide or a bounding box."""
 
     @classmethod
     def for_environment(
