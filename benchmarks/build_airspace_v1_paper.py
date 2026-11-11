@@ -304,7 +304,7 @@ def pipeline_context(data):
 
 
 def shipped_context():
-    cfg = "src/opdi/config"
+    cfg = "src/opdi/config/events.py"
     flags = {
         f: bool(class_constant("EventConfig", f, cfg))
         for f in ("emit_holding", "emit_point_merge", "emit_fir_crossings")
