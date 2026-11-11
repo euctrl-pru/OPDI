@@ -115,7 +115,7 @@ def test_the_merged_arm_is_the_only_one_with_adsc_enabled():
     import inspect
 
     src = inspect.getsource(r.run_arm)
-    assert 'cfg.adsc.enabled = (arm == "merged")' in src
+    assert 'cfg.adsc.enabled = arm == "merged"' in src
 
 
 def test_the_steps_include_adsc_ingestion():
