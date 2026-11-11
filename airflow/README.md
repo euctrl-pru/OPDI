@@ -30,7 +30,8 @@ A day is built by seven pipeline steps, run in this order:
 | `publish`     | 09   | Writes the day's two published files, the monthly index and the catalogue. |
 
 Before them, `reference` builds the reference tables once (airports,
-runways, aircraft); later runs see they exist and do nothing. `check_space`
+runways, aircraft); later runs check that each table is there and not empty,
+and build again only a table that is missing. `check_space`
 stops the day when the bucket is nearly full. After them, `prune` removes
 the internal tables that are no longer needed.
 

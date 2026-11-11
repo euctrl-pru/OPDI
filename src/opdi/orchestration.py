@@ -55,7 +55,8 @@ DAY_STEPS = ("01", "02", "02a", "03", "04", "04b", "09")
 STEPS_NEEDING_REFERENCE = ("01", "02", "02a", "03", "04", "04b")
 
 #: The step that builds the reference tables (airports, runways, aircraft). It
-#: runs once, not per day, and skips the tables that already exist.
+#: runs once, not per day, and builds only the tables that are missing or
+#: empty, also after it has finished once.
 REFERENCE_STEP = "00"
 
 #: Internal tables that may be removed once a day is published, with the
@@ -396,9 +397,11 @@ def run_unit(
             print(f"Refused: {problem}")
             return 1
         key = unit_key(step, day)
-        # Step 01 is never skipped on its mark: it lists the report folders
-        # of its three days and fetches only the missing ones.
-        if not force and step != "01" and storage.is_done(key):
+        # Steps 00 and 01 are never skipped on their mark: step 00 checks
+        # which reference tables are missing or empty and builds only those,
+        # and step 01 lists the report folders of its three days and fetches
+        # only the missing ones.
+        if not force and step not in (REFERENCE_STEP, "01") and storage.is_done(key):
             print(f"  {label} is already finished; skipped (pass --force to run it again)")
             return 0
         if day is not None:

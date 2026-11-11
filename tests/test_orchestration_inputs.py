@@ -263,3 +263,32 @@ def test_step_01_keeps_the_reports_an_unfinished_day_still_needs(spark, tmp_path
     assert fetched == [D - 2 * ONE]
     days = sorted(p.name.split("=")[1] for p in (_root(wh) / "osn_statevectors_v2").iterdir())
     assert days == [(D + k * ONE).isoformat() for k in (-2, -1, 0, 1)]
+
+
+def test_the_reference_step_checks_its_tables_even_when_marked(spark, warehouse, monkeypatch):
+    """A reference table lost after step 00 finished is built again, alone."""
+    from opdi import runner
+
+    wh, _ = warehouse
+    _storage(spark, wh).mark_done("00")
+    built = []
+    monkeypatch.setattr(
+        periodrun,
+        "reference_substeps_to_run",
+        lambda storage, force=False: {k: k == "00d" for k in periodrun.REFERENCE_OUTPUTS},
+    )
+    monkeypatch.setitem(
+        runner.STEPS, "00", lambda spark_, config, **kw: built.append(kw["run_reference"])
+    )
+    assert o.run_unit("00", None, warehouse=wh) == 0
+    assert len(built) == 1
+    assert [k for k, v in built[0].items() if v] == ["00d"]
+
+    # Nothing missing: nothing built.
+    monkeypatch.setattr(
+        periodrun,
+        "reference_substeps_to_run",
+        lambda storage, force=False: {k: False for k in periodrun.REFERENCE_OUTPUTS},
+    )
+    assert o.run_unit("00", None, warehouse=wh) == 0
+    assert len(built) == 1
