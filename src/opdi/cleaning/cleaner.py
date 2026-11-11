@@ -1,16 +1,10 @@
-"""Track cleaning processor -- pipeline step 02a.
+"""Step 02a: trajectory cleaning.
 
-Reads ``osn_tracks`` (step 02), applies :func:`opdi.cleaning.native.clean_tracks`,
-and writes ``osn_tracks_clean``.
-
-**Why a separate table rather than cleaning in place.** ``osn_tracks`` backs
-published OPDI releases. Masking values inside it would silently change data
-that events v0.0.2 was derived from, and there would be no way to reproduce a
-published result. A second table costs storage but keeps the existing output
-byte-for-byte reproducible, and lets the benchmark compare milestones built on
-cleaned versus uncleaned tracks -- which is the measurement that justifies the
-step existing at all. Once that benchmark exists, collapsing the two tables is
-a decision that can be made on evidence.
+Reads the tracks (``osn_tracks``, step 02), sets the values that cannot be
+trusted to NULL with :func:`opdi.cleaning.native.clean_tracks`, and writes
+``osn_tracks_clean``. The uncleaned table is kept unchanged, because the
+settings of release v0.0.2 build the flight list and events from it.
+See https://www.opdi.aero/content/methods/trajectory-cleaning.html.
 """
 
 import os
@@ -29,7 +23,13 @@ TARGET_TABLE = "osn_tracks_clean"
 
 
 class TrackCleaner:
-    """Applies native trajectory cleaning to ``osn_tracks``, month by month."""
+    """Step 02a: clean the tracks of a day or a month.
+
+    Args:
+        spark: Active Spark session.
+        config: OPDI configuration; the thresholds are ``config.cleaning``.
+        log_file_path: Parquet file that records the processed batches.
+    """
 
     def __init__(
         self,
@@ -67,9 +67,8 @@ class TrackCleaner:
     def process_day(self, day: date, skip_if_processed: bool = True, report: bool = True) -> None:
         """Clean the tracks that started on ``day``, whole.
 
-        The tracks were already claimed by their start day when step 02 wrote
-        them, so there is no window to re-derive here -- this reads the day's
-        partition and cleans exactly what it holds.
+        Step 02 writes each track in the day folder of its first report, so
+        this reads that folder and cleans what it holds.
         """
         self.process_month(month=day, skip_if_processed=skip_if_processed, report=report, day=day)
 
@@ -85,9 +84,8 @@ class TrackCleaner:
         Args:
             month: Any date within the month to process.
             skip_if_processed: Skip batches already in the log.
-            report: Print per-column NULL rates after cleaning. This is the
-                measurement the pipeline verification asserts against; it costs
-                one extra Spark action per batch.
+            report: Print the share of NULL values per column after
+                cleaning; costs one extra Spark action per batch.
             day: Clean the tracks that *started* this day, whole, instead of a
                 month. Selects on ``dof`` rather than on ``event_time``,
                 because a track running past midnight belongs to the day it
@@ -128,11 +126,8 @@ class TrackCleaner:
 
         cleaned = cleaned.repartition("track_id")
         if day is not None:
-            # The layout change EVENTS_RUN_LOG decision 15 said was needed
-            # before a batch could be replaced in place now exists: `dof`
-            # carries through from osn_tracks, so overwrite replaces this day
-            # and leaves every other day alone. Re-cleaning a day is therefore
-            # idempotent rather than duplicating it.
+            # `dof` comes from osn_tracks, so overwrite replaces this day and
+            # leaves every other day alone: cleaning a day again replaces it.
             self.storage.write_table(
                 cleaned,
                 TARGET_TABLE,
@@ -143,10 +138,9 @@ class TrackCleaner:
                 partition_values=[{"dof": day}],
             )
         else:
-            # Append, because the monthly pipeline adds a month this table does
-            # not have. Exactly wrong for a *rebuild* of a month already
-            # present, which is why `benchmarks/clean_tracks.py` forces the
-            # first write of a rebuild to overwrite.
+            # Append, because a monthly run adds a month this table does not
+            # have. Building a month that is already present would double it,
+            # so a rebuild must first overwrite.
             self.storage.write_table(cleaned, TARGET_TABLE, mode="append")
 
         if report:
@@ -157,9 +151,8 @@ class TrackCleaner:
 
         cleaned.unpersist(blocking=True)
         self.spark.catalog.clearCache()
-        # The batch, not the month: a day-at-a-time run that logged its month
-        # would mark all 30 days done after cleaning one of them, and the rest
-        # of the week would be skipped in silence.
+        # Log the batch, not its month: otherwise cleaning one day would mark
+        # the whole month as done.
         self._mark_month_processed(batch)
 
         print(f"Month {month.strftime('%Y-%m')} cleaning complete. ({datetime.now()})")
@@ -204,8 +197,8 @@ class TrackCleaner:
             h3_res_12 STRING COMMENT 'H3 cell at resolution 12.',
             segment_distance_nm DOUBLE COMMENT 'Distance from the previous state vector, NM.',
             cumulative_distance_nm DOUBLE COMMENT 'Cumulative distance from track start, NM.',
-            geo_altitude_c DOUBLE COMMENT 'Rolling-mean-corrected GNSS altitude, metres (step 02).',
-            baro_altitude_c DOUBLE COMMENT 'Rolling-mean-corrected barometric altitude, metres (step 02).',
+            geo_altitude_c DOUBLE COMMENT 'Checked GNSS altitude, metres (step 02).',
+            baro_altitude_c DOUBLE COMMENT 'Checked barometric altitude, metres (step 02).',
             segment_id STRING COMMENT 'Contiguous sub-track: splits track_id at coverage holes.'
         )
         USING iceberg
@@ -215,6 +208,6 @@ class TrackCleaner:
             'write.parquet.compression-codec'='SNAPPY',
             'write.distribution.mode'='hash'
         )
-        COMMENT '`{self.project}`.`{SOURCE_TABLE}` after native trajectory cleaning (step 02a). Bad values are masked to NULL, rows are preserved.';
+        COMMENT '{SOURCE_TABLE} after cleaning (step 02a): bad values are NULL, rows kept.';
         """)
         print(f"Table {self.project}.{TARGET_TABLE} created/verified.")

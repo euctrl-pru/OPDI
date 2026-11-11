@@ -88,8 +88,10 @@ def _turn_series(df: DataFrame, config: EventConfig) -> DataFrame:
 
 
 def _window_flag(df: DataFrame, config: EventConfig, placement: str, name: str) -> DataFrame:
-    """``name`` = the window test over the ``trailing``, ``leading`` or
-    ``centred`` window of ``holding_window_seconds``.
+    """The holding test over one window, as a column named ``name``.
+
+    The window is the ``trailing``, ``leading`` or ``centred`` window of
+    ``holding_window_seconds``.
 
     Three placements, not two: a single orbit shorter than the window is
     seen whole by the trailing window only near its end and by the leading

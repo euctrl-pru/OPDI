@@ -284,11 +284,15 @@ def duckdb_views_template() -> str:
     )
 
 
+#: This package's folder, where the SQL files are written by default.
+_PACKAGE_FOLDER = Path(__file__).resolve().parent
+
+
 def write_files(
     catalog: str = DEFAULT_CATALOG,
     schema: str = DEFAULT_SCHEMA,
     location: str = DEFAULT_LOCATION,
-    folder: Path = Path(__file__).resolve().parent,
+    folder: Path = _PACKAGE_FOLDER,
 ) -> List[Path]:
     """Write the three SQL files into ``folder``.
 

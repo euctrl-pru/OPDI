@@ -432,7 +432,7 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     positions = _once(edges, between_positions)
 
     # The instant at full resolution comes first, so the nearest samples are the
-    # nearest in time, as for every `lag` in the arm. Ordered on `s` alone, two
+    # nearest in time, as for every `lag` in the rule. Ordered on `s` alone, two
     # samples inside one second -- ADS-C can report so -- would be ordered by the
     # altitude being judged.
     edge_sample = F.struct(

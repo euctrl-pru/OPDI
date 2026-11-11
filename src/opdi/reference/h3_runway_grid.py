@@ -1,4 +1,4 @@
-"""H3 runway + approach-corridor grid, from ``oa_runways``.
+"""Step 00f: the H3 grid of runways and approach corridors, from ``oa_runways``.
 
 Universal runway coverage: rasterises *every* large+medium airport's runway
 rectangle and approach corridor to H3 resolution-12 cells, purely from
@@ -7,12 +7,6 @@ detector (``pipeline/runway_ops.py``) joins state-vector samples against. It
 is independent of ``hexaero_airport_layouts`` for that family: this grid is
 geometry-only, needs no OSM data at all, and covers all ~1,353 large+medium
 airports in the OPDI bbox in one pass.
-
-(Historical note: this independence mattered more when
-``hexaero_airport_layouts`` was an Overpass fetch per airport built for only a
-handful of aerodromes. Since the move to a local PBF extract it covers 1,036
-aerodromes and costs minutes, so the two are now complementary rather than one
-working around the other.)
 
 Two zones per physical runway ("strip"):
 
@@ -25,9 +19,10 @@ Two zones per physical runway ("strip"):
   ``APPROACH_FAR_HALF_WIDTH_NM`` at the far end. Both ends get one, since
   arrivals can use either direction of a runway.
 
-Driver-side, not a Spark UDF (load-bearing): this worktree's top-level
-``opdi.py`` shadows ``src/opdi`` on Spark *workers'* sys.path, so a UDF
-closing over any ``opdi.*`` symbol fails there with ``ModuleNotFoundError``
+Built on the driver, not in a Spark UDF, on purpose: the repository's
+top-level ``opdi.py`` hides ``src/opdi`` on the Spark workers' ``sys.path``,
+so a UDF that refers to any ``opdi`` function fails there with
+``ModuleNotFoundError``
 (reproduced in ``tests/test_h3_zones_v4.py::
 test_udf_closing_over_opdi_symbol_fails_on_worker_local_spark``). The
 generator sidesteps this the way ``h3_airport_layouts.AirportLayoutGenerator``
@@ -129,10 +124,12 @@ class RunwayCell:
 
 
 def _is_missing(x) -> bool:
-    """True for None/NaN/NaT -- the shapes a value from a ``.toPandas()``
-    column (float64 with nulls, or a plain Python None from a dict row) can
-    take. ``pd.isna`` handles all of them; it only raises for array-likes,
-    which never reach here (every caller passes a scalar).
+    """True for None, NaN or NaT.
+
+    These are the forms a missing value from a ``.toPandas()`` column (float64
+    with nulls, or a plain Python None from a dict row) can take. ``pd.isna``
+    handles all of them; it only raises for array-likes, which never reach here
+    (every caller passes a scalar).
     """
     try:
         return bool(pd.isna(x))
@@ -163,8 +160,16 @@ def runway_cells(
     approach_nm: float = APPROACH_NM,
     res: int = 12,
 ) -> List[RunwayCell]:
-    """Rasterise one runway direction: its rectangle plus its own-end
-    approach corridor.
+    """The H3 cells of one runway direction: its rectangle and its approach.
+
+    Args:
+        thr_lat: Latitude of this direction's threshold, in degrees.
+        thr_lon: Longitude of this direction's threshold, in degrees.
+        far_lat: Latitude of the opposite threshold, in degrees.
+        far_lon: Longitude of the opposite threshold, in degrees.
+        width_ft: Runway width in feet; 45 m when missing.
+        approach_nm: Length of the approach corridor, in NM.
+        res: H3 resolution.
 
     ``thr``/``far`` are the two physical threshold positions -- *this*
     direction's threshold and the opposite one. The rectangle is symmetric in
@@ -239,7 +244,7 @@ def _endpoint_or_derived(
     """Resolve one threshold's position.
 
     OurAirports almost always carries both thresholds' coordinates directly
-    (verified for every study airport), so the common path is just "return
+    (checked for every airport studied), so the common path is just "return
     ``(lat, lon)``". The fallback -- deriving a missing threshold from the
     OTHER threshold's position, a heading FROM that other threshold TOWARD
     this one, and a length (``length_ft``, defaulting to
@@ -262,8 +267,7 @@ def _endpoint_or_derived(
 
 
 def _strip_cells(row, resolution: int) -> Dict[str, str]:
-    """Build the merged {h3_id: zone} map for one ``oa_runways`` row (one
-    physical runway, both directions).
+    """The ``{h3_id: zone}`` map of one ``oa_runways`` row, both directions.
 
     Calls ``runway_cells`` twice -- once per direction -- so both thresholds
     get their own approach corridor; the two calls' rectangles are identical
@@ -332,8 +336,9 @@ def _strip_id(row, apt_icao: str) -> str:
 
 
 class RunwayGridGenerator:
-    """Builds ``h3_runway_zones`` for every large+medium airport in the OPDI
-    bbox, from ``oa_runways`` (already-ingested, no network fetch).
+    """Step 00f: build ``h3_runway_zones`` from the ingested ``oa_runways``.
+
+    Covers every large and medium airport of the coverage; needs no network.
 
     Shape mirrors ``h3_airport_layouts.AirportLayoutGenerator``: a bbox
     filter to large+medium airports, per-airport processing with success/
@@ -500,8 +505,10 @@ class RunwayGridGenerator:
         airport_types: Optional[List[str]] = None,
         troublesome_airports: Optional[List[str]] = None,
     ) -> Tuple[List[str], List[str]]:
-        """Process every large+medium airport in the bbox, skipping any
-        already recorded as successful in the progress log.
+        """Build the grid of every airport, skipping those already done.
+
+        Large and medium airports of the coverage; the airports the progress
+        log records as done are skipped.
 
         Returns:
             Tuple of (successful_airports, failed_airports) lists.
@@ -572,18 +579,19 @@ class RunwayGridGenerator:
         airport_types: Optional[List[str]] = None,
         troublesome_airports: Optional[List[str]] = None,
     ) -> Tuple[List[str], List[str]]:
-        """Entry point a runner step calls -- naming mirrors
-        ``AirportDetectionZoneGenerator.save_prepared_to_table`` (step 00a);
-        internally it is the resumable per-airport loop modeled on
-        ``AirportLayoutGenerator.process_all`` (step 00b).
+        """Build and write the grid: what step 00f runs.
+
+        Named like ``AirportDetectionZoneGenerator.save_prepared_to_table``
+        (step 00a); it runs :meth:`process_all`.
         """
         return self.process_all(
             airport_types=airport_types, troublesome_airports=troublesome_airports
         )
 
     def create_table_if_not_exists(self) -> None:
-        """Create the ``h3_runway_zones`` Iceberg table if it doesn't exist.
-        No-op in S3 mode (``StorageManager.create_table``).
+        """Create the ``h3_runway_zones`` Iceberg table if it does not exist.
+
+        Does nothing with Parquet folders (``StorageManager.create_table``).
         """
         create_sql = f"""
         CREATE TABLE IF NOT EXISTS `{self.project}`.`{self.table_name}` (
@@ -592,10 +600,10 @@ class RunwayGridGenerator:
             strip_id STRING COMMENT 'Stable id for one physical runway; both directions share it',
             le_ident STRING COMMENT 'Low-end runway designator',
             he_ident STRING COMMENT 'High-end runway designator',
-            zone STRING COMMENT '"runway" (on-strip rectangle) or "approach" (corridor before a threshold)'
+            zone STRING COMMENT 'runway (the strip) or approach (corridor before a threshold)'
         )
         USING iceberg
-        COMMENT 'Universal H3 runway + approach-corridor grid, rasterised from oa_runways for every large+medium airport in the OPDI bbox. Replaces hexaero_airport_layouts as the pruning grid for the runway detection family.'
+        COMMENT 'H3 runway and approach grid of every large and medium airport (oa_runways).'
         """
         self.storage.create_table(create_sql)
         print(f"Table {self.project}.{self.table_name} created/verified.")

@@ -40,7 +40,7 @@ Each traversal is classified by three measurements over its own samples:
 giving ``departure``, ``arrival``, ``crossing`` -- or NULL, which means
 abstain. The classes cannot overlap: ``runway_align_max_deg`` (30) and
 ``runway_cross_min_deg`` (45) leave a band between them where the detector says
-nothing, and the speed gates separate a rolling aircraft from a taxiing one.
+nothing, and the speed limits separate a rolling aircraft from a taxiing one.
 The band is deliberate, not an oversight.
 
 **Timing is interpolated, not sampled.** ``airborne`` and ``touchdown`` are the
@@ -78,7 +78,7 @@ from pyspark.sql.types import (
 )
 from pyspark.sql.window import Window
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
 from opdi.pipeline.crossings import threshold_crossings
@@ -153,7 +153,7 @@ APPROACH_CORRIDOR_NM = 3.0
 APPROACH_CORRIDOR_HALF_WIDTH_NM = 0.5
 
 #: Half-width of the dead band around the go-around trigger and recovery
-#: heights, in feet. Wider than ``AIRBORNE_HYSTERESIS_FT`` because it guards a
+#: heights, in feet. Wider than ``AIRBORNE_HYSTERESIS_FT`` because it covers a
 #: whole excursion rather than an instant: an aircraft levelling at 500 ft on a
 #: normal approach must not enter and leave the trigger repeatedly.
 GOAROUND_HYSTERESIS_FT = 50.0
@@ -238,7 +238,7 @@ def classify_traversal(
 
     The three classes cannot overlap: ``runway_align_max_deg`` (30 deg) and
     ``runway_cross_min_deg`` (45 deg) leave a band in between where the
-    detector says nothing, and the speed gates separate a rolling aircraft from
+    detector says nothing, and the speed limits separate a rolling aircraft from
     a taxiing one. Abstention is a deliberate output, not a gap: naming the
     wrong milestone corrupts a movement count, naming none is an explicit null
     a consumer can see.
@@ -329,7 +329,7 @@ def runway_traversals(
     * on that direction's *approach* -- ``zone == "approach"`` with a
       **negative** along-track (short of that threshold) inside the corridor.
 
-    The negative-along-track gate is what keeps this from polluting departures
+    The negative-along-track condition keeps this from polluting departures
     and crossings: a departing aircraft's own direction has no samples short of
     its threshold, so it is still classified from runway occupancy exactly as
     before; only the *landing* direction of a descending track picks up the
@@ -438,7 +438,7 @@ def runway_traversals(
     )
 
     # Measured against **this traversal's own aerodrome**, not against the more
-    # permissive of the flight's two fields. The classification's height gates
+    # permissive of the flight's two fields. The classification's height limits
     # are thresholds that get reported, not a membership test: measured against
     # the higher field, every movement at the lower one has a negative height,
     # `classify_traversal` abstains, and the whole departure or arrival is

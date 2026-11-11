@@ -7,8 +7,7 @@ For a small extract like Luxembourg that is a non-issue. For the 34.9 GB
 Europe extract it is fatal under this container's 16 GB cgroup cap: the
 default in-memory node index is OOM-killed, and the disk-backed alternative
 (``sparse_file_array``) holds memory down to 3.1 GB but grows a 57 GB on-disk
-index and had not finished assembling areas after 79 minutes -- rejected, see
-the Task 4B brief.
+index and takes well over an hour.
 
 The fix is to never call ``with_areas()`` on the big file at all. Filtering
 first to *only* the objects aeroway geometry needs shrinks Europe down to a
@@ -23,12 +22,11 @@ ways it references -- and it is why every one of the passes below is scoped
 to a single entity type: `FileProcessor`'s `entities` argument skips the
 other blocks entirely at the source, and stacking `osmium.filter.IdFilter` or
 `KeyFilter` on top keeps the accept/reject test itself in C++. That matters
-at Europe's scale: an early version of this module ran an *unfiltered*
-`FileProcessor(src_path, WAY)` over Pass B and paid to decode every one of
-Europe's ~500 million ways into a Python object just to test one `in` check
-against an id set -- throughput fell from ~74 MB/s to ~3 MB/s. `IdFilter`
-(pyosmium 4.3.1) rejects the ones that do not match before they ever cross
-into Python, the same way `KeyFilter` already did in Pass A. `IdFilter`
+at Europe's scale: an unfiltered `FileProcessor(src_path, WAY)` over Pass B
+would decode every one of Europe's about 500 million ways into a Python
+object to test one `in` check, about 25 times slower. `IdFilter` (pyosmium
+4.3.1) rejects the ways that do not match before they reach Python, as
+`KeyFilter` does in Pass A. `IdFilter`
 itself needs a plain iterable of ids, not an `IdSet` -- `IdSet` is not
 iterable -- which is what `_IdCollector` below exists to provide alongside
 still-cheap membership testing.
@@ -56,8 +54,7 @@ _RELATION = osmium.osm.osm_entity_bits.RELATION
 
 
 class _IdCollector:
-    """A de-duplicated, insertion-ordered set of ids that is both cheap to
-    test membership of and cheap to hand to ``osmium.filter.IdFilter``.
+    """A set of OSM ids, in insertion order, for membership tests and ``IdFilter``.
 
     ``osmium.index.IdSet`` alone would cover the membership test, but it is
     not iterable, and ``IdFilter`` requires an iterable. ``array('q')`` keeps
@@ -134,7 +131,7 @@ def filter_aeroway_pbf(src_path: str, dst_path: str) -> Dict[str, float]:
                 if m.type == "w":
                     member_way_ids.add(m.ref)
 
-    # --- Pass A2: bare nodes tagged `aeroway` (a `parking_position` stand is
+    # --- Pass A, nodes: bare nodes tagged `aeroway` (a `parking_position` stand is
     # frequently mapped this way). Same C++-filtered shape as Pass A, scoped
     # to the node blocks instead.
     fp_a2 = osmium.FileProcessor(src_path, _NODE).with_filter(osmium.filter.KeyFilter("aeroway"))

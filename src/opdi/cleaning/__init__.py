@@ -1,8 +1,9 @@
 """Trajectory cleaning for the OPDI pipeline (step 02a).
 
-Native Spark cleaning ported from the 2024 PRC Data Challenge winning
-solution. See :mod:`opdi.cleaning.native` for the algorithm and for the list
-of techniques deliberately not ported.
+:class:`~opdi.cleaning.cleaner.TrackCleaner` runs the step;
+:mod:`opdi.cleaning.native` holds its stages, which follow the winning
+solution of the 2024 PRC Data Challenge, and lists the techniques that are
+deliberately left out.
 """
 
 from opdi.cleaning.native import (

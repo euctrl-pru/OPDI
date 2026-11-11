@@ -1,7 +1,12 @@
-"""OpenSky Network state vectors ingestion module.
+"""Step 01: ingestion of the OpenSky Network state vectors.
 
-Downloads and processes state vector data from OpenSky Network's MinIO server
-and writes to Iceberg tables with proper partitioning.
+A state vector is one position report of one aircraft: time, ICAO 24-bit
+address, call sign, position, barometric and geometric altitude (metres),
+ground speed and vertical rate (m/s), track angle and on-ground flag. This
+step reads the hourly state-vector files of the OpenSky archive for a range
+of days, keeps the reports inside the configured coverage, thins them to one
+report per aircraft every 5 seconds, and writes ``osn_statevectors_v2``,
+partitioned by day.
 """
 
 import os
@@ -17,23 +22,23 @@ from pyspark.sql.functions import col, from_unixtime, to_date
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
 
-#: Thinning rules for :meth:`StateVectorIngestion._apply_filters`.
-#: ``modulo`` is what every published OPDI dataset was built with.
+#: Thinning rules for :meth:`StateVectorIngestion._apply_filters`. ``bucket``
+#: is the default of release v2.0.0; ``modulo`` the rule of release v0.0.2.
 DECIMATION_MODULO = "modulo"
 DECIMATION_BUCKET = "bucket"
 
 
-#: Distinguishes "the caller said nothing" from "the caller said worldwide".
-#: ``None`` used to mean the first; worldwide needs it to mean the second.
+#: Tells "the caller gave no box" (follow the configuration) from "the caller
+#: gave ``None``" (worldwide).
 _UNSET = object()
 
 
 class StateVectorIngestion:
-    """Handles ingestion of OpenSky Network state vectors from MinIO storage.
+    """Step 01: read OpenSky state vectors, filter and thin them, and write them.
 
-    This class manages the complete workflow of downloading state vector parquet files
-    from OpenSky's S3-compatible MinIO server, processing them, and writing to
-    Iceberg tables with daily partitioning.
+    :meth:`ingest_from_s3` reads the archive directly over S3 (the ``opensky``
+    environment); :meth:`ingest` downloads the files with the MinIO client
+    first.
     """
 
     # Column name mapping from camelCase (OSN) to snake_case (OPDI standard)
@@ -67,13 +72,13 @@ class StateVectorIngestion:
         time_interval: int = 5,
         decimation: Optional[str] = None,
     ):
-        """Initialize state vector ingestion.
+        """Prepare the ingestion.
 
         Args:
-            spark: Active SparkSession
-            config: OPDI configuration object
-            local_download_path: Local directory for temporary file downloads
-            log_file_path: Path to file tracking processed files
+            spark: Active Spark session.
+            config: OPDI configuration.
+            local_download_path: Local folder for downloaded files.
+            log_file_path: File that records the processed files.
             bbox: Bounding box as ``(min_lon, min_lat, max_lon, max_lat)``.
                   Omit it to follow ``config.coverage.bbox`` -- the European
                   box by default, ``None`` under ``worldwide=True``. Pass
@@ -81,10 +86,10 @@ class StateVectorIngestion:
                   configuration; pass a tuple to force a specific box.
             time_interval: Thinning interval in seconds. Defaults to 5. Set to 1
                   to keep every row.
-            decimation: Which thinning rule to apply. ``"modulo"`` (default)
-                  keeps rows where ``event_time % time_interval == 0``;
-                  ``"bucket"`` keeps one row per (aircraft, interval bin). See
-                  :meth:`_apply_filters` for why the default is what it is.
+            decimation: Thinning rule: ``"bucket"`` keeps one row per
+                  (aircraft, interval); ``"modulo"`` keeps rows where
+                  ``event_time % time_interval == 0``. Default:
+                  ``config.ingestion.decimation``. See :meth:`_apply_filters`.
         """
         self.spark = spark
         self.config = config
@@ -95,9 +100,8 @@ class StateVectorIngestion:
         self.batch_size = config.ingestion.batch_size
         self.bbox = config.coverage.bbox if bbox is _UNSET else bbox
         self.time_interval = time_interval
-        # None means "whatever the configuration says", so the rule is set in
-        # one place rather than at every call site. An explicit argument still
-        # wins, which is what lets the decimation benchmark run both arms.
+        # None follows the configuration; an explicit argument takes
+        # precedence (a study can compare both rules).
         if decimation is None:
             decimation = getattr(config.ingestion, "decimation", DECIMATION_MODULO)
         if decimation not in (DECIMATION_MODULO, DECIMATION_BUCKET):
@@ -119,25 +123,17 @@ class StateVectorIngestion:
 
         Two thinning rules are available.
 
-        ``modulo`` keeps the row at the one second per interval that is
-        congruent to zero. It is a *fixed-phase* sampler, so on a feed whose
-        rows arrive at arbitrary seconds it would delete far more than one row
-        in ``time_interval``. **This is the default because it is what every
-        published OPDI dataset was built with**, and because on the OSN archive
-        it costs nothing: that table is a complete 1 Hz grid, so the phase
-        always lands on a row.
+        ``bucket`` (default) divides time into intervals of ``time_interval``
+        seconds and keeps the last row of each (aircraft, interval), so a
+        track's final report is kept exactly.
 
-        ``bucket`` bins time into ``floor(t / time_interval)`` and keeps one row
-        per (aircraft, bin) -- the last, so a track's final observation is
-        preserved exactly. This is the rule the modulo filter is an
-        approximation of, and it is correct on a sparse feed.
+        ``modulo`` (release v0.0.2) keeps the row whose time is a multiple of
+        ``time_interval``. On the OpenSky archive, which has a row every second,
+        the two keep nearly the same rows; on a feed with rows at irregular
+        seconds, ``modulo`` would drop far more than it should.
 
-        Measured on three hours of the OSN archive, bucket keeps 1.002x the rows
-        of modulo and costs ~13% more wall clock, so it is offered rather than
-        adopted. See ``benchmarks/decimation_experiment.py`` and the
-        state-vector decimation study for the measurement. Switching rules
-        changes ``track_id`` for every downstream row, so it is not a drop-in
-        change to a published pipeline.
+        Changing the rule changes which reports form each track, and so the
+        ``track_id`` values.
         """
         if self.bbox:
             min_lon, min_lat, max_lon, max_lat = self.bbox
@@ -357,20 +353,10 @@ class StateVectorIngestion:
         # Repartition for efficient write
         df_partitioned = df_with_partition.repartition("event_time_day").orderBy("event_time_day")
 
-        # Partitioned by day, and the partition column is kept.
-        #
-        # It used to be dropped here on the grounds that Iceberg would add it
-        # back, which is true under Iceberg and false in the opensky
-        # environment, where the table is plain parquet on S3. Keeping it is
-        # what lets a single day be replaced, listed, or dropped without
-        # touching its neighbours.
-        #
-        # That matters because ingestion runs a day at a time over a window
-        # that overlaps its neighbours': day D needs D-1, D and D+1. Without
-        # per-day partitions the only options are to keep everything (~220 GB
-        # for a month) or to refetch the overlap every day (three times the
-        # network). With them, each calendar day is fetched once and dropped
-        # when the window has moved past it.
+        # Partitioned by day, with the day column kept, so a single day can be
+        # replaced, listed or removed without touching the others. Day D needs
+        # the reports of D-1 to D+1, so a run keeps a three-day window and
+        # fetches each calendar day once.
         days = [r[0] for r in df_partitioned.select("event_time_day").distinct().collect()]
         self.storage.write_table(
             df_partitioned,
@@ -380,15 +366,8 @@ class StateVectorIngestion:
             partition_values=[{"event_time_day": d} for d in days],
         )
 
-        # The row count is deliberately not printed here.
-        #
-        # A count after the write is a second action on the same
-        # plan, so the whole ingestion -- the S3 read and every transform --
-        # ran twice, to produce a number for a log line. Nothing cached it in
-        # between.
-        #
-        # A diagnostic that costs as much as the step it describes has to be
-        # asked for. `OPDI_REPORT_INGEST_ROWS=1` restores it.
+        # The row count is printed only on request (OPDI_REPORT_INGEST_ROWS=1):
+        # counting after the write runs the whole ingestion a second time.
         if os.environ.get("OPDI_REPORT_INGEST_ROWS"):
             print(f"Written {df_partitioned.count()} records to osn_statevectors_v2")
         else:
@@ -559,16 +538,8 @@ class StateVectorIngestion:
         row_count = df.count()
         print(f"Read {row_count:,} state vectors.")
 
-        # Write via StorageManager, partitioned by day and replacing only the
-        # days present in this frame.
-        #
-        # This is the write the opensky environment actually uses -- the other
-        # one, in `_write_batch`, serves the local-file path. Partitioning only
-        # that one left this as a plain overwrite, so a per-day ingest wiped
-        # the whole table on every call and only the last day survived. Day D's
-        # segmentation then read a window that was two-thirds absent, claimed
-        # almost no tracks, and wrote an empty osn_tracks whose schema could
-        # not be inferred downstream.
+        # Partitioned by day, replacing only the days present in this frame, so
+        # ingesting one day keeps the others of the window.
         df = df.withColumn("event_time_day", to_date(col("event_time")))
         days = [r[0] for r in df.select("event_time_day").distinct().collect()]
         self.storage.write_table(
@@ -583,10 +554,7 @@ class StateVectorIngestion:
         return row_count
 
     def create_table_if_not_exists(self) -> None:
-        """Create the osn_statevectors_v2 Iceberg table if it doesn't exist.
-
-        This should be run once before first ingestion.
-        """
+        """Create the ``osn_statevectors_v2`` Iceberg table if it does not exist."""
         from datetime import date
 
         today = date.today().strftime("%d %B %Y")

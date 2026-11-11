@@ -1,47 +1,33 @@
 #!/usr/bin/env python
-"""Run the OPDI pipeline over a week, with the shipped configuration.
+"""Run the OPDI pipeline over a period of days, one day at a time.
 
-Every algorithm choice comes from the dataclass defaults, which are the
-configurations the portal's studies recommend -- A8 ``standard`` segmentation
-(track-construction-v2), ``endpoint``/``trend`` detection
-(adep-ades-detection-v6.2) and ``events_v0.2.0`` (flight-events-v4).
-``OPDIConfig.for_environment`` sets only ``project`` and ``spark``, so there is
-nothing to pass to get them and no flag here that would change them.
+Uses the default configuration of release v2.0.0. Each day goes through all
+steps before the next day starts; a finished step is recorded, so running the
+same command again after a failure continues where it stopped.
 
 Usage::
 
-    # See the plan without touching the cluster
-    .venv310/bin/python run_period.py --start 2026-06-01 --dry-run
+    # Show the plan without starting Spark
+    python run_period.py --start 2026-06-01 --dry-run
 
-    # Run it
-    .venv310/bin/python run_period.py --start 2026-06-01
+    # Process seven days (the default length)
+    python run_period.py --start 2026-06-01
 
-    # Resume after a failure -- same command, finished steps are skipped
-    .venv310/bin/python run_period.py --start 2026-06-01
-
-    # Just one step
-    .venv310/bin/python run_period.py --start 2026-06-01 --steps 04
+    # One day, one step
+    python run_period.py --start 2026-06-01 --days 1 --steps 04
 
     # Into another warehouse
-    .venv310/bin/python run_period.py --start 2026-06-01 --warehouse s3a://eurocontrol/scratch
+    python run_period.py --start 2026-06-01 --warehouse s3a://eurocontrol/scratch
 
 Runs are worldwide unless ``--europe`` is given. The warehouse is
 ``--warehouse`` if given, else the ``OPDI_WAREHOUSE`` environment variable,
-else ``s3a://eurocontrol/opdi``, for both coverages. Everything is written to
-the release folder inside it (``<warehouse>/v2.0.0``), **including the
-reference tables**: step 00 runs first and rebuilds airport zones, ground
-layouts, the runway grid, OurAirports and the aircraft database there. A run
-therefore reads only tables it produced. A warehouse built with one coverage
-refuses a run with the other.
+else ``s3a://eurocontrol/opdi``. Everything, including the reference tables
+built by step 00, is written in the release folder inside it
+(``<warehouse>/v2.0.0``), so a run reads only tables it produced. A
+warehouse built with one coverage refuses a run with the other.
 
-The reference substeps execute in dependency order rather than id order -- 00d
-creates ``oa_airports``, which 00a, 00b and 00f all read. See
-``runner.REFERENCE_SUBSTEPS``.
-
-Step 00b needs a local OSM extract; set ``OPDI_OSM_PBF`` or
-``h3.airport_layout_pbf_path``. Without one it falls back to the public
-Overpass API, which fails silently at this scale. The run checks this before
-creating a session.
+Step 00b needs a local OpenStreetMap extract: set ``OPDI_OSM_PBF`` or
+``h3.airport_layout_pbf_path``. The run checks this before it starts.
 """
 
 import argparse
@@ -61,13 +47,15 @@ from opdi.periodrun import (  # noqa: E402
 
 
 def _day(value: str) -> date:
+    """A ``YYYY-MM-DD`` command-line value as a date."""
     try:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
-        raise argparse.ArgumentTypeError(f"expected a date as YYYY-MM-DD, got {value!r}")
+        raise argparse.ArgumentTypeError(f"expected a date as YYYY-MM-DD, got {value!r}") from None
 
 
 def main(argv=None) -> int:
+    """Run the command line; returns the exit code (0 when every step finished)."""
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -96,33 +84,30 @@ def main(argv=None) -> int:
         help="Where completion is recorded " "(default: logs/periodrun_{start}_{days}d.json).",
     )
     p.add_argument(
-        "--force", action="store_true", help="Re-run steps already recorded as complete."
+        "--force", action="store_true", help="Run steps again that are recorded as finished."
     )
     p.add_argument(
         "--driver-memory",
         default=None,
-        help="Driver heap, e.g. '6g'. Still capped to what the " "container can hold.",
+        help="Driver memory to ask for, for example '6g'; reduced to what the "
+        "container can hold.",
     )
-    p.add_argument("--executors", type=int, default=None, help="Override spark.executor.instances.")
+    p.add_argument("--executors", type=int, default=None, help="Number of Spark executors.")
     p.add_argument(
         "--warehouse",
         default=_UNSET,
-        help="Warehouse every table is written to and read from, "
-        "inside its release folder <warehouse>/v2.0.0 "
-        "(default: OPDI_WAREHOUSE if set, else "
-        f"{DEFAULT_WAREHOUSE}). Reference tables included: a "
-        "run reuses nothing from elsewhere.",
+        help="Warehouse to read and write, in its release folder "
+        "<warehouse>/v2.0.0, reference tables included "
+        f"(default: OPDI_WAREHOUSE if set, else {DEFAULT_WAREHOUSE}).",
     )
     p.add_argument(
         "--prune-tracks",
         action="store_true",
         default=False,
-        help="Drop osn_tracks and osn_tracks_clean for each day "
-        "once that day's outputs are written. They are ~19 GB "
-        "a day worldwide against ~1.5 GB for the flight list, "
-        "events and measurements, so a long period is only "
-        "affordable without them. Costs the trajectory view "
-        "and re-derivation without re-ingest.",
+        help="Remove each day's osn_tracks and osn_tracks_clean once steps 03 "
+        "and 04 have finished for it. The tracks take about 19 GB a day "
+        "worldwide; without them a day's events cannot be computed again "
+        "without fetching its reports again.",
     )
     p.add_argument(
         "--keep-tracks-on",
@@ -130,9 +115,7 @@ def main(argv=None) -> int:
         default=[],
         type=date.fromisoformat,
         metavar="YYYY-MM-DD",
-        help="Days exempt from --prune-tracks, so a reference day "
-        "keeps its trajectories while the rest of the period "
-        "keeps only outputs.",
+        help="Days whose tracks are kept with --prune-tracks.",
     )
     coverage = p.add_mutually_exclusive_group()
     coverage.add_argument(
@@ -140,23 +123,22 @@ def main(argv=None) -> int:
         dest="worldwide",
         action="store_true",
         default=True,
-        help="Run worldwide: no bounding box. The default; "
-        "kept so existing commands still parse.",
+        help="Process the whole world (the default).",
     )
     coverage.add_argument(
         "--europe",
         dest="worldwide",
         action="store_false",
-        help="Apply the published European bounding box.",
+        help="Keep only positions inside the European box.",
     )
     p.add_argument(
         "--skip-preflight",
         action="store_true",
-        help="Skip the pre-run checks (OSM extract present, "
-        "warehouse clear, reference tables readable).",
+        help="Skip the checks before the run (OpenStreetMap extract present, "
+        "reference tables readable).",
     )
     p.add_argument(
-        "--dry-run", action="store_true", help="Print the plan and exit without creating a session."
+        "--dry-run", action="store_true", help="Print the plan and stop, without starting Spark."
     )
     args = p.parse_args(argv)
 

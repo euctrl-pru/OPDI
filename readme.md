@@ -1,615 +1,325 @@
-# OPDI - Open Performance Data Initiative
+# OPDI: the Open Performance Data Initiative
 
-A pip-installable Python package for processing OpenSky Network aviation data through modular ETL pipelines. OPDI transforms raw ADS-B state vectors into enriched flight datasets with geospatial H3 indexing and event detection, and publishes them as daily files.
+OPDI is an open data set for research on air traffic performance, produced by
+the Performance Review Unit of EUROCONTROL. It is built from the position
+reports that aircraft broadcast (ADS-B), as collected by the
+[OpenSky Network](https://opensky-network.org/), and published as two files
+per day:
 
-## Installation
+- **the flight list**: one row per flight, with its aircraft, its departure
+  and destination airports, the first and last time it was seen, and its main
+  times (off-block, take-off, landing, in-block), runways, stands and the
+  times it crossed distance circles around its airports;
+- **the flight events**: one row per event of those flights (for example
+  take-off, top of climb, the start and end of a level segment, the crossing
+  of a flight level, entry onto a runway, a holding pattern), with the
+  event's time, position and altitude, its measurements (distance flown and
+  time passed since the start of the flight, holding duration, and others)
+  and the flight's columns.
 
-### From source (editable / development mode)
+This repository holds the pipeline that produces the files (the `opdi`
+Python package, which runs on Apache Spark), a reader for the published
+files, and the scripts of the studies behind each method.
 
-```bash
-cd OPDI-dev
-pip install -e .
+The data, each column, each method and its validation are described on the
+OPDI website, <https://www.opdi.aero>:
+
+- the data: <https://www.opdi.aero/content/data/index.html> (download,
+  data dictionary, releases, known limitations);
+- the methods: <https://www.opdi.aero/content/methods/> (one page per method,
+  for example `track-identity.html`, `airports.html`, `runway-milestones.html`).
+
+The current release is **v2.0.0**. The previous release, v0.0.2, can still be
+reproduced (see [Reproducing release v0.0.2](#reproducing-release-v002)).
+
+## Contents
+
+- [Reading the published files](#reading-the-published-files)
+- [Installing the pipeline](#installing-the-pipeline)
+- [How the pipeline works](#how-the-pipeline-works)
+- [Running one day](#running-one-day)
+- [Running a period](#running-a-period)
+- [Where the output goes](#where-the-output-goes)
+- [Coverage: worldwide or Europe](#coverage-worldwide-or-europe)
+- [Configuration](#configuration)
+- [Reproducing release v0.0.2](#reproducing-release-v002)
+- [Studies and their variants](#studies-and-their-variants)
+- [Tests](#tests)
+- [Environment variables](#environment-variables)
+- [Package layout](#package-layout)
+
+## Reading the published files
+
+The files are Parquet files, one per table and day:
+
+```
+<release>/flight_list/flight_list_YYYYMMDD.parquet
+<release>/flight_events/flight_events_YYYYMMDD.parquet
+<release>/index/flight_index_YYYYMM.parquet   # which day holds a flight
+<release>/catalogue.parquet                   # one row per published day
 ```
 
-### With development tools (pytest, black, mypy, ruff)
+A day's files hold the flights that were first seen on that day (UTC). Any
+Parquet reader works (pandas, R `arrow`, DuckDB, Spark). The package includes
+a small reader that needs no Spark:
 
 ```bash
-pip install -e ".[dev]"
+pip install "opdi[reader]"      # pyarrow, pandas and DuckDB
 ```
-
-### With documentation tools (Sphinx)
-
-```bash
-pip install -e ".[docs]"
-```
-
-### All extras
-
-```bash
-pip install -e ".[dev,docs]"
-```
-
-### Requirements
-
-- Python >= 3.8
-- Apache Spark >= 3.3.0 (PySpark)
-- All other dependencies are installed automatically from `pyproject.toml`
-
-## Quick start
 
 ```python
 from datetime import date
-from opdi.config import OPDIConfig
-from opdi.utils.spark_helpers import get_spark
+from opdi import published
 
-config = OPDIConfig.for_environment("opensky")   # "opensky" or "local"
-spark  = get_spark(env="opensky", app_name="My OPDI Analysis")
+flights = published.read_flight_list(date(2026, 6, 14))
+events = published.read_flight_events(date(2026, 6, 14), types=["ATOT", "ALDT"])
 
-# Run one pipeline step
-from opdi.pipeline import TrackProcessor
-processor = TrackProcessor(spark, config)
-processor.process_month(date(2024, 1, 1))
-
-spark.stop()
+# The shapes of release v0.0.2, where events and measurements were separate tables
+events_v0 = published.as_events(events)
+measurements_v0 = published.as_measurements(events)
 ```
 
-## Running the full pipeline
+The files are read from `published.PUBLISHED_BASE_URL` by default; set the
+environment variable `OPDI_PUBLISHED_URL`, or pass `base=`, to read from a
+local folder (`/data/opdi/v2.0.0/`) or an S3 address (`s3://bucket/folder/`).
 
-The package provides three equivalent ways to run the pipeline (steps 00 to 04b, and 09):
+For SQL, `published.duckdb_views()` defines DuckDB views with the same names as
+the Trino tables: `flight_list`, `flight_events`, `flight_index`, and the
+release v0.0.2 shapes `events`, `measurements` and `flight_list_v0`:
 
-### 1. CLI (after `pip install`)
+```python
+import duckdb
+from opdi import published
+
+con = duckdb.connect()
+con.execute(published.duckdb_views(start=date(2026, 6, 14), end=date(2026, 6, 20)))
+con.sql("select type, count(*) from events group by type").show()
+```
+
+The Trino definitions of the same tables and views are in
+`src/opdi/sql/trino/` (regenerate them with `python -m opdi.sql.render`). Every
+column, with its type, unit and meaning, is declared once in
+`src/opdi/output/schema.py`, and the website's data dictionary is built from
+it.
+
+## Installing the pipeline
+
+The pipeline needs Python 3.10 or later, Java 17 and Apache Spark 3.5 or
+later (PySpark is installed with the package).
 
 ```bash
-opdi run --start 2024-01-01 --end 2024-06-01
-
-# Single step only
-opdi run --step 02 --start 2024-01-01 --end 2024-02-01
+git clone https://github.com/euctrl-pru/opdi.git
+cd opdi
+pip install -e .              # the pipeline
+pip install -e ".[dev]"       # plus the tools for tests and linting
+pip install -e ".[airflow]"   # on the machine that runs the Airflow scheduler
 ```
 
-### 2. Standalone script
+On a Spark cluster, the executors need the same Python dependencies; the
+image `docker/Dockerfile` (`quintengs/opdi-spark`) provides them. A
+dependency added to the package must also be added there.
+
+## How the pipeline works
+
+The pipeline runs as numbered steps. Each step reads the tables of the steps
+before it and writes its own:
+
+| Step | What it does | Writes | Module |
+|------|--------------|--------|--------|
+| 00 | Reference tables, built once: airport detection zones (00a), airport layouts from OpenStreetMap (00b), airspaces (00c), OurAirports airports and runways (00d), the OpenSky aircraft database (00e), runway and approach grid (00f) | `h3_airport_detection_zones`, `hexaero_airport_layouts`, `opdi_h3_airspace_ref`, `oa_airports`, `oa_runways`, `osn_aircraft_db`, `h3_runway_zones` | `opdi.reference`, `opdi.ingestion` |
+| 01 | Fetch the position reports (state vectors) of the day before, the day and the day after, thinned to one report per aircraft every 5 seconds | `osn_statevectors_v2` | `opdi.ingestion.osn_statevectors` |
+| 02 | Split the reports into tracks, one per flight (`track_id`) | `osn_tracks` | `opdi.pipeline.tracks` |
+| 02a | Clean the tracks: set values that cannot be trusted to NULL | `osn_tracks_clean` | `opdi.cleaning` |
+| 03 | Flight list: departure and destination airports, aircraft data | `opdi_flight_list` | `opdi.pipeline.flights` |
+| 04 | Flight events and their measurements | `opdi_flight_events`, `opdi_measurements` | `opdi.pipeline.events` |
+| 04b | Copy the main milestones onto the flight list | `opdi_flight_list` | `opdi.pipeline.flight_list_step` |
+| 09 | Publish the day's flight list and flight events files, the monthly index and the catalogue | `published/` | `opdi.output.published` |
+
+Step 01b, off by default, adds ADS-C reports (satellite position reports,
+mostly over oceans) to step 02; see `AdscConfig` in `src/opdi/config.py`.
+
+A day's steps process the flights that started on that day, whole, even when
+they end on the next day. A day can therefore be processed only once the
+following day is complete.
+
+## Running one day
+
+On the OpenSky cluster, one command runs every step of a day, checks the free
+space first and skips the steps already finished:
 
 ```bash
-python opdi.py --start 2024-01-01 --end 2024-06-01
+python -m opdi.orchestration reference                 # step 00, once
+python -m opdi.orchestration day --day 2026-06-14      # steps 01 to 09
+python -m opdi.orchestration step --step 04 --day 2026-06-14 --force   # one step again
 ```
 
-### 3. Programmatic
-
-```python
-from opdi.runner import run_pipeline
-run_pipeline(env="opensky", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
-```
-
-**All three of these are local-driver-only, even under `--env opensky`.** They
-call `SparkSessionManager.create_session(...)` without `distributed=True`, so
-the driver never attaches to the Kubernetes master and the whole pipeline runs
-in one process. That is survivable for a day of one aerodrome and hopeless for
-a real period of network-wide traffic — it cost a failed worldwide reference
-build during development, diagnosed as `PYTHON_VERSION_MISMATCH` with every
-task attributed to "executor driver" rather than a Kubernetes worker. **A real
-cluster run goes through `run_period.py`** (`python run_period.py --start
-2026-06-01 --worldwide`), which calls `create_session(..., distributed=True)`
-explicitly. This is also documented in `run_period.py`'s own module docstring,
-which is why the script exists.
-
-## Pipeline stages
-
-| Step | Script origin | Module | Description |
-|------|--------------|--------|-------------|
-| 00a | `00_create_h3_airport_detection_areas.py` | `reference.h3_airport_zones` | Airport H3 detection zones (0-40 NM rings) |
-| 00b | `00_create_h3_airport_layouts.py` | `reference.h3_airport_layouts` | Airport ground layouts from a local OSM extract (res 12) — see [below](#step-00b-airport-ground-layouts) |
-| 00c | `00_create_h3_airspaces.py` | `reference.h3_airspaces` | ANSP / FIR / country boundaries (res 7) |
-| 00d | `00_etl_ourairports.py` | `ingestion.ourairports` | OurAirports reference data (6 datasets) |
-| 00e | `00_osn_aircraft_db.py` | `ingestion.osn_aircraft_db` | OpenSky aircraft database |
-| 00f | — | `reference.h3_runway_grid` | Runway + approach H3 grid from `oa_runways` |
-| 01 | `01_osn_statevectors_etl.py` | `ingestion.osn_statevectors` | State vector ingestion from OpenSky S3 |
-| 02 | `02_osn_tracks_etl.py` | `pipeline.tracks` | Track creation (SHA256 IDs, H3, distance, alt cleaning) |
-| 03 | `03_opdi_flight_list_v2.py` | `pipeline.flights` | Flight list (DAI + overflights, aircraft enrichment) |
-| 04 | `04_opdi_flight_events_etl.py` | `pipeline.events` | Events & measurements (fuzzy phases, FL crossings, airport events) |
-| 04b | — | `pipeline.flight_list_step` | Main events copied onto the flight list |
-| 09 | — | `output.published` | Daily published files (flight list, flight events) |
-
-### Step 00b: airport ground layouts
-
-Step 00b builds `hexaero_airport_layouts` — the H3 res-12 grid of runways,
-taxiways, aprons, stands, hangars, thresholds and de-icing pads that the
-airport-surface events (`off-block`, `on-block`, the runway family) are matched
-against. It reads a **local OpenStreetMap extract**.
-
-**Point it at an extract.** Either configure it:
-
-```python
-config.h3.airport_layout_pbf_path = "/path/to/europe-latest.osm.pbf"
-```
-
-or set the environment variable, which takes precedence:
-
-```bash
-export OPDI_OSM_PBF=/path/to/europe-latest.osm.pbf
-opdi run --step 00b --env opensky
-```
-
-Extracts come from [Geofabrik](https://download.geofabrik.de/). `europe-latest.osm.pbf`
-is ~35 GB.
-
-**The extract is filtered automatically, once.** A raw continental extract
-cannot be used directly: assembling multipolygon areas requires OSM node
-locations for the *whole* file, which exceeds a 16 GB container and is killed
-by the OOM reaper. Step 00b therefore reduces the extract to aeroway geometry
-plus the nodes and relation members it references, writing `aeroway-<name>`
-beside the source:
-
-```
-Filtering europe-latest.osm.pbf (32.5 GB) to aeroway geometry -> aeroway-europe-latest.osm.pbf ...
-Filtered in 1174 s: 32.5 GB -> 15.4 MB (1,698,326 nodes, 181,742 ways, 1,153 relations)
-```
-
-That file is reused on later runs unless the source is newer, so only the first
-run pays for it. It is ~2,000× smaller and is read in about a second instead of
-six minutes, which is what makes a network-wide build practical. Passing an
-`aeroway-`-prefixed path skips the step. `opdi.reference.pbf_filter.filter_aeroway_pbf`
-does the work and can be called directly.
-
-**How aerodromes are identified.** Each feature is assigned to the aerodrome
-whose own OSM boundary (`aeroway=aerodrome`, matched on its `icao` tag)
-contains it. Where OSM maps an aerodrome as a bare node — it has no area, so it
-can contain nothing — the step falls back to a bounding box derived from the
-runway extent in `oa_runways`. On the 2026-09-07 build, 937 aerodromes were
-assigned by polygon and 97 by that fallback.
-
-**What it produces.** The 2026-09-07 build covered **1,036 aerodromes and
-2,900,230 rows** in about ten minutes. Aerodromes are not built when they lie
-outside the extract's geographic coverage (`europe-latest` reaches roughly
-lon −31…46, lat 33…79, so North Africa, the Middle East, the Canaries and
-eastern Russia need additional regions), or when OSM has no aeroway geometry
-for them. Both are reported in the step's output rather than passing silently.
-
-**The Overpass fallback.** With no extract configured, the step falls back to
-the public Overpass API, which is kept working for single-airport use but
-cannot build the network: it resolves the airport *name* through Nominatim
-first, so a name that does not resolve returns no data rather than an error,
-and at ~1,350 aerodromes the public endpoint refuses outright. Every aerodrome
-published before 2026-09-07 came from that path.
-
-## OpenSky Network environment
-
-The `opensky` environment connects directly to the OpenSky Network S3 bucket and stores pipeline output as parquet on S3 (`s3a://eurocontrol/opdi/`). It does not require Hive or Iceberg.
-
-### Non-distributed (local driver only)
-
-```python
-from opdi.utils.spark_helpers import get_spark
-
-spark = get_spark("opensky", app_name="OPDI Analysis")
-```
-
-### Distributed (Kubernetes executors)
-
-```python
-spark = get_spark("opensky", distributed=True)
-
-# With a custom Docker image containing Python dependencies
-spark = get_spark(
-    "opensky",
-    distributed=True,
-    container_image="my-registry/opdi-spark:v4.1.1",
-)
-```
-
-### Running pipeline steps on OpenSky
-
-All pipeline steps use a `StorageManager` abstraction (`opdi.utils.storage`) that transparently switches between Iceberg tables and S3 parquet depending on the environment. No code changes are needed in individual steps.
-
-```python
-from opdi.config import OPDIConfig
-from opdi.utils.spark_helpers import get_spark
-from opdi.ingestion.osn_aircraft_db import AircraftDatabaseIngestion
-
-config = OPDIConfig.for_environment("opensky")
-spark = get_spark("opensky", app_name="Aircraft DB Ingestion")
-
-ingestion = AircraftDatabaseIngestion(spark, config)
-ingestion.create_table_if_not_exists()  # no-op on S3
-ingestion.ingest(mode="overwrite")      # writes to s3a://eurocontrol/opdi/osn_aircraft_db/
-```
-
-### Reading OpenSky state vectors directly
-
-```python
-# State vectors are available as hourly partitions
-df = spark.read.parquet("s3a://opensky-hdfs-backup/tables_v4/state_vectors/hour=1771952400")
-df.show(10)
-```
-
-See `notebooks/opensky_quickstart.ipynb` for a ready-to-run notebook.
-
-## Worldwide coverage
-
-**OPDI runs worldwide by default** — every entry point, and
-`OPDIConfig.for_environment()` itself. The published European bounding box
-(`opdi.coverage.EUROPE_BBOX`) — the box every released `track_id` and every
-detection study was tuned inside — is unchanged, but you now have to ask for
-it: `--europe` on the command line, `worldwide=False` in code. `--worldwide`
-is still accepted and is a no-op. **Use `run_period.py` for a real worldwide
-run** — it is
-the only one of these that attaches to the Kubernetes cluster
-(`create_session(..., distributed=True)`, see above); a worldwide build
-needs it, and running local-only against network-wide traffic is what cost
-the first worldwide reference build its first attempt:
-
-```bash
-python run_period.py --start 2026-06-01             # worldwide, the cluster path -- use this
-python run_period.py --start 2026-06-01 --europe    # the published European box
-```
-
-`opdi run` and `python opdi.py` take the same `--europe` switch, but both are
-**local-driver-only** (see above) and cannot perform a real worldwide run —
-fine for a single day against one aerodrome, not for network-wide traffic:
-
-```bash
-opdi run --env opensky --start 2026-06-01 --end 2026-06-02   # local-only, worldwide
-python opdi.py --europe --start 2026-06-01 --end 2026-06-02  # local-only, European box
-```
-
-or programmatically:
-
-```python
-config = OPDIConfig.for_environment("opensky")                   # worldwide
-config = OPDIConfig.for_environment("opensky", worldwide=False)  # European box
-```
-
-**How worldwide differs from `--europe`:**
-
-- **No coverage filter.** `config.coverage.bbox` is `None` rather than the
-  European tuple; ingestion, detection and every H3 reference generator treat
-  that as "everywhere" (`lit(True)`, not a box of ±180/±90 — a longitude range
-  cannot express "everywhere" once the coordinate wraps at the antimeridian).
-- **One warehouse setting.** In the `opensky` environment the warehouse (the
-  storage prefix that holds OPDI's data) is `--warehouse` (or the `warehouse`
-  argument of `OPDIConfig.for_environment`) if given, else the
-  `OPDI_WAREHOUSE` environment variable, else `s3a://eurocontrol/opdi`. The
-  coverage does not change it. Each release has its own folder inside it, the
-  release root (`<warehouse>/v2.0.0`), which holds the working tables, the
-  progress records (`_state/`) and the published files (`published/`). Every
-  run prints the warehouse, the release root and the coverage at start-up, and
-  says so when `OPDI_WAREHOUSE` names another place than the one in use. In the
-  `local` environment a worldwide run writes to the declared path followed by
-  `-world`.
-- **A `coverage_marker` table stamps each warehouse** with the coverage that
-  built it (`europe` / `worldwide` / `custom`) and refuses to mix: pointing a
-  worldwide run at a warehouse already marked European fails at step 00 with a
-  message naming both coverages, and the reverse fails the same way. An
-  unmarked warehouse (nothing has ever written to it) is treated as a
-  legitimate first run, not refused.
-- **Step 00c (airspaces) does not run.** Its sources are the PRU Atlas
-  ANSP/FIR parquets, which are European; there is no global FIR source to
-  build from, so the substep is skipped automatically whenever
-  `config.coverage.is_worldwide`.
-- **The out-of-area (`OOA`) label is inert.** `OOA` marks a flight that
-  entered the observed area already airborne — meaningful only when there is
-  an edge to have crossed. Worldwide there is none, so no row is ever labelled
-  `OOA`.
-- **The airport and reference-data footprint is much larger.** OurAirports
-  lists 5,280 large + medium aerodromes worldwide against 1,357 inside the
-  European box (both measured), and `h3_airport_detection_zones` scales
-  accordingly — **projected**, not yet measured, at the order of 125 M cells
-  against Europe's measured ~32 M (the aerodrome ratio applied to the
-  European cell count; the worldwide reference build has not completed, so
-  nobody has counted the real table). The OSM aeroway extract needed
-  for step 00b's ground layouts is a planet-wide Geofabrik/Overpass pull,
-  filtered down to aeroway geometry the same way the European extract is (see
-  [Step 00b](#step-00b-airport-ground-layouts)) — 66.5 MB from a 94.86 GB
-  planet source, in one measured build.
-- **State-vector volume is roughly 2.7×** the European figure (measured
-  2.73× over three hours of 2026-06-01: 1.95× at 06Z, rising to 3.86× at 18Z
-  as the Americas wake up and Europe winds down — well below the 3.89×
-  airport-count ratio, because OpenSky's own receiver network is
-  Europe-heavy). Budget storage accordingly; a single worldwide day is
-  **projected** at ~23 GB before events — the 11-day European campaign's
-  per-day storage (statevectors, tracks, clean tracks) scaled by the
-  measured 2.73× row ratio: 2.7 + 10.6 + 9.8 GB. This supersedes an earlier
-  10–20 GB estimate, which undercounted; the worldwide run is currently
-  blocked on a bucket quota, so planning against too small a number is a live
-  risk, not a hypothetical one.
-
-**Worldwide output is not comparable to published European data**, and not
-only because it lives in a different warehouse. There is no ground truth to
-check it against: `eurocontrol`'s PRISME/APDF extracts are European, so
-ADEP/ADES accuracy and milestone quality worldwide are **unmeasured** — every
-accuracy figure OPDI has ever published comes from that European ground
-truth. A worldwide run is a wider *pipeline* output, not a benchmarked one; a
-paper or dashboard using it must say so rather than carrying European
-accuracy figures across.
-
-## `cruise_linked` track segmentation (A10)
-
-**The default.** `standard` points to `cruise_linked` since the track-construction-v5
-study; before that it pointed to `debounced` (A9), which now lives with the study
-scripts (`benchmarks/study_variants/segmentation.py`).
-`cruise_linked` is A9 with one change: a reception gap over 30 minutes does not end
-a track when the evidence at its two edges fits one continuous flight (both edges at
-cruise or the old edge still climbing, a plausible implied speed, an agreeing
-callsign, no descent then climb). No sample is invented: the hole stays empty and
-only the identity changes. A callsign change and a short gap at low altitude still
-split. A track can therefore hold a *hole*, hours in which nothing was received;
-the event detectors that pair or interpolate samples (level segments, flight-level
-and ring crossings) work per *piece* between holes, and cumulative distance adds
-the straight line across one (`EventConfig.track_hole_seconds`,
-`pipeline/holes.py`).
-
-Each edge's altitude, vertical rate and speed read their own nearest five values
-within `link_edge_position_minutes`, past any blank samples, because altitude often
-arrives in a later message. No altitude in that span means split. Two settings let
-an edge below the cruise floor link on its direction, both on by default and both
-provisional on about a hundred checkable holes each: `link_old_edge_climb`, for an
-old edge still climbing (0 false joins in 185 checkable holes in v4), and
-`link_new_edge_descent`, for a new edge descending. V4 had switched descent off on
-3 false joins in 119; v5 found all three were estimated Network Manager arrival
-times at Seoul, minutes before ADS-B still showed the aircraft airborne, and the
-study's labelling no longer takes events outside Europe as evidence (0 in 117 since).
-
-To run the rule that reproduces the v0.0.2 release instead:
-
-```python
-config = OPDIConfig.for_environment("opensky")
-config.segmentation.method = "legacy"
-```
-
-A study script that needs one of the other rules of the studies registers them
-first (`from study_variants.segmentation import register_study_arms;
-register_study_arms()`); see `benchmarks/README.md`.
-
-What differs from the other rules when you run it:
-
-- **`process_day` reads 11 hours back at the defaults, not 3**, because a piece
-  after midnight can belong to a track whose old piece ended up to
-  `link_max_gap_minutes` earlier, and the decision also reads evidence behind that
-  edge. See `tracks.required_lookback_hours`.
-- **A shorter explicit `lookback_hours` raises `ValueError`.** Two days could
-  otherwise decide one hole differently, and samples after midnight would be
-  claimed twice or by neither.
-- **Segmentation is slower.** Each edge's frame spans `link_edge_position_minutes`,
-  so at 5 s cadence it reads up to 60 samples per row. On the study's pipeline day,
-  steps 02 to 04b under this rule took about 27 minutes on a 10% sample.
-- **The truncation warning is wider and noisier.** Its margin grows from 60 s to
-  `link_max_gap_minutes` plus the longer of `link_callsign_lookahead_minutes` and
-  `link_edge_position_minutes`, because a hole can straddle the end of the read.
-  A track named there may have lost its tail, or may simply be long. Past the end
-  of the read a wrong decision is detected like this, not prevented.
-
-**Its promotion is a further silent `track_id` boundary**, after those at A8 and
-A9: a join across it returns nothing rather than an error, and `osn_tracks` has no
-version column to say which rule produced a row. The evidence is in
-`opdi-portal/papers/track-construction-v5/` (and v4, which it supersedes).
-
-## Building a flight list
-
-Step 03 turns tracks into a flight list: one row per flight with a departure
-aerodrome (`ADEP`), a destination (`ADES`), and how each was determined.
-
-Departures and arrivals are **not** produced by the same algorithm, because
-they are not equally hard. Departures use `endpoint` — the aerodrome nearest
-the track's first fix, accepted only if that fix is close and low, and
-abstained on otherwise. Arrivals use `trend` — a vote over smoothed barometric
-altitude near each candidate aerodrome, which decides climb from descent.
-Both rank candidates on exact great-circle distance, with a penalty against
-aerodromes without scheduled service.
-
-Both the algorithms and their thresholds are `DetectionConfig` defaults, and
-those defaults are the values measured in
-[the ADEP/ADES detection study](https://www.eurocontrol.int/opdi) — so the
-recommended configuration is what you get by passing nothing:
-
-```python
-from datetime import date
-
-from opdi.config import OPDIConfig
-from opdi.pipeline.flights import FlightListProcessor
-from opdi.utils.spark_helpers import get_spark
-
-config = OPDIConfig.for_environment("opensky")
-spark = get_spark("opensky", distributed=True, app_name="OPDI flight list")
-
-FlightListProcessor(spark, config).process_dai(
-    month=date(2025, 6, 1),   # any date inside the month to process
-)
-```
-
-`process_dai` reads `osn_tracks` for the month, builds the endpoint candidate
-cache if it is not already there, and appends to `opdi_flight_list`. Pass
-`write_mode="overwrite"` and a `table_name` of your own to build a comparison
-table instead of extending the published one.
-
-To use one algorithm for both roles — for a like-for-like comparison, say —
-name it explicitly:
-
-```python
-processor.process_dai(month=date(2025, 6, 1), mode="trend")           # both roles
-processor.process_dai(month=date(2025, 6, 1), ades_mode="endpoint")   # arrivals only
-```
-
-The shipped settings, all overridable on `DetectionConfig`:
-
-| Parameter | Ships as | Applies to |
-|---|---|---|
-| `adep_mode` | `"endpoint"` | which algorithm names the departure |
-| `ades_mode` | `"trend"` | which algorithm names the destination |
-| `trend_max_fl` | FL60 | `trend` — samples above this are ignored |
-| `trend_radius_nm` | 20 NM | `trend` — zone radius for the sample-to-aerodrome join |
-| `trend_vote_margin` | 2 | `trend` — climb votes must beat descent votes by this many |
-| `trend_sched_penalty_nm` | 10 NM | `trend` — added to an aerodrome without scheduled service |
-| `trend_rank_by` | `"haversine"` | `trend` — exact distance, not H3 ring count |
-| `endpoint_radius_nm` | 30 NM | `endpoint` — how far the first/last fix may be |
-| `endpoint_height_ft` | 15,000 ft | `endpoint` — above *field elevation*, not sea level |
-| `endpoint_sched_penalty_nm` | 10 NM | `endpoint` |
-
-To override one, build the config with a modified `DetectionConfig`:
-
-```python
-import dataclasses
-
-from opdi.config import DetectionConfig, OPDIConfig
-
-config = OPDIConfig.for_environment("opensky")
-config.detection = dataclasses.replace(config.detection, trend_max_fl=80)
-```
-
-### Reproducing a flight list published before 2026
-
-The defaults changed in 2026. Re-running an older month with them will **not**
-reproduce what was released — the thresholds moved and so did the rule for
-choosing among candidate aerodromes. `DetectionConfig.legacy()` returns the
-values every earlier release was built with:
-
-```python
-from opdi.config import DetectionConfig, OPDIConfig
-
-config = OPDIConfig.for_environment("opensky")
-# FL40, 30 NM, margin 4, no penalty, ring ranking, and `trend` for both roles
-config.detection = DetectionConfig.legacy()
-
-FlightListProcessor(spark, config).process_dai(month=date(2024, 6, 1))
-```
-
-One caveat `legacy()` cannot cover: the state-vector sampler changed at the
-same time, from a fixed-phase `event_time % 5` filter to keeping the newest row
-in each 5 s bin. The rescued rows sit at track boundaries, so `track_id` values
-differ. Re-ingesting an old month reproduces the *aerodromes* but not the
-identifiers.
-
-### From the command line
-
-```bash
-# Flight list only, for one month — uses the DetectionConfig defaults
-opdi run --step 03 --env opensky --start 2025-06-01 --end 2025-07-01
-
-# Override the algorithm for one role
-opdi run --step 03 --env opensky --start 2025-06-01 --end 2025-07-01 \
-    --adep-mode endpoint --ades-mode trend
-
-# Everything the flight list depends on, in order
-opdi run --env opensky --start 2025-06-01 --end 2025-07-01
-```
-
-## Package structure
-
-```
-src/opdi/
-├── config.py               # Centralised configuration (opensky/local)
-├── runner.py               # Full pipeline orchestrator (steps 00-04b, 09)
-├── cli.py                  # CLI entry point (`opdi run ...`)
-├── ingestion/              # Data source connectors
-│   ├── osn_statevectors.py # OpenSky S3 state vectors
-│   ├── osn_aircraft_db.py  # Aircraft metadata
-│   └── ourairports.py      # OurAirports reference data
-├── reference/              # H3 reference data generators
-│   ├── h3_airport_zones.py # Concentric detection rings
-│   ├── h3_airport_layouts.py # Ground infrastructure from OSM
-│   └── h3_airspaces.py     # ANSP/FIR/country boundaries
-├── pipeline/               # Core transformations
-│   ├── tracks.py           # State vectors -> flight tracks
-│   ├── flights.py          # Tracks -> flight list (ADEP/ADES)
-│   └── events.py           # Flight events & measurements
-├── output/                 # Published files
-│   ├── schema.py           # Declared columns of the published files
-│   └── published.py        # Step 09: daily flight list and flight events
-└── utils/                  # Shared utilities
-    ├── storage.py           # Storage abstraction (Iceberg / S3 parquet)
-    ├── datetime_helpers.py  # Date ranges, month boundaries
-    ├── spark_helpers.py     # Spark session factory
-    ├── geospatial.py        # Haversine, bearing, distance
-    └── h3_helpers.py        # H3 index operations
-```
+Every finished step is recorded in the warehouse, so running a command again
+continues where it stopped, on any machine. `python -m opdi.orchestration
+--help` lists every command, including `check-space` and `prune` (removing the
+working tables that are no longer needed).
+
+Step 00b needs a local OpenStreetMap extract of the airports (set
+`OPDI_OSM_PBF`); see `opdi.reference.pbf_filter` to reduce a regional or
+planet extract to the aeroway features it needs.
+
+## Running a period
+
+Two ways, both day by day:
+
+- **Airflow.** `airflow/dags/opdi_pipeline.py` defines a daily run and a
+  backfill of any range of days. `airflow/README.md` explains the set-up, the
+  settings, how disk space is protected and what a day costs.
+- **`run_period.py`**, from a terminal on the machine that hosts the Spark
+  driver:
+
+  ```bash
+  python run_period.py --start 2026-06-01 --dry-run   # show the plan
+  python run_period.py --start 2026-06-01             # seven days
+  python run_period.py --start 2026-06-01 --days 1 --steps 04
+  ```
+
+  Running the same command again after a failure continues where it stopped.
+
+`opdi run` (and `python opdi.py`) runs the steps over a date range in one local
+Spark session, without the cluster; it is meant for small tests.
+
+## Where the output goes
+
+All tables are kept in one **warehouse**, a storage prefix. In the `opensky`
+environment it is the `--warehouse` argument if given, else the
+`OPDI_WAREHOUSE` environment variable, else `s3a://eurocontrol/opdi`. Each
+release has its own folder in it, the release root, for example
+`s3a://eurocontrol/opdi/v2.0.0/`:
+
+| Folder | Holds |
+|--------|-------|
+| `published/` | The published files: `flight_list/`, `flight_events/`, `index/`, `catalogue.parquet` |
+| `_state/` | Which steps of which days are finished, and the steps' progress logs |
+| other folders | The reference tables and the working tables of the steps |
+
+Every command prints the warehouse, the release root and the coverage when it
+starts. In the `local` environment the tables are Iceberg tables in a local
+catalog (or plain Parquet folders when `spark.enable_iceberg` is off).
+
+## Coverage: worldwide or Europe
+
+The pipeline processes the whole world by default. `--europe` on the command
+line, or `OPDIConfig.for_environment(env, worldwide=False)` in code, keeps
+only positions inside the European box (`opdi.coverage.EUROPE_BBOX`), which
+is the coverage of release v0.0.2. A warehouse records the coverage that
+built it, and a run with the other coverage is refused, so the two are never
+mixed.
+
+The accuracy figures on the website were measured against European reference
+data. Outside Europe the results have not been validated.
 
 ## Configuration
 
+Every setting is a field of a dataclass in `src/opdi/config.py`, with its
+meaning, unit and default described there:
+
 ```python
 from opdi.config import OPDIConfig
 
-config = OPDIConfig.for_environment("local")    # Local testing
-config = OPDIConfig.for_environment("opensky")  # OpenSky Network S3
-
-# All settings are accessible as typed dataclass attributes
-config.project.project_name             # "project_opdi"
-config.h3.airport_detection_resolution  # 7
-config.ingestion.batch_size             # 250
-config.spark.executor_memory            # "12G"
+config = OPDIConfig.for_environment("opensky")   # or "local"
+config.detection.endpoint_radius_nm               # 30.0
+config.events.ring_radii_nm                       # (40.0, 50.0, 60.0, 100.0, 110.0, 120.0)
+config.segmentation.method                        # "standard"
 ```
 
-## Documentation
+Thresholds are in aviation units with the unit in the field name (`_ft`,
+`_nm`, `_kt`, `_seconds`). The stored position reports are in SI units
+(metres, metres per second), as OpenSky delivers them; where a threshold meets
+such a column, the column is scaled to the threshold's unit for the
+comparison only.
 
-Full API documentation is built with Sphinx from the Google-style docstrings embedded in every module.
+## Reproducing release v0.0.2
 
-### Building the docs locally
+Release v0.0.2 used other methods for track identity, airports and events.
+They remain available as settings:
+
+```python
+from dataclasses import replace
+from opdi.config import DetectionConfig, EventConfig, OPDIConfig
+
+config = OPDIConfig.for_environment("opensky", worldwide=False)
+config.segmentation.method = "legacy"          # track rule of v0.0.2
+config.ingestion.decimation = "modulo"         # thinning of v0.0.2
+config.detection = DetectionConfig.legacy()    # airport detection of v0.0.2
+config.events = EventConfig.legacy()           # events of v0.0.2 (events_v0.0.2)
+config.cleaning = replace(config.cleaning, feeds_flight_list=False)  # uncleaned tracks
+```
+
+The test `tests/test_golden_outputs.py` runs both this configuration and the
+default one over a synthetic day and compares every output with reference
+files, so a change that alters either is noticed.
+
+The `track_id` values of release v0.0.2 and of release v2.0.0 differ for the
+same flight, because the track rules differ, and nothing in the tables says
+which rule produced an id; ids of the two releases do not join.
+
+## Studies and their variants
+
+Every method was chosen by a study that compared it with alternatives against
+reference data (EUROCONTROL's airport operations data). The studies are
+summarised on the website, with links to the full reports. Their scripts are
+in `benchmarks/`, which is separate from the package: the package never
+imports from it. The alternative methods the studies compared, which are not
+part of the package, are in `benchmarks/study_variants/`; a study script
+registers them before use (see `benchmarks/README.md`).
+
+## Tests
 
 ```bash
-# Install doc dependencies
-pip install -e ".[docs]"
-
-# Build HTML
-cd docs
-make html            # Linux / macOS
-.\make.bat html      # Windows (PowerShell)
-
-# Open in browser
-# Linux/macOS:   open _build/html/index.html
-# Windows:       start _build\html\index.html
+.venv310/bin/python -m pytest tests/                       # all tests
+.venv310/bin/python -m pytest tests/test_golden_outputs.py # outputs on a synthetic day
 ```
 
-The generated site includes:
-
-- **Getting Started** - installation, prerequisites, quick start
-- **Pipeline Overview** - all 9 stages with data flow diagram
-- **API Reference** - auto-generated from docstrings for every class and function
-
-### Online docs
-
-Documentation is published automatically to GitHub Pages on every push to `main`. See the repository's **Environments** tab for the live URL.
-
-## Development
-
-```bash
-# Install everything
-pip install -e ".[dev,docs]"
-
-# Run tests
-pytest
-
-# Format code
-black src/opdi
-
-# Lint
-ruff check src/opdi
-
-# Type check
-mypy src/opdi
-
-# Build docs
-cd docs && make html
-```
+The tests run on a local Spark session and need no cluster or credentials.
+The tests of the study scripts are in `tests/benchmarks/`. When a change is
+meant to alter the outputs, write new reference files with
+`python tools/make_golden.py` and commit them with the change. Formatting and
+linting: `black .` and `ruff check src airflow tools`.
 
 ## Environment variables
 
-For OpenSky Network data ingestion, set:
+| Variable | Meaning |
+|----------|---------|
+| `OPDI_WAREHOUSE` | The warehouse of the `opensky` environment (default `s3a://eurocontrol/opdi`) |
+| `OPDI_OSM_PBF` | Local OpenStreetMap extract for step 00b |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Credentials for the OpenSky S3 storage (also read from a `.env` file) |
+| `OSN_USERNAME`, `OSN_KEY` | OpenSky credentials for the MinIO download path of step 01 |
+| `OPDI_BUCKET_QUOTA_GB` | Storage quota of the bucket, for the free-space check (default 200) |
+| `OPDI_PUBLISHED_URL` | Where `opdi.published` reads the published files from |
 
-```bash
-export OSN_USERNAME="your_username"
-export OSN_KEY="your_api_key"
+## Package layout
+
+```
+src/opdi/
+  config.py            settings of every step
+  coverage.py          worldwide or a bounding box
+  orchestration.py     one step of one day at a time (used by Airflow)
+  periodrun.py         a period of days (run_period.py)
+  runner.py, cli.py    a range of dates in one session (opdi run)
+  ingestion/           step 01 (state vectors, ADS-C) and the external reference data
+  reference/           step 00: H3 reference tables
+  pipeline/            steps 02, 03, 04 and 04b; one module per event family
+  cleaning/            step 02a
+  output/              step 09 and the declared columns of the published files
+  published.py         reading the published files, without Spark
+  sql/                 Trino and DuckDB definitions of the published tables
+  utils/               storage, Spark session, dates, geometry, H3
+airflow/               the Airflow DAGs and their README
+benchmarks/            the study scripts (not part of the package)
+tests/                 the tests
 ```
 
-Obtain credentials from [opensky-network.org](https://opensky-network.org/).
+## Licence and contact
 
-## License
+MIT licence. EUROCONTROL Performance Review Unit, pru-support@eurocontrol.int,
+<https://github.com/euctrl-pru/opdi>.
 
-MIT
-
-## Contact
-
-EUROCONTROL Performance Review Unit
-- Email: pru-support@eurocontrol.int
-- Repository: [github.com/euctrl-pru/opdi](https://github.com/euctrl-pru/opdi)
-
-## Acknowledgements
-
-- [OpenSky Network](https://opensky-network.org/) for ADS-B data
-- [OurAirports](https://ourairports.com/) for airport reference data
-- [Uber H3](https://h3geo.org/) for hexagonal geospatial indexing
+OPDI is built on data from the [OpenSky Network](https://opensky-network.org/),
+[OurAirports](https://ourairports.com/) and
+[OpenStreetMap](https://www.openstreetmap.org/), and uses the
+[H3](https://h3geo.org/) hexagonal grid.

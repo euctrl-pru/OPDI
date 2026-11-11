@@ -35,8 +35,9 @@ PATTERNS = {
     r"\bTask [0-9]+\b": "a task number of the development plan",
     r"\b(SIGKILL|bitten|EVENTS_RUN_LOG|weekrun|run log)\b": "an incident or a run log",
     # History of the code.
-    r"\b(previously|used to|no longer|we found|we measured|was found|"
-    r"until now|at the time|historically)\b": "development history",
+    r"\b(previously|we found|we measured|was found|until now|at the time|historically)\b"
+    r"|\b(it|this|that|which|there)\s+used to\b|\bused to be\b"
+    r"|\bno longer (the default|part of|used|read|written|published)\b": "development history",
     r"\b(since|as of|until|before|after|on)\s+20[0-9]{2}-[0-9]{2}": "the date of a decision",
     # Vague or jargon words.
     r"\bgates?\b": "'gate' (except an airport gate)",
@@ -54,6 +55,14 @@ ALLOWED = (
     "airport gate",
     "at the gate",
     "to the gate",
+    # Versions of the h3 library and of Linux control groups, not of a study.
+    "h3 v3",
+    "h3 v4",
+    "H3 v4",
+    "v3's",
+    "v4's",
+    "v3 and v4",
+    "cgroup v2",
 )
 
 
@@ -106,10 +115,6 @@ def _hits():
     return out
 
 
-import pytest  # noqa: E402
-
-
-@pytest.mark.xfail(strict=True, reason="the docstrings are being rewritten")
 def test_docstrings_and_comments_are_plain_language():
     hits = _hits()
     assert not hits, f"{len(hits)} hit(s):\n" + "\n".join(hits)
@@ -129,6 +134,7 @@ def test_the_scan_finds_what_it_is_meant_to_find(tmp_path):
         "see the V6 study",
         "the rung below",
         "this used to default to append",
+        "it is no longer the default",
         "since 2026-08-27",
         "a guard against",
         "pinned by the tests",
@@ -147,5 +153,8 @@ def test_the_scan_finds_what_it_is_meant_to_find(tmp_path):
         "register_arm",
         "a taxiway to the gate",
         "gate-to-gate times",
+        "the distance used to rank the airports",
+        "tracks that no longer exist",
+        "the h3 v4 API",
     ):
         assert not flagged(good), good

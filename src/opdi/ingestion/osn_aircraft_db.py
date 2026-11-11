@@ -1,6 +1,8 @@
-"""OpenSky Network aircraft database ingestion module.
+"""The OpenSky aircraft database (part of step 00).
 
-Downloads aircraft metadata from OpenSky Network and loads into Iceberg tables.
+Downloads the OpenSky Network aircraft database (registration, model, type
+code, ICAO aircraft class and operator per ICAO 24-bit address) and writes
+it to the table ``osn_aircraft_db``, which step 03 joins to the flight list.
 """
 
 from typing import Optional
@@ -29,12 +31,13 @@ class AircraftDatabaseIngestion:
         config: OPDIConfig,
         url: Optional[str] = None,
     ):
-        """Initialize aircraft database ingestion.
+        """Prepare the ingestion.
 
         Args:
-            spark: Active SparkSession
-            config: OPDI configuration object
-            url: URL to aircraft database CSV. If None, uses config default
+            spark: Active Spark session.
+            config: OPDI configuration.
+            url: Address of the aircraft database CSV file. Default:
+                ``config.ingestion.osn_aircraft_db_url``.
         """
         self.spark = spark
         self.config = config

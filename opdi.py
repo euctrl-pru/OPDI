@@ -1,33 +1,30 @@
 #!/usr/bin/env python
-"""OPDI full pipeline script.
+"""Run the OPDI pipeline over a range of dates, in one Spark session.
 
-Runs the OPDI data processing pipeline from start to finish.
+The same as ``opdi run`` after ``pip install``. It uses a local Spark
+session; to process days on the OpenSky cluster, use ``run_period.py`` or
+``python -m opdi.orchestration`` instead.
 
 Usage::
 
-    # Run the full pipeline with default settings (opensky environment)
-    python opdi.py
+    # Every step, default settings
+    python opdi.py --start 2024-01-01 --end 2024-06-01
 
-    # Run for a specific environment and date range
-    python opdi.py --env local --start 2024-01-01 --end 2024-06-01
+    # The local environment
+    python opdi.py --env local --start 2024-01-01 --end 2024-02-01
 
-    # Run only a specific step
+    # One step
     python opdi.py --step 02 --start 2024-01-01 --end 2024-02-01
-
-    # Worldwide (the default)
-    python opdi.py --env opensky --worldwide --start 2024-01-01 --end 2024-02-01
-
-    # After pip install, also available as:
-    opdi run --start 2024-01-01 --end 2024-06-01
 
 Pipeline steps
 --------------
-00  Reference data (airport zones, layouts, airspaces, OurAirports, aircraft DB)
-01  State vector ingestion from OpenSky Network S3
-02  Track processing (state vectors -> continuous flight tracks)
-03  Flight list generation (departures, arrivals, overflights)
-04  Flight events & measurements (phases, FL crossings, airport events)
-04b Flight list milestones (the main events copied onto the flight list)
+00  Reference tables (airport zones, layouts, airspaces, OurAirports, aircraft database)
+01  Ingestion of the state vectors from the OpenSky Network archive
+02  Tracks (the reports of each flight)
+02a Trajectory cleaning
+03  Flight list (departure and destination airports, overflights)
+04  Flight events and measurements
+04b Main milestones copied onto the flight list
 09  Published daily files (flight list and flight events)
 """
 
@@ -37,8 +34,9 @@ from datetime import date
 
 
 def main(argv=None):
+    """Run the command line; returns the exit code."""
     parser = argparse.ArgumentParser(
-        description="OPDI v2.0.0 - Full pipeline runner",
+        description="OPDI v2.0.0: run the pipeline over a range of dates.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -46,11 +44,8 @@ def main(argv=None):
         "--env",
         choices=["local", "opensky"],
         default="opensky",
-        help="Target environment (default: opensky). NOTE: this script and "
-        "`opdi run` build a local-only Spark session -- they call "
-        "create_session without distributed=True -- so --env opensky "
-        "here does not attach to the Kubernetes cluster. A real "
-        "cluster run goes through run_period.py.",
+        help="Environment (default: opensky). The Spark session is local in "
+        "both; a run on the cluster goes through run_period.py.",
     )
     parser.add_argument(
         "--start",
@@ -78,17 +73,14 @@ def main(argv=None):
         dest="worldwide",
         action="store_true",
         default=True,
-        help="Run worldwide (the default; kept so existing commands still "
-        "parse). No coverage filter is applied to ingest, detection or "
-        "reference geometry. In the opensky environment the coverage does "
-        "not change the warehouse; a run whose coverage differs from the "
-        "one that built the warehouse is refused at step 00.",
+        help="Process the whole world (the default). A warehouse built with "
+        "the other coverage is refused at step 00.",
     )
     coverage.add_argument(
         "--europe",
         dest="worldwide",
         action="store_false",
-        help="Apply the published European bounding box. In the local "
+        help="Keep only positions inside the European box. In the local "
         "environment this also selects the European warehouse.",
     )
 

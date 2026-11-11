@@ -109,9 +109,9 @@ def _info(field: str) -> Column:
 def _runway() -> Column:
     """The runway an ``ATOT``/``ALDT`` event used.
 
-    Two spellings because the two arms that can produce the merged event spell
+    Two spellings because the two detectors that can produce the merged event spell
     it differently: ``events.calculate_runway_events`` writes ``runway``,
-    ``runway_ops._info`` writes ``rwy_ident``. Coalescing reads whichever arm
+    ``runway_ops._info`` writes ``rwy_ident``. Coalescing reads whichever one
     won for that flight without this module having to know which.
     """
     return F.coalesce(_info("runway"), _info("rwy_ident"))
@@ -174,7 +174,7 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
     to a named aerodrome's own pavement *while taking off or landing*. Where
     the two disagree, the pavement wins.
 
-    No first/last heuristic and no guard against inventing a landing: a
+    No first/last heuristic and no check against inventing a landing: a
     departure aerodrome is where the take-off happened and an arrival aerodrome
     is where the landing did. A track with no landing gets no ``ADES`` from
     here, which is the right answer rather than a case to special-case.
@@ -335,7 +335,7 @@ def add_movement_columns(flight_list: DataFrame, config: Optional[EventConfig] =
     # same flight is still seen at 40 NM, and at the edge of the network that
     # is the common case, not the exception.
     #
-    # Coalesced across every ring rather than pinned to C40, so a configuration
+    # Coalesced across every ring rather than tied to C40, so a configuration
     # that does not emit 40 NM does not silently condemn every departure.
     left_dep = F.coalesce(*[F.col(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM])
     came_arr = F.coalesce(*[F.col(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM])

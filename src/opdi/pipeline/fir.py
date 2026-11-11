@@ -39,8 +39,9 @@ _RES_MASK = 0xF << _RES_SHIFT
 
 
 def h3_parent_expr(cell_col, res: int):
-    """The lower-case hex index of ``cell_col``'s ancestor at ``res`` (0..7),
-    as a native column expression (no UDF).
+    """The H3 index of ``cell_col``'s parent cell at resolution ``res`` (0 to 7).
+
+    Lower-case hexadecimal, as a native column expression (no UDF).
     """
     idx = F.conv(cell_col, 16, 10).cast("long")
     cleared = idx.bitwiseAND(lit(~_RES_MASK))
@@ -51,10 +52,11 @@ def h3_parent_expr(cell_col, res: int):
 
 
 def load_fir_reference(storage) -> Optional[DataFrame]:
-    """The FIR layer of ``opdi_h3_airspace_ref``, or None when the table is
-    absent or still has the earlier port's per-cell schema (``h3_res_7``
-    columns, no ``h3_cell``/``h3_res``): that table was overwritten once per
-    polygon and holds one country, and step 00c must be re-run first.
+    """The FIR layer of ``opdi_h3_airspace_ref``, or None when it cannot be used.
+
+    None when the table is absent, or has an older layout (``h3_res_7``
+    columns instead of ``h3_cell``/``h3_res``) that holds only one polygon;
+    step 00c must then be run again.
     """
     if not storage.table_exists(AIRSPACE_TABLE):
         print(f"{AIRSPACE_TABLE} not found; xing-fir will not be computed.")
@@ -70,8 +72,10 @@ def load_fir_reference(storage) -> Optional[DataFrame]:
 
 
 def attach_fir(df: DataFrame, fir_ref: DataFrame, config: EventConfig) -> DataFrame:
-    """Add ``fir_code, fir_band_width, fir_area_km2, airac_cfmu, airac_validity_start,
-    airac_validity_end`` per sample (NULL when no volume matches).
+    """Add the FIR of each report and its definition (NULL outside every FIR).
+
+    The columns are ``fir_code``, ``fir_band_width``, ``fir_area_km2``,
+    ``airac_cfmu``, ``airac_validity_start`` and ``airac_validity_end``.
 
     One broadcast left join per resolution from 7 down to 0, each against the
     reference rows stored at that resolution and gated on the FL band; the

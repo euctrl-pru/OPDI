@@ -211,8 +211,7 @@ def h3_to_children(h3_index: str, child_resolution: int) -> Set[str]:
 def _ring_to_latlng(
     ring: List[List[float]], geo_json_conformant: bool
 ) -> List[Tuple[float, float]]:
-    """Convert one GeoJSON coordinate ring to the [lat, lng] tuples h3.LatLngPoly
-    expects.
+    """One GeoJSON coordinate ring as the ``[lat, lng]`` tuples ``h3.LatLngPoly`` takes.
 
     THE FOOTGUN: v3's ``polyfill(..., geo_json_conformant=True)`` consumed
     GeoJSON-ordered rings, i.e. ``[lng, lat]`` pairs. v4's ``h3.LatLngPoly``

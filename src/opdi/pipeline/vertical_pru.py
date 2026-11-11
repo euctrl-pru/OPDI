@@ -42,7 +42,7 @@ from opdi.pipeline.flights import haversine_nm
 from opdi.pipeline.runway_ops import MILESTONE_SCHEMA
 from opdi.utils.datetime_helpers import get_start_end_of_month
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
     from opdi.utils.storage import StorageManager
 

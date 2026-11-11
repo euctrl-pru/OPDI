@@ -1,7 +1,9 @@
-"""Reference data generators for OPDI pipeline.
+"""Step 00: the reference tables the pipeline steps read.
 
-Provides H3 hexagonal encoding for airport detection zones,
-airport ground layouts, and airspace boundaries.
+H3 airport detection zones (00a), airport layouts from OpenStreetMap (00b),
+airspaces for the FIR crossings (00c), the runway and approach grid (00f),
+and the curated point merge table. OurAirports (00d) and the aircraft
+database (00e) are read by :mod:`opdi.ingestion`.
 """
 
 from opdi.reference.h3_airport_layouts import (

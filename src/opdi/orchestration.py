@@ -602,7 +602,7 @@ def _day(value: str) -> date:
     try:
         return date.fromisoformat(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"expected a date as YYYY-MM-DD, got {value!r}")
+        raise argparse.ArgumentTypeError(f"expected a date as YYYY-MM-DD, got {value!r}") from None
 
 
 def _working_arguments(parser: argparse.ArgumentParser) -> None:

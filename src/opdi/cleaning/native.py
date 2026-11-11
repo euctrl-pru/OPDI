@@ -1,11 +1,13 @@
-"""Native Spark trajectory cleaning (pipeline step 02a).
+"""The stages of trajectory cleaning (step 02a), as Spark column expressions.
 
-Ported from the 2024 PRC Data Challenge winning solution (Alligier & Gianazza,
-ENAC), ``filterclassic.py``. Every stage here is a pure ``DataFrame ->
-DataFrame`` function, composable via ``DataFrame.transform``, expressed purely
-as column and window expressions partitioned by ``track_id`` -- the same idiom
-the rest of the pipeline uses. No ``applyInPandas``, no ``pandas_udf``, no
-``traffic`` dependency.
+The method follows the trajectory cleaning of the winning solution of the
+2024 PRC Data Challenge (Alligier and Gianazza, ENAC), ``filterclassic.py``.
+See https://www.opdi.aero/content/methods/trajectory-cleaning.html.
+
+Every stage here is a pure ``DataFrame -> DataFrame`` function, composable via
+``DataFrame.transform``, expressed purely as column and window expressions
+partitioned by ``track_id`` -- the same idiom the rest of the pipeline uses. No
+``applyInPandas``, no ``pandas_udf``, no ``traffic`` dependency.
 
 **Design: mask to NULL, keep the row.** The 2024 solution masks bad values and
 retains the row; the 2025 solution drops rows and resamples to 1 s. The 2024
@@ -137,15 +139,6 @@ def _next_valid(value: Column, target: Column) -> Column:
     on the reversed ordering asks the same question of a frame that *grows*,
     which Spark maintains incrementally in O(n).
 
-    Measured on one partition, identical output both ways:
-
-        rows    shrinking   reversed-growing
-        8,000       1.34s              0.14s
-        32,000     15.23s              0.12s
-
-    This was 94% of step 02a: one stage, 200 tasks, 94 minutes, while a
-    neighbouring stage moved the same 9 GB of shuffle in 14 seconds.
-
     The reversal is exact, not an approximation. "Nearest following row with a
     non-NULL value" and "nearest preceding row with a non-NULL value, read
     backwards" are the same row. Ties would be the one way they could differ,
@@ -263,20 +256,18 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
         port does not: **the first sample of a track has no predecessor, so it
         cannot be a repeat of anything.**
 
-        Requiring ``prev.isNotNull()`` here -- as this did originally -- makes
-        every column of the first row "unchanged", which the caller then reads
-        as "stale" and NULLs. The result was that cleaning destroyed the
-        position of the first sample of every single track: measured at 100%
-        on 2025-06-05, which took ADEP detection on cleaned tracks to zero.
-        Absence of a predecessor is absence of evidence for a repeat, not
-        evidence of one.
+        Requiring ``prev.isNotNull()`` here would make every column of the
+        first row "unchanged", and the caller would remove the first position
+        of every track. No predecessor is no evidence of a repeat.
         """
         prev = F.lag(F.col(name)).over(w)
         return F.col(name).isNotNull() & (prev.isNull() | (F.col(name) != prev))
 
     def position_changed() -> Column:
-        """``changed("lat") | changed("lon")``, or the ``last_pos_update``
-        discriminator when the config asks for it and the row carries one.
+        """Whether the position changed since the previous report.
+
+        ``changed("lat") | changed("lon")``, or the ``last_pos_update`` test
+        when the configuration asks for it and the row carries one.
 
         A NULL ``last_pos_update`` -- data lacking the field entirely, or a
         row where it just wasn't populated -- falls back to plain

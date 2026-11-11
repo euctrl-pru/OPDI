@@ -1,10 +1,9 @@
-"""OurAirports reference data ingestion.
+"""OurAirports reference data (step 00d).
 
-Downloads and loads airport reference datasets from OurAirports into
-Spark tables. Covers airports, runways, navaids, frequencies, countries,
-and regions.
-
-Ported from: OPDI-live/python/v2.0.0/00_etl_ourairports.py
+Downloads the OurAirports data files (airports, runways, navigation aids,
+frequencies, countries and regions) and writes them to the tables
+``oa_airports``, ``oa_runways`` and so on. The airports give positions and
+elevations; the runways give the thresholds used by the runway milestones.
 """
 
 from datetime import datetime

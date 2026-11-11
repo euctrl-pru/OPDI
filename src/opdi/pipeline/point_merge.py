@@ -160,7 +160,7 @@ def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
     # least twice that far out. Whether it flew a straight, aligned direct is
     # kept as information (``direct_aligned``): on the runway 10 system at
     # Dublin the turn-in is a curve to the fix, not a straight line, and a
-    # strict alignment gate lost every one of those legs.
+    # strict alignment test would lose every one of those legs.
     legs = legs.filter(
         (col("duration_s") >= config.pms_leg_min_duration_seconds)
         & (col("min_d_ahead") <= config.pms_merge_point_radius_nm)

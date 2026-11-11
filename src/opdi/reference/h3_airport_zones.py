@@ -1,10 +1,11 @@
-"""H3 airport detection zone generator.
+"""Step 00a: the airport detection zones.
 
-Creates concentric hexagonal rings around airports for flight detection.
-Each airport gets rings at configurable radii (default: 0-40 NM) encoded
-as H3 hexagons at resolution 7.
-
-Ported from: OPDI-live/python/v2.0.0/00_create_h3_airport_detection_areas.py
+Around every airport of the coverage, rings of H3 cells at resolution 7
+(about 5 km across) every 5 NM out to 110 NM, written to
+``h3_airport_detection_zones`` with the inner and outer radius of each ring.
+Step 03 matches the reports to these zones to find departure and
+destination airports, and applies its own detection radius.
+See https://www.opdi.aero/content/methods/airports.html.
 """
 
 import json
@@ -99,48 +100,22 @@ def _h3_distance_udf(h1, h2):
 
 @udf(returnType=ArrayType(StringType()))
 def _polyfill_geojson_udf(geojson_str, resolution):
-    """H3 v4 replacement for ``h3_pyspark.polyfill(col, res, geo_json_conformant=True)``.
+    """The H3 cells inside a GeoJSON polygon, as a Spark UDF.
 
-    h3_pyspark's ``polyfill`` wraps h3 v3's ``h3.polyfill``, which no longer
-    exists on the installed h3 4.5.0 (AttributeError at task execution time --
-    see tests/test_h3_zones_v4.py::test_h3_pyspark_geo_to_h3_is_broken_on_h3_v4,
-    which pins the same failure mode for ``geo_to_h3``). The circle polygons
-    this generator builds (:func:`generate_circle_polygon`) are GeoJSON
-    strings in ``[lon, lat]`` order.
+    Replaces ``h3_pyspark.polyfill(col, res, geo_json_conformant=True)``, which
+    calls the h3 version 3 function ``h3.polyfill`` that does not exist in h3
+    version 4. The circle polygons of :func:`generate_circle_polygon` are
+    GeoJSON strings in ``[lon, lat]`` order; ``h3.LatLngPoly`` takes
+    ``[lat, lon]``, so every ring coordinate is swapped first. Getting the
+    order wrong gives an empty or wrong set of cells.
 
-    THE FOOTGUN: v3's ``polyfill(geojson, res, geo_json_conformant=True)``
-    consumed those ``[lng, lat]`` rings directly. v4's ``h3.LatLngPoly``
-    always takes ``[lat, lng]`` tuples, so every ring coordinate is swapped
-    below before calling h3 -- getting this backwards yields an empty or
-    silently wrong cell set.
-
-    This is the same swap-then-polyfill primitive as
-    ``opdi.utils.h3_helpers.polyfill_geojson(..., geo_json_conformant=True)``
-    (used by ``h3_airspaces``) -- but reimplemented inline here rather than
-    imported, so this module ends up with a *third* independent copy of the
-    footgun swap (the second being ``h3_airport_layouts._polyfill_latlng``/
-    ``polygon_to_h3``, which is also standalone and does not call
-    ``h3_helpers`` either). This one cannot be consolidated: this function
-    only ever runs inside a Spark UDF, and this worktree has a top-level
-    ``opdi.py`` script that shadows the ``src/opdi`` package on a Spark
-    worker's ``sys.path`` (workers don't inherit the driver's pytest
-    ``pythonpath = ["src"]`` prepend, confirmed locally under the test
-    suite's ``local[1]`` fixture -- not merely a cluster-only concern).
-    cloudpickle needs to pickle a UDF's referenced globals *by reference*
-    when they resolve to another named function or an imported symbol,
-    which forces the worker to re-import that function's home module --
-    confirmed empirically: closing over ``opdi.utils.h3_helpers.polyfill_geojson``,
-    or even over a second top-level function in *this* module, both fail on
-    the worker with ``ModuleNotFoundError: No module named 'opdi...'; 'opdi'
-    is not a package``. This is pinned by
-    tests/test_h3_zones_v4.py::test_udf_closing_over_opdi_symbol_fails_on_worker_local_spark,
-    a regression test that reproduces the failure directly rather than
-    leaving it as an unverified claim. Every other UDF in this module has
-    the same constraint and only ever touches the third-party ``h3``
-    package inline for that reason -- this keeps the pattern rather than
-    reintroducing the failure. tests/test_h3_zones_v4.py separately checks
-    this UDF's output against ``h3_helpers.polyfill_geojson`` (called
-    driver-side, where the import works) to prove the two stay identical.
+    The same operation as ``opdi.utils.h3_helpers.polyfill_geojson``, written
+    out here rather than imported: on a Spark worker the repository's
+    top-level ``opdi.py`` hides the ``opdi`` package, so a UDF that refers to
+    any ``opdi`` function fails there with ``ModuleNotFoundError``
+    (``tests/test_h3_zones_v4.py`` reproduces this). The UDF therefore only
+    uses the ``h3`` package. ``tests/test_h3_zones_v4.py`` also checks that
+    its result equals ``h3_helpers.polyfill_geojson``.
     """
     if geojson_str is None or resolution is None:
         return None
@@ -157,16 +132,11 @@ def _polyfill_geojson_udf(geojson_str, resolution):
             # A ring of one distinct point is not a polygon.
             #
             # `radii_nm` starts at 0, and `generate_circle_polygon` at radius 0
-            # returns the same coordinate `num_points` times. h3 v3 answered
-            # that with an empty set, which is why it never surfaced and why
-            # the published table was built without trouble. v4 raises
-            # H3FailedError instead, so the innermost ring of the first airport
-            # killed the stage.
-            #
-            # Empty is the right answer, not an error: a zero-radius circle
-            # encloses no area, so it contains no cells. The annulus it bounds
-            # is emitted by the next radius up, which is why the published
-            # table's smallest `max_c_radius_nm` is 5 and nothing is lost here.
+            # returns the same coordinate `num_points` times, which h3
+            # version 4 refuses (H3FailedError). A circle of radius 0 holds no
+            # cells; the band it bounds is produced by the next radius up, so
+            # the smallest `max_c_radius_nm` of the table is 5 and nothing is
+            # lost.
             if len({(round(x, 12), round(y, 12)) for x, y in outer}) < 3:
                 continue
             outer_latlng = [(lat, lng) for lng, lat in outer]
@@ -381,13 +351,12 @@ class AirportDetectionZoneGenerator:
         self._circle_udf = udf(generate_circle_polygon, StringType())
 
     def filter_airports(self, sdf: DataFrame) -> DataFrame:
-        """Aerodromes this coverage builds zones for.
+        """The airports this coverage builds zones for.
 
-        Type first, then geography, then latitude. All three must be here: the
-        type filter alone once widened the candidate set tenfold and OOM'd
-        every executor, the geography filter is what follows configuration,
-        and the latitude filter is what keeps a pole out of a polygon fill
-        that cannot express one.
+        By type (``config.coverage.airport_types``; all airport types would
+        multiply the size of the table), then by the coverage box, then by
+        latitude, which keeps the poles out of a polygon fill that cannot
+        represent them.
         """
         cov = self.config.coverage
         kept = sdf.filter(
@@ -436,7 +405,9 @@ class AirportDetectionZoneGenerator:
         """Load airport data from OurAirports and filter to this run's coverage.
 
         Args:
-            airports_url: URL to OurAirports airports CSV.
+            airports_url: Address of the OurAirports airports CSV file.
+            airports_df: The airports, when already read (the ``oa_airports``
+                table); ``airports_url`` is then not read.
 
         Returns:
             Spark DataFrame with airport data filtered to this coverage.
@@ -531,14 +502,16 @@ class AirportDetectionZoneGenerator:
         airports_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
         airports_df: Optional[DataFrame] = None,
     ) -> pd.DataFrame:
-        """Generate H3 detection zones for all airports in the European bounding box.
+        """Generate the H3 detection zones of every airport of the coverage.
 
         Each airport-ring combination produces a set of H3 hex IDs formed by
         subtracting the inner circle hexagons from the outer circle hexagons,
         creating a ring-shaped detection zone.
 
         Args:
-            airports_url: URL to OurAirports airports CSV.
+            airports_url: Address of the OurAirports airports CSV file.
+            airports_df: The airports, when already read (the ``oa_airports``
+                table); ``airports_url`` is then not read.
 
         Returns:
             Pandas DataFrame with airport detection zone hex IDs.
@@ -609,21 +582,9 @@ class AirportDetectionZoneGenerator:
         sdf.cache()
         self._result_sdf = sdf
 
-        # Deliberately NOT collected.
-        #
-        # This used to end `self._result_df = sdf.toPandas()`, which pulls
-        # every row to the driver -- and a row here holds an *array* of cells,
-        # up to 98,250 of them for the outermost ring. Across 1,357 aerodromes
-        # that is 584 million cell strings in driver pandas, and the driver was
-        # SIGKILLed by the container (exit 137) every time.
-        #
-        # It went unnoticed because the collect was free while it was broken:
-        # under the old h3 v3 executors the polyfill returned NULL, so
-        # toPandas() brought back 21,712 empty arrays. The moment the cells
-        # were real, so was the memory.
-        #
-        # Anything that genuinely needs pandas asks for it through
-        # `result_df`, which collects on demand and says what that costs.
+        # Not collected to the driver: a row holds an array of up to about
+        # 100,000 cells for the outermost ring, hundreds of millions of cells
+        # for a network build. `result_df` collects on demand.
         print("Generated airport-ring combinations (Spark; not collected).")
         return sdf
 

@@ -1,10 +1,12 @@
-"""H3 airport ground layout generator.
+"""Step 00b: the airport layouts.
 
-Retrieves airport infrastructure data (runways, taxiways, aprons, hangars)
-from OpenStreetMap via osmnx, converts geometries to H3 hexagons at
-resolution 12, and stores the results for use in airport event detection.
-
-Ported from: OPDI-live/python/v2.0.0/00_create_h3_airport_layouts.py
+Reads the parts of each airport (runways, taxiways, aprons, stands, hangars
+and others) from OpenStreetMap, from a local extract
+(:mod:`opdi.reference.pbf_source`) or, without one, from the Overpass
+service, converts their shapes to H3 cells at resolution 12 (about 20 m
+across), and writes ``hexaero_airport_layouts``. Step 04 matches the reports
+to these cells for the airport layout events.
+See https://www.opdi.aero/content/methods/surface-events.html.
 """
 
 import os
@@ -316,7 +318,7 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.D
     df = df[~df.hex_id.isna()]
 
     # Add H3 coordinates (cell_to_latlng returns (lat, lng), same order as
-    # the v3 h3_to_geo it replaces).
+    # the h3 v3 h3_to_geo it replaces).
     df["hex_latitude"], df["hex_longitude"] = zip(*df["hex_id"].apply(h3.cell_to_latlng))
     df["hex_res"] = resolution
 
@@ -431,8 +433,7 @@ class AirportLayoutGenerator:
           from the boxes silently produced no geometry, which is indis-
           tinguishable from an airport OSM does not map.
 
-        ``airports_url`` is retained and honoured so an explicit override still
-        works, but it is no longer the default path.
+        ``airports_url``, when given, is read instead.
 
         Returns:
             DataFrame with columns: ident, latitude_deg, longitude_deg,
@@ -473,14 +474,9 @@ class AirportLayoutGenerator:
         return airports_df
 
     def process_airport(self, apt_icao: str) -> Optional[pd.DataFrame]:
-        """Build the H3 layout rows for one airport. **Writes nothing.**
+        """Build the H3 layout rows for one airport; nothing is written.
 
-        This used to write ``hexaero_airport_layouts`` itself, with
-        ``mode="overwrite"`` -- so calling it in a loop left the table holding
-        only the last airport, and calling it once destroyed the table. The
-        write belongs to :meth:`process_all`, which knows how many airports it
-        is about to produce; a per-airport function cannot know that and must
-        not decide it.
+        :meth:`process_all` writes the table once for all airports.
 
         Args:
             apt_icao: ICAO airport code.

@@ -1,16 +1,14 @@
-"""Step 04b -- fold the milestones back into the flight list.
+"""Step 04b: copy the main milestones of the events onto the flight list.
 
-``opdi_flight_events`` is long-form: one row per (flight, milestone). Asking
-"when did this flight take off, from which runway, off which stand" therefore
-means three joins and a pivot. APDF -- the reference OPDI benchmarks against --
-is flight-shaped, so every comparison began by reshaping OPDI's output.
-
-This step does that reshaping once, per day, and writes the result back into
-``opdi_flight_list`` as additional columns. It reads; it does not detect. Every
+The flight events have one row per (flight, event). This step reads them,
+computes for each flight its main times, runways, stands and circle
+crossings (:func:`opdi.pipeline.flight_list_milestones.enrich_flight_list`),
+and writes them back into ``opdi_flight_list`` as additional columns, one
+day at a time. It reads; it does not detect. Every
 value here already exists in the event table, and a column is null exactly when
 the event behind it is missing.
 
-**Why the round trip through a staging table.** The enriched frame is derived
+**Why a staging table.** The enriched frame is derived
 from ``opdi_flight_list`` and written back to it. Spark evaluates a write
 lazily, so deleting the target partitions and then appending would delete the
 very rows the plan still has to read -- and the failure is silent, because the
@@ -99,14 +97,9 @@ def enrich_day(
     # ``ID`` is the track identifier and the flight list's primary key: one row
     # per flight, always. Enforced here because 04b is the only step that reads
     # the whole table, so it is the only place that can see a violation -- and
-    # because it self-heals one. The NULL-partition delete bug (a NULL value
-    # formatted as ``DOF=None``, a path that does not exist) left 746 dateless
-    # rows duplicated; the delete is fixed, so they no longer multiply, but
-    # nothing would have removed the copies already written.
+    # because it can repair one: a duplicated row is dropped here.
     #
-    # Reported rather than silently dropped. A duplicate in a *dated* partition
-    # would mean something new and worse than a stale write, and the count is
-    # how anyone would notice.
+    # The number dropped is reported, so a duplicate is noticed.
     before = flight_list.count()
     flight_list = flight_list.dropDuplicates(["ID"])
     removed = before - flight_list.count()

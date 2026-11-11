@@ -29,7 +29,7 @@ from pyspark.sql.window import Window
 
 from opdi.pipeline.flights import haversine_nm
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
 KT_PER_MPS = 1.94384
@@ -78,13 +78,12 @@ def movement_window(
 
     gs_kt = F.col("velocity") * KT_PER_MPS
     if config.ground_speed_derive_from_position and "lat" in sdf.columns and "lon" in sdf.columns:
-        # Fill the gap, don't replace: keeps today's behaviour wherever
-        # `velocity` exists and adds signal only where it is missing -- see
-        # EventConfig.ground_speed_derive_from_position. Guarded on column
-        # presence, not just NULL values: a caller that never carried lat/lon
-        # at all (some tests, and any minimal projection) must get exactly
-        # today's velocity-only behaviour rather than an unresolved-column
-        # analysis error.
+        # Fill the gaps, do not replace: the reported speed is used wherever
+        # `velocity` exists, the derived one only where it is missing (see
+        # EventConfig.ground_speed_derive_from_position). Applied only when the
+        # lat/lon columns are present: a caller without them (some tests, any
+        # minimal projection) gets the reported speed alone rather than an
+        # unresolved-column analysis error.
         gs_kt = F.coalesce(gs_kt, _derived_groundspeed_kt(ordered, time_col))
     work = sdf.withColumn("_moving", gs_kt > F.lit(config.ground_speed_threshold_kt))
 

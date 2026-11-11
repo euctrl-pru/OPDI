@@ -7,8 +7,8 @@
 ``import opdi.output.schema`` works without PySpark installed.
 """
 
-#: Names of the monthly v0.0.2 exporters (steps 05 and 06), which are no
-#: longer part of the package.
+#: Names of the monthly exporters of release v0.0.2 (steps 05 and 06), which
+#: are not part of this package; importing them raises an error that says so.
 _REMOVED = ("CSVExporter", "ParquetExporter", "clean_and_save_data")
 
 

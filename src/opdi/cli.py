@@ -1,8 +1,9 @@
-"""Command-line interface for the OPDI pipeline.
+"""The ``opdi`` command.
 
-Provides an ``opdi`` CLI command (registered via pyproject.toml
-``[project.scripts]``) that dispatches to individual pipeline stages
-or runs the full pipeline end-to-end.
+Installed with the package. ``opdi run`` runs the pipeline steps over a range
+of dates in one local Spark session (see :func:`opdi.runner.run_pipeline`).
+To process days on the OpenSky cluster, use ``run_period.py`` or
+``python -m opdi.orchestration``.
 
 Usage::
 
@@ -19,14 +20,14 @@ def main(argv=None):
     """Entry point for the ``opdi`` command."""
     parser = argparse.ArgumentParser(
         prog="opdi",
-        description="OPDI - Open Performance Data Initiative pipeline runner",
+        description="OPDI, the Open Performance Data Initiative: run the pipeline.",
     )
     parser.add_argument("--version", action="store_true", help="Show package version and exit.")
 
     subparsers = parser.add_subparsers(dest="command")
 
     # --- run sub-command ---
-    run_parser = subparsers.add_parser("run", help="Run pipeline stages.")
+    run_parser = subparsers.add_parser("run", help="Run the pipeline steps over a range of dates.")
     run_parser.add_argument(
         "--env",
         choices=["local", "opensky"],
@@ -84,20 +85,21 @@ def main(argv=None):
         "--adep-mode",
         choices=["trend", "endpoint"],
         default=None,
-        help="Detection algorithm for departures (step 03). Defaults to the "
-        "value in DetectionConfig.",
+        help="Method that names the departure airport in step 03 "
+        "(default: DetectionConfig.adep_mode, endpoint).",
     )
     run_parser.add_argument(
         "--ades-mode",
         choices=["trend", "endpoint"],
         default=None,
-        help="Detection algorithm for arrivals (step 03). The two roles take "
-        "different rules because they are not equally hard.",
+        help="Method that names the destination airport in step 03 "
+        "(default: DetectionConfig.ades_mode, trend).",
     )
     run_parser.add_argument(
         "--airports-hex-path",
         default="data/airport_hex/zones_res7_processed.parquet",
-        help="Path to pre-generated airport hex zones parquet.",
+        help="Local Parquet file of the airport zones, used when the table "
+        "h3_airport_detection_zones does not exist.",
     )
     coverage = run_parser.add_mutually_exclusive_group()
     coverage.add_argument(
@@ -105,17 +107,14 @@ def main(argv=None):
         dest="worldwide",
         action="store_true",
         default=True,
-        help="Run worldwide (the default; kept so existing commands still "
-        "parse). No coverage filter is applied to ingest, detection or "
-        "reference geometry. In the opensky environment the coverage does "
-        "not change the warehouse; a run whose coverage differs from the "
-        "one that built the warehouse is refused at step 00.",
+        help="Process the whole world (the default). A warehouse built with "
+        "the other coverage is refused at step 00.",
     )
     coverage.add_argument(
         "--europe",
         dest="worldwide",
         action="store_false",
-        help="Apply the published European bounding box. In the local "
+        help="Keep only positions inside the European box. In the local "
         "environment this also selects the European warehouse.",
     )
 

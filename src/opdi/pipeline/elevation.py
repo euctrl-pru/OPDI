@@ -100,8 +100,8 @@ def height_above_field_ft(sdf):
        :func:`height_above_aerodrome_ft` (or, where the aerodrome is fixed by
        the detector's own definition, :func:`height_above_elevation_ft`).
 
-    NULL elevations coalesce to zero, which reproduces the behaviour of every
-    caller that used a bare pressure altitude before this existed.
+    A NULL elevation counts as 0 ft, so the height is then the pressure
+    altitude.
     """
     alt_ft = F.col("baro_altitude_c") * F.lit(FT_PER_M)
     return F.least(

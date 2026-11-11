@@ -1,8 +1,8 @@
-"""Data ingestion modules for OPDI pipeline.
+"""Reading the external data the pipeline starts from.
 
-Provides connectors for loading data from external sources:
-OpenSky Network state vectors, the ADS-C topic, the aircraft database,
-and OurAirports.
+The OpenSky Network state vectors (step 01) and ADS-C reports (step 01b),
+the OpenSky aircraft database and the OurAirports airport and runway data
+(both part of step 00, the reference tables).
 """
 
 from opdi.ingestion.osn_adsc import AdscIngestion

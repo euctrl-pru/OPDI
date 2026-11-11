@@ -113,8 +113,10 @@ def _shift_east(poly: Polygon) -> Polygon:
 
 
 def _polygons(geom) -> List[Polygon]:
-    """The polygon parts of any geometry, dropping lines and points a cut or a
-    union can leave behind (a boundary that touches the cut line is one).
+    """The polygon parts of a geometry, without lines and points.
+
+    A cut or a union can leave lines and points behind (a boundary that
+    touches the cut line is one).
     """
     if geom is None or geom.is_empty:
         return []
@@ -126,9 +128,11 @@ def _polygons(geom) -> List[Polygon]:
 
 
 def split_antimeridian(geom):
-    """Split every polygon whose ring jumps across 180 degrees into a western
-    and an eastern part, each inside [-180, 180]. Other geometry is returned
-    as is. ``h3.polygon_to_cells`` fills the complement of such a ring.
+    """Split every polygon that crosses the 180th meridian into two parts.
+
+    The western and eastern parts each lie inside [-180, 180]; other geometry
+    is returned as is. ``h3.polygon_to_cells`` would fill the rest of the
+    globe for a ring that jumps across 180 degrees.
     """
     out = []
     for poly in _polygons(geom):
@@ -173,8 +177,9 @@ def compact_cells(geometry_wkt: str, res: int) -> List[Tuple[str, int]]:
 
 
 def fill_geometry(geometry_wkt: str, res: int = 7) -> list:
-    """Full polyfill per sub-polygon of a WKT MultiPolygon (kept for callers
-    of the earlier port; the generator itself uses ``compact_cells``).
+    """All cells of each part of a WKT MultiPolygon, at one resolution.
+
+    The generator itself uses ``compact_cells``.
     """
     return [
         polyfill_geojson(shapely.geometry.mapping(x), res, geo_json_conformant=True)
@@ -278,8 +283,9 @@ def dissolve_volumes(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fill_volumes(volumes: pd.DataFrame, res: int) -> pd.DataFrame:
-    """One row per compact cell of every volume: the volume columns plus
-    ``h3_cell`` and ``h3_res``.
+    """One row per compact cell of every volume.
+
+    The rows hold the volume's columns plus ``h3_cell`` and ``h3_res``.
     """
     out = []
     for r in volumes.itertuples(index=False):
@@ -314,8 +320,10 @@ def fill_volumes(volumes: pd.DataFrame, res: int) -> pd.DataFrame:
 
 
 def overlap_report(cells: pd.DataFrame) -> pd.DataFrame:
-    """Pairs of different codes that claim the same full-resolution cell with
-    overlapping FL bands, with how many such cells: ``code_a, code_b, cells``.
+    """Pairs of codes that claim the same cell at overlapping flight levels.
+
+    Columns ``code_a``, ``code_b`` and ``cells`` (the number of shared cells
+    at full resolution).
 
     Computed at the finest resolution present by uncompacting every volume to
     integer cell arrays, so a coarse interior cell of one volume is compared
@@ -390,9 +398,10 @@ def _country_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 class AirspaceH3Generator:
-    """Builds ``opdi_h3_airspace_ref``: one layer per airspace type, each
-    written once, partitioned by ``airspace_type`` so the layers do not
-    clobber each other.
+    """Step 00c: build ``opdi_h3_airspace_ref``, the airspaces as H3 cells.
+
+    One layer per airspace type (FIR, ANSP, COUNTRY), each written once and
+    partitioned by ``airspace_type``, so writing one layer keeps the others.
     """
 
     def __init__(self, spark: SparkSession, config: OPDIConfig, storage=None):
@@ -405,10 +414,11 @@ class AirspaceH3Generator:
     # -- one layer ---------------------------------------------------------
 
     def _refuse_old_table(self) -> None:
-        """The earlier port's table (per-cell ``h3_res_7`` columns, unpartitioned,
-        one polygon surviving) cannot take a partitioned write of the new
-        columns. Deleting a table is not this step's to do silently: stop and
-        name it.
+        """Refuse to write into a table of the older layout.
+
+        A table with per-cell ``h3_res_7`` columns, not partitioned, cannot
+        take the partitioned write of the new columns. The step does not
+        delete a table by itself; it stops and names it.
         """
         if not self.storage.table_exists(TABLE):
             return
@@ -474,6 +484,7 @@ class AirspaceH3Generator:
         frames: Optional[List[pd.DataFrame]] = None,
         res: Optional[int] = None,
     ) -> pd.DataFrame:
+        """Build and write the FIR layer, from ``urls`` or ready ``frames``."""
         frames = frames or [pd.read_parquet(u) for u in (urls or DEFAULT_FIR_URLS)]
         print(f"Processing FIR layer ({len(frames)} source file(s))")
         return self._process_layer(frames, "FIR", res=res, report_overlaps=True)
@@ -484,6 +495,7 @@ class AirspaceH3Generator:
         frames: Optional[List[pd.DataFrame]] = None,
         res: Optional[int] = None,
     ) -> pd.DataFrame:
+        """Build and write the ANSP layer, from ``urls`` or ready ``frames``."""
         frames = frames or [pd.read_parquet(u) for u in (urls or DEFAULT_ANSP_URLS)]
         print(f"Processing ANSP layer ({len(frames)} source file(s))")
         return self._process_layer(frames, "ANSP", res=res)
@@ -494,6 +506,7 @@ class AirspaceH3Generator:
         frames: Optional[List[pd.DataFrame]] = None,
         res: Optional[int] = None,
     ) -> pd.DataFrame:
+        """Build and write the country layer, from ``urls`` or ready ``frames``."""
         frames = frames or [
             _country_frame(pd.read_parquet(u)) for u in (urls or DEFAULT_COUNTRY_URLS)
         ]
@@ -501,11 +514,13 @@ class AirspaceH3Generator:
         return self._process_layer(frames, "COUNTRY", res=res)
 
     def process_all(self, ansp_urls=None, fir_urls=None, country_urls=None) -> None:
+        """Build and write the three layers."""
         self.process_fir(fir_urls)
         self.process_ansp(ansp_urls)
         self.process_countries(country_urls)
 
     def create_table_if_not_exists(self) -> None:
+        """Create the Iceberg table if it does not exist."""
         create_sql = f"""
         CREATE TABLE IF NOT EXISTS `{self.project}`.`{TABLE}` (
             airspace_type STRING COMMENT 'Airspace type (ANSP, FIR, COUNTRY)',

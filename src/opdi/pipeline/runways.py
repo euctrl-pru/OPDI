@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Optional
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
 from opdi.pipeline.flights import angle_between, bearing_deg, haversine_nm
@@ -154,7 +154,7 @@ def detect_runway_movements(
     ``ends`` is one row per (track_id, apt_ident, role) with the aerodrome
     position and elevation; ``role`` is ``"departure"`` or ``"arrival"``.
 
-    The gates are traffic's: within ``runway_max_dist_nm`` of the aerodrome,
+    The limits are those of the traffic library: within ``runway_max_dist_nm`` of the aerodrome,
     below ``runway_max_height_ft`` above the field, groundspeed above
     ``runway_min_groundspeed_kt``, and a vertical rate beyond
     ``runway_min_vert_rate_ftmin`` in the direction the role implies. What

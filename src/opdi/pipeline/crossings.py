@@ -51,7 +51,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
 
@@ -246,8 +246,10 @@ def _empty_result(
     time_col: str,
     interpolate_cols: Sequence[str],
 ) -> DataFrame:
-    """Shape-correct empty frame, so a caller configured with no thresholds
-    (``EventConfig.legacy()`` has no rings) still unions cleanly.
+    """An empty frame with the columns of a crossing frame.
+
+    A caller configured with no thresholds (``EventConfig.legacy()`` has no
+    distance circles) can still union it with the other events.
     """
     cols = (
         [F.col(c) for c in partition_cols]

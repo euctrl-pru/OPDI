@@ -954,7 +954,7 @@ def run_period(
                     # built from reports of the day after it.
                     ingest_end = end_date + timedelta(days=INGEST_LOOKAHEAD_DAYS)
                     fn(spark, config, start_date, ingest_end, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - reported, then surfaced
+        except Exception as exc:  # noqa: BLE001 - reported, then returned as the exit code
             elapsed = time.time() - step_start
             print(f"\nStep {step} ({scope}) FAILED after {elapsed:.1f}s: {exc}")
             import traceback
