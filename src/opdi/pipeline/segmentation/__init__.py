@@ -1,7 +1,10 @@
 """Track segmentation: turning state vectors into flight tracks.
 
-``tracks.py:_add_track_id`` remains the production algorithm and remains frozen.
-This package is the study of what should replace it.
+:mod:`~opdi.pipeline.segmentation.base` is the engine and
+:mod:`~opdi.pipeline.segmentation.methods` holds the rules: the default rule
+(``cruise_linked``) and the v0.0.2 rule (``legacy``). Step 02
+(``tracks.TrackProcessor``) builds ``track_id`` with the rule the configuration
+names.
 """
 
 from opdi.pipeline.segmentation.base import (

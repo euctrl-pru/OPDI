@@ -199,8 +199,7 @@ class TrackProcessor:
     reproduces the published ids byte for byte and remains selectable;
     ``standard`` is the study's recommendation and the default -- it resolves
     to ``cruise_linked`` (A10), which keeps one track across an en-route
-    reception hole, having resolved to ``debounced`` (A9) and before that to
-    ``recommended`` (A8). All delegate to ``pipeline/segmentation``, so
+    reception hole. Both delegate to ``pipeline/segmentation``, so
     production runs the code the study measured rather than a second
     implementation of the same prose.
     """

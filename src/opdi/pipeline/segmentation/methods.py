@@ -127,7 +127,7 @@ def callsign_memory_minutes(p) -> float:
     the callsign for hours, so A10 forgets a callsign older than the longest hole
     it can link. Every day reads at least that far back plus the callsign
     lookback (``tracks.required_lookback_hours``), so both reads hold whatever
-    counts. ``debounced`` by name keeps its published behaviour.
+    counts. The study rule ``debounced`` keeps its published behaviour.
     """
     return float(p.link_max_gap_minutes)
 
