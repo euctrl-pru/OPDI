@@ -11,6 +11,7 @@ from typing import List, Dict, Optional, Tuple
 import os
 
 from opdi.coverage import EUROPE_BBOX, CoverageConfig
+from opdi.output.schema import RELEASE
 
 
 def _load_dotenv() -> None:
@@ -43,6 +44,28 @@ class ProjectConfig:
 
     hadoop_filesystem: str = "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged"
     """Hadoop filesystem path for Kerberos access."""
+
+    release: str = RELEASE
+    """Name of the data release, for example ``v2.0.0``.
+
+    In the ``opensky`` environment every table, the progress records and the
+    published files of a release are kept in a folder of this name inside the
+    warehouse (see :attr:`release_root`), so two releases never share a
+    table. Set it to an empty string to use the warehouse path itself, for
+    example to read a study folder that holds its tables directly."""
+
+    @property
+    def release_root(self) -> str:
+        """The folder that holds this release's tables.
+
+        In the ``opensky`` environment it is ``<warehouse_path>/<release>``,
+        for example ``s3a://eurocontrol/opdi/v2.0.0``. In the other
+        environments, and when :attr:`release` is empty, it is
+        :attr:`warehouse_path` itself.
+        """
+        if self.project_name == "opensky" and self.release:
+            return f"{self.warehouse_path.rstrip('/')}/{self.release}"
+        return self.warehouse_path
 
 
 @dataclass
@@ -1970,44 +1993,26 @@ class SegmentationConfig:
     """Altitude a descent must reach before a following climb is a new sortie (feet)."""
 
 
-#: The opensky environment's warehouse path before OPDI_WAREHOUSE is applied.
-#:
-#: Hoisted out of the opensky branch of `for_environment` so the worldwide
-#: switch can reach the *declared* default without going through the
-#: environment-resolved `config.project.warehouse_path` -- see
-#: `_worldwide_warehouse`.
-_OPENSKY_DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi"
+#: The warehouse of the ``opensky`` environment when nothing else is named:
+#: the storage prefix under which each release has its own folder.
+OPENSKY_DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi"
+
+#: Environment variable that names the warehouse of the ``opensky``
+#: environment.
+WAREHOUSE_VARIABLE = "OPDI_WAREHOUSE"
 
 
-def _worldwide_warehouse(env: str, declared_warehouse_path: str) -> str:
-    """Where a worldwide run writes.
+def _worldwide_warehouse(declared_warehouse_path: str) -> str:
+    """Where a worldwide run writes in the ``dev``, ``live`` and ``local`` environments.
 
-    ``OPDI_WAREHOUSE_WORLD`` wins; otherwise the environment's declared
-    warehouse path with its last segment suffixed ``-world``.
-
-    **``OPDI_WAREHOUSE`` is deliberately not consulted.** That variable is how
-    production points the pipeline at the European prefix, so it is exported in
-    the shell an operator would most likely run a worldwide experiment from. If
-    it steered worldwide runs too, ``--worldwide`` would silently append
-    planet-wide rows to ``opdi-prod`` -- the exact outcome the separate table
-    set exists to prevent. Task 6's coverage marker is the second line of
-    defence behind this one.
-
-    For ``opensky`` specifically, "declared" cannot mean
-    ``config.project.warehouse_path``: by the time this function runs, that
-    value has already absorbed ``OPDI_WAREHOUSE`` (see the opensky branch of
-    `OPDIConfig.for_environment`), so consulting it here would let
-    ``OPDI_WAREHOUSE`` leak into the worldwide prefix through the back door.
-    The worldwide suffix is therefore always applied to
-    `_OPENSKY_DEFAULT_WAREHOUSE` for that environment, never to the
-    environment-resolved value; the other environments have no such override
-    to worry about, so their own declared path is used directly.
+    These environments keep their European tables at the declared path, so a
+    worldwide run writes beside them, at the declared path followed by
+    ``-world``. The ``opensky`` environment does not use this rule: there the
+    coverage does not change the warehouse, and the coverage marker (a small
+    table that records which coverage built a warehouse) refuses to mix the
+    two.
     """
-    override = os.environ.get("OPDI_WAREHOUSE_WORLD")
-    if override:
-        return override
-    base = _OPENSKY_DEFAULT_WAREHOUSE if env == "opensky" else declared_warehouse_path
-    return base.rstrip("/") + "-world"
+    return declared_warehouse_path.rstrip("/") + "-world"
 
 
 @dataclass
@@ -2026,22 +2031,34 @@ class OPDIConfig:
     coverage: CoverageConfig = field(default_factory=CoverageConfig)
 
     @classmethod
-    def for_environment(cls, env: str = "dev", worldwide: bool = True) -> "OPDIConfig":
-        """
-        Create configuration for specific environment.
+    def for_environment(
+        cls,
+        env: str = "dev",
+        worldwide: bool = True,
+        warehouse: Optional[str] = None,
+    ) -> "OPDIConfig":
+        """Create the configuration of one environment.
+
+        Where the ``opensky`` environment writes is decided by one setting,
+        the warehouse: the ``warehouse`` argument if given, else the
+        ``OPDI_WAREHOUSE`` environment variable if set, else
+        ``s3a://eurocontrol/opdi``. The same rule holds for both coverages.
+        The tables of the release then go to ``<warehouse>/v2.0.0`` (see
+        :attr:`ProjectConfig.release_root`).
 
         Args:
-            env: Environment name ("dev", "live", "local", or "opensky")
-            worldwide: Drop the coverage bounding box and route output to the
-                worldwide warehouse. **On by default**: OPDI works worldwide
-                unless a caller asks otherwise. Pass ``worldwide=False`` to get
-                the published European box (``EUROPE_BBOX``) and the European
-                warehouse -- the box itself is still a published contract and
-                is unchanged, it is just no longer what you get by saying
-                nothing.
+            env: Environment name: ``"dev"``, ``"live"``, ``"local"`` or
+                ``"opensky"``.
+            worldwide: Process the whole world (the default). Pass ``False``
+                to keep only positions inside the European box
+                (``EUROPE_BBOX``). In ``dev``, ``live`` and ``local`` a
+                worldwide run writes to the declared warehouse path followed
+                by ``-world``.
+            warehouse: The warehouse to use. It replaces the environment's
+                declared path in every environment.
 
         Returns:
-            OPDIConfig instance with environment-specific settings
+            The configuration.
         """
         if env == "live":
             # Production environment settings
@@ -2105,8 +2122,8 @@ class OPDIConfig:
                     # the whole pipeline into a parallel prefix without
                     # touching a production table, which is what makes a
                     # from-scratch rebuild safe to attempt.
-                    warehouse_path=os.environ.get(
-                        "OPDI_WAREHOUSE", _OPENSKY_DEFAULT_WAREHOUSE),
+                    warehouse_path=os.environ.get(WAREHOUSE_VARIABLE)
+                    or OPENSKY_DEFAULT_WAREHOUSE,
                     hadoop_filesystem="",
                 ),
                 spark=SparkConfig(
@@ -2155,11 +2172,35 @@ class OPDIConfig:
 
         if worldwide:
             config.coverage = CoverageConfig(bbox=None)
-            config.project = replace(
-                config.project,
-                warehouse_path=_worldwide_warehouse(env, config.project.warehouse_path),
-            )
+            if env != "opensky":
+                config.project = replace(
+                    config.project,
+                    warehouse_path=_worldwide_warehouse(config.project.warehouse_path),
+                )
+        if warehouse:
+            config.project = replace(config.project, warehouse_path=warehouse)
         return config
+
+    def describe_target(self) -> str:
+        """Where this configuration reads and writes, as lines to print at start-up.
+
+        Names the warehouse, the release root and the coverage. When the
+        ``OPDI_WAREHOUSE`` environment variable is set to another place than
+        the warehouse in use, a further line says so, so that a wrong target
+        is seen before anything is written.
+        """
+        lines = [
+            f"  warehouse   : {self.project.warehouse_path}",
+            f"  release root: {self.project.release_root}",
+            f"  coverage    : {self.coverage.label}",
+        ]
+        variable = os.environ.get(WAREHOUSE_VARIABLE)
+        if variable and variable.rstrip("/") != self.project.warehouse_path.rstrip("/"):
+            lines.append(
+                f"  note        : {WAREHOUSE_VARIABLE} is set to {variable}, but this run "
+                f"uses {self.project.warehouse_path}"
+            )
+        return "\n".join(lines)
 
     @classmethod
     def default(cls) -> "OPDIConfig":

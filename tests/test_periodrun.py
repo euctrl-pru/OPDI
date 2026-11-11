@@ -236,16 +236,16 @@ def test_a_week_run_builds_its_own_reference_tables():
     assert W[0] == "00"
 
 
-def test_the_default_warehouse_is_not_the_published_one():
-    """Writing reference tables into `opdi/` would overwrite published data.
-
-    The whole point of a separate prefix is that a from-scratch rebuild is safe
-    to attempt; pointing the default at the published prefix would make it the
-    opposite.
-    """
+def test_the_default_warehouse_keeps_each_release_in_its_own_folder(monkeypatch):
+    """The default warehouse holds earlier data, so a run writes only inside
+    the release folder, never beside what is already there."""
+    from opdi.config import OPDIConfig
     from opdi.periodrun import DEFAULT_WAREHOUSE
-    assert DEFAULT_WAREHOUSE.rstrip("/") != "s3a://eurocontrol/opdi"
-    assert DEFAULT_WAREHOUSE.startswith("s3a://")
+    monkeypatch.delenv("OPDI_WAREHOUSE", raising=False)
+    assert DEFAULT_WAREHOUSE == "s3a://eurocontrol/opdi"
+    cfg = OPDIConfig.for_environment("opensky")
+    assert cfg.project.warehouse_path == DEFAULT_WAREHOUSE
+    assert cfg.project.release_root == f"{DEFAULT_WAREHOUSE}/v2.0.0"
 
 
 def test_the_reference_substeps_run_in_dependency_order_not_id_order():
@@ -793,82 +793,34 @@ def test_airspaces_run_under_both_coverages():
     assert europe["00c"] is True
 
 
-def test_a_worldwide_period_run_does_not_default_to_the_european_prefix():
-    """periodrun overwrites config.project.warehouse_path with its own default,
-    which is the European prefix. Without this the --worldwide flag would be
-    silently discarded at the one entry point production actually uses."""
+def test_a_period_run_is_worldwide_by_default():
     import inspect
-    from opdi.periodrun import run_period, DEFAULT_WAREHOUSE
-    assert DEFAULT_WAREHOUSE == "s3a://eurocontrol/opdi-prod"
+    from opdi.periodrun import run_period
     assert inspect.signature(run_period).parameters["worldwide"].default is True
-    # Behavioural half: resolve the warehouse the way run_period does.
-    from opdi.config import OPDIConfig
-    world = OPDIConfig.for_environment("opensky", worldwide=True)
-    assert world.project.warehouse_path != DEFAULT_WAREHOUSE
 
 
 # --- _resolve_warehouse ------------------------------------------------------
-#
-# The behavioural half of the DEFAULT_WAREHOUSE leak lives in this pure
-# function, extracted specifically so the guard is testable without stubbing
-# all of run_period's dependencies (a Spark session, a state file, a
-# warehouse to preflight). `test_a_worldwide_period_run_does_not_default_to_
-# the_european_prefix` above only pins config.py's OPDIConfig.for_environment
-# behaviour, already covered by test_coverage_config.py -- it never calls
-# into periodrun.py at all, so the guard itself needed its own tests.
 
-def test_resolve_warehouse_follows_coverage_when_omitted_worldwide():
-    """Caller omitted `warehouse`, `worldwide=True` -> the worldwide path."""
+def test_resolve_warehouse_uses_the_configured_one_when_omitted():
     from opdi.periodrun import _resolve_warehouse, _UNSET
-    assert _resolve_warehouse(
-        _UNSET, True, "s3a://eurocontrol/opdi-world"
-    ) == "s3a://eurocontrol/opdi-world"
+    assert _resolve_warehouse(_UNSET, "s3a://eurocontrol/opdi") == "s3a://eurocontrol/opdi"
 
 
-def test_resolve_warehouse_defaults_to_opdi_prod_when_omitted_european():
-    """Caller omitted `warehouse`, `worldwide=False` -> DEFAULT_WAREHOUSE,
-    unchanged from before this function existed."""
-    from opdi.periodrun import _resolve_warehouse, _UNSET, DEFAULT_WAREHOUSE
-    assert _resolve_warehouse(
-        _UNSET, False, "s3a://eurocontrol/opdi-world"
-    ) == DEFAULT_WAREHOUSE
-
-
-def test_resolve_warehouse_an_explicit_value_wins_worldwide():
-    """Caller passed an explicit warehouse, `worldwide=True` -> the caller's
-    value wins, even though it is not the worldwide path for this env."""
+def test_resolve_warehouse_an_explicit_value_wins():
     from opdi.periodrun import _resolve_warehouse
     assert _resolve_warehouse(
-        "s3a://eurocontrol/scratch", True, "s3a://eurocontrol/opdi-world"
+        "s3a://eurocontrol/scratch", "s3a://eurocontrol/opdi"
     ) == "s3a://eurocontrol/scratch"
 
 
-def test_resolve_warehouse_an_explicit_value_wins_european():
-    """Caller passed an explicit warehouse, `worldwide=False` -> the caller's
-    value wins, unchanged from before this function existed."""
+def test_resolve_warehouse_an_empty_value_counts_as_omitted():
     from opdi.periodrun import _resolve_warehouse
-    assert _resolve_warehouse(
-        "s3a://eurocontrol/scratch", False, "s3a://eurocontrol/opdi-world"
-    ) == "s3a://eurocontrol/scratch"
-
-
-def test_resolve_warehouse_an_explicit_default_lookalike_still_wins():
-    """The bug this function exists to close: a caller who explicitly passed
-    the exact string DEFAULT_WAREHOUSE, under worldwide=True, must not have
-    it silently overridden by the worldwide path. A bare `warehouse ==
-    DEFAULT_WAREHOUSE` comparison cannot tell that apart from "the caller
-    said nothing" -- only the _UNSET sentinel can, which is why the default
-    changed from a literal to the sentinel."""
-    from opdi.periodrun import _resolve_warehouse, DEFAULT_WAREHOUSE
-    assert _resolve_warehouse(
-        DEFAULT_WAREHOUSE, True, "s3a://eurocontrol/opdi-world"
-    ) == DEFAULT_WAREHOUSE
+    assert _resolve_warehouse("", "s3a://eurocontrol/opdi") == "s3a://eurocontrol/opdi"
 
 
 def test_run_period_still_defaults_the_warehouse_parameter_to_unset():
-    """Pins the signature change itself: an unset `warehouse` must be the
-    sentinel, not the literal DEFAULT_WAREHOUSE, or the lookalike case above
-    could never be reached from a real call."""
+    """An omitted `warehouse` is the sentinel, so the configured warehouse
+    (OPDI_WAREHOUSE or the default) applies."""
     import inspect
     from opdi.periodrun import run_period, _UNSET
     assert inspect.signature(run_period).parameters["warehouse"].default is _UNSET
@@ -927,11 +879,8 @@ def _fake_run_period(monkeypatch, script):
 
 
 def test_the_wrapper_script_leaves_warehouse_unset_by_default(monkeypatch):
-    """This is the test that would have caught the defect: --warehouse used
-    to default to the DEFAULT_WAREHOUSE *string*, so argparse materialised it
-    before run_period() ever saw it -- _resolve_warehouse would then take the
-    "explicit" branch and a --worldwide run would silently write into
-    opdi-prod. Parsing with no --warehouse must yield the sentinel."""
+    """With no --warehouse, run_period() receives the sentinel and uses the
+    configured warehouse (OPDI_WAREHOUSE or the default)."""
     import run_period as script
 
     captured = _fake_run_period(monkeypatch, script)

@@ -69,6 +69,8 @@ def scoring_config():
 
     cfg = OPDIConfig.for_environment("opensky", worldwide=False)
     cfg.project.warehouse_path = WAREHOUSE
+    # The prefix holds the tables directly, without a release folder.
+    cfg.project.release = ""
     return cfg
 
 

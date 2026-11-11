@@ -76,6 +76,8 @@ def main() -> int:
 
     cfg = OPDIConfig.for_environment("opensky")
     cfg.project.warehouse_path = RESEARCH_WAREHOUSE
+    # The prefix holds the tables directly, without a release folder.
+    cfg.project.release = ""
     cfg.segmentation.method = "debounced"
     cfg.segmentation.callsign_min_persistence_seconds = args.persistence_seconds
     cfg.spark.executor_instances = str(args.executors)

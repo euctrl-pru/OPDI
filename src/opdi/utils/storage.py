@@ -6,11 +6,19 @@ mode (dev, live) tables are managed via the catalog. In S3 mode (opensky)
 tables are stored as parquet directories on S3.
 """
 
+import json
+import os
+import time
 from typing import Any, Mapping, Optional, Sequence
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from opdi.config import OPDIConfig
+
+
+#: Local folder for the progress records when the tables are in a catalog
+#: rather than in a warehouse folder.
+LOCAL_STATE_DIR = "OPDI_live/state"
 
 
 #: What Hive -- and therefore Spark -- calls the directory holding rows whose
@@ -43,7 +51,7 @@ class StorageManager:
         self.config = config
         self.project = config.project.project_name
         self.use_s3 = not config.spark.enable_iceberg
-        self.base_path = config.project.warehouse_path
+        self.base_path = config.project.release_root
         self._registered_views: set = set()
 
     def _s3_path(self, table_name: str) -> str:
@@ -405,3 +413,112 @@ class StorageManager:
             "Point this run at a different warehouse, or delete the existing "
             "tables if they are no longer wanted."
         )
+
+    # --- progress records -----------------------------------------------------
+    #
+    # The pipeline records which (step, day) units are finished, and its steps
+    # keep small progress logs. Both are kept in the warehouse, under
+    # ``<release root>/_state/``, so that any machine that runs the next unit
+    # sees what the previous one did. The folder name starts with an
+    # underscore, so Spark never reads it as a table.
+
+    @property
+    def state_path(self) -> str:
+        """The folder of the progress records.
+
+        ``<release root>/_state`` when the tables are in a warehouse folder
+        (the ``opensky`` environment), otherwise the local folder
+        :data:`LOCAL_STATE_DIR`.
+        """
+        if self.use_s3:
+            return f"{self.base_path.rstrip('/')}/_state"
+        return "file://" + os.path.abspath(LOCAL_STATE_DIR)
+
+    def _hadoop_path(self, path: str):
+        jvm = self.spark._jvm
+        p = jvm.org.apache.hadoop.fs.Path(path)
+        return p.getFileSystem(self.spark._jsc.hadoopConfiguration()), p
+
+    def _done_path(self, key: str) -> str:
+        if "/" in key or not key:
+            raise ValueError(f"a progress key must be a non-empty name without '/': {key!r}")
+        return f"{self.state_path}/done/{key}.json"
+
+    def mark_done(self, key: str, seconds: float = 0.0) -> None:
+        """Record that the unit ``key`` (for example ``02@2026-06-14``) is finished.
+
+        Args:
+            key: Name of the unit.
+            seconds: How long the unit took, in seconds.
+        """
+        fs, p = self._hadoop_path(self._done_path(key))
+        out = fs.create(p, True)
+        try:
+            body = json.dumps({"seconds": round(float(seconds), 1),
+                               "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                            time.gmtime())})
+            out.write(bytearray(body.encode("utf-8")))
+        finally:
+            out.close()
+
+    def is_done(self, key: str) -> bool:
+        """Whether the unit ``key`` has been recorded as finished."""
+        fs, p = self._hadoop_path(self._done_path(key))
+        return bool(fs.exists(p))
+
+    def clear_done(self, key: str) -> None:
+        """Forget that the unit ``key`` was finished, so that it runs again."""
+        fs, p = self._hadoop_path(self._done_path(key))
+        if fs.exists(p):
+            fs.delete(p, False)
+
+    def _logs_path(self) -> str:
+        return f"{self.state_path}/logs"
+
+    def pull_logs(self, local_dir: str) -> int:
+        """Copy the progress logs kept in the warehouse into ``local_dir``.
+
+        The steps read and write their progress logs as local files. Call
+        this before a step and :meth:`push_logs` after it.
+
+        Returns:
+            The number of files copied.
+        """
+        os.makedirs(local_dir, exist_ok=True)
+        fs, folder = self._hadoop_path(self._logs_path())
+        if not fs.exists(folder):
+            return 0
+        jvm = self.spark._jvm
+        n = 0
+        for status in fs.listStatus(folder):
+            if not status.isFile():
+                continue
+            target = os.path.join(os.path.abspath(local_dir), status.getPath().getName())
+            if os.path.exists(target):
+                os.remove(target)
+            fs.copyToLocalFile(False, status.getPath(), jvm.org.apache.hadoop.fs.Path(target), True)
+            n += 1
+        return n
+
+    def push_logs(self, local_dir: str) -> int:
+        """Copy the progress logs in ``local_dir`` into the warehouse.
+
+        Returns:
+            The number of files copied.
+        """
+        if not os.path.isdir(local_dir):
+            return 0
+        fs, folder = self._hadoop_path(self._logs_path())
+        fs.mkdirs(folder)
+        jvm = self.spark._jvm
+        n = 0
+        for name in sorted(os.listdir(local_dir)):
+            source = os.path.join(os.path.abspath(local_dir), name)
+            if not os.path.isfile(source) or name.endswith(".crc"):
+                continue
+            fs.copyFromLocalFile(
+                False, True, jvm.org.apache.hadoop.fs.Path("file://" + source),
+                jvm.org.apache.hadoop.fs.Path(f"{self._logs_path()}/{name}"),
+            )
+            n += 1
+        return n

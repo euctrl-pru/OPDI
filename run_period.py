@@ -22,17 +22,17 @@ Usage::
     # Just one step
     .venv310/bin/python run_period.py --start 2026-06-01 --steps 04
 
-    # European box, into opdi-prod rather than the worldwide warehouse
-    .venv310/bin/python run_period.py --start 2026-06-01 --europe
+    # Into another warehouse
+    .venv310/bin/python run_period.py --start 2026-06-01 --warehouse s3a://eurocontrol/scratch
 
-Runs are worldwide unless ``--europe`` is given. Everything is written under
-``--warehouse`` (default: the worldwide warehouse, or
-``s3a://eurocontrol/opdi-prod`` under ``--europe``), **including the reference
-tables**: step 00 runs first and
-rebuilds airport zones, ground layouts, the runway grid, OurAirports and the
-aircraft database into that prefix. A run therefore reads only tables it
-produced, and cannot touch the published ``s3a://eurocontrol/opdi``. An
-explicit ``--warehouse`` always wins, in either coverage.
+Runs are worldwide unless ``--europe`` is given. The warehouse is
+``--warehouse`` if given, else the ``OPDI_WAREHOUSE`` environment variable,
+else ``s3a://eurocontrol/opdi``, for both coverages. Everything is written to
+the release folder inside it (``<warehouse>/v2.0.0``), **including the
+reference tables**: step 00 runs first and rebuilds airport zones, ground
+layouts, the runway grid, OurAirports and the aircraft database there. A run
+therefore reads only tables it produced. A warehouse built with one coverage
+refuses a run with the other.
 
 The reference substeps execute in dependency order rather than id order -- 00d
 creates ``oa_airports``, which 00a, 00b and 00f all read. See
@@ -94,12 +94,11 @@ def main(argv=None) -> int:
     p.add_argument("--executors", type=int, default=None,
                    help="Override spark.executor.instances.")
     p.add_argument("--warehouse", default=_UNSET,
-                   help="Prefix every table is written to and read from "
-                        "(default: the worldwide warehouse, or "
-                        f"{DEFAULT_WAREHOUSE} under --europe). Reference tables "
-                        "included -- a run reuses nothing from elsewhere. "
-                        "An explicit value here always wins, in either "
-                        "coverage.")
+                   help="Warehouse every table is written to and read from, "
+                        "inside its release folder <warehouse>/v2.0.0 "
+                        "(default: OPDI_WAREHOUSE if set, else "
+                        f"{DEFAULT_WAREHOUSE}). Reference tables included: a "
+                        "run reuses nothing from elsewhere.")
     p.add_argument("--prune-tracks", action="store_true", default=False,
                    help="Drop osn_tracks and osn_tracks_clean for each day "
                         "once that day's outputs are written. They are ~19 GB "
@@ -115,13 +114,10 @@ def main(argv=None) -> int:
     coverage = p.add_mutually_exclusive_group()
     coverage.add_argument("--worldwide", dest="worldwide", action="store_true",
                           default=True,
-                          help="Run worldwide: no bounding box, and the "
-                               "worldwide warehouse unless --warehouse names a "
-                               "prefix explicitly. The default; kept so "
-                               "existing commands still parse.")
+                          help="Run worldwide: no bounding box. The default; "
+                               "kept so existing commands still parse.")
     coverage.add_argument("--europe", dest="worldwide", action="store_false",
-                          help="Apply the published European bounding box and "
-                               f"default the warehouse to {DEFAULT_WAREHOUSE}.")
+                          help="Apply the published European bounding box.")
     p.add_argument("--allow-existing", action="store_true",
                    help="Build even though the warehouse already holds "
                         "reference tables. Off by default so a rebuild cannot "

@@ -17,7 +17,7 @@ Usage::
     # Run only a specific step
     python opdi.py --step 02 --start 2024-01-01 --end 2024-02-01
 
-    # Worldwide, into its own warehouse rather than the European one
+    # Worldwide (the default)
     python opdi.py --env opensky --worldwide --start 2024-01-01 --end 2024-02-01
 
     # After pip install, also available as:
@@ -96,15 +96,16 @@ def main(argv=None):
         default=True,
         help="Run worldwide (the default; kept so existing commands still "
              "parse). No coverage filter is applied to ingest, detection or "
-             "reference geometry, and output goes to the worldwide warehouse, "
-             "so the two coverages can never mix in one warehouse.",
+             "reference geometry. In the opensky environment the coverage does "
+             "not change the warehouse; a run whose coverage differs from the "
+             "one that built the warehouse is refused at step 00.",
     )
     coverage.add_argument(
         "--europe",
         dest="worldwide",
         action="store_false",
-        help="Apply the published European bounding box and write to the "
-             "European warehouse instead of the worldwide one.",
+        help="Apply the published European bounding box. In the dev, live and "
+             "local environments this also selects the European warehouse.",
     )
 
     args = parser.parse_args(argv)

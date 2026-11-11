@@ -178,6 +178,8 @@ def build_config(arm: str, link_params=None, executors: int = 8) -> OPDIConfig:
         raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
     cfg = OPDIConfig.for_environment("opensky", worldwide=True)
     cfg.project.warehouse_path = REFERENCE_WAREHOUSE
+    # The prefix holds the tables directly, without a release folder.
+    cfg.project.release = ""
     cfg.adsc.enabled = False
     cfg.spark.executor_instances = str(executors)
     cfg.segmentation.method = arm

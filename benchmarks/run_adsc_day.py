@@ -298,6 +298,8 @@ def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
     # Setting it explicitly keeps one source of truth for where reference data
     # is read from.
     cfg.project.warehouse_path = reference_warehouse
+    # The prefix holds the tables directly, without a release folder.
+    cfg.project.release = ""
     cfg.adsc.enabled = (arm == "merged")
     cfg.spark.executor_instances = str(executors)
 

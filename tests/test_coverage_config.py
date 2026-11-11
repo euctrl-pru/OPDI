@@ -47,29 +47,27 @@ def test_a_custom_box_is_neither():
     assert CoverageConfig(bbox=(0.0, 40.0, 10.0, 50.0)).label == "custom"
 
 
-def test_worldwide_writes_to_its_own_warehouse():
-    """The decision that keeps the published European tables safe. If these two
-    are ever equal, a worldwide run appends planet-wide rows to the table the
-    European track_id contract lives in."""
+def test_both_coverages_share_the_opensky_warehouse(monkeypatch):
+    """In the opensky environment the coverage does not change the warehouse.
+    The coverage marker, not the path, keeps the two coverages apart."""
+    monkeypatch.delenv("OPDI_WAREHOUSE", raising=False)
     eu = OPDIConfig.for_environment("opensky", worldwide=False)
     world = OPDIConfig.for_environment("opensky", worldwide=True)
-    assert world.project.warehouse_path != eu.project.warehouse_path
-    assert world.project.warehouse_path.endswith("opdi-world")
+    assert world.project.release_root == eu.project.release_root
+    assert world.project.release_root == "s3a://eurocontrol/opdi/v2.0.0"
 
 
-def test_opdi_warehouse_does_not_leak_into_a_worldwide_run(monkeypatch):
-    """OPDI_WAREHOUSE is how production points at the European prefix. If it
-    also steered worldwide runs, an operator with it exported -- which is the
-    normal state -- would silently write planet-wide rows into opdi-prod."""
-    monkeypatch.setenv("OPDI_WAREHOUSE", "s3a://eurocontrol/opdi-prod")
+def test_opdi_warehouse_applies_to_a_worldwide_run(monkeypatch):
+    monkeypatch.setenv("OPDI_WAREHOUSE", "s3a://eurocontrol/scratch")
     world = OPDIConfig.for_environment("opensky", worldwide=True)
-    assert "opdi-prod" not in world.project.warehouse_path
+    assert world.project.release_root == "s3a://eurocontrol/scratch/v2.0.0"
 
 
-def test_the_worldwide_warehouse_is_overridable(monkeypatch):
+def test_the_worldwide_variable_is_not_read(monkeypatch):
+    monkeypatch.delenv("OPDI_WAREHOUSE", raising=False)
     monkeypatch.setenv("OPDI_WAREHOUSE_WORLD", "s3a://eurocontrol/scratch-world")
     world = OPDIConfig.for_environment("opensky", worldwide=True)
-    assert world.project.warehouse_path == "s3a://eurocontrol/scratch-world"
+    assert "scratch-world" not in world.project.release_root
 
 
 def test_the_spark_filter_is_a_no_op_worldwide(spark):

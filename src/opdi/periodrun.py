@@ -119,56 +119,34 @@ def reference_substeps_to_run(storage, force: bool = False) -> Dict[str, bool]:
 #: but only after the run had spent the time.
 INGEST_LOOKAHEAD_DAYS = 2
 
-#: Where a run writes when the caller names nothing else.
-#:
-#: A separate prefix from the published ``s3a://eurocontrol/opdi``. Everything
-#: -- reference tables included -- is written here, so a run cannot read a
-#: table an earlier campaign left behind and cannot damage one either.
-#: ``StorageManager`` resolves every table name against this single value, so
-#: one knob redirects the entire pipeline.
-DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi-prod"
+#: The warehouse a run uses when neither the caller nor the
+#: ``OPDI_WAREHOUSE`` environment variable names one. The tables of a release
+#: go into its own folder inside it, ``<warehouse>/v2.0.0``, so a run never
+#: touches the tables of another release or anything else in the bucket.
+DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi"
 
-#: Distinguishes "the caller said nothing" from "the caller explicitly passed
-#: the string that happens to equal ``DEFAULT_WAREHOUSE``". Only the first
-#: should follow coverage; the second is a caller who named that exact prefix
-#: and meant it. Same pattern as ``ingestion.osn_statevectors._UNSET``, for
-#: the same reason: a sentinel value, not a comparison against the default
-#: itself, is the only thing that can tell the two apart.
+#: Marks a ``warehouse`` argument the caller did not give, as distinct from
+#: any string the caller did give.
 _UNSET = object()
 
 
-def _resolve_warehouse(
-    warehouse,
-    worldwide: bool,
-    worldwide_warehouse: str,
-    default: str = DEFAULT_WAREHOUSE,
-) -> str:
-    """Which warehouse prefix a period run actually writes to.
-
-    Pure and Spark-free on purpose, so the coverage guard this exists to
-    enforce -- worldwide data must never land in ``opdi-prod`` by default --
-    is directly unit-testable without stubbing the rest of ``run_period``.
+def _resolve_warehouse(warehouse, configured: str) -> str:
+    """The warehouse a period run uses.
 
     Args:
-        warehouse: What the caller passed for ``warehouse``, or ``_UNSET`` if
-            they passed nothing (``run_period``'s own default).
-        worldwide: Whether this run has dropped the European bounding box.
-        worldwide_warehouse: The warehouse ``OPDIConfig.for_environment``
-            resolved for ``worldwide=True`` in this environment -- used only
-            when ``warehouse`` is unset and ``worldwide`` is true.
-        default: What an unset, non-worldwide ``warehouse`` resolves to.
+        warehouse: What the caller passed, or ``_UNSET`` when nothing was
+            passed.
+        configured: The warehouse of the environment's configuration: the
+            ``OPDI_WAREHOUSE`` environment variable if set, else
+            :data:`DEFAULT_WAREHOUSE`.
 
-    An explicit ``warehouse`` -- including one that happens to equal
-    ``default`` -- always wins outright, because the caller named a prefix
-    and meant it. Comparing ``warehouse == default`` instead of using a
-    sentinel could not distinguish that case from "the caller said nothing",
-    so an explicitly-passed ``default`` would have been silently overridden
-    under ``worldwide=True`` -- exactly the bug this function exists to
-    close.
+    Returns:
+        ``warehouse`` when the caller gave one, else ``configured``. The
+        coverage never changes the result.
     """
-    if warehouse is not _UNSET:
+    if warehouse is not _UNSET and warehouse:
         return warehouse
-    return worldwide_warehouse if worldwide else default
+    return configured
 
 
 #: Steps available but not run by default. Export and statistics are
@@ -609,6 +587,22 @@ def _log_dir(kwargs: dict) -> str:
     return kwargs.get("log_dir") or DEFAULT_LOG_DIR
 
 
+#: Steps whose processors keep progress logs.
+STEPS_WITH_LOGS = ("02", "02a", "03", "04")
+
+
+def _shared_log_dir(storage) -> str:
+    """A local folder that mirrors the progress logs kept in the warehouse.
+
+    One folder per state location, so that two warehouses never share logs on
+    one machine.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(storage.state_path.encode("utf-8")).hexdigest()[:12]
+    return os.path.join("OPDI_live", "state", digest, "logs")
+
+
 def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     """Run one pipeline step for the tracks that started on ``day``.
 
@@ -617,7 +611,24 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     rather than a slice of a month. They are called directly rather than
     through ``runner.STEPS`` because those entry points take a date *range*
     and would quietly widen a day back into a month.
+
+    In the ``opensky`` environment the steps' progress logs are kept in the
+    warehouse, under ``<release root>/_state/logs``: they are copied to a
+    local folder before the step and back after it succeeds, so that the
+    next step can run on another machine. A ``log_dir`` in ``kwargs`` turns
+    this off and uses that local folder alone.
     """
+    if step in STEPS_WITH_LOGS and not kwargs.get("log_dir"):
+        from opdi.utils.storage import StorageManager
+
+        storage = StorageManager(spark, config)
+        if storage.use_s3:
+            local = _shared_log_dir(storage)
+            storage.pull_logs(local)
+            run_day_step(spark, config, step, day, dict(kwargs, log_dir=local))
+            storage.push_logs(local)
+            return
+
     if step == "01":
         from opdi.ingestion.osn_statevectors import StateVectorIngestion
         from opdi.utils.storage import StorageManager
@@ -844,20 +855,18 @@ def run_period(
         skip_preflight: Do not check the reference tables. For when a
             reference table is known-missing and the run is deliberate.
         dry_run: Report the plan and exit without creating a session.
-        warehouse: Prefix every table is resolved against. Omit it (the
-            default is the ``_UNSET`` sentinel, not a literal string) to get
-            ``DEFAULT_WAREHOUSE`` -- or, under ``worldwide=True``, the
-            worldwide warehouse instead. Pass any string, including one that
-            happens to equal ``DEFAULT_WAREHOUSE``, to pin that exact prefix
-            regardless of coverage; see :func:`_resolve_warehouse`.
+        warehouse: The warehouse to use. When omitted, the
+            ``OPDI_WAREHOUSE`` environment variable, else
+            :data:`DEFAULT_WAREHOUSE`. The tables go to the release root
+            inside it (``<warehouse>/v2.0.0`` in the ``opensky``
+            environment); see :func:`_resolve_warehouse`.
         allow_existing: Proceed even though the warehouse prefix already holds
             objects. Off by default: a rebuild that silently merged with a
             previous attempt's output would produce a table nobody could date.
-        worldwide: Drop the published European bounding box. On by default;
-            pass ``False`` for a European run. When on, and ``warehouse`` was
-            left unset, the default follows coverage to the worldwide
-            warehouse instead of ``opdi-prod`` -- an explicitly-passed
-            ``warehouse`` still wins, always.
+        worldwide: Process the whole world (the default). Pass ``False``
+            for a run limited to the European box. The coverage does not
+            change the warehouse; the coverage marker refuses a run whose
+            coverage differs from the one that built the release root.
     """
     from opdi.config import OPDIConfig
     from opdi.runner import STEPS, reference_substeps_for_coverage
@@ -943,17 +952,10 @@ def run_period(
     todo = [u for u in units if force or _key(*u) not in state.completed]
     done = [u for u in units if u not in todo]
 
-    # An unset `warehouse` defaults to the European prefix (`DEFAULT_WAREHOUSE`),
-    # so a worldwide run that did not name one explicitly would land there --
-    # silently discarding `--worldwide` at the one entry point production
-    # actually uses. `_resolve_warehouse` makes the default follow coverage
-    # while an explicitly passed warehouse -- even one spelled identically to
-    # `DEFAULT_WAREHOUSE` -- always wins.
-    warehouse = _resolve_warehouse(warehouse, worldwide, config.project.warehouse_path)
-    # Before anything reads it. StorageManager resolves every table name
-    # against this, so setting it here redirects reference tables, intermediate
-    # tables and outputs together -- there is no second place a stale prefix
-    # could survive.
+    # Set before anything reads it. StorageManager resolves every table name
+    # against the release root inside this warehouse, so reference tables,
+    # working tables and published files all move together.
+    warehouse = _resolve_warehouse(warehouse, config.project.warehouse_path)
     config.project.warehouse_path = warehouse
     mem = _cgroup_v2_limit()
     limit_bytes, used_bytes = mem if mem else (None, 0)
@@ -965,7 +967,7 @@ def run_period(
     print("OPDI period run")
     print("=" * 72)
     print(f"  environment : {env}")
-    print(f"  coverage    : {config.coverage.label}")
+    print(config.describe_target())
     print(f"  window      : {start_date} .. {end_date}  ({days} days)")
     print(f"  steps       : {' '.join(steps)}")
     if done:
@@ -988,7 +990,6 @@ def run_period(
         )
     else:
         print(f"  driver heap : {heap}")
-    print(f"  warehouse   : {warehouse}")
     print(f"  state file  : {state_path}")
     print("=" * 72)
 
@@ -1079,7 +1080,8 @@ def run_period(
                     missing = preflight(storage)
                     if not missing and not force:
                         print(
-                            f"  reference   : already built in {warehouse}; "
+                            f"  reference   : already built in "
+                            f"{config.project.release_root}; "
                             "reusing it (pass --force to rebuild)"
                         )
                         state.mark(step, 0.0)

@@ -649,9 +649,9 @@ def run_pipeline(
             (produced by step 00, consumed by step 03).
         export_dir: Base directory for parquet/CSV exports (steps 05-06).
         last_n_months: Only export the last N months of data (step 05).
-        worldwide: Drop the published European bounding box and route output
-            to a separate worldwide warehouse. On by default; pass ``False``
-            for the European box and the European warehouse.
+        worldwide: Process the whole world (the default). Pass ``False``
+            for the European box. In the ``dev``, ``live`` and ``local``
+            environments this also selects the European warehouse.
 
     Returns:
         Exit code: ``0`` on success, ``1`` on failure.
@@ -679,8 +679,7 @@ def run_pipeline(
     print("=" * 70)
     print(f"  Environment : {env}")
     print(f"  Project     : {config.project.project_name}")
-    print(f"  Coverage    : {config.coverage.label}")
-    print(f"  Warehouse   : {config.project.warehouse_path}")
+    print(config.describe_target())
     print(f"  Date range  : {start_date} to {end_date}")
     run_reference = {
         "00a": run_airport_zones,

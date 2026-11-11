@@ -39,6 +39,8 @@ def main() -> None:
 
     config = OPDIConfig.for_environment("opensky")
     config.project.warehouse_path = args.warehouse
+    # The prefix holds the tables directly, without a release folder.
+    config.project.release = ""
     config.spark.executor_instances = args.executors
     spark = SparkSessionManager.create_session(
         app_name="callsign flicker", config=config, distributed=True

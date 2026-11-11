@@ -244,7 +244,7 @@ the first worldwide reference build its first attempt:
 
 ```bash
 python run_period.py --start 2026-06-01             # worldwide, the cluster path -- use this
-python run_period.py --start 2026-06-01 --europe    # the published European box, into opdi-prod
+python run_period.py --start 2026-06-01 --europe    # the published European box
 ```
 
 `opdi run` and `python opdi.py` take the same `--europe` switch, but both are
@@ -269,13 +269,17 @@ config = OPDIConfig.for_environment("opensky", worldwide=False)  # European box
   European tuple; ingestion, detection and every H3 reference generator treat
   that as "everywhere" (`lit(True)`, not a box of ±180/±90 — a longitude range
   cannot express "everywhere" once the coordinate wraps at the antimeridian).
-- **A separate warehouse.** Worldwide writes to `s3a://eurocontrol/opdi-world`
-  by default, never to the European `s3a://eurocontrol/opdi-prod`.
-  **`OPDI_WAREHOUSE` is deliberately ignored worldwide** — that
-  variable is how production points the European runs at their prefix and is
-  normally exported, so honouring it here too would silently send planet-wide
-  rows into `opdi-prod`. Point a worldwide run somewhere else with
-  `OPDI_WAREHOUSE_WORLD` instead.
+- **One warehouse setting.** In the `opensky` environment the warehouse (the
+  storage prefix that holds OPDI's data) is `--warehouse` (or the `warehouse`
+  argument of `OPDIConfig.for_environment`) if given, else the
+  `OPDI_WAREHOUSE` environment variable, else `s3a://eurocontrol/opdi`. The
+  coverage does not change it. Each release has its own folder inside it, the
+  release root (`<warehouse>/v2.0.0`), which holds the working tables, the
+  progress records (`_state/`) and the published files (`published/`). Every
+  run prints the warehouse, the release root and the coverage at start-up, and
+  says so when `OPDI_WAREHOUSE` names another place than the one in use. In the
+  `dev`, `live` and `local` environments a worldwide run writes to the declared
+  path followed by `-world`.
 - **A `coverage_marker` table stamps each warehouse** with the coverage that
   built it (`europe` / `worldwide` / `custom`) and refuses to mix: pointing a
   worldwide run at a warehouse already marked European fails at step 00 with a
