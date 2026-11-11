@@ -48,7 +48,7 @@ def main(argv=None) -> int:
             if e["type"] == "pms-leg-exit":
                 info = json.loads(e["info"])
                 ax.set_xlabel(
-                    f"leg {info['leg_distance_nm']} NM, {info['leg_level_ft']:.0f} ft, {info['duration_s']:.0f} s, {info['direction']}"
+                    f"leg {info['leg_distance_nm']} NM, {info['leg_level_ft']:.0f} ft, {info['duration_s']:.0f} s, {info['direction']}"  # noqa: E501
                 )
         ax.set_xlim(lon0 - 1.6, lon0 + 1.6)
         ax.set_ylim(lat0 - 1.0, lat0 + 1.0)

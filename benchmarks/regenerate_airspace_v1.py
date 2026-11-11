@@ -68,7 +68,7 @@ def jobs() -> list:
             },
             code_paths=CORE + ["src/opdi/pipeline/holding.py"],
             data_root=DATA,
-            notes="Shipped holding thresholds and a three-threshold sweep against the hand-corrected "
+            notes="Shipped holding thresholds and a three-threshold sweep against the hand-corrected "  # noqa: E501
             "2019 labels (one day, EGLL and EIDW), scored as the label paper scores.",
         ),
         v4.Job(
@@ -84,7 +84,7 @@ def jobs() -> list:
             },
             code_paths=CORE + ["src/opdi/pipeline/fir.py", "src/opdi/reference/h3_airspaces.py"],
             data_root=DATA,
-            notes="H3 lookup against exact polygons on a sample of crossing tracks; the day's crossings.",
+            notes="H3 lookup against exact polygons on a sample of crossing tracks; the day's crossings.",  # noqa: E501
         ),
         v4.Job(
             name="point_merge",

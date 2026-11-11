@@ -140,11 +140,11 @@ def measure(label: str, warehouse: str, days, month: str) -> dict:
     print(f"  APDF                       dep {nd:8,}          arr {na:8,}")
     print(
         f"  OPDI, every row            dep {raw[0]:8,} ({raw[0]/nd:5.2f}x)  "
-        f"arr {raw[1]:8,} ({raw[1]/na:5.2f}x)   baseline {BASELINE['dep_raw']}x / {BASELINE['arr_raw']}x"
+        f"arr {raw[1]:8,} ({raw[1]/na:5.2f}x)   baseline {BASELINE['dep_raw']}x / {BASELINE['arr_raw']}x"  # noqa: E501
     )
     print(
         f"  OPDI, fragments removed    dep {kept[0]:8,} ({kept[0]/nd:5.2f}x)  "
-        f"arr {kept[1]:8,} ({kept[1]/na:5.2f}x)   baseline {BASELINE['dep_kept']}x / {BASELINE['arr_kept']}x"
+        f"arr {kept[1]:8,} ({kept[1]/na:5.2f}x)   baseline {BASELINE['dep_kept']}x / {BASELINE['arr_kept']}x"  # noqa: E501
     )
 
     # The rule's central claim, restated as a check rather than a memory.

@@ -181,7 +181,7 @@ def main() -> None:
             f"{m['ades_accuracy']:6.2%}/{m['ades_overall']:6.2%}"
         )
 
-    aligned = lambda d: F.coalesce(F.col("align_deg") <= d, F.lit(False))
+    aligned = lambda d: F.coalesce(F.col("align_deg") <= d, F.lit(False))  # noqa: E731
 
     print("\nscoring:")
     run("base", by_dist, F.col("gate_ok"))

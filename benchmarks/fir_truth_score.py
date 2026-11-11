@@ -1,6 +1,9 @@
-"""Score ``xing-fir`` against NM airspace profiles (``reference/extract_airspace_profiles.R``).
+"""Score ``xing-fir`` against Network Manager airspace profiles.
 
-    python benchmarks/fir_truth_score.py --day 2026-06-14 --truth reference/airspace_profiles_2026-06-14_CPF.parquet \\
+The profiles are extracted by ``reference/extract_airspace_profiles.R``.
+
+    python benchmarks/fir_truth_score.py --day 2026-06-14 \\
+        --truth reference/airspace_profiles_2026-06-14_CPF.parquet \\
         --results-dir <paper>/data/fir
 
 A truth crossing is the boundary between consecutive FIR volumes of one NM

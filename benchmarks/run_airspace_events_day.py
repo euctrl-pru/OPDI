@@ -4,10 +4,10 @@
     export PYSPARK_DRIVER_PYTHON=$PWD/.venv310/bin/python
     unset PYSPARK_PYTHON
     .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --steps 00c 03
-    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --arm off --steps 04 \\
-        --timings-csv <paper>/data/pipeline_day/timings.csv
-    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --arm on --steps 04 \\
-        --timings-csv <paper>/data/pipeline_day/timings.csv
+    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 \\
+        --arm off --steps 04 --timings-csv <paper>/data/pipeline_day/timings.csv
+    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 \\
+        --arm on --steps 04 --timings-csv <paper>/data/pipeline_day/timings.csv
 
 The measurement run of the holding / point merge / FIR study
 (``docs/superpowers/specs/2026-11-10-airspace-events-design.md``). The two
@@ -200,7 +200,7 @@ def run(arm: str, day: date, executors: int, steps, input_source: str, timings_c
     cfg = build_config(arm, executors)
     print("=" * 72)
     print(
-        f"  arm        : {arm}  ({', '.join(f'{f}={getattr(cfg.events, f)}' for f in NAVIGATION_FLAGS)})"
+        f"  arm        : {arm}  ({', '.join(f'{f}={getattr(cfg.events, f)}' for f in NAVIGATION_FLAGS)})"  # noqa: E501
     )
     print(f"  day        : {day}")
     print(f"  inputs     : {arm_path(arm, 'osn_tracks_clean', input_source)}  (read-only)")

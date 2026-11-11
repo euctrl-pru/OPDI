@@ -44,7 +44,8 @@ PATTERNS = {
     r"\bguard(s|ed|ing)?\b": "'guard': say check or condition",
     r"\bpin(s|ned|ning)?\b": "'pin': say fix, keep or test",
     r"\bload-bearing\b": "jargon",
-    r"\bsurfaces?\s+(it|them|this|that|the\s+(error|problem|failure))\b|\bsurfaced\b|\bto surface\b": "'surface' as a verb",
+    r"\bsurfaces?\s+(it|them|this|that|the\s+(error|problem|failure))\b"
+    r"|\bsurfaced\b|\bto surface\b": "'surface' as a verb",
     r"\b(robust|robustly|robustness|leverage|leverages|delve|seamless|seamlessly|"
     r"crucial|comprehensive)\b": "vague wording",
 }

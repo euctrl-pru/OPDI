@@ -115,14 +115,14 @@ So the scored population is flights that take off and land on the day, which lea
 westbound. Truth is European, so most of the world's holes stay ``unknown``.
 
 **Cost.** One day is about 150M rows, and the day's frames are each built once. The
-heavy steps are the whole-day feature windows of the real holes; the controls and
-funnel, which together make some dozens of passes over the samples inside truth flights,
-as each family makes its own cuts, so those samples are cached first; and the two-callsign counts, which segment the whole
-day under both arms, once per day, for the chosen point only. Each point then runs
-about seven small jobs over small cached frames, and the reasons three per day over
-frames kept until the days are pooled. Elapsed time per stage is printed.
-Nothing is written to S3. Results go to a local directory, and each day's are on disk
-before the next day starts.
+heavy steps are the whole-day feature windows of the real holes; the controls and funnel,
+which together make some dozens of passes over the samples inside truth flights, as each
+family makes its own cuts, so those samples are cached first; and the two-callsign counts,
+which segment the whole day under both arms, once per day, for the chosen point only. Each
+point then runs about seven small jobs over small cached frames, and the reasons three per
+day over frames kept until the days are pooled. Elapsed time per stage is printed. Nothing
+is written to S3. Results go to a local directory, and each day's are on disk before the
+next day starts.
 
     python benchmarks/track_link_grid.py --days 2026-06-14 2025-06-14 \
         --results-dir benchmarks/out/track_link_grid
@@ -374,7 +374,7 @@ def _product(settings: Dict[str, Sequence[float]]) -> List[SegmentationParams]:
 
 
 def grid_points() -> List[SegmentationParams]:
-    """The study's 54 points. Every setting outside the grid stays at ``GRID_BASE`` or its default."""
+    """The study's 54 points. Every setting outside the grid stays at ``GRID_BASE`` or its default."""  # noqa: E501
     return _product(GRID)
 
 

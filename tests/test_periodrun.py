@@ -708,7 +708,7 @@ def test_consecutive_days_overlap_by_two_of_three():
     from datetime import timedelta
 
     d = date(2026, 6, 10)
-    win = lambda x: {x - timedelta(days=1), x, x + timedelta(days=1)}
+    win = lambda x: {x - timedelta(days=1), x, x + timedelta(days=1)}  # noqa: E731
     assert len(win(d) & win(d + timedelta(days=1))) == 2
 
 

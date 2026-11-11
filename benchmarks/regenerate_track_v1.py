@@ -362,7 +362,7 @@ def jobs() -> list:
                 "sweep_recommended_2025_stage2b_shipped.csv",
             ],
             outputs={
-                "sweep_recommended_2025_stage2b_shipped.csv": "sweep_recommended_2025_stage2b_shipped.csv"
+                "sweep_recommended_2025_stage2b_shipped.csv": "sweep_recommended_2025_stage2b_shipped.csv"  # noqa: E501
             },
             code_paths=SWEEP_AS_RECORDED,
             notes="callsign_lookback_minutes at the cell that actually ships.",

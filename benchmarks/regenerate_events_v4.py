@@ -395,7 +395,7 @@ def jobs(reuse_rungs=(), reuse_newer_than=None) -> list:
                 # while the tables beside them were current.
                 {
                     f"per_airport_{period}.csv": f"per_airport_{period}.csv",
-                    f"per_airport_by_detector_{period}.csv": f"per_airport_by_detector_{period}.csv",
+                    f"per_airport_by_detector_{period}.csv": f"per_airport_by_detector_{period}.csv",  # noqa: E501
                     f"pooling_rules_{period}.csv": f"pooling_rules_{period}.csv",
                     f"rings_{period}.csv": f"rings_{period}.csv",
                     # `floor_{period}.csv` is deliberately NOT declared. The

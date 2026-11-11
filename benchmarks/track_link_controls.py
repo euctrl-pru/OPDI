@@ -25,12 +25,12 @@ control records the depth it reached, one that overshoots by more than
 one hole at several depths would tighten the upper bound without new evidence.
 
 **Those controls have both edges at or above the floor, so they cannot test an edge
-below it**, which ``link_old_edge_climb`` or ``link_new_edge_descent`` lets through. ``control_family`` says which
-kind a control is. ``cruise_cruise`` is the one above, and three more hide the same
-landing behind an edge below the floor. An edge in a climb is the first flight's last
-sample below the floor climbing past ``link_edge_vert_rate_fpm`` before its cruise, and
-an edge in a descent the second flight's first such sample descending after its cruise,
-because those are the samples the directional test accepts:
+below it**, which ``link_old_edge_climb`` or ``link_new_edge_descent`` lets through.
+``control_family`` says which kind a control is. ``cruise_cruise`` is the one above, and
+three more hide the same landing behind an edge below the floor. An edge in a climb is the
+first flight's last sample below the floor climbing past ``link_edge_vert_rate_fpm`` before
+its cruise, and an edge in a descent the second flight's first such sample descending after
+its cruise, because those are the samples the directional test accepts:
 
   ``cruise_descent``  the first flight's cruise, at the usual depths, then the second's descent
   ``climb_cruise``    the first flight's climb, then the second's cruise, at the usual depths
@@ -699,13 +699,13 @@ def positive_controls(
 ) -> DataFrame:
     """One flight's cruise cut, one row per flight and length, and one for ``low_edge``.
 
-    ``expected`` is ``link``. In ``control_family`` ``cruise_cruise`` the hole is centred between the flight's first and last
-    samples at or above the floor, and starts at the last such sample at or before
-    where it should. ``requested_gap_min`` says which length was asked for, as
-    ``gap_stratum`` merges 60 and 120. The columns of the negative controls' depth and
-    pair are NULL. A flight whose cruise is shorter than the hole has no control at
-    that length. ``low_edge`` removes the whole cruise, and only those edges say how
-    long that is. ``p`` and ``samples`` are as in :func:`negative_controls`.
+    ``expected`` is ``link``. In ``control_family`` ``cruise_cruise`` the hole is centred
+    between the flight's first and last samples at or above the floor, and starts at the
+    last such sample at or before where it should. ``requested_gap_min`` says which length
+    was asked for, as ``gap_stratum`` merges 60 and 120. The columns of the negative
+    controls' depth and pair are NULL. A flight whose cruise is shorter than the hole has no
+    control at that length. ``low_edge`` removes the whole cruise, and only those edges say
+    how long that is. ``p`` and ``samples`` are as in :func:`negative_controls`.
     """
     samples = flight_samples(tracks, truth) if samples is None else samples
     attempts = _positive_attempts(samples, truth, floor_ft, gaps_min, p)

@@ -474,7 +474,7 @@ def main() -> int:
                 controls,
                 sys.argv[1:],
                 tables,
-                notes="cruise_descent hidden-landing controls, with the rule's verdict under descent on.",
+                notes="cruise_descent hidden-landing controls, with the rule's verdict under descent on.",  # noqa: E501
             )
             print(f"{day}: {len(controls)} cruise_descent controls", flush=True)
             tracks.unpersist()

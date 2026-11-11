@@ -115,8 +115,8 @@ def test_an_older_partition_without_the_source_columns_reads_them_as_null(spark,
     storage = StorageManager(spark, cfg)
 
     new = spark.createDataFrame(
-        [("a", "EIDW", "aerodrome", "2025-06-02")], "ID string, ADEP string, "
-        "ADEP_SOURCE string, DOF string"
+        [("a", "EIDW", "aerodrome", "2025-06-02")],
+        "ID string, ADEP string, " "ADEP_SOURCE string, DOF string",
     )
     old = spark.createDataFrame([("b", "EGLL", "2025-06-01")], "ID string, ADEP string, DOF string")
     # The older day is written last, so its file is the one a plain reader

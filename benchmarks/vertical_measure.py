@@ -124,7 +124,9 @@ def main() -> None:
         g.cache()
         n = g.count()
 
-        agree = lambda a, b: F.avg(F.when(F.signum(a) == F.signum(b), 1.0).otherwise(0.0))
+        agree = lambda a, b: F.avg(  # noqa: E731
+            F.when(F.signum(a) == F.signum(b), 1.0).otherwise(0.0)
+        )  # noqa: E731
         stats = g.agg(
             agree(F.col("vr_mean"), F.col("slope_ols")).alias("vr_vs_ols"),
             agree(F.col("slope_2pt"), F.col("slope_ols")).alias("t2pt_vs_ols"),
@@ -168,7 +170,7 @@ def main() -> None:
         )
         for r in by.collect():
             print(
-                f"   {r['b']:>16} {r['flights']:>9,} {r['vr_vs_ols']:>17.1%} {r['t2pt_vs_ols']:>15.1%}"
+                f"   {r['b']:>16} {r['flights']:>9,} {r['vr_vs_ols']:>17.1%} {r['t2pt_vs_ols']:>15.1%}"  # noqa: E501
             )
             rows.append(
                 {

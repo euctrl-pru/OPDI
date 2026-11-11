@@ -125,7 +125,7 @@ def flight_list_table(period: str) -> str:
 #:    (emit_runway_milestones, emit_pru_tops, level_method, level_floors_above_field,
 #:    level_radius_enforced, level_anchor, airport_gate_above_field,
 #:    airport_admit_on_ground) added when
-#:    EventConfig's defaults moved to events_v0.2.0. An event-count change would be attributed to a rung that
+#:    EventConfig's defaults moved to events_v0.2.0. An event-count change would be attributed to a rung that  # noqa: E501
 #:    did multiple things at once.
 #:
 #:    ``L13_shipped`` is not a single-behaviour rung; it is the catch-all that

@@ -112,7 +112,7 @@ def test_level_events_do_not_span_a_hole(spark):
     sdf, first, second = _cruise_hole_cruise(spark)
     events = calculate_horizontal_segment_events(add_piece(sdf, 1800.0), EventConfig())
     epoch = sdf.agg(F.min("event_time")).first()[0]
-    at = lambda s: epoch + dt.timedelta(seconds=s)
+    at = lambda s: epoch + dt.timedelta(seconds=s)  # noqa: E731
     got = _types(events.filter(F.col("type").isin("level-start", "level-end")))
     assert got == sorted(
         [

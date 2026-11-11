@@ -690,7 +690,7 @@ def build_context(data):
         raise MissingValue("final_edges and final_grid differ on the low-edge tests")
 
     def points(row):
-        return f"{100.0 * (num(row, 'crossing_flights_in_one_track') - num(off, 'crossing_flights_in_one_track')) / cf:.1f}"
+        return f"{100.0 * (num(row, 'crossing_flights_in_one_track') - num(off, 'crossing_flights_in_one_track')) / cf:.1f}"  # noqa: E501
 
     climb_lab, descent_lab = num(climb, "linked_by_climb_labelled"), num(
         descent, "linked_by_descent_labelled"
@@ -707,8 +707,8 @@ def build_context(data):
     c.update(
         low_labelled=n(climb_lab + descent_lab),
         low_hidden_tests=n(climb_tests + descent_tests),
-        chance_real=f"{chance_all_in_one_drawn(num(descent, 'false_joined_by_descent'), descent_lab, climb_lab + descent_lab):.3f}",
-        chance_hidden=f"{chance_all_in_one_repeated(num(climb, 'negative_climb_cruise_false_joins'), climb_tests, climb_tests + descent_tests):.3f}",
+        chance_real=f"{chance_all_in_one_drawn(num(descent, 'false_joined_by_descent'), descent_lab, climb_lab + descent_lab):.3f}",  # noqa: E501
+        chance_hidden=f"{chance_all_in_one_repeated(num(climb, 'negative_climb_cruise_false_joins'), climb_tests, climb_tests + descent_tests):.3f}",  # noqa: E501
         off_crossing=pct(num(off, "crossing_flights_in_one_track"), cf),
         off_linked=n(num(off, "real_holes_linked")),
         off_false=n(num(off, "linked_false_join")),
@@ -769,7 +769,7 @@ def build_context(data):
             only,
             f"{n(num(row, 'linked_false_join'))} of {n(labelled(row))} "
             f"({pct(num(row, 'linked_false_join'), labelled(row), 3)})",
-            f"{n(num(row, 'negative_limit_false_joins'))} of {n(num(row, 'negative_limit_controls'))}",
+            f"{n(num(row, 'negative_limit_false_joins'))} of {n(num(row, 'negative_limit_controls'))}",  # noqa: E501
             (
                 "yes, provisional"
                 if row["within_limits"] == "True" and row["provisional"] == "True"
@@ -1276,7 +1276,7 @@ def to_html(md, paper=None):
         '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{html.escape(paper.title)}</title>\n<style>{CSS}</style>\n</head>\n<body>\n<main>\n"
-        f'<h1>{html.escape(paper.title)}</h1>\n<p class="subtitle">{html.escape(paper.subtitle)}</p>\n'
+        f'<h1>{html.escape(paper.title)}</h1>\n<p class="subtitle">{html.escape(paper.subtitle)}</p>\n'  # noqa: E501
         '<p class="note">EUROCONTROL Performance Review Unit. Built from the staged CSVs by '
         f"<code>benchmarks/{paper.builder}</code>; not a Quarto render.</p>\n"
         f"{markdown_to_html(md)}\n</main>\n</body>\n</html>\n"
@@ -1319,7 +1319,7 @@ def to_pdf(md, out_path, paper=None):
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
         from reportlab.platypus import (
-            KeepTogether,
+            KeepTogether,  # noqa: F401
             ListFlowable,
             ListItem,
             Paragraph,
@@ -1357,7 +1357,7 @@ def to_pdf(md, out_path, paper=None):
     ink, muted, accent, band = (
         colors.HexColor(h) for h in ("#1f2328", "#57606a", "#0a3d7a", "#f0f3f6")
     )
-    S = lambda name, **kw: ParagraphStyle(
+    S = lambda name, **kw: ParagraphStyle(  # noqa: E731
         name, fontName=kw.pop("fontName", "Body"), textColor=kw.pop("textColor", ink), **kw
     )
     body = S("body", fontSize=9.5, leading=13.5, spaceAfter=6, alignment=TA_LEFT)

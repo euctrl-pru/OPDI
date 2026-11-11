@@ -1,7 +1,7 @@
 """Point merge usage per airport on a pipeline day, with plots for a visual check.
 
-    python benchmarks/point_merge_report.py --day 2026-06-14 --results-dir <paper>/data/point_merge \\
-        --plot EIDW --n 20
+    python benchmarks/point_merge_report.py --day 2026-06-14 \\
+        --results-dir <paper>/data/point_merge --plot EIDW --n 20
 
 Reads the ``on`` arm's ``opdi_flight_events`` and the day's ``opdi_flight_list``
 from the study prefix (``run_airspace_events_day.py``) and writes

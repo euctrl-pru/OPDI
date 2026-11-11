@@ -121,6 +121,8 @@ convention = "google"
 # Tests and study scripts put their own folders on sys.path before importing.
 "tests/**" = ["D", "N802", "E402"]
 "benchmarks/**" = ["D", "E402"]
+# The report's style sheet is one literal string with long CSS rules.
+"benchmarks/build_track_v4_paper.py" = ["D", "E402", "E501"]
 "tools/**" = ["D"]
 
 [tool.mypy]
