@@ -31,8 +31,8 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
 
-_CODE_PATHS = [REPO / "benchmarks" / "fir_consistency.py", REPO / "src" / "opdi" / "pipeline" / "fir.py",
-               REPO / "src" / "opdi" / "reference" / "h3_airspaces.py"]
+_CODE_PATHS = ["benchmarks/fir_consistency.py", "src/opdi/pipeline/fir.py",
+               "src/opdi/reference/h3_airspaces.py"]
 
 
 def exact_membership(samples: pd.DataFrame, volumes: pd.DataFrame) -> pd.Series:
@@ -154,7 +154,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         day_rows.append({"metric": f"pair {r.fir_from}->{r.fir_to}", "value": int(r.crossings)})
     name = f"fir_crossings_{args.day}.csv"
     pd.DataFrame(day_rows).to_csv(out / name, index=False)
-    provenance.record(out, name, "benchmarks/fir_consistency.py", argv, _CODE_PATHS,
+    provenance.record(out, name, "benchmarks/fir_consistency.py", argv, [REPO / p for p in _CODE_PATHS],
                       inputs={"crossings": len(ev)}, input_tables=[f"{PREFIX}/on/opdi_flight_events"])
 
     # --- H3 against the exact polygons on a sample of crossing tracks --------
@@ -180,7 +180,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary["double_match_rows_dropped"] = int(n_in - len(frame))
     name = f"fir_consistency_{args.day}.csv"
     pd.DataFrame([{"metric": k, "value": v} for k, v in summary.items()]).to_csv(out / name, index=False)
-    provenance.record(out, name, "benchmarks/fir_consistency.py", argv, _CODE_PATHS,
+    provenance.record(out, name, "benchmarks/fir_consistency.py", argv, [REPO / p for p in _CODE_PATHS],
                       inputs={"samples": summary["samples"], "tracks": summary["tracks"]},
                       input_tables=[f"{inputs}/osn_tracks_clean", f"{PREFIX}/ref/opdi_h3_airspace_ref"])
     print(pd.DataFrame(day_rows).to_string(index=False))

@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
 
-_CODE_PATHS = [REPO / "benchmarks" / "point_merge_report.py", REPO / "src" / "opdi" / "pipeline" / "point_merge.py"]
+_CODE_PATHS = ["benchmarks/point_merge_report.py", "src/opdi/pipeline/point_merge.py"]
 
 
 def usage_table(events: pd.DataFrame, flight_list: pd.DataFrame, covered: List[str]) -> pd.DataFrame:
@@ -143,7 +143,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     name = f"point_merge_usage_{args.day}.csv"
     table.to_csv(out / name, index=False)
-    provenance.record(out, name, "benchmarks/point_merge_report.py", argv, _CODE_PATHS,
+    provenance.record(out, name, "benchmarks/point_merge_report.py", argv, [REPO / p for p in _CODE_PATHS],
                       inputs={"airports": len(table), "pms_events": len(events)},
                       input_tables=[f"{PREFIX}/on/opdi_flight_events", f"{inputs}/opdi_flight_list"])
     print(table.to_string(index=False))

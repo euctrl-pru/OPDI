@@ -75,6 +75,9 @@ def score_crossings(opdi: pd.DataFrame, truth: pd.DataFrame, tolerance_s: float 
     }
 
 
+_CODE_PATHS = ["benchmarks/fir_truth_score.py"]
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     import provenance
     from pyspark.sql import SparkSession
@@ -103,7 +106,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     name = f"fir_truth_score_{args.day}.csv"
     pd.DataFrame([{"metric": k, "value": v} for k, v in result.items()]).to_csv(out / name, index=False)
     provenance.record(out, name, "benchmarks/fir_truth_score.py", argv,
-                      [REPO / "benchmarks" / "fir_truth_score.py"], inputs=result)
+                      [REPO / p for p in _CODE_PATHS], inputs=result)
     print(json.dumps(result, indent=1))
     spark.stop()
     return 0

@@ -20,6 +20,8 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
 
+_CODE_PATHS = ["benchmarks/airspace_counts.py"]
+
 NEW_TYPES = ("holding-", "pms-", "xing-fir")
 NEW_MEASURES = ("Holding ", "Point merge ")
 
@@ -56,7 +58,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     df = pd.DataFrame(rows).sort_values(["kind", "name"])
     df.to_csv(out / "counts.csv", index=False)
     provenance.record(out, "counts.csv", "benchmarks/airspace_counts.py", argv,
-                      [REPO / "benchmarks" / "airspace_counts.py"], inputs={"rows": len(df)},
+                      [REPO / p for p in _CODE_PATHS], inputs={"rows": len(df)},
                       input_tables=[f"{PREFIX}/on/opdi_flight_events", f"{PREFIX}/on/opdi_measurements"])
     print(df.to_string(index=False))
     spark.stop()

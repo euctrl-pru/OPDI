@@ -45,9 +45,9 @@ from opdi.pipeline.holding import calculate_holding_events  # noqa: E402
 from opdi.pipeline.holes import add_piece  # noqa: E402
 
 _CODE_PATHS = [
-    REPO / "benchmarks" / "holding_labels_score.py",
-    REPO / "src" / "opdi" / "pipeline" / "holding.py",
-    REPO / "src" / "opdi" / "config.py",
+    "benchmarks/holding_labels_score.py",
+    "src/opdi/pipeline/holding.py",
+    "src/opdi/config.py",
 ]
 
 #: Aerodrome elevations (ft) for the labelled airports, from OurAirports.
@@ -295,7 +295,7 @@ def run(spark, data_dir: Path, airports: List[str], day: pd.Timestamp, sweep: bo
 def write(results_dir: Path, name: str, df: pd.DataFrame, argv: List[str], notes: str = "") -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(results_dir / name, index=False)
-    provenance.record(results_dir, name, "benchmarks/holding_labels_score.py", argv, _CODE_PATHS,
+    provenance.record(results_dir, name, "benchmarks/holding_labels_score.py", argv, [REPO / p for p in _CODE_PATHS],
                       inputs={"rows": len(df)}, notes=notes)
 
 
