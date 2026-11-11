@@ -19,7 +19,7 @@ Ported from ``OPDI-live/python/v2.0.0/04_opdi_flight_events_etl.py``.
 
 import os
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -53,7 +53,11 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
 from opdi.pipeline.flights import bearing_deg, haversine_nm, resolve_flight_id
+from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
+from opdi.pipeline.holding import calculate_holding_events
 from opdi.pipeline.holes import PIECE, add_piece
+from opdi.pipeline.point_merge import calculate_point_merge_events
+from opdi.reference.point_merge import point_merge_systems_for_day
 from opdi.pipeline.level_segments import LEVEL_ARMS, classify_level_offs
 from opdi.pipeline.ground import block_times, movement_window
 from opdi.pipeline.runway_ops import go_arounds, runway_milestones, runway_traversals
@@ -107,6 +111,10 @@ TRACK_COLUMNS = [
     "track_id", "lat", "lon", "event_time", "baro_altitude_c",
     "velocity", "vert_rate", "callsign", "icao24", "heading", "h3_res_12",
     "on_ground",
+    # The FIR family joins the resolution-7 cell against the compact airspace
+    # reference; without it here the detector would find no column and emit
+    # nothing, which is the silent failure the comment above describes.
+    "h3_res_7",
 ]
 
 
@@ -1161,6 +1169,79 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
 # Measurement helper functions
 # ======================================================================
 
+#: Measurements read off an event's ``info`` JSON, beside the two every event
+#: gets (distance flown, time passed). One entry is
+#: ``(event type, info field, measurement type, measurement version)``: where the
+#: field is present in a row of that type, one measurement row is written with
+#: the field's value cast to double. This is how a family publishes a
+#: duration or a count as a measurement without its own write path. Families
+#: append to it when they are imported (see ``holding.py``, ``point_merge.py``).
+EXTRA_MEASURES: List[Tuple[str, str, str, str]] = []
+
+
+def _register_family_measures() -> None:
+    """Collect the families' measurement entries. Imported lazily so the
+    family modules, which import ``EventConfig``, never import this module
+    at load time."""
+    from opdi.pipeline.holding import HOLDING_MEASURES
+    from opdi.pipeline.point_merge import PMS_MEASURES
+
+    for entry in HOLDING_MEASURES + PMS_MEASURES:
+        if entry not in EXTRA_MEASURES:
+            EXTRA_MEASURES.append(entry)
+
+
+_register_family_measures()
+
+
+def measurement_suffix(measurement_type: str) -> str:
+    """The id suffix of an extra measurement: ``_m`` plus six hex characters of
+    the measurement type's hash. Keyed on the type, not on the position in
+    ``EXTRA_MEASURES``, so adding or reordering an entry cannot renumber ids
+    already published."""
+    import hashlib
+
+    return "_m" + hashlib.sha256(measurement_type.encode("utf-8")).hexdigest()[:6]
+
+
+def extra_measurement_rows(df_events: DataFrame) -> Optional[DataFrame]:
+    """Measurement rows for every ``EXTRA_MEASURES`` entry, or None if none apply.
+
+    ``df_events`` is the stamped event frame (``id_tmp``, ``type``, ``info``,
+    ``dof``). The measurement id is the event id plus ``measurement_suffix``
+    of the measurement type: stable per entry and distinct from the
+    ``_d``/``_t`` pair. (The
+    families that use this all run with deterministic event ids; under the
+    legacy, partition-dependent ids they are off.)
+
+    One pass, one reference to ``df_events``: every entry's value is read in a
+    single projection and exploded with its position. Building one filtered
+    copy of the event frame per entry made Spark analyse the whole detector
+    plan once more per entry, which is what exhausted a small driver.
+    """
+    if not EXTRA_MEASURES:
+        return None
+    values = F.array(*[
+        F.when(col("type") == event_type, F.get_json_object(col("info"), f"$.{field}").cast("double"))
+        for event_type, field, _, _ in EXTRA_MEASURES
+    ])
+    types = F.array(*[lit(m) for _, _, m, _ in EXTRA_MEASURES])
+    versions = F.array(*[lit(v) for _, _, _, v in EXTRA_MEASURES])
+    suffixes = F.array(*[lit(measurement_suffix(m)) for _, _, m, _ in EXTRA_MEASURES])
+    exploded = (
+        df_events.select(col("id_tmp"), col("dof"), F.posexplode(values).alias("_pos", "value"))
+        .filter(col("value").isNotNull())
+    )
+    return exploded.select(
+        F.concat(col("id_tmp"), F.element_at(suffixes, col("_pos") + 1)).alias("id"),
+        col("id_tmp").alias("milestone_id"),
+        F.element_at(types, col("_pos") + 1).alias("type"),
+        col("value"),
+        F.element_at(versions, col("_pos") + 1).alias("version"),
+        col("dof"),
+    )
+
+
 def add_time_measure(sdf_input: DataFrame) -> DataFrame:
     """Add cumulative time (seconds from track start) to each state vector."""
     window_spec = Window.partitionBy("track_id").orderBy("event_time")
@@ -1309,6 +1390,7 @@ class FlightEventProcessor:
             "vertical": os.path.join(log_dir, "04_osn-flight_event-vertical-etl-log.parquet"),
             "hexaero": os.path.join(log_dir, "04_osn-flight_event-hexaero_airport-log.parquet"),
             "seen": os.path.join(log_dir, "04_osn-flight_event-first_seen_last_seen-log.parquet"),
+            "navigation": os.path.join(log_dir, "04_osn-flight_event-navigation-log.parquet"),
         }
 
         os.makedirs(log_dir, exist_ok=True)
@@ -1482,6 +1564,7 @@ class FlightEventProcessor:
         calc_horizontal: bool = True,
         calc_hexaero: bool = True,
         calc_seen: bool = True,
+        calc_navigation: bool = True,
     ) -> None:
         """
         Core ETL: calculate events and measurements, write to tables.
@@ -1494,6 +1577,8 @@ class FlightEventProcessor:
             calc_horizontal: Whether to calculate phase events.
             calc_hexaero: Whether to calculate airport events.
             calc_seen: Whether to calculate first/last seen events.
+            calc_navigation: Whether to calculate the holding, point merge
+                and FIR crossing families (each also gated by its emit flag).
         """
         sdf_input = add_distance_measure(
             sdf_input, self.events.distance_from_last_known_position
@@ -1549,12 +1634,21 @@ class FlightEventProcessor:
                 tops.cache()
 
         df_events = None
+        #: The go-around rows, if the runway family computed them: the holding
+        #: family drops an episode next to one.
+        df_go_arounds = None
 
         def add(frame: Optional[DataFrame]) -> None:
             nonlocal df_events
             if frame is None:
                 return
-            df_events = frame if df_events is None else df_events.unionByName(frame)
+            # A family may carry its own ``version`` column (holding, point
+            # merge, FIR); the older detectors do not. Missing columns are
+            # filled with NULL so the stamp below can coalesce per row.
+            df_events = (
+                frame if df_events is None
+                else df_events.unionByName(frame, allowMissingColumns=True)
+            )
 
         if calc_horizontal:
             print(f"Calculating horizontal events (phase) for batch: {batch_id}")
@@ -1617,14 +1711,37 @@ class FlightEventProcessor:
                 # the destination geometry it actually reads and on nothing
                 # else.
                 if "ades_lat" in rwy_sv.columns:
-                    add(go_arounds(rwy_sv, self.events))
+                    df_go_arounds = go_arounds(rwy_sv, self.events)
+                    add(df_go_arounds)
 
             if self.events.emit_block_events:
                 add(calculate_block_events(sdf_input, df_hexaero, self.events))
 
+        if (calc_navigation and not calc_hexaero and df_go_arounds is None
+                and self.events.emit_holding and self.events.emit_runway_milestones):
+            # A navigation-only top-up (the other families already logged for
+            # this day) still needs the go-arounds the holding family excludes
+            # against, or its output would differ from a full rebuild's.
+            rwy_sv = self._with_flight_id(geo)
+            if "ades_lat" in rwy_sv.columns:
+                df_go_arounds = go_arounds(rwy_sv, self.events)
+
         if calc_seen:
             print(f"Calculating first_seen/last_seen events for batch: {batch_id}")
             add(calculate_firstseen_lastseen_events(sdf_input))
+
+        if calc_navigation:
+            ev = self.events
+            if ev.emit_holding:
+                print(f"Calculating holding events for batch: {batch_id}")
+                add(calculate_holding_events(geo, ev, go_arounds=df_go_arounds))
+            if ev.emit_point_merge:
+                print(f"Calculating point merge events for batch: {batch_id}")
+                pms_ref = point_merge_systems_for_day(self.spark, day or month)
+                add(calculate_point_merge_events(geo, pms_ref, ev))
+            if ev.emit_fir_crossings:
+                print(f"Calculating FIR crossings for batch: {batch_id}")
+                add(calculate_fir_events(sdf_input, load_fir_reference(self.storage), ev))
 
         if df_events is None:
             return
@@ -1641,7 +1758,15 @@ class FlightEventProcessor:
         # at cluster scale.
         df_events = merge_milestone_duplicates(df_events, self.events)
         df_events = df_events.withColumn("source", lit("OSN"))
-        df_events = df_events.withColumn("version", lit(self.events.events_version))
+        # Per-family versions: a detector that stamps its own ``version`` keeps
+        # it, everything else gets the shared events version. The published
+        # types therefore stay at ``events_v0.3.0`` while a new family can
+        # carry ``holding_v0.1.0`` and evolve alone.
+        if "version" not in df_events.columns:
+            df_events = df_events.withColumn("version", lit(None).cast("string"))
+        df_events = df_events.withColumn(
+            "version", F.coalesce(col("version"), lit(self.events.events_version))
+        )
 
         df_events = df_events.withColumn("id_tmp", self._event_id(batch_id)).select(
             col("id_tmp"), col("track_id"), col("type"), col("event_time"),
@@ -1677,7 +1802,7 @@ class FlightEventProcessor:
         # subset would delete the families that were already there. A full
         # rebuild can safely replace the partition; a partial one must add to
         # it.
-        full_rebuild = all([calc_vertical, calc_horizontal, calc_hexaero, calc_seen])
+        full_rebuild = all([calc_vertical, calc_horizontal, calc_hexaero, calc_seen, calc_navigation])
         # A day-scoped batch writes exactly one partition, and it is the day.
         _partition_values = [{"dof": day}] if day is not None else None
         write_mode = "overwrite" if full_rebuild else "append"
@@ -1734,6 +1859,9 @@ class FlightEventProcessor:
         )
 
         df_measurements = df_dist.unionByName(df_time)
+        extra = extra_measurement_rows(df_events)
+        if extra is not None:
+            df_measurements = df_measurements.unionByName(extra)
         df_measurements = df_measurements.repartition("dof").orderBy("type", "version")
         # ``opdi_measurements`` had no time column at all -- its schema was
         # id, milestone_id, type, value, version -- so it could not be
@@ -1787,8 +1915,9 @@ class FlightEventProcessor:
         calc_vertical = _redo or _batch not in self._load_processed("vertical")
         calc_hexaero = _redo or _batch not in self._load_processed("hexaero")
         calc_seen = _redo or _batch not in self._load_processed("seen")
+        calc_navigation = _redo or _batch not in self._load_processed("navigation")
 
-        if not any([calc_horizontal, calc_vertical, calc_hexaero, calc_seen]):
+        if not any([calc_horizontal, calc_vertical, calc_hexaero, calc_seen, calc_navigation]):
             if skip_if_processed:
                 print("All events for this month already processed.")
                 return
@@ -1822,6 +1951,7 @@ class FlightEventProcessor:
             calc_horizontal=calc_horizontal,
             calc_hexaero=calc_hexaero,
             calc_seen=calc_seen,
+            calc_navigation=calc_navigation,
         )
 
         # Update progress logs
@@ -1837,6 +1967,8 @@ class FlightEventProcessor:
             self._mark_processed("hexaero", batch)
         if calc_seen:
             self._mark_processed("seen", batch)
+        if calc_navigation:
+            self._mark_processed("navigation", batch)
 
         self.spark.catalog.clearCache()
 

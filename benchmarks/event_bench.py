@@ -196,6 +196,12 @@ LADDER = [
     # released measurement lost two segments around every blanked position. No
     # event type or time moves; a level-off's info.distance_nm does.
     ("L15_distance_known_position", {"distance_from_last_known_position": True}),
+    # The three navigation families of 2026-11 (holding, point merge, FIR
+    # crossings), one rung: none of them touches a type the ladder scores, so
+    # splitting them would give three rungs with identical scores.
+    ("L16_navigation_families", {
+        "emit_holding": True, "emit_point_merge": True, "emit_fir_crossings": True,
+    }),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
@@ -231,6 +237,10 @@ V4_BASE = dict(
     level_radius_enforced=False,
     level_anchor="phase",
     airport_gate_above_field=False,
+    # The navigation families (2026-11) did not exist in any earlier rung.
+    emit_holding=False,
+    emit_point_merge=False,
+    emit_fir_crossings=False,
     events_version="events_v0.1.0",
 )
 
@@ -270,6 +280,9 @@ LADDER_V4 = [
         "events_version": "events_v0.3.0",
     }),
     ("V09_distance_known_position", {"distance_from_last_known_position": True}),
+    ("V10_holding", {"emit_holding": True}),
+    ("V11_point_merge", {"emit_point_merge": True}),
+    ("V12_fir", {"emit_fir_crossings": True}),
 ]
 
 #: Rungs that are allowed to be config-identical to the rung before them,

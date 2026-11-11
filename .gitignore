@@ -61,3 +61,7 @@ mc
 # osmnx response cache. Regenerable, machine-local, and swept into a commit
 # by `git add -A` once already.
 cache/
+
+# Curated reference tables that ship inside the package.
+!src/opdi/reference/data/
+!src/opdi/reference/data/*.csv

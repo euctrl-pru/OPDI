@@ -355,6 +355,25 @@ def stub_storage(spark):
         "h3_id string, apt_icao string, strip_id string, "
         "le_ident string, he_ident string, zone string",
     )
+    # The FIR layer of step 00c: two volumes, cell A below 20,000 ft (the
+    # climb and the descent) and cell B at cruise, so the shipped run must
+    # emit a crossing each way. The families that did not exist before 2026-11
+    # are off under every reconstructed configuration, which the ladder's base
+    # pins, so the older runs are unaffected.
+    import h3
+    from opdi.reference.h3_airspaces import AIRSPACE_SCHEMA
+
+    cell_a = h3.latlng_to_cell(50.9, 4.48, 7)
+    cell_b = h3.latlng_to_cell(50.0, 8.5, 7)
+    fir = spark.createDataFrame(
+        [("FIR", code, code, "524", "2024-11-28", "2024-12-26", 0, 999, 1e4, cell, 7)
+         for code, cell in (("AAAA", cell_a), ("BBBB", cell_b))],
+        AIRSPACE_SCHEMA,
+    )
+    tracks = _flight(spark).withColumn(
+        "h3_res_7",
+        F.when(F.col("baro_altitude_c") * 3.28084 >= 20000.0, F.lit(cell_b)).otherwise(F.lit(cell_a)),
+    )
     return _StubStorage(
         {
             "opdi_flight_list": flight_list,
@@ -362,8 +381,9 @@ def stub_storage(spark):
             "h3_runway_zones": runway_grid,
             "oa_airports": airports,
             "oa_runways": runways,
+            "opdi_h3_airspace_ref": fir,
         },
-        tracks=_flight(spark),
+        tracks=tracks,
     )
 
 
@@ -785,3 +805,115 @@ def test_force_recomputes_every_family(spark, stub_storage, monkeypatch):
     assert "_redo = not skip_if_processed" in src
     for family in ("horizontal", "vertical", "hexaero", "seen"):
         assert f'_redo or _batch not in self._load_processed("{family}")' in src, family
+
+
+
+
+# --- per-family versions, info-backed measurements, the navigation group ------
+
+
+def test_a_family_s_own_version_survives_stamping(spark, stub_storage):
+    """A detector that stamps its own ``version`` keeps it; the published
+    types keep ``events_version``."""
+    out = _run(spark, stub_storage, EventConfig())
+    versions = {r["type"]: r["version"] for r in out.collect()}
+    assert versions["xing-fir"] == "fir_v0.1.0"
+    assert versions["level-start"] == EventConfig().events_version
+
+
+def test_a_full_run_emits_the_fir_family(spark, stub_storage):
+    out = _run(spark, stub_storage, EventConfig())
+    xings = out.filter(F.col("type") == "xing-fir").collect()
+    assert len(xings) == 2
+    pairs = sorted((json.loads(r["info"])["fir_from"], json.loads(r["info"])["fir_to"]) for r in xings)
+    assert pairs == [("AAAA", "BBBB"), ("BBBB", "AAAA")]
+
+
+def test_families_off_emit_none_of_the_new_types(spark, stub_storage):
+    """The ladder's base turns the three families off; its run has none of
+    their types."""
+    types = _types(_run(spark, stub_storage, EventConfig(**event_bench.V4_BASE)))
+    assert not {t for t in types if t.startswith(("holding-", "pms-", "xing-fir"))}
+
+
+def test_an_info_field_listed_in_extra_measures_becomes_a_measurement(spark, monkeypatch):
+    import opdi.pipeline.events as ev
+
+    monkeypatch.setattr(
+        ev, "EXTRA_MEASURES",
+        [("holding-end", "duration_s", "Holding duration (s)", "holding_v9"),
+         ("holding-end", "absent_field", "Test absent", "holding_v9")],
+    )
+    events = spark.createDataFrame(
+        [("e1", "holding-end", '{"duration_s": 42.0}', dt.date(2024, 6, 1)),
+         ("e2", "holding-start", '{"duration_s": 42.0}', dt.date(2024, 6, 1)),
+         ("e3", "holding-end", '{"other": 1}', dt.date(2024, 6, 1))],
+        "id_tmp string, type string, info string, dof date",
+    )
+    rows = ev.extra_measurement_rows(events).collect()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["id"], row["milestone_id"], row["type"], row["value"], row["version"], str(row["dof"])) == (
+        "e1" + ev.measurement_suffix("Holding duration (s)"), "e1", "Holding duration (s)", 42.0,
+        "holding_v9", "2024-06-01")
+    assert row["id"].startswith("e1_m") and len(row["id"]) == len("e1_m") + 6
+
+
+def test_measurement_suffixes_are_stable_and_distinct():
+    from opdi.pipeline.events import EXTRA_MEASURES, measurement_suffix
+
+    suffixes = [measurement_suffix(m) for _, _, m, _ in EXTRA_MEASURES]
+    assert len(set(suffixes)) == len(suffixes)
+    assert measurement_suffix("Holding duration (s)") == measurement_suffix("Holding duration (s)")
+
+
+def test_a_navigation_only_top_up_still_computes_go_arounds(spark, stub_storage, monkeypatch):
+    """The holding family drops episodes next to a go-around; a run that
+    computes only the navigation group must still have them."""
+    import opdi.pipeline.events as ev
+
+    seen = {}
+
+    def capture(geo, config, go_arounds=None):
+        seen["go_arounds"] = go_arounds
+        return None
+
+    monkeypatch.setattr(ev, "calculate_holding_events", capture)
+    monkeypatch.setattr(ev, "calculate_point_merge_events", lambda *a, **k: None)
+    monkeypatch.setattr(ev, "calculate_fir_events", lambda *a, **k: None)
+    config = OPDIConfig()
+    with tempfile.TemporaryDirectory() as log_dir:
+        proc = FlightEventProcessor(spark, config, log_dir=log_dir)
+        proc.storage = stub_storage
+        proc._etl_flight_events_and_measures(
+            stub_storage.tracks, batch_id="b_", month=MONTH,
+            calc_vertical=False, calc_horizontal=False, calc_hexaero=False, calc_seen=True,
+            calc_navigation=True,
+        )
+    assert seen["go_arounds"] is not None
+    assert "event_time" in seen["go_arounds"].columns
+
+
+def test_no_extra_measures_means_no_frame(spark, monkeypatch):
+    import opdi.pipeline.events as ev
+
+    monkeypatch.setattr(ev, "EXTRA_MEASURES", [])
+    events = spark.createDataFrame([("e1", "x", "{}", dt.date(2024, 6, 1))],
+                                   "id_tmp string, type string, info string, dof date")
+    assert ev.extra_measurement_rows(events) is None
+
+
+def test_track_columns_include_h3_res_7():
+    from opdi.pipeline.events import TRACK_COLUMNS
+
+    assert "h3_res_7" in TRACK_COLUMNS
+
+
+def test_the_navigation_group_is_tracked_in_the_progress_log(spark, tmp_path):
+    config = OPDIConfig()
+    proc = FlightEventProcessor(spark, config, log_dir=str(tmp_path))
+    assert "navigation" in proc._log_paths
+    proc._mark_processed("navigation", dt.date(2026, 6, 14))
+    assert dt.date(2026, 6, 14) in [
+        d.date() if hasattr(d, "date") else d for d in proc._load_processed("navigation")
+    ]

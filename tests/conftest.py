@@ -70,7 +70,10 @@ def spark() -> SparkSession:
         # the session fails with ConnectionRefusedError, pointing at code that
         # has nothing to do with the cause. The data is still tiny; what needs
         # the room is the accumulated plans, broadcasts and cached blocks.
-        .config("spark.driver.memory", "4g")
+        # 4 GB carried four full passes; the navigation families of 2026-11
+        # (holding, point merge, FIR) add window passes to every shipped-config
+        # run and the fifth pass no longer fit, so 8 GB.
+        .config("spark.driver.memory", "8g")
         .getOrCreate()
     )
     session.sparkContext.setLogLevel("ERROR")

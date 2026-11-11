@@ -982,7 +982,8 @@ class Paper:
     Quarto front matter -- is shared.
     """
 
-    def __init__(self, version, title, subtitle, allowed_literals, context, render_default="run"):
+    def __init__(self, version, title, subtitle, allowed_literals, context, render_default="run",
+                 builder=None, pdf_name=None, regenerate=None):
         self.version = version
         self.title = title
         self.subtitle = subtitle
@@ -990,8 +991,11 @@ class Paper:
         self.context = context
         #: What ``OPDI_RENDER`` means when unset. A superseded paper is frozen: ``skip``.
         self.render_default = render_default
-        self.builder = f"build_track_{version}_paper.py"
-        self.pdf_name = f"track-construction-{version}.pdf"
+        #: The three file names a paper outside the track-construction series
+        #: passes explicitly (``build_airspace_v1_paper.py`` does).
+        self.builder = builder or f"build_track_{version}_paper.py"
+        self.pdf_name = pdf_name or f"track-construction-{version}.pdf"
+        self.regenerate = regenerate or f"regenerate_track_{version}.py"
 
 
 def to_html(md, paper=None):
@@ -1195,8 +1199,10 @@ if (MODE != "skip") {
 
 def to_qmd(md, paper=None):
     paper = paper or V4
-    chunk = REGENERATE_CHUNK.replace("track_v4", f"track_{paper.version}").replace(
-        "@DEFAULT@", paper.render_default
+    chunk = (
+        REGENERATE_CHUNK.replace("regenerate_track_v4.py", paper.regenerate)
+        .replace("build_track_v4_paper.py", paper.builder)
+        .replace("@DEFAULT@", paper.render_default)
     )
     return (
         f'---\ntitle: "{paper.title}"\nsubtitle: "{paper.subtitle}"\n'

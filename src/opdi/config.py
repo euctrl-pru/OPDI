@@ -1318,6 +1318,176 @@ class EventConfig:
     two together. Earlier track rules break at every gap over that threshold, so
     their tracks hold no hole and their events are unchanged."""
 
+    # ----- holding patterns -----------------------------------------------
+    emit_holding: bool = True
+    """Emit ``holding-start``/``holding-end`` (version ``holding_v0.1.0``).
+
+    A hold is a period in which the aircraft turns through at least one
+    near-complete circle in one rotational sense while staying in a small area
+    at roughly one level, above circuit height and at flying speed. Both
+    racetrack holds and single ATC orbits qualify; ``info.pattern`` says which.
+    The rule is the discriminator every published method converges on (the
+    signed cumulative turn), with thresholds taken from Melo 2023, the Boeing
+    holding patent and ICAO Doc 8168 timing; see ``pipeline/holding.py``."""
+
+    holding_window_seconds: float = 360.0
+    """Length of the sliding window the turn is summed over, trailing and
+    leading. One circuit takes 4 to 7 min (ICAO 1 to 1.5 min legs, airliner
+    turn rates of 1 to 2 deg/s), and the open label set this rule is scored
+    against uses 6 min windows."""
+
+    holding_sample_period_seconds: float = 5.0
+    """The cadence the window is counted in: a window of
+    ``holding_window_seconds`` is the sample ``window / period`` rows away.
+    Spark re-aggregates a time-bounded sliding frame from scratch for every
+    row, which made step 04 three times slower worldwide; differences of
+    running sums between two rows cost a single pass. OSN state vectors are
+    thinned to one per 5 s before step 02. A window whose two rows are not
+    0.8 to 1.25 windows apart in time (a gap inside it) is not judged."""
+
+    holding_max_sample_gap_seconds: float = 60.0
+    """A heading difference across a longer silence is not a turn: it is
+    nulled, so a gap does not read as a half circle."""
+
+    holding_turn_rate_spike_deg: float = 6.0
+    """Degrees **per second** above which a heading difference is a derivative
+    spike, not a turn (twice the ICAO maximum of 3 deg/s)."""
+
+    holding_turn_rate_min_deg: float = 0.4
+    """Degrees **per second** from which a sample counts as turning (the
+    Boeing patent's direction threshold; airliner hold turns are 1 to 2 deg/s,
+    track jitter at the 5 s cadence is about 0.2 deg/s)."""
+
+    holding_net_turn_min_deg: float = 300.0
+    """Signed turn a window must contain, in magnitude. A circuit is 360;
+    300 tolerates a window straddling a straight leg (vendor rules use 330,
+    Huang et al. 360)."""
+
+    holding_same_sense_min_pct: float = 80.0
+    """``|net turn| / gross turn`` floor: vectoring turns alternate sense and a
+    figure-8 nets to zero, a hold turns one way (Boeing "same rotational
+    sense")."""
+
+    holding_max_displacement_nm: float = 8.0
+    """Great-circle distance between the window's first and last positions: a
+    hold is 8 to 10 NM long, a go-around loop or a vectoring dog-leg is wider
+    (Melo's 2 to 4 NM cylinder)."""
+
+    holding_min_path_nm: float = 15.0
+    """Distance flown in the window: 6 min at 150 kt; rejects slow traffic."""
+
+    holding_max_altitude_range_ft: float = 2500.0
+    """Total altitude change (sum of the absolute changes between samples)
+    allowed inside one window: two stack steps of 1,000 ft (Melo's 1,000 ft
+    was start-to-end of a whole hold and is too tight for a descending
+    stack). A climb-out or a descent through the window fails it."""
+
+    holding_min_height_ft: float = 2500.0
+    """Height above the flight's aerodrome below which nothing is a hold:
+    aerodrome circuits and go-around patterns live below it."""
+
+    holding_min_speed_kt: float = 140.0
+    """Ground speed floor; helicopters and training circuits are slower."""
+
+    holding_bridge_gap_seconds: float = 120.0
+    """Two flagged stretches closer than this are one episode (Melo)."""
+
+    holding_min_duration_seconds: float = 240.0
+    """Shortest episode kept: one textbook circuit (Melo's 4 min)."""
+
+    holding_min_episode_turn_deg: float = 330.0
+    """Signed turn over the whole episode, in magnitude: at least one
+    near-complete circuit, the airline "completed orbit" criterion."""
+
+    holding_orbit_max_straight_pct: float = 15.0
+    """Share of non-turning samples below which the episode is an orbit
+    rather than a racetrack (a racetrack is 35 to 55% straight)."""
+
+    holding_orbit_max_turn_deg: float = 450.0
+    """Total turn above which an episode is a racetrack even if it has no
+    straight legs (more than one and a quarter circuits)."""
+
+    holding_goaround_exclusion_seconds: float = 180.0
+    """An episode starting or ending within this of a ``go-around`` on the
+    same track is dropped: repeated approaches are not holds."""
+
+    # ----- point merge systems ----------------------------------------------
+    emit_point_merge: bool = True
+    """Emit ``pms-leg-entry``/``pms-leg-exit``/``pms-merge-point`` (version
+    ``pms_v0.1.0``) for arrivals at airports in the curated point-merge table
+    (``reference/data/point_merge_systems.csv``). A sequencing leg is a stretch
+    flown at constant distance from the merge point, inside the published band,
+    moving tangentially, that is followed by a direct to the merge point; see
+    ``pipeline/point_merge.py``."""
+
+    pms_candidate_radius_nm: float = 60.0
+    """Samples farther than this from every merge point of the destination are
+    not looked at (the longest legs in the catalogue sit 46 NM out)."""
+
+    pms_candidate_max_altitude_ft: float = 25000.0
+    """Samples above this are not looked at (legs are flown at FL70 to FL270;
+    the Paris ACC pre-sequencing legs are the highest)."""
+
+    pms_leg_window_seconds: float = 45.0
+    """Half-width of the window the constant-distance test looks over (90 s in
+    all, the shortest leg the ``traffic`` library accepts)."""
+
+    pms_leg_distance_band_nm: float = 1.5
+    """Spread of the distance to the merge point allowed inside the window: a
+    published leg is a polyline of fly-by waypoints, and the sagitta of a 10 NM
+    chord on an 18 NM arc is 0.7 NM, plus RNAV 1 tolerance."""
+
+    pms_leg_distance_margin_nm: float = 2.0
+    """Margin around the catalogue's legs-to-merge-point band."""
+
+    pms_leg_min_bearing_sweep_deg: float = 8.0
+    """Bearing from the merge point must sweep at least this over the window:
+    an aircraft on an 18 NM arc at 250 kt sweeps about 20 degrees in 90 s, so
+    8 tolerates slow aircraft and long arcs while rejecting a stationary hold
+    at the same distance."""
+
+    pms_leg_tangential_min_pct: float = 80.0
+    """Share of window samples whose track is 60 to 120 degrees off the bearing
+    to the merge point (moving along the arc, not toward or away from it)."""
+
+    pms_leg_min_duration_seconds: float = 90.0
+    """Shortest leg run kept (``traffic``'s 90 s)."""
+
+    pms_direct_lookahead_seconds: float = 600.0
+    """A leg counts only if the track reaches the merge point within this
+    (``traffic`` looks 10 min back from the direct)."""
+
+    pms_direct_align_deg: float = 5.0
+    """Track within this of the bearing to the merge point is "aligned"
+    (``traffic`` uses 1 degree at 1 Hz; OPDI samples every 5 s with integer
+    headings). Reported as ``info.direct_aligned``, not a gate: Dublin's
+    runway 10 turn-in is a curve to the fix and a strict gate lost it."""
+
+    pms_direct_min_duration_seconds: float = 60.0
+    """Shortest aligned run that sets ``direct_aligned``."""
+
+    pms_merge_point_radius_nm: float = 3.0
+    """The track must come within this of the merge point, from a leg at
+    least twice as far out, for the leg to count; ``pms-merge-point`` is
+    emitted at the closest approach."""
+
+    # ----- FIR crossings ----------------------------------------------------
+    emit_fir_crossings: bool = True
+    """Emit ``xing-fir`` (version ``fir_v0.1.0``): one event per change of FIR
+    volume along a track, from the compact H3 reference step 00c builds
+    (``opdi_h3_airspace_ref``, FIR layer). The volumes are the Network
+    Manager model: lower FIRs and upper UIRs, so a climb through FL195 or
+    FL245 is a crossing like a lateral one. Every event carries the CFMU AIRAC
+    cycle the definition came from (524 today, valid 2024-11-28 to
+    2024-12-26, the newest public set). See ``pipeline/fir.py``."""
+
+    fir_min_dwell_seconds: float = 60.0
+    """A run of samples in one volume shorter than this is absorbed into the
+    preceding run: a track skimming a boundary at resolution 7 (1.2 km cells)
+    flips cells every few seconds, and each flip would otherwise be two
+    crossings. The persistence idea of the A9 callsign rule, applied to
+    airspace."""
+
     distance_from_last_known_position: bool = True
     """Measure cumulative distance from the last *known* position.
 
@@ -1590,6 +1760,9 @@ class EventConfig:
             airport_gate_above_field=False,
             airport_admit_on_ground=False,
             distance_from_last_known_position=False,
+            emit_holding=False,
+            emit_point_merge=False,
+            emit_fir_crossings=False,
             events_version="events_v0.0.2",
         )
 
