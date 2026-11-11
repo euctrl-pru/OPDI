@@ -19,6 +19,7 @@ Written for Airflow 2.7.2 and its core operators only.
 
 from __future__ import annotations
 
+import shlex
 from datetime import date, datetime, timedelta, timezone
 
 from airflow.models import Variable
@@ -110,15 +111,37 @@ def _var(name: str) -> str:
     return f"{{{{ var.value.get('{name}', '{VARIABLE_DEFAULTS[name]}') }}}}"
 
 
+#: Jinja filters of both DAGs. ``shquote`` quotes a value for the shell
+#: (``shlex.quote``), so that a value is always one word of the command: a
+#: warehouse such as ``s3a://b/x; echo hi`` stays one argument instead of
+#: starting a second command. The command prefix is not quoted: it is shell
+#: text by design.
+FILTERS = {"shquote": shlex.quote}
+
 COMMAND = _var("opdi_command_prefix") + " python -m opdi.orchestration"
 WAREHOUSE = (
     "{% set wh = var.value.get('opdi_warehouse', '') %}"
-    "{% if wh %} --warehouse {{ wh }}{% endif %}"
+    "{% if wh %} --warehouse {{ wh | shquote }}{% endif %}"
 )
 DAILY_DAY = (
     "{{ macros.ds_add(data_interval_end.strftime('%Y-%m-%d'), "
-    "-(var.value.get('opdi_lag_days', '2') | int)) }}"
+    "-(var.value.get('opdi_lag_days', '2') | int)) | shquote }}"
 )
+MIN_FREE_GB = (
+    "{{ var.value.get('opdi_min_free_gb', '" + VARIABLE_DEFAULTS["opdi_min_free_gb"] + "')"
+    " | shquote }}"
+)
+
+#: Smallest allowed value of ``opdi_lag_days``. Day D is built from the
+#: position reports of D-1 to D+1, so D+1 must be complete in the OpenSky
+#: archive when the run starts: at 06:00 UTC on day R, R-1 is not complete
+#: yet, so the latest day that can be built is R-2.
+MIN_LAG_DAYS = 2
+
+#: The warehouses the backfill parameter accepts: empty, a storage address
+#: (``s3a://``, ``s3://``, ``file://``) or an absolute path, made of letters,
+#: digits and ``. _ / -`` only.
+WAREHOUSE_PATTERN = r"^$|^(s3a?|file)://[A-Za-z0-9._/-]+$|^/[A-Za-z0-9._/-]*$"
 KEEP_INTERNAL = "var.value.get('opdi_keep_internal', 'false') | lower == 'true'"
 DROP_WORKING = (
     "{% if var.value.get('opdi_keep_working', 'true') | lower == 'false' %}"
@@ -161,6 +184,22 @@ def _variable(name: str) -> str:
     return Variable.get(name, default_var=VARIABLE_DEFAULTS[name])
 
 
+def _lag_days() -> int:
+    """The Variable ``opdi_lag_days``, checked.
+
+    Raises:
+        ValueError: If it is below :data:`MIN_LAG_DAYS`.
+    """
+    lag = int(_variable("opdi_lag_days"))
+    if lag < MIN_LAG_DAYS:
+        raise ValueError(
+            f"opdi_lag_days is {lag}; it must be at least {MIN_LAG_DAYS}: day D is built "
+            "from the position reports of D-1 to D+1, and D+1 must be complete when the "
+            "day runs."
+        )
+    return lag
+
+
 def _previous_run_finished(**context) -> None:
     """Fail when the previous daily run did not succeed.
 
@@ -172,9 +211,13 @@ def _previous_run_finished(**context) -> None:
     running, so the next run waits; once that task has failed for good, the
     next run starts and stops here.
 
+    It also checks the Variable ``opdi_lag_days`` (see :func:`_lag_days`).
+
     Raises:
         RuntimeError: If the previous run of the DAG did not succeed.
+        ValueError: If ``opdi_lag_days`` is below :data:`MIN_LAG_DAYS`.
     """
+    _lag_days()
     previous = context["dag_run"].get_previous_dagrun()
     if previous is not None and previous.state != "success":
         raise RuntimeError(
@@ -187,32 +230,34 @@ def _previous_run_finished(**context) -> None:
 def _backfill_commands(**context) -> list:
     """One shell command per day of the backfill, in the order asked for."""
     params = context["params"]
+    lag = _lag_days()
     end = (
         params.get("end_date")
-        or (
-            datetime.now(timezone.utc).date() - timedelta(days=int(_variable("opdi_lag_days")))
-        ).isoformat()
+        or (datetime.now(timezone.utc).date() - timedelta(days=lag)).isoformat()
     )
     prefix = _variable("opdi_command_prefix")
     warehouse = params.get("warehouse") or _variable("opdi_warehouse")
     keep = bool(params.get("keep_internal")) or _variable("opdi_keep_internal").lower() == "true"
-    options = f" --min-free-gb {_variable('opdi_min_free_gb')}"
+    # Every value is quoted for the shell; the prefix is shell text by design.
+    options = f" --min-free-gb {shlex.quote(_variable('opdi_min_free_gb'))}"
     if warehouse:
-        options += f" --warehouse {warehouse}"
+        options += f" --warehouse {shlex.quote(warehouse)}"
     if keep:
         options += " --keep-internal"
     if _variable("opdi_keep_working").lower() == "false":
         options += " --drop-published-working"
     days = plan_days(params["start_date"], end, params.get("order") or "newest_first")
     print(f"backfill of {len(days)} day(s), {days[0]} first, {days[-1]} last")
-    return [f"{prefix} python -m opdi.orchestration day --day {d}{options}" for d in days]
+    return [
+        f"{prefix} python -m opdi.orchestration day --day {shlex.quote(d)}{options}" for d in days
+    ]
 
 
 DAILY_DOC = """
 ### OPDI daily run
 
 Processes one day every morning at 06:00 UTC: the day `opdi_lag_days` days
-(2 by default) before the run date. A day can only be processed once the day
+(2 by default, at least 2) before the run date. A day can only be processed once the day
 after it is complete, because flights that start late in the evening end
 after midnight.
 
@@ -259,6 +304,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
+    user_defined_filters=FILTERS,
     doc_md=DAILY_DOC,
     tags=["opdi"],
 ) as daily:
@@ -271,9 +317,7 @@ with DAG(
         BashOperator(task_id="reference", bash_command=f"{COMMAND} reference{WAREHOUSE}"),
         BashOperator(
             task_id="check_space",
-            bash_command=(
-                f"{COMMAND} check-space --min-free-gb {_var('opdi_min_free_gb')}{WAREHOUSE}"
-            ),
+            bash_command=(f"{COMMAND} check-space --min-free-gb {MIN_FREE_GB}{WAREHOUSE}"),
         ),
     ]
     for name, step in DAY_STEPS:
@@ -305,6 +349,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
+    user_defined_filters=FILTERS,
     doc_md=BACKFILL_DOC,
     params={
         "start_date": Param(
@@ -322,7 +367,8 @@ with DAG(
         "warehouse": Param(
             BACKFILL_PARAMS["warehouse"],
             type="string",
-            description="Warehouse for this run; empty for the Variable.",
+            pattern=WAREHOUSE_PATTERN,
+            description="Warehouse for this run (s3a://bucket/folder); empty for the Variable.",
         ),
         "keep_internal": Param(BACKFILL_PARAMS["keep_internal"], type="boolean"),
     },
@@ -333,7 +379,7 @@ with DAG(
         bash_command=(
             f"{COMMAND} reference"
             "{% set wh = params.warehouse or var.value.get('opdi_warehouse', '') %}"
-            "{% if wh %} --warehouse {{ wh }}{% endif %}"
+            "{% if wh %} --warehouse {{ wh | shquote }}{% endif %}"
         ),
     )
     plan = PythonOperator(task_id="plan_days", python_callable=_backfill_commands)

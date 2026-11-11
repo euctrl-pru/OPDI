@@ -25,6 +25,7 @@ ALLOWED_MODULES = {
     "__future__",
     "datetime",
     "json",
+    "shlex",
 }
 DAILY_TASKS = [
     "previous_run_finished",

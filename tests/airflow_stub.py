@@ -13,6 +13,7 @@ import types
 from datetime import date, datetime, timedelta
 
 import jinja2
+import jinja2.sandbox
 
 
 class Variable:
@@ -154,17 +155,20 @@ def _ds_add(ds, days):
     return (date.fromisoformat(ds) + timedelta(days=days)).isoformat()
 
 
-def render(template, variables=None, params=None, data_interval_end=None):
+def render(template, variables=None, params=None, data_interval_end=None, filters=None):
     """``template`` rendered as Airflow renders a templated field.
 
     Airflow renders with a sandboxed Jinja environment whose context holds
     ``var`` (the Variables), ``params``, ``macros`` and the dates of the run.
     """
     env = jinja2.sandbox.SandboxedEnvironment(undefined=jinja2.StrictUndefined)
+    # A DAG's user_defined_filters are added to the environment, as Airflow does.
+    env.filters.update(filters or {})
     context = {
         "var": types.SimpleNamespace(value=_VarValue(dict(variables or {}))),
         "params": dict(params or {}),
         "macros": types.SimpleNamespace(ds_add=_ds_add),
         "data_interval_end": data_interval_end or datetime(2026, 11, 11, 6, 0),
+        "ds": (data_interval_end or datetime(2026, 11, 11, 6, 0)).strftime("%Y-%m-%d"),
     }
     return env.from_string(template).render(**context)

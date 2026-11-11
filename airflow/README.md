@@ -132,13 +132,33 @@ Set them under Admin > Variables. All are optional.
 | `opdi_command_prefix` | empty     | Text placed before `python -m opdi.orchestration` in every command. It says where OPDI runs. Examples: `kubectl exec -n eurocontrol <driver-pod> --` (run inside the pod that hosts the Spark driver), `source /opt/opdi/.venv/bin/activate &&` (a virtual environment on the worker). |
 | `opdi_warehouse`      | empty     | The warehouse. Empty means the `OPDI_WAREHOUSE` environment variable where the command runs, else `s3a://eurocontrol/opdi`. |
 | `opdi_min_free_gb`    | `25`      | Free space, in GB, a day needs before it starts. A worldwide day writes about 20 GB of internal tables (mostly tracks) before `prune` removes them. |
-| `opdi_lag_days`       | `2`       | How many days the daily run stays behind the run date. |
+| `opdi_lag_days`       | `2`       | How many days the daily run stays behind the run date. At least 2: day D is built from the position reports of D-1 to D+1, and at 06:00 UTC on day R the reports of R-1 are not complete yet. A smaller value stops the run at its first task with a message. |
 | `opdi_keep_internal`  | `false`   | `true` keeps the internal tables of each day after publishing (needs much more space). |
 | `opdi_keep_working`   | `true`    | `false` also removes the working events and measurements of days that are already published, except the 7 days on each side of the day just run. See "How disk space is protected". |
 
 Every command prints the warehouse, the release root and the coverage when
 it starts, and warns when `OPDI_WAREHOUSE` points elsewhere. Check the first
 lines of a task log after any change.
+
+The warehouse and the other values are quoted for the shell in every
+command, so each stays one argument. The backfill parameter `warehouse`
+accepts only a storage address (`s3a://...`, `s3://...`, `file://...`) or
+an absolute path, made of letters, digits and `. _ / -`. The command prefix
+is not quoted: it is shell text on purpose.
+
+**Stopping a command that runs through a prefix.** With a prefix such as
+`kubectl exec ... --`, Airflow runs `kubectl` on the worker, and `kubectl`
+runs the OPDI command in the pod. When a task reaches its time limit
+(`execution_timeout`, 6 hours, 24 hours for a backfill day) or is marked
+failed by hand, Airflow stops only the local `kubectl` process; the OPDI
+command and its Spark job go on in the pod. Stop it there:
+
+```bash
+kubectl exec -n eurocontrol <driver-pod> -- pkill -f opdi.orchestration
+```
+
+If it was publishing, remove the lock it leaves with
+`python -m opdi.orchestration clear-lock` (see "Installing the DAG").
 
 ## Starting the daily run
 
