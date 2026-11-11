@@ -108,6 +108,9 @@ ignore = [
     "N803",
     "N806",
     "N812",
+    # The class docstring documents the constructor's arguments (Google
+    # style), so __init__ needs no docstring of its own.
+    "D107",
 ]
 
 [tool.ruff.lint.pydocstyle]

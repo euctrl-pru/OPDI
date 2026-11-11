@@ -1,9 +1,10 @@
-"""Storage abstraction layer for OPDI pipeline.
+"""Reading and writing the pipeline's tables.
 
-Provides environment-aware table read/write operations. In Iceberg mode
-(the ``local`` environment by default) tables are managed via the catalog. In
-parquet mode (``opensky``, or ``spark.enable_iceberg = False``) tables are
-parquet folders under the release root.
+:class:`StorageManager` gives every step the same table operations whatever
+the storage: Iceberg tables in a Spark catalog (the ``local`` environment by
+default), or plain Parquet folders under the release root (the ``opensky``
+environment, or ``spark.enable_iceberg = False``). It also keeps the
+progress records of a run and the coverage marker of a warehouse.
 """
 
 import json
@@ -21,28 +22,28 @@ from opdi.config import OPDIConfig
 LOCAL_STATE_DIR = "OPDI_live/state"
 
 
-#: What Hive -- and therefore Spark -- calls the directory holding rows whose
-#: partition column is NULL.
+#: The folder name Hive, and so Spark, gives to the rows whose partition
+#: column is NULL.
 HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__"
 
 
 def _partition_dir_value(value):
-    """The directory name Spark writes a partition value to.
+    """The folder name Spark writes a partition value to.
 
-    A NULL does not become ``col=None``; it becomes
-    ``col=__HIVE_DEFAULT_PARTITION__``. Formatting it naively builds a path
-    that does not exist, so the delete finds nothing, silently succeeds, and
-    the append that follows lands *beside* the rows it was supposed to
-    replace -- duplicating every one of them, once per run. That is how a
-    flight list with 746 dateless rows came to hold two copies of each after a
-    single re-enrichment.
+    A NULL becomes ``col=__HIVE_DEFAULT_PARTITION__``, not ``col=None``. A
+    delete that built the path naively would find nothing, and the append
+    after it would add a second copy of the rows it meant to replace.
     """
     return HIVE_DEFAULT_PARTITION if value is None else value
 
 
 class StorageManager:
-    """Abstracts table I/O so pipeline steps work against both
-    Iceberg catalogs and plain S3 parquet directories.
+    """Table operations for the pipeline steps, on Iceberg or on Parquet folders.
+
+    Args:
+        spark: Active Spark session.
+        config: OPDI configuration; ``config.spark.enable_iceberg`` chooses
+            the storage and ``config.project.release_root`` the folder.
     """
 
     def __init__(self, spark: SparkSession, config: OPDIConfig):
@@ -57,10 +58,10 @@ class StorageManager:
         return f"{self.base_path}/{table_name}"
 
     def table_ref(self, table_name: str) -> str:
-        """Return a reference usable in ``spark.sql()`` queries.
+        """A name of the table for ``spark.sql()`` queries.
 
-        * Iceberg mode: returns backtick-quoted ```project`.`table```
-        * S3 mode: reads parquet from S3, registers a temp view, returns the view name
+        With Iceberg, ```project`.`table```. With Parquet folders, the table is
+        read and registered as a temporary view, whose name is returned.
         """
         if self.use_s3:
             if table_name not in self._registered_views:
@@ -70,11 +71,11 @@ class StorageManager:
             return table_name
         return f"`{self.project}`.`{table_name}`"
 
-    #: Tables whose day partitions may differ in their columns. Older days of
-    #: the flight list were written without ``ADEP_SOURCE`` and
-    #: ``ADES_SOURCE`` by one of the two passes of step 03. These tables are
-    #: read with the columns of every file merged, so a column missing from
-    #: one file reads as NULL there instead of vanishing from the whole read.
+    #: Tables whose day folders may differ in their columns. Days of the
+    #: flight list can lack ``ADEP_SOURCE`` and ``ADES_SOURCE`` in the rows of
+    #: one of the two passes of step 03. These tables are read with the
+    #: columns of all files merged, so a column missing from one file reads as
+    #: NULL there instead of being dropped from the whole read.
     MERGE_SCHEMA_TABLES = ("opdi_flight_list",)
 
     def _read_parquet(self, table_name: str) -> DataFrame:
@@ -99,65 +100,44 @@ class StorageManager:
         partition_by: Optional[Sequence[str]] = None,
         partition_values: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
-        """Write *df* to *table_name*.
+        """Write ``df`` to ``table_name``.
 
         Args:
-            df: Spark DataFrame to persist.
-            table_name: Bare table name (no project prefix).
-            mode: ``"append"`` | ``"overwrite"`` | ``"insert_overwrite"``
-                  (the last one maps to Hive-style insertInto).
-            partition_by: Columns to partition the written table by. When set
-                **and** ``mode`` is ``"overwrite"``, only the partitions present
-                in *df* are replaced; everything else in the table is left
-                alone. That is what makes publishing one day at a time possible
-                -- see the note below.
+            df: Spark DataFrame to write.
+            table_name: Table name, without the project prefix.
+            mode: ``"append"``, ``"overwrite"`` or ``"insert_overwrite"`` (Hive
+                ``insertInto``). Required, with no default, so that every
+                caller decides whether a second run adds rows or replaces them.
+            partition_by: Columns to partition the table by. With
+                ``mode="overwrite"``, only the partitions present in ``df``
+                are replaced and every other partition is kept, which is what
+                lets one day be written at a time.
+            partition_values: The partition values ``df`` holds, when the
+                caller knows them (for example the day being processed); saves
+                computing ``df`` once to find them.
 
-        ``mode`` is **required and has no default**. It used to default to
-        ``"append"``, which meant a caller that had not thought about
-        re-processing got the option that silently doubles a table: nothing
-        errors, the rows are simply counted twice, and every aggregate reading
-        them is wrong by an amount nothing reports. Three separate places in
-        this repo -- ``rebuild_sample.py``, ``benchmarks/clean_tracks.py`` and
-        the V7 chain -- carry a workaround for that default. Requiring the
-        argument is what stops the *next* call site needing a fourth.
+        Raises:
+            ValueError: If ``mode`` is unknown, or a ``partition_by`` column
+                is not in ``df``.
 
         .. warning::
 
-           ``insert_overwrite`` does **not** mean "replace this month".
-           In Iceberg mode it overwrites the partitions the DataFrame touches,
-           and in S3 mode it overwrites the entire parquet directory. For a
-           table partitioned by something other than time -- as
-           ``opdi_flight_events`` is, by ``(type, version)`` -- it therefore
-           destroys every other month. Re-processing safely needs the month to
-           be a partition, which is a layout change to published data, or a
-           read-filter-rewrite of the whole table. See
-           ``benchmarks/EVENTS_RUN_LOG.md`` decision 15.
-
-           ``partition_by`` is the way out of that, and it is why this argument
-           exists: with the day as a partition column, ``mode="overwrite"``
-           replaces only the days *df* contains. Spark's default is the
-           opposite -- ``static`` partition overwrite deletes the whole table
-           before writing -- so the writer sets ``partitionOverwriteMode`` to
-           ``dynamic`` explicitly rather than relying on a session setting that
-           some other caller may not have made. Scoped to this write, so it
-           cannot change the behaviour of anything else in the session.
+           ``insert_overwrite`` replaces the partitions ``df`` touches (Iceberg)
+           or the whole folder (Parquet), not "this month". For a table
+           partitioned by something other than time it therefore removes
+           other months too. Use ``partition_by`` with ``mode="overwrite"``
+           to replace days.
         """
         if mode not in self.WRITE_MODES:
-            # Previously an unrecognised mode fell through every branch in the
-            # Iceberg path and wrote nothing at all, reporting success. A typo
-            # in a mode string was a silent no-op.
+            # An unknown mode would otherwise write nothing and report success.
             raise ValueError(
                 f"Unknown write mode {mode!r} for table {table_name!r}; "
                 f"expected one of {', '.join(self.WRITE_MODES)}."
             )
 
         if partition_by:
-            # Checked before the write, not discovered by it. Spark's
-            # partitionBy on an absent column raises deep inside the job with a
-            # message that names the analysis plan rather than the mistake, and
-            # a caller who typo'd a column would otherwise be one silent
-            # unpartitioned write away from having the next overwrite delete
-            # every day at once.
+            # Checked before the write: Spark would fail deep inside the job,
+            # with a message about its plan rather than the missing column.
             missing = [c for c in partition_by if c not in df.columns]
             if missing:
                 raise ValueError(
@@ -172,26 +152,16 @@ class StorageManager:
             if partition_by and s3_mode == "overwrite":
                 # Replace the partitions by deleting them, then appending.
                 #
-                # Spark's own `partitionOverwriteMode=dynamic` is the obvious
-                # way to do this and does not work here: the S3A **magic
-                # committer**, which this cluster uses so that writes to S3 are
-                # correct without a rename, refuses it outright --
+                # Spark's dynamic partition overwrite cannot be used: the S3A
+                # "magic" committer, which writes to S3 without renames,
+                # refuses it ("PathOutputCommitter does not support
+                # dynamicPartitionOverwrite").
                 #
-                #   java.io.IOException: PathOutputCommitter does not support
-                #   dynamicPartitionOverwrite: MagicCommitter{...}
-                #
-                # It is not a configuration to relax. The magic committer
-                # cannot express "replace these prefixes atomically", so Spark
-                # declines rather than writing something half-replaced.
-                #
-                # Deleting the prefixes ourselves and appending is what dynamic
-                # overwrite does internally, minus the atomicity. The window
-                # matters and is stated rather than hidden: a crash between the
-                # delete and the write leaves that day absent. That is
-                # recoverable -- the day is simply re-run, and the runner's
-                # state file will not have marked it done -- whereas the
-                # alternative, appending without deleting, silently doubles the
-                # day and nothing reports it.
+                # Deleting the folders and appending is what dynamic overwrite
+                # does, without its atomicity: a failure between the delete
+                # and the write leaves that day missing. The day is then run
+                # again, as the state file does not mark it done. Appending
+                # without deleting would double the day instead.
                 persisted = self._delete_partitions(df, path, partition_by, partition_values)
                 s3_mode = "append"
             else:
@@ -202,8 +172,7 @@ class StorageManager:
                 writer = writer.partitionBy(*partition_by)
             writer.parquet(path)
             if persisted:
-                # Released only after the write, which is the consumer the
-                # persist exists for.
+                # Released after the write, which is what it was kept for.
                 df.unpersist()
         else:
             qualified = f"`{self.project}`.`{table_name}`"
@@ -211,53 +180,37 @@ class StorageManager:
                 df.writeTo(qualified).append()
             elif mode == "overwrite":
                 # overwritePartitions replaces only the partitions the frame
-                # touches; plain overwrite replaces the table. The Iceberg
-                # equivalent of the dynamic mode set above.
+                # touches; plain overwrite replaces the table.
                 if partition_by:
                     df.writeTo(qualified).overwritePartitions()
                 else:
-                    # PySpark's DataFrameWriterV2.overwrite() takes a required
-                    # `condition` -- there is no zero-arg form, in any version
-                    # this repo has run against. lit(True) is "replace
-                    # everything", which is what an unpartitioned overwrite
-                    # means here; omitting the argument is not a default, it
-                    # is a TypeError raised before any write happens.
+                    # DataFrameWriterV2.overwrite() needs a condition;
+                    # lit(True) replaces everything, which is what an
+                    # unpartitioned overwrite means.
                     df.writeTo(qualified).overwrite(F.lit(True))
             else:
                 df.write.mode("overwrite").insertInto(f"{self.project}.{table_name}")
 
     def _delete_partitions(self, df: DataFrame, path: str, partition_by, values=None) -> bool:
-        """Remove the Hive-style partition directories *df* is about to write.
+        """Remove the partition folders ``df`` is about to write.
 
-        Only the partitions present in *df* are touched; every other day in the
-        table is left alone. The values come from the frame itself, so a day
-        that produced no rows is not deleted -- which is correct: there is
-        nothing to replace it with, and removing it would turn "this run wrote
-        nothing" into "this day no longer exists".
+        Only the partitions present in ``df`` are removed. A day that
+        produced no rows is not removed: there is nothing to replace it with.
+
+        Returns:
+            True when ``df`` was persisted to find its partitions (the caller
+            releases it after the write).
         """
         if values is not None:
-            # The caller knew, so nothing has to be computed to find out.
-            #
-            # Probing the frame for its partition values evaluates it, and the
-            # write then evaluates it again. Persisting instead of probing only
-            # trades one cost for another: measured, it bought 4% on step 04
-            # and cost 8% on step 02a, whose output is 3.7 GB and cheap to
-            # recompute. Every day-scoped write already knows its day, so the
-            # honest fix is to pass it rather than to rediscover it.
+            # The caller knows the values, so the frame is not computed to
+            # find them.
             self._delete_partition_paths(path, partition_by, values)
             return False
 
-        # Persisted first, because this collect evaluates the frame.
-        #
-        # Asking which partitions a frame will write means computing the frame.
-        # Without persisting, the subsequent .parquet() computes it a *second*
-        # time -- the whole step, twice. Measured on step 04: stages 80, 81 and
-        # 82 were 71% of its 62 minutes, all three attributed to this line, all
-        # three duplicates of work the write then repeated.
-        #
-        # MEMORY_AND_DISK rather than the default MEMORY_ONLY: a frame too big
-        # for memory would otherwise be silently recomputed, which is the exact
-        # failure this is here to remove.
+        # Persisted first, because finding the partitions computes the frame,
+        # and the write would otherwise compute it a second time. With
+        # MEMORY_AND_DISK, a frame too large for memory is kept on disk
+        # rather than computed again.
         from pyspark import StorageLevel
 
         df.persist(StorageLevel.MEMORY_AND_DISK)
@@ -280,12 +233,10 @@ class StorageManager:
                 fs.delete(target, True)
 
     def list_partitions(self, table_name: str, column: str) -> list:
-        """The partition values currently present, as strings.
+        """The partition values present, as strings, read from the folder names.
 
-        Reads the directory names rather than the data: a Hive-style layout
-        encodes the value in the path, so this costs one listing and no scan.
-        Returns an empty list when the table does not exist yet, which is the
-        normal state on the first day of a campaign.
+        One folder listing, no data read. Empty when the table does not exist
+        yet. Parquet folders only.
         """
         if not self.use_s3:
             raise NotImplementedError("partition listing is S3-mode only")
@@ -303,7 +254,7 @@ class StorageManager:
         return sorted(out)
 
     def drop_partitions(self, table_name: str, column: str, values) -> int:
-        """Delete specific partitions. Returns how many were removed."""
+        """Remove the partitions ``values`` of ``column``; returns how many."""
         if not values:
             return 0
         path = self._s3_path(table_name)
@@ -311,14 +262,15 @@ class StorageManager:
         return len(values)
 
     def create_table(self, sql: str) -> None:
-        """Run DDL (CREATE TABLE). No-op in S3 mode."""
+        """Run a ``CREATE TABLE`` statement. Does nothing with Parquet folders."""
         if not self.use_s3:
             self.spark.sql(sql)
 
     def table_exists(self, table_name: str) -> bool:
+        """Whether the table exists and can be read."""
         if self.use_s3:
             try:
-                self.spark.read.parquet(self._s3_path(table_name)).schema
+                self.spark.read.parquet(self._s3_path(table_name)).schema  # noqa: B018
                 return True
             except Exception:
                 return False
@@ -329,36 +281,29 @@ class StorageManager:
             return False
 
     COVERAGE_MARKER = "coverage_marker"
-    """One row, recording which coverage wrote this warehouse.
+    """Name of the one-row table that records which coverage wrote a warehouse.
 
-    Not ``_coverage_marker``: Spark's file-index listing filters out paths
-    whose name begins with ``_`` or ``.`` (the ``_SUCCESS``/``_committed``
-    convention), so an underscore-prefixed table name would be fragile to read
-    back in S3 mode and could make ``table_exists``/``read_table`` behave as
-    though the marker were absent -- which would make this guard silently
-    always-pass, the exact inverse of its purpose.
+    Not ``_coverage_marker``: Spark skips paths whose name starts with ``_``
+    or ``.``, so such a table could look absent and the check would never
+    refuse anything.
     """
 
     def write_coverage_marker(self) -> None:
-        """Record which coverage this warehouse holds. Idempotent.
+        """Record the coverage of this warehouse (worldwide or European).
 
-        Overwrite rather than append: this is a property of the warehouse, not
-        a history of runs against it, and an append would leave two rows whose
-        disagreement nothing resolves.
+        Overwrites: the coverage is a property of the warehouse, not a history
+        of runs.
         """
-        # In Iceberg mode, write_table's "overwrite" path assumes the table
-        # already exists -- every other writer in this codebase calls its own
-        # create_table_if_not_exists() first. The marker has no dedicated
-        # processor class to hold that method, so it is inlined here; a no-op
-        # in S3 mode, same as every other create_table call.
+        # With Iceberg, write_table's overwrite expects the table to exist, so
+        # it is created first (nothing happens with Parquet folders).
         self.create_table(f"""
             CREATE TABLE IF NOT EXISTS `{self.project}`.`{self.COVERAGE_MARKER}` (
-              coverage STRING COMMENT 'Coverage label this warehouse was written under: europe, worldwide, or custom',
-              bbox ARRAY<DOUBLE> COMMENT 'min_lon, min_lat, max_lon, max_lat degrees; NULL for worldwide',
-              airport_types ARRAY<STRING> COMMENT 'Aerodrome types included when this warehouse reference data was built'
+              coverage STRING COMMENT 'Coverage of this warehouse: europe, worldwide or custom',
+              bbox ARRAY<DOUBLE> COMMENT 'min_lon, min_lat, max_lon, max_lat; NULL for worldwide',
+              airport_types ARRAY<STRING> COMMENT 'Airport types of the reference tables'
             )
             USING iceberg
-            COMMENT 'One row: which coverage wrote this warehouse. Not a data product -- nothing reads it at query time.'
+            COMMENT 'One row: the coverage that wrote this warehouse.'
             """)
         cov = self.config.coverage
         df = self.spark.createDataFrame(
@@ -374,13 +319,10 @@ class StorageManager:
         self.write_table(df, self.COVERAGE_MARKER, mode="overwrite")
 
     def read_coverage_marker(self) -> Optional[dict]:
-        """The marker, or ``None`` if this warehouse has never been stamped.
+        """The coverage marker, or ``None`` if this warehouse has none.
 
-        Every failure reads as unstamped -- absent, unreadable, or empty. A
-        marker that cannot be read must not block a run: the guard exists to
-        catch a specific mistake, and a guard that fails closed on its own
-        malfunction would make every warehouse unusable the first time the
-        parquet read hiccuped.
+        A marker that is absent, unreadable or empty reads as none, so that a
+        read error never blocks a run.
         """
         try:
             rows = self.read_table(self.COVERAGE_MARKER).limit(1).collect()
@@ -396,12 +338,9 @@ class StorageManager:
         }
 
     def check_coverage(self) -> Optional[str]:
-        """A problem describing a coverage mismatch, or ``None``.
+        """A message when this run's coverage differs from the warehouse's, else ``None``.
 
-        An unstamped warehouse is **not** a problem: it is a first run, or a
-        warehouse written before markers existed. Refusing those would make
-        every existing prefix unusable, which is a bigger break than the one
-        being prevented.
+        A warehouse without a marker (a first run) is not a problem.
         """
         marker = self.read_coverage_marker()
         if marker is None:

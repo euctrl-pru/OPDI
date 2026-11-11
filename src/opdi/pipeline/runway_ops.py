@@ -1,4 +1,11 @@
-"""A-CDM runway milestones, from classified runway traversals.
+"""Runway milestones of Airport Collaborative Decision Making (A-CDM).
+
+Part of step 04. Finds, for every flight, the runway it used and the times
+of ``line-up``, ``take-off-roll``, ``airborne``, ``landing`` (crossing of the
+threshold), ``touchdown`` and ``runway-vacated``, the runway crossings of a
+taxiing aircraft, and ``go-around``. All are read from passages over a
+runway, built from the H3 cells of the runway zones (``h3_runway_zones``).
+See https://www.opdi.aero/content/methods/runway-milestones.html.
 
 Nine of the eleven A-CDM milestones come out of one pass over the same object:
 a *traversal*, a maximal run of consecutive samples whose H3 res-12 cell falls
@@ -7,7 +14,7 @@ A gap longer than ``airport_trace_gap_seconds`` starts a new one, so an
 aircraft that sits on the runway across a coverage hole is two traversals
 rather than one implausible ten-minute occupancy.
 
-**Why one object rather than nine detectors.** ``line-up`` and ``take-off-roll``
+**One object rather than nine detectors.** ``line-up`` and ``take-off-roll``
 and ``airborne`` are not independent questions; they are three readings of one
 departure. Deriving them from a shared, explicitly classified traversal means
 they cannot disagree about which runway, which aerodrome, or even whether the
@@ -40,11 +47,10 @@ The band is deliberate, not an oversight.
 instants the height above field elevation crosses ``runway_airborne_height_ft``,
 and ``landing`` the instant the along-track distance from the threshold changes
 sign. All three go through :func:`opdi.pipeline.crossings.threshold_crossings`
--- the same Schmitt-trigger-plus-interpolation engine that produces the
-flight-level and ring crossings. This is the substantive improvement over
-``ATOT``/``ALDT``, which took the *extreme sample* of a detection window and
-paid for it with a +19 s median bias on departures. A bias that is always in
-the same direction is not noise a larger sample averages away.
+-- the same crossing detector (a dead band plus interpolation) that produces
+the flight-level and ring crossings. The take-off and landing times of the
+runway window method (``ATOT``/``ALDT``) are instead the first or last
+report of a window, which places them systematically late or early.
 
 ``landing`` needs one sample the traversal does not contain: the threshold is
 the near edge of the runway polygon, so the point short of it is outside the
@@ -96,10 +102,8 @@ KT_PER_MPS = 1.94384
 AIRBORNE_HYSTERESIS_FT = 5.0
 
 #: Half-width of the dead band around the threshold plane, in nautical miles.
-#: 0.05 NM is 304 ft, which at 140 kt (236 ft/s) is about 1.3 s -- not a
-#: fraction of a second, as an earlier version of this comment claimed. It does
-#: not matter, and the reason it does not matter is the thing to remember: the
-#: dead band gates *confirmation*, not the reported instant. ``landing`` is
+#: 0.05 NM is 304 ft, which at 140 kt (236 ft/s) is about 1.3 s. The band
+#: only confirms a crossing; it does not move the reported instant. ``landing`` is
 #: interpolated to the sample pair that straddles the bare plane, which is
 #: earlier than the confirming sample and unaffected by how wide the band is.
 #: What the width buys is that a sample sitting on the plane cannot toggle the
@@ -115,10 +119,6 @@ THRESHOLD_PLANE_HYSTERESIS_NM = 0.05
 #: seconds is six times the 5 s nominal ADS-B cadence: generous enough that
 #: ordinary reception dropouts do not break a real roll, short enough that the
 #: hold measures continuous observation rather than elapsed time.
-#:
-#: A module constant rather than an ``EventConfig`` field only because the
-#: config surface is fixed this round; it is a tuning parameter and belongs
-#: there eventually.
 ROLL_MAX_GAP_SECONDS = 30.0
 
 #: How far back before a traversal's entry the *arrival* sample window reaches,
@@ -160,15 +160,10 @@ GOAROUND_HYSTERESIS_FT = 50.0
 
 #: What a traversal is, for windowing purposes.
 #:
-#: ``apt_ident`` is in the key and has to be. ``trace_id`` restarts at 0 for
-#: every ``(track_id, strip_id, rwy_ident)``, so it carries no information across
-#: aerodromes -- and runway designators repeat: a flight departing 07 at its
-#: origin and crossing a runway also called 07 at its destination produced two
-#: traversals with an identical ``(track_id, "07", "0")``. Everything windowed
-#: on that key then collapsed them into one, giving a single crossing pair
-#: whose entry came from the origin and whose exit came from the destination,
-#: straddling the entire flight. 07/25 and 09/27 are among the commonest
-#: designators in Europe, so this was not a corner case.
+#: ``apt_ident`` must be in the key. ``trace_id`` restarts at 0 for every
+#: ``(track_id, strip_id, rwy_ident)``, and runway designators repeat between
+#: airports (a flight can use a runway 07 at both ends), so without the airport
+#: two passages at different airports would share one key.
 #:
 #: The four together are unique: a runway *direction* belongs to exactly one
 #: strip at one aerodrome, and ``trace_id`` separates repeat traversals of it.
@@ -319,7 +314,8 @@ def runway_traversals(
     ``grid`` is ``h3_runway_zones`` -- one row per (res-12 cell, strip), tagged
     ``zone`` ``"runway"`` or ``"approach"``. An equi-join on the cell prunes
     ``sv`` to the neighbourhood of a runway at every covered aerodrome, which is
-    the coverage the retired ``hexaero_airport_layouts`` polygons never had.
+    a wider coverage than the airport layout polygons
+    (``hexaero_airport_layouts``) give.
     ``thresholds`` is :func:`runways.runway_thresholds` -- one row per runway
     *direction*, carrying ``rwy_length_nm``/``rwy_half_width_nm``.
 
@@ -353,13 +349,10 @@ def runway_traversals(
         F.col("he_ident"),
         F.col("zone"),
     )
-    # NOT broadcast. ``grid_cols`` is the network-wide h3_runway_zones (~7M
-    # res-12 cells); a run whose ``sv`` spans the whole network (the benchmark
-    # ladder, and production) leaves it near its full size even after the
-    # per-batch aerodrome pre-filter, and forcing that into the driver heap to
-    # broadcast OOM'd the driver JVM. Let Spark pick the strategy: it sort-merges
-    # the large grid, and auto-broadcasts only when a study-scoped ``sv`` has
-    # already shrunk it below the broadcast threshold.
+    # Not broadcast. ``grid_cols`` is the network-wide h3_runway_zones (about
+    # 7 million cells); a network-wide run leaves it near its full size, which
+    # does not fit in the driver's memory. Spark chooses the join itself, and
+    # broadcasts the grid only when it is small enough.
     near = sv.join(
         grid_cols,
         (sv.h3_res_12 == grid_cols.h3_id) & F.array_contains(sv.apt, grid_cols.apt_icao),
@@ -456,8 +449,7 @@ def runway_traversals(
     work = work.withColumn("_flight_id", _col_or_null(sv, "flight_id", "string"))
 
     # ``min_by``/``max_by``, never ``first``/``last``: the latter take partition
-    # order, not time order, which is the correctness fix
-    # ``airport_events_ordered`` records. For an arrival the earliest sample is
+    # order, not time order (see ``airport_events_ordered``). For an arrival the earliest sample is
     # now on final and the latest after the flare, so ``entry_height_ft`` is the
     # height on approach and ``exit_height_ft`` the height after touchdown --
     # the two readings ``classify_traversal`` needs, from the descent rather
@@ -491,9 +483,6 @@ def runway_traversals(
         # ``entry_height_ft < airborne_h`` is then NULL -> false: the whole
         # movement is silently dropped. Masking the ordering key to the
         # non-null rows takes the first/last height that actually exists.
-        # (This is why an upstream ``baro_altitude_c`` bound hid the bug:
-        # ``NULL < x`` is false, so it dropped exactly these ground samples and
-        # the endpoints became real-valued by accident.)
         F.min_by("_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))).alias(
             "entry_height_ft"
         ),
@@ -627,12 +616,12 @@ def _info(milestone: Optional[str], method: Optional[str] = None):
     """The ``info`` JSON every runway milestone carries.
 
     ``milestone`` is the ICAO number, and it is what lets a consumer tell the
-    new threshold-crossing ``landing`` from the retired ground-contact one
-    without parsing version strings. The classification, the runway and the
+    threshold-crossing ``landing`` (T16) from the ``landing`` of the phase
+    method without parsing version strings. The classification, the runway and the
     alignment travel with it so the decision that produced the row is auditable
     from the row.
 
-    ``method`` names the arm on the two types the merge makes ambiguous:
+    ``method`` names the detector on the two types the merge makes ambiguous:
     ``ATOT`` and ``ALDT`` may come from here (``"acdm"``) or from the legacy
     window detector (``"legacy"``), and the two have different biases. It is
     NULL on every type with only one source, where there is nothing to
@@ -642,8 +631,8 @@ def _info(milestone: Optional[str], method: Optional[str] = None):
         F.struct(
             # ``runway`` is the canonical key: the legacy ATOT/ALDT detector writes
             # it under that name, and under ``merge_duplicate_milestones`` both
-            # arms publish the same ``type``, so a consumer reading the runway off
-            # an ATOT event must not have to know which arm produced it.
+            # detectors publish the same ``type``, so the runway of an ATOT event
+            # is read the same way whichever detector gave it.
             # ``rwy_ident`` is kept beside it as the name this family shipped with.
             F.col("rwy_ident").alias("runway"),
             F.col("rwy_ident").alias("rwy_ident"),
@@ -947,7 +936,7 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
     # extended one exists solely so the threshold-plane crossing has a sample
     # short of the threshold to interpolate from. See ARRIVAL_LEAD_SECONDS.
     # Under the merge these two are ``ATOT``/``ALDT`` and are stamped with the
-    # arm that produced them; without it they keep the A-CDM names and have no
+    # detector that produced them; without it they keep the A-CDM names and have no
     # second source to be told apart from.
     merged = config.merge_duplicate_milestones
     lift_off = ACDM_NAMES["airborne"] if merged else "airborne"
@@ -989,8 +978,11 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
 
 
 def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
-    """A descent below ``goaround_trigger_height_ft`` near the destination that
-    climbs back above ``goaround_recovery_height_ft`` with no touchdown between.
+    """Go-arounds: a descent near the destination followed by a climb back.
+
+    A go-around is a descent below ``goaround_trigger_height_ft`` near the
+    destination that climbs back above ``goaround_recovery_height_ft`` with no
+    touchdown between.
 
     Independent of the traversals, because a go-around may never touch a runway
     polygon at all -- an approach abandoned at 400 ft is still a go-around and

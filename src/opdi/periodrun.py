@@ -1,37 +1,24 @@
-"""Run the full OPDI pipeline over a short window, resumably.
+"""Run the pipeline over a period of days, resuming where it stopped.
 
-``run_pipeline`` builds one Spark session, walks every step, and returns 1 on
-the first exception. That is the right shape for a single month run by hand. It
-is the wrong shape for a week of network-wide data, for three reasons this
-module exists to fix.
+``python -m opdi.periodrun --start 2026-06-14 --days 7`` processes seven days,
+one day at a time: each day goes through all its steps before the next day
+starts. The steps of release v2.0.0 are 00 (reference tables, once), 01
+(ingestion of the position reports), 02 (tracks), 02a (cleaning), 03 (flight
+list), 04 (events) and 04b (milestones on the flight list); 09 (publishing)
+is added on request.
 
-**A failure must not cost the steps that already succeeded.** Steps 01 to 04
-over seven days are hours of cluster time. ``run_pipeline`` keeps no record of
-what finished, so a failure in step 04 means re-ingesting and re-tracking from
-scratch. Here every step's completion is written to a state file as it happens,
-and a re-invocation skips what is already done. Resuming is the default; the
-only way to redo finished work is to ask for it.
+Three properties make long runs practical:
 
-**The driver heap must fit the container, not the preset.** ``opensky`` asks
-for a 10 GB heap (``config.py``, ``SparkConfig.driver_memory``). The JupyterLab
-pod this driver runs in is capped at 16 GiB *shared with everything else in it*,
-and a 15-hour events run was SIGKILLed on its final rung for exactly this
-reason -- with no crash dump, because the kernel kills the process rather than
-the JVM throwing ``OutOfMemoryError``. ``safe_driver_memory`` sizes the heap
-from the cgroup's real headroom at launch.
-
-**The session must actually be distributed.** ``run_pipeline`` calls
-``create_session`` without ``distributed=True``, so even under ``--env
-opensky`` it never attaches to the Kubernetes master and silently runs
-local-only. That is survivable for a day of one aerodrome and hopeless for a
-period of the network.
-
-A fourth choice is deliberate rather than corrective: **one Spark session per
-step**. A long-lived ``SparkContext`` accumulates retained UI state -- stages,
-jobs, tasks, SQL executions -- and that growth is what put the driver within
-reach of the container cap in the first place. Recreating the session between
-steps bounds it, and costs a session start (tens of seconds) against steps that
-run for hours.
+* **Resumable.** Every finished unit (a step, or a step for one day) is
+  recorded in a state file at once, and running the same command again skips
+  it. ``--force`` runs finished units again.
+* **Driver memory that fits.** The Spark driver's memory is set from the
+  memory actually free in the container when the run starts
+  (:func:`safe_driver_memory`), because a container that runs out of memory
+  stops the process without an error message.
+* **One Spark session per step,** distributed on Kubernetes in the
+  ``opensky`` environment. A long-lived session accumulates history and
+  memory; a new one per step costs seconds against steps that run for hours.
 """
 
 from __future__ import annotations
@@ -44,45 +31,28 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
-#: Steps a data run performs, in execution order.
+#: Steps a run performs, in order.
 #:
-#: Step 00 is **included**, because this runner's contract is a build that
-#: reuses nothing. Reference tables are not carried over from an existing
-#: warehouse; they are rebuilt into the target prefix alongside the data, so
-#: every table a run reads is one that run produced. That is what makes the
-#: output self-contained and what makes "which geometry produced this event"
-#: answerable without a separate vintage record.
-#:
-#: The substeps inside 00 run in dependency order, not id order -- see
-#: ``runner.REFERENCE_SUBSTEPS``. Skipping 00 is still possible
-#: (``--steps 01 02 02a 03 04``), and then the reference tables must already
-#: exist, which ``preflight`` checks.
+#: Step 00 is included: the reference tables are built in the warehouse the
+#: run writes to (and reused when they are complete), so every table a run
+#: reads was produced by it. Its substeps run in dependency order (see
+#: ``runner.REFERENCE_SUBSTEPS``). Leaving out 00 (``--steps 01 02 02a 03
+#: 04``) requires the reference tables to exist already, which ``preflight``
+#: checks.
 PERIOD_STEPS: tuple[str, ...] = ("00", "01", "01b", "02", "02a", "03", "04", "04b")
 
-#: Steps that run once for the whole window, not per day.
-#:
-#: 00 builds reference tables, which have no notion of a day. 01 ingests state
-#: vectors by calendar date and has no track semantics at all -- and it must
-#: cover the whole window *plus* the lookahead before any day is segmented,
-#: because day D reads into D+1 to finish the flights that start on D. Running
-#: ingestion per day would have each day depend on the next day's ingest, which
-#: is an ordering knot with nothing to gain.
+#: Steps that run once for the whole period, not per day: 00 builds the
+#: reference tables, which have no day, and 01 fetches the position reports
+#: by calendar day and is run per day inside :func:`run_day_step`.
 WINDOW_STEPS: tuple[str, ...] = ("00",)
 
 #: Steps that run once per day, on the tracks that day owns.
 DAY_STEPS: tuple[str, ...] = ("01", "01b", "02", "02a", "03", "04", "04b")
 
-#: What each reference substep produces.
-#:
-#: Step 00 is all-or-nothing without this: once the set is incomplete it runs,
-#: and every substep runs with it -- so a build that died on the runway grid
-#: re-downloads and rewrites OurAirports on the way back to it. Harmless, since
-#: those writes replace rather than append, but it is minutes of work for an
-#: unchanged result and it obscures which table the run is actually there to
-#: build.
-#:
-#: 00c is listed for completeness. Its output is read by nothing today, so
-#: skipping it changes no result either way.
+#: The tables each reference substep produces. A substep whose tables all
+#: exist and are not empty is skipped, so a build that stopped part way
+#: resumes at the table it stopped on. 00c (airspaces) is read only by the
+#: FIR crossings.
 REFERENCE_OUTPUTS = {
     "00a": ("h3_airport_detection_zones",),
     "00b": ("hexaero_airport_layouts",),
@@ -94,12 +64,10 @@ REFERENCE_OUTPUTS = {
 
 
 def reference_substeps_to_run(storage, force: bool = False) -> dict[str, bool]:
-    """Which reference substeps still have work to do.
+    """The reference substeps that still have work to do.
 
-    A substep is skipped when everything it produces is present *and
-    non-empty*; see :func:`preflight` for why emptiness counts as absent. The
-    check is per substep rather than per step, so a build that died partway
-    resumes at the table it died on instead of starting again from OurAirports.
+    A substep is skipped when every table it produces is present and not
+    empty (see :func:`preflight` for why an empty table counts as missing).
     """
     if force:
         return {k: True for k in REFERENCE_OUTPUTS}
@@ -108,13 +76,8 @@ def reference_substeps_to_run(storage, force: bool = False) -> dict[str, bool]:
     }
 
 
-#: Extra days of state vectors to ingest past the window.
-#:
-#: The last day of the window is segmented over data running into the day
-#: after it, so that a flight departing at 22:50 is complete. Without this the
-#: final day would be segmented against an empty tail and every late departure
-#: in it would be truncated -- which the truncation check would report, loudly,
-#: but only after the run had spent the time.
+#: Extra days of position reports fetched after the period, so that the last
+#: day's late departures are complete.
 INGEST_LOOKAHEAD_DAYS = 2
 
 #: The warehouse a run uses when neither the caller nor the
@@ -161,15 +124,13 @@ def is_day_step(step: str) -> bool:
     return step in DAY_STEPS or step in OPTIONAL_DAY_STEPS
 
 
-#: Steps that take no date range. Mirrors the same split in ``runner.py``; if
-#: that list changes this one must change with it, which ``test_periodrun``
-#: pins.
+#: Steps that take no date range. The same list as in ``runner.py``;
+#: ``tests/test_periodrun.py`` checks that the two agree.
 UNDATED_STEPS: frozenset = frozenset({"00"})
 
-#: Reference tables the data steps read. A run that starts without these does
-#: not fail fast -- it produces empty joins and reports them as coverage
-#: failures, which is the most expensive kind of wrong answer because it looks
-#: like a result. Sources, in order: 00d, 00f, 00e, 00b, 00f, 00a.
+#: Reference tables the data steps read. A run without them does not fail;
+#: it produces empty joins that look like missing coverage, so they are
+#: checked before the run. Produced by 00d, 00f, 00e, 00b, 00f and 00a.
 REQUIRED_REFERENCE_TABLES: tuple[str, ...] = (
     "oa_airports",
     "oa_runways",
@@ -179,19 +140,14 @@ REQUIRED_REFERENCE_TABLES: tuple[str, ...] = (
     "h3_airport_detection_zones",
 )
 
-#: Fraction of measured container headroom the JVM heap may claim.
-#:
-#: A JVM's resident size is its heap plus metaspace, thread stacks, code cache,
-#: GC structures and direct byte buffers; Spark's driver adds Python for
-#: PySpark and the off-heap buffers used by the S3A committer. Those are not
-#: small and they are not counted in ``-Xmx``. Claiming much more than half of
-#: what is free leaves the kernel to make up the difference, and the kernel
-#: makes it up with SIGKILL.
+#: Share of the container's free memory the driver's Java heap may take.
+#: The process also needs memory outside the heap (metaspace, thread stacks,
+#: Python, buffers), and a container that runs out of memory stops it without
+#: warning.
 HEAP_FRACTION_OF_HEADROOM = 0.55
 
-#: Never propose a heap below this. Under it Spark spends its time in GC and a
-#: run fails slowly instead of quickly, which is worse: a fast failure is a
-#: message, a slow one is a wasted afternoon.
+#: Smallest driver heap, in GB, worth starting with; below it Spark spends
+#: its time collecting garbage and fails slowly.
 MIN_DRIVER_HEAP_GB = 2
 
 
@@ -225,28 +181,26 @@ def safe_driver_memory(
     used_bytes: int = 0,
     fraction: float = HEAP_FRACTION_OF_HEADROOM,
 ) -> str:
-    """The largest driver heap that fits, expressed as a Spark size string.
+    """The largest driver heap that fits, as a Spark size string.
 
-    Returns ``requested`` unchanged when there is no cgroup limit to respect,
-    or when what was asked for already fits. Otherwise returns the reduced
-    value. Never returns more than ``requested``: this exists to stop a driver
-    being killed, not to hand it memory the operator did not ask for.
+    Returns ``requested`` unchanged when there is no container limit or when
+    it already fits; otherwise a smaller value. Never more than
+    ``requested``.
 
     Args:
-        requested: Spark size string, e.g. ``"10G"``. Case-insensitive.
-        limit_bytes: Container memory cap. ``None`` means unconstrained, and
-            ``requested`` is returned as-is.
-        used_bytes: Anonymous memory already resident in the container. The
-            driver has to fit in what is left, not in the whole cap -- this
-            pod also hosts the notebook kernel that launched it.
-        fraction: Share of headroom the heap may claim. See
-            ``HEAP_FRACTION_OF_HEADROOM``.
+        requested: Spark size string, for example ``"10G"``; case does not
+            matter.
+        limit_bytes: Memory limit of the container. ``None`` means no limit,
+            and ``requested`` is returned as is.
+        used_bytes: Memory already in use in the container (the driver must
+            fit in what is left).
+        fraction: Share of the free memory the heap may take; see
+            :data:`HEAP_FRACTION_OF_HEADROOM`.
 
     Raises:
-        ValueError: if ``requested`` is not a parseable size string, or if the
-            headroom cannot fit ``MIN_DRIVER_HEAP_GB``. The second is a refusal
-            rather than a silent shrink: a run that cannot be given a workable
-            heap should say so at launch, not die four hours in.
+        ValueError: If ``requested`` cannot be read, or if the free memory
+            cannot hold :data:`MIN_DRIVER_HEAP_GB`; the run is then refused
+            at the start rather than failing hours later.
     """
     want_gb = _parse_size_gb(requested)
     if limit_bytes is None:
@@ -276,13 +230,10 @@ def _parse_size_gb(size: str) -> int:
 
 
 def period_window(start: date, days: int = 7) -> tuple[date, date]:
-    """The half-open window ``[start, start + days)`` as inclusive dates.
+    """The dates ``start`` to ``start + days - 1``, both included.
 
-    The pipeline's steps take ``start_date``/``end_date`` and treat them as an
-    inclusive range, so seven days is ``start`` to ``start + 6``. Stating this
-    once here keeps every caller from doing its own off-by-one, which is the
-    kind of error that costs a day of cluster time and is invisible in the
-    output.
+    The steps take ``start_date`` and ``end_date`` as an inclusive range, so
+    seven days are ``start`` to ``start + 6``.
     """
     if days < 1:
         raise ValueError(f"days must be >= 1, got {days}")
@@ -291,12 +242,10 @@ def period_window(start: date, days: int = 7) -> tuple[date, date]:
 
 @dataclass
 class RunState:
-    """What a run has finished, persisted so a re-invocation can skip it.
+    """What a run has finished, kept so that running it again skips it.
 
-    Held as a plain JSON file rather than a table because it must be readable
-    and editable when a run has gone wrong at three in the morning, and because
-    it has to survive the cluster being unreachable -- which is exactly when it
-    matters.
+    A plain JSON file, so it can be read and edited by hand, and read without
+    the cluster.
     """
 
     path: Path
@@ -305,15 +254,14 @@ class RunState:
     end_date: str = ""
     env: str = ""
     coverage: str = ""
-    """``config.coverage.label`` at the time this state was written. An empty
-    string reads as ``"europe"`` in :meth:`matches` -- every state file
-    written before this field existed described a European run, since
-    worldwide coverage did not exist yet, so an old file must keep matching a
-    European re-invocation rather than suddenly refusing it."""
+    """``config.coverage.label`` when this state was written. An empty value
+    reads as ``"europe"``, the coverage of state files that do not record
+    one."""
     completed: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> RunState:
+        """Read the state file at ``path``; an empty state when it is absent."""
         path = Path(path)
         if not path.exists():
             return cls(path=path)
@@ -329,6 +277,7 @@ class RunState:
         )
 
     def save(self) -> None:
+        """Write the state file."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "run_id": self.run_id,
@@ -343,11 +292,7 @@ class RunState:
         tmp.replace(self.path)
 
     def mark(self, step: str, seconds: float) -> None:
-        """Record a step as done. Written immediately, not at the end.
-
-        Batching these to the end would lose the whole record to the crash
-        they exist to protect against.
-        """
+        """Record a step as done, and write the file at once."""
         self.completed[step] = {
             "finished_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "seconds": round(seconds, 1),
@@ -355,20 +300,12 @@ class RunState:
         self.save()
 
     def matches(self, env: str, start: date, end: date, coverage: str = "europe") -> bool:
-        """Whether this state describes the window and coverage now being
-        asked for.
+        """Whether this state belongs to the period and coverage now asked for.
 
-        A state file from a different window must never be used to skip steps:
-        the step names are identical, so nothing else would catch it, and the
-        result would be a run that silently reports someone else's data. Same
-        reasoning for coverage: a European run's progress must not be mistaken
-        for a worldwide one's, or vice versa -- this has bitten before, when a
-        stale ``weekrun_2026-06-01_1d.json`` made a run report five completed
-        units and skip steps 02-04 entirely.
-
-        ``self.coverage`` empty (an old state file, written before this field
-        existed) is read as ``"europe"``, since every run before worldwide
-        coverage existed was implicitly European.
+        A state file of another period or coverage must never be used to skip
+        steps: the step names are the same, so nothing else would notice. An
+        empty ``coverage`` (a file that does not record one) reads as
+        ``"europe"``.
         """
         if not self.completed:
             return True
@@ -385,12 +322,10 @@ def plan_steps(
     state: RunState,
     force: bool = False,
 ) -> list[str]:
-    """Which of ``requested`` still need to run, in order.
+    """The units of ``requested`` that still need to run, in their order.
 
-    Order is ``requested``'s, not sorted: ``"02a"`` must follow ``"02"`` and
-    sorting strings puts it there by luck rather than by rule. The luck holds
-    today and would stop holding the moment a step named ``"02b"`` or ``"10"``
-    appeared.
+    The order of ``requested`` is kept rather than sorted, because "02a" must
+    follow "02" by rule, not by alphabetical luck.
     """
     if force:
         return list(requested)
@@ -398,34 +333,32 @@ def plan_steps(
 
 
 def resolve_pbf_path(config) -> str | None:
-    """The OSM extract step 00b will read, by the same precedence runner uses.
+    """The OpenStreetMap extract step 00b will read.
 
-    ``OPDI_OSM_PBF`` beats the configured value, matching
-    ``runner._step_00b_airport_layouts`` so this check cannot disagree with
-    what the step actually does. ``None`` means no extract is configured, and
-    00b would fall back to the public Overpass API -- which resolves airport
-    *names* through Nominatim, returns no data rather than an error when a name
-    does not resolve, and refuses outright at this scale. Five of twenty
-    aerodromes came back silently empty the last time that path built anything.
+    ``OPDI_OSM_PBF`` takes precedence over the configured value, as in
+    ``runner._step_00b_airport_layouts``. ``None`` means no extract: step 00b
+    would then query the public Overpass service, which cannot serve many
+    airports and returns nothing, without an error, for an airport whose
+    name it cannot resolve.
     """
     return os.environ.get("OPDI_OSM_PBF") or getattr(config.h3, "airport_layout_pbf_path", None)
 
 
-#: Degrees added to ``EUROPE_BBOX`` before checking a worldwide-configured
-#: extract for out-of-Europe aerodrome geometry (see
-#: ``preflight_fresh_build``). Covers legitimate "greater Europe" outliers a
-#: real European regional extract ships (Svalbard, the Azores) so they are
-#: not mistaken for evidence of worldwide coverage; measured worst case 8.67
-#: degrees against ``aeroway-europe.osm.pbf``.
+#: Degrees added around ``EUROPE_BBOX`` before deciding that an extract holds
+#: airports outside Europe (see ``preflight_fresh_build``). A European extract
+#: also holds airports somewhat outside the box (Svalbard, up to 8.7 degrees
+#: north of it; the Azores), which must not count as worldwide coverage.
 _GREATER_EUROPE_MARGIN_DEG = 10.0
 
 
 def preflight_fresh_build(config) -> list[str]:
-    """Problems that would make a from-scratch reference build fail or lie.
+    """Problems that would make a reference build from scratch fail or lack data.
 
-    Returns human-readable problems, empty when there are none. Checked before
-    a session is created, because every one of these is knowable without the
-    cluster and each costs hours if discovered later.
+    Checked before a Spark session starts, because each can be known without
+    the cluster and would otherwise cost hours.
+
+    Returns:
+        Readable descriptions of the problems; empty when there are none.
     """
     problems: list[str] = []
     pbf = resolve_pbf_path(config)
@@ -438,31 +371,15 @@ def preflight_fresh_build(config) -> list[str]:
     elif not Path(pbf).exists():
         problems.append(f"the configured OSM extract does not exist: {pbf}")
     elif getattr(getattr(config, "coverage", None), "is_worldwide", False):
-        # A worldwide run pointed at a European-only extract would build
-        # worldwide detection zones and a worldwide runway grid (both from
-        # ``oa_airports``/``oa_runways``, not the extract) but European-only
-        # ground layouts (00b, the only substep this file drives) -- every
-        # aerodrome outside Europe then has no geometry, indistinguishable
-        # from "OSM never mapped it", a documented normal outcome. Caught
-        # here rather than left to be discovered after hours of build: one
-        # aerodrome outside the box is enough, so this stops at the first
-        # match rather than reading the whole file.
-        #
-        # The check is against ``EUROPE_BBOX`` widened by
-        # ``_GREATER_EUROPE_MARGIN_DEG``, not the bare box. Geofabrik's own
-        # "europe" regional extract -- the real file this guard exists to
-        # catch -- legitimately ships aerodromes outside the strict box:
-        # Svalbard/Jan Mayen (up to 8.67 degrees past ``max_lat``) and the
-        # Azores (past ``min_lon``). Measured directly against
-        # ``aeroway-europe.osm.pbf``: 17 of 7,263 aerodromes sit outside the
-        # bare box, worst excursion 8.67 degrees (Ny-Alesund, Svalbard). A
-        # bare-box check would treat that legitimate European extract as
-        # already worldwide and never report a problem -- the false negative
-        # this guard exists to prevent, just moved one level down. 10
-        # degrees clears every measured legitimate excursion with margin to
-        # spare, while a genuinely worldwide extract's nearest non-European
-        # aerodrome (confirmed against ``aeroway-planet.osm.pbf``: Sydney,
-        # ~100 degrees of longitude away) is nowhere near it.
+        # A worldwide run with a European extract would build worldwide
+        # detection zones and runway grid (from OurAirports) but European
+        # layouts only, and every airport outside Europe would look as if
+        # OpenStreetMap had no map of it. One airport outside the widened box
+        # is enough to show the extract is worldwide, so the scan stops at the
+        # first. The box is widened by _GREATER_EUROPE_MARGIN_DEG because a
+        # European extract holds a few airports just outside the strict box;
+        # a worldwide extract's nearest airport outside Europe is much
+        # further away.
         from opdi.coverage import EUROPE_BBOX
         from opdi.reference.pbf_source import pbf_has_aerodrome_outside_bbox
 
@@ -481,18 +398,11 @@ def preflight_fresh_build(config) -> list[str]:
 
 
 def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> list[str]:
-    """Names of required reference tables that are missing or unreadable.
+    """Names of the required reference tables that are missing, empty or unreadable.
 
-    Returns a list rather than raising so the caller can report every problem
-    at once. Being told about one missing table, fixing it, and then being told
-    about the next is the behaviour this avoids.
-
-    A coverage mismatch, if any, is prepended ahead of the table checks -- it
-    is the more fundamental problem: a period run that is about to mix
-    coverages in one warehouse should be told that before it is told which
-    tables it would have read. ``storage`` may be a lightweight stand-in used
-    in tests that has no ``check_coverage``; that case is treated the same as
-    "no problem", not as a failure.
+    Returns every problem at once rather than raising at the first. A
+    warehouse built with a different coverage is reported first. ``storage``
+    may be a test stand-in without ``check_coverage``.
     """
     problems: list[str] = []
     check_coverage = getattr(storage, "check_coverage", None)
@@ -505,46 +415,32 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> lis
     for name in tables:
         try:
             if storage.read_table(name).limit(1).count() == 0:
-                # Present but empty counts as missing, and the distinction is
-                # not academic. A Spark stage whose executors all die can still
-                # commit: it writes a zero-row part file and a _SUCCESS marker,
-                # so the table exists, reads cleanly, and contains nothing.
-                # Observed exactly this on a from-scratch build -- step 00a
-                # lost eight executors to OOM and left
-                # h3_airport_detection_zones at 0 rows with _SUCCESS beside it.
-                #
-                # Testing readability alone would then call the reference set
-                # complete, skip the rebuild, and run the whole pipeline
-                # against an empty detection grid -- producing no ADEP or ADES
-                # for any flight, with nothing anywhere reporting why.
+                # Present but empty counts as missing: a Spark job whose
+                # executors all fail can still write an empty file and a
+                # _SUCCESS marker. An empty detection zone table would give no
+                # flight an airport, with nothing reporting why.
                 missing.append(name)
         except Exception:
             missing.append(name)
     return problems + missing
 
 
-#: Tables that exist only to feed later steps and can be dropped once a day's
-#: outputs are written.
-#:
-#: `osn_tracks` and `osn_tracks_clean` are the bulk of a day -- ~9.8 GB and
-#: ~9.4 GB worldwide against ~1.5 GB for the flight list, events and
-#: measurements combined. They are inputs to steps 03 and 04, so they cannot be
-#: skipped at write time; retention is therefore a decision made AFTER the
-#: dependent steps land, not a flag on the write.
+#: Tables that only feed later steps and can be removed once a day's outputs
+#: are written. The tracks are most of a day's working data (about 10 GB
+#: each for ``osn_tracks`` and ``osn_tracks_clean`` worldwide), and steps 03
+#: and 04 read them, so they are removed after those steps, not skipped.
 TRACK_TABLES: tuple[str, ...] = ("osn_tracks", "osn_tracks_clean")
 
 
 def prune_tracks_for_day(storage, day: date) -> int:
-    """Drop the track partitions for *day*. Returns partitions removed.
+    """Remove the track day folders of ``day``.
 
-    Only safe once every step that reads tracks has completed for this day --
-    03 builds the flight list from them and 04 derives events from them. The
-    caller enforces that ordering; this function does not check it.
+    Only once every step that reads the tracks (03 and 04) has finished for
+    the day; the caller makes sure of that. A removed day can no longer have
+    its events computed again without fetching its reports again.
 
-    What is lost is re-derivation without re-ingest: events for a pruned day
-    cannot be recomputed from stored tracks, only by ingesting the day again.
-    The benchmarker's `trajectory` cache table also reads `osn_tracks`, so a
-    pruned day has no trajectory view.
+    Returns:
+        The number of day folders removed.
     """
     removed = 0
     for table in TRACK_TABLES:
@@ -560,23 +456,13 @@ DEFAULT_LOG_DIR = "OPDI_live/logs"
 
 
 def _log_dir(kwargs: dict) -> str:
-    """Where this run's local ETL progress logs live.
+    """The local folder of this run's progress logs.
 
-    **A run that redirects its tables must redirect these too.** The logs sit
-    on the driver's local disk, and one of them gates a *remote* write:
-    `build_endpoint_candidates` is deliberately not keyed to
-    `skip_if_processed` -- rebuilding the flight list with different thresholds
-    does not invalidate the candidates, which is the point of caching them --
-    so it skips on its own day log and step 03 then reads the table it did not
-    write.
-
-    That is exactly how the ADS-C arm run failed on its first attempt: a
-    production campaign over 2026-06-01..14 had logged all fourteen days on
-    this pod, so the arm run skipped the build and died with PATH_NOT_FOUND
-    against its own research prefix. The tables were redirected; the local
-    state saying they existed was not.
-
-    Defaulting to the shared directory keeps every existing caller unchanged.
+    A run that writes its tables elsewhere must keep its logs elsewhere as
+    well: the logs are on the local disk, and one of them decides whether
+    the endpoint candidates are built. With shared logs, a run in another
+    warehouse would skip the build and then fail to read a table it never
+    wrote. The default is the shared folder.
     """
     return kwargs.get("log_dir") or DEFAULT_LOG_DIR
 
@@ -588,8 +474,8 @@ STEPS_WITH_LOGS = ("02", "02a", "03", "04")
 def _shared_log_dir(storage) -> str:
     """A local folder that mirrors the progress logs kept in the warehouse.
 
-    One folder per state location, so that two warehouses never share logs on
-    one machine.
+    One folder per warehouse, so two warehouses never share logs on one
+    machine.
     """
     import hashlib
 
@@ -600,17 +486,23 @@ def _shared_log_dir(storage) -> str:
 def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     """Run one pipeline step for the tracks that started on ``day``.
 
-    Each processor has a ``process_day`` that reads the day's own tracks --
-    whole, including the part of a late departure that runs past midnight --
-    rather than a slice of a month. They are called directly rather than
-    through ``runner.STEPS`` because those entry points take a date *range*
-    and would quietly widen a day back into a month.
+    Each processor's ``process_day`` reads the day's own tracks, whole,
+    including the part of a late departure after midnight. They are called
+    directly, not through ``runner.STEPS``, whose entry points take a date
+    range.
 
     In the ``opensky`` environment the steps' progress logs are kept in the
     warehouse, under ``<release root>/_state/logs``: they are copied to a
-    local folder before the step and back after it succeeds, so that the
-    next step can run on another machine. A ``log_dir`` in ``kwargs`` turns
-    this off and uses that local folder alone.
+    local folder before the step and back after it succeeds, so the next
+    step can run on another machine. A ``log_dir`` in ``kwargs`` turns this
+    off and uses that local folder alone.
+
+    Args:
+        spark: Active Spark session.
+        config: OPDI configuration.
+        step: Step id, for example ``"02"``.
+        day: The day.
+        kwargs: Extra arguments for the step (``log_dir``).
     """
     if step in STEPS_WITH_LOGS and not kwargs.get("log_dir"):
         from opdi.utils.storage import StorageManager
@@ -627,17 +519,11 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         from opdi.ingestion.osn_statevectors import StateVectorIngestion
         from opdi.utils.storage import StorageManager
 
-        # A sliding window, not a fresh fetch.
-        #
-        # Day D is segmented over [D - lookback, D+1 + lookahead), which spans
-        # D-1, D and D+1. Consecutive days therefore overlap by two thirds: if
-        # each day re-fetched its whole window, every calendar day would be
-        # pulled from the archive three times.
-        #
-        # So fetch only the days not already on disk, and drop only the days
-        # the window has moved past. Across a campaign each calendar day is
-        # fetched once and deleted once, and the table holds three days rather
-        # than the whole month.
+        # A sliding window of three days, not a new fetch. Day D is built from
+        # the reports of D-1 to D+1, so consecutive days share two of their
+        # three days. Only the days not already in the table are fetched, and
+        # only the days the window has passed are removed, so each calendar
+        # day is fetched once and the table holds three days.
         needed = [day - timedelta(days=1), day, day + timedelta(days=1)]
         storage = StorageManager(spark, config)
         present = set(storage.list_partitions("osn_statevectors_v2", "event_time_day"))
@@ -660,9 +546,8 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
                 sv.ingest(start_date=d, end_date=d + timedelta(days=1))
 
         if stale:
-            # After fetching, never before: a crash between the two would
-            # otherwise leave the window short and the next run would have no
-            # way to tell that from a day the archive genuinely lacks.
+            # After fetching, never before: after a failure in between, a
+            # short window could not be told from a day the archive lacks.
             n = storage.drop_partitions("osn_statevectors_v2", "event_time_day", stale)
             print(f"    dropped {n} day(s) the window has passed: {', '.join(stale)}")
     elif step == "01b":
@@ -672,14 +557,9 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
 
         from opdi.ingestion.osn_adsc import AdscIngestion
 
-        # The same three-day sliding window step 01 uses, and for the same
-        # reason: day D is segmented over [D-1, D+2), so the merge needs ADS-C
-        # for all three days or the tracks at the window's edges would see one
-        # source on one side of midnight and two on the other.
-        #
-        # No partition pruning of the kind step 01 does, because the whole
-        # table is a few megabytes per day: refetching three days costs less
-        # than the listing that would avoid it.
+        # The same three-day window as step 01, so the tracks at the window's
+        # edges see the same sources on both sides of midnight. The ADS-C table
+        # is a few MB per day, so the three days are simply fetched again.
         adsc = AdscIngestion(spark, config)
         adsc.ingest_from_s3(
             start_date=day - timedelta(days=1),
@@ -725,9 +605,8 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         from opdi.pipeline.flight_list_step import enrich_day
         from opdi.utils.storage import StorageManager
 
-        # One day at a time, and only the day this unit owns: the enrichment
-        # replaces the flight list partition it reads, so a wider window would
-        # rewrite days this unit was not asked for.
+        # Only the day this unit owns: the step rewrites the flight list day
+        # folder it reads.
         written = enrich_day(StorageManager(spark, config), config.events, day, day)
         if written is not None:
             print(f"  flight list enriched: {written:,} rows")
@@ -749,11 +628,7 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
 
 
 def day_state_key(step: str, day: date) -> str:
-    """How a per-day step records completion.
-
-    Namespaced by day, because the same step runs once per day and a bare step
-    name would mark all seven done after the first.
-    """
+    """The state key of a step for one day: ``"<step>@<YYYY-MM-DD>"``."""
     return f"{step}@{day.isoformat()}"
 
 
@@ -763,17 +638,12 @@ def days_in(start: date, end: date) -> list[date]:
 
 
 def _session_extras() -> dict[str, str]:
-    """Spark settings applied to every step's session.
+    """Spark settings added to every step's session.
 
-    The retained-state caps are permanent: a driver keeps stage, job, task and
-    SQL-execution history for the life of its context, and that growth is what
-    put an earlier run within reach of the container's memory cap.
-
-    Event logging is opt-in through ``OPDI_EVENTLOG_DIR`` because it is a
-    measurement tool, not something a production run should pay for. Set it and
-    the run writes a per-stage cost history that can be read afterwards --
-    which is the only way to attribute a slow step to a specific shuffle rather
-    than to a guess.
+    Caps on the history the driver keeps (stages, jobs, tasks, SQL runs),
+    which otherwise grows for the life of the session. Spark event logging is
+    turned on when ``OPDI_EVENTLOG_DIR`` names a folder, to measure where a
+    step spends its time.
     """
     extras = {
         "spark.ui.retainedStages": "50",
@@ -783,12 +653,8 @@ def _session_extras() -> dict[str, str]:
     }
     eventlog = os.environ.get("OPDI_EVENTLOG_DIR")
     if eventlog:
-        # Spark refuses to start if the event-log directory does not exist --
-        # "FileNotFoundException: File ... does not exist" from
-        # SparkContext init, before a single step runs. For a local path there
-        # is no reason to make the operator create it by hand; for a remote one
-        # we leave it alone, because creating a bucket prefix is not ours to
-        # guess at.
+        # Spark refuses to start if the event log folder does not exist. A
+        # local folder is created; a remote one is left to the operator.
         if eventlog.startswith("file://"):
             Path(eventlog[len("file://") :]).mkdir(parents=True, exist_ok=True)
         elif "://" not in eventlog:
@@ -797,8 +663,7 @@ def _session_extras() -> dict[str, str]:
             {
                 "spark.eventLog.enabled": "true",
                 "spark.eventLog.dir": eventlog,
-                # Stage-level metrics are the point; without this the log records
-                # that a stage ran but not what it cost.
+                # Record what each stage cost, not only that it ran.
                 "spark.eventLog.logStageExecutorMetrics": "true",
             }
         )
@@ -831,38 +696,39 @@ def run_period(
     keep_tracks_on: Sequence[date] = (),
     worldwide: bool = True,
 ) -> int:
-    """Run the pipeline over a window of ``days``, resuming where it stopped.
+    """Run the pipeline over ``days`` days, resuming where it stopped.
 
-    Returns a process exit code: 0 if every requested step is complete, 1
-    otherwise. A step that fails stops the run -- steps are a dependency chain,
-    and continuing past a failure would build step 04 on a step 03 that is not
-    there.
+    Each day goes through all requested steps before the next day starts. A
+    failed step stops the run, because later steps read its output.
 
     Args:
-        env: Environment name. ``"opensky"`` additionally turns on distributed
-            mode, which ``run_pipeline`` does not do for any environment.
-        start: First day of the window, inclusive.
-        days: Window length. Seven by default; the name of this module is not
-            a constraint on it.
-        steps: Step ids to run, in dependency order.
-        state_path: Where completion is recorded. Defaults to
+        env: Environment name, ``"opensky"`` (distributed on Kubernetes) or
+            ``"local"``.
+        start: First day of the period.
+        days: Number of days (default 7).
+        steps: Step ids to run, in order.
+        state_path: File that records the finished units. Default:
             ``logs/periodrun_{start}_{days}d.json``.
-        force: Re-run steps already marked complete.
-        driver_memory: Override the heap. Still capped to what the container
-            can hold -- an override raises the ask, it does not waive physics.
-        executors: Override ``spark.executor.instances``.
-        skip_preflight: Do not check the reference tables. For when a
-            reference table is known-missing and the run is deliberate.
-        dry_run: Report the plan and exit without creating a session.
-        warehouse: The warehouse to use. When omitted, the
-            ``OPDI_WAREHOUSE`` environment variable, else
-            :data:`DEFAULT_WAREHOUSE`. The tables go to the release root
-            inside it (``<warehouse>/v2.0.0`` in the ``opensky``
-            environment); see :func:`_resolve_warehouse`.
-        worldwide: Process the whole world (the default). Pass ``False``
-            for a run limited to the European box. The coverage does not
-            change the warehouse; the coverage marker refuses a run whose
-            coverage differs from the one that built the release root.
+        force: Run units again that are recorded as finished.
+        driver_memory: Driver heap to ask for; still reduced to what the
+            container can hold.
+        executors: Number of Spark executors (``spark.executor.instances``).
+        skip_preflight: Do not check the reference tables first.
+        dry_run: Print the plan and stop, without starting Spark.
+        warehouse: The warehouse. Default: the ``OPDI_WAREHOUSE``
+            environment variable, else :data:`DEFAULT_WAREHOUSE`. The tables
+            go to the release root inside it (``<warehouse>/v2.0.0`` in the
+            ``opensky`` environment).
+        prune_tracks: Remove each day's track folders once steps 03 and 04
+            have finished for it (see :func:`prune_tracks_for_day`).
+        keep_tracks_on: Days whose tracks are kept even with
+            ``prune_tracks``.
+        worldwide: Process the whole world (default). ``False`` limits the
+            run to the European box. A warehouse built with the other
+            coverage is refused.
+
+    Returns:
+        0 when every requested unit is finished, 1 otherwise.
     """
     from opdi.config import OPDIConfig
     from opdi.runner import STEPS, reference_substeps_for_coverage
@@ -876,19 +742,16 @@ def run_period(
     if unknown:
         raise ValueError(f"unknown step(s) {unknown}; valid: {sorted(STEPS)}")
 
-    # Built early, ahead of the state-file check: the state file must be
-    # scoped to a coverage as well as a window, and `config.coverage.label`
-    # is what scopes it.
+    # Built first: the state file is tied to the coverage as well as to the
+    # period.
     config = OPDIConfig.for_environment(env, worldwide=worldwide)
 
     start_date, end_date = period_window(start, days)
     if state_path is None:
         state_path = Path("logs") / f"periodrun_{start_date.isoformat()}_{days}d.json"
         if not state_path.exists():
-            # A campaign started before this module was renamed keeps its
-            # progress under the old name. Losing sight of it would restart a
-            # thirty-day run at day one, so the legacy file is adopted when the
-            # new one does not exist yet.
+            # Adopt a state file written under the module's former name, so a
+            # running campaign does not start again from its first day.
             legacy = state_path.with_name(f"weekrun_{start_date.isoformat()}_{days}d.json")
             if legacy.exists():
                 print(f"  resuming from pre-rename state file {legacy}")
@@ -916,25 +779,14 @@ def run_period(
 
     all_days = days_in(start_date, end_date)
 
-    # A unit of work is a (step, day) pair for the per-day steps and a bare
-    # step for the window-wide ones, so resuming lands on the day that failed
-    # rather than restarting the period.
-    # Day-major, not step-major: a day is carried all the way through before
-    # the next day starts.
+    # A unit is a (step, day) pair for the per-day steps and a bare step for
+    # the others, so a resumed run starts at the day that failed.
     #
-    # Iterating steps on the outside runs every day's ingest, then every day's
-    # segmentation, and so on. That was survivable while state vectors
-    # accumulated. It is not survivable now they are overwritten per day: day
-    # 1's raw data is replaced by day 2's ingest long before step 02 reaches
-    # day 1, so segmentation reads a window belonging to some later day and
-    # the output is quietly wrong rather than missing.
-    #
-    # Observed: `<<< step 01 day 2026-06-01` followed immediately by
-    # `>>> step 01 day 2026-06-02`.
-    #
-    # Day-major also means a failure costs one day rather than a phase, and a
-    # half-finished campaign holds whole days rather than every day's tracks
-    # and no day's events.
+    # Day by day, not step by step: a day goes through every step before the
+    # next day starts. Step 01 keeps only a three-day window of reports, so
+    # running every day's step 01 first would replace day 1's reports before
+    # step 02 reached day 1. A failure then also costs one day, and a stopped
+    # run holds whole days.
     units: list[tuple[str, date | None]] = []
     units.extend((step, None) for step in steps if not is_day_step(step))
     for d in all_days:
@@ -946,9 +798,8 @@ def run_period(
     todo = [u for u in units if force or _key(*u) not in state.completed]
     done = [u for u in units if u not in todo]
 
-    # Set before anything reads it. StorageManager resolves every table name
-    # against the release root inside this warehouse, so reference tables,
-    # working tables and published files all move together.
+    # Set before anything reads it: every table, reference or working, and the
+    # published files are resolved inside this warehouse's release root.
     warehouse = _resolve_warehouse(warehouse, config.project.warehouse_path)
     config.project.warehouse_path = warehouse
     mem = _cgroup_v2_limit()
@@ -966,9 +817,8 @@ def run_period(
         print(f"  already done: {len(done)} unit(s)  (from {state_path})")
     print(f"  to run      : {len(todo)} unit(s) over {len(all_days)} day(s)")
     print(f"  day steps   : {' '.join(s for s in steps if is_day_step(s))}")
-    # The last day-step in the REQUESTED order, not in DAY_STEPS order: a run
-    # asking for only 01 02 must prune after 02, not wait for an 04b it never
-    # runs.
+    # The last day step in the requested order, which is where the tracks can
+    # be removed (a run of only 01 and 02 removes them after 02).
     last_day_step = next((s for s in reversed(list(steps)) if is_day_step(s)), None)
     keep_set = set(keep_tracks_on)
     if prune_tracks:
@@ -1013,8 +863,8 @@ def run_period(
     kwargs = dict(
         airports_hex_path="data/airport_hex/zones_res7_processed.parquet",
         airports_hex_raw_path="data/airport_hex/zones_res7.parquet",
-        # Filled in below, once a session exists to inspect the warehouse
-        # with. Substeps whose output is already built are skipped.
+        # Filled in below, once a session exists; substeps whose tables are
+        # already built are skipped.
         run_reference={k: True for k in REFERENCE_OUTPUTS},
         adep_mode=None,
         ades_mode=None,
@@ -1025,10 +875,8 @@ def run_period(
         scope = f"day {day}" if day is not None else f"{start_date} .. {end_date}"
         print(f"\n{'-' * 72}\n>>> step {step}  ({scope})\n{'-' * 72}")
         step_start = time.time()
-        # A session per step. The driver's retained UI state grows with every
-        # stage and SQL execution it has ever seen, and this run may span
-        # hours; a fresh context per step keeps that growth inside one step
-        # rather than accumulating across all of them.
+        # A new Spark session per step keeps the driver's growing history
+        # within one step.
         spark = SparkSessionManager.create_session(
             app_name=f"OPDI period {start_date}..{end_date} step {step}",
             config=config,
@@ -1036,39 +884,25 @@ def run_period(
             extra_configs=_session_extras(),
         )
         try:
-            # `(step, day)`, not `step`: todo holds pairs since the run
-            # became day-by-day, and comparing the bare name to a pair is
-            # always False -- which made this whole block dead code.
+            # The units are (step, day) pairs, so the pair is compared.
             if not skip_preflight and (step, day) == todo[0]:
                 storage = StorageManager(spark, config)
 
-                # Checked on its own, ahead of the table-presence logic below.
-                # `preflight()` also folds a coverage problem into the list it
-                # returns, but the `building_reference` branch below treats
-                # *any* non-empty `preflight()` result as "tables to build" --
-                # so a mismatch left to flow through that path would be
-                # misread as a missing table and the run would attempt to
-                # build reference data into the wrong warehouse instead of
-                # refusing. This check is what actually stops that.
+                # The coverage is checked first and on its own: the branch
+                # below treats any problem `preflight()` returns as "tables to
+                # build", and would otherwise try to build reference tables in
+                # a warehouse of the other coverage instead of refusing.
                 coverage_problem = storage.check_coverage()
                 if coverage_problem is not None:
                     print(f"Preflight failed: {coverage_problem}")
                     return 1
 
                 if building_reference:
-                    # Reference tables already in the warehouse are reused, not
-                    # rebuilt.
-                    #
-                    # A campaign runs one day at a time, and the state file is
-                    # per-window -- so day 2 starts with no record that day 1
-                    # built the reference data. Rebuilding it each day would
-                    # repeat hours of geometry for an unchanged result, and
-                    # before this the aircraft database was appended rather
-                    # than replaced, so seven days left seven stacked copies.
-                    #
-                    # Completeness is the test, not emptiness: a *partial* set
-                    # means an earlier build died midway, and finishing it is
-                    # exactly what should happen.
+                    # Reference tables already in the warehouse are reused. A
+                    # period is run one day at a time with one state file per
+                    # period, so day 2 does not know that day 1 built them.
+                    # An incomplete set means an earlier build stopped part
+                    # way, and it is completed.
                     missing = preflight(storage)
                     if not missing and not force:
                         print(
@@ -1083,19 +917,11 @@ def run_period(
                             f"  reference   : building {len(missing)} missing "
                             f"table(s): {', '.join(missing)}"
                         )
-                        # Narrow step 00 to the substeps with work left. The
-                        # set is incomplete, but that is no reason to
-                        # re-download OurAirports on the way to the runway
-                        # grid.
+                        # Run only the substeps with work left.
                         todo_subs = reference_substeps_to_run(storage, force=force)
-                        # `todo_subs` is derived from table presence alone, and
-                        # a fresh worldwide warehouse has no
-                        # `opdi_h3_airspace_ref` table -- so without this it
-                        # would return `{"00c": True}` and build the European
-                        # airspace layer into a worldwide warehouse. The skip
-                        # inside `_step_00_reference_data` catches this too,
-                        # but composing it here keeps the "already built"
-                        # summary printed below honest about 00c as well.
+                        # 00c is left out of a worldwide run, which has no
+                        # airspace table by design (the airspace sources are
+                        # European), so it does not count as work left.
                         for substep, run in reference_substeps_for_coverage(config).items():
                             if not run:
                                 todo_subs[substep] = False
@@ -1124,9 +950,8 @@ def run_period(
                 if step in UNDATED_STEPS:
                     fn(spark, config, **kwargs)
                 else:
-                    # Ingestion has to cover the lookahead as well as the
-                    # window: day D is segmented over data running into D+1,
-                    # so the last day's tail must already be on disk.
+                    # Fetch the period plus the lookahead: the last day is
+                    # built from reports of the day after it.
                     ingest_end = end_date + timedelta(days=INGEST_LOOKAHEAD_DAYS)
                     fn(spark, config, start_date, ingest_end, **kwargs)
         except Exception as exc:  # noqa: BLE001 - reported, then surfaced
@@ -1147,11 +972,9 @@ def run_period(
         state.mark(_key(step, day), elapsed)
         print(f"<<< step {step} {scope} done in {elapsed:.1f}s")
 
-        # Retention, decided after the day's outputs exist rather than at write
-        # time: steps 03 and 04 read the tracks this drops, so pruning may only
-        # happen once the last day-step for THIS day has been marked. Days named
-        # in `keep_tracks_on` are exempt, which is how a reference day keeps its
-        # trajectories while a long period keeps only its outputs.
+        # Removing the tracks, once the last day step of THIS day has
+        # finished (steps 03 and 04 read them). Days in `keep_tracks_on` keep
+        # their tracks.
         if prune_tracks and day is not None and step == last_day_step:
             if day in keep_set:
                 print(f"  prune: keeping tracks for {day} (exempt)")
