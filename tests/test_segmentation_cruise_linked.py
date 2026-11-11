@@ -16,6 +16,9 @@ from conftest import make_track
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
+# The study rules the default rule is compared with live with the study scripts.
+from study_variants.segmentation import debounced, recommended  # noqa: E402
+
 from opdi.config import SegmentationConfig
 from opdi.pipeline.flights import EARTH_R_NM, haversine_nm
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
@@ -30,12 +33,10 @@ from opdi.pipeline.segmentation.methods import (
     LINK_EDGE_SAMPLES,
     PLACEHOLDER_ICAO24,
     cruise_linked,
-    debounced,
     debounced_callsign_change,
     link_checks,
     link_feature_columns,
     linkable,
-    recommended,
     select_link_features,
     stable_callsign,
 )
