@@ -206,7 +206,8 @@ def test_the_old_per_cell_table_is_refused_not_overwritten(spark):
 
     old = spark.createDataFrame(
         [("FIR", "AAAA", "x", 50.0, 4.0)],
-        "airspace_type string, code string, h3_res_7 string, h3_res_7_lat double, h3_res_7_lon double",
+        "airspace_type string, code string, h3_res_7 string, h3_res_7_lat double, "
+        "h3_res_7_lon double",
     )
     gen = ha.AirspaceH3Generator(spark, OPDIConfig(), storage=_StubStorage(existing=old))
     df = pd.DataFrame([_row("AAAAFIR", "A", 0, 195, box(0, 50, 1, 51))])

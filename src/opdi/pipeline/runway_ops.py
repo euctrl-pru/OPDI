@@ -54,9 +54,9 @@ entry, exit and every reported position stay bounded by the polygon.
 
 **This module reads no table.** ``grid`` and ``thresholds`` arrive as
 DataFrames, and ``sv`` must already carry the flight list's aerodrome array,
-its ``adep``/``ades`` idents and the two field elevations. The join to the flight list therefore happens once
-for every detector that needs it rather than once per family, and every
-function here is testable on a laptop with no storage layer at all.
+its ``adep``/``ades`` idents and the two field elevations. The join to the
+flight list therefore happens once for every detector that needs it rather
+than once per family, and every function here is testable on a laptop with no storage layer at all.
 """
 
 from typing import TYPE_CHECKING, Optional

@@ -38,7 +38,8 @@ class SparkSessionManager:
             env: Environment name ("dev", "live", "local", "opensky") - used if config is None
             extra_configs: Additional Spark configurations to override defaults
             distributed: If True, enable Kubernetes distributed mode (opensky env)
-            container_image: Override K8s executor container image (e.g. "my-registry/opdi-spark:v4.1.1")
+            container_image: Override the Kubernetes executor container image
+                (e.g. "my-registry/opdi-spark:v4.1.1").
 
         Returns:
             Configured SparkSession
@@ -185,14 +186,17 @@ def get_spark(
         env: Environment name ("dev", "live", "local", "opensky")
         app_name: Name for the Spark application
         distributed: If True, enable Kubernetes distributed mode (opensky env)
-        container_image: Override K8s executor container image (e.g. "my-registry/opdi-spark:v4.1.1")
+        container_image: Override the Kubernetes executor container image
+            (e.g. "my-registry/opdi-spark:v4.1.1").
 
     Returns:
         Configured SparkSession
 
     Example:
         >>> from opdi.utils.spark_helpers import get_spark
-        >>> spark = get_spark("opensky", distributed=True, container_image="my-registry/opdi-spark:v4.1.1")
+        >>> spark = get_spark(
+        ...     "opensky", distributed=True, container_image="my-registry/opdi-spark:v4.1.1"
+        ... )
     """
     return SparkSessionManager.create_session(
         app_name=app_name,

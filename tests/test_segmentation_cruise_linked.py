@@ -1207,7 +1207,7 @@ def test_each_field_finds_its_own_samples(spark):
 
 
 def test_only_the_nearest_five_values_of_a_field_count(spark):
-    """Blanks, then five at cruise, then one low: the low one is the sixth value, not the sixth row."""
+    """Blanks, five at cruise, then one low: the low one is the sixth value, not the sixth row."""
     samples = _piece(-45, 0.0)
     samples += _piece(3600, _lon(480.0), n=8, step_s=1, baro_altitude=None)
     samples += _piece(3608, _lon(480.0), n=5, step_s=1)

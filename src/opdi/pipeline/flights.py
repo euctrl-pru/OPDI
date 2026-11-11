@@ -581,7 +581,8 @@ class FlightListProcessor:
             df_apt = pd.read_parquet(airports_hex_path)
             return self.spark.createDataFrame(df_apt.to_dict(orient="records"))
         raise FileNotFoundError(
-            "No airport hex zones found. Run AirportDetectionZoneGenerator.save_prepared_to_table() first, "
+            "No airport hex zones found. Run "
+            "AirportDetectionZoneGenerator.save_prepared_to_table() first, "
             "or provide airports_hex_path."
         )
 

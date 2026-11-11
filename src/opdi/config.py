@@ -158,7 +158,9 @@ class SparkConfig:
                     "spark.hadoop.fs.s3a.endpoint": self.s3_endpoint,
                     "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                     "spark.hadoop.fs.s3a.path.style.access": "true",
-                    "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+                    "spark.hadoop.fs.s3a.aws.credentials.provider": (
+                        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+                    ),
                     "spark.driver.memory": self.driver_memory,
                     "spark.driver.maxResultSize": self.driver_max_result_size,
                 }
@@ -187,8 +189,12 @@ class SparkConfig:
                     "spark.executor.extraClassPath": self.iceberg_jar_path,
                     "spark.driver.extraClassPath": self.iceberg_jar_path,
                     "spark.sql.catalog.spark_catalog.type": "hive",
-                    "spark.sql.catalog.spark_catalog": "org.apache.iceberg.spark.SparkSessionCatalog",
-                    "spark.sql.iceberg.handle-timestamp-without-timezone": self.handle_timestamp_without_timezone,
+                    "spark.sql.catalog.spark_catalog": (
+                        "org.apache.iceberg.spark.SparkSessionCatalog"
+                    ),
+                    "spark.sql.iceberg.handle-timestamp-without-timezone": (
+                        self.handle_timestamp_without_timezone
+                    ),
                     "spark.sql.catalog.spark_catalog.warehouse": project_config.warehouse_path,
                 }
             )
