@@ -18,6 +18,15 @@ Each command ends with exit code 0 when it succeeded and 1 when it failed.
 Every unit keeps its state in the warehouse, not on the machine that runs it:
 a finished unit is recorded under ``<release root>/_state/done/``, so running
 the same command again skips it, on any machine. ``--force`` runs it again.
+Steps 00 and 01 are the exceptions: they check their tables or folders at
+every run and build only what is missing.
+
+Before a step runs, the day folders it reads are checked (see
+:func:`step_inputs`). A single ``step`` whose input is gone refuses, with the
+command that builds the day again; ``day`` starts the day again from step 01
+and clears the marks from the step that writes the missing folder. A day
+that has started but is not published keeps every folder it reads: neither
+:func:`prune_internal` nor the step 01 of another day removes them.
 
 The days are processed by the date of the flight: day D holds the flights
 first seen on D. Building day D reads the position reports of D-1 to D+1, so a
