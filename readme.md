@@ -150,7 +150,7 @@ before it and writes its own:
 | 09 | Publish the day's flight list and flight events files, the monthly index and the catalogue | `published/` | `opdi.output.published` |
 
 Step 01b, off by default, adds ADS-C reports (satellite position reports,
-mostly over oceans) to step 02; see `AdscConfig` in `src/opdi/config.py`.
+mostly over oceans) to step 02; see `AdscConfig` in `src/opdi/config/adsc.py`.
 
 A day's steps process the flights that started on that day, whole, even when
 they end on the next day. A day can therefore be processed only once the
@@ -229,7 +229,8 @@ data. Outside Europe the results have not been validated.
 
 ## Configuration
 
-Every setting is a field of a dataclass in `src/opdi/config.py`, with its
+Every setting is a field of a dataclass in the package `src/opdi/config/`
+(one module per part of the pipeline, for example `events.py`), with its
 meaning, unit and default described there:
 
 ```python

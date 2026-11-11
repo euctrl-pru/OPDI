@@ -768,11 +768,12 @@ def run_period(
     if state_path is None:
         state_path = Path("logs") / f"periodrun_{start_date.isoformat()}_{days}d.json"
         if not state_path.exists():
-            # Adopt a state file written under the module's former name, so a
-            # running campaign does not start again from its first day.
+            # A state file of the same period named weekrun_... is used when
+            # there is one, so that a long run recorded under that name
+            # continues where it stopped instead of starting again.
             legacy = state_path.with_name(f"weekrun_{start_date.isoformat()}_{days}d.json")
             if legacy.exists():
-                print(f"  resuming from pre-rename state file {legacy}")
+                print(f"  resuming from the state file {legacy}")
                 state_path = legacy
     state = RunState.load(Path(state_path))
 
@@ -782,10 +783,9 @@ def run_period(
             f"{state.start_date}..{state.end_date} "
             f"({state.coverage or 'europe'}), but this run is {env} "
             f"{start_date}..{end_date} ({config.coverage.label}). Refusing "
-            "to reuse it -- pass a different --state-path, or delete that "
-            "file if it is stale. This has bitten before: a stale state file "
-            "once made a run report units complete and skip steps it had "
-            "never actually run."
+            "to reuse it: its finished steps belong to another run, and this "
+            "run would skip them. Pass a different --state-path, or delete "
+            "that file if it is no longer needed."
         )
 
     state.env = env

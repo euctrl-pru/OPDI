@@ -747,7 +747,7 @@ def test_a_campaign_started_before_the_rename_still_resumes(tmp_path, monkeypatc
 
     src = inspect.getsource(periodrun.run_period)
     assert 'f"weekrun_{start_date.isoformat()}_{days}d.json"' in src
-    assert "resuming from pre-rename state file" in src
+    assert "resuming from the state file" in src
 
 
 def test_the_name_no_longer_claims_a_week():

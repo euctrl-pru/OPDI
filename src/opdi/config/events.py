@@ -602,8 +602,8 @@ class EventConfig:
         if self.level_method not in ("icao", "pru"):
             raise ValueError(
                 f"level_method must be 'icao' or 'pru', got {self.level_method!r}. "
-                "An unknown arm would silently fall through to no level segments "
-                "at all, which reads as a coverage failure rather than a typo."
+                "Another value would give no level segments at all, which would "
+                "look like missing data rather than a typing error."
             )
         if self.level_anchor not in ("pru", "phase"):
             raise ValueError(f"level_anchor must be 'pru' or 'phase', got {self.level_anchor!r}.")

@@ -354,11 +354,11 @@ class StorageManager:
             f"coverage mismatch at {self.base_path}: the warehouse was written "
             f"with coverage {marker['coverage']!r} (bbox {marker['bbox']}) and "
             f"this run is {cov.label!r} (bbox "
-            f"{list(cov.bbox) if cov.bbox else None}). Mixing two coverages in "
-            "one warehouse is silent -- the rows are indistinguishable "
-            "afterwards and the track_id contract only holds for one of them. "
-            "Point this run at a different warehouse, or delete the existing "
-            "tables if they are no longer wanted."
+            f"{list(cov.bbox) if cov.bbox else None}). The rows of two coverages "
+            "cannot be told apart once they are in one warehouse, and the "
+            "flight identifiers of one coverage do not match those of the "
+            "other. Point this run at a different warehouse, or delete the "
+            "existing tables if they are no longer wanted."
         )
 
     # --- progress records -----------------------------------------------------

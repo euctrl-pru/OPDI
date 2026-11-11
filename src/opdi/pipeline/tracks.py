@@ -269,9 +269,10 @@ class TrackProcessor:
             raise RuntimeError(
                 f"config.adsc.enabled is True but {cfg.table!r} is absent from "
                 f"{self.config.project.warehouse_path!r}. Run step 01b for this "
-                f"window first. Falling back to ADS-B only here would write the "
-                f"baseline arm under the merged arm's name, and the two arms' "
-                f"tables are schema-identical -- nothing downstream could tell."
+                f"window first. Without it, these tracks would be built from "
+                f"ADS-B alone but stored as if they held ADS-C as well, and the "
+                f"two kinds of tables have the same columns, so nothing later "
+                f"could tell them apart."
             )
 
         df_adsc = self._read_adsc(start_time_str, end_time_str)
@@ -665,29 +666,40 @@ class TrackProcessor:
         lookback_hours: int = None,
         lookahead_hours: int = None,
     ) -> None:
-        """Process the tracks that *start* on ``day``, whole.
+        """Build the tracks that start on ``day``, each one whole.
 
-        Reads ``[day - lookback, day+1 + lookahead)`` and keeps the tracks whose
-        first sample falls inside ``day``. Every track has exactly one first
-        sample and so exactly one owning day, which is what makes a sequence of
-        days a partition of the data rather than an overlapping sweep: no state
-        vector is processed twice, and none is skipped.
+        Reads the position reports (state vectors) from ``lookback_hours``
+        before the start of ``day`` to ``lookahead_hours`` after its end, and
+        keeps the tracks whose first report falls on ``day``. Every track has
+        exactly one first report, so every track belongs to exactly one day:
+        run day after day, no report is processed twice and none is left out.
+        A track that runs past midnight is built in full by the day it
+        started; that is what the reports after the end of the day are read
+        for.
 
-        A track running past midnight is processed by the day it *started*,
-        in full -- that is what the lookahead is for.
-
-        The lookback defaults to ``required_lookback_hours``: 3 h, or under
-        ``cruise_linked`` ``max(3, ceil(link_max_gap_minutes / 60) +
+        The reports before the start of the day are read so that a track
+        which began shortly before midnight is seen whole and not taken for a
+        new one. By default this is :func:`required_lookback_hours`: 3 hours,
+        or, under the segmentation method ``cruise_linked`` (which joins two
+        parts of a track across a gap in reception), the longest gap it may
+        join plus the time it looks back for a call sign or a position:
+        ``max(3, ceil(link_max_gap_minutes / 60) +
         ceil(max(link_callsign_lookback_minutes, link_edge_position_minutes) / 60))``,
-        which is 11 h at the defaults.
+        11 hours with the default settings.
+
+        Args:
+            day: The day whose tracks are built.
+            skip_if_processed: Skip the day when the progress log records it.
+            lookback_hours: Hours read before the start of the day.
+            lookahead_hours: Hours read after the end of the day
+                (:attr:`DEFAULT_LOOKAHEAD_HOURS` by default).
 
         Raises:
-            ValueError: ``lookback_hours`` is below that under ``cruise_linked``.
-                Two days could then decide one gap differently, and reports
-                after midnight would be claimed twice or not at all. A gap or
-                its evidence past the end of the read is reported by the
-                truncation warning instead. Other rules decide locally, so an
-                explicit value is taken as given.
+            ValueError: If ``lookback_hours`` is below the required value under
+                ``cruise_linked``. Two days could then decide one gap
+                differently, and reports after midnight would be given to two
+                days or to none. Under the other methods each split is decided
+                from the reports next to it, so any value is accepted.
         """
         from opdi.pipeline.segmentation import SegmentationParams
 
