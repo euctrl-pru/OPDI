@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks"))
 
 import check_main_parity as parity
 import pytest
@@ -112,7 +112,7 @@ def test_a_missing_path_is_reported(tmp_path):
             }
         )
     )
-    repo = Path(__file__).resolve().parent.parent
+    repo = Path(__file__).resolve().parents[2]
     missing = parity.code_on_main(m, ref="HEAD", repo=repo)
     assert missing == ["benchmarks/definitely_not_a_real_file.py"]
 
@@ -136,6 +136,6 @@ def test_the_config_is_read_from_the_checkout_it_was_asked_for():
 def test_asking_for_a_worktree_gets_the_worktree():
     """The mirror: the loader honours whatever checkout it is given, so the
     caller -- not the ambient path -- decides what is being reported on."""
-    wt = Path(__file__).resolve().parent.parent
+    wt = Path(__file__).resolve().parents[2]
     cfg = parity.detection_config_from(wt)
     assert cfg["_from"].startswith(str(wt / "src"))

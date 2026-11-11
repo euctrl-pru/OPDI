@@ -9,7 +9,7 @@ import pytest
 PAPER = Path(
     os.environ.get(
         "OPDI_PAPER_DIR_AIRSPACE",
-        Path(__file__).resolve().parents[2] / "opdi-portal" / "papers" / "airspace-events-v1",
+        Path(__file__).resolve().parents[3] / "opdi-portal" / "papers" / "airspace-events-v1",
     )
 )
 

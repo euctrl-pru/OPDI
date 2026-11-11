@@ -13,7 +13,7 @@ be visible in a diff of the paper's own source.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks"))
 
 import flight_list_v62
 import regenerate_v62
@@ -324,7 +324,7 @@ def test_the_grid_brackets_the_shipped_ceiling():
 
 
 def _script_source(job):
-    return (Path(__file__).resolve().parent.parent / job.script).read_text()
+    return (Path(__file__).resolve().parents[2] / job.script).read_text()
 
 
 def test_every_flag_a_job_passes_exists_in_the_script_it_runs():
@@ -398,7 +398,7 @@ def test_no_job_reads_a_cache_it_did_not_declare():
     """
     import re
 
-    repo = Path(__file__).resolve().parent.parent
+    repo = Path(__file__).resolve().parents[2]
     owner = {
         "research/trend_votes_agl": "trend_sweep_agl",
         "research/trend_votes": "trend_sweep",

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "benchmarks"))
 
 import build_track_v4_paper as B  # noqa: E402

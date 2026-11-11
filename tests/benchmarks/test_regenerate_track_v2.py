@@ -14,7 +14,7 @@ No Spark, no cluster, no credentials.
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "benchmarks"))
 
 import regenerate_track_v2 as reg  # noqa: E402

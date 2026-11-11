@@ -13,7 +13,7 @@ import datetime as dt
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks"))
 
 import pytest
 from trend_sweep_agl import FL_CAPS, HEIGHT_CAPS, add_height_votes, predictions

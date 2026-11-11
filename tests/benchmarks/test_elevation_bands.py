@@ -9,7 +9,7 @@ wrong silently, so the boundaries are asserted rather than eyeballed.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks"))
 
 import pytest
 from elevation_bands import BANDS, elevation_band

@@ -10,7 +10,7 @@ which never did. This finds them by looking.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks"))
 
 import check_report_numbers as crn
 import pytest
@@ -125,7 +125,7 @@ def _find_paper() -> Path:
     then *skips*, which is the worst outcome available: the check silently
     does not run and the suite still reads green.
     """
-    repo = Path(__file__).resolve().parent.parent
+    repo = Path(__file__).resolve().parents[2]
     for base in (repo, *repo.parents):
         candidate = base.parent / "opdi-portal" / "papers"
         if candidate.is_dir():
