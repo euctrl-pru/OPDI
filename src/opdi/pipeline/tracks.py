@@ -1,11 +1,14 @@
-"""Track processing and enrichment module.
+"""Step 02: split the position reports into tracks.
 
-Transforms raw state vectors into structured flight tracks with:
-- Track ID generation (SHA256-based)
-- Track splitting based on time gaps
-- H3 geospatial encoding
-- Distance calculations
-- Altitude cleaning
+Reads the state vectors (``osn_statevectors_v2``), gives every report the
+``track_id`` of the track it belongs to, adds H3 cell indices, the distance
+flown since the start of the track and a checked altitude, and writes
+``osn_tracks``. A day's run keeps the tracks that start on that day, whole,
+even when they end on the next day.
+
+The track rule is chosen by ``config.segmentation.method``; the rules are in
+:mod:`opdi.pipeline.segmentation`.
+See https://www.opdi.aero/content/methods/track-identity.html.
 """
 
 import math
@@ -62,16 +65,11 @@ from opdi.utils.storage import StorageManager
 
 @udf(returnType=StringType())
 def _geo_to_h3_cell(lat, lon, resolution):
-    """H3 index for one (lat, lon, resolution) triple.
+    """H3 cell of one position at one resolution, NULL for a missing coordinate.
 
-    Replaces ``h3_pyspark.geo_to_h3``: h3_pyspark wraps h3 *v3* names
-    internally (``h3.geo_to_h3``), which no longer exist on the installed h3
-    4.5.0 -- calling it raises ``AttributeError`` at task execution time (see
-    tests/test_h3_zones_v4.py::test_h3_pyspark_geo_to_h3_is_broken_on_h3_v4).
-    This is a plain UDF mirroring what h3_pyspark itself did (it is
-    UDF-based too), just calling native ``h3.latlng_to_cell`` instead. Null
-    coordinates yield a null cell, matching h3_pyspark's ``handle_nulls``
-    contract.
+    A plain user-defined function over ``h3.latlng_to_cell`` of h3 version 4.
+    The ``h3_pyspark`` package calls the version 3 names, which do not exist
+    in version 4.
     """
     if lat is None or lon is None or resolution is None:
         return None
@@ -134,32 +132,32 @@ def tracks_touching_window_end(df, read_end, margin_seconds=60):
 
 
 def _resolve_segmentation_method(method: str) -> str:
-    """The arm a configured method names: ``standard`` is a pointer, not an arm.
+    """The rule a configured method names.
 
-    It resolves to ``cruise_linked``, the default rule; see
+    ``standard`` is another name of the default rule, ``cruise_linked``; see
     ``SegmentationConfig.method``.
     """
     return "cruise_linked" if method == "standard" else method
 
 
 def required_lookback_hours(method: str, p) -> int:
-    """Hours ``process_day`` must read before the day under *method*.
+    """Hours ``process_day`` must read before the day under ``method``.
 
-    For most arms a break is a local condition, so any silence longer than the gap
-    rule proves a sample starts a track, and ``DEFAULT_LOOKBACK_HOURS`` is plenty.
-    ``cruise_linked`` breaks that: a piece after midnight may belong to a track
-    whose old piece ended up to ``link_max_gap_minutes`` earlier. If the read window
-    misses the old piece, the day sees a new track and claims it, while the day
-    before claims the same samples inside the linked track, under another id.
+    Under most rules a new track starts at a local condition, so any silence
+    longer than the gap threshold proves that a report starts a track, and
+    ``DEFAULT_LOOKBACK_HOURS`` is enough. Under ``cruise_linked`` a track
+    piece after midnight may continue a piece that ended up to
+    ``link_max_gap_minutes`` earlier. If the read missed the earlier piece,
+    the day would claim the later piece as a new track while the day before
+    claims it as part of the linked track.
 
     The longest of ``link_callsign_lookback_minutes``,
-    ``link_edge_position_minutes`` and the callsign persistence hold is added
-    because the decision also reads the callsign and the position that far behind
-    the old edge, and the callsign guard remembers a callsign for the longest
-    linkable hole plus the hold (``methods.callsign_memory_minutes``). Every day's
-    read must hold that evidence, or two days decide one hole differently and a
-    piece can be claimed by no day at all. Taking the longest rather than assuming
-    the callsign's covers it means no setting can move the evidence outside the read.
+    ``link_edge_position_minutes`` and the call sign persistence is added,
+    because the link decision also reads the call sign and the position that
+    far before the gap, and the call sign memory lasts for the longest
+    linkable gap plus the persistence (``methods.callsign_memory_minutes``).
+    Every day's read must hold that evidence, or two days could decide one
+    gap differently.
     """
     if _resolve_segmentation_method(method) == "cruise_linked":
         behind_the_edge = max(
@@ -175,31 +173,22 @@ def required_lookback_hours(method: str, p) -> int:
 
 
 class TrackProcessor:
-    """Processes raw state vectors into structured flight tracks.
+    """Step 02: build tracks from the state vectors.
 
-    This class implements the core track creation logic including:
-    - Unique track ID generation using SHA256 hashing
-    - Track splitting based on time gaps and altitude
-    - H3 hexagonal encoding at multiple resolutions
-    - Cumulative distance calculation
-    - Altitude outlier detection and smoothing
+    For each report it adds:
 
-    **Track identity is versioned, not frozen.** This class used to carry a
-    "CRITICAL - DO NOT MODIFY" warning on the id algorithm. That was the wrong
-    way to state a real constraint: changing the algorithm changes ``track_id``
-    for everything produced afterwards, so it is a *release* decision that
-    consumers must be told about -- but it is a decision that can be taken, and
-    the track-construction study was commissioned to take it. What must not
-    happen is a silent change, or one that leaves published data unreproducible
-    without saying so.
+    * ``track_id``, from the track rule ``config.segmentation.method``:
+      ``standard`` (the default, which resolves to ``cruise_linked`` and
+      keeps one track across a gap in en-route reception) or ``legacy``
+      (the rule of release v0.0.2, which reproduces its published ids);
+    * the H3 cells of the position (``h3_res_7``, ``h3_res_12``);
+    * the distance from the previous report and the distance flown since
+      the start of the track, in NM;
+    * ``baro_altitude_c`` and ``geo_altitude_c``: the altitudes with
+      implausible values set to NULL.
 
-    So the algorithm is selected by ``config.segmentation.method``. ``legacy``
-    reproduces the published ids byte for byte and remains selectable;
-    ``standard`` is the study's recommendation and the default -- it resolves
-    to ``cruise_linked`` (A10), which keeps one track across an en-route
-    reception hole. Both delegate to ``pipeline/segmentation``, so
-    production runs the code the study measured rather than a second
-    implementation of the same prose.
+    Changing the track rule changes ``track_id`` for all data produced
+    afterwards, and nothing in ``osn_tracks`` records which rule was used.
     """
 
     def __init__(
@@ -208,12 +197,12 @@ class TrackProcessor:
         config: OPDIConfig,
         log_file_path: str = "OPDI_live/logs/02_osn-tracks-etl-log.parquet",
     ):
-        """Initialize track processor.
+        """Prepare the processor.
 
         Args:
-            spark: Active SparkSession
-            config: OPDI configuration object
-            log_file_path: Path to parquet file tracking processed months
+            spark: Active Spark session.
+            config: OPDI configuration.
+            log_file_path: Parquet file that records the processed months.
         """
         self.spark = spark
         self.config = config
@@ -246,11 +235,10 @@ class TrackProcessor:
             processed_df.to_parquet(self.log_file_path)
 
     def _read_adsc(self, start_time_str: str, end_time_str: str) -> DataFrame:
-        """The ADS-C state vectors for this batch's window.
+        """The ADS-C state vectors for this batch's time window.
 
-        Separate from :meth:`_merge_adsc` so the union logic is testable
-        without a table: the test replaces this method, which is the only part
-        that touches storage.
+        Separate from :meth:`_merge_adsc` so that the merge can be tested
+        without a table.
         """
         ref = self.storage.table_ref(self.config.adsc.table)
         return self.spark.sql(f"""
@@ -260,21 +248,16 @@ class TrackProcessor:
         """)
 
     def _merge_adsc(self, df_sv: DataFrame, start_time_str: str, end_time_str: str) -> DataFrame:
-        """Union ADS-C into the state-vector frame, before segmentation.
+        """Add the ADS-C reports to the state vectors, before track building.
 
-        **Before**, deliberately. The question this fusion exists to answer is
-        whether a second source extends tracks and closes reception holes, and
-        both of those are properties of ``track_id`` -- which
-        :meth:`_add_track_id` assigns from the frame it is given. Merging
-        afterwards could only attach ADS-C to tracks ADS-B had already drawn,
-        which is not the hypothesis.
+        Merged before :meth:`_add_track_id` so that ADS-C reports can extend
+        a track and bridge gaps in ADS-B reception.
 
-        Returns ``df_sv`` **unchanged, column for column**, when
-        ``config.adsc.enabled`` is false. The ``source`` column is not added in
-        that case: it would appear in the partitions a new run writes and not
-        in the ones already on S3, and ``spark.read.parquet`` infers a table's
-        schema from a sample of footers -- so a consumer would intermittently
-        see a column that intermittently does not exist.
+        Returns ``df_sv`` unchanged, column for column, when
+        ``config.adsc.enabled`` is false. In particular no ``source`` column
+        is added then: a column present in new day folders and absent from
+        older ones would appear and disappear depending on which file a
+        Parquet reader takes the schema from.
         """
         cfg = self.config.adsc
         if not cfg.enabled:
@@ -294,10 +277,9 @@ class TrackProcessor:
         df_adsc = self._read_adsc(start_time_str, end_time_str)
         kept = shadow_filter(df_adsc, df_sv, cfg.shadow_before_seconds, cfg.shadow_after_seconds)
 
-        # The partition column of the table `process_month` read back. ADS-C
-        # rows must carry their own day, not NULL: `process_month` selects
-        # every input column through to the write, and a NULL partition value
-        # lands in `__HIVE_DEFAULT_PARTITION__` where no day's read finds it.
+        # The day column `process_month` partitions by. ADS-C rows need their
+        # own day: a NULL day lands in `__HIVE_DEFAULT_PARTITION__`, where no
+        # day's read finds it.
         if "event_time_day" in df_sv.columns:
             kept = kept.withColumn("event_time_day", to_date(col("event_time")))
 
@@ -306,31 +288,26 @@ class TrackProcessor:
         )
 
     def _add_track_id(self, df: DataFrame) -> DataFrame:
-        """Add unique track ID to each state vector.
+        """Add ``track_id`` to every state vector.
 
-        Dispatches on ``config.segmentation.method``.
+        ``legacy``, the rule of release v0.0.2:
 
-        ``legacy`` -- the algorithm behind every published dataset:
-        1. group_id: SHA2(icao24 + callsign, 256) truncated to 16 chars
-        2. split on a gap > 30 minutes, or > 15 minutes below 1524 m (5000 ft)
-        3. offset counts the splits before this point within the group
-        4. track_id: ``{group_id}_{offset}_{year}_{month}``
+        1. group id: the first 16 characters of SHA-256(icao24 + callsign);
+        2. a new track at a gap over 30 minutes, or over 15 minutes below
+           1524 m (5,000 ft);
+        3. offset: the number of new tracks before this report in its group;
+        4. ``track_id`` = ``{group_id}_{offset}_{year}_{month}``.
 
-        ``standard`` -- the track-construction study's recommendation, delegated
-        to ``pipeline.segmentation`` so production runs the benchmarked code.
-        Grouping is on ``icao24`` alone, a genuine non-blank callsign change is
-        an additional break, a reception hole whose edges fit one flight is not
-        a break, and the id has no year/month suffix.
-
-        The legacy branch below is left exactly as it was written, including its
-        own column names and comments: it is what reproduces the published ids,
-        and the cheapest way to keep it doing that is not to tidy it.
+        ``standard`` and any other rule of the registry are built by
+        :mod:`opdi.pipeline.segmentation` (see
+        :meth:`_add_track_id_segmentation`). The ``legacy`` code below is
+        kept exactly as it produced the published ids.
 
         Args:
-            df: DataFrame with state vectors
+            df: State vectors.
 
         Returns:
-            DataFrame with track_id column added
+            The state vectors with a ``track_id`` column.
         """
         method = self.config.segmentation.method
         if method != "legacy":
@@ -403,17 +380,17 @@ class TrackProcessor:
         return df
 
     def _add_track_id_segmentation(self, df: DataFrame, method: str) -> DataFrame:
-        """``track_id`` from a named arm of ``pipeline.segmentation``.
+        """``track_id`` from a rule of :mod:`opdi.pipeline.segmentation`.
 
-        Delegating rather than reimplementing is the point. The arms were
-        benchmarked through this module, so calling it here means the algorithm
-        in production is the one the study measured -- not a second rendering of
-        the same description, which is exactly how two implementations drift
-        while both look correct.
+        The thresholds come from ``config.segmentation`` through
+        :meth:`SegmentationParams.from_config`.
 
-        Thresholds come from ``config.segmentation`` via ``from_config``, so a
-        deployment can retune without editing code, and the fields carry their
-        units in their names.
+        Args:
+            df: State vectors.
+            method: Name of the rule in the registry, or ``standard``.
+
+        Returns:
+            The state vectors with a ``track_id`` column.
         """
         from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
         from opdi.pipeline.segmentation.methods import ARMS, STUDY_ARMS, STUDY_HOME
@@ -455,15 +432,18 @@ class TrackProcessor:
         return df
 
     def _add_cumulative_distance(self, df: DataFrame) -> DataFrame:
-        """Calculate segment and cumulative distances using Haversine formula.
+        """Add the distance from the previous report and the distance flown.
 
-        Uses PySpark native functions for distributed computation.
+        Great-circle (haversine) distance with an Earth radius of 6371 km,
+        in nautical miles (1 NM = 1.852 km), in report order within each
+        track.
 
         Args:
-            df: DataFrame with lat, lon, track_id, event_time columns
+            df: Reports with ``lat``, ``lon``, ``track_id`` and ``event_time``.
 
         Returns:
-            DataFrame with segment_distance_nm and cumulative_distance_nm columns
+            The reports with ``segment_distance_nm`` and
+            ``cumulative_distance_nm``.
         """
         # Define window specifications
         window_lag = Window.partitionBy("track_id").orderBy("event_time")
@@ -509,41 +489,20 @@ class TrackProcessor:
         return df
 
     def _add_clean_altitude(self, df: DataFrame, col_name: str) -> DataFrame:
-        """Mask altitudes whose first derivative is implausible.
+        """Set to NULL the altitudes that change implausibly fast.
 
-        ``{col_name}_c`` is the column with bad samples **masked to NULL**. It
-        is never a substituted value, and that is the point of this function
-        rather than an implementation detail.
+        ``{col_name}_c`` is the altitude with every report whose rate of
+        change from the previous report exceeds the limit set to NULL. No
+        value is replaced by an estimate, so a missing value stays
+        distinguishable from a measured one.
 
-        It used to replace an implausible reading with a +/-5 minute centred
-        rolling mean. Two things were wrong with that:
-
-        * A substituted value is indistinguishable downstream from a measured
-          one. OPDI's cleaning follows the 2024 PRC approach -- mask to NULL,
-          keep the row -- precisely so that "no data" and "interpolated data"
-          stay distinguishable. This function was the one place that did not.
-        * During a climb the +/-5 minute mean is roughly the altitude the
-          aircraft reaches *minutes later*. On 2026-06-10 a smooth climb
-          through 8,000 ft was rewritten to 11,125 ft for two samples, which
-          made the FL crossing detector report a crossing up through FL100 and
-          back down again -- 23,088 such reversals that day, across 6,651
-          flights, because the detector reads this column.
-
-        The threshold is ``CleaningConfig.{baro,geo}_altitude_d1_max_ft_s``,
-        the Alligier first-derivative bound the vote-based filter in
-        :mod:`opdi.cleaning.native` already uses. The previous
-        ``max_vertical_rate_mps`` of 25.4 m/s is 83.3 ft/s -- 5,000 ft/min,
-        which jets exceed routinely. Of the 119,154 samples it rejected on
-        2026-06-10, 64,088 (53.8%) were climbing between 83.3 and 200 ft/s and
-        were perfectly good.
-
-        Stated in ft/s and compared in ft/s: the stored column stays SI, and
-        only the comparison is scaled, which is the pattern
-        ``cleaning/native.py`` uses for the same reason -- the output is a
-        NULL mask, which carries no unit.
+        The limit is ``CleaningConfig.baro_altitude_d1_max_ft_s`` (or
+        ``geo_altitude_d1_max_ft_s``), 200 ft/s, the first-difference limit
+        of the trajectory cleaning. The stored altitude is in metres; it is
+        scaled to feet only for the comparison.
 
         Args:
-            df: DataFrame with the altitude column, ``track_id`` and
+            df: Reports with the altitude column, ``track_id`` and
                 ``event_time``.
             col_name: ``"baro_altitude"`` or ``"geo_altitude"``.
 
@@ -553,9 +512,8 @@ class TrackProcessor:
         window_spec = Window.partitionBy("track_id").orderBy("event_time")
 
         seconds = unix_timestamp("event_time") - unix_timestamp(lag("event_time").over(window_spec))
-        # A zero or absent gap yields NULL rather than a division error, and a
-        # NULL rate does not trip the comparison below -- the first sample of
-        # a track has nothing to be implausible against.
+        # A zero or missing time step gives a NULL rate, which does not fail
+        # the test: the first report of a track has nothing to compare with.
         rate_ft_s = f_abs(
             (col(col_name) - lag(col_name).over(window_spec))
             * AVIATION_UNIT_FACTOR[col_name]
@@ -575,25 +533,18 @@ class TrackProcessor:
         window: tuple = None,
         claim: tuple = None,
     ) -> None:
-        """Process tracks for a single month.
+        """Build the tracks of one month, or of a time window inside it.
 
         Args:
-            month: Date representing the first day of the month to process
-            skip_if_processed: If True, skip if month already processed
-            window: Optional ``(start, end)`` timestamp strings narrowing the
-                slice read from the state vectors, end-exclusive. ``None``
-                processes the whole month, which is what production does.
-
-        ``window`` exists so a benchmark can run *this* method over a few days
-        rather than reimplementing it. A month of state vectors is ~100 GB
-        materialised, so an end-to-end comparison of two segmentations at month
-        granularity does not fit the bucket -- and a benchmark that reimplements
-        the step to get around that stops measuring the pipeline and starts
-        measuring its own copy, which is the failure the v1 study ran into.
-
-        It does not change what production does: the default is the whole month,
-        and the id's year/month suffix comes from each sample's own timestamp
-        either way.
+            month: First day of the month to process.
+            skip_if_processed: Skip a month the log records as processed.
+            window: Optional ``(start, end)`` timestamp strings that narrow
+                the reports read, end excluded. ``None`` reads the whole
+                month. A study can use it to run this method over a few days.
+            claim: Optional ``(start, end)`` instants; only the tracks whose
+                first report falls in ``[start, end)`` are kept (see
+                :func:`keep_tracks_starting_in`). :meth:`process_day` sets it
+                to the day being processed.
 
         Example:
             >>> from datetime import date
@@ -661,14 +612,9 @@ class TrackProcessor:
 
         # Prepare for write.
         #
-        # ``dof`` is the day the *track* starts, not the day each sample falls
-        # in, so a track that crosses midnight stays in one partition and the
-        # day that owns it can read it back whole. Partitioning on the sample's
-        # own date would scatter a single flight across two days and make
-        # "give me the tracks day D processed" unanswerable.
-        #
-        # This replaces a column that was built and immediately dropped: it
-        # only ever influenced file layout, and only under Iceberg.
+        # ``dof`` is the day the *track* starts, not the day of each report,
+        # so a track that crosses midnight stays in one day folder and the
+        # day that owns it reads it back whole.
         df_month = df_month.withColumn(
             "dof",
             to_date(f_min("event_time").over(Window.partitionBy("track_id"))),
@@ -698,21 +644,18 @@ class TrackProcessor:
         print(f"Month {month.strftime('%Y-%m')} processing complete. ({datetime.now()})")
 
     #: Hours read before the day, so a track overlapping midnight can be told
-    #: from one that genuinely starts just after it. Only has to exceed the gap
-    #: threshold (30 min): a break is a local condition, so three hours of
-    #: silence in front of a sample already proves it starts a track. Not so
-    #: under ``cruise_linked``, which ``required_lookback_hours`` reads further for.
+    #: from one that starts just after it. Only has to exceed the gap
+    #: threshold (30 min): three hours of silence before a report already
+    #: prove it starts a track. Under ``cruise_linked``,
+    #: ``required_lookback_hours`` reads further.
     DEFAULT_LOOKBACK_HOURS = 3
 
     #: Hours read after the day, so a track starting inside it is complete.
     #:
-    #: This is the direction that loses data when it is too small, and 24 is a
-    #: starting value rather than a measured one. A track is not a flight: with
-    #: a 30-minute gap rule and no callsign change, a continuously received
-    #: airframe can chain several rotations into one track. Measure the
-    #: duration distribution on real data and raise this above the observed
-    #: maximum; ``process_day`` warns when a track reaches the edge, so
-    #: truncation is at least never silent.
+    #: Too small a value cuts tracks short. A track is not always one flight:
+    #: an aircraft received without interruption and without a call sign
+    #: change can chain several flights into one track. ``process_day`` warns
+    #: when a track reaches the end of the read, so a cut is never silent.
     DEFAULT_LOOKAHEAD_HOURS = 24
 
     def process_day(
@@ -740,12 +683,11 @@ class TrackProcessor:
 
         Raises:
             ValueError: ``lookback_hours`` is below that under ``cruise_linked``.
-                Two days could then decide one hole differently, and samples after
-                midnight would be claimed twice or not at all. That disagreement is
-                prevented on the lookback side, by this check, and detected on the
-                lookahead side, by the truncation warning below: a hole or its evidence
-                past the read's end is reported, not avoided. Other arms decide breaks
-                locally, so their explicit value is taken as given.
+                Two days could then decide one gap differently, and reports
+                after midnight would be claimed twice or not at all. A gap or
+                its evidence past the end of the read is reported by the
+                truncation warning instead. Other rules decide locally, so an
+                explicit value is taken as given.
         """
         from opdi.pipeline.segmentation import SegmentationParams
 
@@ -780,11 +722,9 @@ class TrackProcessor:
             claim=(claim_start, claim_end),
         )
 
-        # Check the lookahead against what actually happened, rather than
-        # trusting it. A track still transmitting when the read window closed
-        # was cut off by the window, not by landing -- and nothing downstream
-        # can tell, because the track is present and simply stops. Tomorrow
-        # will not pick it up either: it did not start tomorrow.
+        # Check the lookahead against the data: a track still transmitting when
+        # the read ended was cut by the read, not by landing, and the next day
+        # will not pick it up because it did not start then.
         written = self.storage.read_table("osn_tracks").filter(col("dof") == lit(day))
         # Under a link the last sample can be a whole hole short of the read end, and
         # the verdict on that hole also reads this far past its new edge.
@@ -820,20 +760,17 @@ class TrackProcessor:
     def process_date_range(
         self, start_month: date, end_month: date, skip_if_processed: bool = True
     ) -> None:
-        """Process tracks for a range of months.
+        """Build the tracks of a range of months.
 
         Args:
-            start_month: First month to process (first day of month)
-            end_month: Last month to process (first day of month)
-            skip_if_processed: If True, skip already processed months
+            start_month: First month to process (first day of the month).
+            end_month: Last month to process (first day of the month).
+            skip_if_processed: Skip months the log records as processed.
 
         Example:
             >>> from datetime import date
             >>> processor = TrackProcessor(spark, config)
-            >>> processor.process_date_range(
-            ...     date(2024, 1, 1),
-            ...     date(2024, 3, 1)
-            ... )
+            >>> processor.process_date_range(date(2024, 1, 1), date(2024, 3, 1))
         """
         from opdi.utils.datetime_helpers import generate_months
 
@@ -847,24 +784,20 @@ class TrackProcessor:
         print(f"Completed processing {len(months)} months.")
 
     def create_table_if_not_exists(self) -> None:
-        """Create the osn_tracks Iceberg table if it doesn't exist.
+        """Create the ``osn_tracks`` Iceberg table if it does not exist.
 
-        This should be run once before first track processing.
+        Used in the ``local`` environment with Iceberg; with plain Parquet
+        folders the table is created by its first write.
         """
         from datetime import date
 
         today = date.today().strftime("%d %B %Y")
 
-        # `source` is deliberately absent from this DDL.
-        #
-        # A run with `config.adsc.enabled` writes an extra `source` column
-        # ("ADS-B" / "ADS-C") into the parquet it produces. That arm runs in
-        # the `opensky` environment, where `create_table` is a no-op and the
-        # schema is whatever the files carry -- so the column costs nothing
-        # there. Adding it here would put it on the Iceberg tables in dev and
-        # live, where the writer does not supply it and a by-name write would
-        # fail. The merged arm is a research arm; when it becomes a production
-        # one, this DDL and `cleaning/cleaner.py`'s change together.
+        # `source` is not in this table definition. Only a run with
+        # `config.adsc.enabled` writes it, and such runs use plain Parquet
+        # folders, whose schema is whatever the files carry. If merged ADS-C
+        # runs are ever written to an Iceberg table, this definition and the
+        # one in `cleaning/cleaner.py` must gain the column together.
         create_table_sql = f"""
         CREATE TABLE IF NOT EXISTS `{self.project}`.`osn_tracks` (
           event_time TIMESTAMP COMMENT 'Timestamp of state vector',
