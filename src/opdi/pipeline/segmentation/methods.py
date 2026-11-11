@@ -10,10 +10,11 @@ when a new track starts, and how the id is built. There are two:
 * :func:`legacy`, the rule of the v0.0.2 release: grouped on airframe and
   callsign, a new track at a gap over 30 min, or over 15 min below 5,000 ft.
 
-:data:`ARMS` maps a configuration's ``segmentation.method`` to its rule. The
-other rules of the track construction studies live with the study scripts
-(``benchmarks/study_variants/segmentation.py``), which add them to
-:data:`ARMS` with :func:`register_arm`.
+:data:`ARMS` is the registry of rules: it maps a configuration's
+``segmentation.method`` to its rule. (The name is kept for the study scripts,
+which add further rules to it with :func:`register_arm`; those rules live in
+``benchmarks/study_variants/segmentation.py``.)
+See https://www.opdi.aero/content/methods/track-identity.html.
 """
 
 from functools import reduce
@@ -70,35 +71,32 @@ PLACEHOLDER_ICAO24 = ("000000", "000001", "ffffff")
 
 
 def legacy_general_gap(p):
-    """Legacy's altitude-independent half: any gap over ``gap_minutes`` splits.
+    """The first half of the v0.0.2 rule: any gap over ``gap_minutes`` splits.
 
-    Named separately from :func:`legacy_low_altitude_gap` because the default
-    rule keeps only the other half whole: it does not break at a long gap whose
-    two edges fit one flight.
+    A separate function because the default rule uses only the other half
+    unchanged; it does not split at a long gap whose two sides fit one
+    flight.
     """
     return gap_minutes() > p.gap_minutes
 
 
 def legacy_low_altitude_gap(p):
-    """Legacy's other half: a *shorter* gap counts, when below ``low_alt_ft``.
+    """The second half of the v0.0.2 rule: a shorter gap splits at low altitude.
 
-    This is production's proxy for "the aircraft is on the ground somewhere" --
-    it uses barometric altitude because that is all it has. It is exactly the
-    rule one of the study rules replaces with real airport geometry.
+    A gap over ``low_alt_gap_minutes`` splits when the aircraft is below
+    ``low_alt_ft``. A low barometric altitude stands in for "the aircraft may have landed".
     """
     return (gap_minutes() > p.low_alt_gap_minutes) & (altitude_ft() < p.low_alt_ft)
 
 
 def legacy() -> BreakRule:
-    """A0 -- the production algorithm, as parameters of the engine.
+    """The track rule of release v0.0.2.
 
-    Split when the gap exceeds ``gap_minutes``, or exceeds
-    ``low_alt_gap_minutes`` below ``low_alt_ft``. The month suffix is kept: it is
-    what production does, and A2 exists to measure removing it.
-
-    The two disjuncts are :func:`legacy_general_gap` and
-    :func:`legacy_low_altitude_gap`; A0's behaviour is their OR and is unchanged
-    by having been given names.
+    Groups the reports by aircraft address and call sign. A new track starts
+    at a gap longer than ``gap_minutes``, or longer than
+    ``low_alt_gap_minutes`` below ``low_alt_ft`` (the OR of
+    :func:`legacy_general_gap` and :func:`legacy_low_altitude_gap`). Each id
+    ends with ``_{year}_{month}``.
     """
     return BreakRule(
         name="legacy",
@@ -117,34 +115,31 @@ def _real_callsign() -> Column:
 
 
 def callsign_memory_minutes(p) -> float:
-    """How long A10 remembers a callsign it has not heard again.
+    """How long, in minutes, the default rule remembers a call sign not heard again.
 
-    A9 remembers one without limit, and that is a read-window dependence: a day's
-    run reads a bounded stretch before the day, so one day can still hold a
-    callsign the next day's read begins after, and the two then judge the same
-    flicker differently -- a piece written twice, or by no day. Under A9 that
-    takes three hours of samples with no callsign; under A10 a linked hole hides
-    the callsign for hours, so A10 forgets a callsign older than the longest hole
-    it can link. Every day reads at least that far back plus the callsign
-    lookback (``tracks.required_lookback_hours``), so both reads hold whatever
-    counts. The study rule ``debounced`` keeps its published behaviour.
+    A day's run reads only a bounded stretch before the day. If a call sign
+    were remembered without limit, one day's run could still see a call sign
+    that the next day's run does not, and the two would judge the same
+    change differently. So a call sign older than the longest gap that can
+    be linked is forgotten, and every day's run reads at least that far back
+    plus the call sign lookback (``tracks.required_lookback_hours``).
     """
     return float(p.link_max_gap_minutes)
 
 
 def stable_callsign(p, memory_minutes: float | None = None) -> Column:
-    """The debounced callsign: the last value that persisted, carried forward.
+    """The stable call sign: the last value kept long enough, carried forward.
 
-    NULL until a group's first real callsign. With ``memory_minutes``, a previous
-    callsign heard longer ago than that counts as none, so the next one is a
-    group's first run again: see :func:`callsign_memory_minutes`.
+    NULL until a group's first real call sign. With ``memory_minutes``, a
+    previous call sign heard longer ago than that counts as none, so the
+    next one starts afresh: see :func:`callsign_memory_minutes`.
     """
     w = segment_window()
     back = w.rowsBetween(Window.unboundedPreceding, -1)
     real = _real_callsign()
-    # The previous real callsign. Used here to find where a new run of a real
-    # value *starts* -- it is deliberately not used as the comparison value
-    # itself; see the block in `debounced_callsign_change`.
+    # The previous real call sign, used to find where a run of a new value
+    # starts; the comparison itself uses the stable value (see
+    # `debounced_callsign_change`).
     prev_real = F.last(real, ignorenulls=True).over(back)
     if memory_minutes is not None:
         prev_real_ts = F.last(F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True).over(back)
@@ -157,75 +152,51 @@ def stable_callsign(p, memory_minutes: float | None = None) -> Column:
     if hold <= 0.0:
         return real
 
-    # A run is a maximal stretch of consecutive samples carrying the
-    # same real callsign, blanks bridged over exactly as `recommended`
-    # bridges them. `is_new_value` marks the one row that starts a
-    # run: its real callsign differs from the last real one seen (or
-    # there is no previous real value at all -- the track's very
-    # first run, which is never checked, because "does it persist"
-    # presupposes something it might be reverting *from*).
+    # A run is a longest stretch of reports carrying the same real call
+    # sign, blanks skipped over. `is_new_value` marks the row that starts
+    # a run: its call sign differs from the last real one seen, or there
+    # is none before it (the group's first run, which is never checked,
+    # because there is nothing it could revert to).
     is_new_value = real.isNotNull() & (prev_real.isNull() | (real != prev_real))
 
-    # How long this run lasts before the *next* run starts --
-    # measured as a timestamp difference, not a row count, so an
-    # irregular sampling rate cannot skew it. `next_transition_ts` is
-    # the nearest future row where a new run begins, found by the
-    # same reversed-growing-frame technique `cleaning/native.py`
-    # documents (there for `_next_valid`): `F.first(...)` over
-    # `rowsBetween(1, unboundedFollowing)` is a shrinking frame,
-    # re-scanned per row and quadratic in track length; `F.last(...,
-    # ignorenulls=True)` over the reversed ordering's `rowsBetween(
-    # unboundedPreceding, -1)` asks the same question of a frame that
-    # grows, which Spark maintains incrementally. This search is
-    # genuinely unbounded -- unlike a fixed persistence horizon, the
-    # next transition could be arbitrarily far away -- so this is
-    # the one place in this arm where that transformation actually
-    # earns its keep.
+    # How long this run lasts before the next run starts, as a time
+    # difference so that an irregular report rate cannot change it.
+    # `next_transition_ts` is the nearest later row where a new run
+    # begins. It is found with `F.last(..., ignorenulls=True)` over the
+    # reversed order's growing frame, which Spark keeps up incrementally;
+    # a forward `F.first` over a shrinking frame would be rescanned for
+    # every row. The next change can be arbitrarily far away.
     next_transition_ts = F.last(F.when(is_new_value, F.col("_ts")), ignorenulls=True).over(
         w.orderBy(F.col("_ts").desc()).rowsBetween(Window.unboundedPreceding, -1)
     )
 
-    # Persisted if: this is the track's first run (nothing to revert
-    # from, so nothing to check); or there is no next run at all (the
-    # track ends inside this one, and a value with no later data has
-    # not been shown to revert); or the run lasted at least `hold`
-    # seconds before it was replaced. The boundary is inclusive --
-    # exactly `hold` seconds counts.
+    # The run is kept if it is the group's first run (nothing to revert
+    # from), if no run follows it (the data end inside it), or if it
+    # lasted at least `hold` seconds before it was replaced; exactly
+    # `hold` seconds counts.
     #
-    # This is a run-level verdict, not a per-row one, and that
-    # distinction is load-bearing. An earlier version asked whether
-    # *this row's own* forward horizon still showed its own value --
-    # which nulled every sample within `hold` seconds *before* a
-    # genuine change, because a row deep inside an established run
-    # can have a real, later transition inside its own horizon. With
-    # every sample ahead of a genuine change nulled, the arm had no
-    # earlier stable value left to compare the change against, and
-    # reported no break at all. Asking instead "how long did *the
-    # run this row belongs to* last" is answered once per run and
-    # inherited by every row in it, so a run's own impending genuine
-    # replacement cannot retroactively undermine it.
+    # The decision is made once per run and shared by all its rows. A
+    # decision per row, from that row's own look ahead, would also drop
+    # the rows of an established run just before a real change, leaving
+    # nothing to compare the change with.
     persisted_run = (
         prev_real.isNull()
         | next_transition_ts.isNull()
         | ((F.unix_timestamp(next_transition_ts) - F.unix_timestamp(F.col("_ts"))) >= hold)
     )
 
-    # The verdict is planted only at the row that starts a run --
-    # NULL everywhere else -- then carried forward across every
-    # continuation sample of that run by the same ignorenulls
-    # forward-fill `recommended` uses to carry a real callsign
-    # across blanks. A run whose start failed the persistence check
-    # leaves no seed, so the forward-fill keeps supplying the
-    # *previous* successful run's value straight through it --
-    # "a flicker is invisible", applied per run instead of per row.
+    # The decision is written only at the row that starts a run and then
+    # carried forward over the rest of the run. A run that was not kept
+    # writes nothing, so the previous kept value carries on through it:
+    # a short flicker is invisible.
     run_seed = F.when(is_new_value & persisted_run, real)
     return F.last(run_seed, ignorenulls=True).over(w.rowsBetween(Window.unboundedPreceding, 0))
 
 
 def debounced_callsign_change(p, memory_minutes: float | None = None) -> Column:
-    """A9's callsign break: the stable callsign changed, recently. Never NULL.
+    """True where the stable call sign changes, within the lookback. Never NULL.
 
-    ``memory_minutes`` is passed on to :func:`stable_callsign`; A9 passes none.
+    ``memory_minutes`` is passed on to :func:`stable_callsign`.
     """
     w = segment_window()
     back = w.rowsBetween(Window.unboundedPreceding, -1)
@@ -238,23 +209,11 @@ def debounced_callsign_change(p, memory_minutes: float | None = None) -> Column:
 
     stable = stable_callsign(p, memory_minutes)
 
-    # **Persisted against persisted, not persisted against previous-real.**
-    # A flicker trips the rule twice -- once on the X->Y excursion and again
-    # on the Y->X revert -- and measured on 2026-06-01 both legs are there:
-    # 5,241 revert boundaries and 5,000 excursion boundaries, 23.1% of all
-    # 44,406 boundaries between them.
-    #
-    # Comparing the new value against the previous *real* one suppresses
-    # only the excursion: at the first X after the flicker, the previous
-    # real callsign is Y, the current is X, and X does persist -- so it
-    # breaks. The flight still splits, in two instead of three, and the
-    # fragmentation measurement would show a real but halved improvement,
-    # plausible enough to be accepted.
-    #
-    # Carrying the last *stable* callsign forward instead leaves the
-    # transient invisible: stable is X,X,X,X,NULL,X,X,X,X across a flicker,
-    # so every comparison is X against X and nothing breaks. A genuine
-    # change gives X,X,X,X,Y,Y,Y,Y and breaks once, at the first Y.
+    # Stable compared with stable, not with the previous real value. A
+    # flicker X -> Y -> X changes the real value twice. Compared with the
+    # previous real value, the return to X would still split the flight.
+    # The stable value reads X, X, X, NULL, X, X across the flicker, so
+    # nothing splits; a real change X -> Y splits once, at the first Y.
     prev_stable = F.last(stable, ignorenulls=True).over(back)
     callsign_change = (
         stable.isNotNull() & prev_stable.isNotNull() & recent & (stable != prev_stable)
@@ -332,13 +291,13 @@ def _edge_summary(frame: Column, latest_first: bool) -> Column:
 
 
 def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Column]:
-    """What :func:`linkable` sees of a hole, evaluated at the first sample after it.
+    """What :func:`linkable` sees of a gap, at the first report after it.
 
-    Every value is computed on every row, gap or no gap, and carries no verdict:
-    the study applies many parameter sets to one cached frame, so nothing here may
-    read a threshold the grid varies. The only parameters reached are the callsign
-    lookahead and lookback, the edge position window and, through
-    :func:`stable_callsign`, the debounce it shares with A9.
+    Every value is computed on every row, gap or no gap, and none applies a
+    threshold of the link tests, so the same features can be judged under
+    many settings. The only settings read are the call sign lookahead and
+    lookback, the edge position window and, through
+    :func:`stable_callsign`, the call sign persistence.
 
     ``gap_min`` is the silence between samples, which is what the 30 minute split
     sees. ``position_gap_min`` and ``gc_nm`` are the time and distance between the
@@ -347,15 +306,16 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
 
     The altitude, vertical rate, speed and rate-count features read each field's
     nearest :data:`LINK_EDGE_SAMPLES` values within ``link_edge_position_minutes`` of
-    the edge, past any blank samples. A row count alone has no bound in time, so at a
-    sparse edge it reaches across an earlier break into another flight, and a row can
-    fall inside one day's read and outside the next day's. The bound makes two days'
-    reads of a hole agree: on the lookback side this is prevented, since
-    ``process_day`` reads at least that far behind the old edge. Past the new edge it
-    is detected, not prevented: see the truncation warning in ``process_day``.
+    the edge, past any blank samples. A row count alone has no bound in time,
+    so at a sparse edge it could reach into another flight, and a row could
+    fall inside one day's read and outside the next day's. With the bound,
+    two days' runs read a gap the same way: behind the old side because step
+    02 reads at least that far back, and past the new side it is detected
+    instead (see the truncation warning in ``process_day``).
 
-    ``window`` defaults to the engine's :func:`segment_window`. Whichever is used,
-    the frame needs the arm contract's ``_ts`` and the ``_alt_ft`` and ``_spd_kt``
+    ``window`` defaults to the engine's :func:`segment_window`. Whichever is
+    used, the frame needs the engine's ``_ts`` and the ``_alt_ft`` and
+    ``_spd_kt``
     behind the accessors. A frame near a group's edge just holds fewer rows, and
     the edge is decided from those.
 
@@ -370,11 +330,10 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
 def select_link_features(
     frame: DataFrame, p, window: WindowSpec | None = None, keep: Sequence = ()
 ) -> DataFrame:
-    """*frame* reduced to *keep* and :func:`link_feature_columns`, with each read done once.
+    """``frame`` reduced to ``keep`` and :func:`link_feature_columns`, read once.
 
-    The same values, at about a third of the cost on a local run: selected column by
-    column, every feature taken from an edge's read is that read again. A study that keeps
-    the features of a day wants this.
+    The same values at about a third of the cost: selected column by column,
+    every feature taken from one read repeats that read.
 
     Raises:
         ValueError: see :func:`link_feature_columns`.
@@ -416,12 +375,9 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     vert_rate_fpm = F.col("vert_rate") * FPM_PER_MPS
     span_s = int(p.link_edge_position_minutes * 60)
 
-    # The callsign before the hole, and whether it is recent enough to count. The
-    # bound is measured back from the old edge, and `process_day` reads at least
-    # that far behind it, so two days' reads of one hole see the same evidence behind
-    # it. Unbounded, one read could see an old callsign and split where the next day's
-    # read could not and link, and the piece after the hole would be published by
-    # neither day.
+    # The call sign before the gap, and whether it is recent enough to count.
+    # The age is measured back from the old side, and step 02 reads at least
+    # that far back, so every day's run sees the same evidence.
     back = w.rowsBetween(Window.unboundedPreceding, -1)
     real = _real_callsign()
     old_edge_ts = F.lag(F.col("_ts")).over(w)
@@ -546,11 +502,12 @@ def _features_from(reads: Mapping[str, Column]) -> Dict[str, Column]:
 def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     """One named verdict per test of the rule, in the spec's order. Never NULL.
 
-    A pure function of the features and the thresholds, so the study can score a
-    parameter set without re-segmenting, and can say which test stopped a hole.
-    A wrongly glued flight is worse than a split one, so a NULL in a required input
-    fails its test; the ``coalesce`` on every entry is what enforces that. So a hole
-    with no position inside the window on either side splits.
+    A function of the features and the thresholds only, so a set of
+    thresholds can be judged without building the tracks again, and the test
+    that stopped a link can be named. Joining two flights by mistake is worse
+    than splitting one, so a NULL in a required input fails its test (the
+    ``coalesce`` on every entry). A gap with no position near either side
+    therefore splits.
 
     Speed and time budget divide the distance by ``position_gap_min``, the time
     between the samples the positions came from: using the sample gap would credit
@@ -567,12 +524,14 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     With ``link_old_edge_climb``, a flight that left coverage still climbing can pass
     the old edge's test below the floor, and with ``link_new_edge_descent`` one that
     reappears on approach to its destination can pass the new edge's. They are separate
-    settings because the study decides them separately. The direction is the evidence
+    settings because they can be chosen independently. The direction is the
+    evidence
     there, so a NULL vertical rate does not pass, unlike in the descend-then-climb test,
     and the mean must rest on at least :data:`LINK_DIRECTION_MIN_RATES` rates in that
     edge's values. A new edge the low-altitude gap can break at does not pass either: the
-    rule splits there whatever this says, and the study, which reads this verdict
-    instead of re-segmenting, must not count it as a link. That reads the lowest of the
+    rule splits there whatever this says, and a caller that reads this
+    verdict instead of building the tracks must not count it as a link. That
+    reads the lowest of the
     edge's values, not the first sample's, so a blank first sample cannot slip past a low
     value right behind it: the rule then splits too, on this test.
 
@@ -581,10 +540,10 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     cruise. So where the old edge passed only by direction the ratio is not read, and
     ``not_slow_for_this_flight`` falls back to ``link_min_implied_speed_kt`` alone. That
     adds no evidence, since ``implied_speed_not_too_slow`` requires the same: such a
-    hole has no per-flight speed test at all, and the study should read it so.
+    gap has no per-flight speed test at all.
     """
-    # Guarded because two samples can share a second, and a Spark 4 session raises
-    # on a zero divisor. A plain division here would fail the whole job on them.
+    # Two reports can share a second, and Spark 4 raises on division by zero,
+    # so the divisor is checked first.
     implied_kt = F.when(f["position_gap_min"] > 0.0, f["gc_nm"] / (f["position_gap_min"] / 60.0))
 
     descend_then_climb = (f["vr_before_fpm"] < -p.link_edge_vert_rate_fpm) & (
@@ -646,22 +605,24 @@ def linkable(f: Mapping[str, Column], p) -> Column:
 
 
 def cruise_linked() -> BreakRule:
-    """A10 -- A9, but a gap whose two edges can be one flight does not break.
+    """The default track rule (``method="standard"``).
 
-    A flight crossing the Atlantic loses ADS-B reception for hours, and A9 turns
-    it into two tracks, neither with both ends. Measured on 2026-06-05, among
-    airframes with ADS-C: 1,204 of 1,334 flights crossing the European box have a
-    gap over 30 min, median 191 min. Only the general gap rule changes. A short
-    gap at low altitude still breaks, and a callsign change still breaks.
-    ``link_old_edge_climb`` and ``link_new_edge_descent`` widen what counts as an edge:
-    see :func:`link_checks`.
+    Groups the reports by aircraft address alone. A new track starts:
 
-    The default since the track-construction-v5 study: ``standard`` resolves to
-    it. That is a ``track_id`` boundary like A8's and A9's before it, silent to a
-    joiner. ``process_day`` reads further back under this arm, or a piece after
-    midnight would be claimed twice: see ``tracks.required_lookback_hours``. The
-    callsign guard it shares with A9 forgets a callsign older than the longest
-    linkable hole, for the same reason: see :func:`callsign_memory_minutes`.
+    * where the stable call sign changes (:func:`debounced_callsign_change`,
+      with ``callsign_min_persistence_seconds``);
+    * at a gap longer than ``low_alt_gap_minutes`` below ``low_alt_ft``;
+    * at a gap longer than ``gap_minutes``, unless the two sides of the gap
+      fit one continuous flight (:func:`linkable`), as when a flight crosses
+      an ocean out of ADS-B reception.
+
+    ``link_old_edge_climb`` and ``link_new_edge_descent`` let a side below the
+    cruise floor be linked when it climbs or descends: see
+    :func:`link_checks`. Because a track can span a long gap, step 02 reads
+    further back under this rule (see ``tracks.required_lookback_hours``),
+    and the call sign memory is bounded for the same reason (see
+    :func:`callsign_memory_minutes`). Each id is the group hash and the
+    second of the track's first report.
     """
 
     def expr(p):
@@ -689,7 +650,7 @@ def cruise_linked() -> BreakRule:
     )
 
 
-#: Names of the rules that moved to the study scripts, for the messages below.
+#: Names of the study rules kept with the study scripts, for the messages below.
 STUDY_ARMS = STUDY_SEGMENTATION_METHODS
 
 #: Where the study rules live, named in every error about one.
@@ -700,7 +661,7 @@ STUDY_HOME = (
 
 
 class _Rules(dict):
-    """The rule table: a ``dict`` whose missing study rules say where they went."""
+    """The rule registry: a ``dict`` that says where a missing study rule lives."""
 
     def __missing__(self, name):
         if name in STUDY_ARMS:
@@ -708,8 +669,10 @@ class _Rules(dict):
         raise KeyError(name)
 
 
-#: The segmentation rules the pipeline can select, by name. ``standard`` is not
-#: in it: it is the name of the default rule, ``cruise_linked``.
+#: The registry of track rules the pipeline can select, by name. ``standard``
+#: is not in it: it is another name of the default rule, ``cruise_linked``.
+#: Study scripts add their rules with :func:`register_arm`; it must stay a
+#: plain module-level dictionary for that.
 ARMS = _Rules(
     legacy=legacy,
     cruise_linked=cruise_linked,
@@ -717,9 +680,11 @@ ARMS = _Rules(
 
 
 def register_arm(name: str, rule: Callable[[], BreakRule]) -> None:
-    """Add a rule to :data:`ARMS`, so a configuration can select it by name.
+    """Add a rule to the registry :data:`ARMS`, to be selected by name.
 
-    Used by the study scripts to bring back the rules of the studies.
+    Args:
+        name: Name of the rule, as written in ``segmentation.method``.
+        rule: Function that returns the rule's :class:`BreakRule`.
     """
     ARMS[name] = rule
 
