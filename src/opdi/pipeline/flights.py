@@ -1559,11 +1559,13 @@ class FlightListProcessor:
             "LAST_SEEN",
             "VERSION",
         ]
-        # Carry the provenance columns when the caller produced them. A fixed
-        # list here silently dropped them, so the flight list came out without
-        # the one field that distinguishes "outside the observed area" from
-        # "could not determine".
-        columns += [c for c in ("ADEP_SOURCE", "ADES_SOURCE") if c in merged_upper.columns]
+        # Both passes of step 03 write into the same day partition, so they
+        # must write the same columns in the same order. A frame without the
+        # two source columns gets them as NULL.
+        for name in ("ADEP_SOURCE", "ADES_SOURCE"):
+            if name not in merged_upper.columns:
+                merged_upper = merged_upper.withColumn(name, lit(None).cast("string"))
+        columns += ["ADEP_SOURCE", "ADES_SOURCE"]
         return merged_upper.select(*columns)
 
     # ------------------------------------------------------------------
@@ -1618,6 +1620,9 @@ class FlightListProcessor:
 
         for col_name in ["ADEP", "ADES", "ADEP_P", "ADES_P"]:
             sv_f = sv_f.withColumn(col_name, lit(None).cast("string"))
+        # Neither end of an overflight was placed at an aerodrome.
+        for col_name in ["adep_source", "ades_source"]:
+            sv_f = sv_f.withColumn(col_name, lit("undetermined"))
         sv_f = sv_f.withColumn("version", lit(self._version_for("trend")))
 
         sv_f = sv_f.select(
@@ -1626,6 +1631,8 @@ class FlightListProcessor:
             "ADES",
             "ADEP_P",
             "ADES_P",
+            "adep_source",
+            "ades_source",
             "ICAO24",
             "FLT_ID",
             "first_seen",

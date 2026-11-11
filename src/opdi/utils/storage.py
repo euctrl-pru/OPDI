@@ -67,16 +67,29 @@ class StorageManager:
         """
         if self.use_s3:
             if table_name not in self._registered_views:
-                df = self.spark.read.parquet(self._s3_path(table_name))
+                df = self._read_parquet(table_name)
                 df.createOrReplaceTempView(table_name)
                 self._registered_views.add(table_name)
             return table_name
         return f"`{self.project}`.`{table_name}`"
 
+    #: Tables whose day partitions may differ in their columns. Older days of
+    #: the flight list were written without ``ADEP_SOURCE`` and
+    #: ``ADES_SOURCE`` by one of the two passes of step 03. These tables are
+    #: read with the columns of every file merged, so a column missing from
+    #: one file reads as NULL there instead of vanishing from the whole read.
+    MERGE_SCHEMA_TABLES = ("opdi_flight_list",)
+
+    def _read_parquet(self, table_name: str) -> DataFrame:
+        reader = self.spark.read
+        if table_name in self.MERGE_SCHEMA_TABLES:
+            reader = reader.option("mergeSchema", "true")
+        return reader.parquet(self._s3_path(table_name))
+
     def read_table(self, table_name: str) -> DataFrame:
         """Read a full table as a DataFrame."""
         if self.use_s3:
-            return self.spark.read.parquet(self._s3_path(table_name))
+            return self._read_parquet(table_name)
         return self.spark.table(f"{self.project}.{table_name}")
 
     WRITE_MODES = ("append", "overwrite", "insert_overwrite")

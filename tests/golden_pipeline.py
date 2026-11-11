@@ -140,6 +140,8 @@ class Flight:
     stand: int = 1
     # Only for an overflight: where it enters, its heading and how long it flies.
     overflight: Optional[Tuple[float, float, float, float]] = None
+    # The golden configurations whose day includes this flight.
+    configurations: Tuple[str, ...] = ("default", "v002")
 
 
 def _simulate(f: Flight) -> List[dict]:
@@ -293,13 +295,13 @@ def _simulate(f: Flight) -> List[dict]:
 #: The flights of the synthetic day. They cover: a turnaround of one airframe
 #: under two callsigns, a holding pattern, a garbled callsign for a few
 #: seconds, a long reception gap at cruise, and flights that cross midnight at
-#: both ends of the day.
+#: both ends of the day, and one overflight at cruise level far from every
+#: aerodrome, which step 03 adds to the flight list in its second pass.
 #:
-#: There is no overflight. Step 03 appends overflights to the flight list
-#: without the ``ADEP_SOURCE`` and ``ADES_SOURCE`` columns, and when Spark then
-#: reads the day's partition from the file without them, step 04b drops the
-#: two columns and step 09 refuses the day. An overflight would make the
-#: golden run depend on which file Spark reads first.
+#: The overflight is flown in the default configuration only. Under the
+#: v0.0.2 configuration, event and measurement ids are row numbers counted
+#: over the whole day, so any added flight renumbers the events of the other
+#: flights; leaving it out keeps the v0.0.2 reference files comparable.
 FLIGHTS = [
     Flight("4ca001", "TST101", "EBBR", "EDDF", dt.datetime(2024, 6, 12, 8, 0, 0)),
     Flight(
@@ -322,17 +324,32 @@ FLIGHTS = [
     ),
     Flight("440004", "AUA7", "LOWW", "EDDF", dt.datetime(2024, 6, 11, 23, 30, 0)),
     Flight("39c005", "AFR8", "EDDF", "LFPG", dt.datetime(2024, 6, 12, 23, 20, 0), stand=2),
+    Flight(
+        "4d0006",
+        "SWR19",
+        None,
+        None,
+        dt.datetime(2024, 6, 12, 14, 0, 0),
+        overflight=(46.5, 0.0, 90.0, 1800.0),
+        configurations=("default",),
+    ),
 ]
 
 
-def state_vectors() -> pd.DataFrame:
+def state_vectors(name: str = "default") -> pd.DataFrame:
     """Raw 1 Hz state vectors of every flight, as ingested from OpenSky.
 
     ``event_time`` is in Unix seconds, as in the OpenSky archive, so the
     ingestion thinning can be applied to it.
+
+    Args:
+        name: The golden configuration, ``"default"`` or ``"v002"``; only the
+            flights flown in it are included.
     """
     rows = []
     for f in FLIGHTS:
+        if name not in f.configurations:
+            continue
         t0 = (f.start - dt.datetime(1970, 1, 1)).total_seconds()
         for s in _simulate(f):
             if any(a <= s["t"] < b for a, b in f.holes):
@@ -634,7 +651,7 @@ def _spark_frame(spark, pdf: pd.DataFrame, ddl: str):
     return spark.createDataFrame(pdf.astype(object).where(pdf.notna(), None), ddl)
 
 
-def write_inputs(spark, config) -> None:
+def write_inputs(spark, config, name: str = "default") -> None:
     """Write the state vectors (thinned by the configured rule) and the reference tables."""
     from pyspark.sql import functions as F
 
@@ -642,7 +659,7 @@ def write_inputs(spark, config) -> None:
     from opdi.utils.storage import StorageManager
 
     storage = StorageManager(spark, config)
-    raw = state_vectors()
+    raw = state_vectors(name)
     sv_ddl = (
         "event_time bigint, icao24 string, lat double, lon double, velocity double, "
         "heading double, vert_rate double, callsign string, on_ground boolean, "
@@ -743,7 +760,7 @@ def run(spark, name: str, warehouse: str) -> Dict[str, pd.DataFrame]:
 
     os.environ["OPDI_COMMIT"] = "golden"
     config = configuration(name, warehouse)
-    write_inputs(spark, config)
+    write_inputs(spark, config, name)
     logs = os.path.join(warehouse, "_logs")
     for step in STEPS:
         run_day_step(spark, config, step, DAY, {"log_dir": logs})
