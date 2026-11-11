@@ -36,6 +36,15 @@ def test_schema_imports_without_pyspark():
     assert out.returncode == 0, out.stderr
 
 
+def test_reader_and_sql_import_without_pyspark():
+    out = _run(
+        "import opdi.published, opdi.output.schema, opdi.sql.render\n"
+        "assert opdi.published.PUBLISHED_BASE_URL\n"
+        "assert 'CREATE TABLE' in opdi.sql.render.trino_tables()\n"
+    )
+    assert out.returncode == 0, out.stderr
+
+
 def test_package_version_needs_no_pyspark():
     out = _run("import opdi\nassert opdi.__version__\n")
     assert out.returncode == 0, out.stderr

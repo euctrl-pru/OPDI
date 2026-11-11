@@ -553,6 +553,37 @@ MEASUREMENT_VERSION: Dict[str, str] = {
 }
 
 
+#: The classic events table of release v0.0.2, which kept events and
+#: measurements in separate files: published column -> classic column, in the
+#: classic order.
+CLASSIC_EVENT_COLUMNS: Dict[str, str] = {
+    "event_id": "id",
+    "flight_id": "flight_id",
+    "type": "type",
+    "event_time": "event_time",
+    "longitude": "longitude",
+    "latitude": "latitude",
+    "altitude_ft": "altitude",
+    "source": "source",
+    "version": "version",
+    "info": "info",
+}
+
+#: The columns of the classic measurements table, one row per measured value.
+CLASSIC_MEASUREMENT_COLUMNS: Tuple[str, ...] = ("id", "event_id", "type", "value", "version")
+
+#: The classic flight list of release v0.0.2: published column -> classic
+#: column name in upper case, in the classic order.
+CLASSIC_FLIGHT_LIST: Dict[str, str] = {
+    name: name.upper().replace("FLIGHT_ID", "ID")
+    for name in (
+        "flight_id", "icao24", "flt_id", "dof", "adep", "ades", "adep_p", "ades_p",
+        "registration", "model", "typecode", "icao_aircraft_class", "icao_operator",
+        "first_seen", "last_seen", "version",
+    )
+}
+
+
 def as_markdown(columns: Iterable[Column]) -> str:
     """The columns as a Markdown table with name, type, unit and description.
 

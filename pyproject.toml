@@ -57,6 +57,14 @@ dev = [
     "black>=22.0.0",
     "mypy>=0.990",
     "ruff>=0.1.0",
+    "duckdb>=1.0.0",
+    "sqlglot>=25.0.0",
+]
+# Reading the published files without Spark (opdi.published).
+reader = [
+    "pyarrow>=10.0.0",
+    "duckdb>=1.0.0",
+    "pandas>=1.5.0",
 ]
 docs = [
     "sphinx>=7.0.0",
@@ -79,6 +87,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 opdi = ["py.typed"]
 "opdi.reference" = ["data/*.csv", "data/*.md"]
+"opdi.sql" = ["*.sql", "trino/*.sql"]
 
 [tool.black]
 line-length = 100
