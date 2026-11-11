@@ -230,3 +230,15 @@ def test_without_duckdb_the_readers_work_and_the_views_say_what_to_install(base,
     assert len(published.as_events(published.read_flight_events(DAY, base=base))) == 5
     with pytest.raises(ImportError, match=r"opdi\[reader\]"):
         published.duckdb_views(base=base, start=DAY)
+
+
+def test_duckdb_views_over_a_folder_whose_name_has_a_quote(tmp_path, base):
+    duckdb = pytest.importorskip("duckdb")
+    import shutil
+
+    folder = tmp_path / "it's here"
+    shutil.copytree(base[len("file://") :], folder)
+    con = duckdb.connect()
+    con.execute(published.duckdb_views(base=f"file://{folder}/"))
+    assert con.execute("select count(*) from flight_list").fetchone()[0] == 3
+    assert con.execute("select count(*) from flight_index").fetchone()[0] == 3

@@ -289,11 +289,16 @@ def _duckdb_address(url: str) -> str:
     return url
 
 
+def _sql_text(text: str) -> str:
+    """``text`` as an SQL string literal (a quote inside is doubled)."""
+    return "'" + text.replace("'", "''") + "'"
+
+
 def _duckdb_files(table: str, base, start, end) -> str:
     if start is None:
-        return "'" + _duckdb_address(f"{base_url(base)}{table}/*.parquet") + "'"
+        return _sql_text(_duckdb_address(f"{base_url(base)}{table}/*.parquet"))
     files = [_duckdb_address(file_url(table, d, base)) for d in _days(start, end)]
-    return "[" + ", ".join("'" + f.replace("'", "''") + "'" for f in files) + "]"
+    return "[" + ", ".join(_sql_text(f) for f in files) + "]"
 
 
 def _months(start: date, end: Optional[date]) -> List[date]:
@@ -313,13 +318,13 @@ def _duckdb_index_files(base, start, end) -> Optional[str]:
     if start is None:
         if local is not None and not glob.glob(os.path.join(local, "index", "*.parquet")):
             return None
-        return "'" + _duckdb_address(f"{root}index/*.parquet") + "'"
+        return _sql_text(_duckdb_address(f"{root}index/*.parquet"))
     files = [f"{root}index/flight_index_{m:%Y%m}.parquet" for m in _months(start, end)]
     if local is not None:
         files = [f for f in files if os.path.isfile(_local_path(f))]
         if not files:
             return None
-    return "[" + ", ".join("'" + _duckdb_address(f).replace("'", "''") + "'" for f in files) + "]"
+    return "[" + ", ".join(_sql_text(_duckdb_address(f)) for f in files) + "]"
 
 
 def duckdb_views(
