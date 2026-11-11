@@ -574,6 +574,17 @@ def _step_08_advanced_stats(spark, config, **kwargs):
     )
 
 
+def _step_09_publish(spark, config, start_date, end_date, **kwargs):
+    """Step 09: write the published flight list and flight events files of each day."""
+    print("\n" + "=" * 70)
+    print(f"STEP 09 - Publish the day's files ({start_date} to {end_date})")
+    print("=" * 70)
+
+    from opdi.output.published import publish_range
+
+    publish_range(spark, config, start_date, end_date)
+
+
 # Registry mapping step names to functions
 STEPS = {
     "00": _step_00_reference_data,
@@ -588,6 +599,7 @@ STEPS = {
     "06": _step_06_cleanup,
     "07": _step_07_basic_stats,
     "08": _step_08_advanced_stats,
+    "09": _step_09_publish,
 }
 
 
@@ -619,7 +631,7 @@ def run_pipeline(
         env: Environment name (``"dev"``, ``"live"``, or ``"local"``).
         start_date: Pipeline start date (first day of first month to process).
         end_date: Pipeline end date (first day of last month to process).
-        step: Run only this step (``"00"`` through ``"08"``).
+        step: Run only this step (``"00"`` through ``"09"``).
             If ``None``, all steps run sequentially.
         run_airport_zones: Run step 00a — Airport H3 detection zones.
         run_airport_layouts: Run step 00b — Airport ground layouts (OSM -> H3).

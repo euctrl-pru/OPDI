@@ -1047,3 +1047,26 @@ def test_the_log_dir_can_be_redirected():
 
     assert _log_dir({"log_dir": "OPDI_live/logs/adsc-merged"}) == \
         "OPDI_live/logs/adsc-merged"
+
+
+# --- publishing ---------------------------------------------------------------
+
+def test_publishing_is_an_optional_day_step():
+    """Step 09 runs once per day when asked for, and never by default."""
+    from opdi import periodrun
+
+    assert "09" in STEPS
+    assert "09" in periodrun.OPTIONAL_DAY_STEPS
+    assert "09" in periodrun.OPTIONAL_STEPS
+    assert "09" not in PERIOD_STEPS
+    assert periodrun.is_day_step("09") and periodrun.is_day_step("02")
+    assert not periodrun.is_day_step("00")
+
+
+def test_publishing_is_dispatched_per_day():
+    import inspect
+
+    from opdi import periodrun
+
+    src = inspect.getsource(periodrun.run_day_step)
+    assert 'step == "09"' in src and "publish_day" in src

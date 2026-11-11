@@ -174,7 +174,16 @@ def _resolve_warehouse(
 #: Steps available but not run by default. Export and statistics are
 #: publication actions; a test period should be inspected before anything is
 #: published from it.
-OPTIONAL_STEPS: Tuple[str, ...] = ("05", "06", "07", "08")
+OPTIONAL_STEPS: Tuple[str, ...] = ("05", "06", "07", "08", "09")
+
+#: Optional steps that run once per day, like :data:`DAY_STEPS`. Step 09
+#: publishes the day's flight list and flight events files; put it last.
+OPTIONAL_DAY_STEPS: Tuple[str, ...] = ("09",)
+
+
+def is_day_step(step: str) -> bool:
+    """Whether ``step`` runs once per day rather than once for the whole window."""
+    return step in DAY_STEPS or step in OPTIONAL_DAY_STEPS
 
 #: Steps that take no date range. Mirrors the same split in ``runner.py``; if
 #: that list changes this one must change with it, which ``test_periodrun``
@@ -711,9 +720,21 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         written = enrich_day(StorageManager(spark, config), config.events, day, day)
         if written is not None:
             print(f"  flight list enriched: {written:,} rows")
+    elif step == "09":
+        from opdi.output.published import PublishedLayout, pipeline_commit, publish_day
+        from opdi.utils.storage import StorageManager
+
+        # Writes the day's flight list and flight events files into the
+        # published folder, then updates the month's index and the catalogue.
+        storage = StorageManager(spark, config)
+        counts = publish_day(
+            spark, storage, day, PublishedLayout.for_storage(storage), pipeline_commit()
+        )
+        print(f"  published: {counts['flights']:,} flights, {counts['events']:,} events")
     else:
         raise ValueError(
-            f"{step!r} is not a per-day step; expected one of {DAY_STEPS}."
+            f"{step!r} is not a per-day step; expected one of "
+            f"{DAY_STEPS + OPTIONAL_DAY_STEPS}."
         )
 
 
@@ -912,9 +933,9 @@ def run_period(
     # half-finished campaign holds whole days rather than every day's tracks
     # and no day's events.
     units: List[Tuple[str, Optional[date]]] = []
-    units.extend((step, None) for step in steps if step not in DAY_STEPS)
+    units.extend((step, None) for step in steps if not is_day_step(step))
     for d in all_days:
-        units.extend((step, d) for step in steps if step in DAY_STEPS)
+        units.extend((step, d) for step in steps if is_day_step(step))
 
     def _key(step, day):
         return day_state_key(step, day) if day is not None else step
@@ -950,11 +971,11 @@ def run_period(
     if done:
         print(f"  already done: {len(done)} unit(s)  (from {state_path})")
     print(f"  to run      : {len(todo)} unit(s) over {len(all_days)} day(s)")
-    print(f"  day steps   : {' '.join(s for s in steps if s in DAY_STEPS)}")
+    print(f"  day steps   : {' '.join(s for s in steps if is_day_step(s))}")
     # The last day-step in the REQUESTED order, not in DAY_STEPS order: a run
     # asking for only 01 02 must prune after 02, not wait for an 04b it never
     # runs.
-    last_day_step = next((s for s in reversed(list(steps)) if s in DAY_STEPS), None)
+    last_day_step = next((s for s in reversed(list(steps)) if is_day_step(s)), None)
     keep_set = set(keep_tracks_on)
     if prune_tracks:
         print(f"  retention   : tracks pruned after {last_day_step}"
