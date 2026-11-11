@@ -70,8 +70,16 @@ def test_a_missing_day_names_the_file(base):
 def test_as_events_has_the_ten_classic_columns(base):
     ev = published.as_events(published.read_flight_events(DAY, base=base))
     assert list(ev.columns) == [
-        "id", "flight_id", "type", "event_time", "longitude", "latitude", "altitude",
-        "source", "version", "info",
+        "id",
+        "flight_id",
+        "type",
+        "event_time",
+        "longitude",
+        "latitude",
+        "altitude",
+        "source",
+        "version",
+        "info",
     ]
     assert list(ev.columns) == list(CLASSIC_EVENT_COLUMNS.values())
     assert len(ev) == 5
@@ -87,7 +95,9 @@ def test_as_measurements_has_one_row_per_measured_value(base):
         assert row.id == row.event_id + MEASUREMENT_SUFFIX[row.type]
         assert row.version == MEASUREMENT_VERSION[row.type]
     assert set(m.loc[m.event_id == "e2", "type"]) == {
-        "Distance flown (NM)", "Time Passed (s)", "Holding duration (s)",
+        "Distance flown (NM)",
+        "Time Passed (s)",
+        "Holding duration (s)",
     }
 
 
@@ -121,9 +131,7 @@ def test_duckdb_views_over_a_folder_use_a_wildcard(base):
     assert con.execute("select count(*) from opdi_flight_list").fetchone()[0] == 3
 
 
-def test_without_duckdb_the_readers_work_and_the_views_say_what_to_install(
-    base, monkeypatch
-):
+def test_without_duckdb_the_readers_work_and_the_views_say_what_to_install(base, monkeypatch):
     monkeypatch.setitem(sys.modules, "duckdb", None)
     assert len(published.read_flight_list(DAY, base=base)) == 2
     assert len(published.as_events(published.read_flight_events(DAY, base=base))) == 5

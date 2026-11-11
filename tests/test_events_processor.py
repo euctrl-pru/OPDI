@@ -160,12 +160,20 @@ _T0 = dt.datetime(2024, 6, 1, 12, 0, 0)
 #: and ``AIBT`` are deliberately absent: v0.2.0 retired them in favour of
 #: ``off-block``/``on-block``, and v0.3.0 brings the names back because one
 #: detector should have one name. The A-CDM strings are what is retired now.
-V4_RETIRED = {"take-off", "airborne", "touchdown", "off-block", "on-block",
-              "entry-runway", "exit-runway",
-              "top-of-climb-cco", "top-of-descent-cdo"}
+V4_RETIRED = {
+    "take-off",
+    "airborne",
+    "touchdown",
+    "off-block",
+    "on-block",
+    "entry-runway",
+    "exit-runway",
+    "top-of-climb-cco",
+    "top-of-descent-cdo",
+}
 
 _RWY_BEARING = 70.0
-_EBBR = (50.0, 4.0)   # runway 07 threshold, and the aerodrome reference point
+_EBBR = (50.0, 4.0)  # runway 07 threshold, and the aerodrome reference point
 _EDDF = (51.0, 6.0)
 
 _TRACK_SCHEMA = (
@@ -233,11 +241,21 @@ def _flight(spark):
     rows = []
 
     def add(t, lat, lon, alt_ft, roc_ftmin, gs_kt, h3):
-        rows.append((
-            "trk-1", lat, lon, _T0 + dt.timedelta(seconds=t),
-            alt_ft / 3.28084, gs_kt / 1.94384, roc_ftmin / 196.850394,
-            "TEST123", "abc123", _RWY_BEARING, h3,
-        ))
+        rows.append(
+            (
+                "trk-1",
+                lat,
+                lon,
+                _T0 + dt.timedelta(seconds=t),
+                alt_ft / 3.28084,
+                gs_kt / 1.94384,
+                roc_ftmin / 196.850394,
+                "TEST123",
+                "abc123",
+                _RWY_BEARING,
+                h3,
+            )
+        )
 
     for t, along, alt_ft, roc, kt, cell in _DEPARTURE:
         lat, lon = _along(_EBBR, along)
@@ -249,8 +267,10 @@ def _flight(spark):
     enroute = (
         [(alt, 2000.0, 300.0) for alt in range(2000, 20000, 2000)]
         + [(35000, 0.0, 600.0)] * 21
-        + [(alt, -2000.0, 300.0) for alt in
-           (33000, 29000, 25000, 21000, 17000, 13000, 9000, 7000, 6000, 5000)]
+        + [
+            (alt, -2000.0, 300.0)
+            for alt in (33000, 29000, 25000, 21000, 17000, 13000, 9000, 7000, 6000, 5000)
+        ]
     )
     start, end = _along(_EBBR, 2.5), _along(_EDDF, -1.5)
     for i, (alt_ft, roc, kt) in enumerate(enroute):
@@ -276,8 +296,7 @@ def _flight(spark):
             cell = "cell-eddf-stand"
         else:
             cell = "cell-eddf-rwy" if along >= 0 else "cell-air"
-        add(510 + 10 * i, lat, lon, alt_ft, -590.0 if alt_ft > 0 else 0.0, kt,
-            cell)
+        add(510 + 10 * i, lat, lon, alt_ft, -590.0 if alt_ft > 0 else 0.0, kt, cell)
 
     return spark.createDataFrame(rows, _TRACK_SCHEMA)
 
@@ -318,21 +337,21 @@ def stub_storage(spark):
     """
     flight_list = spark.createDataFrame(
         [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EBBR", "EDDF", None, None)],
-        "id string, dof timestamp, adep string, ades string, "
-        "adep_p string, ades_p string",
+        "id string, dof timestamp, adep string, ades string, " "adep_p string, ades_p string",
     )
     layouts = spark.createDataFrame(
-        [("cell-ebbr-rwy", "EBBR", "osm-ebbr", "runway", "07/25"),
-         ("cell-eddf-rwy", "EDDF", "osm-eddf", "runway", "07/25"),
-         ("cell-ebbr-stand", "EBBR", "osm-ebbr-a1", "parking_position", "A1"),
-         ("cell-eddf-stand", "EDDF", "osm-eddf-b2", "parking_position", "B2")],
+        [
+            ("cell-ebbr-rwy", "EBBR", "osm-ebbr", "runway", "07/25"),
+            ("cell-eddf-rwy", "EDDF", "osm-eddf", "runway", "07/25"),
+            ("cell-ebbr-stand", "EBBR", "osm-ebbr-a1", "parking_position", "A1"),
+            ("cell-eddf-stand", "EDDF", "osm-eddf-b2", "parking_position", "B2"),
+        ],
         "hexaero_h3_id string, hexaero_apt_icao string, hexaero_osm_id string, "
         "hexaero_aeroway string, hexaero_ref string",
     )
     airports = spark.createDataFrame(
         [("EBBR", _EBBR[0], _EBBR[1], 0.0), ("EDDF", _EDDF[0], _EDDF[1], 0.0)],
-        "ident string, latitude_deg double, longitude_deg double, "
-        "elevation_ft double",
+        "ident string, latitude_deg double, longitude_deg double, " "elevation_ft double",
     )
     runways = []
     for ident, thr in (("EBBR", _EBBR), ("EDDF", _EDDF)):
@@ -348,8 +367,10 @@ def stub_storage(spark):
     # than the hexaero polygons (which stay for ``calculate_airport_events``).
     # One runway cell per aerodrome, tagged with the strip's two directions.
     runway_grid = spark.createDataFrame(
-        [("cell-ebbr-rwy", "EBBR", "EBBR-07/25", "07", "25", "runway"),
-         ("cell-eddf-rwy", "EDDF", "EDDF-07/25", "07", "25", "runway")],
+        [
+            ("cell-ebbr-rwy", "EBBR", "EBBR-07/25", "07", "25", "runway"),
+            ("cell-eddf-rwy", "EDDF", "EDDF-07/25", "07", "25", "runway"),
+        ],
         "h3_id string, apt_icao string, strip_id string, "
         "le_ident string, he_ident string, zone string",
     )
@@ -365,13 +386,17 @@ def stub_storage(spark):
     cell_a = h3.latlng_to_cell(50.9, 4.48, 7)
     cell_b = h3.latlng_to_cell(50.0, 8.5, 7)
     fir = spark.createDataFrame(
-        [("FIR", code, code, "524", "2024-11-28", "2024-12-26", 0, 999, 1e4, cell, 7)
-         for code, cell in (("AAAA", cell_a), ("BBBB", cell_b))],
+        [
+            ("FIR", code, code, "524", "2024-11-28", "2024-12-26", 0, 999, 1e4, cell, 7)
+            for code, cell in (("AAAA", cell_a), ("BBBB", cell_b))
+        ],
         AIRSPACE_SCHEMA,
     )
     tracks = _flight(spark).withColumn(
         "h3_res_7",
-        F.when(F.col("baro_altitude_c") * 3.28084 >= 20000.0, F.lit(cell_b)).otherwise(F.lit(cell_a)),
+        F.when(F.col("baro_altitude_c") * 3.28084 >= 20000.0, F.lit(cell_b)).otherwise(
+            F.lit(cell_a)
+        ),
     )
     return _StubStorage(
         {
@@ -407,9 +432,7 @@ def _run(spark, stub_storage, events: EventConfig):
         with tempfile.TemporaryDirectory() as log_dir:
             proc = FlightEventProcessor(spark, config, log_dir=log_dir)
             proc.storage = stub_storage
-            proc._etl_flight_events_and_measures(
-                stub_storage.tracks, batch_id="b_", month=MONTH
-            )
+            proc._etl_flight_events_and_measures(stub_storage.tracks, batch_id="b_", month=MONTH)
         # Materialised into a plain frame of its own rows, and the session
         # cache dropped afterwards. A whole pass through step 04 leaves a query
         # plan and a dozen cached frames behind it; keeping either alive across
@@ -443,7 +466,10 @@ def test_v4_keeps_atot_aldt_alongside_the_acdm_family(spark, stub_storage):
     its interpolated-crossing accuracy where reception allows -- both in one
     table, told apart by type string and version."""
     types = _types(_run(spark, stub_storage, EventConfig(**event_bench.V020_BASE)))
-    assert {"ATOT", "ALDT"} <= types, f"ATOT/ALDT must be retained under v0.2.0; got {sorted(types)}"
+    assert {
+        "ATOT",
+        "ALDT",
+    } <= types, f"ATOT/ALDT must be retained under v0.2.0; got {sorted(types)}"
     assert {"airborne", "touchdown"} <= types
 
 
@@ -459,9 +485,9 @@ def test_v5_publishes_one_type_per_question(spark, stub_storage):
     """
     types = _types(_run(spark, stub_storage, EventConfig()))
     assert {"ATOT", "ALDT"} <= types
-    assert types & {"airborne", "touchdown"} == set(), (
-        f"the merged names must replace the A-CDM ones, not join them: {sorted(types)}"
-    )
+    assert (
+        types & {"airborne", "touchdown"} == set()
+    ), f"the merged names must replace the A-CDM ones, not join them: {sorted(types)}"
     assert types & {"off-block", "on-block"} == set()
     assert {"AOBT", "AIBT"} <= types
 
@@ -480,8 +506,7 @@ def test_v4_emits_the_a_cdm_runway_family(spark, stub_storage):
     arrived. Without this the previous test passes on a step that emits
     nothing at all."""
     got = _types(_run(spark, stub_storage, EventConfig()))
-    assert {"line-up", "take-off-roll", "ATOT", "landing", "ALDT",
-            "runway-vacated"} <= got
+    assert {"line-up", "take-off-roll", "ATOT", "landing", "ALDT", "runway-vacated"} <= got
 
 
 def test_legacy_still_emits_exactly_what_it_always_did(spark, stub_storage):
@@ -510,9 +535,14 @@ def test_the_v0_1_0_rung_is_reconstructible(spark, stub_storage):
     """
     types = _types(_run(spark, stub_storage, EventConfig(**event_bench.V4_BASE)))
 
-    assert {"take-off", "landing", "ATOT", "ALDT", "AOBT", "AIBT"} <= types, (
-        f"the v0.1.0 vocabulary is not reconstructible: {sorted(types)}"
-    )
+    assert {
+        "take-off",
+        "landing",
+        "ATOT",
+        "ALDT",
+        "AOBT",
+        "AIBT",
+    } <= types, f"the v0.1.0 vocabulary is not reconstructible: {sorted(types)}"
     assert types & {"line-up", "airborne"} == set()
 
 
@@ -539,9 +569,7 @@ def test_landing_carries_the_new_meaning_only_under_the_new_version(spark, stub_
     info = json.loads(v4.collect()[0]["info"])
     assert info["milestone"] == "T16"
 
-    legacy = _run(spark, stub_storage, EventConfig.legacy()).filter(
-        F.col("type") == "landing"
-    )
+    legacy = _run(spark, stub_storage, EventConfig.legacy()).filter(F.col("type") == "landing")
     assert legacy.count() > 0
     assert legacy.collect()[0]["info"] == ""
 
@@ -554,8 +582,7 @@ def test_every_top_of_climb_records_which_algorithm_produced_it(spark, stub_stor
     a published row, which is what makes a past table readable after the next
     change.
     """
-    out = _run(spark, stub_storage, EventConfig()).filter(
-        F.col("type").startswith("top-of-climb"))
+    out = _run(spark, stub_storage, EventConfig()).filter(F.col("type").startswith("top-of-climb"))
     methods = {json.loads(r["info"])["method"] for r in out.collect()}
     assert methods == {"pru"}
 
@@ -569,7 +596,8 @@ def test_every_top_of_descent_records_it_too(spark, stub_storage):
     change.
     """
     out = _run(spark, stub_storage, EventConfig()).filter(
-        F.col("type").startswith("top-of-descent"))
+        F.col("type").startswith("top-of-descent")
+    )
     methods = {json.loads(r["info"])["method"] for r in out.collect()}
     assert methods == {"pru"}
 
@@ -584,14 +612,34 @@ def test_a_go_around_does_not_depend_on_the_runway_reference_tables(spark, tmp_p
     back exactly the dependency the detector exists to avoid -- and it would
     fail open: no go-arounds and no error.
     """
-    profile = [(0, 2000.0, -1575.0), (10, 1200.0, -1575.0), (20, 700.0, -1575.0),
-               (30, 300.0, -787.0), (40, 200.0, 0.0), (50, 600.0, 1969.0),
-               (60, 1200.0, 1969.0), (70, 2000.0, 1969.0), (80, 2500.0, 1969.0)]
+    profile = [
+        (0, 2000.0, -1575.0),
+        (10, 1200.0, -1575.0),
+        (20, 700.0, -1575.0),
+        (30, 300.0, -787.0),
+        (40, 200.0, 0.0),
+        (50, 600.0, 1969.0),
+        (60, 1200.0, 1969.0),
+        (70, 2000.0, 1969.0),
+        (80, 2500.0, 1969.0),
+    ]
     tracks = spark.createDataFrame(
-        [("trk-g", _EDDF[0], _EDDF[1], _T0 + dt.timedelta(seconds=t),
-          ft / 3.28084, 140 / 1.94384, roc / 196.850394,
-          "TEST456", "abc124", 70.0, "cell-air")
-         for t, ft, roc in profile],
+        [
+            (
+                "trk-g",
+                _EDDF[0],
+                _EDDF[1],
+                _T0 + dt.timedelta(seconds=t),
+                ft / 3.28084,
+                140 / 1.94384,
+                roc / 196.850394,
+                "TEST456",
+                "abc124",
+                70.0,
+                "cell-air",
+            )
+            for t, ft, roc in profile
+        ],
         _TRACK_SCHEMA,
     )
     # Layouts present, ``oa_runways`` absent: the traversal family cannot name
@@ -610,8 +658,7 @@ def test_a_go_around_does_not_depend_on_the_runway_reference_tables(spark, tmp_p
             ),
             "oa_airports": spark.createDataFrame(
                 [("EBBR", _EBBR[0], _EBBR[1], 0.0), ("EDDF", _EDDF[0], _EDDF[1], 0.0)],
-                "ident string, latitude_deg double, longitude_deg double, "
-                "elevation_ft double",
+                "ident string, latitude_deg double, longitude_deg double, " "elevation_ft double",
             ),
         },
         tracks=tracks,
@@ -625,8 +672,12 @@ def test_a_go_around_does_not_depend_on_the_runway_reference_tables(spark, tmp_p
     # the hexaero branch, and a whole-step pass here would add three more
     # families to the most expensive kind of test in the suite for nothing.
     proc._etl_flight_events_and_measures(
-        tracks, batch_id="g_", month=MONTH,
-        calc_vertical=False, calc_horizontal=False, calc_seen=False,
+        tracks,
+        batch_id="g_",
+        month=MONTH,
+        calc_vertical=False,
+        calc_horizontal=False,
+        calc_seen=False,
     )
     types = {r["type"] for r in storage.written["opdi_flight_events"].collect()}
     spark.catalog.clearCache()
@@ -645,16 +696,21 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
         "track_id string, event_time timestamp, velocity double",
     )
     stand = spark.createDataFrame(
-        [("trk-1", "exit-parking_position", _T0),
-         ("trk-1", "entry-parking_position", _T0 + dt.timedelta(seconds=200))],
+        [
+            ("trk-1", "exit-parking_position", _T0),
+            ("trk-1", "entry-parking_position", _T0 + dt.timedelta(seconds=200)),
+        ],
         "track_id string, type string, event_time timestamp",
     )
 
     shipped = {r["type"] for r in calculate_block_events(sv, stand, EventConfig()).collect()}
-    v020 = {r["type"] for r in calculate_block_events(
-        sv, stand, EventConfig(merge_duplicate_milestones=False)).collect()}
-    legacy = {r["type"] for r in
-              calculate_block_events(sv, stand, EventConfig.legacy()).collect()}
+    v020 = {
+        r["type"]
+        for r in calculate_block_events(
+            sv, stand, EventConfig(merge_duplicate_milestones=False)
+        ).collect()
+    }
+    legacy = {r["type"] for r in calculate_block_events(sv, stand, EventConfig.legacy()).collect()}
 
     # One detector, one name -- and the name is the one legacy already used.
     # Only v0.2.0, which published the A-CDM vocabulary without merging it,
@@ -700,9 +756,7 @@ def test_the_track_projection_carries_every_column_a_detector_feature_gates_on()
     )
 
 
-def test_the_log_directory_is_created_by_the_constructor_and_written_at_the_end(
-    spark, tmp_path
-):
+def test_the_log_directory_is_created_by_the_constructor_and_written_at_the_end(spark, tmp_path):
     """`log_dir` is created on construction and written to as the last act of a run.
 
     Both halves matter together, and the pairing is what makes the *ordering*
@@ -780,9 +834,7 @@ def test_a_measurement_inherits_the_day_from_its_parent_event(spark, stub_storag
         SF.col("milestone_id").alias("_ms_id"), SF.col("dof").alias("_ms_dof")
     )
 
-    joined = measurements.join(
-        events, SF.col("_ms_id") == SF.col("_ev_id"), "inner"
-    )
+    joined = measurements.join(events, SF.col("_ms_id") == SF.col("_ev_id"), "inner")
     assert joined.count() > 0, "no measurement joined its event; the test proves nothing"
     assert joined.filter(SF.col("_ms_dof") != SF.col("_ev_dof")).count() == 0
 
@@ -805,8 +857,6 @@ def test_force_recomputes_every_family(spark, stub_storage, monkeypatch):
         assert f'_redo or _batch not in self._load_processed("{family}")' in src, family
 
 
-
-
 # --- per-family versions, info-backed measurements, the navigation group ------
 
 
@@ -823,7 +873,9 @@ def test_a_full_run_emits_the_fir_family(spark, stub_storage):
     out = _run(spark, stub_storage, EventConfig())
     xings = out.filter(F.col("type") == "xing-fir").collect()
     assert len(xings) == 2
-    pairs = sorted((json.loads(r["info"])["fir_from"], json.loads(r["info"])["fir_to"]) for r in xings)
+    pairs = sorted(
+        (json.loads(r["info"])["fir_from"], json.loads(r["info"])["fir_to"]) for r in xings
+    )
     assert pairs == [("AAAA", "BBBB"), ("BBBB", "AAAA")]
 
 
@@ -838,22 +890,39 @@ def test_an_info_field_listed_in_extra_measures_becomes_a_measurement(spark, mon
     import opdi.pipeline.events as ev
 
     monkeypatch.setattr(
-        ev, "EXTRA_MEASURES",
-        [("holding-end", "duration_s", "Holding duration (s)", "holding_v9"),
-         ("holding-end", "absent_field", "Test absent", "holding_v9")],
+        ev,
+        "EXTRA_MEASURES",
+        [
+            ("holding-end", "duration_s", "Holding duration (s)", "holding_v9"),
+            ("holding-end", "absent_field", "Test absent", "holding_v9"),
+        ],
     )
     events = spark.createDataFrame(
-        [("e1", "holding-end", '{"duration_s": 42.0}', dt.date(2024, 6, 1)),
-         ("e2", "holding-start", '{"duration_s": 42.0}', dt.date(2024, 6, 1)),
-         ("e3", "holding-end", '{"other": 1}', dt.date(2024, 6, 1))],
+        [
+            ("e1", "holding-end", '{"duration_s": 42.0}', dt.date(2024, 6, 1)),
+            ("e2", "holding-start", '{"duration_s": 42.0}', dt.date(2024, 6, 1)),
+            ("e3", "holding-end", '{"other": 1}', dt.date(2024, 6, 1)),
+        ],
         "id_tmp string, type string, info string, dof date",
     )
     rows = ev.extra_measurement_rows(events).collect()
     assert len(rows) == 1
     row = rows[0]
-    assert (row["id"], row["milestone_id"], row["type"], row["value"], row["version"], str(row["dof"])) == (
-        "e1" + ev.measurement_suffix("Holding duration (s)"), "e1", "Holding duration (s)", 42.0,
-        "holding_v9", "2024-06-01")
+    assert (
+        row["id"],
+        row["milestone_id"],
+        row["type"],
+        row["value"],
+        row["version"],
+        str(row["dof"]),
+    ) == (
+        "e1" + ev.measurement_suffix("Holding duration (s)"),
+        "e1",
+        "Holding duration (s)",
+        42.0,
+        "holding_v9",
+        "2024-06-01",
+    )
     assert row["id"].startswith("e1_m") and len(row["id"]) == len("e1_m") + 6
 
 
@@ -884,8 +953,13 @@ def test_a_navigation_only_top_up_still_computes_go_arounds(spark, stub_storage,
         proc = FlightEventProcessor(spark, config, log_dir=log_dir)
         proc.storage = stub_storage
         proc._etl_flight_events_and_measures(
-            stub_storage.tracks, batch_id="b_", month=MONTH,
-            calc_vertical=False, calc_horizontal=False, calc_hexaero=False, calc_seen=True,
+            stub_storage.tracks,
+            batch_id="b_",
+            month=MONTH,
+            calc_vertical=False,
+            calc_horizontal=False,
+            calc_hexaero=False,
+            calc_seen=True,
             calc_navigation=True,
         )
     assert seen["go_arounds"] is not None
@@ -896,8 +970,10 @@ def test_no_extra_measures_means_no_frame(spark, monkeypatch):
     import opdi.pipeline.events as ev
 
     monkeypatch.setattr(ev, "EXTRA_MEASURES", [])
-    events = spark.createDataFrame([("e1", "x", "{}", dt.date(2024, 6, 1))],
-                                   "id_tmp string, type string, info string, dof date")
+    events = spark.createDataFrame(
+        [("e1", "x", "{}", dt.date(2024, 6, 1))],
+        "id_tmp string, type string, info string, dof date",
+    )
     assert ev.extra_measurement_rows(events) is None
 
 

@@ -86,8 +86,7 @@ from opdi.config import OPDIConfig  # noqa: E402
 #: real data and then feed each arm the previous arm's candidates. The write
 #: guard caught exactly that on the first end-to-end attempt. A table this list
 #: forgets is a table the guard has to stop, and the guard stops the whole run.
-TABLES = ("osn_tracks", "osn_tracks_clean", "opdi_flight_list",
-          "opdi_endpoint_candidates")
+TABLES = ("osn_tracks", "osn_tracks_clean", "opdi_flight_list", "opdi_endpoint_candidates")
 
 RESEARCH_ROOT = "research/tcv2"
 
@@ -105,12 +104,16 @@ SHARED_SV = f"{RESEARCH_ROOT}/_shared/osn_statevectors_v2"
 SV_TABLE = "osn_statevectors_v2"
 
 PERIODS = {
-    "2025": {"month": date(2025, 6, 1),
-             "days": ["2025-06-05", "2025-06-06", "2025-06-07"],
-             "months": ["202506"]},
-    "2024": {"month": date(2024, 6, 1),
-             "days": ["2024-06-05", "2024-06-06", "2024-06-07"],
-             "months": ["202406"]},
+    "2025": {
+        "month": date(2025, 6, 1),
+        "days": ["2025-06-05", "2025-06-06", "2025-06-07"],
+        "months": ["202506"],
+    },
+    "2024": {
+        "month": date(2024, 6, 1),
+        "days": ["2024-06-05", "2024-06-06", "2024-06-07"],
+        "months": ["202406"],
+    },
 }
 
 
@@ -169,7 +172,8 @@ def guard_writes(allowed_prefix: str = "research/") -> None:
         if not (name.startswith(allowed_prefix) or dest.startswith(allowed_root)):
             raise RuntimeError(
                 f"refusing to write {name!r} (resolves to {dest!r}): this "
-                f"benchmark writes only under {allowed_prefix!r}")
+                f"benchmark writes only under {allowed_prefix!r}"
+            )
         print(f"  -> writing {name} -> {dest}")
         return orig_write(self, df, table_name, *a, **kw)
 
@@ -260,8 +264,7 @@ def build_tracks(spark, cfg, period, days) -> None:
     proc.create_table_if_not_exists()
     # skip_if_processed=False: the month log lives with the pipeline, and a
     # second method must not be skipped because the first recorded the month.
-    proc.process_month(period["month"], skip_if_processed=False,
-                       window=(start, end))
+    proc.process_month(period["month"], skip_if_processed=False, window=(start, end))
 
 
 def clean_tracks(spark, cfg, period) -> None:
@@ -318,7 +321,9 @@ def build_flight_list(spark, cfg, period, airports_hex_path, method) -> None:
     proc = FlightListProcessor(spark, cfg, log_dir=flight_list_log_dir(method))
     proc.create_table_if_not_exists()
     proc.process_date_range(
-        period["month"], period["month"], airports_hex_path,
+        period["month"],
+        period["month"],
+        airports_hex_path,
         skip_if_processed=False,
     )
 
@@ -332,10 +337,9 @@ def read_cleaned(spark, method, days):
     partition path because the table is not day-partitioned on disk; see
     ``track_methods.PERIODS``.
     """
-    return (
-        spark.read.parquet(f"s3a://{BUCKET}/opdi/{table_for(method, 'osn_tracks_clean')}")
-        .filter(F.to_date("event_time").isin(days))
-    )
+    return spark.read.parquet(
+        f"s3a://{BUCKET}/opdi/{table_for(method, 'osn_tracks_clean')}"
+    ).filter(F.to_date("event_time").isin(days))
 
 
 def export_track_extents(spark, method, period: str, days, results_dir) -> dict:
@@ -410,13 +414,11 @@ def score_segmentation(spark, method, period, days) -> dict:
     ``matched`` and handed to :func:`track_score.score_arm_gated` by name,
     which is the same pattern ``ff38531`` wired for V1's ``_score_with_gate``.
     """
-    assign = read_cleaned(spark, method, days).select(
-        "icao24", "event_time", "track_id")
+    assign = read_cleaned(spark, method, days).select("icao24", "event_time", "track_id")
     gt = track_truth.load_flight_intervals(spark, period["months"], days)
     extents = track_extents(assign)
     matched = track_truth.overlap_join(assign, gt)
-    matched_gate = track_truth.overlap_join(
-        assign, gt, bounds=("t_off_block", "t_in_block"))
+    matched_gate = track_truth.overlap_join(assign, gt, bounds=("t_off_block", "t_in_block"))
     return score_arm_gated(matched, extents, matched_gate)
 
 
@@ -457,31 +459,45 @@ def write_rows_csv(path: Path, rows: list) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(PERIODS), default="2025")
-    ap.add_argument("--methods", nargs="+",
-                    default=["legacy", "airframe_only", "standard"],
-                    help="in ablation order. `standard` is `airframe_only` "
-                         "plus the callsign-change break, so running the "
-                         "middle arm is what splits the total gain into the "
-                         "two changes that produced it; drop it and the study "
-                         "reports a sum it cannot decompose")
-    ap.add_argument("--days", nargs="+", default=None,
-                    help="override the period's day list; one day is ~6.7 GB "
-                         "of materialised tables, three is ~20 GB")
+    ap.add_argument(
+        "--methods",
+        nargs="+",
+        default=["legacy", "airframe_only", "standard"],
+        help="in ablation order. `standard` is `airframe_only` "
+        "plus the callsign-change break, so running the "
+        "middle arm is what splits the total gain into the "
+        "two changes that produced it; drop it and the study "
+        "reports a sum it cannot decompose",
+    )
+    ap.add_argument(
+        "--days",
+        nargs="+",
+        default=None,
+        help="override the period's day list; one day is ~6.7 GB "
+        "of materialised tables, three is ~20 GB",
+    )
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--out-name", default=None)
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4066)
     ap.add_argument("--k", type=float, default=2.0)
-    ap.add_argument("--airports-hex-path",
-                    default="data/airport_hex/zones_res7_processed.parquet")
-    ap.add_argument("--keep", action="store_true",
-                    help="do not delete a method's tables after scoring it")
-    ap.add_argument("--keep-sv", action="store_true",
-                    help="leave the shared state-vector slice behind so a "
-                         "follow-up run skips the ingest; costs a few GB on a "
-                         "shared bucket until removed")
-    ap.add_argument("--min-free-gb", type=float, default=8.0,
-                    help="abort before a method if less than this is free")
+    ap.add_argument("--airports-hex-path", default="data/airport_hex/zones_res7_processed.parquet")
+    ap.add_argument(
+        "--keep", action="store_true", help="do not delete a method's tables after scoring it"
+    )
+    ap.add_argument(
+        "--keep-sv",
+        action="store_true",
+        help="leave the shared state-vector slice behind so a "
+        "follow-up run skips the ingest; costs a few GB on a "
+        "shared bucket until removed",
+    )
+    ap.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=8.0,
+        help="abort before a method if less than this is free",
+    )
     args = ap.parse_args()
 
     out_name = args.out_name or f"pipeline_{args.period}.csv"
@@ -505,13 +521,13 @@ def main() -> None:
     try:
         for method in args.methods:
             free = bucket_free_gb(s3)
-            print(f"\n=== {method} ({args.period}, {len(days)} day(s)) === "
-                  f"{free:.2f} GB free")
+            print(f"\n=== {method} ({args.period}, {len(days)} day(s)) === " f"{free:.2f} GB free")
             if free < args.min_free_gb:
                 raise SystemExit(
                     f"only {free:.2f} GB free, need {args.min_free_gb:.2f} -- "
                     f"a method materialises ~6.7 GB per day and a write that "
-                    f"exceeds quota fails after the work is done")
+                    f"exceeds quota fails after the work is done"
+                )
 
             cfg = OPDIConfig.for_environment("opensky")
             cfg.segmentation.method = method
@@ -546,23 +562,25 @@ def main() -> None:
                 # choice on a first run, which is how this was learned.
                 if not (args.keep or args.keep_sv):
                     n, freed = delete_prefix(s3, f"opdi/{SHARED_SV}/")
-                    print(f"  -- dropped state vectors before cleaning: "
-                          f"{n} objects, {freed / 1e9:.2f} GB "
-                          f"({bucket_free_gb(s3):.2f} GB now free)")
+                    print(
+                        f"  -- dropped state vectors before cleaning: "
+                        f"{n} objects, {freed / 1e9:.2f} GB "
+                        f"({bucket_free_gb(s3):.2f} GB now free)"
+                    )
 
                 clean_tracks(spark, cfg, period)
 
                 # Same reasoning one step later: step 03 reads the cleaned
                 # table, so the raw one is dead weight from here.
                 if not args.keep:
-                    n, freed = delete_prefix(
-                        s3, f"opdi/{table_for(method, 'osn_tracks')}/")
-                    print(f"  -- dropped raw tracks before the flight list: "
-                          f"{n} objects, {freed / 1e9:.2f} GB "
-                          f"({bucket_free_gb(s3):.2f} GB now free)")
+                    n, freed = delete_prefix(s3, f"opdi/{table_for(method, 'osn_tracks')}/")
+                    print(
+                        f"  -- dropped raw tracks before the flight list: "
+                        f"{n} objects, {freed / 1e9:.2f} GB "
+                        f"({bucket_free_gb(s3):.2f} GB now free)"
+                    )
 
-                row = {"method": method, "period": args.period,
-                       "days": len(days)}
+                row = {"method": method, "period": args.period, "days": len(days)}
                 row.update(score_segmentation(spark, method, period, days))
 
                 # Comment 7: step 03 -- the expensive step -- and its ADEP/ADES
@@ -572,8 +590,7 @@ def main() -> None:
                 # ADEP/ADES keys, which is what write_rows_csv's union header
                 # is for.
                 if method in FLIGHT_LIST_METHODS:
-                    build_flight_list(
-                        spark, cfg, period, args.airports_hex_path, method)
+                    build_flight_list(spark, cfg, period, args.airports_hex_path, method)
                     row.update(score_adep_ades(spark, method, period, days, args.k))
 
                 # Both of these read osn_tracks_clean, so both must run before
@@ -582,13 +599,10 @@ def main() -> None:
                 # half-summary claiming to describe a run that did not finish.
                 # args.period, not `period`: the latter is the PERIODS dict,
                 # and this argument reaches `extents_name` to build a filename.
-                row.update(export_track_extents(
-                    spark, method, args.period, days, args.results_dir))
-                row.update(track_diagnostics.null_rates(
-                    read_cleaned(spark, method, days)))
+                row.update(export_track_extents(spark, method, args.period, days, args.results_dir))
+                row.update(track_diagnostics.null_rates(read_cleaned(spark, method, days)))
 
-                row["minutes"] = round(
-                    (datetime.utcnow() - started).total_seconds() / 60.0, 1)
+                row["minutes"] = round((datetime.utcnow() - started).total_seconds() / 60.0, 1)
                 rows.append(row)
                 # Rewritten whole, not appended -- see write_rows_csv for why
                 # a row-by-row appending writer is not safe once one arm's row
@@ -602,8 +616,7 @@ def main() -> None:
                 # the space more than this one needs its wreckage.
                 if not args.keep:
                     n, freed = delete_method(s3, method)
-                    print(f"  -- deleted {n} objects ({freed / 1e9:.2f} GB) "
-                          f"for {method}")
+                    print(f"  -- deleted {n} objects ({freed / 1e9:.2f} GB) " f"for {method}")
     finally:
         spark.stop()
         # The shared slice outlives the per-method loop by design -- both
@@ -612,38 +625,43 @@ def main() -> None:
         # ingest but keeps several GB resident on a shared bucket.
         if not (args.keep or args.keep_sv):
             n, freed = delete_prefix(s3, f"opdi/{SHARED_SV}/")
-            print(f"-- deleted {n} shared state-vector objects "
-                  f"({freed / 1e9:.2f} GB)")
+            print(f"-- deleted {n} shared state-vector objects " f"({freed / 1e9:.2f} GB)")
 
     if rows:
         provenance.record(
-            args.results_dir, out_name,
-            script="benchmarks/track_pipeline_v2.py", argv=sys.argv[1:],
-            code_paths=["benchmarks/track_pipeline_v2.py",
-                        "benchmarks/track_truth.py", "benchmarks/track_score.py",
-                        "benchmarks/adep_ades.py", "benchmarks/osn_sample.py",
-                        "benchmarks/flight_list_v7.py",
-                        # null_rates lives here, and its output is in the row.
-                        "benchmarks/track_diagnostics.py",
-                        # extents_name lives here, so it decides the filename
-                        # the continuity job goes looking for.
-                        "benchmarks/track_continuity.py",
-                        "src/opdi/ingestion/osn_statevectors.py",
-                        "src/opdi/pipeline/tracks.py",
-                        "src/opdi/cleaning/cleaner.py",
-                        "src/opdi/cleaning/native.py",
-                        "src/opdi/pipeline/flights.py",
-                        # __init__ decides which implementation
-                        # `assign_track_id` resolves to, so it can change every
-                        # number here while base.py and methods.py stay
-                        # byte-identical.
-                        "src/opdi/pipeline/segmentation/__init__.py",
-                        "src/opdi/pipeline/segmentation/base.py",
-                        "src/opdi/pipeline/segmentation/methods.py",
-                        "src/opdi/config.py"],
+            args.results_dir,
+            out_name,
+            script="benchmarks/track_pipeline_v2.py",
+            argv=sys.argv[1:],
+            code_paths=[
+                "benchmarks/track_pipeline_v2.py",
+                "benchmarks/track_truth.py",
+                "benchmarks/track_score.py",
+                "benchmarks/adep_ades.py",
+                "benchmarks/osn_sample.py",
+                "benchmarks/flight_list_v7.py",
+                # null_rates lives here, and its output is in the row.
+                "benchmarks/track_diagnostics.py",
+                # extents_name lives here, so it decides the filename
+                # the continuity job goes looking for.
+                "benchmarks/track_continuity.py",
+                "src/opdi/ingestion/osn_statevectors.py",
+                "src/opdi/pipeline/tracks.py",
+                "src/opdi/cleaning/cleaner.py",
+                "src/opdi/cleaning/native.py",
+                "src/opdi/pipeline/flights.py",
+                # __init__ decides which implementation
+                # `assign_track_id` resolves to, so it can change every
+                # number here while base.py and methods.py stay
+                # byte-identical.
+                "src/opdi/pipeline/segmentation/__init__.py",
+                "src/opdi/pipeline/segmentation/base.py",
+                "src/opdi/pipeline/segmentation/methods.py",
+                "src/opdi/config.py",
+            ],
             notes=f"Real pipeline steps 02, 02a per method, 03 for "
-                  f"{FLIGHT_LIST_METHODS} only. Scored airborne and "
-                  f"gate-to-gate. days={days}.",
+            f"{FLIGHT_LIST_METHODS} only. Scored airborne and "
+            f"gate-to-gate. days={days}.",
         )
         print(f"\n-> {out}")
 

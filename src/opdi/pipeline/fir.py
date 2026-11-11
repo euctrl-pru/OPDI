@@ -59,8 +59,10 @@ def load_fir_reference(storage) -> Optional[DataFrame]:
         return None
     ref = storage.read_table(AIRSPACE_TABLE)
     if "h3_cell" not in ref.columns or "h3_res" not in ref.columns:
-        print(f"{AIRSPACE_TABLE} has the pre-2026-11 schema (no h3_cell/h3_res); "
-              "re-run step 00c. xing-fir will not be computed.")
+        print(
+            f"{AIRSPACE_TABLE} has the pre-2026-11 schema (no h3_cell/h3_res); "
+            "re-run step 00c. xing-fir will not be computed."
+        )
         return None
     return ref.filter(col("airspace_type") == "FIR")
 
@@ -87,28 +89,39 @@ def attach_fir(df: DataFrame, fir_ref: DataFrame, config: EventConfig) -> DataFr
         ref_r = fir_ref.filter(col("h3_res") == r).select(
             col("h3_cell").alias(f"_c{r}"),
             col("code").alias(f"_code{r}"),
-            col("min_fl").alias(f"_lo{r}"), col("max_fl").alias(f"_hi{r}"),
+            col("min_fl").alias(f"_lo{r}"),
+            col("max_fl").alias(f"_hi{r}"),
             col("area_km2").alias(f"_area{r}"),
             col("airac_cfmu").alias(f"_airac{r}"),
             F.date_format(col("validity_start"), "yyyy-MM-dd").alias(f"_vs{r}"),
             F.date_format(col("validity_end"), "yyyy-MM-dd").alias(f"_ve{r}"),
         )
         parent = h3_parent_expr(col("h3_res_7"), r) if r < 7 else col("h3_res_7")
-        cond = (parent == col(f"_c{r}")) & (col("_fl") >= col(f"_lo{r}")) & (col("_fl") < col(f"_hi{r}"))
+        cond = (
+            (parent == col(f"_c{r}"))
+            & (col("_fl") >= col(f"_lo{r}"))
+            & (col("_fl") < col(f"_hi{r}"))
+        )
         df = df.join(F.broadcast(ref_r), cond, "left").drop(f"_c{r}")
-        candidates.append(F.struct(
-            (col(f"_hi{r}") - col(f"_lo{r}")).alias("band_width"),
-            col(f"_area{r}").alias("area_km2"),
-            col(f"_code{r}").alias("code"),
-            col(f"_airac{r}").alias("airac_cfmu"),
-            col(f"_vs{r}").alias("validity_start"),
-            col(f"_ve{r}").alias("validity_end"),
-        ))
+        candidates.append(
+            F.struct(
+                (col(f"_hi{r}") - col(f"_lo{r}")).alias("band_width"),
+                col(f"_area{r}").alias("area_km2"),
+                col(f"_code{r}").alias("code"),
+                col(f"_airac{r}").alias("airac_cfmu"),
+                col(f"_vs{r}").alias("validity_start"),
+                col(f"_ve{r}").alias("validity_end"),
+            )
+        )
     matched = F.filter(F.array(*candidates), lambda c: c["code"].isNotNull())
     best = F.try_element_at(F.array_sort(matched), lit(1))
     df = df.withColumn("_best", best)
     df = df.select(
-        *[c for c in df.columns if not (c.startswith(("_code", "_lo", "_hi", "_area", "_airac", "_vs", "_ve")))],
+        *[
+            c
+            for c in df.columns
+            if not (c.startswith(("_code", "_lo", "_hi", "_area", "_airac", "_vs", "_ve")))
+        ],
     )
     df = (
         df.withColumn("fir_code", col("_best.code"))
@@ -121,8 +134,10 @@ def attach_fir(df: DataFrame, fir_ref: DataFrame, config: EventConfig) -> DataFr
     )
     # Duplicates from a double match at one resolution: keep the best-ranked row.
     w = Window.partitionBy("track_id", PIECE).orderBy(
-        col("_ts").asc(), col("fir_band_width").asc_nulls_last(),
-        col("fir_area_km2").asc_nulls_last(), col("fir_code").asc_nulls_last(),
+        col("_ts").asc(),
+        col("fir_band_width").asc_nulls_last(),
+        col("fir_area_km2").asc_nulls_last(),
+        col("fir_code").asc_nulls_last(),
     )
     dup = F.lag("_ts").over(w) == col("_ts")
     return df.withColumn("_dup", F.coalesce(dup, lit(False))).filter(~col("_dup")).drop("_dup")
@@ -134,14 +149,19 @@ def _debounced_runs(df: DataFrame, config: EventConfig) -> DataFrame:
     upto = w.rowsBetween(Window.unboundedPreceding, 0)
     after = w.rowsBetween(1, Window.unboundedFollowing)
     whole = w.rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
-    start = ~(col("fir_code").eqNullSafe(F.lag("fir_code").over(w))) | F.lag("fir_code").over(w).isNull() & F.lag("_ts").over(w).isNull()
+    start = (
+        ~(col("fir_code").eqNullSafe(F.lag("fir_code").over(w)))
+        | F.lag("fir_code").over(w).isNull() & F.lag("_ts").over(w).isNull()
+    )
     df = df.withColumn("_start", F.coalesce(start, lit(True)))
     df = df.withColumn("_run_start_ts", F.max(F.when(col("_start"), col("_ts"))).over(upto))
     prev_ts = F.lag("_ts").over(w)
     df = df.withColumn("_prev_ts", prev_ts)
     df = df.withColumn(
         "_run_last_ts",
-        F.coalesce(F.min(F.when(col("_start"), col("_prev_ts"))).over(after), F.max("_ts").over(whole)),
+        F.coalesce(
+            F.min(F.when(col("_start"), col("_prev_ts"))).over(after), F.max("_ts").over(whole)
+        ),
     )
     long = (col("_run_last_ts") - col("_run_start_ts")) >= config.fir_min_dwell_seconds
     df = df.withColumn("_long_code", F.when(long, col("fir_code")))
@@ -154,7 +174,9 @@ def _debounced_runs(df: DataFrame, config: EventConfig) -> DataFrame:
         ignorenulls=True,
     ).over(upto)
     df = df.withColumn("fir_run", F.when(long, col("fir_code")).otherwise(carried["c"]))
-    return df.drop("_start", "_run_start_ts", "_prev_ts", "_run_last_ts", "_long_code", "_long_seen")
+    return df.drop(
+        "_start", "_run_start_ts", "_prev_ts", "_run_last_ts", "_long_code", "_long_seen"
+    )
 
 
 def calculate_fir_events(
@@ -195,19 +217,27 @@ def calculate_fir_events(
     )
     seq = Window.partitionBy("track_id").orderBy("_ts")
     df = df.withColumn("crossing_seq", F.row_number().over(seq))
-    info = F.to_json(F.struct(
-        col("crossing_seq"),
-        col("_prev_run").alias("fir_from"),
-        col("fir_run").alias("fir_to"),
-        F.round(col("_fl"), 0).alias("fl"),
-        col("_bracket_s").alias("bracket_s"),
-        col("airac_cfmu"),
-        col("airac_validity_start"),
-        col("airac_validity_end"),
-    ))
+    info = F.to_json(
+        F.struct(
+            col("crossing_seq"),
+            col("_prev_run").alias("fir_from"),
+            col("fir_run").alias("fir_to"),
+            F.round(col("_fl"), 0).alias("fl"),
+            col("_bracket_s").alias("bracket_s"),
+            col("airac_cfmu"),
+            col("airac_validity_start"),
+            col("airac_validity_end"),
+        )
+    )
     return df.select(
-        col("track_id"), lit("xing-fir").alias("type"), col("event_time"),
-        col("lon"), col("lat"), (col("baro_altitude_c") * FT_PER_M).alias("altitude_ft"),
-        col("cumulative_distance_nm"), col("cumulative_time_s").cast("long"),
-        info.alias("info"), lit(FIR_VERSION).alias("version"),
+        col("track_id"),
+        lit("xing-fir").alias("type"),
+        col("event_time"),
+        col("lon"),
+        col("lat"),
+        (col("baro_altitude_c") * FT_PER_M).alias("altitude_ft"),
+        col("cumulative_distance_nm"),
+        col("cumulative_time_s").cast("long"),
+        info.alias("info"),
+        lit(FIR_VERSION).alias("version"),
     )

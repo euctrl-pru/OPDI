@@ -66,17 +66,47 @@ _CODE_PATHS = [
 ]
 
 HOLE_COLUMNS = [
-    "icao24", "track_id", "t_old_edge", "t_new_edge", "gap_min", "population", "label",
-    "event_near_edge", "event_outside_box_inside", "descent_edge", "alt_after_ft", "vr_after_fpm", "vr_after_samples",
-    "alt_before_ft", "vr_before_fpm", "implied_kt", "cs_before", "cs_after", "callsign_state",
+    "icao24",
+    "track_id",
+    "t_old_edge",
+    "t_new_edge",
+    "gap_min",
+    "population",
+    "label",
+    "event_near_edge",
+    "event_outside_box_inside",
+    "descent_edge",
+    "alt_after_ft",
+    "vr_after_fpm",
+    "vr_after_samples",
+    "alt_before_ft",
+    "vr_before_fpm",
+    "implied_kt",
+    "cs_before",
+    "cs_after",
+    "callsign_state",
     "other_checks_pass",
 ]
 
 CONTROL_COLUMNS = [
-    "control_id", "pair_id", "requested_gap_min", "depth_min", "gap_min", "same_callsign",
-    "descent_edge", "alt_after_ft", "vr_after_fpm", "vr_after_samples", "alt_before_ft",
-    "vr_before_fpm", "implied_kt", "cs_before", "cs_after", "callsign_state",
-    "other_checks_pass", "joined",
+    "control_id",
+    "pair_id",
+    "requested_gap_min",
+    "depth_min",
+    "gap_min",
+    "same_callsign",
+    "descent_edge",
+    "alt_after_ft",
+    "vr_after_fpm",
+    "vr_after_samples",
+    "alt_before_ft",
+    "vr_before_fpm",
+    "implied_kt",
+    "cs_before",
+    "cs_after",
+    "callsign_state",
+    "other_checks_pass",
+    "joined",
 ]
 
 
@@ -121,7 +151,9 @@ def other_checks_pass(p: SegmentationParams) -> Column:
 
 
 def implied_kt() -> Column:
-    return F.when(F.col("position_gap_min") > 0.0, F.col("gc_nm") / (F.col("position_gap_min") / 60.0))
+    return F.when(
+        F.col("position_gap_min") > 0.0, F.col("gc_nm") / (F.col("position_gap_min") / 60.0)
+    )
 
 
 def _populations(holes: DataFrame, truth: DataFrame) -> DataFrame:
@@ -142,12 +174,16 @@ def _populations(holes: DataFrame, truth: DataFrame) -> DataFrame:
         .groupBy(*key)
         .agg(F.max("_crosses").alias("_crosses"))
     )
-    return holes.join(inside, on=key, how="left").withColumn(
-        "population",
-        F.when(F.col("_crosses").isNull(), "none")
-        .when(F.col("_crosses"), "crosses_box")
-        .otherwise("other"),
-    ).drop("_crosses")
+    return (
+        holes.join(inside, on=key, how="left")
+        .withColumn(
+            "population",
+            F.when(F.col("_crosses").isNull(), "none")
+            .when(F.col("_crosses"), "crosses_box")
+            .otherwise("other"),
+        )
+        .drop("_crosses")
+    )
 
 
 def _describe(frame: DataFrame, p: SegmentationParams) -> DataFrame:
@@ -252,35 +288,42 @@ def score_candidates(holes, controls):
         same_upper = rule_of_three_upper(same_joined, len(same))
         within = (
             false_joins == 0
-            and hidden_upper is not None and hidden_upper <= HIDDEN_LIMIT
+            and hidden_upper is not None
+            and hidden_upper <= HIDDEN_LIMIT
             and (same_upper is None or same_upper <= SAME_CALLSIGN_LIMIT)
         )
         crossing = int((h["population"] == "crosses_box").sum())
-        rows.append({
-            "candidate": candidate,
-            "conditions": 0 if candidate == "none" else candidate.count("+") + 1,
-            "real_linked": len(h),
-            "real_crossing_linked": crossing,
-            "real_checkable": len(checkable),
-            "real_false_joins": false_joins,
-            "real_unknown": int((h["label"] == "unknown").sum()),
-            "false_join_upper_95": rule_of_three_upper(false_joins, len(checkable)),
-            "controls": len(c),
-            "controls_joined": joined,
-            "controls_joined_upper_95": hidden_upper,
-            "same_callsign_controls": len(same),
-            "same_callsign_joined": same_joined,
-            "same_callsign_upper_95": same_upper,
-            "within_limits": bool(within),
-            "adoptable": bool(within and len(checkable) >= MIN_CHECKABLE
-                              and crossing >= MIN_CROSSING_LINKED),
-        })
+        rows.append(
+            {
+                "candidate": candidate,
+                "conditions": 0 if candidate == "none" else candidate.count("+") + 1,
+                "real_linked": len(h),
+                "real_crossing_linked": crossing,
+                "real_checkable": len(checkable),
+                "real_false_joins": false_joins,
+                "real_unknown": int((h["label"] == "unknown").sum()),
+                "false_join_upper_95": rule_of_three_upper(false_joins, len(checkable)),
+                "controls": len(c),
+                "controls_joined": joined,
+                "controls_joined_upper_95": hidden_upper,
+                "same_callsign_controls": len(same),
+                "same_callsign_joined": same_joined,
+                "same_callsign_upper_95": same_upper,
+                "within_limits": bool(within),
+                "adoptable": bool(
+                    within and len(checkable) >= MIN_CHECKABLE and crossing >= MIN_CROSSING_LINKED
+                ),
+            }
+        )
     return pd.DataFrame(rows)
 
 
 def choose(scored) -> Optional[str]:
     """The adoptable candidate with the fewest conditions; ties go to C2, then C1, then C3."""
-    order = {name: i for i, name in enumerate(["none", "C2", "C1", "C3", "C1+C2", "C2+C3", "C1+C3", "C1+C2+C3"])}
+    order = {
+        name: i
+        for i, name in enumerate(["none", "C2", "C1", "C3", "C1+C2", "C2+C3", "C1+C3", "C1+C2+C3"])
+    }
     good = scored[scored["adoptable"].astype(bool)]
     if good.empty:
         return None
@@ -288,8 +331,14 @@ def choose(scored) -> Optional[str]:
     return best[0]["candidate"]
 
 
-def write_rows(results_dir, name: str, rows: List[Dict], argv: List[str],
-               input_tables: List[str], notes: str = "") -> None:
+def write_rows(
+    results_dir,
+    name: str,
+    rows: List[Dict],
+    argv: List[str],
+    input_tables: List[str],
+    notes: str = "",
+) -> None:
     """Write *rows* as a CSV beside its provenance entry."""
     import gzip
 
@@ -302,8 +351,14 @@ def write_rows(results_dir, name: str, rows: List[Dict], argv: List[str],
         out.writeheader()
         out.writerows(rows)
     provenance.record(
-        results_dir, name, "benchmarks/track_link_descent.py", argv, _CODE_PATHS,
-        inputs={"rows": len(rows)}, notes=notes, input_tables=input_tables,
+        results_dir,
+        name,
+        "benchmarks/track_link_descent.py",
+        argv,
+        _CODE_PATHS,
+        inputs={"rows": len(rows)},
+        notes=notes,
+        input_tables=input_tables,
     )
 
 
@@ -322,18 +377,32 @@ def score_main(args) -> int:
         files = sorted(Path(args.results_dir).glob(f"{stem}_*.csv*"))
         if not files:
             raise SystemExit(f"no {stem}_*.csv under {args.results_dir}: run the export first")
-        return pd.concat([pd.read_csv(f) for f in files], ignore_index=True), [f.name for f in files]
+        return pd.concat([pd.read_csv(f) for f in files], ignore_index=True), [
+            f.name for f in files
+        ]
 
     holes, hole_files = staged("descent_holes")
     controls, control_files = staged("descent_controls")
     scored = score_candidates(holes, controls)
     inputs = hole_files + control_files
-    write_rows(args.results_dir, "descent_candidates.csv", scored.to_dict("records"), sys.argv[1:],
-               inputs, notes="Candidates scored over every exported day; see CANDIDATES.")
+    write_rows(
+        args.results_dir,
+        "descent_candidates.csv",
+        scored.to_dict("records"),
+        sys.argv[1:],
+        inputs,
+        notes="Candidates scored over every exported day; see CANDIDATES.",
+    )
     linked = holes[_truthy(holes["descent_edge"]) & _truthy(holes["other_checks_pass"])]
     false_joins = linked[linked["label"] == "false_join"]
-    write_rows(args.results_dir, "descent_false_joins.csv", false_joins.to_dict("records"), sys.argv[1:],
-               inputs, notes="The false joins among holes linked only by descent, in full.")
+    write_rows(
+        args.results_dir,
+        "descent_false_joins.csv",
+        false_joins.to_dict("records"),
+        sys.argv[1:],
+        inputs,
+        notes="The false joins among holes linked only by descent, in full.",
+    )
     print(scored.to_string(index=False))
     print(f"chosen: {choose(scored)}")
     return 0
@@ -359,8 +428,9 @@ def main() -> int:
     ap.add_argument("--airports", default=AIRPORTS)
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--executors", type=int, default=8)
-    ap.add_argument("--score", action="store_true",
-                    help="score the candidates on the exported CSVs; no cluster")
+    ap.add_argument(
+        "--score", action="store_true", help="score the candidates on the exported CSVs; no cluster"
+    )
     args = ap.parse_args()
     if args.score:
         return score_main(args)
@@ -380,18 +450,32 @@ def main() -> int:
         for day in args.days:
             tracks = read_tracks(spark, args.source, day).cache()
             truth = with_population(
-                load_flight_intervals(spark, truth_months(day), [day], reference_base=args.reference_base),
+                load_flight_intervals(
+                    spark, truth_months(day), [day], reference_base=args.reference_base
+                ),
                 airports,
             ).cache()
             tables = [f"{args.source}/dof={day}", args.airports]
             holes = _rows(descent_holes(tracks, truth, p))
-            write_rows(args.results_dir, f"descent_holes_{day}.csv", holes, sys.argv[1:], tables,
-                       notes="Real holes whose new edge is below the floor and descending.")
+            write_rows(
+                args.results_dir,
+                f"descent_holes_{day}.csv",
+                holes,
+                sys.argv[1:],
+                tables,
+                notes="Real holes whose new edge is below the floor and descending.",
+            )
             print(f"{day}: {len(holes)} holes with a descending new edge", flush=True)
             controls = _rows(descent_controls(tracks, truth, p))
             # Gzipped: eighty thousand rows a day, which pandas reads as it is.
-            write_rows(args.results_dir, f"descent_controls_{day}.csv.gz", controls, sys.argv[1:], tables,
-                       notes="cruise_descent hidden-landing controls, with the rule's verdict under descent on.")
+            write_rows(
+                args.results_dir,
+                f"descent_controls_{day}.csv.gz",
+                controls,
+                sys.argv[1:],
+                tables,
+                notes="cruise_descent hidden-landing controls, with the rule's verdict under descent on.",
+            )
             print(f"{day}: {len(controls)} cruise_descent controls", flush=True)
             tracks.unpersist()
             truth.unpersist()

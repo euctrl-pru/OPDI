@@ -96,14 +96,16 @@ APPROACH_ZONE = "approach"
 
 TABLE_NAME = "h3_runway_zones"
 
-RUNWAY_GRID_SCHEMA = StructType([
-    StructField("h3_id", StringType(), True),
-    StructField("apt_icao", StringType(), True),
-    StructField("strip_id", StringType(), True),
-    StructField("le_ident", StringType(), True),
-    StructField("he_ident", StringType(), True),
-    StructField("zone", StringType(), True),
-])
+RUNWAY_GRID_SCHEMA = StructType(
+    [
+        StructField("h3_id", StringType(), True),
+        StructField("apt_icao", StringType(), True),
+        StructField("strip_id", StringType(), True),
+        StructField("le_ident", StringType(), True),
+        StructField("he_ident", StringType(), True),
+        StructField("zone", StringType(), True),
+    ]
+)
 
 
 class NullGeometryError(ValueError):
@@ -272,14 +274,20 @@ def _strip_cells(row, resolution: int) -> Dict[str, str]:
     neither threshold's geometry is derivable at all.
     """
     le_pos = _endpoint_or_derived(
-        row.get("le_latitude_deg"), row.get("le_longitude_deg"),
-        row.get("he_latitude_deg"), row.get("he_longitude_deg"),
-        row.get("he_heading_degT"), row.get("length_ft"),
+        row.get("le_latitude_deg"),
+        row.get("le_longitude_deg"),
+        row.get("he_latitude_deg"),
+        row.get("he_longitude_deg"),
+        row.get("he_heading_degT"),
+        row.get("length_ft"),
     )
     he_pos = _endpoint_or_derived(
-        row.get("he_latitude_deg"), row.get("he_longitude_deg"),
-        row.get("le_latitude_deg"), row.get("le_longitude_deg"),
-        row.get("le_heading_degT"), row.get("length_ft"),
+        row.get("he_latitude_deg"),
+        row.get("he_longitude_deg"),
+        row.get("le_latitude_deg"),
+        row.get("le_longitude_deg"),
+        row.get("le_heading_degT"),
+        row.get("length_ft"),
     )
     if le_pos is None or he_pos is None:
         raise NullGeometryError(
@@ -433,8 +441,7 @@ class RunwayGridGenerator:
             )
         )
         airports_df = apt.toPandas()
-        print(f"There are {len(airports_df)} airports to process "
-              f"(coverage: {cov.label})...")
+        print(f"There are {len(airports_df)} airports to process " f"(coverage: {cov.label})...")
         return airports_df
 
     def fetch_runways(self, apt_idents: Optional[List[str]]) -> pd.DataFrame:
@@ -468,18 +475,22 @@ class RunwayGridGenerator:
                 # (a zero-length or self-touching ring). Either way one bad
                 # runway must not lose the whole airport's other strips -- log
                 # and skip this strip, exactly as a null one.
-                print(f"  Skipping runway {apt_icao} {row.get('le_ident')}/"
-                      f"{row.get('he_ident')} (strip {strip_id}): {e}")
+                print(
+                    f"  Skipping runway {apt_icao} {row.get('le_ident')}/"
+                    f"{row.get('he_ident')} (strip {strip_id}): {e}"
+                )
                 continue
             for h3_id, zone in cells.items():
-                records.append({
-                    "h3_id": h3_id,
-                    "apt_icao": apt_icao,
-                    "strip_id": strip_id,
-                    "le_ident": row.get("le_ident"),
-                    "he_ident": row.get("he_ident"),
-                    "zone": zone,
-                })
+                records.append(
+                    {
+                        "h3_id": h3_id,
+                        "apt_icao": apt_icao,
+                        "strip_id": strip_id,
+                        "le_ident": row.get("le_ident"),
+                        "he_ident": row.get("he_ident"),
+                        "zone": zone,
+                    }
+                )
         return pd.DataFrame.from_records(
             records, columns=["h3_id", "apt_icao", "strip_id", "le_ident", "he_ident", "zone"]
         )
@@ -523,7 +534,8 @@ class RunwayGridGenerator:
             print(f"Processing {apt_icao}...")
             rwy_rows = (
                 rwy_all[rwy_all["airport_ident"] == apt_icao]
-                if not rwy_all.empty else pd.DataFrame()
+                if not rwy_all.empty
+                else pd.DataFrame()
             )
             try:
                 pdf = self.process_airport(apt_icao, rwy_rows)

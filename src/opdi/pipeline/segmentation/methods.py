@@ -227,19 +227,13 @@ def ground_anchored() -> BreakRule:
         w = segment_window()
         # A ground run's length: time from the first to the last of the
         # consecutive on-ground samples immediately preceding this one.
-        ground_start = F.last(
-            F.when(~F.col("on_ground"), F.col("_ts")), ignorenulls=True
-        ).over(w.rowsBetween(Window.unboundedPreceding, -1))
+        ground_start = F.last(F.when(~F.col("on_ground"), F.col("_ts")), ignorenulls=True).over(
+            w.rowsBetween(Window.unboundedPreceding, -1)
+        )
         prev_ts = F.lag("_ts").over(w)
         prev_ground = F.lag("on_ground").over(w)
-        ground_run_min = (
-            F.unix_timestamp(prev_ts) - F.unix_timestamp(ground_start)
-        ) / 60.0
-        turnaround = (
-            ~F.col("on_ground")
-            & prev_ground
-            & (ground_run_min >= p.ground_dwell_minutes)
-        )
+        ground_run_min = (F.unix_timestamp(prev_ts) - F.unix_timestamp(ground_start)) / 60.0
+        turnaround = ~F.col("on_ground") & prev_ground & (ground_run_min >= p.ground_dwell_minutes)
         return turnaround | legacy().break_expr(p)
 
     return BreakRule(
@@ -320,22 +314,18 @@ def airport_anchored() -> BreakRule:
         # the aircraft was *not* stationary at an aerodrome. NULL when the group
         # has never moved, in which case the group's own first sample anchors it.
         run_start = F.coalesce(
-            F.last(
-                F.when(~stationary, F.col("_ts")), ignorenulls=True
-            ).over(w.rowsBetween(Window.unboundedPreceding, -1)),
+            F.last(F.when(~stationary, F.col("_ts")), ignorenulls=True).over(
+                w.rowsBetween(Window.unboundedPreceding, -1)
+            ),
             F.first(F.col("_ts")).over(w.rowsBetween(Window.unboundedPreceding, 0)),
         )
-        parked_run_min = (
-            F.unix_timestamp(prev_ts) - F.unix_timestamp(run_start)
-        ) / 60.0
+        parked_run_min = (F.unix_timestamp(prev_ts) - F.unix_timestamp(run_start)) / 60.0
 
         # Gap arm: fires once, at the sample that ends the silence.
         gap_turnaround = prev_stationary & (gap_minutes() >= p.ground_dwell_minutes)
         # Parked-run arm: fires once, at the first sample that moves again.
         parked_turnaround = (
-            ~stationary
-            & prev_stationary
-            & (parked_run_min >= p.ground_dwell_minutes)
+            ~stationary & prev_stationary & (parked_run_min >= p.ground_dwell_minutes)
         )
         # Floor: the general gap rule only. NOT legacy_low_altitude_gap -- that
         # is the rule this arm exists to replace, and an arm cannot measure a
@@ -421,9 +411,7 @@ def vertical_profile() -> BreakRule:
         )
         # The climb half: back up through the floor. This is where the break
         # goes, so the departing leg starts at the crossing.
-        climbing_away = (height_ft > p.descent_floor_ft) & (
-            prev_height_ft <= p.descent_floor_ft
-        )
+        climbing_away = (height_ft > p.descent_floor_ft) & (prev_height_ft <= p.descent_floor_ft)
         return (climbing_away & reached_floor_before) | legacy().break_expr(p)
 
     return BreakRule(
@@ -481,9 +469,7 @@ def recommended() -> BreakRule:
             F.trim(F.col("callsign")),
         )
         prev_real = F.last(real, ignorenulls=True).over(back)
-        prev_real_ts = F.last(
-            F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
-        ).over(back)
+        prev_real_ts = F.last(F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True).over(back)
 
         # **The lookback must be bounded, and that is the whole subtlety here.**
         # `break_expr` is evaluated over the group window, which spans every
@@ -503,12 +489,7 @@ def recommended() -> BreakRule:
             F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
         ) / 60.0 < lookback_minutes(p)
 
-        callsign_change = (
-            real.isNotNull()
-            & prev_real.isNotNull()
-            & recent
-            & (real != prev_real)
-        )
+        callsign_change = real.isNotNull() & prev_real.isNotNull() & recent & (real != prev_real)
         return F.coalesce(callsign_change, F.lit(False)) | legacy().break_expr(p)
 
     return BreakRule(
@@ -564,9 +545,7 @@ def stable_callsign(p, memory_minutes: float | None = None) -> Column:
     # itself; see the block in `debounced_callsign_change`.
     prev_real = F.last(real, ignorenulls=True).over(back)
     if memory_minutes is not None:
-        prev_real_ts = F.last(
-            F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
-        ).over(back)
+        prev_real_ts = F.last(F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True).over(back)
         remembered = (
             F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
         ) / 60.0 <= float(memory_minutes)
@@ -583,9 +562,7 @@ def stable_callsign(p, memory_minutes: float | None = None) -> Column:
     # there is no previous real value at all -- the track's very
     # first run, which is never checked, because "does it persist"
     # presupposes something it might be reverting *from*).
-    is_new_value = real.isNotNull() & (
-        prev_real.isNull() | (real != prev_real)
-    )
+    is_new_value = real.isNotNull() & (prev_real.isNull() | (real != prev_real))
 
     # How long this run lasts before the *next* run starts --
     # measured as a timestamp difference, not a row count, so an
@@ -602,9 +579,7 @@ def stable_callsign(p, memory_minutes: float | None = None) -> Column:
     # next transition could be arbitrarily far away -- so this is
     # the one place in this arm where that transformation actually
     # earns its keep.
-    next_transition_ts = F.last(
-        F.when(is_new_value, F.col("_ts")), ignorenulls=True
-    ).over(
+    next_transition_ts = F.last(F.when(is_new_value, F.col("_ts")), ignorenulls=True).over(
         w.orderBy(F.col("_ts").desc()).rowsBetween(Window.unboundedPreceding, -1)
     )
 
@@ -630,13 +605,7 @@ def stable_callsign(p, memory_minutes: float | None = None) -> Column:
     persisted_run = (
         prev_real.isNull()
         | next_transition_ts.isNull()
-        | (
-            (
-                F.unix_timestamp(next_transition_ts)
-                - F.unix_timestamp(F.col("_ts"))
-            )
-            >= hold
-        )
+        | ((F.unix_timestamp(next_transition_ts) - F.unix_timestamp(F.col("_ts"))) >= hold)
     )
 
     # The verdict is planted only at the row that starts a run --
@@ -648,9 +617,7 @@ def stable_callsign(p, memory_minutes: float | None = None) -> Column:
     # *previous* successful run's value straight through it --
     # "a flicker is invisible", applied per run instead of per row.
     run_seed = F.when(is_new_value & persisted_run, real)
-    return F.last(run_seed, ignorenulls=True).over(
-        w.rowsBetween(Window.unboundedPreceding, 0)
-    )
+    return F.last(run_seed, ignorenulls=True).over(w.rowsBetween(Window.unboundedPreceding, 0))
 
 
 def debounced_callsign_change(p, memory_minutes: float | None = None) -> Column:
@@ -662,9 +629,7 @@ def debounced_callsign_change(p, memory_minutes: float | None = None) -> Column:
     back = w.rowsBetween(Window.unboundedPreceding, -1)
     real = _real_callsign()
     # The previous real callsign's timestamp, for the lookback bound.
-    prev_real_ts = F.last(
-        F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
-    ).over(back)
+    prev_real_ts = F.last(F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True).over(back)
     recent = (
         F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
     ) / 60.0 < lookback_minutes(p)
@@ -690,10 +655,7 @@ def debounced_callsign_change(p, memory_minutes: float | None = None) -> Column:
     # change gives X,X,X,X,Y,Y,Y,Y and breaks once, at the first Y.
     prev_stable = F.last(stable, ignorenulls=True).over(back)
     callsign_change = (
-        stable.isNotNull()
-        & prev_stable.isNotNull()
-        & recent
-        & (stable != prev_stable)
+        stable.isNotNull() & prev_stable.isNotNull() & recent & (stable != prev_stable)
     )
     return F.coalesce(callsign_change, F.lit(False))
 
@@ -786,9 +748,9 @@ def _edge_summary(frame: Column, latest_first: bool) -> Column:
                 _mean(v.getField("vr_fpm")).alias("mean_vr_fpm"),
                 F.size(v.getField("vr_fpm")).cast("long").alias("vr_samples"),
                 _mean(v.getField("spd_kt")).alias("mean_spd_kt"),
-                (
-                    (F.size(v.getField("alt_ft")) > 0) & ~v.getField("altitude_at_the_edge")
-                ).alias("alt_read_past_blank"),
+                ((F.size(v.getField("alt_ft")) > 0) & ~v.getField("altitude_at_the_edge")).alias(
+                    "alt_read_past_blank"
+                ),
             )
 
         return _once(
@@ -912,11 +874,11 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     # read these positions many times over. So the frames are read once into one
     # struct, and a lambda over a one-element array is what lets the rest refer to it.
     position = F.when(
-        F.col("lat").isNotNull() & F.col("lon").isNotNull()
-        & ~F.isnan(F.col("lat")) & ~F.isnan(F.col("lon")),
-        F.struct(
-            F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")
-        ),
+        F.col("lat").isNotNull()
+        & F.col("lon").isNotNull()
+        & ~F.isnan(F.col("lat"))
+        & ~F.isnan(F.col("lon")),
+        F.struct(F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")),
     )
     edges = F.struct(
         old_edge_ts.alias("old_edge_ts"),
@@ -934,8 +896,7 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
         )
         return F.struct(
             (
-                (F.unix_timestamp(new.getField("ts")) - F.unix_timestamp(old.getField("ts")))
-                / 60.0
+                (F.unix_timestamp(new.getField("ts")) - F.unix_timestamp(old.getField("ts"))) / 60.0
             ).alias("position_gap_min"),
             haversine_nm(
                 old.getField("lat"), old.getField("lon"), new.getField("lat"), new.getField("lon")
@@ -1054,9 +1015,7 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     """
     # Guarded because two samples can share a second, and a Spark 4 session raises
     # on a zero divisor. A plain division here would fail the whole job on them.
-    implied_kt = F.when(
-        f["position_gap_min"] > 0.0, f["gc_nm"] / (f["position_gap_min"] / 60.0)
-    )
+    implied_kt = F.when(f["position_gap_min"] > 0.0, f["gc_nm"] / (f["position_gap_min"] / 60.0))
 
     descend_then_climb = (f["vr_before_fpm"] < -p.link_edge_vert_rate_fpm) & (
         f["vr_after_fpm"] > p.link_edge_vert_rate_fpm
@@ -1102,8 +1061,7 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
         "implied_speed_not_impossible": implied_kt <= p.link_max_implied_speed_kt,
         "not_slow_for_this_flight": slow_for_this_flight_passes,
         "no_time_for_a_stop": (
-            f["position_gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0
-            < p.link_min_stop_minutes
+            f["position_gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0 < p.link_min_stop_minutes
             if p.link_min_stop_minutes > 0.0
             else F.lit(True)
         ),
@@ -1143,9 +1101,7 @@ def cruise_linked() -> BreakRule:
         reads = _link_reads(p)
         linked = _once(
             F.struct(*[column.alias(name) for name, column in reads.items()]),
-            lambda row: linkable(
-                _features_from({name: row.getField(name) for name in reads}), p
-            ),
+            lambda row: linkable(_features_from({name: row.getField(name) for name in reads}), p),
         )
         return F.coalesce(
             debounced_callsign_change(p, callsign_memory_minutes(p))

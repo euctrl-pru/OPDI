@@ -31,8 +31,18 @@ RELEASE = "v2.0.0"
 #: The groups a column can belong to. The data dictionary uses them as
 #: section headings.
 GROUPS = (
-    "identity", "aircraft", "airports", "times", "milestones", "runway", "rings",
-    "quality", "event", "position", "measurement", "release",
+    "identity",
+    "aircraft",
+    "airports",
+    "times",
+    "milestones",
+    "runway",
+    "rings",
+    "quality",
+    "event",
+    "position",
+    "measurement",
+    "release",
 )
 
 
@@ -66,18 +76,24 @@ _RING_RADII_NM = (40, 50, 60, 100, 110, 120)
 def _ring(nm: int, arrival: bool) -> Column:
     if arrival:
         return Column(
-            f"c{nm}_arr", "timestamp", "UTC",
+            f"c{nm}_arr",
+            "timestamp",
+            "UTC",
             f"Time when the arriving flight last crossed, inbound, a circle of {nm} "
             "nautical miles (NM) radius around the destination airport. NULL when no "
             "such crossing was detected.",
-            f"C{nm}_ARR", "rings",
+            f"C{nm}_ARR",
+            "rings",
         )
     return Column(
-        f"c{nm}_dep", "timestamp", "UTC",
+        f"c{nm}_dep",
+        "timestamp",
+        "UTC",
         f"Time when the departing flight first crossed, outbound, a circle of {nm} "
         "nautical miles (NM) radius around the departure airport. NULL when no "
         "such crossing was detected.",
-        f"C{nm}_DEP", "rings",
+        f"C{nm}_DEP",
+        "rings",
     )
 
 
@@ -91,223 +107,320 @@ _MOVEMENT_RULE = (
 FLIGHT_LIST: Tuple[Column, ...] = (
     # Identity
     Column(
-        "flight_id", "string", "",
+        "flight_id",
+        "string",
+        "",
         "Unique identifier of the flight. A flight is one track: the sequence of "
         "position reports of one aircraft that belong together.",
-        "ID", "identity",
+        "ID",
+        "identity",
     ),
     Column(
-        "icao24", "string", "",
+        "icao24",
+        "string",
+        "",
         "ICAO 24-bit address of the aircraft's transponder, written as six hexadecimal "
         "characters. It normally stays with one aircraft.",
-        "ICAO24", "identity",
+        "ICAO24",
+        "identity",
     ),
     Column(
-        "flt_id", "string", "",
+        "flt_id",
+        "string",
+        "",
         "Call sign broadcast by the aircraft, for example DLH123.",
-        "FLT_ID", "identity",
+        "FLT_ID",
+        "identity",
     ),
     Column(
-        "dof", "date", "UTC",
+        "dof",
+        "date",
+        "UTC",
         "Date of the flight: the day on which it was first seen. A day's files hold "
         "the flights of that date.",
-        "DOF", "identity",
+        "DOF",
+        "identity",
     ),
     # Airports
     Column(
-        "adep", "string", "",
+        "adep",
+        "string",
+        "",
         "Departure airport, as its four-letter ICAO code. NULL when no departure "
         "airport could be identified.",
-        "ADEP", "airports",
+        "ADEP",
+        "airports",
     ),
     Column(
-        "ades", "string", "",
+        "ades",
+        "string",
+        "",
         "Destination airport, as its four-letter ICAO code. NULL when no destination "
         "airport could be identified.",
-        "ADES", "airports",
+        "ADES",
+        "airports",
     ),
     Column(
-        "adep_p", "string", "",
+        "adep_p",
+        "string",
+        "",
         "Other airports near the start of the track that the flight could have left "
         "from, as a comma-separated list of ICAO codes, nearest first.",
-        "ADEP_P", "airports",
+        "ADEP_P",
+        "airports",
     ),
     Column(
-        "ades_p", "string", "",
+        "ades_p",
+        "string",
+        "",
         "Other airports near the end of the track that the flight could have gone to, "
         "as a comma-separated list of ICAO codes, nearest first.",
-        "ADES_P", "airports",
+        "ADES_P",
+        "airports",
     ),
     Column(
-        "adep_source", "string", "",
+        "adep_source",
+        "string",
+        "",
         "How the departure airport was decided: 'aerodrome' when an airport was "
         "identified, 'out_of_area' when the track began outside the area covered, "
         "'undetermined' when no airport could be identified. When adep is NULL, this "
         "column tells the last two cases apart.",
-        "ADEP_SOURCE", "airports",
+        "ADEP_SOURCE",
+        "airports",
     ),
     Column(
-        "ades_source", "string", "",
-        "How the destination airport was decided, with the same values as "
-        "adep_source.",
-        "ADES_SOURCE", "airports",
+        "ades_source",
+        "string",
+        "",
+        "How the destination airport was decided, with the same values as " "adep_source.",
+        "ADES_SOURCE",
+        "airports",
     ),
     # Aircraft
     Column(
-        "registration", "string", "",
+        "registration",
+        "string",
+        "",
         "Registration of the aircraft (its tail number), from the OpenSky aircraft "
         "database. NULL when the aircraft is not in that database.",
-        "REGISTRATION", "aircraft",
+        "REGISTRATION",
+        "aircraft",
     ),
     Column(
-        "model", "string", "",
+        "model",
+        "string",
+        "",
         "Aircraft model, from the OpenSky aircraft database.",
-        "MODEL", "aircraft",
+        "MODEL",
+        "aircraft",
     ),
     Column(
-        "typecode", "string", "",
-        "ICAO aircraft type designator, for example A320, from the OpenSky aircraft "
-        "database.",
-        "TYPECODE", "aircraft",
+        "typecode",
+        "string",
+        "",
+        "ICAO aircraft type designator, for example A320, from the OpenSky aircraft " "database.",
+        "TYPECODE",
+        "aircraft",
     ),
     Column(
-        "icao_aircraft_class", "string", "",
+        "icao_aircraft_class",
+        "string",
+        "",
         "ICAO aircraft description, for example L2J for a landplane with two jet "
         "engines, from the OpenSky aircraft database.",
-        "ICAO_AIRCRAFT_CLASS", "aircraft",
+        "ICAO_AIRCRAFT_CLASS",
+        "aircraft",
     ),
     Column(
-        "icao_operator", "string", "",
-        "Three-letter ICAO code of the aircraft operator, from the OpenSky aircraft "
-        "database.",
-        "ICAO_OPERATOR", "aircraft",
+        "icao_operator",
+        "string",
+        "",
+        "Three-letter ICAO code of the aircraft operator, from the OpenSky aircraft " "database.",
+        "ICAO_OPERATOR",
+        "aircraft",
     ),
     # Times
     Column(
-        "first_seen", "timestamp", "UTC",
-        "Time of the first position report of the flight received by the OpenSky "
-        "Network.",
-        "FIRST_SEEN", "times",
+        "first_seen",
+        "timestamp",
+        "UTC",
+        "Time of the first position report of the flight received by the OpenSky " "Network.",
+        "FIRST_SEEN",
+        "times",
     ),
     Column(
-        "last_seen", "timestamp", "UTC",
-        "Time of the last position report of the flight received by the OpenSky "
-        "Network.",
-        "LAST_SEEN", "times",
+        "last_seen",
+        "timestamp",
+        "UTC",
+        "Time of the last position report of the flight received by the OpenSky " "Network.",
+        "LAST_SEEN",
+        "times",
     ),
     # Milestones
     Column(
-        "atot", "timestamp", "UTC",
+        "atot",
+        "timestamp",
+        "UTC",
         "Actual take-off time: when the aircraft left the runway at the departure "
         "airport. Taken from the flight's earliest ATOT event at that airport. NULL "
         "when no take-off was detected.",
-        "ATOT", "milestones",
+        "ATOT",
+        "milestones",
     ),
     Column(
-        "aldt", "timestamp", "UTC",
+        "aldt",
+        "timestamp",
+        "UTC",
         "Actual landing time: when the aircraft touched down at the destination "
         "airport. Taken from the flight's latest ALDT event at that airport. NULL "
         "when no landing was detected.",
-        "ALDT", "milestones",
+        "ALDT",
+        "milestones",
     ),
     Column(
-        "aobt", "timestamp", "UTC",
+        "aobt",
+        "timestamp",
+        "UTC",
         "Actual off-block time: when the aircraft started to move away from its "
         "parking position. Taken from the flight's earliest AOBT event. NULL when it "
         "was not detected, which is common because it needs reception on the ground.",
-        "AOBT", "milestones",
+        "AOBT",
+        "milestones",
     ),
     Column(
-        "aibt", "timestamp", "UTC",
+        "aibt",
+        "timestamp",
+        "UTC",
         "Actual in-block time: when the aircraft stopped at its parking position after "
         "landing. Taken from the flight's latest AIBT event. NULL when it was not "
         "detected, which is common because it needs reception on the ground.",
-        "AIBT", "milestones",
+        "AIBT",
+        "milestones",
     ),
     # Runway
     Column(
-        "rwy_dep", "string", "",
+        "rwy_dep",
+        "string",
+        "",
         "Runway used for take-off, for example 25R. Taken from the same event as atot.",
-        "RWY_DEP", "runway",
+        "RWY_DEP",
+        "runway",
     ),
     Column(
-        "rwy_dep_bearing_deg", "double", "degrees",
+        "rwy_dep_bearing_deg",
+        "double",
+        "degrees",
         "True bearing of the centre line of the take-off runway, in degrees clockwise "
         "from north. It describes the runway, not the heading of the aircraft.",
-        "RWY_DEP_BEARING_DEG", "runway",
+        "RWY_DEP_BEARING_DEG",
+        "runway",
     ),
     Column(
-        "rwy_arr", "string", "",
+        "rwy_arr",
+        "string",
+        "",
         "Runway used for landing, for example 07L. Taken from the same event as aldt.",
-        "RWY_ARR", "runway",
+        "RWY_ARR",
+        "runway",
     ),
     Column(
-        "rwy_arr_bearing_deg", "double", "degrees",
+        "rwy_arr_bearing_deg",
+        "double",
+        "degrees",
         "True bearing of the centre line of the landing runway, in degrees clockwise "
         "from north. It describes the runway, not the heading of the aircraft.",
-        "RWY_ARR_BEARING_DEG", "runway",
+        "RWY_ARR_BEARING_DEG",
+        "runway",
     ),
     Column(
-        "stnd_dep", "string", "",
+        "stnd_dep",
+        "string",
+        "",
         "Parking position (stand) the flight left from, with the name it has in "
         "OpenStreetMap. NULL when it was not detected.",
-        "STND_DEP", "milestones",
+        "STND_DEP",
+        "milestones",
     ),
     Column(
-        "stnd_arr", "string", "",
+        "stnd_arr",
+        "string",
+        "",
         "Parking position (stand) the flight arrived at, with the name it has in "
         "OpenStreetMap. NULL when it was not detected.",
-        "STND_ARR", "milestones",
+        "STND_ARR",
+        "milestones",
     ),
     # Distance circles
     *[_ring(nm, arrival=True) for nm in _RING_RADII_NM],
     *[_ring(nm, arrival=False) for nm in _RING_RADII_NM],
     # Quality
     Column(
-        "track_duration_min", "double", "min",
+        "track_duration_min",
+        "double",
+        "min",
         "Time between first_seen and last_seen, in minutes. Very short tracks are often "
         "pieces of a flight seen on the ground rather than whole flights. No row is "
         "removed on this value, so users can choose their own limit.",
-        "TRACK_DURATION_MIN", "quality",
+        "TRACK_DURATION_MIN",
+        "quality",
     ),
     Column(
-        "superseded_dep", "boolean", "",
+        "superseded_dep",
+        "boolean",
+        "",
         "True when this row is a piece of a departure that is already counted on "
         "another row: it has no take-off, and the same aircraft departs again from the "
         "same airport within 3 hours (10,800 s). False otherwise.",
-        "SUPERSEDED_DEP", "quality",
+        "SUPERSEDED_DEP",
+        "quality",
     ),
     Column(
-        "superseded_arr", "boolean", "",
+        "superseded_arr",
+        "boolean",
+        "",
         "True when this row is a piece of an arrival that is already counted on "
         "another row: it has no landing, and the same aircraft arrived at the same "
         "airport within the 3 hours (10,800 s) before. False otherwise.",
-        "SUPERSEDED_ARR", "quality",
+        "SUPERSEDED_ARR",
+        "quality",
     ),
     Column(
-        "movement_dep", "boolean", "",
+        "movement_dep",
+        "boolean",
+        "",
         f"True when this row counts as a departure: {_MOVEMENT_RULE}. Use this column "
         "to count departures.",
-        "MOVEMENT_DEP", "quality",
+        "MOVEMENT_DEP",
+        "quality",
     ),
     Column(
-        "movement_arr", "boolean", "",
+        "movement_arr",
+        "boolean",
+        "",
         f"True when this row counts as an arrival: {_MOVEMENT_RULE}. Use this column "
         "to count arrivals.",
-        "MOVEMENT_ARR", "quality",
+        "MOVEMENT_ARR",
+        "quality",
     ),
     # Release
     Column(
-        "version", "string", "",
+        "version",
+        "string",
+        "",
         "Version of the method that built this flight row, for example v5.0.0. It "
         "changes only when that method changes.",
-        "VERSION", "release",
+        "VERSION",
+        "release",
     ),
     Column(
-        "release", "string", "",
+        "release",
+        "string",
+        "",
         f"Name of the data release the row belongs to ({RELEASE}). It is the same on "
         "every row of a release.",
-        "RELEASE", "release",
+        "RELEASE",
+        "release",
     ),
 )
 
@@ -315,62 +428,93 @@ FLIGHT_LIST: Tuple[Column, ...] = (
 EVENT_COLUMNS: Tuple[Column, ...] = (
     Column("event_id", "string", "", "Unique identifier of the event.", "id", "event"),
     Column(
-        "flight_id", "string", "",
+        "flight_id",
+        "string",
+        "",
         "Identifier of the flight the event belongs to. It matches flight_id in the "
         "flight list.",
-        "flight_id", "event",
+        "flight_id",
+        "event",
     ),
     Column(
-        "type", "string", "",
+        "type",
+        "string",
+        "",
         "Event type, for example ATOT, level-start or xing-40nm. The data dictionary "
         "lists every type.",
-        "type", "event",
+        "type",
+        "event",
     ),
     Column(
-        "event_time", "timestamp", "UTC", "Time at which the event happened.",
-        "event_time", "event",
+        "event_time",
+        "timestamp",
+        "UTC",
+        "Time at which the event happened.",
+        "event_time",
+        "event",
     ),
     Column(
-        "longitude", "double", "degrees",
+        "longitude",
+        "double",
+        "degrees",
         "Longitude of the aircraft at the event, in degrees (WGS 84, positive east).",
-        "longitude", "position",
+        "longitude",
+        "position",
     ),
     Column(
-        "latitude", "double", "degrees",
+        "latitude",
+        "double",
+        "degrees",
         "Latitude of the aircraft at the event, in degrees (WGS 84, positive north).",
-        "latitude", "position",
+        "latitude",
+        "position",
     ),
     Column(
-        "altitude_ft", "double", "ft",
+        "altitude_ft",
+        "double",
+        "ft",
         "Altitude of the aircraft at the event, in feet, from the barometric altitude "
         "the aircraft reports. For a flight-level crossing it is the flight level "
         "times 100. NULL for events that have no altitude.",
-        "altitude", "position",
+        "altitude",
+        "position",
     ),
     Column(
-        "h3_res_5", "string", "",
+        "h3_res_5",
+        "string",
+        "",
         "Cell of the H3 hexagonal grid at resolution 5 that contains the event "
         "position. Cells cover about 250 km2 each, so the column can be used to "
         "select events in a region quickly.",
-        "h3(latitude, longitude, 5)", "position",
+        "h3(latitude, longitude, 5)",
+        "position",
     ),
     Column(
-        "source", "string", "",
+        "source",
+        "string",
+        "",
         "Source of the position reports, OSN for the OpenSky Network.",
-        "source", "event",
+        "source",
+        "event",
     ),
     Column(
-        "version", "string", "",
+        "version",
+        "string",
+        "",
         "Version of the method that produced this event type, for example "
         "events_v0.3.0. Different event types can have different versions.",
-        "version", "event",
+        "version",
+        "event",
     ),
     Column(
-        "info", "string", "",
+        "info",
+        "string",
+        "",
         "Extra details about the event, as JSON text, for example the runway or the "
         "airport. The keys depend on the event type and are listed in the data "
         "dictionary.",
-        "info", "event",
+        "info",
+        "event",
     ),
 )
 
@@ -384,60 +528,89 @@ _PMS = (
 #: The measurements, one column each, in the flight events file.
 MEASUREMENT_COLUMNS: Tuple[Column, ...] = (
     Column(
-        "distance_flown_nm", "double", "NM",
+        "distance_flown_nm",
+        "double",
+        "NM",
         "Distance flown from the start of the track to this event, along the received "
         "positions, in nautical miles (NM, 1 NM = 1,852 m).",
-        "Distance flown (NM)", "measurement",
+        "Distance flown (NM)",
+        "measurement",
     ),
     Column(
-        "time_passed_s", "double", "s",
+        "time_passed_s",
+        "double",
+        "s",
         "Time from the first position of the track to this event, in seconds.",
-        "Time Passed (s)", "measurement",
+        "Time Passed (s)",
+        "measurement",
     ),
     Column(
-        "holding_duration_s", "double", "s",
+        "holding_duration_s",
+        "double",
+        "s",
         "Time spent in a holding pattern, in seconds. A holding pattern is a loop "
         "flown while the aircraft waits for permission to continue. "
         + _ONLY_ON.format(event="holding-end"),
-        "Holding duration (s)", "measurement",
+        "Holding duration (s)",
+        "measurement",
     ),
     Column(
-        "holding_distance_nm", "double", "NM",
+        "holding_distance_nm",
+        "double",
+        "NM",
         "Distance flown in the holding pattern, in nautical miles (NM). "
         + _ONLY_ON.format(event="holding-end"),
-        "Holding distance (NM)", "measurement",
+        "Holding distance (NM)",
+        "measurement",
     ),
     Column(
-        "holding_circuits", "double", "count",
+        "holding_circuits",
+        "double",
+        "count",
         "Number of loops flown in the holding pattern: the total turn divided by 360 "
         "degrees, to one decimal. " + _ONLY_ON.format(event="holding-end"),
-        "Holding circuits", "measurement",
+        "Holding circuits",
+        "measurement",
     ),
     Column(
-        "pms_leg_time_s", "double", "s",
-        "Time spent on a point merge leg, in seconds. " + _PMS + " "
+        "pms_leg_time_s",
+        "double",
+        "s",
+        "Time spent on a point merge leg, in seconds. "
+        + _PMS
+        + " "
         + _ONLY_ON.format(event="pms-leg-exit"),
-        "Point merge leg time (s)", "measurement",
+        "Point merge leg time (s)",
+        "measurement",
     ),
     Column(
-        "pms_leg_distance_nm", "double", "NM",
+        "pms_leg_distance_nm",
+        "double",
+        "NM",
         "Distance flown along the point merge leg, in nautical miles (NM). "
         + _ONLY_ON.format(event="pms-leg-exit"),
-        "Point merge leg distance (NM)", "measurement",
+        "Point merge leg distance (NM)",
+        "measurement",
     ),
     Column(
-        "pms_direct_to_distance_nm", "double", "NM",
+        "pms_direct_to_distance_nm",
+        "double",
+        "NM",
         "Distance from the aircraft to the merge point when it left the leg, in "
         "nautical miles (NM). " + _ONLY_ON.format(event="pms-leg-exit"),
-        "Point merge direct-to distance (NM)", "measurement",
+        "Point merge direct-to distance (NM)",
+        "measurement",
     ),
 )
 
 _FLIGHT_VERSION = Column(
-    "flight_version", "string", "",
+    "flight_version",
+    "string",
+    "",
     "Version of the method that built the flight's row in the flight list (the version "
     "column of the flight list).",
-    "VERSION", "release",
+    "VERSION",
+    "release",
 )
 
 #: The published flight events file, in column order: the event, its
@@ -458,10 +631,13 @@ FLIGHT_INDEX: Tuple[Column, ...] = tuple(
     for n in ("flight_id", "icao24", "flt_id", "adep", "ades", "first_seen", "last_seen", "dof")
 ) + (
     Column(
-        "file", "string", "",
+        "file",
+        "string",
+        "",
         "Path of the flight list file that holds the flight, relative to the published "
         "folder, for example flight_list/flight_list_20260614.parquet.",
-        "file name", "identity",
+        "file name",
+        "identity",
     ),
 )
 
@@ -469,58 +645,97 @@ FLIGHT_INDEX: Tuple[Column, ...] = tuple(
 CATALOGUE: Tuple[Column, ...] = (
     Column("day", "date", "UTC", "Day the row describes.", "day", "release"),
     Column(
-        "flights", "bigint", "count", "Number of rows in the day's flight list file.",
-        "count", "release",
-    ),
-    Column(
-        "events", "bigint", "count", "Number of rows in the day's flight events file.",
-        "count", "release",
-    ),
-    Column(
-        "first_event", "timestamp", "UTC",
-        "Time of the earliest event in the day's flight events file. NULL when the file "
-        "is empty.",
-        "min(event_time)", "release",
-    ),
-    Column(
-        "last_event", "timestamp", "UTC",
-        "Time of the latest event in the day's flight events file. It can fall on the "
-        "next day, because a flight keeps all its events in the file of the day it "
-        "started. NULL when the file is empty.",
-        "max(event_time)", "release",
-    ),
-    Column(
-        "flight_list_bytes", "bigint", "bytes", "Size of the day's flight list file.",
-        "file size", "release",
-    ),
-    Column(
-        "flight_events_bytes", "bigint", "bytes", "Size of the day's flight events file.",
-        "file size", "release",
-    ),
-    Column(
-        "release", "string", "", f"Name of the data release ({RELEASE}).", "RELEASE",
+        "flights",
+        "bigint",
+        "count",
+        "Number of rows in the day's flight list file.",
+        "count",
         "release",
     ),
     Column(
-        "flight_list_version", "string", "",
+        "events",
+        "bigint",
+        "count",
+        "Number of rows in the day's flight events file.",
+        "count",
+        "release",
+    ),
+    Column(
+        "first_event",
+        "timestamp",
+        "UTC",
+        "Time of the earliest event in the day's flight events file. NULL when the file "
+        "is empty.",
+        "min(event_time)",
+        "release",
+    ),
+    Column(
+        "last_event",
+        "timestamp",
+        "UTC",
+        "Time of the latest event in the day's flight events file. It can fall on the "
+        "next day, because a flight keeps all its events in the file of the day it "
+        "started. NULL when the file is empty.",
+        "max(event_time)",
+        "release",
+    ),
+    Column(
+        "flight_list_bytes",
+        "bigint",
+        "bytes",
+        "Size of the day's flight list file.",
+        "file size",
+        "release",
+    ),
+    Column(
+        "flight_events_bytes",
+        "bigint",
+        "bytes",
+        "Size of the day's flight events file.",
+        "file size",
+        "release",
+    ),
+    Column(
+        "release",
+        "string",
+        "",
+        f"Name of the data release ({RELEASE}).",
+        "RELEASE",
+        "release",
+    ),
+    Column(
+        "flight_list_version",
+        "string",
+        "",
         "Version of the flight list method used for the day. When several were used, "
         "they are listed separated by commas.",
-        "VERSION", "release",
+        "VERSION",
+        "release",
     ),
     Column(
-        "event_versions", "array<string>", "",
+        "event_versions",
+        "array<string>",
+        "",
         "Versions of the event methods found in the day's flight events file.",
-        "version", "release",
+        "version",
+        "release",
     ),
     Column(
-        "commit", "string", "",
+        "commit",
+        "string",
+        "",
         "Identifier of the version of the OPDI software (the git commit) that "
         "published the day.",
-        "commit", "release",
+        "commit",
+        "release",
     ),
     Column(
-        "published_at", "timestamp", "UTC", "Time when the day was published.",
-        "current time", "release",
+        "published_at",
+        "timestamp",
+        "UTC",
+        "Time when the day was published.",
+        "current time",
+        "release",
     ),
 )
 
@@ -577,9 +792,22 @@ CLASSIC_MEASUREMENT_COLUMNS: Tuple[str, ...] = ("id", "event_id", "type", "value
 CLASSIC_FLIGHT_LIST: Dict[str, str] = {
     name: name.upper().replace("FLIGHT_ID", "ID")
     for name in (
-        "flight_id", "icao24", "flt_id", "dof", "adep", "ades", "adep_p", "ades_p",
-        "registration", "model", "typecode", "icao_aircraft_class", "icao_operator",
-        "first_seen", "last_seen", "version",
+        "flight_id",
+        "icao24",
+        "flt_id",
+        "dof",
+        "adep",
+        "ades",
+        "adep_p",
+        "ades_p",
+        "registration",
+        "model",
+        "typecode",
+        "icao_aircraft_class",
+        "icao_operator",
+        "first_seen",
+        "last_seen",
+        "version",
     )
 }
 

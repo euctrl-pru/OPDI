@@ -111,8 +111,17 @@ from opdi.utils.storage import StorageManager
 #: Before removing a column here, check whether any detector names it in a
 #: ``in ... .columns`` guard. ``tests/test_events_processor.py`` pins this.
 TRACK_COLUMNS = [
-    "track_id", "lat", "lon", "event_time", "baro_altitude_c",
-    "velocity", "vert_rate", "callsign", "icao24", "heading", "h3_res_12",
+    "track_id",
+    "lat",
+    "lon",
+    "event_time",
+    "baro_altitude_c",
+    "velocity",
+    "vert_rate",
+    "callsign",
+    "icao24",
+    "heading",
+    "h3_res_12",
     "on_ground",
     # The FIR family joins the resolution-7 cell against the compact airspace
     # reference; without it here the detector would find no column and emit
@@ -125,6 +134,7 @@ TRACK_COLUMNS = [
 # Fuzzy membership functions for flight phase classification
 # ======================================================================
 
+
 def zmf(column, a, b):
     """Zero-order membership function (Z-shaped). Returns 1 below a, 0 above b."""
     return F.when(column <= a, 1).when(column >= b, 0).otherwise((b - column) / (b - a))
@@ -132,7 +142,7 @@ def zmf(column, a, b):
 
 def gaussmf(column, mean, sigma):
     """Gaussian membership function. Peak at mean, width controlled by sigma."""
-    return F.exp(-((column - mean) ** 2) / (2 * sigma ** 2))
+    return F.exp(-((column - mean) ** 2) / (2 * sigma**2))
 
 
 def smf(column, a, b):
@@ -143,6 +153,7 @@ def smf(column, a, b):
 # ======================================================================
 # Event calculation functions
 # ======================================================================
+
 
 def _smooth_phase(df: DataFrame, twindow_seconds: float) -> DataFrame:
     """Majority-smooth the per-sample phase label over a time window.
@@ -215,9 +226,7 @@ def _not_across_a_hole(crossings: DataFrame, config: EventConfig) -> DataFrame:
     crossing happened, it just cannot be placed.
     """
     limit_s = float(config.track_hole_seconds)
-    return crossings.filter(
-        F.coalesce(col("bracket_seconds") <= lit(limit_s), lit(True))
-    )
+    return crossings.filter(F.coalesce(col("bracket_seconds") <= lit(limit_s), lit(True)))
 
 
 def calculate_threshold_crossing_events(
@@ -233,15 +242,21 @@ def calculate_threshold_crossing_events(
     config = config or EventConfig()
 
     src = sdf_input.select(
-        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
-        "cumulative_distance_nm", "cumulative_time_s",
+        "track_id",
+        "lat",
+        "lon",
+        "event_time",
+        "baro_altitude_c",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
     )
     # The cumulative measures are interpolated to the crossing alongside the
     # position: a measurement attached to an interpolated instant but read off
     # a neighbouring sample would disagree with its own event.
     crossings = flight_level_crossings(
-        src.withColumn("cumulative_distance_nm", col("cumulative_distance_nm").cast("double"))
-           .withColumn("cumulative_time_s", col("cumulative_time_s").cast("double")),
+        src.withColumn(
+            "cumulative_distance_nm", col("cumulative_distance_nm").cast("double")
+        ).withColumn("cumulative_time_s", col("cumulative_time_s").cast("double")),
         config,
         interpolate_cols=("lat", "lon", "cumulative_distance_nm", "cumulative_time_s"),
     )
@@ -309,9 +324,7 @@ def calculate_level_off_events(
     """
     config = config or EventConfig()
 
-    segs = segments if segments is not None else LEVEL_ARMS[config.level_method](
-        sdf_input, config
-    )
+    segs = segments if segments is not None else LEVEL_ARMS[config.level_method](sdf_input, config)
 
     if config.level_anchor == "pru":
         pru = tops if tops is not None else pru_tops(sdf_input, segs, config)
@@ -324,9 +337,7 @@ def calculate_level_off_events(
         )
         segs = segs.join(anchors, segs.track_id == col("_top_id"), "left").drop("_top_id")
     else:
-        phase_tops = horizontal_events.filter(
-            col("type").isin("top-of-climb", "top-of-descent")
-        )
+        phase_tops = horizontal_events.filter(col("type").isin("top-of-climb", "top-of-descent"))
         toc = phase_tops.filter(col("type") == "top-of-climb").select(
             col("track_id").alias("_toc_id"),
             col("event_time").alias("toc_time"),
@@ -345,9 +356,12 @@ def calculate_level_off_events(
     segs = segs.filter(col("toc_time").isNotNull() & col("tod_time").isNotNull())
 
     labelled = classify_level_offs(
-        segs, config,
-        toc_time=col("toc_time"), tod_time=col("tod_time"),
-        toc_altitude_ft=col("toc_alt"), tod_altitude_ft=col("tod_alt"),
+        segs,
+        config,
+        toc_time=col("toc_time"),
+        tod_time=col("tod_time"),
+        toc_altitude_ft=col("toc_alt"),
+        tod_altitude_ft=col("tod_alt"),
     )
 
     leg = F.when(col("kpi") == "KPI17", lit("climb")).otherwise(lit("descent"))
@@ -370,11 +384,13 @@ def calculate_level_off_events(
     ]
     starts = labelled.select(
         concat(lit("level-off-"), leg, lit("-start")).alias("type"),
-        col("start_time").alias("event_time"), *common,
+        col("start_time").alias("event_time"),
+        *common,
     )
     ends = labelled.select(
         concat(lit("level-off-"), leg, lit("-end")).alias("type"),
-        col("end_time").alias("event_time"), *common,
+        col("end_time").alias("event_time"),
+        *common,
     )
     return starts.unionByName(ends)
 
@@ -421,12 +437,16 @@ def calculate_block_events(
     off_type = "off-block" if _acdm_names else "AOBT"
     on_type = "on-block" if _acdm_names else "AIBT"
     aobt = blocks.filter(col("aobt").isNotNull()).select(
-        col("track_id"), lit(off_type).alias("type"), col("aobt").alias("event_time"),
+        col("track_id"),
+        lit(off_type).alias("type"),
+        col("aobt").alias("event_time"),
         *common,
         to_json(struct(col("stand_exit").alias("stand_exit"))).alias("info"),
     )
     aibt = blocks.filter(col("aibt").isNotNull()).select(
-        col("track_id"), lit(on_type).alias("type"), col("aibt").alias("event_time"),
+        col("track_id"),
+        lit(on_type).alias("type"),
+        col("aibt").alias("event_time"),
         *common,
         to_json(struct(col("stand_entry").alias("stand_entry"))).alias("info"),
     )
@@ -465,14 +485,18 @@ def calculate_runway_events(
     start_ts, end_ts = get_start_end_of_month(month)
     fl = (
         storage.read_table("opdi_flight_list")
-        .filter((col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts))))
+        .filter(
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
+        )
         .select(col("id").alias("track_id"), col("adep"), col("ades"))
     )
-    ends = fl.select(
-        "track_id", col("adep").alias("apt_ident"), lit("departure").alias("role")
-    ).unionByName(
-        fl.select("track_id", col("ades").alias("apt_ident"), lit("arrival").alias("role"))
-    ).filter(col("apt_ident").isNotNull() & (col("apt_ident") != ""))
+    ends = (
+        fl.select("track_id", col("adep").alias("apt_ident"), lit("departure").alias("role"))
+        .unionByName(
+            fl.select("track_id", col("ades").alias("apt_ident"), lit("arrival").alias("role"))
+        )
+        .filter(col("apt_ident").isNotNull() & (col("apt_ident") != ""))
+    )
 
     apt = storage.read_table("oa_airports").select(
         col("ident").alias("_ident"),
@@ -517,8 +541,7 @@ def calculate_runway_events(
                 # interpolated 15 ft crossing. NULL where there is no second
                 # arm to be told apart from.
                 (
-                    lit("legacy") if config.merge_duplicate_milestones
-                    else lit(None).cast("string")
+                    lit("legacy") if config.merge_duplicate_milestones else lit(None).cast("string")
                 ).alias("method"),
             )
         ).alias("info"),
@@ -569,9 +592,9 @@ def merge_milestone_duplicates(
 
     merged = col("type").isin(*MERGED_TYPES)
     rank = F.coalesce(
-        F.create_map(
-            *[x for k, v in _METHOD_RANK.items() for x in (lit(k), lit(v))]
-        )[F.get_json_object(col("info"), "$.method")],
+        F.create_map(*[x for k, v in _METHOD_RANK.items() for x in (lit(k), lit(v))])[
+            F.get_json_object(col("info"), "$.method")
+        ],
         # An unrecognised or absent method sorts last: it is neither arm, so it
         # may fill a gap but must never displace one that is.
         lit(len(_METHOD_RANK)),
@@ -580,9 +603,7 @@ def merge_milestone_duplicates(
     # across runs -- two rows of the same method for one flight would otherwise
     # be resolved by partition order, which is the non-determinism this table
     # has already been bitten by once.
-    best = Window.partitionBy("track_id", "type").orderBy(
-        rank.asc(), col("event_time").asc()
-    )
+    best = Window.partitionBy("track_id", "type").orderBy(rank.asc(), col("event_time").asc())
     kept = (
         df_events.filter(merged)
         .withColumn("_rank", F.row_number().over(best))
@@ -624,26 +645,40 @@ def calculate_ring_crossing_events(
     start_ts, end_ts = get_start_end_of_month(month)
     fl = (
         storage.read_table("opdi_flight_list")
-        .filter((col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts))))
+        .filter(
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
+        )
         .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
     )
-    ends = fl.select("_fl_id", col("adep").alias("apt_ident")).unionByName(
-        fl.select("_fl_id", col("ades").alias("apt_ident"))
-    ).filter(col("apt_ident").isNotNull() & (col("apt_ident") != "")).distinct()
+    ends = (
+        fl.select("_fl_id", col("adep").alias("apt_ident"))
+        .unionByName(fl.select("_fl_id", col("ades").alias("apt_ident")))
+        .filter(col("apt_ident").isNotNull() & (col("apt_ident") != ""))
+        .distinct()
+    )
 
     apt = storage.read_table("oa_airports").select(
         col("ident").alias("_apt_ident"),
         col("latitude_deg").cast("double").alias("apt_lat"),
         col("longitude_deg").cast("double").alias("apt_lon"),
     )
-    ends = ends.join(
-        F.broadcast(apt), ends.apt_ident == col("_apt_ident"), "inner"
-    ).drop("_apt_ident")
+    ends = ends.join(F.broadcast(apt), ends.apt_ident == col("_apt_ident"), "inner").drop(
+        "_apt_ident"
+    )
 
-    work = sdf_input.select(
-        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
-        "cumulative_distance_nm", "cumulative_time_s",
-    ).join(F.broadcast(ends), col("track_id") == col("_fl_id"), "inner").drop("_fl_id")
+    work = (
+        sdf_input.select(
+            "track_id",
+            "lat",
+            "lon",
+            "event_time",
+            "baro_altitude_c",
+            "cumulative_distance_nm",
+            "cumulative_time_s",
+        )
+        .join(F.broadcast(ends), col("track_id") == col("_fl_id"), "inner")
+        .drop("_fl_id")
+    )
 
     work = (
         work.withColumn(
@@ -659,8 +694,11 @@ def calculate_ring_crossing_events(
         config,
         partition_cols=["track_id", "apt_ident", "apt_lat", "apt_lon"],
         interpolate_cols=(
-            "lat", "lon", "flight_level",
-            "cumulative_distance_nm", "cumulative_time_s",
+            "lat",
+            "lon",
+            "flight_level",
+            "cumulative_distance_nm",
+            "cumulative_time_s",
         ),
     )
 
@@ -720,8 +758,15 @@ def calculate_horizontal_segment_events(
     config = config or EventConfig()
 
     wanted = [
-        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
-        "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s",
+        "track_id",
+        "lat",
+        "lon",
+        "event_time",
+        "baro_altitude_c",
+        "vert_rate",
+        "velocity",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
     ]
     # Carried only when the caller attached them, so the detector stays a pure
     # column-in/column-out function and can be tested without storage.
@@ -798,8 +843,11 @@ def calculate_horizontal_segment_events(
     df = df.withColumn(
         "aggregated",
         F.greatest(
-            col("rule_ground"), col("rule_climb"), col("rule_descent"),
-            col("rule_cruise"), col("rule_level"),
+            col("rule_ground"),
+            col("rule_climb"),
+            col("rule_descent"),
+            col("rule_cruise"),
+            col("rule_level"),
         ),
     )
 
@@ -821,8 +869,16 @@ def calculate_horizontal_segment_events(
     )
 
     df = df.select(
-        "track_id", "lat", "lon", "event_time", "cumulative_distance_nm",
-        "cumulative_time_s", "altitude_ft", "roc_ft_min", "speed_kt", "flight_phase",
+        "track_id",
+        "lat",
+        "lon",
+        "event_time",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
+        "altitude_ft",
+        "roc_ft_min",
+        "speed_kt",
+        "flight_phase",
         *pieces,
     )
 
@@ -915,8 +971,7 @@ def calculate_horizontal_segment_events(
     # Create event type arrays
     is_level_start = start_of_segment | (col("event_time") == col("first_cr_time"))
     is_level_end = (
-        (col("flight_phase").isin("CR", "LVL"))
-        & (col("next_phase") != col("flight_phase"))
+        (col("flight_phase").isin("CR", "LVL")) & (col("next_phase") != col("flight_phase"))
     ) | (col("event_time") == col("last_cr_time"))
 
     if config.merge_duplicate_milestones:
@@ -1000,9 +1055,14 @@ def calculate_horizontal_segment_events(
     df_exploded = df_exploded.filter("type IS NOT NULL")
 
     df_events = df_exploded.select(
-        col("track_id"), col("type"), col("event_time"),
-        col("lon"), col("lat"), col("altitude_ft"),
-        col("cumulative_distance_nm"), col("cumulative_time_s"),
+        col("track_id"),
+        col("type"),
+        col("event_time"),
+        col("lon"),
+        col("lat"),
+        col("altitude_ft"),
+        col("cumulative_distance_nm"),
+        col("cumulative_time_s"),
     )
 
     df_events = df_events.dropDuplicates(["track_id", "type", "event_time"])
@@ -1048,8 +1108,15 @@ def calculate_vertical_crossing_events(sdf_input: DataFrame) -> DataFrame:
         cumulative_time_s, info.
     """
     df = sdf_input.select(
-        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
-        "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s",
+        "track_id",
+        "lat",
+        "lon",
+        "event_time",
+        "baro_altitude_c",
+        "vert_rate",
+        "velocity",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
     )
 
     df = df.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
@@ -1100,13 +1167,27 @@ def calculate_vertical_crossing_events(sdf_input: DataFrame) -> DataFrame:
     all_crossings = first_crossings.unionByName(last_crossings)
 
     df_events = all_crossings.select(
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s",
+        "track_id",
+        "type",
+        "event_time",
+        "lon",
+        "lat",
+        "altitude_ft",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
     )
-    df_events = df_events.dropDuplicates([
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s",
-    ])
+    df_events = df_events.dropDuplicates(
+        [
+            "track_id",
+            "type",
+            "event_time",
+            "lon",
+            "lat",
+            "altitude_ft",
+            "cumulative_distance_nm",
+            "cumulative_time_s",
+        ]
+    )
     df_events = df_events.withColumn("info", lit(""))
 
     return df_events
@@ -1123,8 +1204,15 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
         DataFrame with first/last seen events.
     """
     df = sdf_input.select(
-        "track_id", "lat", "lon", "event_time", "baro_altitude_c",
-        "vert_rate", "velocity", "cumulative_distance_nm", "cumulative_time_s",
+        "track_id",
+        "lat",
+        "lon",
+        "event_time",
+        "baro_altitude_c",
+        "vert_rate",
+        "velocity",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
     )
 
     df = df.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
@@ -1149,13 +1237,27 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
     all_events = first_seen.unionByName(last_seen)
 
     df_events = all_events.select(
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s",
+        "track_id",
+        "type",
+        "event_time",
+        "lon",
+        "lat",
+        "altitude_ft",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
     )
-    df_events = df_events.dropDuplicates([
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s",
-    ])
+    df_events = df_events.dropDuplicates(
+        [
+            "track_id",
+            "type",
+            "event_time",
+            "lon",
+            "lat",
+            "altitude_ft",
+            "cumulative_distance_nm",
+            "cumulative_time_s",
+        ]
+    )
     df_events = df_events.withColumn("info", lit(""))
 
     return df_events
@@ -1224,17 +1326,21 @@ def extra_measurement_rows(df_events: DataFrame) -> Optional[DataFrame]:
     """
     if not EXTRA_MEASURES:
         return None
-    values = F.array(*[
-        F.when(col("type") == event_type, F.get_json_object(col("info"), f"$.{field}").cast("double"))
-        for event_type, field, _, _ in EXTRA_MEASURES
-    ])
+    values = F.array(
+        *[
+            F.when(
+                col("type") == event_type,
+                F.get_json_object(col("info"), f"$.{field}").cast("double"),
+            )
+            for event_type, field, _, _ in EXTRA_MEASURES
+        ]
+    )
     types = F.array(*[lit(m) for _, _, m, _ in EXTRA_MEASURES])
     versions = F.array(*[lit(v) for _, _, _, v in EXTRA_MEASURES])
     suffixes = F.array(*[lit(measurement_suffix(m)) for _, _, m, _ in EXTRA_MEASURES])
-    exploded = (
-        df_events.select(col("id_tmp"), col("dof"), F.posexplode(values).alias("_pos", "value"))
-        .filter(col("value").isNotNull())
-    )
+    exploded = df_events.select(
+        col("id_tmp"), col("dof"), F.posexplode(values).alias("_pos", "value")
+    ).filter(col("value").isNotNull())
     return exploded.select(
         F.concat(col("id_tmp"), F.element_at(suffixes, col("_pos") + 1)).alias("id"),
         col("id_tmp").alias("milestone_id"),
@@ -1354,6 +1460,7 @@ def _distance_from_last_known_position(df: DataFrame, ordered) -> DataFrame:
 # ======================================================================
 # Main orchestrator class
 # ======================================================================
+
 
 class FlightEventProcessor:
     """
@@ -1509,9 +1616,7 @@ class FlightEventProcessor:
             sv = sv.withColumnRenamed("callsign", "flight_id")
         return resolve_flight_id(sv.fillna({"flight_id": ""}))
 
-    def _runway_traversal_family(
-        self, sv: DataFrame, month: date
-    ) -> Optional[DataFrame]:
+    def _runway_traversal_family(self, sv: DataFrame, month: date) -> Optional[DataFrame]:
         """The eight traversal-derived A-CDM milestones.
 
         ``sv`` is the geometry-enriched frame with ``flight_id`` already
@@ -1537,9 +1642,7 @@ class FlightEventProcessor:
             return None
 
         apt_sets = flight_aerodrome_sets(month, self.storage)
-        sv = sv.join(
-            F.broadcast(apt_sets), sv.track_id == apt_sets.id, "inner"
-        ).drop("id")
+        sv = sv.join(F.broadcast(apt_sets), sv.track_id == apt_sets.id, "inner").drop("id")
         sv.cache()
 
         grid = self.storage.read_table("h3_runway_zones")
@@ -1551,9 +1654,7 @@ class FlightEventProcessor:
         # the whole network's millions of res-12 cells: for the twenty-aerodrome
         # study that is a few tens of thousands of cells, not the lot.
         apt_present = sv.select(F.explode("apt").alias("_apt")).distinct()
-        grid = grid.join(
-            F.broadcast(apt_present), grid.apt_icao == apt_present._apt, "left_semi"
-        )
+        grid = grid.join(F.broadcast(apt_present), grid.apt_icao == apt_present._apt, "left_semi")
         traversals = runway_traversals(sv, grid, thresholds, self.events)
         return runway_milestones(sv, traversals, self.events)
 
@@ -1583,9 +1684,7 @@ class FlightEventProcessor:
             calc_navigation: Whether to calculate the holding, point merge
                 and FIR crossing families (each also gated by its emit flag).
         """
-        sdf_input = add_distance_measure(
-            sdf_input, self.events.distance_from_last_known_position
-        )
+        sdf_input = add_distance_measure(sdf_input, self.events.distance_from_last_known_position)
         sdf_input = add_time_measure(sdf_input)
         # Which piece of its track each sample belongs to: 0 throughout for a
         # track with no hole. Read by the detectors that pair or interpolate
@@ -1649,7 +1748,8 @@ class FlightEventProcessor:
             # merge, FIR); the older detectors do not. Missing columns are
             # filled with NULL so the stamp below can coalesce per row.
             df_events = (
-                frame if df_events is None
+                frame
+                if df_events is None
                 else df_events.unionByName(frame, allowMissingColumns=True)
             )
 
@@ -1668,9 +1768,11 @@ class FlightEventProcessor:
                 add(calculate_vertical_crossing_events(sdf_input))
 
             if df_events is not None and self.events.emit_level_offs:
-                add(calculate_level_off_events(
-                    geo, df_events, self.events, segments=segments, tops=tops
-                ))
+                add(
+                    calculate_level_off_events(
+                        geo, df_events, self.events, segments=segments, tops=tops
+                    )
+                )
 
             if self.events.emit_pru_tops:
                 add(pru_top_events(geo, segments, self.events, tops=tops))
@@ -1690,19 +1792,13 @@ class FlightEventProcessor:
             # Gated on emit_runway_events alone (True in v0.2.0, False in
             # legacy()), so legacy still reproduces byte for byte.
             if self.events.emit_runway_events:
-                add(calculate_runway_events(
-                    sdf_input, month, self.storage, self.events
-                ))
+                add(calculate_runway_events(sdf_input, month, self.storage, self.events))
 
-            add(calculate_ring_crossing_events(
-                sdf_input, month, self.storage, self.events
-            ))
+            add(calculate_ring_crossing_events(sdf_input, month, self.storage, self.events))
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
-            df_hexaero = calculate_airport_events(
-                sdf_input, month, self.storage, self.events
-            )
+            df_hexaero = calculate_airport_events(sdf_input, month, self.storage, self.events)
             add(df_hexaero)
 
             if self.events.emit_runway_milestones:
@@ -1720,8 +1816,13 @@ class FlightEventProcessor:
             if self.events.emit_block_events:
                 add(calculate_block_events(sdf_input, df_hexaero, self.events))
 
-        if (calc_navigation and not calc_hexaero and df_go_arounds is None
-                and self.events.emit_holding and self.events.emit_runway_milestones):
+        if (
+            calc_navigation
+            and not calc_hexaero
+            and df_go_arounds is None
+            and self.events.emit_holding
+            and self.events.emit_runway_milestones
+        ):
             # A navigation-only top-up (the other families already logged for
             # this day) still needs the go-arounds the holding family excludes
             # against, or its output would differ from a full rebuild's.
@@ -1772,9 +1873,17 @@ class FlightEventProcessor:
         )
 
         df_events = df_events.withColumn("id_tmp", self._event_id(batch_id)).select(
-            col("id_tmp"), col("track_id"), col("type"), col("event_time"),
-            col("lon"), col("lat"), col("altitude_ft"), col("source"),
-            col("version"), col("info"), col("cumulative_distance_nm"),
+            col("id_tmp"),
+            col("track_id"),
+            col("type"),
+            col("event_time"),
+            col("lon"),
+            col("lat"),
+            col("altitude_ft"),
+            col("source"),
+            col("version"),
+            col("info"),
+            col("cumulative_distance_nm"),
             col("cumulative_time_s"),
         )
 
@@ -1793,9 +1902,7 @@ class FlightEventProcessor:
         # sample by construction, and it avoids both a join against a large
         # table and the question of what to do with a track the flight list
         # has no row for.
-        track_day = sdf_input.groupBy("track_id").agg(
-            F.to_date(F.min("event_time")).alias("dof")
-        )
+        track_day = sdf_input.groupBy("track_id").agg(F.to_date(F.min("event_time")).alias("dof"))
         df_events = df_events.join(track_day, on="track_id", how="left")
 
         # Whether this call is rebuilding the whole day or topping up one
@@ -1805,7 +1912,9 @@ class FlightEventProcessor:
         # subset would delete the families that were already there. A full
         # rebuild can safely replace the partition; a partial one must add to
         # it.
-        full_rebuild = all([calc_vertical, calc_horizontal, calc_hexaero, calc_seen, calc_navigation])
+        full_rebuild = all(
+            [calc_vertical, calc_horizontal, calc_hexaero, calc_seen, calc_navigation]
+        )
         # A day-scoped batch writes exactly one partition, and it is the day.
         _partition_values = [{"dof": day}] if day is not None else None
         write_mode = "overwrite" if full_rebuild else "append"
@@ -1826,7 +1935,10 @@ class FlightEventProcessor:
         )
         df_milestones = df_milestones.repartition("dof").orderBy("type", "version")
         self.storage.write_table(
-            df_milestones, "opdi_flight_events", mode=write_mode, partition_by=["dof"],
+            df_milestones,
+            "opdi_flight_events",
+            mode=write_mode,
+            partition_by=["dof"],
             # Known when a single day is being processed; None falls back to
             # probing, which a month-scoped run still needs.
             partition_values=_partition_values,
@@ -1872,7 +1984,10 @@ class FlightEventProcessor:
         # event's track rather than from the measurement, which has no instant
         # of its own to speak of.
         self.storage.write_table(
-            df_measurements, "opdi_measurements", mode=write_mode, partition_by=["dof"],
+            df_measurements,
+            "opdi_measurements",
+            mode=write_mode,
+            partition_by=["dof"],
             # Known when a single day is being processed; None falls back to
             # probing, which a month-scoped run still needs.
             partition_values=_partition_values,
@@ -1889,9 +2004,7 @@ class FlightEventProcessor:
         """
         self.process_month(day, skip_if_processed=skip_if_processed, day=day)
 
-    def process_month(
-        self, month: date, skip_if_processed: bool = True, day: date = None
-    ) -> None:
+    def process_month(self, month: date, skip_if_processed: bool = True, day: date = None) -> None:
         """
         Process all flight events for a single month.
 
@@ -1938,9 +2051,7 @@ class FlightEventProcessor:
         print(f"Reading tracks from: {source}")
 
         sdf_input = (
-            self._get_data_within_timeframe(source, month, day=day)
-            .select(*TRACK_COLUMNS)
-            .cache()
+            self._get_data_within_timeframe(source, month, day=day).select(*TRACK_COLUMNS).cache()
         )
 
         batch_id = month.strftime("%Y%m%d") + "_"

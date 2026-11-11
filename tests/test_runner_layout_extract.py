@@ -5,6 +5,7 @@ every path exercised here returns *before* anything is parsed, so a real
 extract would only make the suite slower. The parsing itself is covered by
 ``test_pbf_filter.py`` against the Luxembourg extract.
 """
+
 import pytest
 
 from opdi.runner import _AEROWAY_EXTRACT_PREFIX, _fmt_size, _prepare_layout_extract
@@ -33,6 +34,7 @@ def test_a_cached_filtered_extract_is_reused(tmp_path):
     # it here states that relationship explicitly rather than relying on the
     # order the two happened to be written in.
     import os
+
     os.utime(cached, (src.stat().st_atime + 10, src.stat().st_mtime + 10))
 
     assert _prepare_layout_extract(str(src)) == str(cached)
@@ -51,6 +53,7 @@ def test_a_stale_cache_is_not_reused(tmp_path):
     src.write_bytes(b"raw")
 
     import os
+
     os.utime(cached, (src.stat().st_atime - 10, src.stat().st_mtime - 10))
 
     # Reuse is refused, so it tries to filter -- and fails on the dummy bytes.
@@ -74,9 +77,9 @@ def test_a_missing_extract_fails_loudly(tmp_path):
 @pytest.mark.parametrize(
     "n, expected",
     [
-        (34940824103, "32.5 GB"),   # the raw Europe extract
-        (16125133, "15.4 MB"),      # the filtered Europe extract
-        (42496, "41.5 KB"),         # the filtered Luxembourg extract
+        (34940824103, "32.5 GB"),  # the raw Europe extract
+        (16125133, "15.4 MB"),  # the filtered Europe extract
+        (42496, "41.5 KB"),  # the filtered Luxembourg extract
         (12, "12 B"),
     ],
 )

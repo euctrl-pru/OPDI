@@ -51,8 +51,7 @@ def filter_batch(
     """
     if (month is None) == (day is None):
         raise ValueError(
-            "pass exactly one of month= or day=; got "
-            f"month={month!r}, day={day!r}."
+            "pass exactly one of month= or day=; got " f"month={month!r}, day={day!r}."
         )
 
     if day is not None:

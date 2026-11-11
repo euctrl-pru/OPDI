@@ -19,9 +19,7 @@ def test_events_config_is_reachable_from_the_container():
     assert isinstance(OPDIConfig().events, EventConfig)
 
 
-@pytest.mark.parametrize(
-    "field_name,field", list(EventConfig().__dataclass_fields__.items())
-)
+@pytest.mark.parametrize("field_name,field", list(EventConfig().__dataclass_fields__.items()))
 def test_every_measurement_carries_its_unit(field_name, field):
     """Units live in field names so a threshold cannot be read in the wrong one.
 
@@ -40,9 +38,7 @@ def test_every_measurement_carries_its_unit(field_name, field):
     # from it.
     declared = field.type
     if typing.get_origin(declared) is typing.Union:
-        declared = next(
-            (a for a in typing.get_args(declared) if a is not type(None)), declared
-        )
+        declared = next((a for a in typing.get_args(declared) if a is not type(None)), declared)
     if declared in (bool, str, "bool", "str"):
         return
     # Two numeric exceptions, both carrying their unit in the name already:

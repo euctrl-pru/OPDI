@@ -27,8 +27,14 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
 __all__ = [
-    "contingency", "homogeneity_completeness", "match_rates", "track_extents",
-    "boundary_offsets", "boundary_error", "score_arm", "score_arm_gated",
+    "contingency",
+    "homogeneity_completeness",
+    "match_rates",
+    "track_extents",
+    "boundary_offsets",
+    "boundary_error",
+    "score_arm",
+    "score_arm_gated",
 ]
 
 
@@ -130,9 +136,7 @@ def match_rates(matched: DataFrame) -> dict:
         F.max("n").alias("best_n"),
         F.count(F.lit(1)).alias("n_tracks_for_flight"),
     )
-    per_track = c.groupBy("track_id").agg(
-        F.count(F.lit(1)).alias("n_flights_for_track")
-    )
+    per_track = c.groupBy("track_id").agg(F.count(F.lit(1)).alias("n_flights_for_track"))
     # One row per flight: its dominant track, and how many flights that track holds.
     # A flight can be tied between several tracks with equal sample counts (e.g. an
     # exact 50/50 split). The tie-break must be deterministic -- a metric that can
@@ -228,9 +232,7 @@ def boundary_offsets(matched: DataFrame, extents: DataFrame) -> DataFrame:
     # rows, double-counting the flight into n_apdf_flights and every percentile).
     # There is no merge/pure distinction to prefer here, so the ordering is just
     # dominant sample count, then track_id for a total order.
-    tie_break = Window.partitionBy("flight_key").orderBy(
-        F.col("n").desc(), F.col("track_id").asc()
-    )
+    tie_break = Window.partitionBy("flight_key").orderBy(F.col("n").desc(), F.col("track_id").asc())
     best = (
         ends.withColumn("_rank", F.row_number().over(tie_break))
         .filter(F.col("_rank") == 1)
@@ -258,11 +260,7 @@ def boundary_offsets(matched: DataFrame, extents: DataFrame) -> DataFrame:
         )
     ).cache()
 
-    missing = (
-        best.filter(F.col("trk_start").isNull())
-        .select("track_id")
-        .distinct()
-    )
+    missing = best.filter(F.col("trk_start").isNull()).select("track_id").distinct()
     n_missing = missing.count()
     if n_missing:
         sample = [r["track_id"] for r in missing.limit(5).collect()]
@@ -377,6 +375,7 @@ def boundary_error(matched: DataFrame, extents: DataFrame) -> dict:
     best.unpersist()
 
     n = e["n_apdf_flights"] or 0
+
     # With no APDF-sourced rows every percentile is NULL. Coercing that to 0.0 --
     # which this did -- reports the *best possible* boundary error, so an arm
     # with no APDF coverage at all outscored every arm that was actually
@@ -429,8 +428,7 @@ def score_arm(matched: DataFrame, extents: DataFrame, assign: DataFrame = None) 
     return row
 
 
-def score_arm_gated(matched: DataFrame, extents: DataFrame,
-                    matched_gate: DataFrame) -> dict:
+def score_arm_gated(matched: DataFrame, extents: DataFrame, matched_gate: DataFrame) -> dict:
     """The airborne row, plus every gate-to-gate rate under a ``gate_`` prefix.
 
     ``matched`` is ``track_truth.overlap_join``'s default output -- containment

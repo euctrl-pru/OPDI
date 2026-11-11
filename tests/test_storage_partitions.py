@@ -9,6 +9,7 @@ The day columns the callers use (``dof`` on the flight list, the stamped run
 day on events and measurements) are supplied by the callers; this file is only
 about the storage layer honouring them.
 """
+
 import pytest
 
 from opdi.config import OPDIConfig
@@ -29,17 +30,12 @@ def _s3_like_storage(spark, tmp_path):
 
 
 def _rows(spark, tmp_path, table):
-    return {
-        (r["v"], str(r["dof"]))
-        for r in spark.read.parquet(f"{tmp_path}/{table}").collect()
-    }
+    return {(r["v"], str(r["dof"])) for r in spark.read.parquet(f"{tmp_path}/{table}").collect()}
 
 
 def test_a_partitioned_write_creates_one_directory_per_day(spark, tmp_path):
     storage, _ = _s3_like_storage(spark, tmp_path)
-    df = spark.createDataFrame(
-        [(1, "2026-06-01"), (2, "2026-06-02")], "v int, dof string"
-    )
+    df = spark.createDataFrame([(1, "2026-06-01"), (2, "2026-06-02")], "v int, dof string")
 
     storage.write_table(df, "t", mode="overwrite", partition_by=["dof"])
 
@@ -90,11 +86,13 @@ def test_an_unpartitioned_overwrite_still_replaces_everything(spark, tmp_path):
     storage, _ = _s3_like_storage(spark, tmp_path)
     storage.write_table(
         spark.createDataFrame([(1, "2026-06-01")], "v int, dof string"),
-        "t", mode="overwrite",
+        "t",
+        mode="overwrite",
     )
     storage.write_table(
         spark.createDataFrame([(2, "2026-06-02")], "v int, dof string"),
-        "t", mode="overwrite",
+        "t",
+        mode="overwrite",
     )
 
     assert _rows(spark, tmp_path, "t") == {(2, "2026-06-02")}
@@ -104,11 +102,15 @@ def test_appending_to_a_partitioned_table_adds_a_day(spark, tmp_path):
     storage, _ = _s3_like_storage(spark, tmp_path)
     storage.write_table(
         spark.createDataFrame([(1, "2026-06-01")], "v int, dof string"),
-        "t", mode="append", partition_by=["dof"],
+        "t",
+        mode="append",
+        partition_by=["dof"],
     )
     storage.write_table(
         spark.createDataFrame([(2, "2026-06-02")], "v int, dof string"),
-        "t", mode="append", partition_by=["dof"],
+        "t",
+        mode="append",
+        partition_by=["dof"],
     )
 
     assert _rows(spark, tmp_path, "t") == {(1, "2026-06-01"), (2, "2026-06-02")}
@@ -157,12 +159,11 @@ def test_partitioned_overwrite_does_not_rely_on_dynamic_partition_overwrite():
 
     tree = ast.parse(inspect.getsource(StorageManager.write_table).lstrip())
     literals = {
-        n.value for n in ast.walk(tree)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)
     }
-    assert "partitionOverwriteMode" not in literals, (
-        "the magic committer rejects it; delete the partitions and append"
-    )
+    assert (
+        "partitionOverwriteMode" not in literals
+    ), "the magic committer rejects it; delete the partitions and append"
 
 
 def test_only_the_partitions_being_written_are_deleted(spark, tmp_path):
@@ -171,14 +172,16 @@ def test_only_the_partitions_being_written_are_deleted(spark, tmp_path):
     become 'this day no longer exists'."""
     storage, _ = _s3_like_storage(spark, tmp_path)
     storage.write_table(
-        spark.createDataFrame(
-            [(1, "2026-06-01"), (2, "2026-06-02")], "v int, dof string"
-        ),
-        "t", mode="overwrite", partition_by=["dof"],
+        spark.createDataFrame([(1, "2026-06-01"), (2, "2026-06-02")], "v int, dof string"),
+        "t",
+        mode="overwrite",
+        partition_by=["dof"],
     )
     storage.write_table(
         spark.createDataFrame([(99, "2026-06-02")], "v int, dof string"),
-        "t", mode="overwrite", partition_by=["dof"],
+        "t",
+        mode="overwrite",
+        partition_by=["dof"],
     )
 
     assert _rows(spark, tmp_path, "t") == {(1, "2026-06-01"), (99, "2026-06-02")}
@@ -202,7 +205,8 @@ def test_the_frame_is_persisted_before_the_partition_probe():
 
     tree = ast.parse(inspect.getsource(StorageManager._delete_partitions).lstrip())
     calls = [
-        n.func.attr for n in ast.walk(tree)
+        n.func.attr
+        for n in ast.walk(tree)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     ]
     assert "persist" in calls, "the probe must not recompute the frame"
@@ -218,7 +222,8 @@ def test_the_persist_is_released_after_the_write():
 
     tree = ast.parse(inspect.getsource(StorageManager.write_table).lstrip())
     calls = [
-        n.func.attr for n in ast.walk(tree)
+        n.func.attr
+        for n in ast.walk(tree)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     ]
     assert "unpersist" in calls

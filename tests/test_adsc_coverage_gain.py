@@ -30,9 +30,13 @@ UNSOURCED = StructType(_FIELDS)
 
 def _r(track, seconds, source, callsign="SAS4414", segment=None):
     return Row(
-        track_id=track, icao24="4acb41", callsign=callsign,
+        track_id=track,
+        icao24="4acb41",
+        callsign=callsign,
         event_time=T0 + dt.timedelta(seconds=seconds),
-        segment_id=segment or f"{track}_1", lat=52.0, lon=-5.0,
+        segment_id=segment or f"{track}_1",
+        lat=52.0,
+        lon=-5.0,
         source=source,
     )
 
@@ -41,25 +45,38 @@ def _r(track, seconds, source, callsign="SAS4414", segment=None):
 def merged(spark):
     # One track: three ADS-B samples, a 600 s hole, one ADS-C sample in it,
     # then two more ADS-B samples.
-    return spark.createDataFrame([
-        _r("t1", 0, "ADS-B"), _r("t1", 5, "ADS-B"), _r("t1", 10, "ADS-B"),
-        _r("t1", 310, "ADS-C", callsign=None, segment="t1_2"),
-        _r("t1", 610, "ADS-B", segment="t1_3"),
-        _r("t1", 615, "ADS-B", segment="t1_3"),
-    ], schema=SOURCED)
+    return spark.createDataFrame(
+        [
+            _r("t1", 0, "ADS-B"),
+            _r("t1", 5, "ADS-B"),
+            _r("t1", 10, "ADS-B"),
+            _r("t1", 310, "ADS-C", callsign=None, segment="t1_2"),
+            _r("t1", 610, "ADS-B", segment="t1_3"),
+            _r("t1", 615, "ADS-B", segment="t1_3"),
+        ],
+        schema=SOURCED,
+    )
 
 
 @pytest.fixture
 def base(spark):
     # The same track without the ADS-C sample, and with no `source` column --
     # which is what the baseline arm actually writes.
-    return spark.createDataFrame([
-        Row(track_id="t1", icao24="4acb41", callsign="SAS4414",
-            event_time=T0 + dt.timedelta(seconds=s),
-            segment_id=seg, lat=52.0, lon=-5.0)
-        for s, seg in ((0, "t1_1"), (5, "t1_1"), (10, "t1_1"),
-                       (610, "t1_2"), (615, "t1_2"))
-    ], schema=UNSOURCED)
+    return spark.createDataFrame(
+        [
+            Row(
+                track_id="t1",
+                icao24="4acb41",
+                callsign="SAS4414",
+                event_time=T0 + dt.timedelta(seconds=s),
+                segment_id=seg,
+                lat=52.0,
+                lon=-5.0,
+            )
+            for s, seg in ((0, "t1_1"), (5, "t1_1"), (10, "t1_1"), (610, "t1_2"), (615, "t1_2"))
+        ],
+        schema=UNSOURCED,
+    )
 
 
 def test_summary_counts_the_adsc_contribution(spark, merged):
@@ -89,13 +106,16 @@ def test_two_callsign_tracks_are_counted(spark):
     # The merge-neutrality guard, taken from the A9 study: a track holding two
     # distinct real callsigns is two flights fused into one, which is the way
     # this change could do harm. NULL is not a callsign and must not count.
-    df = spark.createDataFrame([
-        _r("t1", 0, "ADS-B", callsign="SAS4414"),
-        _r("t1", 5, "ADS-C", callsign=None),
-        _r("t1", 10, "ADS-B", callsign="SAS9001"),
-        _r("t2", 0, "ADS-B", callsign="KLM1234"),
-        _r("t2", 5, "ADS-C", callsign=None),
-    ], schema=SOURCED)
+    df = spark.createDataFrame(
+        [
+            _r("t1", 0, "ADS-B", callsign="SAS4414"),
+            _r("t1", 5, "ADS-C", callsign=None),
+            _r("t1", 10, "ADS-B", callsign="SAS9001"),
+            _r("t2", 0, "ADS-B", callsign="KLM1234"),
+            _r("t2", 5, "ADS-C", callsign=None),
+        ],
+        schema=SOURCED,
+    )
     assert arm_summary(df).collect()[0]["tracks_with_two_callsigns"] == 1
 
 
@@ -110,10 +130,14 @@ def test_an_adsc_sample_beside_adsb_is_not_a_bridge(spark):
     # Inside a dense stretch an ADS-C sample adds a point, not coverage. The
     # shadow filter should have removed it; if one survives, it must not be
     # counted as a closed hole.
-    df = spark.createDataFrame([
-        _r("t1", 0, "ADS-B"), _r("t1", 70, "ADS-C", callsign=None),
-        _r("t1", 140, "ADS-B"),
-    ], schema=SOURCED)
+    df = spark.createDataFrame(
+        [
+            _r("t1", 0, "ADS-B"),
+            _r("t1", 70, "ADS-C", callsign=None),
+            _r("t1", 140, "ADS-B"),
+        ],
+        schema=SOURCED,
+    )
     assert bridged_holes(df, hole_seconds=300).count() == 0
 
 
@@ -121,10 +145,14 @@ def test_a_sample_past_the_last_adsb_report_is_a_bridge(spark):
     # The clearest case of added coverage: the track ends in ADS-B silence and
     # ADS-C extends it. Treating the missing neighbour as "not a hole" would
     # discard exactly this.
-    df = spark.createDataFrame([
-        _r("t1", 0, "ADS-B"), _r("t1", 5, "ADS-B"),
-        _r("t1", 900, "ADS-C", callsign=None),
-    ], schema=SOURCED)
+    df = spark.createDataFrame(
+        [
+            _r("t1", 0, "ADS-B"),
+            _r("t1", 5, "ADS-B"),
+            _r("t1", 900, "ADS-C", callsign=None),
+        ],
+        schema=SOURCED,
+    )
     holes = bridged_holes(df, hole_seconds=300).collect()
     assert len(holes) == 1
     assert holes[0]["gap_after_s"] >= 1.0e9
@@ -135,12 +163,15 @@ def test_consecutive_adsc_samples_are_measured_against_adsb_not_each_other(spark
     # them against each other would report the hole closed twice and 600 s
     # narrower than it is, so both must still count and both must see the
     # ADS-B gap.
-    df = spark.createDataFrame([
-        _r("t1", 0, "ADS-B"),
-        _r("t1", 600, "ADS-C", callsign=None),
-        _r("t1", 1200, "ADS-C", callsign=None),
-        _r("t1", 1800, "ADS-B"),
-    ], schema=SOURCED)
+    df = spark.createDataFrame(
+        [
+            _r("t1", 0, "ADS-B"),
+            _r("t1", 600, "ADS-C", callsign=None),
+            _r("t1", 1200, "ADS-C", callsign=None),
+            _r("t1", 1800, "ADS-B"),
+        ],
+        schema=SOURCED,
+    )
     holes = bridged_holes(df, hole_seconds=300).collect()
     assert len(holes) == 2
     for h in holes:
@@ -157,9 +188,14 @@ def test_extension_measures_both_ends(spark, base, merged):
 
 def test_extension_is_signed_so_a_regression_is_visible(spark, base):
     later = base.selectExpr(
-        "track_id", "icao24", "callsign",
-        "event_time + INTERVAL 100 SECONDS AS event_time", "segment_id",
-        "lat", "lon")
+        "track_id",
+        "icao24",
+        "callsign",
+        "event_time + INTERVAL 100 SECONDS AS event_time",
+        "segment_id",
+        "lat",
+        "lon",
+    )
     ext = extension_by_airframe(base, later).collect()[0]
     assert ext["first_shift_s"] == pytest.approx(100.0)
     assert ext["last_shift_s"] == pytest.approx(100.0)
@@ -171,15 +207,20 @@ def test_tracks_made_only_of_adsc_are_counted(spark):
     # track at all, so the merge creates one -- a coverage gain presenting as a
     # count increase. Splitting an existing track would also raise the count,
     # and that would be harm. The bare count cannot tell them apart.
-    df = spark.createDataFrame([
-        # t1: mixed -- existed in the baseline, gained an ADS-C sample.
-        _r("t1", 0, "ADS-B"), _r("t1", 600, "ADS-C", callsign=None),
-        # t2: ADS-C only -- an airframe ADS-B never heard.
-        _r("t2", 0, "ADS-C", callsign=None),
-        _r("t2", 600, "ADS-C", callsign=None),
-        # t3: ADS-B only.
-        _r("t3", 0, "ADS-B"), _r("t3", 5, "ADS-B"),
-    ], schema=SOURCED)
+    df = spark.createDataFrame(
+        [
+            # t1: mixed -- existed in the baseline, gained an ADS-C sample.
+            _r("t1", 0, "ADS-B"),
+            _r("t1", 600, "ADS-C", callsign=None),
+            # t2: ADS-C only -- an airframe ADS-B never heard.
+            _r("t2", 0, "ADS-C", callsign=None),
+            _r("t2", 600, "ADS-C", callsign=None),
+            # t3: ADS-B only.
+            _r("t3", 0, "ADS-B"),
+            _r("t3", 5, "ADS-B"),
+        ],
+        schema=SOURCED,
+    )
     r = arm_summary(df).collect()[0]
     assert r["tracks"] == 3
     assert r["tracks_with_adsc"] == 2

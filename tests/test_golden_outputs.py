@@ -72,8 +72,10 @@ def _canonical(frame: pd.DataFrame, tmp_path: Path, key: str) -> list:
     path = tmp_path / f"{key}.parquet"
     frame.to_parquet(path, index=False)
     back = pd.read_parquet(path)
-    return [json.dumps([_plain(v) for v in row], default=str)
-            for row in back.itertuples(index=False, name=None)]
+    return [
+        json.dumps([_plain(v) for v in row], default=str)
+        for row in back.itertuples(index=False, name=None)
+    ]
 
 
 def test_the_runs_produce_rows(outputs):
@@ -94,9 +96,9 @@ def test_output_equals_the_reference(outputs, name, key, tmp_path):
     types_path = GOLDEN_DIR / name / f"{key}.types.json"
     if WRITE:
         pytest.skip("writing the reference files")
-    assert reference_path.exists(), (
-        f"no reference file {reference_path}; run python tools/make_golden.py"
-    )
+    assert (
+        reference_path.exists()
+    ), f"no reference file {reference_path}; run python tools/make_golden.py"
 
     expected_types = [tuple(t) for t in json.loads(types_path.read_text())]
     assert [tuple(t) for t in frame.attrs["types"]] == expected_types

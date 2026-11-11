@@ -19,9 +19,17 @@ ROOT = Path(__file__).resolve().parent.parent
 def main() -> int:
     env = dict(os.environ, OPDI_WRITE_GOLDEN="1")
     return subprocess.call(
-        [sys.executable, "-m", "pytest", "tests/test_golden_outputs.py", "-q",
-         "-p", "no:cacheprovider"],
-        cwd=ROOT, env=env,
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_golden_outputs.py",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=ROOT,
+        env=env,
     )
 
 

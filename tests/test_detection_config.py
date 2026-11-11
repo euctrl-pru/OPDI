@@ -88,9 +88,7 @@ def test_unknown_mode_is_rejected():
         assert bad not in modes
 
 
-@pytest.mark.parametrize(
-    "field_name,field", list(DetectionConfig().__dataclass_fields__.items())
-)
+@pytest.mark.parametrize("field_name,field", list(DetectionConfig().__dataclass_fields__.items()))
 def test_every_measurement_carries_its_unit(field_name, field):
     """The package convention: units live in field names so a threshold cannot
     be read in the wrong one.

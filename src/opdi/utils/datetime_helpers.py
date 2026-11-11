@@ -169,7 +169,9 @@ def get_data_within_interval(
         ... )
     """
     # Convert dates to Unix timestamps (start of start_date, end of end_date)
-    start_timestamp = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0).timestamp()
+    start_timestamp = datetime(
+        start_date.year, start_date.month, start_date.day, 0, 0, 0
+    ).timestamp()
     end_timestamp = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59).timestamp()
 
     # Load the table

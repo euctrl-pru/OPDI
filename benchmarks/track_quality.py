@@ -53,17 +53,21 @@ OUT = f"{OUT_BASE}/track_quality"
 
 def track_summary(sv: DataFrame) -> DataFrame:
     """One row per track: extent, size, and the raw callsign as broadcast."""
-    return sv.groupBy("track_id").agg(
-        F.count(F.lit(1)).alias("n_samples"),
-        F.min("event_time").alias("t_start"),
-        F.max("event_time").alias("t_end"),
-        F.first("icao24").alias("icao24"),
-        F.first("callsign").alias("callsign_raw"),
-        F.min("baro_altitude").alias("alt_min_m"),
-        F.max("baro_altitude").alias("alt_max_m"),
-    ).withColumn(
-        "duration_h",
-        (F.unix_timestamp("t_end") - F.unix_timestamp("t_start")) / 3600.0,
+    return (
+        sv.groupBy("track_id")
+        .agg(
+            F.count(F.lit(1)).alias("n_samples"),
+            F.min("event_time").alias("t_start"),
+            F.max("event_time").alias("t_end"),
+            F.first("icao24").alias("icao24"),
+            F.first("callsign").alias("callsign_raw"),
+            F.min("baro_altitude").alias("alt_min_m"),
+            F.max("baro_altitude").alias("alt_max_m"),
+        )
+        .withColumn(
+            "duration_h",
+            (F.unix_timestamp("t_end") - F.unix_timestamp("t_start")) / 3600.0,
+        )
     )
 
 
@@ -75,9 +79,9 @@ def measure(spark: SparkSession, sv: DataFrame, gt: DataFrame, days: list) -> di
     cs = ts.select(
         F.sum(F.when(F.col("callsign_raw").isNull(), 1).otherwise(0)).alias("null_cs"),
         F.sum(F.when(F.trim(F.col("callsign_raw")) == "", 1).otherwise(0)).alias("blank_cs"),
-        F.sum(
-            F.when(F.col("callsign_raw") != F.trim(F.col("callsign_raw")), 1).otherwise(0)
-        ).alias("padded_cs"),
+        F.sum(F.when(F.col("callsign_raw") != F.trim(F.col("callsign_raw")), 1).otherwise(0)).alias(
+            "padded_cs"
+        ),
     ).first()
 
     # -- duration / size outliers ----------------------------------------
@@ -99,9 +103,9 @@ def measure(spark: SparkSession, sv: DataFrame, gt: DataFrame, days: list) -> di
         F.sum(
             F.when(F.unix_timestamp("t_start") - F.unix_timestamp(lo) < 300, 1).otherwise(0)
         ).alias("starts_at_edge"),
-        F.sum(
-            F.when(F.unix_timestamp(hi) - F.unix_timestamp("t_end") < 300, 1).otherwise(0)
-        ).alias("ends_at_edge"),
+        F.sum(F.when(F.unix_timestamp(hi) - F.unix_timestamp("t_end") < 300, 1).otherwise(0)).alias(
+            "ends_at_edge"
+        ),
     ).first()
 
     # -- fragmentation and merging against ground truth -------------------
@@ -127,17 +131,23 @@ def measure(spark: SparkSession, sv: DataFrame, gt: DataFrame, days: list) -> di
     ts.unpersist()
     return {
         "n_tracks": n_tracks,
-        "callsign_null": cs["null_cs"], "callsign_blank": cs["blank_cs"],
+        "callsign_null": cs["null_cs"],
+        "callsign_blank": cs["blank_cs"],
         "callsign_padded": cs["padded_cs"],
-        "single_sample": sz["single_sample"], "over_18h": sz["over_18h"],
-        "under_5min": sz["under_5min"], "median_duration_h": float(sz["median_h"] or 0),
-        "p99_duration_h": float(sz["p99_h"] or 0), "max_duration_h": float(sz["max_h"] or 0),
+        "single_sample": sz["single_sample"],
+        "over_18h": sz["over_18h"],
+        "under_5min": sz["under_5min"],
+        "median_duration_h": float(sz["median_h"] or 0),
+        "p99_duration_h": float(sz["p99_h"] or 0),
+        "max_duration_h": float(sz["max_h"] or 0),
         "starts_at_window_edge": tr["starts_at_edge"],
         "ends_at_window_edge": tr["ends_at_edge"],
-        "matched_flights": frag["matched_flights"], "fragmented_flights": frag["fragmented"],
+        "matched_flights": frag["matched_flights"],
+        "fragmented_flights": frag["fragmented"],
         "p99_tracks_per_flight": int(frag["p99_tracks"] or 0),
         "max_tracks_per_flight": int(frag["max_tracks"] or 0),
-        "matched_tracks": merge["matched_tracks"], "merged_tracks": merge["merged"],
+        "matched_tracks": merge["matched_tracks"],
+        "merged_tracks": merge["merged"],
         "max_flights_per_track": int(merge["max_flights"] or 0),
     }
 
@@ -159,9 +169,7 @@ def main() -> None:
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.shuffle.partitions", "96")
 
-    sv = spark.read.parquet(*[
-        f"{TRACKS_BASE}/aircraft={args.aircraft}/day={d}" for d in args.days
-    ])
+    sv = spark.read.parquet(*[f"{TRACKS_BASE}/aircraft={args.aircraft}/day={d}" for d in args.days])
     gt = load_ground_truth(spark, args.months, args.days)
     stats = measure(spark, sv, gt, args.days)
 
@@ -172,9 +180,7 @@ def main() -> None:
     stats["days"] = ",".join(args.days)
     stats["months"] = ",".join(args.months)
     tag = f"{len(args.days)}d-{min(args.days)}"
-    spark.createDataFrame([stats]).coalesce(1).write.mode("overwrite").parquet(
-        f"{OUT}/{tag}"
-    )
+    spark.createDataFrame([stats]).coalesce(1).write.mode("overwrite").parquet(f"{OUT}/{tag}")
     print(f"\n-> {OUT}/{tag}")
     spark.stop()
 

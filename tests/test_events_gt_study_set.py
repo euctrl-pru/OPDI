@@ -59,9 +59,7 @@ def test_the_study_set_is_the_top_twenty_of_the_coverage_ranking():
 
 def test_filter_study_airports_restricts_to_the_study_set(spark):
     """The shared helper both milestones() and ring_truth() route through."""
-    df = spark.createDataFrame(
-        [("EBBR",), ("EHAM",)], "gt_airport string"
-    )
+    df = spark.createDataFrame([("EBBR",), ("EHAM",)], "gt_airport string")
 
     study = _filter_study_airports(df, "study")
     assert sorted(r.gt_airport for r in study.collect()) == ["EBBR"]
@@ -75,14 +73,30 @@ def test_milestones_routes_through_the_study_airports_filter(spark):
     EBBR is in STUDY_AIRPORTS, EHAM is not."""
     rows = [
         (
-            "abc111", "TEST01 ", None, None, None, "DEP",
-            dt.datetime(2026, 6, 5, 10, 0, 0), dt.datetime(2026, 6, 5, 9, 50, 0),
-            "EBBR", "LFPG", "25R",
+            "abc111",
+            "TEST01 ",
+            None,
+            None,
+            None,
+            "DEP",
+            dt.datetime(2026, 6, 5, 10, 0, 0),
+            dt.datetime(2026, 6, 5, 9, 50, 0),
+            "EBBR",
+            "LFPG",
+            "25R",
         ),
         (
-            "abc222", "TEST02 ", None, None, None, "DEP",
-            dt.datetime(2026, 6, 5, 11, 0, 0), dt.datetime(2026, 6, 5, 10, 50, 0),
-            "EHAM", "LFPG", "18C",
+            "abc222",
+            "TEST02 ",
+            None,
+            None,
+            None,
+            "DEP",
+            dt.datetime(2026, 6, 5, 11, 0, 0),
+            dt.datetime(2026, 6, 5, 10, 50, 0),
+            "EHAM",
+            "LFPG",
+            "18C",
         ),
     ]
     bridged = spark.createDataFrame(

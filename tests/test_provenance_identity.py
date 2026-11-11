@@ -36,19 +36,17 @@ class _FakeS3:
 
 
 def _obj(key, size):
-    return {"Key": key, "Size": size,
-            "LastModified": dt.datetime(2026, 8, 22, 12, 0, 0)}
+    return {"Key": key, "Size": size, "LastModified": dt.datetime(2026, 8, 22, 12, 0, 0)}
 
 
 @pytest.fixture
 def patched(monkeypatch):
     def install(contents):
         fake = _FakeS3(contents)
-        monkeypatch.setitem(
-            sys.modules, "boto3", type("m", (), {"client": lambda *a, **k: fake})
-        )
+        monkeypatch.setitem(sys.modules, "boto3", type("m", (), {"client": lambda *a, **k: fake}))
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "x")
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "y")
+
     return install
 
 
@@ -61,12 +59,14 @@ def test_a_prefix_holding_only_a_directory_marker_is_empty(patched):
 
 
 def test_real_objects_are_counted(patched):
-    patched([
-        _obj("opdi/research/trend_votes_agl/", 0),          # marker, ignored
-        _obj("opdi/research/trend_votes_agl/part-0.parquet", 1024),
-        _obj("opdi/research/trend_votes_agl/part-1.parquet", 2048),
-        _obj("opdi/research/trend_votes_agl/_SUCCESS", 0),  # real, zero bytes
-    ])
+    patched(
+        [
+            _obj("opdi/research/trend_votes_agl/", 0),  # marker, ignored
+            _obj("opdi/research/trend_votes_agl/part-0.parquet", 1024),
+            _obj("opdi/research/trend_votes_agl/part-1.parquet", 2048),
+            _obj("opdi/research/trend_votes_agl/_SUCCESS", 0),  # real, zero bytes
+        ]
+    )
     got = provenance.s3_identity("s3a://eurocontrol/opdi/research/trend_votes_agl")
     # Three: the two parts and _SUCCESS. _SUCCESS is zero bytes but does not
     # end in `/`, and it is a genuine artefact of a committed write -- dropping

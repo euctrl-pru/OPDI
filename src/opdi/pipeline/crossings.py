@@ -147,8 +147,9 @@ def threshold_crossings(
         s = _slug(th)
         work = work.withColumn(
             f"_side_{s}",
-            F.when(v > F.lit(th) + F.lit(hysteresis), F.lit(1))
-            .when(v < F.lit(th) - F.lit(hysteresis), F.lit(-1)),
+            F.when(v > F.lit(th) + F.lit(hysteresis), F.lit(1)).when(
+                v < F.lit(th) - F.lit(hysteresis), F.lit(-1)
+            ),
         )
         # Equality is attributed to the upward case so a sample landing exactly
         # on the threshold is counted once, not twice or never.
@@ -162,9 +163,7 @@ def threshold_crossings(
             f"_xt_{s}",
             F.when(straddles, F.col("_t_prev") + frac * (F.col("_t") - F.col("_t_prev"))),
         )
-        work = work.withColumn(
-            f"_gap_{s}", F.when(straddles, F.col("_t") - F.col("_t_prev"))
-        )
+        work = work.withColumn(f"_gap_{s}", F.when(straddles, F.col("_t") - F.col("_t_prev")))
         for c in interpolate_cols:
             work = work.withColumn(
                 f"_x_{c}_{s}",
@@ -182,12 +181,8 @@ def threshold_crossings(
         work = work.withColumn(
             f"_side_ff_{s}", F.last(f"_side_{s}", ignorenulls=True).over(running)
         )
-        work = work.withColumn(
-            f"_xt_ff_{s}", F.last(f"_xt_{s}", ignorenulls=True).over(running)
-        )
-        work = work.withColumn(
-            f"_gap_ff_{s}", F.last(f"_gap_{s}", ignorenulls=True).over(running)
-        )
+        work = work.withColumn(f"_xt_ff_{s}", F.last(f"_xt_{s}", ignorenulls=True).over(running))
+        work = work.withColumn(f"_gap_ff_{s}", F.last(f"_gap_{s}", ignorenulls=True).over(running))
         for c in interpolate_cols:
             work = work.withColumn(
                 f"_x_ff_{c}_{s}",
@@ -206,22 +201,16 @@ def threshold_crossings(
         confirmed = now.isNotNull() & was.isNotNull() & (now != was)
         fields = [
             F.lit(float(th)).alias("threshold"),
-            F.when(now == 1, F.lit(up_label)).otherwise(F.lit(down_label)).alias(
-                "direction"
+            F.when(now == 1, F.lit(up_label)).otherwise(F.lit(down_label)).alias("direction"),
+            (F.timestamp_seconds(F.col(f"_xt_ff_{s}")) if interpolate else F.col(time_col)).alias(
+                time_col
             ),
-            (
-                F.timestamp_seconds(F.col(f"_xt_ff_{s}"))
-                if interpolate
-                else F.col(time_col)
-            ).alias(time_col),
             (F.col(f"_gap_ff_{s}") if interpolate else F.lit(None).cast("double")).alias(
                 "bracket_seconds"
             ),
         ]
         for c in interpolate_cols:
-            fields.append(
-                (F.col(f"_x_ff_{c}_{s}") if interpolate else F.col(c)).alias(c)
-            )
+            fields.append((F.col(f"_x_ff_{c}_{s}") if interpolate else F.col(c)).alias(c))
         fired.append(F.when(confirmed, F.struct(*fields)))
 
     # Only rows where something fired survive; the trajectory is never

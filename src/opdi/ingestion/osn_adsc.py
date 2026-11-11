@@ -107,12 +107,12 @@ def to_opdi_schema(df: DataFrame) -> DataFrame:
         col("squawk").cast("string").alias("squawk"),
         (col("alt_baro_ft").cast("double") * lit(_FT_TO_M)).alias("baro_altitude"),
         (col("alt_geom").cast("double") * lit(_FT_TO_M)).alias("geo_altitude"),
-        (col("time").cast("double")
-         - F.coalesce(col("seen_pos").cast("double"), lit(0.0))
-         ).alias("last_pos_update"),
-        (col("time").cast("double")
-         - F.coalesce(col("seen").cast("double"), lit(0.0))
-         ).alias("last_contact"),
+        (col("time").cast("double") - F.coalesce(col("seen_pos").cast("double"), lit(0.0))).alias(
+            "last_pos_update"
+        ),
+        (col("time").cast("double") - F.coalesce(col("seen").cast("double"), lit(0.0))).alias(
+            "last_contact"
+        ),
         lit(None).cast("array<int>").alias("serials"),
         lit(ADSC_SOURCE).alias("source"),
     )
@@ -153,8 +153,8 @@ def shadow_filter(
     before, after = int(before_seconds), int(after_seconds)
     if before <= 0 or after <= 0:
         raise ValueError(
-            f"both half-windows must be positive, got before={before!r} "
-            f"after={after!r}")
+            f"both half-windows must be positive, got before={before!r} " f"after={after!r}"
+        )
     s = max(before, after)
 
     def bin_of(t):
@@ -165,9 +165,13 @@ def shadow_filter(
         col("icao24"),
         col("event_time"),
         adsc_t.alias("_t_adsc"),
-        F.explode(F.array(
-            bin_of(adsc_t) - 1, bin_of(adsc_t), bin_of(adsc_t) + 1,
-        )).alias("_bin"),
+        F.explode(
+            F.array(
+                bin_of(adsc_t) - 1,
+                bin_of(adsc_t),
+                bin_of(adsc_t) + 1,
+            )
+        ).alias("_bin"),
     )
 
     adsb_t = F.unix_timestamp("event_time").cast("double")
@@ -180,8 +184,7 @@ def shadow_filter(
     shadowed = (
         adsb_keys.join(
             F.broadcast(adsc_keys),
-            (col("_icao24") == col("icao24"))
-            & (adsb_keys["_bin"] == adsc_keys["_bin"]),
+            (col("_icao24") == col("icao24")) & (adsb_keys["_bin"] == adsc_keys["_bin"]),
             "inner",
         )
         # `t_adsb - t_adsc` in `[-before, +after]`: an ADS-B sample up to
@@ -269,21 +272,23 @@ class AdscIngestion:
         """
         wanted = self.hour_paths(start_date, end_date)
         paths = self.existing(wanted)
-        print(f"ADS-C: {len(paths)}/{len(wanted)} hourly partitions present "
-              f"({start_date} to {end_date})")
+        print(
+            f"ADS-C: {len(paths)}/{len(wanted)} hourly partitions present "
+            f"({start_date} to {end_date})"
+        )
         if not paths:
             print("ADS-C: nothing to ingest; table left untouched")
             return 0
 
-        df = to_opdi_schema(
-            self.spark.read.option("mergeSchema", "true").parquet(*paths)
-        )
+        df = to_opdi_schema(self.spark.read.option("mergeSchema", "true").parquet(*paths))
 
         if self.bbox:
             min_lon, min_lat, max_lon, max_lat = self.bbox
             df = df.filter(
-                (col("lon") >= min_lon) & (col("lon") <= max_lon)
-                & (col("lat") >= min_lat) & (col("lat") <= max_lat)
+                (col("lon") >= min_lon)
+                & (col("lon") <= max_lon)
+                & (col("lat") >= min_lat)
+                & (col("lat") <= max_lat)
             )
 
         # Exact duplicates only -- same airframe, instant and position. The
@@ -306,21 +311,23 @@ class AdscIngestion:
         # cannot silently mean two different things by one timestamp.
         offset = float(self.config.adsc.time_offset_seconds)
         if offset:
-            print(f"ADS-C: applying a global time offset of {offset:+.3f} s. "
-                  f"The measured skew is per-airframe -- see AdscConfig.")
+            print(
+                f"ADS-C: applying a global time offset of {offset:+.3f} s. "
+                f"The measured skew is per-airframe -- see AdscConfig."
+            )
             df = df.withColumn("event_time", col("event_time") + lit(offset))
 
-        df = df.withColumn(
-            "event_time", from_unixtime(col("event_time")).cast("timestamp"))
+        df = df.withColumn("event_time", from_unixtime(col("event_time")).cast("timestamp"))
         df = df.withColumn("event_time_day", to_date(col("event_time")))
 
         rows = df.count()
         days = [r[0] for r in df.select("event_time_day").distinct().collect()]
         self.storage.write_table(
-            df, self.table, mode="overwrite",
+            df,
+            self.table,
+            mode="overwrite",
             partition_by=["event_time_day"],
             partition_values=[{"event_time_day": d} for d in days],
         )
-        print(f"ADS-C: written {rows:,} rows to {self.table} "
-              f"({len(days)} day partition(s))")
+        print(f"ADS-C: written {rows:,} rows to {self.table} " f"({len(days)} day partition(s))")
         return rows

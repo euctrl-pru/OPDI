@@ -11,6 +11,7 @@ Read-only against OSN tables. With ``--out-name`` and ``--results-dir`` it also
 writes the boundary-cause breakdown and the flicker-holding-time stats as one
 CSV row, so ``regenerate_track_v3.py`` can stage it for the paper.
 """
+
 import argparse
 import csv
 from pathlib import Path
@@ -31,11 +32,13 @@ def main() -> None:
     ap.add_argument("--day", default="2026-06-01")
     ap.add_argument("--warehouse", default="s3a://eurocontrol/opdi-prod")
     ap.add_argument("--executors", type=int, default=6)
-    ap.add_argument("--results-dir", type=Path, default=None,
-                     help="stage the boundary-cause breakdown here as a CSV "
-                          "row, if --out-name is also given")
-    ap.add_argument("--out-name", default=None,
-                     help="CSV filename under --results-dir")
+    ap.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="stage the boundary-cause breakdown here as a CSV " "row, if --out-name is also given",
+    )
+    ap.add_argument("--out-name", default=None, help="CSV filename under --results-dir")
     args = ap.parse_args()
 
     config = OPDIConfig.for_environment("opensky")
@@ -57,8 +60,7 @@ def main() -> None:
     # The raw callsign sequence per airframe, ignoring blanks -- a blank is
     # "not transmitted", not "changed to nothing", and the arm already treats
     # it that way.
-    real = F.when(F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
-                  F.trim(F.col("callsign")))
+    real = F.when(F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "", F.trim(F.col("callsign")))
     w = Window.partitionBy("icao24").orderBy("event_time")
     seq = (
         sv.withColumn("_cs", real)
@@ -91,8 +93,10 @@ def main() -> None:
 
     print(f"day {args.day}")
     print(f"  raw callsign changes            {total:,}")
-    print(f"  of which X -> Y -> X (flicker)  {n_flicker:,}"
-          f"  ({100 * n_flicker / max(total, 1):.1f}%)")
+    print(
+        f"  of which X -> Y -> X (flicker)  {n_flicker:,}"
+        f"  ({100 * n_flicker / max(total, 1):.1f}%)"
+    )
     held_stats = held.selectExpr(
         "percentile_approx(_held_s, 0.5) AS p50",
         "percentile_approx(_held_s, 0.9) AS p90",
@@ -144,10 +148,12 @@ def main() -> None:
     classified = (
         boundaries.join(
             flicker_x.withColumn("_is_flicker_x", F.lit(True)),
-            ["icao24", "event_time"], "left",
+            ["icao24", "event_time"],
+            "left",
         ).join(
             flicker_y.withColumn("_is_flicker_y", F.lit(True)),
-            ["icao24", "event_time"], "left",
+            ["icao24", "event_time"],
+            "left",
         )
     ).withColumn(
         "_class",
@@ -163,13 +169,13 @@ def main() -> None:
     )
 
     print("\n  track boundaries under `recommended`, classified by cause:")
-    counts = (
-        classified.groupBy("_class").count().orderBy(F.desc("count")).collect()
-    )
+    counts = classified.groupBy("_class").count().orderBy(F.desc("count")).collect()
     n_boundaries = sum(r["count"] for r in counts)
     for r in counts:
-        print(f"    {r['_class']:<24} {r['count']:>8,}"
-              f"  ({100 * r['count'] / max(n_boundaries, 1):5.1f}%)")
+        print(
+            f"    {r['_class']:<24} {r['count']:>8,}"
+            f"  ({100 * r['count'] / max(n_boundaries, 1):5.1f}%)"
+        )
     print(f"    {'TOTAL':<24} {n_boundaries:>8,}")
 
     # Fix round 1, finding 1 (code review): where two flickers abut with no
@@ -184,15 +190,21 @@ def main() -> None:
     n_collision = classified.filter(
         F.col("_is_flicker_x").isNotNull() & F.col("_is_flicker_y").isNotNull()
     ).count()
-    print(f"\n  boundaries matching BOTH a flicker's revert leg and another"
-          f" flicker's excursion leg: {n_collision:,}")
+    print(
+        f"\n  boundaries matching BOTH a flicker's revert leg and another"
+        f" flicker's excursion leg: {n_collision:,}"
+    )
     if n_collision == 0:
-        print("  -> no collisions: the flicker-bucket count is a clean 1:1"
-              " match against the first-pass flicker count.")
+        print(
+            "  -> no collisions: the flicker-bucket count is a clean 1:1"
+            " match against the first-pass flicker count."
+        )
     else:
-        print("  -> collisions present: the flicker-bucket count and the"
-              " first-pass flicker count agreeing exactly is not, by itself,"
-              " proof of a 1:1 correspondence -- some boundaries satisfy both.")
+        print(
+            "  -> collisions present: the flicker-bucket count and the"
+            " first-pass flicker count agreeing exactly is not, by itself,"
+            " proof of a 1:1 correspondence -- some boundaries satisfy both."
+        )
 
     if args.results_dir and args.out_name:
         # One row, wide: every quantity this script measures, so the paper

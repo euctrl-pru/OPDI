@@ -55,20 +55,22 @@ AEROWAY_TAGS = [
     "deicing_pad",
 ]
 
-HEXAERO_SCHEMA = StructType([
-    StructField("hexaero_apt_icao", StringType(), True),
-    StructField("hexaero_h3_id", StringType(), True),
-    StructField("hexaero_latitude", DoubleType(), True),
-    StructField("hexaero_longitude", DoubleType(), True),
-    StructField("hexaero_res", IntegerType(), True),
-    StructField("hexaero_aeroway", StringType(), True),
-    StructField("hexaero_length", DoubleType(), True),
-    StructField("hexaero_ref", StringType(), True),
-    StructField("hexaero_surface", StringType(), True),
-    StructField("hexaero_width", DoubleType(), True),
-    StructField("hexaero_osm_id", LongType(), True),
-    StructField("hexaero_type", StringType(), True),
-])
+HEXAERO_SCHEMA = StructType(
+    [
+        StructField("hexaero_apt_icao", StringType(), True),
+        StructField("hexaero_h3_id", StringType(), True),
+        StructField("hexaero_latitude", DoubleType(), True),
+        StructField("hexaero_longitude", DoubleType(), True),
+        StructField("hexaero_res", IntegerType(), True),
+        StructField("hexaero_aeroway", StringType(), True),
+        StructField("hexaero_length", DoubleType(), True),
+        StructField("hexaero_ref", StringType(), True),
+        StructField("hexaero_surface", StringType(), True),
+        StructField("hexaero_width", DoubleType(), True),
+        StructField("hexaero_osm_id", LongType(), True),
+        StructField("hexaero_type", StringType(), True),
+    ]
+)
 
 COLUMN_TYPES: Dict[str, type] = {
     "hexaero_apt_icao": str,
@@ -108,9 +110,7 @@ def retrieve_osm_data(icao_code: str) -> "gpd.GeoDataFrame":
     return gdf
 
 
-def buffer_geometry(
-    line: LineString, width_m: float, always_xy: bool = True
-) -> Polygon:
+def buffer_geometry(line: LineString, width_m: float, always_xy: bool = True) -> Polygon:
     """
     Buffer a LineString geometry to create a Polygon with a specified width.
 
@@ -125,12 +125,8 @@ def buffer_geometry(
     Returns:
         Buffered geometry as a Polygon.
     """
-    transformer_to_meters = Transformer.from_crs(
-        "EPSG:4326", "EPSG:3395", always_xy=always_xy
-    )
-    transformer_to_degrees = Transformer.from_crs(
-        "EPSG:3395", "EPSG:4326", always_xy=always_xy
-    )
+    transformer_to_meters = Transformer.from_crs("EPSG:4326", "EPSG:3395", always_xy=always_xy)
+    transformer_to_degrees = Transformer.from_crs("EPSG:3395", "EPSG:4326", always_xy=always_xy)
     line_in_meters = transform(transformer_to_meters.transform, line)
     buffered_line = line_in_meters.buffer(width_m)
     return transform(transformer_to_degrees.transform, buffered_line)
@@ -313,9 +309,7 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.D
     if "width" not in df.columns:
         df["width"] = None
 
-    df["width"] = df.apply(
-        lambda row: fill_missing_width(row["aeroway"], row["width"]), axis=1
-    )
+    df["width"] = df.apply(lambda row: fill_missing_width(row["aeroway"], row["width"]), axis=1)
 
     # Handle multiple polygons per feature
     df["polygon_geometries"] = df.apply(
@@ -333,9 +327,7 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.D
 
     # Add H3 coordinates (cell_to_latlng returns (lat, lng), same order as
     # the v3 h3_to_geo it replaces).
-    df["hex_latitude"], df["hex_longitude"] = zip(
-        *df["hex_id"].apply(h3.cell_to_latlng)
-    )
+    df["hex_latitude"], df["hex_longitude"] = zip(*df["hex_id"].apply(h3.cell_to_latlng))
     df["hex_res"] = resolution
 
     # Reorganize columns
@@ -466,9 +458,7 @@ class AirportLayoutGenerator:
         if airports_url is not None:
             airports_df = pd.read_csv(airports_url)
             airports_df = airports_df[airports_df["type"].isin(airport_types)][cols]
-            mask = cov.pandas_mask(
-                airports_df.latitude_deg, airports_df.longitude_deg, offset=True
-            )
+            mask = cov.pandas_mask(airports_df.latitude_deg, airports_df.longitude_deg, offset=True)
             airports_df = airports_df[mask]
         else:
             if not self.storage.table_exists("oa_airports"):
@@ -490,8 +480,7 @@ class AirportLayoutGenerator:
             )
             airports_df = apt.toPandas()
 
-        print(f"There are {len(airports_df)} airports to process "
-              f"(coverage: {cov.label})...")
+        print(f"There are {len(airports_df)} airports to process " f"(coverage: {cov.label})...")
         return airports_df
 
     def process_airport(self, apt_icao: str) -> Optional[pd.DataFrame]:
@@ -516,9 +505,7 @@ class AirportLayoutGenerator:
                 from opdi.reference.pbf_source import PbfLayoutSource
 
                 self._pbf_source = PbfLayoutSource(self.pbf_path, self.storage)
-            df = hexagonify_airport(
-                apt_icao, resolution=self.resolution, source=self._pbf_source
-            )
+            df = hexagonify_airport(apt_icao, resolution=self.resolution, source=self._pbf_source)
             # `hexagonify_airport` can return duplicate column labels. pandas
             # raises InvalidIndexError when such frames are concatenated, and
             # `createDataFrame` warns "columns are not unique, some columns will
@@ -576,9 +563,7 @@ class AirportLayoutGenerator:
                 frames.append(result)
                 self._mark_success(apt_icao, processed_success)
             else:
-                self._mark_failed(
-                    apt_icao, "See logs", processed_failed, processed_errors
-                )
+                self._mark_failed(apt_icao, "See logs", processed_failed, processed_errors)
 
         # One write for the whole run, not one per airport. The per-airport
         # write this replaced was ``mode="overwrite"`` on the shared table, so
@@ -595,7 +580,8 @@ class AirportLayoutGenerator:
             sdf = self.spark.createDataFrame(big, HEXAERO_SCHEMA)
             sdf = sdf.repartition("hexaero_apt_icao").orderBy("hexaero_apt_icao")
             self.storage.write_table(
-                sdf, "hexaero_airport_layouts",
+                sdf,
+                "hexaero_airport_layouts",
                 mode="overwrite" if first_write else "append",
             )
 

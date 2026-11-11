@@ -57,7 +57,8 @@ def _find_portal() -> Path:
             return candidate
     raise SystemExit(
         "cannot find the opdi-portal checkout beside this repository. "
-        "Set OPDI_PORTAL to its path.")
+        "Set OPDI_PORTAL to its path."
+    )
 
 
 DATA = _find_portal() / "papers" / "adep-ades-detection-v6" / "data"
@@ -91,17 +92,21 @@ def compare(name, filename, key_cols, k=2.0):
             co, wo = counts(old[key], side)
             cn, wn = counts(new[key], side)
             ds.append((cn - k * wn) - (co - k * wo))
-            dc.append(float(new[key][f"{side}_coverage"])
-                      - float(old[key][f"{side}_coverage"]))
-        rows.append({
-            "comparison": name, "role": side, "cells": len(keys),
-            "median_dscore": statistics.median(ds),
-            "mean_dscore": round(statistics.mean(ds), 1),
-            "min_dscore": min(ds), "max_dscore": max(ds),
-            "median_dcoverage_pp": round(100 * statistics.median(dc), 4),
-            "cells_improved": sum(1 for d in ds if d > 0),
-            "cells_worsened": sum(1 for d in ds if d < 0),
-        })
+            dc.append(float(new[key][f"{side}_coverage"]) - float(old[key][f"{side}_coverage"]))
+        rows.append(
+            {
+                "comparison": name,
+                "role": side,
+                "cells": len(keys),
+                "median_dscore": statistics.median(ds),
+                "mean_dscore": round(statistics.mean(ds), 1),
+                "min_dscore": min(ds),
+                "max_dscore": max(ds),
+                "median_dcoverage_pp": round(100 * statistics.median(dc), 4),
+                "cells_improved": sum(1 for d in ds if d > 0),
+                "cells_worsened": sum(1 for d in ds if d < 0),
+            }
+        )
     return rows
 
 
@@ -113,30 +118,36 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    rows += compare("trend sweep", "trend_sweep_2025.csv",
-                    ["stage", "fl_cap", "margin", "radius_nm", "penalty_nm",
-                     "stage2_role"])
-    rows += compare("endpoint grid", "sweep_radius_height_2025.csv",
-                    ["radius_nm", "height_ft"])
+    rows += compare(
+        "trend sweep",
+        "trend_sweep_2025.csv",
+        ["stage", "fl_cap", "margin", "radius_nm", "penalty_nm", "stage2_role"],
+    )
+    rows += compare("endpoint grid", "sweep_radius_height_2025.csv", ["radius_nm", "height_ft"])
     rows += compare("pipeline modes", "mode_comparison_v6.csv", ["run"])
 
     if not rows:
         raise SystemExit(
             "no comparable outputs found. The modulo baseline lives in "
             f"{BASELINE} and is frozen from the last run before the sampler "
-            "changed; without it there is nothing to compare against.")
+            "changed; without it there is nothing to compare against."
+        )
 
     with open(out / "sampler_comparison.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
 
-    print(f"{'comparison':<18}{'role':<6}{'cells':>7}{'med dscore':>12}"
-          f"{'med dcov pp':>13}{'improved':>10}{'worsened':>10}")
+    print(
+        f"{'comparison':<18}{'role':<6}{'cells':>7}{'med dscore':>12}"
+        f"{'med dcov pp':>13}{'improved':>10}{'worsened':>10}"
+    )
     for r in rows:
-        print(f"{r['comparison']:<18}{r['role']:<6}{r['cells']:>7}"
-              f"{r['median_dscore']:>12,.0f}{r['median_dcoverage_pp']:>13.4f}"
-              f"{r['cells_improved']:>10}{r['cells_worsened']:>10}")
+        print(
+            f"{r['comparison']:<18}{r['role']:<6}{r['cells']:>7}"
+            f"{r['median_dscore']:>12,.0f}{r['median_dcoverage_pp']:>13.4f}"
+            f"{r['cells_improved']:>10}{r['cells_worsened']:>10}"
+        )
     print(f"\nwritten to {out}")
 
 

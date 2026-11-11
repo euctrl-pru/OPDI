@@ -49,10 +49,13 @@ def _detected(spark, rows):
 def test_a_missing_detection_counts_against_coverage(spark):
     """Ground truth is the denominator: a flight never seen is a miss, not an
     absent row. An inner join here would drop exactly the failures measured."""
-    truth = _truth(spark, [
-        ("abc123", "DLH1", "ATOT", T0, "07R", True),
-        ("def456", "DLH2", "ATOT", T0, "07R", True),
-    ])
+    truth = _truth(
+        spark,
+        [
+            ("abc123", "DLH1", "ATOT", T0, "07R", True),
+            ("def456", "DLH2", "ATOT", T0, "07R", True),
+        ],
+    )
     detected = _detected(spark, [("abc123", "DLH1", "ATOT", T0, "07R")])
 
     got = score(align(truth, detected)).collect()[0]
@@ -66,9 +69,9 @@ def test_bias_is_signed_and_median(spark):
     """A detector consistently early is a different animal from one scattered
     about zero, and the sign is what says which."""
     truth = _truth(spark, [(f"a{i}", f"C{i}", "ATOT", T0, None, True) for i in range(5)])
-    detected = _detected(spark, [
-        (f"a{i}", f"C{i}", "ATOT", T0 - dt.timedelta(seconds=8), None) for i in range(5)
-    ])
+    detected = _detected(
+        spark, [(f"a{i}", f"C{i}", "ATOT", T0 - dt.timedelta(seconds=8), None) for i in range(5)]
+    )
 
     got = score(align(truth, detected)).collect()[0]
 
@@ -81,9 +84,11 @@ def test_one_wild_detection_does_not_move_the_bias(spark):
     error of hours and would drag a mean anywhere."""
     rows = [(f"a{i}", f"C{i}", "ATOT", T0, None, True) for i in range(9)]
     truth = _truth(spark, rows)
-    detected = _detected(spark, [
-        (f"a{i}", f"C{i}", "ATOT", T0 + dt.timedelta(seconds=2), None) for i in range(8)
-    ] + [("a8", "C8", "ATOT", T0 + dt.timedelta(hours=6), None)])
+    detected = _detected(
+        spark,
+        [(f"a{i}", f"C{i}", "ATOT", T0 + dt.timedelta(seconds=2), None) for i in range(8)]
+        + [("a8", "C8", "ATOT", T0 + dt.timedelta(hours=6), None)],
+    )
 
     got = score(align(truth, detected)).collect()[0]
 
@@ -94,10 +99,13 @@ def test_the_nearest_detection_is_kept_when_several_match(spark):
     """A go-around gives two ALDT candidates; scoring on an arbitrary one would
     measure the ordering rather than the detector."""
     truth = _truth(spark, [("abc123", "DLH1", "ALDT", T0, None, True)])
-    detected = _detected(spark, [
-        ("abc123", "DLH1", "ALDT", T0 + dt.timedelta(minutes=9), None),
-        ("abc123", "DLH1", "ALDT", T0 + dt.timedelta(seconds=3), None),
-    ])
+    detected = _detected(
+        spark,
+        [
+            ("abc123", "DLH1", "ALDT", T0 + dt.timedelta(minutes=9), None),
+            ("abc123", "DLH1", "ALDT", T0 + dt.timedelta(seconds=3), None),
+        ],
+    )
 
     got = score(align(truth, detected)).collect()[0]
 
@@ -119,14 +127,20 @@ def test_hit_rates_are_measured_against_truth_not_detections(spark):
 def test_runway_match_is_exact_not_fuzzy(spark):
     """07R and 07L are different runways; a fuzzy match would hide the error
     most worth finding."""
-    truth = _truth(spark, [
-        ("a0", "C0", "ATOT", T0, "07R", True),
-        ("a1", "C1", "ATOT", T0, "07L", True),
-    ])
-    detected = _detected(spark, [
-        ("a0", "C0", "ATOT", T0, "07r"),   # case only -- a match
-        ("a1", "C1", "ATOT", T0, "07R"),   # wrong runway -- not a match
-    ])
+    truth = _truth(
+        spark,
+        [
+            ("a0", "C0", "ATOT", T0, "07R", True),
+            ("a1", "C1", "ATOT", T0, "07L", True),
+        ],
+    )
+    detected = _detected(
+        spark,
+        [
+            ("a0", "C0", "ATOT", T0, "07r"),  # case only -- a match
+            ("a1", "C1", "ATOT", T0, "07R"),  # wrong runway -- not a match
+        ],
+    )
 
     got = score_runways(align(truth, detected)).collect()[0]
 
@@ -249,12 +263,12 @@ def test_truth_resolution_can_be_split_per_aerodrome(spark):
 def test_the_default_grouping_is_what_it_always_was(spark):
     """Existing callers -- V3's chain among them -- must see the network-level
     split unchanged."""
-    out = score_by_truth_resolution(
-        _aligned_two_airports_two_resolutions(spark)
-    ).collect()
+    out = score_by_truth_resolution(_aligned_two_airports_two_resolutions(spark)).collect()
 
     assert {(r["milestone"], r["gt_subminute"]) for r in out} == {
-        ("ATOT", True), ("ATOT", False), ("ALDT", True)
+        ("ATOT", True),
+        ("ATOT", False),
+        ("ALDT", True),
     }
     assert "gt_airport" not in out[0].asDict()
 
@@ -289,14 +303,17 @@ def test_pooling_keeps_only_the_nearest_detector(spark):
     `score` sees it.
     """
     truth = _truth(spark, [("abc123", "TEST1", "ATOT", T0, "07", True)])
-    det = _detected_with_type(spark, [
-        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
-        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
-    ])
+    det = _detected_with_type(
+        spark,
+        [
+            ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+            ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
+        ],
+    )
     got = score(align(truth, det)).collect()
     assert len(got) == 1
     assert got[0]["n_truth"] == 1 and got[0]["n_detected"] == 1
-    assert got[0]["bias_s"] == pytest.approx(4.0)   # the nearer one, not +30
+    assert got[0]["bias_s"] == pytest.approx(4.0)  # the nearer one, not +30
 
 
 def test_the_split_scores_each_detector_on_the_same_denominator(spark):
@@ -307,19 +324,28 @@ def test_the_split_scores_each_detector_on_the_same_denominator(spark):
     0% rather than vanishing from the table, which is what makes the two rows
     comparable down a column.
     """
-    truth = _truth(spark, [
-        ("abc123", "TEST1", "ATOT", T0, "07", True),
-        ("def456", "TEST2", "ATOT", T0, "07", True),
-    ])
-    det = _detected_with_type(spark, [
-        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
-        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
-        # TEST2 is answered by ATOT only; airborne must still be charged it.
-        ("def456", "TEST2", "ATOT", T0 + dt.timedelta(seconds=20), "ATOT"),
-    ])
-    rows = {r["det_type"]: r for r in score(
-        align_by_detector(truth, det), group_cols=("milestone", "det_type")
-    ).collect()}
+    truth = _truth(
+        spark,
+        [
+            ("abc123", "TEST1", "ATOT", T0, "07", True),
+            ("def456", "TEST2", "ATOT", T0, "07", True),
+        ],
+    )
+    det = _detected_with_type(
+        spark,
+        [
+            ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+            ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
+            # TEST2 is answered by ATOT only; airborne must still be charged it.
+            ("def456", "TEST2", "ATOT", T0 + dt.timedelta(seconds=20), "ATOT"),
+        ],
+    )
+    rows = {
+        r["det_type"]: r
+        for r in score(
+            align_by_detector(truth, det), group_cols=("milestone", "det_type")
+        ).collect()
+    }
     assert set(rows) == {"ATOT", "airborne"}
     assert rows["ATOT"]["n_truth"] == 2 and rows["ATOT"]["n_detected"] == 2
     # Same denominator, so airborne's miss on TEST2 is visible as coverage.
@@ -343,10 +369,13 @@ def test_priority_takes_the_preferred_detector_even_when_it_is_further(spark):
     the pooled figure and reproducible where the pooled figure is not.
     """
     truth = _truth(spark, [("abc123", "TEST1", "ATOT", T0, "07", True)])
-    det = _detected_with_type(spark, [
-        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
-        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
-    ])
+    det = _detected_with_type(
+        spark,
+        [
+            ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+            ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=4), "airborne"),
+        ],
+    )
     legacy = score(align_by_priority(truth, det, ["ATOT", "airborne"])).collect()[0]
     acdm = score(align_by_priority(truth, det, ["airborne", "ATOT"])).collect()[0]
     assert legacy["bias_s"] == pytest.approx(30.0)
@@ -357,14 +386,20 @@ def test_priority_takes_the_preferred_detector_even_when_it_is_further(spark):
 
 def test_priority_falls_back_when_the_preferred_detector_is_silent(spark):
     """Fallback is the whole point: the pair covers more than either alone."""
-    truth = _truth(spark, [
-        ("abc123", "TEST1", "ATOT", T0, "07", True),
-        ("def456", "TEST2", "ATOT", T0, "07", True),
-    ])
-    det = _detected_with_type(spark, [
-        ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
-        # TEST2 answered only by the fallback.
-        ("def456", "TEST2", "ATOT", T0 + dt.timedelta(seconds=6), "airborne"),
-    ])
+    truth = _truth(
+        spark,
+        [
+            ("abc123", "TEST1", "ATOT", T0, "07", True),
+            ("def456", "TEST2", "ATOT", T0, "07", True),
+        ],
+    )
+    det = _detected_with_type(
+        spark,
+        [
+            ("abc123", "TEST1", "ATOT", T0 + dt.timedelta(seconds=30), "ATOT"),
+            # TEST2 answered only by the fallback.
+            ("def456", "TEST2", "ATOT", T0 + dt.timedelta(seconds=6), "airborne"),
+        ],
+    )
     got = score(align_by_priority(truth, det, ["ATOT", "airborne"])).collect()[0]
     assert got["n_detected"] == 2 and got["coverage_pct"] == pytest.approx(100.0)

@@ -35,7 +35,16 @@ DEFAULT_MAX_RADIUS_NM = 30.0
 #: several are cases the ADEP/ADES study called out -- EHAM and LFPG for dense
 #: terminal areas, LICC for its neighbouring military field.
 DEFAULT_AERODROMES = [
-    "EHAM", "EGLL", "LFPG", "EDDF", "LEMD", "LIRF", "LSZH", "EKCH", "LICC", "LTFM",
+    "EHAM",
+    "EGLL",
+    "LFPG",
+    "EDDF",
+    "LEMD",
+    "LIRF",
+    "LSZH",
+    "EKCH",
+    "LICC",
+    "LTFM",
 ]
 
 
@@ -65,8 +74,12 @@ def load_zones(
         df = pd.read_parquet(part)
         df = df[df["apt_ident"].isin(keep)]
         # Tolerate both namings; see prepare_for_flight_list_spark.
-        df = df.rename(columns={"min_c_radius_nm": "apt_min_c_radius_nm",
-                                "max_c_radius_nm": "apt_max_c_radius_nm"})
+        df = df.rename(
+            columns={
+                "min_c_radius_nm": "apt_min_c_radius_nm",
+                "max_c_radius_nm": "apt_max_c_radius_nm",
+            }
+        )
         if max_radius_nm is not None:
             df = df[df["apt_max_c_radius_nm"] <= max_radius_nm]
         if len(df):
@@ -115,8 +128,14 @@ def _config(default_max_nm: float, radius_bounds: tuple) -> dict:
                                     "category": "ColorBrewer",
                                     # Inner rings warm, outer rings cool, so the
                                     # concentric structure reads at a glance.
-                                    "colors": ["#d73027", "#fc8d59", "#fee090",
-                                               "#e0f3f8", "#91bfdb", "#4575b4"],
+                                    "colors": [
+                                        "#d73027",
+                                        "#fc8d59",
+                                        "#fee090",
+                                        "#e0f3f8",
+                                        "#91bfdb",
+                                        "#4575b4",
+                                    ],
                                 },
                                 "coverage": 1,
                                 "enable3d": False,
@@ -165,8 +184,12 @@ def _config(default_max_nm: float, radius_bounds: tuple) -> dict:
                 "styleType": "carto_dark",
                 "topLayerGroups": {},
                 "visibleLayerGroups": {
-                    "label": True, "road": True, "border": False,
-                    "building": True, "water": True, "land": True,
+                    "label": True,
+                    "road": True,
+                    "border": False,
+                    "building": True,
+                    "water": True,
+                    "land": True,
                 },
                 "threeDBuildingColor": [15.0, 15.0, 15.0],
                 "mapStyles": {
@@ -193,8 +216,10 @@ def render(
     from keplergl import KeplerGl
 
     cols = [
-        "apt_ident", "apt_hex_id",
-        "apt_min_c_radius_nm", "apt_max_c_radius_nm",
+        "apt_ident",
+        "apt_hex_id",
+        "apt_min_c_radius_nm",
+        "apt_max_c_radius_nm",
         "distance_from_center",
     ]
     data = zones[[c for c in cols if c in zones.columns]].copy()
@@ -234,9 +259,7 @@ def _finish_html(path: Path) -> None:
     # loader appears both as a script tag and again inside a bundled JS
     # string, so the endpoint is neutralised rather than the code excised --
     # excising only the tag leaves the second copy live.
-    html = re.sub(
-        r"<script>\(function\(i,s,o,g,r,a,m\).*?</script>", "", html, flags=re.S
-    )
+    html = re.sub(r"<script>\(function\(i,s,o,g,r,a,m\).*?</script>", "", html, flags=re.S)
     html = html.replace("https://www.google-analytics.com/analytics.js", "about:blank")
     path.write_text(html)
 

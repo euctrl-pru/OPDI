@@ -12,16 +12,16 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent.parent / "src"
 
 _BLOCK_PYSPARK = (
-    "import sys\n"
-    f"sys.path.insert(0, {str(SRC)!r})\n"
-    "sys.modules['pyspark'] = None\n"
+    "import sys\n" f"sys.path.insert(0, {str(SRC)!r})\n" "sys.modules['pyspark'] = None\n"
 )
 
 
 def _run(code: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-c", _BLOCK_PYSPARK + code],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
 
 
@@ -60,5 +60,4 @@ def test_public_names_still_resolve():
     assert {ProjectConfig, SparkConfig, H3Config, IngestionConfig}
     assert {CSVExporter, ParquetExporter, clean_and_save_data}
     assert set(opdi.__all__) >= {"OPDIConfig", "ProjectConfig", "__version__"}
-    assert set(opdi.output.__all__) == {"CSVExporter", "ParquetExporter",
-                                        "clean_and_save_data"}
+    assert set(opdi.output.__all__) == {"CSVExporter", "ParquetExporter", "clean_and_save_data"}

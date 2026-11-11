@@ -73,16 +73,13 @@ def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:
     flight_list = (
         storage.read_table("opdi_flight_list")
         .filter(
-            (col("dof") >= to_timestamp(lit(start_ts)))
-            & (col("dof") < to_timestamp(lit(end_ts)))
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
         )
         .select("id", "adep", "ades", "adep_p", "ades_p")
     )
 
     for c in ["adep", "ades", "adep_p", "ades_p"]:
-        flight_list = flight_list.withColumn(
-            c, when(col(c).isNull(), lit("")).otherwise(col(c))
-        )
+        flight_list = flight_list.withColumn(c, when(col(c).isNull(), lit("")).otherwise(col(c)))
 
     return (
         flight_list.withColumn(
@@ -99,7 +96,9 @@ def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:
 
 
 def calculate_airport_events(
-    sv: DataFrame, month: date, storage: "StorageManager",
+    sv: DataFrame,
+    month: date,
+    storage: "StorageManager",
     config: Optional[EventConfig] = None,
 ) -> DataFrame:
     """
@@ -207,9 +206,19 @@ def calculate_airport_events(
     sv_f = sv_f.filter(gate)
 
     columns = [
-        "track_id", "icao24", "flight_id", "event_time", "lat", "lon",
-        "altitude_ft", "flight_level", "heading", "vert_rate",
-        "h3_res_12", "cumulative_distance_nm", "cumulative_time_s",
+        "track_id",
+        "icao24",
+        "flight_id",
+        "event_time",
+        "lat",
+        "lon",
+        "altitude_ft",
+        "flight_level",
+        "heading",
+        "vert_rate",
+        "h3_res_12",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
     ]
     sv_f = sv_f.select(columns)
 
@@ -273,11 +282,10 @@ def calculate_airport_events(
         col("event_time").cast("long") - lag(col("event_time").cast("long"), 1).over(window_spec),
     )
     df_labelled = df_labelled.withColumn(
-        "new_trace", when(col("time_diff") > config.airport_trace_gap_seconds, lit(1)).otherwise(lit(0))
+        "new_trace",
+        when(col("time_diff") > config.airport_trace_gap_seconds, lit(1)).otherwise(lit(0)),
     )
-    df_labelled = df_labelled.withColumn(
-        "trace_id", f_sum(col("new_trace")).over(window_spec)
-    )
+    df_labelled = df_labelled.withColumn("trace_id", f_sum(col("new_trace")).over(window_spec))
     df_labelled = df_labelled.drop("time_diff", "new_trace")
 
     # Aggregate entry/exit times.
@@ -289,17 +297,25 @@ def calculate_airport_events(
     # nothing to indicate it. ``min_by``/``max_by`` pick the value at the
     # extreme of an explicit ordering column, which is what was meant.
     if config.airport_events_ordered:
+
         def at_entry(c):
             return F.min_by(c, "event_time")
 
         def at_exit(c):
             return F.max_by(c, "event_time")
+
     else:
         at_entry, at_exit = F.first, F.last
 
     result = df_labelled.groupBy(
-        "track_id", "icao24", "flight_id",
-        "hexaero_apt_icao", "hexaero_osm_id", "hexaero_aeroway", "hexaero_ref", "trace_id",
+        "track_id",
+        "icao24",
+        "flight_id",
+        "hexaero_apt_icao",
+        "hexaero_osm_id",
+        "hexaero_aeroway",
+        "hexaero_ref",
+        "trace_id",
     ).agg(
         f_min("event_time").alias("entry_time"),
         f_max("event_time").alias("exit_time"),
@@ -322,19 +338,26 @@ def calculate_airport_events(
     result = result.filter(col("time_in_use_seconds") != 0)
 
     result = (
-        result
-        .withColumnRenamed("hexaero_osm_id", "osm_id")
+        result.withColumnRenamed("hexaero_osm_id", "osm_id")
         .withColumnRenamed("hexaero_aeroway", "osm_aeroway")
         .withColumnRenamed("hexaero_ref", "osm_ref")
         .withColumnRenamed("hexaero_apt_icao", "osm_airport")
     )
 
-    result = result.withColumn("info", to_json(struct(
-        col("osm_id"), col("osm_aeroway"), col("osm_ref"), col("osm_airport"),
-        col("time_in_use_seconds").alias("opdi_time_in_use_s"),
-        col("icao24").alias("osn_icao24"),
-        col("flight_id").alias("osn_flight_id"),
-    )))
+    result = result.withColumn(
+        "info",
+        to_json(
+            struct(
+                col("osm_id"),
+                col("osm_aeroway"),
+                col("osm_ref"),
+                col("osm_airport"),
+                col("time_in_use_seconds").alias("opdi_time_in_use_s"),
+                col("icao24").alias("osn_icao24"),
+                col("flight_id").alias("osn_flight_id"),
+            )
+        ),
+    )
 
     result = result.withColumn("entry_type", concat_ws("-", lit("entry"), col("osm_aeroway")))
     result = result.withColumn("exit_type", concat_ws("-", lit("exit"), col("osm_aeroway")))
@@ -365,12 +388,27 @@ def calculate_airport_events(
 
     apt_events = entry_events.unionByName(exit_events)
     apt_events = apt_events.select(
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s", "info",
+        "track_id",
+        "type",
+        "event_time",
+        "lon",
+        "lat",
+        "altitude_ft",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
+        "info",
     )
-    apt_events = apt_events.dropDuplicates([
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s",
-    ])
+    apt_events = apt_events.dropDuplicates(
+        [
+            "track_id",
+            "type",
+            "event_time",
+            "lon",
+            "lat",
+            "altitude_ft",
+            "cumulative_distance_nm",
+            "cumulative_time_s",
+        ]
+    )
 
     return apt_events

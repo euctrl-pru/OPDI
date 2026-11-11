@@ -42,6 +42,7 @@ assembled: the apron silently disappears. Pass B exists solely to close that
 gap, by re-scanning ways -- restricted to just the member ids Pass A found --
 after Pass A has seen every relation and knows which way ids it references.
 """
+
 import array
 import os
 import time
@@ -119,9 +120,8 @@ def filter_aeroway_pbf(src_path: str, dst_path: str) -> Dict[str, float]:
     # at the source skips the node blocks entirely, and `KeyFilter` rejects
     # in C++, so only the few hundred thousand tagged survivors ever become
     # Python objects.
-    fp_a = (
-        osmium.FileProcessor(src_path, _WAY | _RELATION)
-        .with_filter(osmium.filter.KeyFilter("aeroway"))
+    fp_a = osmium.FileProcessor(src_path, _WAY | _RELATION).with_filter(
+        osmium.filter.KeyFilter("aeroway")
     )
     for obj in fp_a:
         if isinstance(obj, osmium.osm.Way):
@@ -137,10 +137,7 @@ def filter_aeroway_pbf(src_path: str, dst_path: str) -> Dict[str, float]:
     # --- Pass A2: bare nodes tagged `aeroway` (a `parking_position` stand is
     # frequently mapped this way). Same C++-filtered shape as Pass A, scoped
     # to the node blocks instead.
-    fp_a2 = (
-        osmium.FileProcessor(src_path, _NODE)
-        .with_filter(osmium.filter.KeyFilter("aeroway"))
-    )
+    fp_a2 = osmium.FileProcessor(src_path, _NODE).with_filter(osmium.filter.KeyFilter("aeroway"))
     for obj in fp_a2:
         keep_nodes.add(obj.id)
 
@@ -151,9 +148,8 @@ def filter_aeroway_pbf(src_path: str, dst_path: str) -> Dict[str, float]:
     # `id in keep_ways` in Python.
     pending = [wid for wid in member_way_ids if wid not in keep_ways]
     if pending:
-        fp_b = (
-            osmium.FileProcessor(src_path, _WAY)
-            .with_filter(osmium.filter.IdFilter(array.array("q", pending)))
+        fp_b = osmium.FileProcessor(src_path, _WAY).with_filter(
+            osmium.filter.IdFilter(array.array("q", pending))
         )
         for obj in fp_b:
             keep_ways.add(obj.id)
@@ -170,25 +166,22 @@ def filter_aeroway_pbf(src_path: str, dst_path: str) -> Dict[str, float]:
     n_nodes = n_ways = n_rels = 0
     writer = osmium.SimpleWriter(dst_path)
     try:
-        fp_c1 = (
-            osmium.FileProcessor(src_path, _NODE)
-            .with_filter(osmium.filter.IdFilter(keep_nodes.ids()))
+        fp_c1 = osmium.FileProcessor(src_path, _NODE).with_filter(
+            osmium.filter.IdFilter(keep_nodes.ids())
         )
         for obj in fp_c1:
             writer.add_node(obj)
             n_nodes += 1
 
-        fp_c2 = (
-            osmium.FileProcessor(src_path, _WAY)
-            .with_filter(osmium.filter.IdFilter(keep_ways.ids()))
+        fp_c2 = osmium.FileProcessor(src_path, _WAY).with_filter(
+            osmium.filter.IdFilter(keep_ways.ids())
         )
         for obj in fp_c2:
             writer.add_way(obj)
             n_ways += 1
 
-        fp_c3 = (
-            osmium.FileProcessor(src_path, _RELATION)
-            .with_filter(osmium.filter.IdFilter(keep_rels.ids()))
+        fp_c3 = osmium.FileProcessor(src_path, _RELATION).with_filter(
+            osmium.filter.IdFilter(keep_rels.ids())
         )
         for obj in fp_c3:
             writer.add_relation(obj)

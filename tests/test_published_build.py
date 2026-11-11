@@ -36,11 +36,22 @@ def _flight(fid, dof, first_seen, adep, version="v5.0.0"):
     """One working flight-list row, keyed by the working column names."""
     row = {c.source: None for c in FLIGHT_LIST if c.name != "release"}
     row.update(
-        ID=fid, ICAO24="abc123", FLT_ID="TST" + fid[-1], DOF=dof, ADEP=adep, ADES="EHAM",
-        FIRST_SEEN=first_seen, LAST_SEEN=first_seen + dt.timedelta(hours=2),
-        ADEP_SOURCE="aerodrome", ADES_SOURCE="aerodrome", VERSION=version,
-        TRACK_DURATION_MIN=120.0, SUPERSEDED_DEP=False, SUPERSEDED_ARR=False,
-        MOVEMENT_DEP=True, MOVEMENT_ARR=True,
+        ID=fid,
+        ICAO24="abc123",
+        FLT_ID="TST" + fid[-1],
+        DOF=dof,
+        ADEP=adep,
+        ADES="EHAM",
+        FIRST_SEEN=first_seen,
+        LAST_SEEN=first_seen + dt.timedelta(hours=2),
+        ADEP_SOURCE="aerodrome",
+        ADES_SOURCE="aerodrome",
+        VERSION=version,
+        TRACK_DURATION_MIN=120.0,
+        SUPERSEDED_DEP=False,
+        SUPERSEDED_ARR=False,
+        MOVEMENT_DEP=True,
+        MOVEMENT_ARR=True,
         ATOT=first_seen + dt.timedelta(minutes=10),
     )
     return row
@@ -70,11 +81,18 @@ def _working_tables(spark):
         "id string, flight_id string, type string, event_time timestamp, "
         "longitude double, latitude double, altitude double, dof date",
     )
-    events = (
-        events.selectExpr(
-            "id", "flight_id", "type", "event_time", "longitude", "latitude", "altitude",
-            "'OSN' as source", "'events_v0.3.0' as version", "'{}' as info", "dof",
-        )
+    events = events.selectExpr(
+        "id",
+        "flight_id",
+        "type",
+        "event_time",
+        "longitude",
+        "latitude",
+        "altitude",
+        "'OSN' as source",
+        "'events_v0.3.0' as version",
+        "'{}' as info",
+        "dof",
     )
     measurements = spark.createDataFrame(
         [
@@ -87,8 +105,7 @@ def _working_tables(spark):
             ("e4_d", "e4", "Distance flown (NM)", 0.0, "distance_v0.0.3", DAY),
             ("e6_d", "e6", "Distance flown (NM)", 0.0, "distance_v0.0.3", NEXT),
         ],
-        "id string, milestone_id string, type string, value double, version string, "
-        "dof date",
+        "id string, milestone_id string, type string, value double, version string, " "dof date",
     )
     return {
         "opdi_flight_list": flight_list,
@@ -124,6 +141,7 @@ def _declared(columns):
 
 
 # --- building ---------------------------------------------------------------
+
 
 def test_flight_list_has_the_declared_columns_in_order(tables):
     fl = build_flight_list(tables["opdi_flight_list"])
@@ -179,6 +197,7 @@ def test_flight_columns_are_repeated_on_every_event(tables):
 
 # --- publishing -------------------------------------------------------------
 
+
 @pytest.fixture()
 def layout(tmp_path):
     return PublishedLayout(str(tmp_path / "published"))
@@ -186,9 +205,7 @@ def layout(tmp_path):
 
 def test_layout_paths(layout):
     assert layout.flight_list(DAY).endswith("/flight_list/flight_list_20260614.parquet")
-    assert layout.flight_events(DAY).endswith(
-        "/flight_events/flight_events_20260614.parquet"
-    )
+    assert layout.flight_events(DAY).endswith("/flight_events/flight_events_20260614.parquet")
     assert layout.flight_index(DAY).endswith("/index/flight_index_202606.parquet")
     assert layout.catalogue.endswith("/catalogue.parquet")
 
@@ -197,9 +214,7 @@ def _parquet_files(root):
     return sorted(p.relative_to(root).as_posix() for p in Path(root).rglob("*.parquet"))
 
 
-def test_publish_day_writes_one_file_per_table_and_no_temporary_files(
-    spark, tables, layout
-):
+def test_publish_day_writes_one_file_per_table_and_no_temporary_files(spark, tables, layout):
     counts = publish_day(spark, _Storage(tables), DAY, layout, commit="abc")
     assert counts["flights"] == 2
     assert counts["events"] == 5
@@ -291,6 +306,7 @@ def test_events_file_is_sorted_with_row_groups_and_bloom_filters(spark, tables, 
 
 # --- which day's file an event goes to --------------------------------------
 
+
 def _boundary_tables(spark):
     """Working tables where the date stored on some events differs from the
     date of their flight.
@@ -323,8 +339,17 @@ def _boundary_tables(spark):
         "id string, flight_id string, type string, event_time timestamp, "
         "longitude double, latitude double, altitude double, dof date",
     ).selectExpr(
-        "id", "flight_id", "type", "event_time", "longitude", "latitude", "altitude",
-        "'OSN' as source", "'events_v0.3.0' as version", "'{}' as info", "dof",
+        "id",
+        "flight_id",
+        "type",
+        "event_time",
+        "longitude",
+        "latitude",
+        "altitude",
+        "'OSN' as source",
+        "'events_v0.3.0' as version",
+        "'{}' as info",
+        "dof",
     )
     measurements = spark.createDataFrame(
         [
@@ -332,8 +357,7 @@ def _boundary_tables(spark):
             ("b1_d", "b1", "Distance flown (NM)", 0.0, "distance_v0.0.3", DAY),
             ("o1_d", "o1", "Distance flown (NM)", 99.0, "distance_v0.0.3", DAY),
         ],
-        "id string, milestone_id string, type string, value double, version string, "
-        "dof date",
+        "id string, milestone_id string, type string, value double, version string, " "dof date",
     )
     return {
         "opdi_flight_list": flight_list,
@@ -374,10 +398,13 @@ def test_events_follow_their_flight_into_its_day(spark, tmp_path):
 
 
 def test_identifiers_get_bloom_filters_and_other_columns_keep_a_dictionary(spark, tmp_path):
-    rows = [(f"trk_{i:04d}", f"{i:06x}", f"TST{i}", "EHAM" if i % 2 else "LFPG", "ATOT")
-            for i in range(2000)]
-    df = spark.createDataFrame(rows, "flight_id string, icao24 string, flt_id string, "
-                                     "adep string, type string")
+    rows = [
+        (f"trk_{i:04d}", f"{i:06x}", f"TST{i}", "EHAM" if i % 2 else "LFPG", "ATOT")
+        for i in range(2000)
+    ]
+    df = spark.createDataFrame(
+        rows, "flight_id string, icao24 string, flt_id string, " "adep string, type string"
+    )
     path = str(tmp_path / "x.parquet")
     write_single_file(df, path, sort_by=("flight_id",), bloom_filters=FLIGHT_EVENTS_BLOOM)
     meta = pq.ParquetFile(path).metadata

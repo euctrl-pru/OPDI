@@ -61,32 +61,36 @@ def courses(spark, ends):
     read zero against a correctly identified aerodrome; see abstained_vertical.
     """
     tr_all = spark.read.parquet(TRACKS)
-    tr = (tr_all.select("track_id", "event_time", "lat", "lon")
-          .filter(F.col("lat").isNotNull() & F.col("lon").isNotNull())
-          .join(F.broadcast(ends), "track_id", "inner")
-          .withColumn("_off", F.abs(F.unix_timestamp("t_end")
-                                    - F.unix_timestamp("event_time")))
-          .filter(F.col("_off") <= WINDOW_MIN * 60))
-    g = (tr.groupBy("track_id", "role").agg(
+    tr = (
+        tr_all.select("track_id", "event_time", "lat", "lon")
+        .filter(F.col("lat").isNotNull() & F.col("lon").isNotNull())
+        .join(F.broadcast(ends), "track_id", "inner")
+        .withColumn("_off", F.abs(F.unix_timestamp("t_end") - F.unix_timestamp("event_time")))
+        .filter(F.col("_off") <= WINDOW_MIN * 60)
+    )
+    g = (
+        tr.groupBy("track_id", "role")
+        .agg(
             F.count(F.lit(1)).alias("n"),
-            F.min("_off").alias("o0"), F.max("_off").alias("o1"),
+            F.min("_off").alias("o0"),
+            F.max("_off").alias("o1"),
             F.min_by("lat", "_off").alias("y_near"),
             F.min_by("lon", "_off").alias("x_near"),
             F.max_by("lat", "_off").alias("y_far"),
-            F.max_by("lon", "_off").alias("x_far"))
-         .filter("n >= 5")
-         .filter(F.col("o1") - F.col("o0") >= 60))
-    return g.withColumn("course",
-                        bearing_deg(F.col("y_far"), F.col("x_far"),
-                                    F.col("y_near"), F.col("x_near"))) \
-            .select("track_id", "role", "y_far", "x_far", "course")
+            F.max_by("lon", "_off").alias("x_far"),
+        )
+        .filter("n >= 5")
+        .filter(F.col("o1") - F.col("o0") >= 60)
+    )
+    return g.withColumn(
+        "course", bearing_deg(F.col("y_far"), F.col("x_far"), F.col("y_near"), F.col("x_near"))
+    ).select("track_id", "role", "y_far", "x_far", "course")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--months", nargs="+", default=["202506"])
-    ap.add_argument("--days", nargs="+",
-                    default=["2025-06-05", "2025-06-06", "2025-06-07"])
+    ap.add_argument("--days", nargs="+", default=["2025-06-05", "2025-06-06", "2025-06-07"])
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument("--ui-port", type=int, default=4041)
@@ -103,62 +107,79 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     cand = spark.read.parquet(CANDIDATES)
-    apt_pos = (spark.read.parquet(AIRPORTS)
-               .select(F.col("ident").alias("apt_ident"),
-                       F.col("latitude_deg").cast("double").alias("apt_lat"),
-                       F.col("longitude_deg").cast("double").alias("apt_lon"))
-               .dropDuplicates(["apt_ident"]))
+    apt_pos = (
+        spark.read.parquet(AIRPORTS)
+        .select(
+            F.col("ident").alias("apt_ident"),
+            F.col("latitude_deg").cast("double").alias("apt_lat"),
+            F.col("longitude_deg").cast("double").alias("apt_lon"),
+        )
+        .dropDuplicates(["apt_ident"])
+    )
 
-    ends = (cand.select("track_id", "role", F.col("event_time").alias("t_end"))
-            .dropDuplicates(["track_id", "role"]))
+    ends = cand.select("track_id", "role", F.col("event_time").alias("t_end")).dropDuplicates(
+        ["track_id", "role"]
+    )
     crs = courses(spark, ends).cache()
     print(f"courses computed for {crs.count():,} (track, role) pairs")
 
     # Alignment for every candidate, not only the chosen one.
-    c = (cand.join(F.broadcast(apt_pos), "apt_ident", "left")
-         .join(crs, ["track_id", "role"], "left")
-         .withColumn("align_deg",
-                     angle_between(F.col("course"),
-                                   bearing_deg(F.col("y_far"), F.col("x_far"),
-                                               F.col("apt_lat"), F.col("apt_lon")))))
-    penalty = F.when(F.col("apt_scheduled") == "yes", F.lit(0.0)).otherwise(
-        F.lit(OP_PENALTY_NM))
+    c = (
+        cand.join(F.broadcast(apt_pos), "apt_ident", "left")
+        .join(crs, ["track_id", "role"], "left")
+        .withColumn(
+            "align_deg",
+            angle_between(
+                F.col("course"),
+                bearing_deg(F.col("y_far"), F.col("x_far"), F.col("apt_lat"), F.col("apt_lon")),
+            ),
+        )
+    )
+    penalty = F.when(F.col("apt_scheduled") == "yes", F.lit(0.0)).otherwise(F.lit(OP_PENALTY_NM))
     c = c.withColumn("_eff", F.col("dist_nm") + penalty).cache()
     print(f"candidates with alignment: {c.count():,}")
 
     gate = (F.col("dist_nm") <= OP_RADIUS_NM) & (
-        F.col("on_ground") | (F.col("elev_known")
-                              & (F.col("agl_ft") <= OP_HEIGHT_FT)))
+        F.col("on_ground") | (F.col("elev_known") & (F.col("agl_ft") <= OP_HEIGHT_FT))
+    )
 
     def pick(order_cols):
         w = Window.partitionBy("track_id", "role").orderBy(*order_cols)
-        return (c.withColumn("_r", F.row_number().over(w))
-                .filter(F.col("_r") == 1)
-                .withColumn("gate_ok", gate))
+        return (
+            c.withColumn("_r", F.row_number().over(w))
+            .filter(F.col("_r") == 1)
+            .withColumn("gate_ok", gate)
+        )
 
     by_dist = pick([F.col("_eff").asc_nulls_last()]).cache()
-    by_align = pick([F.col("align_deg").asc_nulls_last(),
-                     F.col("_eff").asc_nulls_last()]).cache()
+    by_align = pick([F.col("align_deg").asc_nulls_last(), F.col("_eff").asc_nulls_last()]).cache()
 
     ident = identities_from_candidates(cand)
-    gt = label_ground_truth(load_ground_truth(spark, args.months, args.days),
-                            airport_locations(spark)).cache()
+    gt = label_ground_truth(
+        load_ground_truth(spark, args.months, args.days), airport_locations(spark)
+    ).cache()
     print(f"ground-truth flights: {gt.count():,}")
 
     def predict(best, accept):
         apt = F.when(accept, F.col("apt_ident")).when(F.col("at_border"), F.lit("OOA"))
-        return (best.withColumn("apt", apt)
-                .groupBy("track_id").pivot("role", ["adep", "ades"])
-                .agg(F.first("apt")))
+        return (
+            best.withColumn("apt", apt)
+            .groupBy("track_id")
+            .pivot("role", ["adep", "ades"])
+            .agg(F.first("apt"))
+        )
 
     rows = []
+
     def run(label, best, accept):
         m = score(predict(best, accept), ident, gt)
         m["model"] = label
         rows.append(m)
-        print(f"  {label:<34} ADEP {m['adep_coverage']:6.2%}/{m['adep_accuracy']:6.2%}"
-              f"/{m['adep_overall']:6.2%}   ADES {m['ades_coverage']:6.2%}/"
-              f"{m['ades_accuracy']:6.2%}/{m['ades_overall']:6.2%}")
+        print(
+            f"  {label:<34} ADEP {m['adep_coverage']:6.2%}/{m['adep_accuracy']:6.2%}"
+            f"/{m['adep_overall']:6.2%}   ADES {m['ades_coverage']:6.2%}/"
+            f"{m['ades_accuracy']:6.2%}/{m['ades_overall']:6.2%}"
+        )
 
     aligned = lambda d: F.coalesce(F.col("align_deg") <= d, F.lit(False))
 

@@ -10,15 +10,25 @@ from opdi.reference import h3_airspaces as ha
 
 
 def _row(code, name, min_fl, max_fl, geom, airac=524):
-    return {"airac_cfmu": airac, "icao": code[:2], "id": code, "code": code, "name": name,
-            "min_fl": min_fl, "max_fl": max_fl, "airspace_type": "FIR",
-            "geometry_wkt": shapely.to_wkt(geom)}
+    return {
+        "airac_cfmu": airac,
+        "icao": code[:2],
+        "id": code,
+        "code": code,
+        "name": name,
+        "min_fl": min_fl,
+        "max_fl": max_fl,
+        "airspace_type": "FIR",
+        "geometry_wkt": shapely.to_wkt(geom),
+    }
 
 
 def test_an_antimeridian_polygon_fills_the_right_side():
     # A box from 170E across the dateline to 170W, written the way the NM
     # polygons are: longitudes jump from +170 to -170 inside one ring.
-    ring = Polygon([(170, -5), (180, -5), (-180, -5), (-170, -5), (-170, 5), (-180, 5), (180, 5), (170, 5)])
+    ring = Polygon(
+        [(170, -5), (180, -5), (-180, -5), (-170, -5), (-170, 5), (-180, 5), (180, 5), (170, 5)]
+    )
     cells = ha.compact_cells(shapely.to_wkt(ring), 4)
     assert cells
     for cell, res in cells:
@@ -35,8 +45,20 @@ def test_split_antimeridian_drops_the_line_a_cut_can_leave():
     g = GeometryCollection([box(170, -5, 179, 5), LineString([(179, -5), (179, 5)])])
     out = ha.split_antimeridian(g)
     assert out.geom_type == "Polygon" and out.area > 0
-    ring = Polygon([(170, -5), (180, -5), (-180, -5), (-170, -5), (-170, 5), (-180, 5), (180, 5), (170, 5),
-                    (170, 0), (170, -5)])   # a vertex repeated on the western edge
+    ring = Polygon(
+        [
+            (170, -5),
+            (180, -5),
+            (-180, -5),
+            (-170, -5),
+            (-170, 5),
+            (-180, 5),
+            (180, 5),
+            (170, 5),
+            (170, 0),
+            (170, -5),
+        ]
+    )  # a vertex repeated on the western edge
     assert ha.split_antimeridian(ring).geom_type == "MultiPolygon"
 
 
@@ -46,30 +68,36 @@ def test_split_antimeridian_leaves_an_ordinary_polygon_alone():
 
 
 def test_placeholder_rows_are_dropped():
-    df = pd.DataFrame([
-        _row("XXXX", "ANYWHERE", 0, 999, box(0, 0, 1, 1)),
-        _row("EGGX", "REROUTING EXTENSION", 0, 999, box(0, 0, 1, 1)),
-        _row("EGGXFIR", "SHANWICK FIR", 0, 999, box(0, 0, 1, 1)),
-    ])
+    df = pd.DataFrame(
+        [
+            _row("XXXX", "ANYWHERE", 0, 999, box(0, 0, 1, 1)),
+            _row("EGGX", "REROUTING EXTENSION", 0, 999, box(0, 0, 1, 1)),
+            _row("EGGXFIR", "SHANWICK FIR", 0, 999, box(0, 0, 1, 1)),
+        ]
+    )
     out = ha.dissolve_volumes(df)
     assert list(out["code"]) == ["EGGXFIR"]
 
 
 def test_same_code_bands_are_merged():
-    df = pd.DataFrame([
-        _row("OBBBUIR", "BAHRAIN UIR", 150, 245, box(50, 25, 51, 26)),
-        _row("OBBBUIR", "BAHRAIN UIR", 245, 999, box(50, 25, 51, 26)),
-    ])
+    df = pd.DataFrame(
+        [
+            _row("OBBBUIR", "BAHRAIN UIR", 150, 245, box(50, 25, 51, 26)),
+            _row("OBBBUIR", "BAHRAIN UIR", 245, 999, box(50, 25, 51, 26)),
+        ]
+    )
     out = ha.dissolve_volumes(df)
     assert len(out) == 1
     assert (int(out.iloc[0]["min_fl"]), int(out.iloc[0]["max_fl"])) == (150, 999)
 
 
 def test_sub_volumes_with_one_code_dissolve():
-    df = pd.DataFrame([
-        _row("CZQXFIR", "GANDER NAT RVSM", 0, 999, box(-50, 45, -45, 50)),
-        _row("CZQXFIR", "GANDER FIR", 0, 999, box(-45, 45, -40, 50)),
-    ])
+    df = pd.DataFrame(
+        [
+            _row("CZQXFIR", "GANDER NAT RVSM", 0, 999, box(-50, 45, -45, 50)),
+            _row("CZQXFIR", "GANDER FIR", 0, 999, box(-45, 45, -40, 50)),
+        ]
+    )
     out = ha.dissolve_volumes(df)
     assert len(out) == 1
     geom = shapely.from_wkt(out.iloc[0]["geometry_wkt"])
@@ -78,10 +106,12 @@ def test_sub_volumes_with_one_code_dissolve():
 
 
 def test_separate_bands_of_one_code_stay_separate():
-    df = pd.DataFrame([
-        _row("AAAAFIR", "A LOWER", 0, 195, box(0, 50, 2, 52)),
-        _row("AAAAFIR", "A UPPER", 245, 999, box(0, 50, 2, 52)),
-    ])
+    df = pd.DataFrame(
+        [
+            _row("AAAAFIR", "A LOWER", 0, 195, box(0, 50, 2, 52)),
+            _row("AAAAFIR", "A UPPER", 245, 999, box(0, 50, 2, 52)),
+        ]
+    )
     assert len(ha.dissolve_volumes(df)) == 2
 
 
@@ -96,11 +126,13 @@ def test_compact_cells_carry_their_resolution():
 
 
 def test_overlap_report_names_the_pairs():
-    df = pd.DataFrame([
-        _row("PLACFIR", "PLACEHOLDER", 0, 999, box(0, 50, 1, 51)),
-        _row("AAAAFIR", "A", 0, 195, box(0, 50, 1, 51)),
-        _row("BBBBFIR", "B", 195, 999, box(0, 50, 1, 51)),
-    ])
+    df = pd.DataFrame(
+        [
+            _row("PLACFIR", "PLACEHOLDER", 0, 999, box(0, 50, 1, 51)),
+            _row("AAAAFIR", "A", 0, 195, box(0, 50, 1, 51)),
+            _row("BBBBFIR", "B", 195, 999, box(0, 50, 1, 51)),
+        ]
+    )
     volumes = ha.dissolve_volumes(df)
     cells = ha.fill_volumes(volumes, 5)
     report = ha.overlap_report(cells)
@@ -131,10 +163,12 @@ def test_the_layer_is_written_once(spark):
     from opdi.config import OPDIConfig
 
     gen = ha.AirspaceH3Generator(spark, OPDIConfig(), storage=_StubStorage())
-    df = pd.DataFrame([
-        _row("AAAAFIR", "A", 0, 195, box(0, 50, 1, 51)),
-        _row("BBBBFIR", "B", 0, 195, box(1, 50, 2, 51)),
-    ])
+    df = pd.DataFrame(
+        [
+            _row("AAAAFIR", "A", 0, 195, box(0, 50, 1, 51)),
+            _row("BBBBFIR", "B", 0, 195, box(1, 50, 2, 51)),
+        ]
+    )
     gen.process_fir(frames=[df], res=5)
     fir_writes = [w for w in gen.storage.writes if w[0] == "opdi_h3_airspace_ref"]
     assert len(fir_writes) == 1
@@ -142,8 +176,19 @@ def test_the_layer_is_written_once(spark):
     assert mode == "overwrite" and list(partition_by) == ["airspace_type"]
     rows = written.collect()
     assert {r.code for r in rows} == {"AAAAFIR", "BBBBFIR"}
-    assert set(written.columns) >= {"airspace_type", "code", "name", "airac_cfmu", "validity_start",
-                                    "validity_end", "min_fl", "max_fl", "area_km2", "h3_cell", "h3_res"}
+    assert set(written.columns) >= {
+        "airspace_type",
+        "code",
+        "name",
+        "airac_cfmu",
+        "validity_start",
+        "validity_end",
+        "min_fl",
+        "max_fl",
+        "area_km2",
+        "h3_cell",
+        "h3_res",
+    }
     assert all(r.airac_cfmu == "524" for r in rows)
     assert all(str(r.validity_start)[:10] == "2024-11-28" for r in rows)
 
@@ -159,8 +204,10 @@ def test_worldwide_runs_00c():
 def test_the_old_per_cell_table_is_refused_not_overwritten(spark):
     from opdi.config import OPDIConfig
 
-    old = spark.createDataFrame([("FIR", "AAAA", "x", 50.0, 4.0)],
-                                "airspace_type string, code string, h3_res_7 string, h3_res_7_lat double, h3_res_7_lon double")
+    old = spark.createDataFrame(
+        [("FIR", "AAAA", "x", 50.0, 4.0)],
+        "airspace_type string, code string, h3_res_7 string, h3_res_7_lat double, h3_res_7_lon double",
+    )
     gen = ha.AirspaceH3Generator(spark, OPDIConfig(), storage=_StubStorage(existing=old))
     df = pd.DataFrame([_row("AAAAFIR", "A", 0, 195, box(0, 50, 1, 51))])
     with pytest.raises(RuntimeError, match="pre-2026-11"):

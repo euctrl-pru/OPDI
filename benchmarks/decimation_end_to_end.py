@@ -115,10 +115,16 @@ def main() -> None:
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument("--ui-port", type=int, default=4041)
-    ap.add_argument("--skip-build", action="store_true",
-                    help="score only; assumes the bucket tables already exist")
-    ap.add_argument("--skip-ingest", action="store_true",
-                    help="reuse an existing research/sv_bucket from a previous run")
+    ap.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="score only; assumes the bucket tables already exist",
+    )
+    ap.add_argument(
+        "--skip-ingest",
+        action="store_true",
+        help="reuse an existing research/sv_bucket from a previous run",
+    )
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -152,21 +158,23 @@ def main() -> None:
         else:
             print(f"\n=== 01 ingest, decimation=bucket, {days[0]} .. {days[-1]} ===")
             ing = StateVectorIngestion(
-                spark, cfg, decimation=DECIMATION_BUCKET,
-                log_file_path=str(logs / "01_statevectors.log"))
-            n = ing.ingest_from_s3(
-                days[0], date.fromordinal(days[-1].toordinal() + 1))
+                spark,
+                cfg,
+                decimation=DECIMATION_BUCKET,
+                log_file_path=str(logs / "01_statevectors.log"),
+            )
+            n = ing.ingest_from_s3(days[0], date.fromordinal(days[-1].toordinal() + 1))
             print(f"  rows ingested: {n:,}")
 
         print("\n=== 02 tracks ===")
-        TrackProcessor(
-            spark, cfg, log_file_path=str(logs / "02_tracks.parquet")
-        ).process_month(month, skip_if_processed=False)
+        TrackProcessor(spark, cfg, log_file_path=str(logs / "02_tracks.parquet")).process_month(
+            month, skip_if_processed=False
+        )
 
         print("\n=== 03 endpoint candidates ===")
-        FlightListProcessor(
-            spark, cfg, log_dir=str(logs)
-        ).build_endpoint_candidates(month, max_radius_nm=110.0, rebuild=True)
+        FlightListProcessor(spark, cfg, log_dir=str(logs)).build_endpoint_candidates(
+            month, max_radius_nm=110.0, rebuild=True
+        )
 
     # -- score both arms on identical ground truth --------------------------
     gt = load_ground_truth(spark, [args.month], args.days)
@@ -174,22 +182,30 @@ def main() -> None:
     print(f"\nground-truth flights on {args.days}: {gt.count():,}")
 
     rows, per_type_frames = [], []
-    for arm, path in (("modulo (published)", MODULO_CANDIDATES),
-                      ("bucket (proposed)", BUCKET_CANDIDATES)):
+    for arm, path in (
+        ("modulo (published)", MODULO_CANDIDATES),
+        ("bucket (proposed)", BUCKET_CANDIDATES),
+    ):
         cand = spark.read.parquet(path)
         # The modulo cache covers three days; restrict it to the same days.
         cand = cand.filter(F.to_date("event_time").isin(args.days)).cache()
         n_cand = cand.count()
         ident = identities_from_candidates(cand)
-        pred = predictions_from_candidates(
-            cand, OP_RADIUS_NM, OP_HEIGHT_FT, OP_PENALTY_NM)
+        pred = predictions_from_candidates(cand, OP_RADIUS_NM, OP_HEIGHT_FT, OP_PENALTY_NM)
         m = score(pred, ident, gt)
-        m.update(arm=arm, candidates=n_cand, radius_nm=OP_RADIUS_NM,
-                 height_ft=OP_HEIGHT_FT, penalty_nm=OP_PENALTY_NM)
+        m.update(
+            arm=arm,
+            candidates=n_cand,
+            radius_nm=OP_RADIUS_NM,
+            height_ft=OP_HEIGHT_FT,
+            penalty_nm=OP_PENALTY_NM,
+        )
         rows.append(m)
-        print(f"  {arm:20} cand {n_cand:>10,}  "
-              f"ADEP {m['adep_coverage']:6.2%}/{m['adep_accuracy']:6.2%}  "
-              f"ADES {m['ades_coverage']:6.2%}/{m['ades_accuracy']:6.2%}")
+        print(
+            f"  {arm:20} cand {n_cand:>10,}  "
+            f"ADEP {m['adep_coverage']:6.2%}/{m['adep_accuracy']:6.2%}  "
+            f"ADES {m['ades_coverage']:6.2%}/{m['ades_accuracy']:6.2%}"
+        )
 
         pt = per_type_counts(pred, ident, gt, airport_types(spark)).toPandas()
         pt["arm"] = arm
@@ -197,6 +213,7 @@ def main() -> None:
 
     spark.createDataFrame(rows).toPandas().to_csv(out / "arm_comparison.csv", index=False)
     import pandas as pd
+
     pd.concat(per_type_frames).to_csv(out / "arm_per_type.csv", index=False)
     print(f"\nwritten to {out}")
     spark.stop()

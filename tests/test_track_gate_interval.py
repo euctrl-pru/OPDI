@@ -6,6 +6,7 @@ the right flight. These tests pin the wider interval, and pin the property that
 makes the two comparable: the gate interval always *contains* the airborne one,
 so gate matching is a superset and can only ever add samples.
 """
+
 import datetime as dt
 
 import track_truth
@@ -28,11 +29,23 @@ def test_gate_interval_contains_the_airborne_interval(spark):
     gt = spark.createDataFrame(
         [
             # normal: off-block 12 min before take-off, in-block 6 after landing
-            ("f1", "abc123", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-             _ts("2025-06-05T09:48:00"), _ts("2025-06-05T11:06:00")),
+            (
+                "f1",
+                "abc123",
+                _ts("2025-06-05T10:00:00"),
+                _ts("2025-06-05T11:00:00"),
+                _ts("2025-06-05T09:48:00"),
+                _ts("2025-06-05T11:06:00"),
+            ),
             # corrupt: AOBT after ATOT, AIBT before ALDT
-            ("f2", "def456", _ts("2025-06-05T14:00:00"), _ts("2025-06-05T15:00:00"),
-             _ts("2025-06-05T14:05:00"), _ts("2025-06-05T14:55:00")),
+            (
+                "f2",
+                "def456",
+                _ts("2025-06-05T14:00:00"),
+                _ts("2025-06-05T15:00:00"),
+                _ts("2025-06-05T14:05:00"),
+                _ts("2025-06-05T14:55:00"),
+            ),
         ],
         "flight_key string, icao24 string, t_off timestamp, t_land timestamp, "
         "aobt timestamp, aibt timestamp",
@@ -52,8 +65,7 @@ def test_null_block_times_fall_back_to_the_measured_buffer(spark):
     needs an interval, and the buffer is a measured median -- not a constant
     someone liked the look of."""
     gt = spark.createDataFrame(
-        [("f3", "abc123", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-          None, None)],
+        [("f3", "abc123", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"), None, None)],
         "flight_key string, icao24 string, t_off timestamp, t_land timestamp, "
         "aobt timestamp, aibt timestamp",
     )
@@ -82,21 +94,51 @@ def test_gate_buffers_are_the_measured_medians(spark):
     a model fitted to itself.
     """
     gt = spark.createDataFrame(
-        [("f1", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-          _ts("2025-06-05T09:50:00"), _ts("2025-06-05T11:05:00"), True, True),
-         ("f2", _ts("2025-06-05T12:00:00"), _ts("2025-06-05T13:00:00"),
-          _ts("2025-06-05T11:40:00"), _ts("2025-06-05T13:15:00"), True, True),
-         ("f3", _ts("2025-06-05T14:00:00"), _ts("2025-06-05T15:00:00"),
-          None, None, False, False),
-         # block times present, movement times not -- 6000 s on either side
-         ("f4", _ts("2025-06-05T16:00:00"), _ts("2025-06-05T17:00:00"),
-          _ts("2025-06-05T14:20:00"), _ts("2025-06-05T18:40:00"), False, False)],
+        [
+            (
+                "f1",
+                _ts("2025-06-05T10:00:00"),
+                _ts("2025-06-05T11:00:00"),
+                _ts("2025-06-05T09:50:00"),
+                _ts("2025-06-05T11:05:00"),
+                True,
+                True,
+            ),
+            (
+                "f2",
+                _ts("2025-06-05T12:00:00"),
+                _ts("2025-06-05T13:00:00"),
+                _ts("2025-06-05T11:40:00"),
+                _ts("2025-06-05T13:15:00"),
+                True,
+                True,
+            ),
+            (
+                "f3",
+                _ts("2025-06-05T14:00:00"),
+                _ts("2025-06-05T15:00:00"),
+                None,
+                None,
+                False,
+                False,
+            ),
+            # block times present, movement times not -- 6000 s on either side
+            (
+                "f4",
+                _ts("2025-06-05T16:00:00"),
+                _ts("2025-06-05T17:00:00"),
+                _ts("2025-06-05T14:20:00"),
+                _ts("2025-06-05T18:40:00"),
+                False,
+                False,
+            ),
+        ],
         "flight_key string, t_off timestamp, t_land timestamp, aobt timestamp, "
         "aibt timestamp, dep_measured boolean, arr_measured boolean",
     )
     b_dep, b_arr = track_truth.gate_buffers(gt)
-    assert b_dep == 900.0    # median of 600 s and 1200 s
-    assert b_arr == 600.0    # median of 300 s and 900 s
+    assert b_dep == 900.0  # median of 600 s and 1200 s
+    assert b_arr == 600.0  # median of 300 s and 900 s
     # and not the medians that let f4's modelled durations in
     assert (b_dep, b_arr) != (1200.0, 900.0)
 
@@ -105,8 +147,7 @@ def test_gate_buffers_fall_back_to_zero_with_nothing_measured(spark):
     """No measured flight on a side degrades that side of the gate interval to
     the airborne bound, rather than inventing a duration."""
     gt = spark.createDataFrame(
-        [("f1", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-          None, None, False, False)],
+        [("f1", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"), None, None, False, False)],
         "flight_key string, t_off timestamp, t_land timestamp, aobt timestamp, "
         "aibt timestamp, dep_measured boolean, arr_measured boolean",
     )
@@ -126,17 +167,31 @@ def test_gate_in_window_flags_the_flights_that_escape_the_sample_window(spark):
     window = ("2025-06-05 00:00:00", "2025-06-06 00:00:00")
     gt = spark.createDataFrame(
         [  # wholly inside
-            ("f1", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-             _ts("2025-06-05T09:48:00"), _ts("2025-06-05T11:06:00")),
+            (
+                "f1",
+                _ts("2025-06-05T10:00:00"),
+                _ts("2025-06-05T11:00:00"),
+                _ts("2025-06-05T09:48:00"),
+                _ts("2025-06-05T11:06:00"),
+            ),
             # airborne inside, pushed back the previous evening
-            ("f2", _ts("2025-06-05T00:05:00"), _ts("2025-06-05T01:05:00"),
-             _ts("2025-06-04T23:50:00"), _ts("2025-06-05T01:11:00")),
+            (
+                "f2",
+                _ts("2025-06-05T00:05:00"),
+                _ts("2025-06-05T01:05:00"),
+                _ts("2025-06-04T23:50:00"),
+                _ts("2025-06-05T01:11:00"),
+            ),
             # airborne inside, on stand after the window closes
-            ("f3", _ts("2025-06-05T22:30:00"), _ts("2025-06-05T23:50:00"),
-             _ts("2025-06-05T22:15:00"), _ts("2025-06-06T00:10:00")),
+            (
+                "f3",
+                _ts("2025-06-05T22:30:00"),
+                _ts("2025-06-05T23:50:00"),
+                _ts("2025-06-05T22:15:00"),
+                _ts("2025-06-06T00:10:00"),
+            ),
         ],
-        "flight_key string, t_off timestamp, t_land timestamp, "
-        "aobt timestamp, aibt timestamp",
+        "flight_key string, t_off timestamp, t_land timestamp, " "aobt timestamp, aibt timestamp",
     )
     out = track_truth.attach_gate_interval(gt, 600, 300, window=window)
     assert out.count() == 3, "gate_in_window must not drop anything"
@@ -161,9 +216,19 @@ def test_taxi_sample_matches_gate_but_not_airborne(spark):
         "icao24 string, event_time timestamp, track_id string",
     )
     gt = spark.createDataFrame(
-        [("f1", "abc123", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-          _ts("2025-06-05T09:48:00"), _ts("2025-06-05T11:06:00"), "apdf",
-          "EBBR", "LEMD")],
+        [
+            (
+                "f1",
+                "abc123",
+                _ts("2025-06-05T10:00:00"),
+                _ts("2025-06-05T11:00:00"),
+                _ts("2025-06-05T09:48:00"),
+                _ts("2025-06-05T11:06:00"),
+                "apdf",
+                "EBBR",
+                "LEMD",
+            )
+        ],
         "flight_key string, icao24 string, t_off timestamp, t_land timestamp, "
         "t_off_block timestamp, t_in_block timestamp, t_source string, "
         "gt_adep string, gt_ades string",
@@ -182,9 +247,19 @@ def test_gated_overlap_join_still_emits_the_airborne_boundaries(spark):
         "icao24 string, event_time timestamp, track_id string",
     )
     gt = spark.createDataFrame(
-        [("f1", "abc123", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-          _ts("2025-06-05T09:48:00"), _ts("2025-06-05T11:06:00"), "apdf",
-          "EBBR", "LEMD")],
+        [
+            (
+                "f1",
+                "abc123",
+                _ts("2025-06-05T10:00:00"),
+                _ts("2025-06-05T11:00:00"),
+                _ts("2025-06-05T09:48:00"),
+                _ts("2025-06-05T11:06:00"),
+                "apdf",
+                "EBBR",
+                "LEMD",
+            )
+        ],
         "flight_key string, icao24 string, t_off timestamp, t_land timestamp, "
         "t_off_block timestamp, t_in_block timestamp, t_source string, "
         "gt_adep string, gt_ades string",
@@ -210,20 +285,40 @@ def test_score_arm_gated_adds_gate_rates_beside_the_airborne_row(spark):
     from track_score import match_rates, score_arm, score_arm_gated, track_extents
 
     assign = spark.createDataFrame(
-        [("abc123", _ts("2025-06-05T09:52:00"), "trk0"),   # taxi-out, own track
-         ("abc123", _ts("2025-06-05T10:10:00"), "trk1"),
-         ("abc123", _ts("2025-06-05T10:50:00"), "trk1"),
-         ("def456", _ts("2025-06-05T14:10:00"), "trkA"),
-         ("def456", _ts("2025-06-05T14:50:00"), "trkB")],
+        [
+            ("abc123", _ts("2025-06-05T09:52:00"), "trk0"),  # taxi-out, own track
+            ("abc123", _ts("2025-06-05T10:10:00"), "trk1"),
+            ("abc123", _ts("2025-06-05T10:50:00"), "trk1"),
+            ("def456", _ts("2025-06-05T14:10:00"), "trkA"),
+            ("def456", _ts("2025-06-05T14:50:00"), "trkB"),
+        ],
         "icao24 string, event_time timestamp, track_id string",
     )
     gt = spark.createDataFrame(
-        [("f1", "abc123", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-          _ts("2025-06-05T09:48:00"), _ts("2025-06-05T11:06:00"), "apdf",
-          "EBBR", "LEMD"),
-         ("f2", "def456", _ts("2025-06-05T14:00:00"), _ts("2025-06-05T15:00:00"),
-          _ts("2025-06-05T13:48:00"), _ts("2025-06-05T15:06:00"), "apdf",
-          "EHAM", "LFPG")],
+        [
+            (
+                "f1",
+                "abc123",
+                _ts("2025-06-05T10:00:00"),
+                _ts("2025-06-05T11:00:00"),
+                _ts("2025-06-05T09:48:00"),
+                _ts("2025-06-05T11:06:00"),
+                "apdf",
+                "EBBR",
+                "LEMD",
+            ),
+            (
+                "f2",
+                "def456",
+                _ts("2025-06-05T14:00:00"),
+                _ts("2025-06-05T15:00:00"),
+                _ts("2025-06-05T13:48:00"),
+                _ts("2025-06-05T15:06:00"),
+                "apdf",
+                "EHAM",
+                "LFPG",
+            ),
+        ],
         "flight_key string, icao24 string, t_off timestamp, t_land timestamp, "
         "t_off_block timestamp, t_in_block timestamp, t_source string, "
         "gt_adep string, gt_ades string",
@@ -243,7 +338,9 @@ def test_score_arm_gated_adds_gate_rates_beside_the_airborne_row(spark):
     for k, v in match_rates(matched_gate).items():
         assert out[f"gate_{k}"] == v
     assert set(out) - set(plain) == {
-        "gate_n_flights", "gate_clean_match_pct", "gate_fragmented_pct",
+        "gate_n_flights",
+        "gate_clean_match_pct",
+        "gate_fragmented_pct",
         "gate_merged_pct",
     }
     # The two really are different measurements, so the assertions above are
@@ -272,10 +369,12 @@ def test_airborne_metrics_are_untouched_by_the_gate_columns(spark):
     from track_score import score_arm, track_extents
 
     assign = spark.createDataFrame(
-        [("abc123", _ts("2025-06-05T09:52:00"), "trk1"),   # taxi-out
-         ("abc123", _ts("2025-06-05T10:10:00"), "trk1"),
-         ("abc123", _ts("2025-06-05T10:50:00"), "trk1"),
-         ("def456", _ts("2025-06-05T14:30:00"), "trk2")],
+        [
+            ("abc123", _ts("2025-06-05T09:52:00"), "trk1"),  # taxi-out
+            ("abc123", _ts("2025-06-05T10:10:00"), "trk1"),
+            ("abc123", _ts("2025-06-05T10:50:00"), "trk1"),
+            ("def456", _ts("2025-06-05T14:30:00"), "trk2"),
+        ],
         "icao24 string, event_time timestamp, track_id string",
     )
     plain_schema = (
@@ -283,16 +382,32 @@ def test_airborne_metrics_are_untouched_by_the_gate_columns(spark):
         "t_source string, gt_adep string, gt_ades string"
     )
     plain_rows = [
-        ("f1", "abc123", _ts("2025-06-05T10:00:00"),
-         _ts("2025-06-05T11:00:00"), "apdf", "EBBR", "LEMD"),
-        ("f2", "def456", _ts("2025-06-05T14:00:00"),
-         _ts("2025-06-05T15:00:00"), "apdf", "EHAM", "LFPG"),
+        (
+            "f1",
+            "abc123",
+            _ts("2025-06-05T10:00:00"),
+            _ts("2025-06-05T11:00:00"),
+            "apdf",
+            "EBBR",
+            "LEMD",
+        ),
+        (
+            "f2",
+            "def456",
+            _ts("2025-06-05T14:00:00"),
+            _ts("2025-06-05T15:00:00"),
+            "apdf",
+            "EHAM",
+            "LFPG",
+        ),
     ]
     plain = spark.createDataFrame(plain_rows, plain_schema)
     widened = track_truth.attach_gate_interval(
-        plain.withColumn("aobt", F.lit(None).cast("timestamp"))
-             .withColumn("aibt", F.lit(None).cast("timestamp")),
-        b_dep_s=600, b_arr_s=300,
+        plain.withColumn("aobt", F.lit(None).cast("timestamp")).withColumn(
+            "aibt", F.lit(None).cast("timestamp")
+        ),
+        b_dep_s=600,
+        b_arr_s=300,
     )
 
     extents = track_extents(assign)

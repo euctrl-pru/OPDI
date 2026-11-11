@@ -30,6 +30,7 @@ def cfg() -> CleaningConfig:
 # Stage 1 -- dedup
 # ---------------------------------------------------------------------------
 
+
 def test_dedup_keeps_one_row_per_timestamp(spark, cfg):
     df = make_track(
         spark,
@@ -57,6 +58,7 @@ def test_dedup_can_be_disabled(spark, cfg):
 # Stage 2 -- range validity
 # ---------------------------------------------------------------------------
 
+
 def test_out_of_range_coordinates_are_nulled(spark, cfg):
     df = make_track(
         spark,
@@ -76,6 +78,7 @@ def test_out_of_range_coordinates_are_nulled(spark, cfg):
 # ---------------------------------------------------------------------------
 # Stage 3 -- stale broadcasts
 # ---------------------------------------------------------------------------
+
 
 def test_repeated_position_is_nulled(spark, cfg):
     """Identical consecutive lat/lon means repeated, not re-measured."""
@@ -130,6 +133,7 @@ def test_first_sample_has_no_predecessor_and_is_kept(spark, cfg):
 # Stage 4 -- derivative spikes
 # ---------------------------------------------------------------------------
 
+
 def _ramp(n: int, step: float = 0.001, spike_at: int = None, spike: float = 0.0):
     """A smooth 1 Hz latitude ramp, optionally with one displaced sample."""
     samples = []
@@ -174,8 +178,7 @@ def test_moderate_step_change_survives(spark, cfg):
 
     lat = column_values(out, "lat")
     assert all(v is not None for v in lat), (
-        "a step change between the two thresholds must survive intact; "
-        f"got {lat}"
+        "a step change between the two thresholds must survive intact; " f"got {lat}"
     )
 
 
@@ -193,9 +196,9 @@ def test_heading_wraparound_is_not_a_spike(spark, cfg):
     cfg.isolated_enabled = False
     out = mask_derivative_spikes(make_track(spark, samples), cfg)
 
-    assert all(v is not None for v in column_values(out, "heading")), (
-        "the wrap must not be read as a 358 deg/s rate"
-    )
+    assert all(
+        v is not None for v in column_values(out, "heading")
+    ), "the wrap must not be read as a 358 deg/s rate"
 
 
 @pytest.mark.parametrize(
@@ -203,9 +206,7 @@ def test_heading_wraparound_is_not_a_spike(spark, cfg):
     [(190.0, False), (210.0, True)],
     ids=["just-under-200ft/s", "just-over-200ft/s"],
 )
-def test_altitude_threshold_is_read_in_feet_not_metres(
-    spark, cfg, rate_ft_s, expect_masked
-):
+def test_altitude_threshold_is_read_in_feet_not_metres(spark, cfg, rate_ft_s, expect_masked):
     """Pins the unit contract: metres on disk, ft/s thresholds.
 
     ``baro_altitude`` is stored in metres but ``baro_altitude_d1_max_ft_s`` is
@@ -218,9 +219,7 @@ def test_altitude_threshold_is_read_in_feet_not_metres(
     derivative is in play and the two cases differ by nothing else.
     """
     metres_per_second = rate_ft_s / 3.28084
-    samples = [
-        {"t": i, "baro_altitude": 3000.0 + i * metres_per_second} for i in range(8)
-    ]
+    samples = [{"t": i, "baro_altitude": 3000.0 + i * metres_per_second} for i in range(8)]
     cfg.stale_enabled = False
     cfg.isolated_enabled = False
     out = mask_derivative_spikes(make_track(spark, samples), cfg)
@@ -233,8 +232,7 @@ def test_altitude_threshold_is_read_in_feet_not_metres(
         )
     else:
         assert all(v is not None for v in interior), (
-            f"{rate_ft_s} ft/s is below the 200 ft/s threshold and must "
-            f"survive; got {interior}"
+            f"{rate_ft_s} ft/s is below the 200 ft/s threshold and must " f"survive; got {interior}"
         )
 
 
@@ -254,6 +252,7 @@ def test_spike_filter_can_be_disabled(spark, cfg):
 # ---------------------------------------------------------------------------
 # Stage 5 -- isolated points
 # ---------------------------------------------------------------------------
+
 
 def test_isolated_point_is_removed(spark, cfg):
     """A sample >20 s from any other measurement of that column is unverifiable."""
@@ -286,6 +285,7 @@ def test_track_boundary_sample_is_kept(spark, cfg):
 # Stage 6 -- gap segmentation
 # ---------------------------------------------------------------------------
 
+
 def test_segment_id_splits_on_coverage_hole(spark, cfg):
     df = make_track(
         spark,
@@ -311,6 +311,7 @@ def test_segment_id_does_not_split_small_gaps(spark, cfg):
 # ---------------------------------------------------------------------------
 # Composition
 # ---------------------------------------------------------------------------
+
 
 def test_clean_tracks_masks_but_does_not_drop_rows(spark, cfg):
     """The 2024 design: mask to NULL, keep the row. Only dedup changes count."""
@@ -385,14 +386,15 @@ def test_genuinely_repeated_position_is_still_masked(spark):
     )
     out = mask_stale_broadcasts(df, CleaningConfig())
     lat = column_values(out, "lat")
-    assert lat[0] == pytest.approx(50.00)   # first: kept, no predecessor
-    assert lat[1] is None                   # second: identical repeat, masked
-    assert lat[2] == pytest.approx(50.01)   # third: moved again, kept
+    assert lat[0] == pytest.approx(50.00)  # first: kept, no predecessor
+    assert lat[1] is None  # second: identical repeat, masked
+    assert lat[2] == pytest.approx(50.01)  # third: moved again, kept
 
 
 # ---------------------------------------------------------------------------
 # Stage 3 -- last_pos_update discriminator (stationary vs. stale)
 # ---------------------------------------------------------------------------
+
 
 def test_stationary_aircraft_survives_with_advancing_last_pos_update(spark):
     """A parked aircraft's lat/lon really are identical across samples. With
@@ -434,7 +436,7 @@ def test_stationary_aircraft_still_masked_with_static_last_pos_update(spark):
     out = mask_stale_broadcasts(df, cfg)
     lat = column_values(out, "lat")
     assert lat[0] == pytest.approx(50.00)  # first: kept, no predecessor
-    assert lat[1] is None                  # static last_pos_update: masked
+    assert lat[1] is None  # static last_pos_update: masked
     assert lat[2] is None
 
 
@@ -477,9 +479,7 @@ def test_the_pre_2026_09_08_masking_is_still_reachable(spark):
             {"t": 10, "lat": 50.00, "lon": 4.00, "last_pos_update": 10},
         ],
     )
-    out = mask_stale_broadcasts(
-        df, CleaningConfig(stale_position_uses_last_pos_update=False)
-    )
+    out = mask_stale_broadcasts(df, CleaningConfig(stale_position_uses_last_pos_update=False))
     lat = column_values(out, "lat")
     assert lat[0] == pytest.approx(50.00)
     assert lat[1] is None

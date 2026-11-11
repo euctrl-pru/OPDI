@@ -5,6 +5,7 @@ so that pointing a worldwide run at the European warehouse fails on the first
 step instead of on the day somebody notices a flight in Auckland inside a
 dataset whose track_id contract says Europe.
 """
+
 from pathlib import Path
 
 from opdi.config import OPDIConfig
@@ -82,6 +83,7 @@ def test_the_problem_names_the_warehouse(spark, tmp_path):
 # unusable the first time a write committed a marker with nothing readable
 # in it -- exactly the failure mode check_coverage exists to avoid, turned
 # against itself.
+
 
 def test_a_zero_row_marker_is_treated_as_unstamped(spark, tmp_path):
     """The marker table exists, reads cleanly, and holds no rows -- e.g. a

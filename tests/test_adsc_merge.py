@@ -27,26 +27,28 @@ T0 = dt.datetime(2026, 6, 5, 12, 0, 0)
 #: Stated rather than inferred: `serials` is NULL on every ADS-C row and on
 #: plenty of ADS-B ones, and `createDataFrame` cannot infer a type for an
 #: all-NULL column -- so an inferred schema fails on the shape under test.
-SV_SCHEMA = StructType([
-    StructField("event_time", TimestampType()),
-    StructField("icao24", StringType()),
-    StructField("callsign", StringType()),
-    StructField("lat", DoubleType()),
-    StructField("lon", DoubleType()),
-    StructField("baro_altitude", DoubleType()),
-    StructField("geo_altitude", DoubleType()),
-    StructField("velocity", DoubleType()),
-    StructField("heading", DoubleType()),
-    StructField("vert_rate", DoubleType()),
-    StructField("on_ground", BooleanType()),
-    StructField("alert", BooleanType()),
-    StructField("spi", BooleanType()),
-    StructField("squawk", StringType()),
-    StructField("last_pos_update", DoubleType()),
-    StructField("last_contact", DoubleType()),
-    StructField("serials", ArrayType(IntegerType())),
-    StructField("event_time_day", DateType()),
-])
+SV_SCHEMA = StructType(
+    [
+        StructField("event_time", TimestampType()),
+        StructField("icao24", StringType()),
+        StructField("callsign", StringType()),
+        StructField("lat", DoubleType()),
+        StructField("lon", DoubleType()),
+        StructField("baro_altitude", DoubleType()),
+        StructField("geo_altitude", DoubleType()),
+        StructField("velocity", DoubleType()),
+        StructField("heading", DoubleType()),
+        StructField("vert_rate", DoubleType()),
+        StructField("on_ground", BooleanType()),
+        StructField("alert", BooleanType()),
+        StructField("spi", BooleanType()),
+        StructField("squawk", StringType()),
+        StructField("last_pos_update", DoubleType()),
+        StructField("last_contact", DoubleType()),
+        StructField("serials", ArrayType(IntegerType())),
+        StructField("event_time_day", DateType()),
+    ]
+)
 
 #: What step 01b writes: the same columns minus the partition date, plus
 #: `source`. The merge adds `event_time_day` itself.
@@ -59,34 +61,80 @@ ADSC_SCHEMA = StructType(
 @pytest.fixture
 def sv(spark):
     """Two ADS-B samples of one airframe, 5 s apart."""
-    return spark.createDataFrame([
-        Row(event_time=T0, icao24="4acb41", callsign="SAS4414 ",
-            lat=52.0, lon=-5.0, baro_altitude=10668.0, geo_altitude=10700.0,
-            velocity=240.0, heading=270.0, vert_rate=0.0, on_ground=False,
-            alert=False, spi=False, squawk="2000", last_pos_update=1.0,
-            last_contact=1.0, serials=None,
-            event_time_day=dt.date(2026, 6, 5)),
-        Row(event_time=T0 + dt.timedelta(seconds=5), icao24="4acb41",
-            callsign="SAS4414 ", lat=52.0, lon=-5.1, baro_altitude=10668.0,
-            geo_altitude=10700.0, velocity=240.0, heading=270.0,
-            vert_rate=0.0, on_ground=False, alert=False, spi=False,
-            squawk="2000", last_pos_update=1.0, last_contact=1.0,
-            serials=None, event_time_day=dt.date(2026, 6, 5)),
-    ], schema=SV_SCHEMA)
+    return spark.createDataFrame(
+        [
+            Row(
+                event_time=T0,
+                icao24="4acb41",
+                callsign="SAS4414 ",
+                lat=52.0,
+                lon=-5.0,
+                baro_altitude=10668.0,
+                geo_altitude=10700.0,
+                velocity=240.0,
+                heading=270.0,
+                vert_rate=0.0,
+                on_ground=False,
+                alert=False,
+                spi=False,
+                squawk="2000",
+                last_pos_update=1.0,
+                last_contact=1.0,
+                serials=None,
+                event_time_day=dt.date(2026, 6, 5),
+            ),
+            Row(
+                event_time=T0 + dt.timedelta(seconds=5),
+                icao24="4acb41",
+                callsign="SAS4414 ",
+                lat=52.0,
+                lon=-5.1,
+                baro_altitude=10668.0,
+                geo_altitude=10700.0,
+                velocity=240.0,
+                heading=270.0,
+                vert_rate=0.0,
+                on_ground=False,
+                alert=False,
+                spi=False,
+                squawk="2000",
+                last_pos_update=1.0,
+                last_contact=1.0,
+                serials=None,
+                event_time_day=dt.date(2026, 6, 5),
+            ),
+        ],
+        schema=SV_SCHEMA,
+    )
 
 
 @pytest.fixture
 def adsc(spark):
     """One ADS-C row far from any ADS-B sample, and one that shadows."""
+
     def row(seconds, lon):
-        return Row(event_time=T0 + dt.timedelta(seconds=seconds),
-                   icao24="4acb41", callsign=None, lat=52.0, lon=lon,
-                   baro_altitude=10668.0, geo_altitude=None, velocity=240.0,
-                   heading=270.0, vert_rate=0.0, on_ground=False, alert=None,
-                   spi=None, squawk="2000", last_pos_update=1.0,
-                   last_contact=1.0, serials=None, source="ADS-C")
-    return spark.createDataFrame([row(600, -6.0), row(10, -5.05)],
-                                 schema=ADSC_SCHEMA)
+        return Row(
+            event_time=T0 + dt.timedelta(seconds=seconds),
+            icao24="4acb41",
+            callsign=None,
+            lat=52.0,
+            lon=lon,
+            baro_altitude=10668.0,
+            geo_altitude=None,
+            velocity=240.0,
+            heading=270.0,
+            vert_rate=0.0,
+            on_ground=False,
+            alert=None,
+            spi=None,
+            squawk="2000",
+            last_pos_update=1.0,
+            last_contact=1.0,
+            serials=None,
+            source="ADS-C",
+        )
+
+    return spark.createDataFrame([row(600, -6.0), row(10, -5.05)], schema=ADSC_SCHEMA)
 
 
 def _processor(spark, enabled):

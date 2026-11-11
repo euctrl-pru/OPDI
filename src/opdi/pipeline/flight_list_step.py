@@ -18,6 +18,7 @@ job succeeds and writes whatever it managed to scan first. Materialising to a
 staging table breaks the dependency: the second write reads a table that no
 longer has anything to do with the one being replaced.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -70,8 +71,10 @@ def enrich_day(
         return None
 
     days = _days_between(start_date, end_date)
-    print(f"  enriching the flight list (asked for {len(days)} day(s) "
-          f"from {start_date}; rewrites every partition)")
+    print(
+        f"  enriching the flight list (asked for {len(days)} day(s) "
+        f"from {start_date}; rewrites every partition)"
+    )
 
     # **The whole table, not the window.** Enriching only the requested days
     # would leave every other partition -- including the
@@ -108,8 +111,10 @@ def enrich_day(
     flight_list = flight_list.dropDuplicates(["ID"])
     removed = before - flight_list.count()
     if removed:
-        print(f"  removed {removed:,} duplicate ID(s) -- the flight list is "
-              f"keyed on ID and must hold one row per flight")
+        print(
+            f"  removed {removed:,} duplicate ID(s) -- the flight list is "
+            f"keyed on ID and must hold one row per flight"
+        )
 
     enriched = enrich_flight_list(flight_list, events, config)
 
@@ -120,7 +125,9 @@ def enrich_day(
     # set is "whatever the table holds", which is what the probe computes. The
     # null-date partition in particular has no value that could be named.
     storage.write_table(
-        enriched.repartition("DOF"), STAGING_TABLE, mode="overwrite",
+        enriched.repartition("DOF"),
+        STAGING_TABLE,
+        mode="overwrite",
         partition_by=["DOF"],
     )
 
@@ -128,7 +135,9 @@ def enrich_day(
     staged = storage.read_table(STAGING_TABLE)
     written = staged.count()
     storage.write_table(
-        staged.repartition("DOF"), FLIGHT_LIST_TABLE, mode="overwrite",
+        staged.repartition("DOF"),
+        FLIGHT_LIST_TABLE,
+        mode="overwrite",
         partition_by=["DOF"],
     )
     return written

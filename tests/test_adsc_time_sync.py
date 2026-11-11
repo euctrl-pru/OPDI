@@ -24,22 +24,35 @@ def _lon_at(seconds):
 
 
 def _adsb(spark, times, icao24="4acb41"):
-    return spark.createDataFrame([
-        Row(icao24=icao24, event_time=T0 + dt.timedelta(seconds=s),
-            lat=LAT, lon=_lon_at(s), velocity=V_MS,
-            last_pos_update=(T0 + dt.timedelta(seconds=s)).timestamp())
-        for s in times])
+    return spark.createDataFrame(
+        [
+            Row(
+                icao24=icao24,
+                event_time=T0 + dt.timedelta(seconds=s),
+                lat=LAT,
+                lon=_lon_at(s),
+                velocity=V_MS,
+                last_pos_update=(T0 + dt.timedelta(seconds=s)).timestamp(),
+            )
+            for s in times
+        ]
+    )
 
 
 def _adsc(spark, at_seconds, lag_seconds=0.0, cross_m=0.0):
     """An ADS-C report tagged `at_seconds` whose position is the aircraft's
     position at `at_seconds + lag_seconds`, offset `cross_m` to the north."""
-    return spark.createDataFrame([
-        Row(icao24="4acb41",
-            event_time=T0 + dt.timedelta(seconds=at_seconds),
-            lat=LAT + math.degrees(cross_m / R),
-            lon=_lon_at(at_seconds + lag_seconds),
-            velocity=V_MS)])
+    return spark.createDataFrame(
+        [
+            Row(
+                icao24="4acb41",
+                event_time=T0 + dt.timedelta(seconds=at_seconds),
+                lat=LAT + math.degrees(cross_m / R),
+                lon=_lon_at(at_seconds + lag_seconds),
+                velocity=V_MS,
+            )
+        ]
+    )
 
 
 def test_a_synchronised_report_shows_no_offset(spark):
@@ -53,8 +66,7 @@ def test_a_synchronised_report_shows_no_offset(spark):
 def test_a_known_lag_is_recovered(spark):
     # The whole instrument: a report whose position is 1.5 s further along
     # than its timestamp claims must read as +1.5 s, and as +375 m along track.
-    out = decompose(bracket(_adsc(spark, 30, lag_seconds=1.5),
-                            _adsb(spark, [0, 60]), 60))
+    out = decompose(bracket(_adsc(spark, 30, lag_seconds=1.5), _adsb(spark, [0, 60]), 60))
     r = out.collect()[0]
     assert r["implied_dt_s"] == pytest.approx(1.5, abs=0.05)
     assert r["along_m"] == pytest.approx(375.0, abs=5.0)
@@ -62,8 +74,7 @@ def test_a_known_lag_is_recovered(spark):
 
 
 def test_a_negative_lag_is_recovered_with_its_sign(spark):
-    out = decompose(bracket(_adsc(spark, 30, lag_seconds=-12.9),
-                            _adsb(spark, [0, 60]), 60))
+    out = decompose(bracket(_adsc(spark, 30, lag_seconds=-12.9), _adsb(spark, [0, 60]), 60))
     assert out.collect()[0]["implied_dt_s"] == pytest.approx(-12.9, abs=0.1)
 
 
@@ -71,8 +82,7 @@ def test_a_cross_track_error_does_not_read_as_a_lag(spark):
     # The discriminator the conclusion rests on. A position error is isotropic;
     # a timing error is purely along track. If a 400 m northward offset leaked
     # into `implied_dt_s`, the 43:1 ratio would be an artefact of the maths.
-    out = decompose(bracket(_adsc(spark, 30, cross_m=400.0),
-                            _adsb(spark, [0, 60]), 60))
+    out = decompose(bracket(_adsc(spark, 30, cross_m=400.0), _adsb(spark, [0, 60]), 60))
     r = out.collect()[0]
     assert r["cross_m"] == pytest.approx(400.0, abs=5.0)
     assert r["along_m"] == pytest.approx(0.0, abs=5.0)
@@ -92,8 +102,7 @@ def test_a_loose_bracket_is_dropped(spark):
 
 
 def test_the_nearest_sample_each_side_is_the_one_used(spark):
-    out = decompose(bracket(_adsc(spark, 30),
-                            _adsb(spark, [0, 25, 35, 60]), 60))
+    out = decompose(bracket(_adsc(spark, 30), _adsb(spark, [0, 25, 35, 60]), 60))
     r = out.collect()[0]
     assert r["bracket_s"] == pytest.approx(10.0, abs=0.01)
 
@@ -111,8 +120,7 @@ def test_a_slow_aircraft_is_excluded(spark):
 
 
 def test_per_airframe_summarises_each_separately(spark):
-    pairs = decompose(bracket(
-        _adsc(spark, 30, lag_seconds=1.5), _adsb(spark, [0, 60]), 60))
+    pairs = decompose(bracket(_adsc(spark, 30, lag_seconds=1.5), _adsb(spark, [0, 60]), 60))
     summary = per_airframe(pairs).collect()
     assert len(summary) == 1
     assert summary[0]["icao24"] == "4acb41"

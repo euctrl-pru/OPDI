@@ -42,6 +42,7 @@ EARTH_RADIUS_M = 6371008.8
 
 # --- geometry ---------------------------------------------------------------
 
+
 def destination(lat: float, lon: float, bearing_deg: float, dist_nm: float) -> Tuple[float, float]:
     """Point reached from (lat, lon) after ``dist_nm`` on a great circle."""
     d = dist_nm * NM_M / EARTH_RADIUS_M
@@ -72,6 +73,7 @@ def bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 # --- aerodromes -------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class Aerodrome:
@@ -115,6 +117,7 @@ BY_ICAO = {a.icao: a for a in AERODROMES}
 
 # --- the flight simulator ---------------------------------------------------
 
+
 @dataclass
 class Flight:
     """A simulated flight: one airframe, gate to gate.
@@ -147,8 +150,7 @@ def _simulate(f: Flight) -> List[dict]:
     on_ground = False
 
     def emit():
-        out.append(dict(t=t, lat=lat, lon=lon, alt=alt, gs=gs, hdg=hdg,
-                        vr=vr, on_ground=on_ground))
+        out.append(dict(t=t, lat=lat, lon=lon, alt=alt, gs=gs, hdg=hdg, vr=vr, on_ground=on_ground))
 
     def move(dist_nm: float, heading: float):
         nonlocal lat, lon
@@ -238,8 +240,7 @@ def _simulate(f: Flight) -> List[dict]:
             else:
                 hold_state = (leg, left - 1.0)
         else:
-            if (held < f.holding_circuits
-                    and distance_nm(lat, lon, *hold_fix) < 1.0):
+            if held < f.holding_circuits and distance_nm(lat, lon, *hold_fix) < 1.0:
                 hold_state = (0, 60.0)
             target_point = hold_fix if held < f.holding_circuits else faf
             want_hdg = bearing(lat, lon, *target_point)
@@ -301,10 +302,24 @@ def _simulate(f: Flight) -> List[dict]:
 #: golden run depend on which file Spark reads first.
 FLIGHTS = [
     Flight("4ca001", "TST101", "EBBR", "EDDF", dt.datetime(2024, 6, 12, 8, 0, 0)),
-    Flight("4ca001", "TST102", "EDDF", "EBBR", dt.datetime(2024, 6, 12, 9, 30, 0),
-           holding_circuits=2, cruise_ft=24000.0),
-    Flight("3c6002", "DLH4", "LFPG", "LOWW", dt.datetime(2024, 6, 12, 11, 0, 0),
-           holes=[(1800.0, 3000.0)], callsign_changes=[(1500.0, 1510.0, "DLH4X")]),
+    Flight(
+        "4ca001",
+        "TST102",
+        "EDDF",
+        "EBBR",
+        dt.datetime(2024, 6, 12, 9, 30, 0),
+        holding_circuits=2,
+        cruise_ft=24000.0,
+    ),
+    Flight(
+        "3c6002",
+        "DLH4",
+        "LFPG",
+        "LOWW",
+        dt.datetime(2024, 6, 12, 11, 0, 0),
+        holes=[(1800.0, 3000.0)],
+        callsign_changes=[(1500.0, 1510.0, "DLH4X")],
+    ),
     Flight("440004", "AUA7", "LOWW", "EDDF", dt.datetime(2024, 6, 11, 23, 30, 0)),
     Flight("39c005", "AFR8", "EDDF", "LFPG", dt.datetime(2024, 6, 12, 23, 20, 0), stand=2),
 ]
@@ -327,29 +342,32 @@ def state_vectors() -> pd.DataFrame:
                 if a <= s["t"] < b:
                     callsign = value
             when = int(t0 + s["t"])
-            rows.append({
-                "event_time": when,
-                "icao24": f.icao24,
-                "lat": round(s["lat"], 6),
-                "lon": round(s["lon"], 6),
-                "velocity": round(s["gs"] / KT_PER_MPS, 3),
-                "heading": round(s["hdg"], 3),
-                "vert_rate": round(s["vr"] / FPM_PER_MPS, 3),
-                "callsign": callsign.ljust(8),
-                "on_ground": bool(s["on_ground"]),
-                "alert": False,
-                "spi": False,
-                "squawk": "1000",
-                "baro_altitude": round(s["alt"] / FT_PER_M, 2),
-                "geo_altitude": round(s["alt"] / FT_PER_M + 30.0, 2),
-                "last_pos_update": float(when),
-                "last_contact": float(when),
-                "serials": [1, 2],
-            })
+            rows.append(
+                {
+                    "event_time": when,
+                    "icao24": f.icao24,
+                    "lat": round(s["lat"], 6),
+                    "lon": round(s["lon"], 6),
+                    "velocity": round(s["gs"] / KT_PER_MPS, 3),
+                    "heading": round(s["hdg"], 3),
+                    "vert_rate": round(s["vr"] / FPM_PER_MPS, 3),
+                    "callsign": callsign.ljust(8),
+                    "on_ground": bool(s["on_ground"]),
+                    "alert": False,
+                    "spi": False,
+                    "squawk": "1000",
+                    "baro_altitude": round(s["alt"] / FT_PER_M, 2),
+                    "geo_altitude": round(s["alt"] / FT_PER_M + 30.0, 2),
+                    "last_pos_update": float(when),
+                    "last_contact": float(when),
+                    "serials": [1, 2],
+                }
+            )
     return pd.DataFrame(rows)
 
 
 # --- reference tables -------------------------------------------------------
+
 
 def _cells_along(a: Tuple[float, float], b: Tuple[float, float], res: int, k: int) -> set:
     """H3 cells covering the segment a-b, widened by ``k`` rings."""
@@ -367,13 +385,28 @@ def oa_airports() -> pd.DataFrame:
     rows = []
     for i, a in enumerate(AERODROMES):
         lat, lon = a.reference_point
-        rows.append(dict(
-            id=i + 1, ident=a.icao, type="large_airport", name=a.name,
-            latitude_deg=lat, longitude_deg=lon, elevation_ft=int(a.elevation_ft),
-            continent="EU", iso_country="XX", iso_region="XX-1", municipality=a.name,
-            scheduled_service="yes", gps_code=a.icao, iata_code=None, local_code=None,
-            home_link=None, wikipedia_link=None, keywords=None,
-        ))
+        rows.append(
+            dict(
+                id=i + 1,
+                ident=a.icao,
+                type="large_airport",
+                name=a.name,
+                latitude_deg=lat,
+                longitude_deg=lon,
+                elevation_ft=int(a.elevation_ft),
+                continent="EU",
+                iso_country="XX",
+                iso_region="XX-1",
+                municipality=a.name,
+                scheduled_service="yes",
+                gps_code=a.icao,
+                iata_code=None,
+                local_code=None,
+                home_link=None,
+                wikipedia_link=None,
+                keywords=None,
+            )
+        )
     return pd.DataFrame(rows)
 
 
@@ -382,17 +415,30 @@ def oa_runways() -> pd.DataFrame:
     rows = []
     for i, a in enumerate(AERODROMES):
         far = a.far_end
-        rows.append(dict(
-            id=100 + i, airport_ref=i + 1, airport_ident=a.icao,
-            length_ft=int(a.length_nm * 6076), width_ft=148, surface="ASP",
-            lighted=True, closed=False,
-            le_ident=a.le, le_latitude_deg=a.threshold[0], le_longitude_deg=a.threshold[1],
-            le_elevation_ft=int(a.elevation_ft), le_heading_degT=a.heading,
-            le_displaced_threshold_ft=None,
-            he_ident=a.he, he_latitude_deg=far[0], he_longitude_deg=far[1],
-            he_elevation_ft=int(a.elevation_ft), he_heading_degT=(a.heading + 180.0) % 360.0,
-            he_displaced_threshold_ft=None,
-        ))
+        rows.append(
+            dict(
+                id=100 + i,
+                airport_ref=i + 1,
+                airport_ident=a.icao,
+                length_ft=int(a.length_nm * 6076),
+                width_ft=148,
+                surface="ASP",
+                lighted=True,
+                closed=False,
+                le_ident=a.le,
+                le_latitude_deg=a.threshold[0],
+                le_longitude_deg=a.threshold[1],
+                le_elevation_ft=int(a.elevation_ft),
+                le_heading_degT=a.heading,
+                le_displaced_threshold_ft=None,
+                he_ident=a.he,
+                he_latitude_deg=far[0],
+                he_longitude_deg=far[1],
+                he_elevation_ft=int(a.elevation_ft),
+                he_heading_degT=(a.heading + 180.0) % 360.0,
+                he_displaced_threshold_ft=None,
+            )
+        )
     return pd.DataFrame(rows)
 
 
@@ -409,13 +455,19 @@ def detection_zones(max_nm: float = 40.0) -> pd.DataFrame:
             if d >= max_nm:
                 continue
             lo = max(r for r in rings if r <= d)
-            rows.append(dict(
-                apt_ident=a.icao, apt_hex_id=cell,
-                distance_from_center=h3.grid_distance(centre, cell),
-                apt_latitude_deg=lat, apt_longitude_deg=lon,
-                apt_min_c_radius_nm=float(lo), apt_max_c_radius_nm=float(lo + 5),
-                apt_type="large_airport", apt_scheduled="yes",
-            ))
+            rows.append(
+                dict(
+                    apt_ident=a.icao,
+                    apt_hex_id=cell,
+                    distance_from_center=h3.grid_distance(centre, cell),
+                    apt_latitude_deg=lat,
+                    apt_longitude_deg=lon,
+                    apt_min_c_radius_nm=float(lo),
+                    apt_max_c_radius_nm=float(lo + 5),
+                    apt_type="large_airport",
+                    apt_scheduled="yes",
+                )
+            )
     return pd.DataFrame(rows)
 
 
@@ -439,12 +491,22 @@ def airport_layouts() -> pd.DataFrame:
             for cell in sorted(cells - seen):
                 seen.add(cell)
                 clat, clon = h3.cell_to_latlng(cell)
-                rows.append(dict(
-                    hexaero_apt_icao=a.icao, hexaero_h3_id=cell, hexaero_latitude=clat,
-                    hexaero_longitude=clon, hexaero_res=12, hexaero_aeroway=aeroway,
-                    hexaero_length=None, hexaero_ref=ref, hexaero_surface=None,
-                    hexaero_width=None, hexaero_osm_id=osm, hexaero_type="way",
-                ))
+                rows.append(
+                    dict(
+                        hexaero_apt_icao=a.icao,
+                        hexaero_h3_id=cell,
+                        hexaero_latitude=clat,
+                        hexaero_longitude=clon,
+                        hexaero_res=12,
+                        hexaero_aeroway=aeroway,
+                        hexaero_length=None,
+                        hexaero_ref=ref,
+                        hexaero_surface=None,
+                        hexaero_width=None,
+                        hexaero_osm_id=osm,
+                        hexaero_type="way",
+                    )
+                )
     return pd.DataFrame(rows)
 
 
@@ -460,8 +522,16 @@ def runway_zones() -> pd.DataFrame:
         ) - runway
         for zone, cells in (("runway", runway), ("approach", approach)):
             for cell in sorted(cells):
-                rows.append(dict(h3_id=cell, apt_icao=a.icao, strip_id=strip,
-                                 le_ident=a.le, he_ident=a.he, zone=zone))
+                rows.append(
+                    dict(
+                        h3_id=cell,
+                        apt_icao=a.icao,
+                        strip_id=strip,
+                        le_ident=a.le,
+                        he_ident=a.he,
+                        zone=zone,
+                    )
+                )
     return pd.DataFrame(rows)
 
 
@@ -481,22 +551,40 @@ def airspaces(sv: pd.DataFrame) -> pd.DataFrame:
     for cell in sorted(near):
         lon = h3.cell_to_latlng(cell)[1]
         code = "EBBU" if lon < 6.0 else ("EDGG" if lon < 12.0 else "LOVV")
-        rows.append(dict(
-            airspace_type="FIR", name=code, code=code, airac_cfmu="486",
-            validity_start="2024-05-16", validity_end="2024-06-13", min_fl=0, max_fl=999,
-            area_km2=1.0e5, h3_cell=cell, h3_res=7,
-        ))
+        rows.append(
+            dict(
+                airspace_type="FIR",
+                name=code,
+                code=code,
+                airac_cfmu="486",
+                validity_start="2024-05-16",
+                validity_end="2024-06-13",
+                min_fl=0,
+                max_fl=999,
+                area_km2=1.0e5,
+                h3_cell=cell,
+                h3_res=7,
+            )
+        )
     return pd.DataFrame(rows)
 
 
 def aircraft_db() -> pd.DataFrame:
     """The ``osn_aircraft_db`` table for the simulated airframes."""
     icao24s = sorted({f.icao24 for f in FLIGHTS})
-    return pd.DataFrame([
-        dict(icao24=i, registration=f"OO-{n:03d}", model="A320", typecode="A320",
-             icao_aircraft_class="L2J", icao_operator="TST")
-        for n, i in enumerate(icao24s)
-    ])
+    return pd.DataFrame(
+        [
+            dict(
+                icao24=i,
+                registration=f"OO-{n:03d}",
+                model="A320",
+                typecode="A320",
+                icao_aircraft_class="L2J",
+                icao_operator="TST",
+            )
+            for n, i in enumerate(icao24s)
+        ]
+    )
 
 
 # --- running the steps ------------------------------------------------------
@@ -527,8 +615,7 @@ def configuration(name: str, warehouse: str):
     """
     from opdi.config import DetectionConfig, EventConfig, OPDIConfig
 
-    config = OPDIConfig.for_environment("local", worldwide=(name == "default"),
-                                        warehouse=warehouse)
+    config = OPDIConfig.for_environment("local", worldwide=(name == "default"), warehouse=warehouse)
     # Plain parquet folders, no catalog, as in the opensky environment.
     config.spark.enable_iceberg = False
     config.spark.enable_hive = False
@@ -566,62 +653,80 @@ def write_inputs(spark, config) -> None:
     sdf = spark.createDataFrame(raw, sv_ddl)
     scratch = os.path.join(config.project.warehouse_path, "_ingest_scratch")
     ingest = StateVectorIngestion(
-        spark, config, local_download_path=os.path.join(scratch, "download"),
+        spark,
+        config,
+        local_download_path=os.path.join(scratch, "download"),
         log_file_path=os.path.join(scratch, "logs", "01.log"),
     )
     # The same transformations as ``StateVectorIngestion.ingest_from_s3``.
     sdf = ingest._apply_filters(sdf)
     sdf = sdf.withColumn("event_time", F.from_unixtime(F.col("event_time")).cast("timestamp"))
     sdf = sdf.withColumn("event_time_day", F.to_date(F.col("event_time")))
-    storage.write_table(sdf, "osn_statevectors_v2", mode="overwrite",
-                        partition_by=["event_time_day"])
+    storage.write_table(
+        sdf, "osn_statevectors_v2", mode="overwrite", partition_by=["event_time_day"]
+    )
 
     from opdi.reference.h3_airspaces import AIRSPACE_SCHEMA
 
     tables = {
-        "oa_airports": (oa_airports(),
-                        "id int, ident string, type string, name string, latitude_deg double, "
-                        "longitude_deg double, elevation_ft int, continent string, "
-                        "iso_country string, iso_region string, municipality string, "
-                        "scheduled_service string, gps_code string, iata_code string, "
-                        "local_code string, home_link string, wikipedia_link string, "
-                        "keywords string"),
-        "oa_runways": (oa_runways(),
-                       "id int, airport_ref int, airport_ident string, length_ft int, "
-                       "width_ft int, surface string, lighted boolean, closed boolean, "
-                       "le_ident string, le_latitude_deg double, le_longitude_deg double, "
-                       "le_elevation_ft int, le_heading_degT double, "
-                       "le_displaced_threshold_ft int, he_ident string, "
-                       "he_latitude_deg double, he_longitude_deg double, he_elevation_ft int, "
-                       "he_heading_degT double, he_displaced_threshold_ft int"),
+        "oa_airports": (
+            oa_airports(),
+            "id int, ident string, type string, name string, latitude_deg double, "
+            "longitude_deg double, elevation_ft int, continent string, "
+            "iso_country string, iso_region string, municipality string, "
+            "scheduled_service string, gps_code string, iata_code string, "
+            "local_code string, home_link string, wikipedia_link string, "
+            "keywords string",
+        ),
+        "oa_runways": (
+            oa_runways(),
+            "id int, airport_ref int, airport_ident string, length_ft int, "
+            "width_ft int, surface string, lighted boolean, closed boolean, "
+            "le_ident string, le_latitude_deg double, le_longitude_deg double, "
+            "le_elevation_ft int, le_heading_degT double, "
+            "le_displaced_threshold_ft int, he_ident string, "
+            "he_latitude_deg double, he_longitude_deg double, he_elevation_ft int, "
+            "he_heading_degT double, he_displaced_threshold_ft int",
+        ),
         "h3_airport_detection_zones": (
             detection_zones(),
             "apt_ident string, apt_hex_id string, distance_from_center int, "
             "apt_latitude_deg double, apt_longitude_deg double, apt_min_c_radius_nm double, "
-            "apt_max_c_radius_nm double, apt_type string, apt_scheduled string"),
+            "apt_max_c_radius_nm double, apt_type string, apt_scheduled string",
+        ),
         "hexaero_airport_layouts": (
             airport_layouts(),
             "hexaero_apt_icao string, hexaero_h3_id string, hexaero_latitude double, "
             "hexaero_longitude double, hexaero_res int, hexaero_aeroway string, "
             "hexaero_length double, hexaero_ref string, hexaero_surface string, "
-            "hexaero_width double, hexaero_osm_id bigint, hexaero_type string"),
-        "h3_runway_zones": (runway_zones(),
-                            "h3_id string, apt_icao string, strip_id string, le_ident string, "
-                            "he_ident string, zone string"),
-        "osn_aircraft_db": (aircraft_db(),
-                            "icao24 string, registration string, model string, "
-                            "typecode string, icao_aircraft_class string, "
-                            "icao_operator string"),
+            "hexaero_width double, hexaero_osm_id bigint, hexaero_type string",
+        ),
+        "h3_runway_zones": (
+            runway_zones(),
+            "h3_id string, apt_icao string, strip_id string, le_ident string, "
+            "he_ident string, zone string",
+        ),
+        "osn_aircraft_db": (
+            aircraft_db(),
+            "icao24 string, registration string, model string, "
+            "typecode string, icao_aircraft_class string, "
+            "icao_operator string",
+        ),
     }
     for name, (pdf, ddl) in tables.items():
         storage.write_table(_spark_frame(spark, pdf, ddl), name, mode="overwrite")
     fir = spark.createDataFrame(
-        [tuple(r) for r in airspaces(raw)[[f.name for f in AIRSPACE_SCHEMA.fields]].itertuples(
-            index=False)],
+        [
+            tuple(r)
+            for r in airspaces(raw)[[f.name for f in AIRSPACE_SCHEMA.fields]].itertuples(
+                index=False
+            )
+        ],
         AIRSPACE_SCHEMA,
     )
-    fir = (fir.withColumn("validity_start", F.col("validity_start").cast("timestamp"))
-           .withColumn("validity_end", F.col("validity_end").cast("timestamp")))
+    fir = fir.withColumn("validity_start", F.col("validity_start").cast("timestamp")).withColumn(
+        "validity_end", F.col("validity_end").cast("timestamp")
+    )
     storage.write_table(fir, "opdi_h3_airspace_ref", mode="overwrite")
 
 
@@ -668,10 +773,16 @@ def _collect(sdf) -> pd.DataFrame:
     types = [(f.name, f.dataType.simpleString()) for f in sdf.schema.fields]
     # Sorting on the text form of every column gives one order for any type,
     # including arrays and maps.
-    order = [F.col(c).cast("string").asc_nulls_first() for c, t in types
-             if not t.startswith(("map", "array", "struct"))]
-    order += [F.to_json(F.col(c)).asc_nulls_first() for c, t in types
-              if t.startswith(("map", "array", "struct"))]
+    order = [
+        F.col(c).cast("string").asc_nulls_first()
+        for c, t in types
+        if not t.startswith(("map", "array", "struct"))
+    ]
+    order += [
+        F.to_json(F.col(c)).asc_nulls_first()
+        for c, t in types
+        if t.startswith(("map", "array", "struct"))
+    ]
     pdf = sdf.orderBy(*order).toPandas() if types else pd.DataFrame()
     pdf = pdf.reset_index(drop=True)
     pdf.attrs["types"] = types

@@ -145,8 +145,10 @@ class StateVectorIngestion:
         if self.bbox:
             min_lon, min_lat, max_lon, max_lat = self.bbox
             df = df.filter(
-                (col("lon") >= min_lon) & (col("lon") <= max_lon)
-                & (col("lat") >= min_lat) & (col("lat") <= max_lat)
+                (col("lon") >= min_lon)
+                & (col("lon") <= max_lon)
+                & (col("lat") >= min_lat)
+                & (col("lat") <= max_lat)
             )
 
         if self.time_interval > 1:
@@ -166,9 +168,7 @@ class StateVectorIngestion:
         window -- one shuffle, and native Spark throughout.
         """
         rest = [c for c in df.columns if c != "event_time"]
-        binned = df.withColumn(
-            "_bin", col("event_time") - (col("event_time") % self.time_interval)
-        )
+        binned = df.withColumn("_bin", col("event_time") - (col("event_time") % self.time_interval))
         return (
             binned.groupBy("icao24", "_bin")
             .agg(F.max(F.struct("event_time", *rest)).alias("_s"))
@@ -210,9 +210,7 @@ class StateVectorIngestion:
             )
 
         print("Setting up MinIO client...")
-        self._execute_shell_command(
-            "curl -O https://dl.min.io/client/mc/release/linux-amd64/mc"
-        )
+        self._execute_shell_command("curl -O https://dl.min.io/client/mc/release/linux-amd64/mc")
         self._execute_shell_command("chmod +x mc")
 
         stdout, stderr = self._execute_shell_command(
@@ -368,11 +366,9 @@ class StateVectorIngestion:
         df_with_partition = df.withColumn("event_time_day", to_date(col("event_time")))
 
         # Repartition for efficient write
-        df_partitioned = df_with_partition.repartition("event_time_day").orderBy(
-            "event_time_day"
-        )
+        df_partitioned = df_with_partition.repartition("event_time_day").orderBy("event_time_day")
 
-# Partitioned by day, and the partition column is kept.
+        # Partitioned by day, and the partition column is kept.
         #
         # It used to be dropped here on the grounds that Iceberg would add it
         # back, which is true under Iceberg and false in the opensky
@@ -386,10 +382,11 @@ class StateVectorIngestion:
         # for a month) or to refetch the overlap every day (three times the
         # network). With them, each calendar day is fetched once and dropped
         # when the window has moved past it.
-        days = [r[0] for r in
-                df_partitioned.select("event_time_day").distinct().collect()]
+        days = [r[0] for r in df_partitioned.select("event_time_day").distinct().collect()]
         self.storage.write_table(
-            df_partitioned, "osn_statevectors_v2", mode="overwrite",
+            df_partitioned,
+            "osn_statevectors_v2",
+            mode="overwrite",
             partition_by=["event_time_day"],
             partition_values=[{"event_time_day": d} for d in days],
         )
@@ -406,8 +403,10 @@ class StateVectorIngestion:
         if os.environ.get("OPDI_REPORT_INGEST_ROWS"):
             print(f"Written {df_partitioned.count()} records to osn_statevectors_v2")
         else:
-            print("Written statevectors to osn_statevectors_v2 "
-                  "(set OPDI_REPORT_INGEST_ROWS=1 for a row count)")
+            print(
+                "Written statevectors to osn_statevectors_v2 "
+                "(set OPDI_REPORT_INGEST_ROWS=1 for a row count)"
+            )
 
     def cleanup_local_files(self, file_names: List[str]) -> None:
         """
@@ -459,9 +458,7 @@ class StateVectorIngestion:
         processed_files = self.load_processed_files()
 
         # Filter out already processed files
-        pending_files = [
-            f for f in files_to_download if f.split("/")[-1] not in processed_files
-        ]
+        pending_files = [f for f in files_to_download if f.split("/")[-1] not in processed_files]
 
         print(f"Total files: {len(files_to_download)}")
         print(f"Already processed: {len(files_to_download) - len(pending_files)}")
@@ -589,7 +586,9 @@ class StateVectorIngestion:
         df = df.withColumn("event_time_day", to_date(col("event_time")))
         days = [r[0] for r in df.select("event_time_day").distinct().collect()]
         self.storage.write_table(
-            df, "osn_statevectors_v2", mode="overwrite",
+            df,
+            "osn_statevectors_v2",
+            mode="overwrite",
             partition_by=["event_time_day"],
             partition_values=[{"event_time_day": d} for d in days],
         )

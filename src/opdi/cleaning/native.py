@@ -173,6 +173,7 @@ def _angular_delta(current: Column, previous: Column) -> Column:
 # Stage 1 -- duplicate removal
 # ---------------------------------------------------------------------------
 
+
 def drop_duplicate_statevectors(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """Drop duplicate ``(track_id, event_time)`` rows.
 
@@ -204,6 +205,7 @@ def drop_duplicate_statevectors(df: DataFrame, cfg: CleaningConfig) -> DataFrame
 # Stage 2 -- range validity
 # ---------------------------------------------------------------------------
 
+
 def mask_out_of_range_positions(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """NULL coordinates outside the physically possible range."""
     return df.withColumn(
@@ -218,6 +220,7 @@ def mask_out_of_range_positions(df: DataFrame, cfg: CleaningConfig) -> DataFrame
 # ---------------------------------------------------------------------------
 # Stage 3 -- stale-broadcast removal
 # ---------------------------------------------------------------------------
+
 
 def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """NULL values that were repeated rather than re-measured.
@@ -300,18 +303,13 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     # value to have been carried forward from.
     exempt = _sparse_mask(df, cfg)
     df = (
-        df.withColumn("_stale_latlon",
-                      ~exempt & ~F.coalesce(lat_or_lon, F.lit(False)))
-        .withColumn("_stale_position",
-                    ~exempt & ~F.coalesce(position, F.lit(False)))
-        .withColumn("_stale_speed",
-                    ~exempt & ~F.coalesce(speed, F.lit(False)))
+        df.withColumn("_stale_latlon", ~exempt & ~F.coalesce(lat_or_lon, F.lit(False)))
+        .withColumn("_stale_position", ~exempt & ~F.coalesce(position, F.lit(False)))
+        .withColumn("_stale_speed", ~exempt & ~F.coalesce(speed, F.lit(False)))
     )
 
     for name in ("lat", "lon"):
-        df = df.withColumn(
-            name, F.when(~F.col("_stale_latlon"), F.col(name))
-        )
+        df = df.withColumn(name, F.when(~F.col("_stale_latlon"), F.col(name)))
     df = df.withColumn(
         "baro_altitude",
         F.when(~F.col("_stale_position"), F.col("baro_altitude")),
@@ -405,11 +403,7 @@ def _mask_spikes_one_column(
     prev_value = _prev_valid(value, scaled, w)
     prev_time = _prev_valid(value, F.col(_T), w)
 
-    delta = (
-        _angular_delta(scaled, prev_value)
-        if name == "heading"
-        else scaled - prev_value
-    )
+    delta = _angular_delta(scaled, prev_value) if name == "heading" else scaled - prev_value
 
     df = df.withColumn("_d_dt", F.col(_T) - prev_time).withColumn("_d_dv", delta)
 
@@ -422,17 +416,11 @@ def _mask_spikes_one_column(
     # it carries the same unit as deriv1. It is not a rate of a rate.
     df = df.withColumn(
         "_d_f1",
-        F.when(
-            (F.abs(F.col("_d_dv")) / F.col("_d_dt")) >= F.lit(first_max), 1
-        ).otherwise(0),
+        F.when((F.abs(F.col("_d_dv")) / F.col("_d_dt")) >= F.lit(first_max), 1).otherwise(0),
     ).withColumn(
         "_d_f2",
         F.when(
-            (
-                F.lit(2.0)
-                * F.abs(F.col("_d_dv") - prev_dv)
-                / (F.col("_d_dt") + prev_dt)
-            )
+            (F.lit(2.0) * F.abs(F.col("_d_dv") - prev_dv) / (F.col("_d_dt") + prev_dt))
             >= F.lit(second_max),
             1,
         ).otherwise(0),
@@ -489,6 +477,7 @@ def mask_derivative_spikes(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
 # Stage 5 -- isolated-point removal
 # ---------------------------------------------------------------------------
 
+
 def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """NULL values too far in time from any other measurement of that column.
 
@@ -519,9 +508,7 @@ def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
         value = F.col(name)
         backward = F.col(_T) - _prev_valid(value, F.col(_T), w)
         forward = _next_valid(value, F.col(_T)) - F.col(_T)
-        gap = F.least(
-            F.coalesce(backward, sentinel), F.coalesce(forward, sentinel)
-        )
+        gap = F.least(F.coalesce(backward, sentinel), F.coalesce(forward, sentinel))
         df = df.withColumn(name, F.when((gap <= limit) | exempt, value))
 
     return df.drop(_T)
@@ -530,6 +517,7 @@ def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
 # ---------------------------------------------------------------------------
 # Stage 6 -- gap segmentation
 # ---------------------------------------------------------------------------
+
 
 def add_segment_id(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """Add ``segment_id``, splitting a track at coverage holes.
@@ -558,6 +546,7 @@ def add_segment_id(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
 # Composition
 # ---------------------------------------------------------------------------
 
+
 def clean_tracks(df: DataFrame, cfg: Optional[CleaningConfig] = None) -> DataFrame:
     """Run the full native cleaning pipeline over an ``osn_tracks`` frame.
 
@@ -584,9 +573,7 @@ def clean_tracks(df: DataFrame, cfg: Optional[CleaningConfig] = None) -> DataFra
     )
 
 
-def null_rate_report(
-    df: DataFrame, columns: Sequence[str] = CLEANED_COLUMNS
-) -> Dict[str, float]:
+def null_rate_report(df: DataFrame, columns: Sequence[str] = CLEANED_COLUMNS) -> Dict[str, float]:
     """Fraction of NULLs per column, for verifying a cleaning run.
 
     The pipeline verification asserts that null rates per stage stay within
@@ -599,10 +586,7 @@ def null_rate_report(
 
     row = df.select(
         F.count(F.lit(1)).alias("_n"),
-        *[
-            F.sum(F.when(F.col(c).isNull(), 1).otherwise(0)).alias(c)
-            for c in present
-        ],
+        *[F.sum(F.when(F.col(c).isNull(), 1).otherwise(0)).alias(c) for c in present],
     ).first()
 
     total = row["_n"] or 0

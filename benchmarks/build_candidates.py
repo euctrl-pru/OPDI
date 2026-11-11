@@ -27,8 +27,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--month", default="202506")
     ap.add_argument("--max-radius-nm", type=float, default=110.0)
-    ap.add_argument("--results-dir", default=None,
-                    help="unused; accepted so the chain can call this like a job")
+    ap.add_argument(
+        "--results-dir", default=None, help="unused; accepted so the chain can call this like a job"
+    )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4055)
     ap.add_argument("--rebuild", action="store_true", default=True)
@@ -47,8 +48,7 @@ def main() -> None:
     month = datetime.strptime(args.month, "%Y%m").date().replace(day=1)
     cfg = OPDIConfig.for_environment("opensky")
     proc = FlightListProcessor(spark, cfg)
-    proc.build_endpoint_candidates(
-        month, max_radius_nm=args.max_radius_nm, rebuild=args.rebuild)
+    proc.build_endpoint_candidates(month, max_radius_nm=args.max_radius_nm, rebuild=args.rebuild)
     print(f"endpoint candidates built for {month:%Y-%m}")
     spark.stop()
 

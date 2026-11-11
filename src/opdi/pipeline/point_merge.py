@@ -49,9 +49,13 @@ def _bearing_deg(lat1, lon1, lat2, lon2):
 
 def _candidates(geo: DataFrame, pms_ref: DataFrame, config: EventConfig) -> DataFrame:
     ref = pms_ref.select(
-        col("apt_icao").alias("_apt"), "pms_id", "merge_point",
-        col("lat").alias("_mp_lat"), col("lon").alias("_mp_lon"),
-        "legs_mp_min_nm", "legs_mp_max_nm",
+        col("apt_icao").alias("_apt"),
+        "pms_id",
+        "merge_point",
+        col("lat").alias("_mp_lat"),
+        col("lon").alias("_mp_lon"),
+        "legs_mp_min_nm",
+        "legs_mp_max_nm",
     )
     df = geo.filter(col("ades").isNotNull() & col("lat").isNotNull() & col("lon").isNotNull())
     df = df.join(F.broadcast(ref), df["ades"] == ref["_apt"], "inner")
@@ -66,7 +70,11 @@ def _candidates(geo: DataFrame, pms_ref: DataFrame, config: EventConfig) -> Data
     # direct. Read the last heading the track had, within the piece.
     if PIECE not in df.columns:
         df = df.withColumn(PIECE, lit(0))
-    known = Window.partitionBy("track_id", PIECE).orderBy("_ts").rowsBetween(Window.unboundedPreceding, 0)
+    known = (
+        Window.partitionBy("track_id", PIECE)
+        .orderBy("_ts")
+        .rowsBetween(Window.unboundedPreceding, 0)
+    )
     df = df.withColumn("heading", F.last("heading", ignorenulls=True).over(known))
     return df.filter(
         (col("d_nm") <= config.pms_candidate_radius_nm)
@@ -101,8 +109,12 @@ def _leg_and_direct_flags(df: DataFrame, config: EventConfig) -> DataFrame:
     aligned = (off < config.pms_direct_align_deg) & (col("d_nm") < F.lag("d_nm").over(base))
     df = df.withColumn("_aligned", F.coalesce(aligned, lit(False)))
     a_start = col("_aligned") & ~F.coalesce(F.lag("_aligned").over(base), lit(False))
-    run_start = F.max(F.when(a_start, col("_ts"))).over(base.rowsBetween(Window.unboundedPreceding, 0))
-    long_aligned = col("_aligned") & ((col("_ts") - run_start) >= config.pms_direct_min_duration_seconds)
+    run_start = F.max(F.when(a_start, col("_ts"))).over(
+        base.rowsBetween(Window.unboundedPreceding, 0)
+    )
+    long_aligned = col("_aligned") & (
+        (col("_ts") - run_start) >= config.pms_direct_min_duration_seconds
+    )
     df = df.withColumn("_long_aligned", F.coalesce(long_aligned, lit(False)))
     ahead = base.rangeBetween(0, int(config.pms_direct_lookahead_seconds))
     df = df.withColumn("_direct_ok", F.max(col("_long_aligned").cast("int")).over(ahead) >= 1)
@@ -113,23 +125,34 @@ def _leg_and_direct_flags(df: DataFrame, config: EventConfig) -> DataFrame:
 def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
     base = Window.partitionBy(*_KEY).orderBy("_ts")
     starts = col("_on_leg") & ~F.coalesce(F.lag("_on_leg").over(base), lit(False))
-    df = df.withColumn("_run", F.sum(starts.cast("int")).over(base.rowsBetween(Window.unboundedPreceding, 0)))
-    legs = df.filter(col("_on_leg")).groupBy(*_KEY, "_run", "apt_icao").agg(
-        F.min("_ts").alias("start_ts"), F.max("_ts").alias("end_ts"),
-        F.min_by("event_time", "_ts").alias("start_time"), F.max_by("event_time", "_ts").alias("end_time"),
-        F.min_by("lat", "_ts").alias("start_lat"), F.min_by("lon", "_ts").alias("start_lon"),
-        F.max_by("lat", "_ts").alias("end_lat"), F.max_by("lon", "_ts").alias("end_lon"),
-        F.min_by("_alt_ft", "_ts").alias("start_alt_ft"), F.max_by("_alt_ft", "_ts").alias("end_alt_ft"),
-        F.min_by("cumulative_distance_nm", "_ts").alias("start_dist_nm"),
-        F.max_by("cumulative_distance_nm", "_ts").alias("end_dist_nm"),
-        F.min_by("cumulative_time_s", "_ts").alias("start_cum_s"),
-        F.max_by("cumulative_time_s", "_ts").alias("end_cum_s"),
-        F.avg("d_nm").alias("leg_distance_nm"),
-        F.percentile_approx("_alt_ft", 0.5).alias("leg_level_ft"),
-        F.sum("_sweep").alias("sweep_deg"),
-        F.max_by("d_nm", "_ts").alias("direct_to_distance_nm"),
-        F.max_by("_direct_ok", "_ts").alias("direct_ok"),
-        F.max_by("_min_d_ahead", "_ts").alias("min_d_ahead"),
+    df = df.withColumn(
+        "_run", F.sum(starts.cast("int")).over(base.rowsBetween(Window.unboundedPreceding, 0))
+    )
+    legs = (
+        df.filter(col("_on_leg"))
+        .groupBy(*_KEY, "_run", "apt_icao")
+        .agg(
+            F.min("_ts").alias("start_ts"),
+            F.max("_ts").alias("end_ts"),
+            F.min_by("event_time", "_ts").alias("start_time"),
+            F.max_by("event_time", "_ts").alias("end_time"),
+            F.min_by("lat", "_ts").alias("start_lat"),
+            F.min_by("lon", "_ts").alias("start_lon"),
+            F.max_by("lat", "_ts").alias("end_lat"),
+            F.max_by("lon", "_ts").alias("end_lon"),
+            F.min_by("_alt_ft", "_ts").alias("start_alt_ft"),
+            F.max_by("_alt_ft", "_ts").alias("end_alt_ft"),
+            F.min_by("cumulative_distance_nm", "_ts").alias("start_dist_nm"),
+            F.max_by("cumulative_distance_nm", "_ts").alias("end_dist_nm"),
+            F.min_by("cumulative_time_s", "_ts").alias("start_cum_s"),
+            F.max_by("cumulative_time_s", "_ts").alias("end_cum_s"),
+            F.avg("d_nm").alias("leg_distance_nm"),
+            F.percentile_approx("_alt_ft", 0.5).alias("leg_level_ft"),
+            F.sum("_sweep").alias("sweep_deg"),
+            F.max_by("d_nm", "_ts").alias("direct_to_distance_nm"),
+            F.max_by("_direct_ok", "_ts").alias("direct_ok"),
+            F.max_by("_min_d_ahead", "_ts").alias("min_d_ahead"),
+        )
     )
     legs = legs.withColumn("duration_s", col("end_ts") - col("start_ts"))
     # A leg counts when the track then went to the merge point: within the
@@ -152,26 +175,36 @@ def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
     by_start = Window.partitionBy("track_id", PIECE).orderBy("start_ts", "merge_point")
     prev_max_end = F.max("end_ts").over(by_start.rowsBetween(Window.unboundedPreceding, -1))
     legs = legs.withColumn("_new_group", F.coalesce(col("start_ts") > prev_max_end, lit(True)))
-    legs = legs.withColumn("_group", F.sum(col("_new_group").cast("int")).over(
-        by_start.rowsBetween(Window.unboundedPreceding, 0)))
+    legs = legs.withColumn(
+        "_group",
+        F.sum(col("_new_group").cast("int")).over(
+            by_start.rowsBetween(Window.unboundedPreceding, 0)
+        ),
+    )
     one = Window.partitionBy("track_id", PIECE, "_group").orderBy(
         col("min_d_ahead").asc(), col("merge_point").asc()
     )
-    legs = legs.withColumn("_rank", F.row_number().over(one)).filter(col("_rank") == 1).drop(
-        "_rank", "_new_group", "_group")
+    legs = (
+        legs.withColumn("_rank", F.row_number().over(one))
+        .filter(col("_rank") == 1)
+        .drop("_rank", "_new_group", "_group")
+    )
     seq = Window.partitionBy("track_id").orderBy("start_ts")
     return legs.withColumn("leg_seq", F.row_number().over(seq))
 
 
 def _event(df: DataFrame, kind: str, type_name: str) -> DataFrame:
     return df.select(
-        col("track_id"), lit(type_name).alias("type"),
+        col("track_id"),
+        lit(type_name).alias("type"),
         col(f"{kind}_time").alias("event_time"),
-        col(f"{kind}_lon").alias("lon"), col(f"{kind}_lat").alias("lat"),
+        col(f"{kind}_lon").alias("lon"),
+        col(f"{kind}_lat").alias("lat"),
         col(f"{kind}_alt_ft").alias("altitude_ft"),
         col(f"{kind}_dist_nm").alias("cumulative_distance_nm"),
         col(f"{kind}_cum_s").cast("long").alias("cumulative_time_s"),
-        col("info"), lit(PMS_VERSION).alias("version"),
+        col("info"),
+        lit(PMS_VERSION).alias("version"),
     )
 
 
@@ -193,16 +226,21 @@ def calculate_point_merge_events(
     df = _leg_and_direct_flags(df, config)
     legs = _legs(df, config)
 
-    leg_info = F.to_json(F.struct(
-        col("apt_icao"), col("pms_id"), col("merge_point"), col("leg_seq"),
-        F.when(col("sweep_deg") > 0, lit("cw")).otherwise(lit("ccw")).alias("direction"),
-        F.round(col("leg_distance_nm"), 2).alias("leg_distance_nm"),
-        F.round(col("leg_level_ft"), 0).alias("leg_level_ft"),
-        col("duration_s"),
-        F.round(col("end_dist_nm") - col("start_dist_nm"), 2).alias("distance_nm"),
-        F.round(col("direct_to_distance_nm"), 2).alias("direct_to_distance_nm"),
-        col("direct_ok").alias("direct_aligned"),
-    ))
+    leg_info = F.to_json(
+        F.struct(
+            col("apt_icao"),
+            col("pms_id"),
+            col("merge_point"),
+            col("leg_seq"),
+            F.when(col("sweep_deg") > 0, lit("cw")).otherwise(lit("ccw")).alias("direction"),
+            F.round(col("leg_distance_nm"), 2).alias("leg_distance_nm"),
+            F.round(col("leg_level_ft"), 0).alias("leg_level_ft"),
+            col("duration_s"),
+            F.round(col("end_dist_nm") - col("start_dist_nm"), 2).alias("distance_nm"),
+            F.round(col("direct_to_distance_nm"), 2).alias("direct_to_distance_nm"),
+            col("direct_ok").alias("direct_aligned"),
+        )
+    )
     legs = legs.withColumn("info", leg_info)
     out = _event(legs, "start", "pms-leg-entry").unionByName(_event(legs, "end", "pms-leg-exit"))
 
@@ -210,30 +248,47 @@ def calculate_point_merge_events(
     # one event per (track, piece, pms_id), for the point come closest to,
     # since the points of one system can be a mile apart and the same sample
     # would otherwise give two events with one id.
-    closest = df.groupBy(*_KEY, "apt_icao").agg(
-        F.min("d_nm").alias("closest_nm"),
-        F.min_by("_ts", "d_nm").alias("mp_ts"),
-        F.min_by("event_time", "d_nm").alias("mp_time"),
-        F.min_by("lat", "d_nm").alias("mp_lat"), F.min_by("lon", "d_nm").alias("mp_lon"),
-        F.min_by("_alt_ft", "d_nm").alias("mp_alt_ft"),
-        F.min_by("cumulative_distance_nm", "d_nm").alias("mp_dist_nm"),
-        F.min_by("cumulative_time_s", "d_nm").alias("mp_cum_s"),
-    ).filter(col("closest_nm") <= config.pms_merge_point_radius_nm)
-    one_mp = Window.partitionBy("track_id", PIECE, "pms_id").orderBy(col("closest_nm").asc(), col("merge_point").asc())
-    closest = closest.withColumn("_rank", F.row_number().over(one_mp)).filter(col("_rank") == 1).drop("_rank")
+    closest = (
+        df.groupBy(*_KEY, "apt_icao")
+        .agg(
+            F.min("d_nm").alias("closest_nm"),
+            F.min_by("_ts", "d_nm").alias("mp_ts"),
+            F.min_by("event_time", "d_nm").alias("mp_time"),
+            F.min_by("lat", "d_nm").alias("mp_lat"),
+            F.min_by("lon", "d_nm").alias("mp_lon"),
+            F.min_by("_alt_ft", "d_nm").alias("mp_alt_ft"),
+            F.min_by("cumulative_distance_nm", "d_nm").alias("mp_dist_nm"),
+            F.min_by("cumulative_time_s", "d_nm").alias("mp_cum_s"),
+        )
+        .filter(col("closest_nm") <= config.pms_merge_point_radius_nm)
+    )
+    one_mp = Window.partitionBy("track_id", PIECE, "pms_id").orderBy(
+        col("closest_nm").asc(), col("merge_point").asc()
+    )
+    closest = (
+        closest.withColumn("_rank", F.row_number().over(one_mp))
+        .filter(col("_rank") == 1)
+        .drop("_rank")
+    )
     via = legs.select(*[col(k).alias(f"_l_{k}") for k in _KEY], col("end_ts").alias("_l_end"))
     cond = (
-        (col("track_id") == col("_l_track_id")) & (col(PIECE) == col(f"_l_{PIECE}"))
+        (col("track_id") == col("_l_track_id"))
+        & (col(PIECE) == col(f"_l_{PIECE}"))
         & (col("pms_id") == col("_l_pms_id"))
         & (col("mp_ts") >= col("_l_end"))
         & (col("mp_ts") - col("_l_end") <= config.pms_direct_lookahead_seconds)
     )
     closest = closest.join(via, cond, "left").withColumn("via_leg", col("_l_end").isNotNull())
     closest = closest.dropDuplicates(_KEY)
-    mp_info = F.to_json(F.struct(
-        col("apt_icao"), col("pms_id"), col("merge_point"),
-        F.round(col("closest_nm"), 2).alias("closest_nm"), col("via_leg"),
-    ))
+    mp_info = F.to_json(
+        F.struct(
+            col("apt_icao"),
+            col("pms_id"),
+            col("merge_point"),
+            F.round(col("closest_nm"), 2).alias("closest_nm"),
+            col("via_leg"),
+        )
+    )
     closest = closest.withColumn("info", mp_info)
     out = out.unionByName(_event(closest, "mp", "pms-merge-point"))
     return out

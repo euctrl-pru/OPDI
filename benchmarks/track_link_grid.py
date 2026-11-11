@@ -318,15 +318,29 @@ COUNT_FIELDS = (
 )
 
 _STRATUM_KEYS = (
-    "point_id", "kind", "control_family", "counts_toward_limit", "gap_stratum", "depth_min",
-    "requested_gap_min", "same_callsign", "within_link_max_gap",
+    "point_id",
+    "kind",
+    "control_family",
+    "counts_toward_limit",
+    "gap_stratum",
+    "depth_min",
+    "requested_gap_min",
+    "same_callsign",
+    "within_link_max_gap",
 )
 
 #: Enough to keep the many small per-point jobs from running hundreds of tasks.
 _FEATURE_PARTITIONS = 16
 
 _TRACK_COLUMNS = (
-    "icao24", "event_time", "lat", "lon", "baro_altitude", "velocity", "vert_rate", "callsign",
+    "icao24",
+    "event_time",
+    "lat",
+    "lon",
+    "baro_altitude",
+    "velocity",
+    "vert_rate",
+    "callsign",
 )
 
 _CODE_PATHS = [
@@ -380,7 +394,11 @@ def grid_from_json(text: str) -> List[SegmentationParams]:
         if name not in _link_fields():
             raise ValueError(f"{name} is not a link setting; choose from {_link_fields()}")
         if name in SWITCHES:
-            if not isinstance(values, list) or not values or not all(isinstance(v, bool) for v in values):
+            if (
+                not isinstance(values, list)
+                or not values
+                or not all(isinstance(v, bool) for v in values)
+            ):
                 raise ValueError(f"{name} needs a non-empty list of true or false, got {values!r}")
         elif (
             not isinstance(values, list)
@@ -538,7 +556,9 @@ def real_hole_counts(holes: DataFrame, p: SegmentationParams) -> Dict[str, int]:
         _sum_when(linked & (label == "false_join")).alias("linked_false_join"),
         _sum_when(linked & (label == "unknown")).alias("linked_unknown"),
         _sum_when(linked & read_through_blank).alias("linked_edge_read_through_blank"),
-        _sum_when(linked & false_join & read_through_blank).alias("false_joined_edge_read_through_blank"),
+        _sum_when(linked & false_join & read_through_blank).alias(
+            "false_joined_edge_read_through_blank"
+        ),
         _sum_when(linked & by_direction).alias("linked_by_direction"),
         _sum_when(linked & false_join & by_direction).alias("false_joined_by_direction"),
         _sum_when(linked & by_direction & labelled).alias("linked_by_direction_labelled"),
@@ -654,7 +674,9 @@ def _finish_stratum(row: Dict) -> Dict:
     return {**row, "wrong_share": wrong / n if n else None, "wrong_upper_95": upper}
 
 
-def strata_counts(controls: DataFrame, kind: str, p: SegmentationParams, point_id: int) -> List[Dict]:
+def strata_counts(
+    controls: DataFrame, kind: str, p: SegmentationParams, point_id: int
+) -> List[Dict]:
     """Controls per family and stratum at one point. ``wrong`` is the decision not wanted.
 
     For a ``negative`` control that is a link, for a ``positive`` one no link. Controls
@@ -668,7 +690,11 @@ def strata_counts(controls: DataFrame, kind: str, p: SegmentationParams, point_i
     size = "depth_min" if kind == "negative" else "requested_gap_min"
     toward_limit = _counts_toward_limit(p) if kind == "negative" else F.lit(False)
     keys = (
-        "control_family", "counts_toward_limit", size, "gap_stratum", "same_callsign",
+        "control_family",
+        "counts_toward_limit",
+        size,
+        "gap_stratum",
+        "same_callsign",
         "within_link_max_gap",
     )
     rows = (
@@ -740,7 +766,9 @@ def holes_inside_flights(holes: DataFrame, truth: DataFrame) -> DataFrame:
     )
 
 
-def _flights_with_tracks(flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams) -> DataFrame:
+def _flights_with_tracks(
+    flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams
+) -> DataFrame:
     """*flights* with ``_tracks``, each flight's A9 tracks less its holes *p* links."""
     linked = (
         holes_in_flights.filter(_linked(p))
@@ -751,7 +779,9 @@ def _flights_with_tracks(flights: DataFrame, holes_in_flights: DataFrame, p: Seg
     return flights.join(linked, on="flight_key", how="left").withColumn("_tracks", tracks)
 
 
-def flight_track_counts(flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams) -> Dict[str, int]:
+def flight_track_counts(
+    flights: DataFrame, holes_in_flights: DataFrame, p: SegmentationParams
+) -> Dict[str, int]:
     """Tracks on truth flights at *p*: each flight's A9 tracks less its linked holes.
 
     The ``base_`` counts are A9 itself, what the current rule scores, so the gain of
@@ -788,16 +818,22 @@ def with_population(truth: DataFrame, airports: DataFrame) -> DataFrame:
     ``load_flight_intervals`` does not. ``airports`` has the ``oa_airports`` columns.
     """
     min_lon, min_lat, max_lon, max_lat = EUROPE_BBOX
-    in_box = airports.where(
-        F.col("longitude_deg").between(min_lon, max_lon)
-        & F.col("latitude_deg").between(min_lat, max_lat)
-    ).select("ident").distinct()
+    in_box = (
+        airports.where(
+            F.col("longitude_deg").between(min_lon, max_lon)
+            & F.col("latitude_deg").between(min_lat, max_lat)
+        )
+        .select("ident")
+        .distinct()
+    )
 
     def inside(frame: DataFrame, column: str, flag: str) -> DataFrame:
         idents = F.broadcast(
             in_box.select(F.col("ident").alias(f"{flag}_ident"), F.lit(True).alias(flag))
         )
-        return frame.join(idents, F.trim(F.col(column)) == F.col(f"{flag}_ident"), "left").drop(f"{flag}_ident")
+        return frame.join(idents, F.trim(F.col(column)) == F.col(f"{flag}_ident"), "left").drop(
+            f"{flag}_ident"
+        )
 
     return (
         inside(inside(truth, "gt_adep", "_adep_in_box"), "gt_ades", "_ades_in_box")
@@ -883,7 +919,9 @@ def reason_counts(holes: DataFrame, p: SegmentationParams) -> List[Dict]:
         holes.withColumn("gap_band", _gap_band(F.col("gap_min"), p))
         .withColumn("first_failed_test", _first_failed_test(checks))
         .groupBy("population", "gap_band", "first_failed_test")
-        .agg(F.count(F.lit(1)).alias("holes"), _sum_when(failed == 1).alias("only_failed_test_holes"))
+        .agg(
+            F.count(F.lit(1)).alias("holes"), _sum_when(failed == 1).alias("only_failed_test_holes")
+        )
         .orderBy("population", "gap_band", "first_failed_test")
         .collect()
     )
@@ -1005,7 +1043,8 @@ def _direction_verdicts(row: Dict) -> Dict:
         same_status = "over_limit"
     return {
         **verdicts,
-        "negative_low_edge_within_limit": low_upper is not None and low_upper <= NEGATIVE_UPPER_LIMIT,
+        "negative_low_edge_within_limit": low_upper is not None
+        and low_upper <= NEGATIVE_UPPER_LIMIT,
         "same_callsign_low_edge_status": same_status,
         "real_by_direction_status": _real_status(row["false_joined_by_direction"], labelled),
     }
@@ -1044,7 +1083,9 @@ def with_verdicts(row: Dict) -> Dict:
         and "over_limit" not in real_statuses
     )
     cruise_cruise_controls = row["negative_limit_controls"] - row["negative_low_edge_controls"]
-    cruise_cruise_false_joins = row["negative_limit_false_joins"] - row["negative_low_edge_false_joins"]
+    cruise_cruise_false_joins = (
+        row["negative_limit_false_joins"] - row["negative_low_edge_false_joins"]
+    )
 
     population_shares = {}
     for name in ("crossing", "other"):
@@ -1147,7 +1188,11 @@ def lowest_bound_point(rows: List[Dict]) -> Optional[Dict]:
         return None
     return min(
         bounded,
-        key=lambda r: (r["negative_cruise_cruise_upper_95"], -r["flights_in_one_track"], r["point_id"]),
+        key=lambda r: (
+            r["negative_cruise_cruise_upper_95"],
+            -r["flights_in_one_track"],
+            r["point_id"],
+        ),
     )
 
 
@@ -1258,7 +1303,10 @@ class DayFeatures:
 
 
 def _controls_per_family(controls: DataFrame) -> Dict[str, int]:
-    return {r["control_family"]: r["count"] for r in controls.groupBy("control_family").count().collect()}
+    return {
+        r["control_family"]: r["count"]
+        for r in controls.groupBy("control_family").count().collect()
+    }
 
 
 def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -> DayFeatures:
@@ -1276,7 +1324,9 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
         # The in-box flags travel with the truth when it has them: the labeller reads
         # them, and an event outside the box is then no evidence of a stop.
         flags = [c for c in ("adep_in_box", "ades_in_box") if c in truth.columns]
-        truth = _keep(truth.select("flight_key", "icao24", "t_off", "t_land", "crosses_box", *flags))
+        truth = _keep(
+            truth.select("flight_key", "icao24", "t_off", "t_land", "crosses_box", *flags)
+        )
 
     with _timed("real holes"):
         # Kept before labelling, which reads its input twice.
@@ -1325,7 +1375,9 @@ def build_features(tracks: DataFrame, truth: DataFrame, p: SegmentationParams) -
     return DayFeatures(holes, negative, positive, flights, holes_in_flights, funnel, reasons)
 
 
-def score_day(day: str, tracks: DataFrame, truth: DataFrame, grid: List[SegmentationParams]) -> tuple:
+def score_day(
+    day: str, tracks: DataFrame, truth: DataFrame, grid: List[SegmentationParams]
+) -> tuple:
     """Grid rows, strata rows, the funnel row and the frames the reasons need, for one day."""
     print(f"--- {day}", flush=True)
     with _timed(f"{day}: features"):
@@ -1347,7 +1399,10 @@ def score_day(day: str, tracks: DataFrame, truth: DataFrame, grid: List[Segmenta
                     }
                 )
             )
-            for kind, controls in (("negative", features.negative), ("positive", features.positive)):
+            for kind, controls in (
+                ("negative", features.negative),
+                ("positive", features.positive),
+            ):
                 strata += [{"day": day, **s} for s in strata_counts(controls, kind, p, point_id)]
     funnel = {"day": day, **features.funnel}
     features.release()
@@ -1361,7 +1416,10 @@ def write_reasons(
     stage: Callable[..., None],
 ) -> None:
     """Stage the reasons reports for each day and pooled, each row naming its settings."""
-    settings = {"settings_from": settings_from, **{name: getattr(p, name) for name in _link_fields()}}
+    settings = {
+        "settings_from": settings_from,
+        **{name: getattr(p, name) for name in _link_fields()},
+    }
     reports = (
         (
             "link_reasons",
@@ -1435,7 +1493,11 @@ def run_study(
             writer.writeheader()
             writer.writerows(rows)
         provenance.record(
-            results_dir, name, "benchmarks/track_link_grid.py", list(argv), _CODE_PATHS,
+            results_dir,
+            name,
+            "benchmarks/track_link_grid.py",
+            list(argv),
+            _CODE_PATHS,
             inputs={
                 "days": list(days),
                 "grid_points": len(grid),
@@ -1517,7 +1579,9 @@ def main() -> int:
     # Before the session exists, so a bad grid costs nothing.
     grid = grid_from_json(args.grid_json) if args.grid_json else grid_points()
     reasons_params = (
-        reasons_params_from_json(args.reasons_params_json, grid) if args.reasons_params_json else None
+        reasons_params_from_json(args.reasons_params_json, grid)
+        if args.reasons_params_json
+        else None
     )
 
     import osn_sample
@@ -1539,7 +1603,10 @@ def main() -> int:
 
     try:
         run_study(
-            args.days, grid, lambda day: read_tracks(spark, args.source, day), load_truth,
+            args.days,
+            grid,
+            lambda day: read_tracks(spark, args.source, day),
+            load_truth,
             args.results_dir,
             argv=sys.argv[1:],
             input_tables=[f"{args.source}/dof={day}" for day in args.days] + [args.airports],

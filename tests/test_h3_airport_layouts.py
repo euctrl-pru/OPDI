@@ -7,6 +7,7 @@ direct call destroyed it -- which is exactly what happened during the
 flight-events-v4 campaign: the published table went from twenty airports to one.
 These tests pin the two properties that prevent it.
 """
+
 import pandas as pd
 
 from opdi.config import OPDIConfig
@@ -34,27 +35,32 @@ class StubStorage:
 def _fake_layout(apt):
     """Two rows in HEXAERO_SCHEMA's column order, so `createDataFrame` accepts
     them without the test having to care about the schema's contents."""
-    return pd.DataFrame({
-        "hexaero_apt_icao": [apt, apt],
-        "hexaero_h3_id": [apt + "-a", apt + "-b"],
-        "hexaero_latitude": [50.0, 50.1],
-        "hexaero_longitude": [4.0, 4.1],
-        "hexaero_res": [12, 12],
-        "hexaero_aeroway": ["parking_position", "taxiway"],
-        "hexaero_length": [1.0, 2.0],
-        "hexaero_ref": ["A1", "T1"],
-        "hexaero_surface": ["asphalt", "asphalt"],
-        "hexaero_width": [20.0, 20.0],
-        "hexaero_osm_id": [1, 2],
-        "hexaero_type": ["way", "way"],
-    })
+    return pd.DataFrame(
+        {
+            "hexaero_apt_icao": [apt, apt],
+            "hexaero_h3_id": [apt + "-a", apt + "-b"],
+            "hexaero_latitude": [50.0, 50.1],
+            "hexaero_longitude": [4.0, 4.1],
+            "hexaero_res": [12, 12],
+            "hexaero_aeroway": ["parking_position", "taxiway"],
+            "hexaero_length": [1.0, 2.0],
+            "hexaero_ref": ["A1", "T1"],
+            "hexaero_surface": ["asphalt", "asphalt"],
+            "hexaero_width": [20.0, 20.0],
+            "hexaero_osm_id": [1, 2],
+            "hexaero_type": ["way", "way"],
+        }
+    )
 
 
 def test_process_airport_writes_nothing(spark, monkeypatch, tmp_path):
     """The regression that cost a published table. A per-airport builder must
     not decide the fate of a table shared by every other airport."""
     import opdi.reference.h3_airport_layouts as mod
-    monkeypatch.setattr(mod, "hexagonify_airport", lambda a, resolution=12, source=None: _fake_layout(a))
+
+    monkeypatch.setattr(
+        mod, "hexagonify_airport", lambda a, resolution=12, source=None: _fake_layout(a)
+    )
     storage = StubStorage(None)
     gen = AirportLayoutGenerator(spark, OPDIConfig(), log_dir=str(tmp_path), storage=storage)
 
@@ -68,13 +74,17 @@ def test_many_airports_are_written_once_and_together(spark, monkeypatch, tmp_pat
     """Three airports, one write, all three in it -- not three overwrites
     leaving the last."""
     import opdi.reference.h3_airport_layouts as mod
-    monkeypatch.setattr(mod, "hexagonify_airport", lambda a, resolution=12, source=None: _fake_layout(a))
+
+    monkeypatch.setattr(
+        mod, "hexagonify_airport", lambda a, resolution=12, source=None: _fake_layout(a)
+    )
     storage = StubStorage(None)
     gen = AirportLayoutGenerator(spark, OPDIConfig(), log_dir=str(tmp_path), storage=storage)
     # `fetch_airport_list` downloads the OurAirports CSV; stub it so the test
     # is about the writes and not about the network.
     monkeypatch.setattr(
-        gen, "fetch_airport_list",
+        gen,
+        "fetch_airport_list",
         lambda *a, **k: pd.DataFrame({"ident": ["EBBR", "LSZH", "EHAM"]}),
     )
 

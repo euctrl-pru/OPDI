@@ -74,6 +74,7 @@ This module reads no storage. Callers hand it frames: samples with the raw
 ``baro_altitude``, ``velocity``, ``vert_rate``, ``callsign``), and truth from
 ``track_truth.load_flight_intervals``.
 """
+
 import math
 from functools import reduce
 from typing import Dict, Iterable, Optional
@@ -194,7 +195,8 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
         return (old < event) & (event < new)
 
     outside_inside = (
-        (inside(F.col("t_off")) & ~F.col("adep_in_box")) | (inside(F.col("t_land")) & ~F.col("ades_in_box"))
+        (inside(F.col("t_off")) & ~F.col("adep_in_box"))
+        | (inside(F.col("t_land")) & ~F.col("ades_in_box"))
         if flagged
         else F.lit(False)
     )
@@ -202,7 +204,8 @@ def label_real_holes(holes: DataFrame, truth: DataFrame) -> DataFrame:
     def near_an_edge(event: Column) -> Column:
         seconds = F.unix_timestamp(event)
         return inside(event) & (
-            (seconds - F.unix_timestamp(old) <= near_s) | (F.unix_timestamp(new) - seconds <= near_s)
+            (seconds - F.unix_timestamp(old) <= near_s)
+            | (F.unix_timestamp(new) - seconds <= near_s)
         )
 
     labels = (
@@ -283,24 +286,36 @@ def _deep_cuts(samples: DataFrame, floor_ft: float, depths: DataFrame) -> tuple:
         _edges_of_cruise(samples.filter(F.col("_alt_ft").isNotNull()), floor_ft)
         .withColumn(
             "_dip_before_last",
-            F.max(F.when(below & (F.col("_ts") < F.col("_last_cruise")), F.col("_ts"))).over(flight),
+            F.max(F.when(below & (F.col("_ts") < F.col("_last_cruise")), F.col("_ts"))).over(
+                flight
+            ),
         )
         .withColumn(
             "_dip_after_first",
-            F.min(F.when(below & (F.col("_ts") > F.col("_first_cruise")), F.col("_ts"))).over(flight),
+            F.min(F.when(below & (F.col("_ts") > F.col("_first_cruise")), F.col("_ts"))).over(
+                flight
+            ),
         )
         .filter(~below)
         .crossJoin(depths)
     )
     depth_s = F.col("depth_min") * 60
-    old_cut = with_runs.filter(
-        (_seconds("_ts") <= _seconds("_last_cruise") - depth_s)
-        & (F.col("_dip_before_last").isNull() | (F.col("_ts") > F.col("_dip_before_last")))
-    ).groupBy("flight_key", "depth_min", "_last_cruise").agg(F.max("_ts").alias("t_old_edge"))
-    new_cut = with_runs.filter(
-        (_seconds("_ts") >= _seconds("_first_cruise") + depth_s)
-        & (F.col("_dip_after_first").isNull() | (F.col("_ts") < F.col("_dip_after_first")))
-    ).groupBy("flight_key", "depth_min", "_first_cruise").agg(F.min("_ts").alias("t_new_edge"))
+    old_cut = (
+        with_runs.filter(
+            (_seconds("_ts") <= _seconds("_last_cruise") - depth_s)
+            & (F.col("_dip_before_last").isNull() | (F.col("_ts") > F.col("_dip_before_last")))
+        )
+        .groupBy("flight_key", "depth_min", "_last_cruise")
+        .agg(F.max("_ts").alias("t_old_edge"))
+    )
+    new_cut = (
+        with_runs.filter(
+            (_seconds("_ts") >= _seconds("_first_cruise") + depth_s)
+            & (F.col("_dip_after_first").isNull() | (F.col("_ts") < F.col("_dip_after_first")))
+        )
+        .groupBy("flight_key", "depth_min", "_first_cruise")
+        .agg(F.min("_ts").alias("t_new_edge"))
+    )
     old_cut = old_cut.withColumn(
         "old_depth_min", (_seconds("_last_cruise") - _seconds("t_old_edge")) / 60.0
     ).drop("_last_cruise")
@@ -320,8 +335,16 @@ def _low_edges(samples: DataFrame, floor_ft: float, p) -> DataFrame:
     """
     vert_rate_fpm = F.col("vert_rate") * FPM_PER_MPS
     below = F.col("_alt_ft") < floor_ft
-    climbing = below & (vert_rate_fpm > p.link_edge_vert_rate_fpm) & (F.col("_ts") < F.col("_first_cruise"))
-    descending = below & (vert_rate_fpm < -p.link_edge_vert_rate_fpm) & (F.col("_ts") > F.col("_last_cruise"))
+    climbing = (
+        below
+        & (vert_rate_fpm > p.link_edge_vert_rate_fpm)
+        & (F.col("_ts") < F.col("_first_cruise"))
+    )
+    descending = (
+        below
+        & (vert_rate_fpm < -p.link_edge_vert_rate_fpm)
+        & (F.col("_ts") > F.col("_last_cruise"))
+    )
     return (
         _edges_of_cruise(samples, floor_ft)
         .groupBy("flight_key")
@@ -333,8 +356,17 @@ def _low_edges(samples: DataFrame, floor_ft: float, p) -> DataFrame:
 
 
 _CUT_COLUMNS = (
-    "control_id", "control_family", "pair_id", "flight_before", "flight_after", "t_old_edge", "t_new_edge",
-    "depth_min", "old_depth_min", "new_depth_min", "requested_gap_min",
+    "control_id",
+    "control_family",
+    "pair_id",
+    "flight_before",
+    "flight_after",
+    "t_old_edge",
+    "t_new_edge",
+    "depth_min",
+    "old_depth_min",
+    "new_depth_min",
+    "requested_gap_min",
 )
 
 
@@ -463,7 +495,9 @@ NEGATIVE_FAMILIES = (
 LOW_EDGE_FAMILIES = tuple(family for family, *_ in NEGATIVE_FAMILIES if family != "cruise_cruise")
 
 
-def _negative_attempts(samples: DataFrame, pairs: DataFrame, floor_ft: float, depths_min, p) -> DataFrame:
+def _negative_attempts(
+    samples: DataFrame, pairs: DataFrame, floor_ft: float, depths_min, p
+) -> DataFrame:
     """Each usable pair at each depth and family, with the ``fate`` of that attempt.
 
     In order: ``no_low_edge``, the side below the floor has no edge in that direction;
@@ -506,7 +540,9 @@ def _negative_attempts(samples: DataFrame, pairs: DataFrame, floor_ft: float, de
         if new_low:
             no_low_edge = no_low_edge | F.col("t_new_edge").isNull()
         attempts.append(
-            attempt.withColumn("control_family", F.lit(family)).withColumn("_no_low_edge", no_low_edge)
+            attempt.withColumn("control_family", F.lit(family)).withColumn(
+                "_no_low_edge", no_low_edge
+            )
         )
     attempts = reduce(lambda a, b: a.unionByName(b, allowMissingColumns=True), attempts)
 
@@ -534,14 +570,17 @@ def _negative_attempts(samples: DataFrame, pairs: DataFrame, floor_ft: float, de
             .otherwise("control"),
         )
         .withColumn(
-            "control_id", F.concat_ws("|", F.lit("negative"), "control_family", "pair_id", "depth_min")
+            "control_id",
+            F.concat_ws("|", F.lit("negative"), "control_family", "pair_id", "depth_min"),
         )
         .withColumn("requested_gap_min", F.lit(None).cast("double"))
         .select(*_CUT_COLUMNS, "fate")
     )
 
 
-def _positive_attempts(samples: DataFrame, truth: DataFrame, floor_ft: float, gaps_min, p) -> DataFrame:
+def _positive_attempts(
+    samples: DataFrame, truth: DataFrame, floor_ft: float, gaps_min, p
+) -> DataFrame:
     """Each truth flight at each requested length, with the ``fate`` of that attempt.
 
     In order: ``no_cruise_sample``; ``outside_cruise``, the cruise is shorter than the
@@ -613,7 +652,9 @@ def _positive_attempts(samples: DataFrame, truth: DataFrame, floor_ft: float, ga
         .withColumn("flight_after", F.col("flight_key"))
         .withColumn(
             "control_id",
-            F.concat_ws("|", F.lit("positive"), "control_family", "flight_key", "requested_gap_min"),
+            F.concat_ws(
+                "|", F.lit("positive"), "control_family", "flight_key", "requested_gap_min"
+            ),
         )
         .withColumn("pair_id", F.lit(None).cast("string"))
         .withColumn("depth_min", F.lit(None).cast("double"))
@@ -755,8 +796,11 @@ def _binomial_cdf(k: int, n: int, prob: float) -> float:
     log_p, log_q = math.log(prob), math.log1p(-prob)
     return sum(
         math.exp(
-            math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1)
-            + i * log_p + (n - i) * log_q
+            math.lgamma(n + 1)
+            - math.lgamma(i + 1)
+            - math.lgamma(n - i + 1)
+            + i * log_p
+            + (n - i) * log_q
         )
         for i in range(k + 1)
     )

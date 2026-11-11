@@ -6,8 +6,7 @@ import pytest
 
 def test_arm_tables_point_at_the_arm_prefix():
     t = a.arm_tables("s3a://eurocontrol/opdi/research/adsc", "merged")
-    assert t["events"] == (
-        "s3a://eurocontrol/opdi/research/adsc/merged/opdi_flight_events")
+    assert t["events"] == ("s3a://eurocontrol/opdi/research/adsc/merged/opdi_flight_events")
     assert t["flight_list"] == "research/adsc/merged/opdi_flight_list"
 
 
@@ -56,8 +55,7 @@ def test_the_period_is_the_v4_period():
 
     assert a.PERIOD == "2026"
     assert events_gt.PERIODS[a.PERIOD]["month"] == "202606"
-    assert events_gt.PERIODS[a.PERIOD]["days"] == [
-        "2026-06-05", "2026-06-06", "2026-06-07"]
+    assert events_gt.PERIODS[a.PERIOD]["days"] == ["2026-06-05", "2026-06-06", "2026-06-07"]
 
 
 def test_an_unknown_arm_is_refused():

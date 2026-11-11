@@ -29,9 +29,7 @@ __all__ = ["EUROPE_BBOX", "CoverageConfig"]
 #: is the run of samples that survived this filter -- and every detection study
 #: OPDI has published was tuned inside it. Changing coverage is done by
 #: choosing a different ``CoverageConfig``, never by editing this tuple.
-EUROPE_BBOX: Tuple[float, float, float, float] = (
-    -25.86653, 26.74617, 49.65699, 70.25976
-)
+EUROPE_BBOX: Tuple[float, float, float, float] = (-25.86653, 26.74617, 49.65699, 70.25976)
 
 
 @dataclass
@@ -104,8 +102,10 @@ class CoverageConfig:
             return F.lit(True)
         min_lon, min_lat, max_lon, max_lat = self._bounds(offset)
         return (
-            (lat_col >= F.lit(min_lat)) & (lat_col <= F.lit(max_lat))
-            & (lon_col >= F.lit(min_lon)) & (lon_col <= F.lit(max_lon))
+            (lat_col >= F.lit(min_lat))
+            & (lat_col <= F.lit(max_lat))
+            & (lon_col >= F.lit(min_lon))
+            & (lon_col <= F.lit(max_lon))
         )
 
     def pandas_mask(self, lat, lon, *, offset: bool):
@@ -117,6 +117,4 @@ class CoverageConfig:
         if self.bbox is None:
             return np.ones(len(lat), dtype=bool)
         min_lon, min_lat, max_lon, max_lat = self._bounds(offset)
-        return (
-            lat.between(min_lat, max_lat) & lon.between(min_lon, max_lon)
-        ).to_numpy()
+        return (lat.between(min_lat, max_lat) & lon.between(min_lon, max_lon)).to_numpy()

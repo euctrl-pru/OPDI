@@ -9,6 +9,7 @@ one stage, 200 tasks, 94 minutes, while a neighbouring stage moved the same
 Asking the same question of the reversed ordering turns the shrinking frame
 into a growing one, which Spark maintains incrementally.
 """
+
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
@@ -52,7 +53,7 @@ def test_it_finds_the_next_non_null_not_the_current_one(spark):
     still look forward. Getting this wrong would be invisible in aggregate."""
     df = _frame(spark, 20, every=5)
     got = {r["id"]: r["r"] for r in _new_form(df).collect()}
-    assert got[5] == 10.0      # own value non-NULL, still looks ahead
+    assert got[5] == 10.0  # own value non-NULL, still looks ahead
     assert got[6] == 10.0
     assert got[9] == 10.0
 

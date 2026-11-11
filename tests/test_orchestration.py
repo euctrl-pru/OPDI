@@ -21,9 +21,15 @@ def test_publishing_needs_no_reference_table():
 
 def test_days_are_inclusive_and_newest_first_by_default():
     assert o.days(date(2026, 6, 1), date(2026, 6, 3)) == [
-        date(2026, 6, 3), date(2026, 6, 2), date(2026, 6, 1)]
+        date(2026, 6, 3),
+        date(2026, 6, 2),
+        date(2026, 6, 1),
+    ]
     assert o.days(date(2026, 6, 1), date(2026, 6, 3), "oldest_first") == [
-        date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)]
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+        date(2026, 6, 3),
+    ]
     assert o.days(D, D) == [D]
 
 
@@ -48,8 +54,12 @@ def test_the_plan_command_prints_the_days(capsys):
 def test_the_step_command_passes_its_arguments(monkeypatch):
     calls = []
     monkeypatch.setattr(o, "run_unit", lambda *a: calls.append(a) or 0)
-    assert o.main(["step", "--step", "02a", "--day", "2026-06-14",
-                   "--warehouse", "s3a://x/y", "--europe"]) == 0
+    assert (
+        o.main(
+            ["step", "--step", "02a", "--day", "2026-06-14", "--warehouse", "s3a://x/y", "--europe"]
+        )
+        == 0
+    )
     assert calls == [("02a", D, "s3a://x/y", False, False)]
 
 
@@ -82,8 +92,9 @@ def test_a_day_runs_its_steps_in_order_and_stops_at_a_failure(monkeypatch):
     assert ran == list(o.DAY_STEPS) + ["prune"]
 
     ran.clear()
-    monkeypatch.setattr(o, "run_unit",
-                        lambda step, *a, **k: ran.append(step) or (1 if step == "03" else 0))
+    monkeypatch.setattr(
+        o, "run_unit", lambda step, *a, **k: ran.append(step) or (1 if step == "03" else 0)
+    )
     assert o.run_day(D) == 1
     assert ran == ["01", "02", "02a", "03"]
 
@@ -159,10 +170,22 @@ def test_free_space_of_a_local_warehouse(tmp_path):
 
 def test_prune_plan_keeps_the_recent_days_and_the_published_files():
     present = {
-        "osn_tracks": ["2026-06-11", "2026-06-12", "2026-06-13", "2026-06-14", "2026-06-15",
-                       "2026-06-16", "2026-06-17", "2026-06-20"],
-        "osn_statevectors_v2": ["2026-06-12", "2026-06-13", "2026-06-15",
-                                "__HIVE_DEFAULT_PARTITION__"],
+        "osn_tracks": [
+            "2026-06-11",
+            "2026-06-12",
+            "2026-06-13",
+            "2026-06-14",
+            "2026-06-15",
+            "2026-06-16",
+            "2026-06-17",
+            "2026-06-20",
+        ],
+        "osn_statevectors_v2": [
+            "2026-06-12",
+            "2026-06-13",
+            "2026-06-15",
+            "__HIVE_DEFAULT_PARTITION__",
+        ],
         "opdi_flight_events": ["2026-06-01"],
         "published": ["2026-06-01"],
     }
@@ -193,7 +216,8 @@ def test_prune_never_targets_a_published_path():
     storage = _Storage("s3a://eurocontrol/opdi/v2.0.0")
     assert o.prune_internal(D, 2, storage=storage) == 3
     assert {p for p, _, _ in storage.dropped} == {
-        f"s3a://eurocontrol/opdi/v2.0.0/{t}" for t in o.INTERNAL_TABLES}
+        f"s3a://eurocontrol/opdi/v2.0.0/{t}" for t in o.INTERNAL_TABLES
+    }
     assert not [p for p, _, _ in storage.dropped if "/published" in p]
 
     inside = _Storage("s3a://eurocontrol/opdi/v2.0.0/published")
@@ -208,9 +232,11 @@ def test_the_module_imports_without_spark():
     from pathlib import Path
 
     src = Path(__file__).resolve().parent.parent / "src"
-    code = (f"import sys; sys.path.insert(0, {str(src)!r}); sys.modules['pyspark'] = None\n"
-            "from opdi import orchestration\n"
-            "assert orchestration.main(['plan', '--start', '2025-01-01', '--end', "
-            "'2025-01-02']) == 0\n")
+    code = (
+        f"import sys; sys.path.insert(0, {str(src)!r}); sys.modules['pyspark'] = None\n"
+        "from opdi import orchestration\n"
+        "assert orchestration.main(['plan', '--start', '2025-01-01', '--end', "
+        "'2025-01-02']) == 0\n"
+    )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr

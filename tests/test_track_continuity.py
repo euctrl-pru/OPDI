@@ -41,15 +41,13 @@ def test_a_pure_rename_is_a_total_break_at_equal_counts():
     Equal counts and equal tracks-per-airframe on both sides are what identify
     it as a rename rather than a merge or a split.
     """
-    before = _rows(("t1_2025_6", "aa1111"), ("t2_2025_6", "aa1111"),
-                   ("t3_2025_6", "bb2222"))
+    before = _rows(("t1_2025_6", "aa1111"), ("t2_2025_6", "aa1111"), ("t3_2025_6", "bb2222"))
     after = _rows(("t1", "aa1111"), ("t2", "aa1111"), ("t3", "bb2222"))
     r = tc.compare(before, after)
     assert r["identical_ids"] == 0
     assert r["identical_pct"] == 0.0
     assert r["n_before"] == r["n_after"] == 3
-    assert (r["mean_tracks_per_airframe_before"]
-            == r["mean_tracks_per_airframe_after"] == 1.5)
+    assert r["mean_tracks_per_airframe_before"] == r["mean_tracks_per_airframe_after"] == 1.5
 
 
 def test_merging_two_tracks_halves_tracks_per_airframe():
@@ -58,8 +56,7 @@ def test_merging_two_tracks_halves_tracks_per_airframe():
     Both score 0% identical when the ids differ, so tracks-per-airframe is the
     only thing in the row that says which one happened.
     """
-    before = _rows(("a1", "aa1111"), ("a2", "aa1111"),
-                   ("b1", "bb2222"), ("b2", "bb2222"))
+    before = _rows(("a1", "aa1111"), ("a2", "aa1111"), ("b1", "bb2222"), ("b2", "bb2222"))
     after = _rows(("m1", "aa1111"), ("m2", "bb2222"))
     r = tc.compare(before, after)
     assert r["mean_tracks_per_airframe_before"] == 2.0
@@ -77,8 +74,7 @@ def test_partial_survival_is_a_share_of_before():
     soon as the new table grew.
     """
     before = _rows(("t1", "aa1111"), ("t2", "aa1111"), ("t3", "bb2222"))
-    after = _rows(("t1", "aa1111"), ("t2", "aa1111"),
-                  ("t9", "bb2222"), ("t8", "cc3333"))
+    after = _rows(("t1", "aa1111"), ("t2", "aa1111"), ("t9", "bb2222"), ("t8", "cc3333"))
     r = tc.compare(before, after)
     assert r["identical_ids"] == 2
     assert r["identical_pct"] == 100.0 * 2 / 3
@@ -96,12 +92,17 @@ def test_read_extents_takes_only_the_identity_columns(tmp_path):
     """The extents file carries t_start/t_end/n_points; continuity ignores them."""
     path = tmp_path / tc.extents_name("legacy", "2025")
     with path.open("w", newline="") as fh:
-        w = csv.DictWriter(
-            fh, fieldnames=["track_id", "icao24", "t_start", "t_end", "n_points"])
+        w = csv.DictWriter(fh, fieldnames=["track_id", "icao24", "t_start", "t_end", "n_points"])
         w.writeheader()
-        w.writerow({"track_id": "t1", "icao24": "aa1111",
-                    "t_start": "2025-06-05 00:00:00",
-                    "t_end": "2025-06-05 01:00:00", "n_points": "120"})
+        w.writerow(
+            {
+                "track_id": "t1",
+                "icao24": "aa1111",
+                "t_start": "2025-06-05 00:00:00",
+                "t_end": "2025-06-05 01:00:00",
+                "n_points": "120",
+            }
+        )
     assert tc.read_extents(path) == [("t1", "aa1111")]
 
 

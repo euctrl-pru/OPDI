@@ -146,7 +146,9 @@ class BasicStatsCollector:
         return [(row.col_name, row.data_type) for row in schema_df.collect()]
 
 
-def print_table_counts(spark: SparkSession, tables: List[str], project: str = "project_opdi") -> None:
+def print_table_counts(
+    spark: SparkSession, tables: List[str], project: str = "project_opdi"
+) -> None:
     """
     Standalone function to print table counts.
 

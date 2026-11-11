@@ -67,8 +67,13 @@ def _leg(icao24, callsign, aobt, arvt, taxi_min=10):
     # every leg falls back to NM inference, which is what these tests assert.
     return Row(
         ID=next(_SAM_ID),
-        AIRCRAFT_ADDRESS=icao24, AIRCRAFT_ID=callsign, ADEP="EBBR", ADES="BIKF",
-        AOBT_3=aobt, ARVT_3=arvt, TAXI_TIME_3=taxi_min,
+        AIRCRAFT_ADDRESS=icao24,
+        AIRCRAFT_ID=callsign,
+        ADEP="EBBR",
+        ADES="BIKF",
+        AOBT_3=aobt,
+        ARVT_3=arvt,
+        TAXI_TIME_3=taxi_min,
     )
 
 
@@ -98,14 +103,28 @@ def test_a_flight_off_block_before_midnight_is_kept(spark, tmp_path):
     04:30 inside it. The interval lies wholly within the window, so the flight
     belongs in the sample -- but a filter keyed on the off-block day drops it.
     """
-    _write_month(spark, tmp_path, "300001", [
-        # off-block 2025-06-04 23:52, airborne 2025-06-05 00:14, down 04:30
-        _leg("mid01", "MIDNIGHT", dt.datetime(2025, 6, 4, 23, 52, 0),
-             dt.datetime(2025, 6, 5, 4, 30, 0), taxi_min=22),
-        # an ordinary leg on the sampled day, as a control
-        _leg("day01", "DAYTIME", dt.datetime(2025, 6, 5, 8, 0, 0),
-             dt.datetime(2025, 6, 5, 10, 0, 0)),
-    ])
+    _write_month(
+        spark,
+        tmp_path,
+        "300001",
+        [
+            # off-block 2025-06-04 23:52, airborne 2025-06-05 00:14, down 04:30
+            _leg(
+                "mid01",
+                "MIDNIGHT",
+                dt.datetime(2025, 6, 4, 23, 52, 0),
+                dt.datetime(2025, 6, 5, 4, 30, 0),
+                taxi_min=22,
+            ),
+            # an ordinary leg on the sampled day, as a control
+            _leg(
+                "day01",
+                "DAYTIME",
+                dt.datetime(2025, 6, 5, 8, 0, 0),
+                dt.datetime(2025, 6, 5, 10, 0, 0),
+            ),
+        ],
+    )
 
     gt = load_flight_intervals(
         spark, months=["300001"], days=["2025-06-05"], reference_base=str(tmp_path)
@@ -134,14 +153,32 @@ def test_a_flight_genuinely_outside_the_window_is_still_dropped(spark, tmp_path)
     next day, which is the fabricated-overhang case the containment rule
     already existed for.
     """
-    _write_month(spark, tmp_path, "300002", [
-        _leg("erl01", "EARLY", dt.datetime(2025, 6, 4, 23, 50, 0),
-             dt.datetime(2025, 6, 5, 3, 0, 0), taxi_min=8),
-        _leg("lat01", "LATE", dt.datetime(2025, 6, 5, 23, 40, 0),
-             dt.datetime(2025, 6, 6, 0, 30, 0)),
-        _leg("day01", "DAYTIME", dt.datetime(2025, 6, 5, 8, 0, 0),
-             dt.datetime(2025, 6, 5, 10, 0, 0)),
-    ])
+    _write_month(
+        spark,
+        tmp_path,
+        "300002",
+        [
+            _leg(
+                "erl01",
+                "EARLY",
+                dt.datetime(2025, 6, 4, 23, 50, 0),
+                dt.datetime(2025, 6, 5, 3, 0, 0),
+                taxi_min=8,
+            ),
+            _leg(
+                "lat01",
+                "LATE",
+                dt.datetime(2025, 6, 5, 23, 40, 0),
+                dt.datetime(2025, 6, 6, 0, 30, 0),
+            ),
+            _leg(
+                "day01",
+                "DAYTIME",
+                dt.datetime(2025, 6, 5, 8, 0, 0),
+                dt.datetime(2025, 6, 5, 10, 0, 0),
+            ),
+        ],
+    )
 
     gt = load_flight_intervals(
         spark, months=["300002"], days=["2025-06-05"], reference_base=str(tmp_path)
@@ -157,14 +194,31 @@ def test_the_pre_filter_still_prunes_days_the_window_cannot_admit(spark, tmp_pat
     cannot reach the window under any plausible taxi time, so it must not
     survive the pre-filter -- and a leg two days after cannot either.
     """
-    _write_month(spark, tmp_path, "300003", [
-        _leg("far01", "FARBEFORE", dt.datetime(2025, 6, 3, 8, 0, 0),
-             dt.datetime(2025, 6, 3, 10, 0, 0)),
-        _leg("far02", "FARAFTER", dt.datetime(2025, 6, 7, 8, 0, 0),
-             dt.datetime(2025, 6, 7, 10, 0, 0)),
-        _leg("day01", "DAYTIME", dt.datetime(2025, 6, 5, 8, 0, 0),
-             dt.datetime(2025, 6, 5, 10, 0, 0)),
-    ])
+    _write_month(
+        spark,
+        tmp_path,
+        "300003",
+        [
+            _leg(
+                "far01",
+                "FARBEFORE",
+                dt.datetime(2025, 6, 3, 8, 0, 0),
+                dt.datetime(2025, 6, 3, 10, 0, 0),
+            ),
+            _leg(
+                "far02",
+                "FARAFTER",
+                dt.datetime(2025, 6, 7, 8, 0, 0),
+                dt.datetime(2025, 6, 7, 10, 0, 0),
+            ),
+            _leg(
+                "day01",
+                "DAYTIME",
+                dt.datetime(2025, 6, 5, 8, 0, 0),
+                dt.datetime(2025, 6, 5, 10, 0, 0),
+            ),
+        ],
+    )
 
     gt = load_flight_intervals(
         spark, months=["300003"], days=["2025-06-05"], reference_base=str(tmp_path)
@@ -172,9 +226,7 @@ def test_the_pre_filter_still_prunes_days_the_window_cannot_admit(spark, tmp_pat
     assert _callsigns(gt) == ["DAYTIME"]
 
 
-def test_at_a_month_edge_the_crosser_is_recovered_only_if_its_month_is_loaded(
-    spark, tmp_path
-):
+def test_at_a_month_edge_the_crosser_is_recovered_only_if_its_month_is_loaded(spark, tmp_path):
     """What the widened pre-filter does -- and does not do -- on the 1st.
 
     The widening reaches an off-block day in the *previous month*, and that day
@@ -185,17 +237,38 @@ def test_at_a_month_edge_the_crosser_is_recovered_only_if_its_month_is_loaded(
     silent -- a sample starting on the 1st simply keeps the old, slightly
     lossy, behaviour.
     """
-    _write_month(spark, tmp_path, "300004", [  # "May"
-        _leg("mid02", "CROSSER", dt.datetime(2025, 5, 31, 23, 52, 0),
-             dt.datetime(2025, 6, 1, 4, 30, 0), taxi_min=22),
-    ])
-    _write_month(spark, tmp_path, "300005", [  # "June"
-        _leg("day02", "DAYTIME", dt.datetime(2025, 6, 1, 8, 0, 0),
-             dt.datetime(2025, 6, 1, 10, 0, 0)),
-    ])
+    _write_month(
+        spark,
+        tmp_path,
+        "300004",
+        [  # "May"
+            _leg(
+                "mid02",
+                "CROSSER",
+                dt.datetime(2025, 5, 31, 23, 52, 0),
+                dt.datetime(2025, 6, 1, 4, 30, 0),
+                taxi_min=22,
+            ),
+        ],
+    )
+    _write_month(
+        spark,
+        tmp_path,
+        "300005",
+        [  # "June"
+            _leg(
+                "day02",
+                "DAYTIME",
+                dt.datetime(2025, 6, 1, 8, 0, 0),
+                dt.datetime(2025, 6, 1, 10, 0, 0),
+            ),
+        ],
+    )
 
     both = load_flight_intervals(
-        spark, months=["300004", "300005"], days=["2025-06-01"],
+        spark,
+        months=["300004", "300005"],
+        days=["2025-06-01"],
         reference_base=str(tmp_path),
     )
     assert _callsigns(both) == ["CROSSER", "DAYTIME"]

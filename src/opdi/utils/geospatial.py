@@ -52,10 +52,7 @@ def haversine_distance(
     dlat = lat2_rad - lat1_rad
     dlon = lon2_rad - lon1_rad
 
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
-    )
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     # Calculate distance
@@ -103,9 +100,7 @@ def add_cumulative_distance(
     # Define window specs
     window_lag = Window.partitionBy(track_id_col).orderBy(time_col)
     window_cumsum = (
-        Window.partitionBy(track_id_col)
-        .orderBy(time_col)
-        .rowsBetween(Window.unboundedPreceding, 0)
+        Window.partitionBy(track_id_col).orderBy(time_col).rowsBetween(Window.unboundedPreceding, 0)
     )
 
     # Convert degrees to radians
@@ -134,9 +129,7 @@ def add_cumulative_distance(
     df = df.withColumn("segment_distance_nm", F.col("distance_km") * KM_TO_NM)
 
     # Calculate cumulative distance
-    df = df.withColumn(
-        "cumulative_distance_nm", F.sum("segment_distance_nm").over(window_cumsum)
-    )
+    df = df.withColumn("cumulative_distance_nm", F.sum("segment_distance_nm").over(window_cumsum))
 
     # Drop temporary columns
     df = df.drop("lat_rad", "lon_rad", "prev_lat_rad", "prev_lon_rad", "a", "c", "distance_km")

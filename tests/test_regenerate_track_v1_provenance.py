@@ -25,10 +25,13 @@ def _fake_script(produced, inputs, input_tables=()):
         results_dir = Path(cmd[cmd.index("--results-dir") + 1])
         (results_dir / produced).write_text("metric,value\nrows,1\n")
         provenance.record(
-            results_dir, produced,
-            script="benchmarks/fake_job.py", argv=list(cmd[3:]),
+            results_dir,
+            produced,
+            script="benchmarks/fake_job.py",
+            argv=list(cmd[3:]),
             code_paths=["benchmarks/fake_job.py"],
-            inputs=inputs, input_tables=list(input_tables),
+            inputs=inputs,
+            input_tables=list(input_tables),
         )
         return types.SimpleNamespace(returncode=0)
 
@@ -37,8 +40,11 @@ def _fake_script(produced, inputs, input_tables=()):
 
 def _job():
     return reg.Job(
-        name="fake", script="benchmarks/fake_job.py", args=["--period", "2025"],
-        outputs={"produced.csv": "staged.csv"}, code_paths=[],
+        name="fake",
+        script="benchmarks/fake_job.py",
+        args=["--period", "2025"],
+        outputs={"produced.csv": "staged.csv"},
+        code_paths=[],
         notes="a stand-in job",
     )
 
@@ -47,12 +53,15 @@ def test_job_run_keeps_the_input_counts_the_script_recorded(tmp_path, monkeypatc
     data = tmp_path / "data"
     monkeypatch.setattr(provenance, "s3_identity", lambda prefix: {"objects": 3})
     monkeypatch.setattr(
-        reg, "subprocess",
-        types.SimpleNamespace(run=_fake_script(
-            "produced.csv",
-            inputs={"samples": 12345, "gt_flights": 678},
-            input_tables=["s3a://eurocontrol/opdi/research/tracks_2025"],
-        )),
+        reg,
+        "subprocess",
+        types.SimpleNamespace(
+            run=_fake_script(
+                "produced.csv",
+                inputs={"samples": 12345, "gt_flights": 678},
+                input_tables=["s3a://eurocontrol/opdi/research/tracks_2025"],
+            )
+        ),
     )
     monkeypatch.setattr(reg, "DATA", data)
 
@@ -60,9 +69,7 @@ def test_job_run_keeps_the_input_counts_the_script_recorded(tmp_path, monkeypatc
 
     entry = provenance.load_manifest(data)["staged.csv"]
     assert entry["inputs"] == {"samples": 12345, "gt_flights": 678}
-    assert list(entry["input_tables"]) == [
-        "s3a://eurocontrol/opdi/research/tracks_2025"
-    ]
+    assert list(entry["input_tables"]) == ["s3a://eurocontrol/opdi/research/tracks_2025"]
     # The runner's own knowledge still wins where it is the authority: the
     # staged name, the spec's argv and notes, and the declared dependency set.
     assert entry["script"] == "benchmarks/fake_job.py"

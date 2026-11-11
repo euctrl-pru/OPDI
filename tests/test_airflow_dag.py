@@ -16,13 +16,27 @@ from opdi import orchestration
 DAG_FILE = Path(__file__).resolve().parent.parent / "airflow" / "dags" / "opdi_pipeline.py"
 
 ALLOWED_MODULES = {
-    "airflow", "airflow.operators.bash", "airflow.operators.python",
-    "airflow.operators.empty", "airflow.models", "airflow.models.param",
-    "__future__", "datetime", "json",
+    "airflow",
+    "airflow.operators.bash",
+    "airflow.operators.python",
+    "airflow.operators.empty",
+    "airflow.models",
+    "airflow.models.param",
+    "__future__",
+    "datetime",
+    "json",
 }
 DAILY_TASKS = [
-    "reference", "check_space", "ingest", "tracks", "clean", "flight_list", "events",
-    "milestones", "publish", "prune",
+    "reference",
+    "check_space",
+    "ingest",
+    "tracks",
+    "clean",
+    "flight_list",
+    "events",
+    "milestones",
+    "publish",
+    "prune",
 ]
 
 
@@ -107,13 +121,17 @@ def test_the_day_planning_matches_the_package(tree):
     """The DAG plans the backfill days itself, without importing opdi."""
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "plan_days")
     namespace = {}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(DAG_FILE), "exec"),
-         {"date": date, "timedelta": __import__("datetime").timedelta}, namespace)
+    exec(
+        compile(ast.Module(body=[fn], type_ignores=[]), str(DAG_FILE), "exec"),
+        {"date": date, "timedelta": __import__("datetime").timedelta},
+        namespace,
+    )
     plan = namespace["plan_days"]
     for order in ("newest_first", "oldest_first"):
         got = plan("2025-01-01", "2025-01-10", order)
-        assert got == [d.isoformat() for d in orchestration.days(
-            date(2025, 1, 1), date(2025, 1, 10), order)]
+        assert got == [
+            d.isoformat() for d in orchestration.days(date(2025, 1, 1), date(2025, 1, 10), order)
+        ]
 
 
 def test_the_dag_loads_in_airflow():

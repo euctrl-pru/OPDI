@@ -75,19 +75,21 @@ CFMU_AIRAC: Dict[int, List[str]] = {
 PLACEHOLDER_CODES = ("XXXX",)
 PLACEHOLDER_NAME_FRAGMENTS = ("REROUTING EXTENSION",)
 
-AIRSPACE_SCHEMA = StructType([
-    StructField("airspace_type", StringType(), True),
-    StructField("name", StringType(), True),
-    StructField("code", StringType(), True),
-    StructField("airac_cfmu", StringType(), True),
-    StructField("validity_start", StringType(), True),
-    StructField("validity_end", StringType(), True),
-    StructField("min_fl", IntegerType(), True),
-    StructField("max_fl", IntegerType(), True),
-    StructField("area_km2", DoubleType(), True),
-    StructField("h3_cell", StringType(), True),
-    StructField("h3_res", IntegerType(), True),
-])
+AIRSPACE_SCHEMA = StructType(
+    [
+        StructField("airspace_type", StringType(), True),
+        StructField("name", StringType(), True),
+        StructField("code", StringType(), True),
+        StructField("airac_cfmu", StringType(), True),
+        StructField("validity_start", StringType(), True),
+        StructField("validity_end", StringType(), True),
+        StructField("min_fl", IntegerType(), True),
+        StructField("max_fl", IntegerType(), True),
+        StructField("area_km2", DoubleType(), True),
+        StructField("h3_cell", StringType(), True),
+        StructField("h3_res", IntegerType(), True),
+    ]
+)
 
 TABLE = "opdi_h3_airspace_ref"
 
@@ -96,6 +98,7 @@ TABLE = "opdi_h3_airspace_ref"
 # Geometry
 # ---------------------------------------------------------------------------
 
+
 def _crosses_antimeridian(poly: Polygon) -> bool:
     xs = [x for x, *_ in poly.exterior.coords]
     return any(abs(b - a) > 180.0 for a, b in zip(xs, xs[1:]))
@@ -103,8 +106,10 @@ def _crosses_antimeridian(poly: Polygon) -> bool:
 
 def _shift_east(poly: Polygon) -> Polygon:
     """Rewrite a dateline-crossing ring in [0, 360) longitudes."""
+
     def shift(ring):
         return [((x + 360.0) if x < 0 else x, y) for x, y, *_ in ring.coords]
+
     return Polygon(shift(poly.exterior), [shift(r) for r in poly.interiors])
 
 
@@ -202,6 +207,7 @@ def _area_km2(geom) -> float:
 # Volumes
 # ---------------------------------------------------------------------------
 
+
 def dissolve_volumes(df: pd.DataFrame) -> pd.DataFrame:
     """One row per ``(code, FL band)`` with the union geometry and ``area_km2``.
 
@@ -220,10 +226,17 @@ def dissolve_volumes(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for code, group in df.groupby("code", sort=True):
         bands = sorted(
-            ({"min_fl": int(rec["min_fl"]), "max_fl": int(rec["max_fl"]), "geoms": [rec["geom"]],
-              "name": rec["name"], "airac_cfmu": rec["airac_cfmu"],
-              "airspace_type": rec["airspace_type"]}
-             for rec in group.to_dict(orient="records")),
+            (
+                {
+                    "min_fl": int(rec["min_fl"]),
+                    "max_fl": int(rec["max_fl"]),
+                    "geoms": [rec["geom"]],
+                    "name": rec["name"],
+                    "airac_cfmu": rec["airac_cfmu"],
+                    "airspace_type": rec["airspace_type"],
+                }
+                for rec in group.to_dict(orient="records")
+            ),
             key=lambda b: (b["min_fl"], b["max_fl"]),
         )
         merged = []
@@ -235,13 +248,31 @@ def dissolve_volumes(df: pd.DataFrame) -> pd.DataFrame:
                 merged.append(band)
         for band in merged:
             geom = unary_union(band["geoms"])
-            rows.append({
-                "airspace_type": band["airspace_type"], "name": band["name"], "code": code,
-                "airac_cfmu": band["airac_cfmu"], "min_fl": band["min_fl"], "max_fl": band["max_fl"],
-                "area_km2": _area_km2(geom), "geometry_wkt": shapely.to_wkt(geom),
-            })
-    return pd.DataFrame(rows, columns=["airspace_type", "name", "code", "airac_cfmu", "min_fl",
-                                       "max_fl", "area_km2", "geometry_wkt"])
+            rows.append(
+                {
+                    "airspace_type": band["airspace_type"],
+                    "name": band["name"],
+                    "code": code,
+                    "airac_cfmu": band["airac_cfmu"],
+                    "min_fl": band["min_fl"],
+                    "max_fl": band["max_fl"],
+                    "area_km2": _area_km2(geom),
+                    "geometry_wkt": shapely.to_wkt(geom),
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "airspace_type",
+            "name",
+            "code",
+            "airac_cfmu",
+            "min_fl",
+            "max_fl",
+            "area_km2",
+            "geometry_wkt",
+        ],
+    )
 
 
 def fill_volumes(volumes: pd.DataFrame, res: int) -> pd.DataFrame:
@@ -250,13 +281,33 @@ def fill_volumes(volumes: pd.DataFrame, res: int) -> pd.DataFrame:
     out = []
     for r in volumes.itertuples(index=False):
         for cell, cell_res in compact_cells(r.geometry_wkt, res):
-            out.append({
-                "airspace_type": r.airspace_type, "name": r.name, "code": r.code,
-                "airac_cfmu": r.airac_cfmu, "min_fl": r.min_fl, "max_fl": r.max_fl,
-                "area_km2": r.area_km2, "h3_cell": cell, "h3_res": cell_res,
-            })
-    return pd.DataFrame(out, columns=["airspace_type", "name", "code", "airac_cfmu", "min_fl",
-                                      "max_fl", "area_km2", "h3_cell", "h3_res"])
+            out.append(
+                {
+                    "airspace_type": r.airspace_type,
+                    "name": r.name,
+                    "code": r.code,
+                    "airac_cfmu": r.airac_cfmu,
+                    "min_fl": r.min_fl,
+                    "max_fl": r.max_fl,
+                    "area_km2": r.area_km2,
+                    "h3_cell": cell,
+                    "h3_res": cell_res,
+                }
+            )
+    return pd.DataFrame(
+        out,
+        columns=[
+            "airspace_type",
+            "name",
+            "code",
+            "airac_cfmu",
+            "min_fl",
+            "max_fl",
+            "area_km2",
+            "h3_cell",
+            "h3_res",
+        ],
+    )
 
 
 def overlap_report(cells: pd.DataFrame) -> pd.DataFrame:
@@ -304,8 +355,9 @@ def overlap_report(cells: pd.DataFrame) -> pd.DataFrame:
     return report.sort_values("cells", ascending=False).reset_index(drop=True)
 
 
-def _with_validity(volumes: pd.DataFrame, airspace_type: str,
-                   cfmu_airac: Optional[Dict[int, List[str]]] = None) -> pd.DataFrame:
+def _with_validity(
+    volumes: pd.DataFrame, airspace_type: str, cfmu_airac: Optional[Dict[int, List[str]]] = None
+) -> pd.DataFrame:
     cfmu_airac = cfmu_airac or CFMU_AIRAC
     df = volumes.copy()
     df["airspace_type"] = airspace_type
@@ -333,6 +385,7 @@ def _country_frame(df: pd.DataFrame) -> pd.DataFrame:
 # Generator
 # ---------------------------------------------------------------------------
 
+
 class AirspaceH3Generator:
     """Builds ``opdi_h3_airspace_ref``: one layer per airspace type, each
     written once, partitioned by ``airspace_type`` so the layers do not
@@ -358,7 +411,8 @@ class AirspaceH3Generator:
         if "h3_cell" not in columns:
             raise RuntimeError(
                 f"{TABLE} exists with the pre-2026-11 schema ({sorted(columns)}); "
-                f"drop it (nothing reads it) and run step 00c again.")
+                f"drop it (nothing reads it) and run step 00c again."
+            )
 
     def _write_layer(self, cells: pd.DataFrame, airspace_type: str) -> None:
         self._refuse_old_table()
@@ -370,14 +424,24 @@ class AirspaceH3Generator:
             .withColumn("validity_end", F.col("validity_end").cast(TimestampType()))
             .filter(F.col("airspace_type") == airspace_type)
         )
-        print(f"  {airspace_type}: {len(cells)} compact cells from {cells['code'].nunique()} volumes")
+        print(
+            f"  {airspace_type}: {len(cells)} compact cells from {cells['code'].nunique()} volumes"
+        )
         self.storage.write_table(
-            spark_df, TABLE, mode="overwrite", partition_by=["airspace_type"],
+            spark_df,
+            TABLE,
+            mode="overwrite",
+            partition_by=["airspace_type"],
             partition_values=[{"airspace_type": airspace_type}],
         )
 
-    def _process_layer(self, frames: Iterable[pd.DataFrame], airspace_type: str,
-                       res: Optional[int] = None, report_overlaps: bool = False) -> pd.DataFrame:
+    def _process_layer(
+        self,
+        frames: Iterable[pd.DataFrame],
+        airspace_type: str,
+        res: Optional[int] = None,
+        report_overlaps: bool = False,
+    ) -> pd.DataFrame:
         res = res or self.res
         volumes = pd.concat([dissolve_volumes(f) for f in frames], ignore_index=True)
         volumes = _with_validity(volumes, airspace_type)
@@ -387,8 +451,10 @@ class AirspaceH3Generator:
         if report_overlaps:
             report = overlap_report(cells)
             if len(report):
-                print(f"  {airspace_type}: {len(report)} code pairs claim the same cell "
-                      f"with overlapping bands ({int(report['cells'].sum())} cells):")
+                print(
+                    f"  {airspace_type}: {len(report)} code pairs claim the same cell "
+                    f"with overlapping bands ({int(report['cells'].sum())} cells):"
+                )
                 print(report.head(20).to_string(index=False))
             else:
                 print(f"  {airspace_type}: no overlapping volumes")
@@ -397,21 +463,35 @@ class AirspaceH3Generator:
 
     # -- the three layers --------------------------------------------------
 
-    def process_fir(self, urls: Optional[List[str]] = None,
-                    frames: Optional[List[pd.DataFrame]] = None, res: Optional[int] = None) -> pd.DataFrame:
+    def process_fir(
+        self,
+        urls: Optional[List[str]] = None,
+        frames: Optional[List[pd.DataFrame]] = None,
+        res: Optional[int] = None,
+    ) -> pd.DataFrame:
         frames = frames or [pd.read_parquet(u) for u in (urls or DEFAULT_FIR_URLS)]
         print(f"Processing FIR layer ({len(frames)} source file(s))")
         return self._process_layer(frames, "FIR", res=res, report_overlaps=True)
 
-    def process_ansp(self, urls: Optional[List[str]] = None,
-                     frames: Optional[List[pd.DataFrame]] = None, res: Optional[int] = None) -> pd.DataFrame:
+    def process_ansp(
+        self,
+        urls: Optional[List[str]] = None,
+        frames: Optional[List[pd.DataFrame]] = None,
+        res: Optional[int] = None,
+    ) -> pd.DataFrame:
         frames = frames or [pd.read_parquet(u) for u in (urls or DEFAULT_ANSP_URLS)]
         print(f"Processing ANSP layer ({len(frames)} source file(s))")
         return self._process_layer(frames, "ANSP", res=res)
 
-    def process_countries(self, urls: Optional[List[str]] = None,
-                          frames: Optional[List[pd.DataFrame]] = None, res: Optional[int] = None) -> pd.DataFrame:
-        frames = frames or [_country_frame(pd.read_parquet(u)) for u in (urls or DEFAULT_COUNTRY_URLS)]
+    def process_countries(
+        self,
+        urls: Optional[List[str]] = None,
+        frames: Optional[List[pd.DataFrame]] = None,
+        res: Optional[int] = None,
+    ) -> pd.DataFrame:
+        frames = frames or [
+            _country_frame(pd.read_parquet(u)) for u in (urls or DEFAULT_COUNTRY_URLS)
+        ]
         print(f"Processing COUNTRY layer ({len(frames)} source file(s))")
         return self._process_layer(frames, "COUNTRY", res=res)
 

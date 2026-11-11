@@ -3,6 +3,7 @@
 Every number here was measured on h3-py 4.5.0 before the fix, so each assertion
 is a fact about the defect rather than a hope about the repair.
 """
+
 import json
 
 import h3
@@ -13,8 +14,7 @@ from opdi.reference.h3_airport_zones import generate_circle_polygon
 
 def _cells(lon, lat, radius_nm, res=7):
     gj = json.loads(generate_circle_polygon(lon, lat, radius_nm))
-    return h3.polygon_to_cells(
-        h3.LatLngPoly([(p[1], p[0]) for p in gj["coordinates"][0]]), res)
+    return h3.polygon_to_cells(h3.LatLngPoly([(p[1], p[0]) for p in gj["coordinates"][0]]), res)
 
 
 def test_every_vertex_is_a_valid_longitude():
@@ -81,11 +81,14 @@ def test_a_pole_aerodrome_is_excluded_rather_than_built_wrong(spark):
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
 
     gen = AirportDetectionZoneGenerator(
-        spark, OPDIConfig.for_environment("opensky", worldwide=True))
+        spark, OPDIConfig.for_environment("opensky", worldwide=True)
+    )
     apt = spark.createDataFrame(
-        [("NZSP", "medium_airport", -90.0, 0.0),
-         ("CYLT", "medium_airport", 82.52, -62.28),
-         ("EBBR", "large_airport", 50.90, 4.48)],
+        [
+            ("NZSP", "medium_airport", -90.0, 0.0),
+            ("CYLT", "medium_airport", 82.52, -62.28),
+            ("EBBR", "large_airport", 50.90, 4.48),
+        ],
         "ident string, type string, latitude_deg double, longitude_deg double",
     )
     got = {r.ident for r in gen.filter_airports(apt).collect()}

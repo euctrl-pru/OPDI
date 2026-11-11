@@ -13,23 +13,75 @@ def feed(spark):
     # samples; 3c… is outside it (mid-Atlantic) and appears once, twice over
     # -- an exact duplicate, which is the thing the duplicate counter exists
     # to find.
-    return spark.createDataFrame([
-        Row(time=1780000000.0, hex="4acb41", lat=52.0, lon=-5.0,
-            alt_baro_ft=35000, track=270.0, gs=480.0, baro_rate=0,
-            flight="SK4414", squawk="2000", on_ground=False),
-        Row(time=1780000600.0, hex="4acb41", lat=52.1, lon=-6.0,
-            alt_baro_ft=35000, track=270.0, gs=None, baro_rate=None,
-            flight="SK4414", squawk=None, on_ground=False),
-        Row(time=1780001200.0, hex="4acb41", lat=52.2, lon=-7.0,
-            alt_baro_ft=9000, track=270.0, gs=None, baro_rate=-1200,
-            flight="SK4414", squawk=None, on_ground=False),
-        Row(time=1780000000.0, hex="3c6568", lat=45.0, lon=-40.0,
-            alt_baro_ft=38000, track=90.0, gs=500.0, baro_rate=0,
-            flight="LH133", squawk="0014", on_ground=False),
-        Row(time=1780000000.0, hex="3c6568", lat=45.0, lon=-40.0,
-            alt_baro_ft=38000, track=90.0, gs=500.0, baro_rate=0,
-            flight="LH133", squawk="0014", on_ground=False),
-    ])
+    return spark.createDataFrame(
+        [
+            Row(
+                time=1780000000.0,
+                hex="4acb41",
+                lat=52.0,
+                lon=-5.0,
+                alt_baro_ft=35000,
+                track=270.0,
+                gs=480.0,
+                baro_rate=0,
+                flight="SK4414",
+                squawk="2000",
+                on_ground=False,
+            ),
+            Row(
+                time=1780000600.0,
+                hex="4acb41",
+                lat=52.1,
+                lon=-6.0,
+                alt_baro_ft=35000,
+                track=270.0,
+                gs=None,
+                baro_rate=None,
+                flight="SK4414",
+                squawk=None,
+                on_ground=False,
+            ),
+            Row(
+                time=1780001200.0,
+                hex="4acb41",
+                lat=52.2,
+                lon=-7.0,
+                alt_baro_ft=9000,
+                track=270.0,
+                gs=None,
+                baro_rate=-1200,
+                flight="SK4414",
+                squawk=None,
+                on_ground=False,
+            ),
+            Row(
+                time=1780000000.0,
+                hex="3c6568",
+                lat=45.0,
+                lon=-40.0,
+                alt_baro_ft=38000,
+                track=90.0,
+                gs=500.0,
+                baro_rate=0,
+                flight="LH133",
+                squawk="0014",
+                on_ground=False,
+            ),
+            Row(
+                time=1780000000.0,
+                hex="3c6568",
+                lat=45.0,
+                lon=-40.0,
+                alt_baro_ft=38000,
+                track=90.0,
+                gs=500.0,
+                baro_rate=0,
+                flight="LH133",
+                squawk="0014",
+                on_ground=False,
+            ),
+        ]
+    )
 
 
 def test_counts_rows_inside_and_outside_the_box(spark, feed):
@@ -59,9 +111,9 @@ def test_altitude_and_geography_bands_are_counted_inside_the_box(spark, feed):
     # ingest, so it is the one a claim about what ADS-C can reach has to be
     # made over. 3c6568's two FL380 rows sit at 40W and must not be counted.
     r = adsc_census.census(feed, EUROPE_BBOX).collect()[0]
-    assert r["in_box_above_fl300"] == 2       # the two FL350 rows, not the FL380 pair
+    assert r["in_box_above_fl300"] == 2  # the two FL350 rows, not the FL380 pair
     assert r["in_box_below_10000ft"] == 1
-    assert r["in_box_west_of_10w"] == 0       # -5/-6/-7 are all east of 10W
+    assert r["in_box_west_of_10w"] == 0  # -5/-6/-7 are all east of 10W
     assert r["in_box_on_ground"] == 0
 
 

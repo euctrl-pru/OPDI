@@ -5,6 +5,7 @@ real one. A value that appears for one sample and reverts therefore cuts a
 flight in half -- measured at 1,457 of 1,765 sub-minute splits on 2026-06-01,
 all of them at cruise with a median implied speed of 421 kt across the gap.
 """
+
 from dataclasses import fields
 
 from opdi.config import SegmentationConfig
@@ -41,13 +42,12 @@ def test_the_config_value_reaches_the_params():
     assert SegmentationParams.from_config(cfg).callsign_min_persistence_seconds == 30.0
 
 
-
 from conftest import make_track
 
 from opdi.pipeline.segmentation import assign_track_id
 from opdi.pipeline.segmentation.methods import debounced, recommended
 
-P0 = SegmentationParams(callsign_min_persistence_seconds=0.0)    # debounce off (A8)
+P0 = SegmentationParams(callsign_min_persistence_seconds=0.0)  # debounce off (A8)
 P30 = SegmentationParams(callsign_min_persistence_seconds=30.0)  # debounce on (shipped default)
 
 
@@ -57,18 +57,17 @@ def n_tracks(df):
 
 def _with_callsigns(spark, callsigns, step_s=5):
     """One airframe at cruise, one callsign per sample, five seconds apart."""
-    df = make_track(spark, [
-        {"t": i * step_s, "baro_altitude": 10000.0} for i in range(len(callsigns))
-    ])
+    df = make_track(
+        spark, [{"t": i * step_s, "baro_altitude": 10000.0} for i in range(len(callsigns))]
+    )
     from pyspark.sql import Window
     from pyspark.sql import functions as F
+
     return df.withColumn(
         "callsign",
         F.element_at(
             F.array(*[F.lit(c) for c in callsigns]),
-            F.row_number().over(
-                Window.partitionBy("icao24").orderBy("event_time")
-            ).cast("int"),
+            F.row_number().over(Window.partitionBy("icao24").orderBy("event_time")).cast("int"),
         ),
     )
 
@@ -132,8 +131,9 @@ def test_zero_persistence_reproduces_recommended(spark):
     arm safe to add beside a published one."""
     df = _with_callsigns(spark, ["BEL123"] * 4 + ["XXXX"] + ["BEL123"] * 4)
 
-    assert n_tracks(assign_track_id(df, debounced(), P0)) == \
-           n_tracks(assign_track_id(df, recommended(), P0))
+    assert n_tracks(assign_track_id(df, debounced(), P0)) == n_tracks(
+        assign_track_id(df, recommended(), P0)
+    )
 
 
 def test_the_gap_rules_are_untouched(spark):
@@ -141,12 +141,13 @@ def test_the_gap_rules_are_untouched(spark):
     changed gap behaviour would be impossible to attribute."""
     df = _with_callsigns(spark, ["BEL123"] * 3)
     from pyspark.sql import functions as F
+
     late = df.withColumn(
         "event_time",
-        F.when(F.col("event_time") == F.min("event_time").over(
-            __import__("pyspark").sql.Window.partitionBy("icao24")
-        ), F.col("event_time")).otherwise(
-            F.col("event_time") + F.expr("INTERVAL 45 MINUTES")
-        ),
+        F.when(
+            F.col("event_time")
+            == F.min("event_time").over(__import__("pyspark").sql.Window.partitionBy("icao24")),
+            F.col("event_time"),
+        ).otherwise(F.col("event_time") + F.expr("INTERVAL 45 MINUTES")),
     )
     assert n_tracks(assign_track_id(late, debounced(), P30)) == 2

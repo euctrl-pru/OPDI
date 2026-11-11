@@ -43,6 +43,7 @@ Step 00b needs a local OSM extract; set ``OPDI_OSM_PBF`` or
 Overpass API, which fails silently at this scale. The run checks this before
 creating a session.
 """
+
 import argparse
 import sys
 from datetime import date, datetime
@@ -63,9 +64,7 @@ def _day(value: str) -> date:
     try:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"expected a date as YYYY-MM-DD, got {value!r}"
-        )
+        raise argparse.ArgumentTypeError(f"expected a date as YYYY-MM-DD, got {value!r}")
 
 
 def main(argv=None) -> int:
@@ -73,60 +72,99 @@ def main(argv=None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--start", type=_day, required=True,
-                   help="First day of the window (YYYY-MM-DD), inclusive.")
-    p.add_argument("--days", type=int, default=7,
-                   help="Window length in days (default: 7).")
-    p.add_argument("--env", default="opensky",
-                   choices=["dev", "live", "local", "opensky"],
-                   help="Environment (default: opensky).")
-    p.add_argument("--steps", nargs="+", default=list(PERIOD_STEPS),
-                   help=f"Steps to run, in order (default: {' '.join(PERIOD_STEPS)}). "
-                        f"Also available: {' '.join(OPTIONAL_STEPS)}.")
-    p.add_argument("--state-path", type=Path, default=None,
-                   help="Where completion is recorded "
-                        "(default: logs/periodrun_{start}_{days}d.json).")
-    p.add_argument("--force", action="store_true",
-                   help="Re-run steps already recorded as complete.")
-    p.add_argument("--driver-memory", default=None,
-                   help="Driver heap, e.g. '6g'. Still capped to what the "
-                        "container can hold.")
-    p.add_argument("--executors", type=int, default=None,
-                   help="Override spark.executor.instances.")
-    p.add_argument("--warehouse", default=_UNSET,
-                   help="Warehouse every table is written to and read from, "
-                        "inside its release folder <warehouse>/v2.0.0 "
-                        "(default: OPDI_WAREHOUSE if set, else "
-                        f"{DEFAULT_WAREHOUSE}). Reference tables included: a "
-                        "run reuses nothing from elsewhere.")
-    p.add_argument("--prune-tracks", action="store_true", default=False,
-                   help="Drop osn_tracks and osn_tracks_clean for each day "
-                        "once that day's outputs are written. They are ~19 GB "
-                        "a day worldwide against ~1.5 GB for the flight list, "
-                        "events and measurements, so a long period is only "
-                        "affordable without them. Costs the trajectory view "
-                        "and re-derivation without re-ingest.")
-    p.add_argument("--keep-tracks-on", nargs="*", default=[],
-                   type=date.fromisoformat, metavar="YYYY-MM-DD",
-                   help="Days exempt from --prune-tracks, so a reference day "
-                        "keeps its trajectories while the rest of the period "
-                        "keeps only outputs.")
+    p.add_argument(
+        "--start", type=_day, required=True, help="First day of the window (YYYY-MM-DD), inclusive."
+    )
+    p.add_argument("--days", type=int, default=7, help="Window length in days (default: 7).")
+    p.add_argument(
+        "--env",
+        default="opensky",
+        choices=["dev", "live", "local", "opensky"],
+        help="Environment (default: opensky).",
+    )
+    p.add_argument(
+        "--steps",
+        nargs="+",
+        default=list(PERIOD_STEPS),
+        help=f"Steps to run, in order (default: {' '.join(PERIOD_STEPS)}). "
+        f"Also available: {' '.join(OPTIONAL_STEPS)}.",
+    )
+    p.add_argument(
+        "--state-path",
+        type=Path,
+        default=None,
+        help="Where completion is recorded " "(default: logs/periodrun_{start}_{days}d.json).",
+    )
+    p.add_argument(
+        "--force", action="store_true", help="Re-run steps already recorded as complete."
+    )
+    p.add_argument(
+        "--driver-memory",
+        default=None,
+        help="Driver heap, e.g. '6g'. Still capped to what the " "container can hold.",
+    )
+    p.add_argument("--executors", type=int, default=None, help="Override spark.executor.instances.")
+    p.add_argument(
+        "--warehouse",
+        default=_UNSET,
+        help="Warehouse every table is written to and read from, "
+        "inside its release folder <warehouse>/v2.0.0 "
+        "(default: OPDI_WAREHOUSE if set, else "
+        f"{DEFAULT_WAREHOUSE}). Reference tables included: a "
+        "run reuses nothing from elsewhere.",
+    )
+    p.add_argument(
+        "--prune-tracks",
+        action="store_true",
+        default=False,
+        help="Drop osn_tracks and osn_tracks_clean for each day "
+        "once that day's outputs are written. They are ~19 GB "
+        "a day worldwide against ~1.5 GB for the flight list, "
+        "events and measurements, so a long period is only "
+        "affordable without them. Costs the trajectory view "
+        "and re-derivation without re-ingest.",
+    )
+    p.add_argument(
+        "--keep-tracks-on",
+        nargs="*",
+        default=[],
+        type=date.fromisoformat,
+        metavar="YYYY-MM-DD",
+        help="Days exempt from --prune-tracks, so a reference day "
+        "keeps its trajectories while the rest of the period "
+        "keeps only outputs.",
+    )
     coverage = p.add_mutually_exclusive_group()
-    coverage.add_argument("--worldwide", dest="worldwide", action="store_true",
-                          default=True,
-                          help="Run worldwide: no bounding box. The default; "
-                               "kept so existing commands still parse.")
-    coverage.add_argument("--europe", dest="worldwide", action="store_false",
-                          help="Apply the published European bounding box.")
-    p.add_argument("--allow-existing", action="store_true",
-                   help="Build even though the warehouse already holds "
-                        "reference tables. Off by default so a rebuild cannot "
-                        "silently merge with a previous attempt.")
-    p.add_argument("--skip-preflight", action="store_true",
-                   help="Skip the pre-run checks (OSM extract present, "
-                        "warehouse clear, reference tables readable).")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Print the plan and exit without creating a session.")
+    coverage.add_argument(
+        "--worldwide",
+        dest="worldwide",
+        action="store_true",
+        default=True,
+        help="Run worldwide: no bounding box. The default; "
+        "kept so existing commands still parse.",
+    )
+    coverage.add_argument(
+        "--europe",
+        dest="worldwide",
+        action="store_false",
+        help="Apply the published European bounding box.",
+    )
+    p.add_argument(
+        "--allow-existing",
+        action="store_true",
+        help="Build even though the warehouse already holds "
+        "reference tables. Off by default so a rebuild cannot "
+        "silently merge with a previous attempt.",
+    )
+    p.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Skip the pre-run checks (OSM extract present, "
+        "warehouse clear, reference tables readable).",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="Print the plan and exit without creating a session."
+    )
     args = p.parse_args(argv)
 
     return run_period(

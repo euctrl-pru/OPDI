@@ -138,9 +138,8 @@ def level_segments(
     # A sample is "flat" when the step to the next one stays inside the band and
     # the vertical speed towards it is within the limit -- ICAO's start
     # condition, evaluated at every sample.
-    flat = (
-        (F.abs(F.col("_alt_next") - F.col("_alt_ft")) <= F.lit(config.level_band_limit_ft))
-        & (F.col("_roc") <= F.lit(config.level_vertical_speed_limit_ftmin))
+    flat = (F.abs(F.col("_alt_next") - F.col("_alt_ft")) <= F.lit(config.level_band_limit_ft)) & (
+        F.col("_roc") <= F.lit(config.level_vertical_speed_limit_ftmin)
     )
     work = work.withColumn("_flat", F.coalesce(flat, F.lit(False)))
 
@@ -206,9 +205,9 @@ def level_segments(
     else:
         out = out.withColumn("distance_nm", F.lit(None).cast("double"))
 
-    return out.filter(
-        F.col("duration_seconds") >= F.lit(config.level_min_duration_seconds)
-    ).drop("_group")
+    return out.filter(F.col("duration_seconds") >= F.lit(config.level_min_duration_seconds)).drop(
+        "_group"
+    )
 
 
 def level_segments_pru(
@@ -244,9 +243,7 @@ def level_segments_pru(
     """
     part = list(partition_cols)
     window_s = float(config.level_window_seconds)
-    carried = [
-        c for c in (*DISTANCE_COLS, "cumulative_distance_nm") if c in sdf.columns
-    ]
+    carried = [c for c in (*DISTANCE_COLS, "cumulative_distance_nm") if c in sdf.columns]
     elevations = [c for c in ("elev_adep_ft", "elev_ades_ft") if c in sdf.columns]
 
     real = sdf.select(
@@ -262,9 +259,7 @@ def level_segments_pru(
     # float in config. ``_t0 + i * window`` also keeps every grid instant an
     # exact multiple of the window away from the track's first sample, which is
     # what makes the geometry in the tests arithmetic.
-    bounds = real.groupBy(*part).agg(
-        F.min("_ts").alias("_t0"), F.max("_ts").alias("_t1")
-    )
+    bounds = real.groupBy(*part).agg(F.min("_ts").alias("_t0"), F.max("_ts").alias("_t1"))
     grid = (
         bounds.withColumn(
             "_i",
@@ -272,9 +267,7 @@ def level_segments_pru(
                 F.sequence(
                     F.lit(0).cast("long"),
                     F.least(
-                        F.floor(
-                            (F.col("_t1") - F.col("_t0")) / F.lit(window_s)
-                        ).cast("long"),
+                        F.floor((F.col("_t1") - F.col("_t0")) / F.lit(window_s)).cast("long"),
                         F.lit(MAX_GRID_POINTS_PER_PARTITION - 1).cast("long"),
                     ),
                 )
@@ -298,9 +291,7 @@ def level_segments_pru(
     if elevations:
         constant = Window.partitionBy(*part)
         for c in elevations:
-            combined = combined.withColumn(
-                c, F.first(F.col(c), ignorenulls=True).over(constant)
-            )
+            combined = combined.withColumn(c, F.first(F.col(c), ignorenulls=True).over(constant))
 
     # Real samples sort before the grid instant they coincide with, so a grid
     # point that lands on a sample interpolates from zero distance and takes
@@ -347,15 +338,15 @@ def level_segments_pru(
                 # and be distinct; outside the sampled span, and where two
                 # samples share a timestamp, the nearer value stands rather
                 # than a division by zero.
-                F.when(pt.isNotNull() & nt.isNotNull() & (nt != pt),
-                       pv + (nv - pv) * (F.col("_ts") - pt) / (nt - pt)),
+                F.when(
+                    pt.isNotNull() & nt.isNotNull() & (nt != pt),
+                    pv + (nv - pv) * (F.col("_ts") - pt) / (nt - pt),
+                ),
                 pv,
                 nv,
             ),
         )
-    combined = combined.drop(
-        *[f"{c}__{s}" for c in value_cols for s in ("pt", "pv", "nt", "nv")]
-    )
+    combined = combined.drop(*[f"{c}__{s}" for c in value_cols for s in ("pt", "pv", "nt", "nv")])
 
     # ``rangeBetween`` takes integral bounds, so the ordering key is whole
     # milliseconds rather than seconds. Sub-millisecond resolution is well
@@ -369,16 +360,13 @@ def level_segments_pru(
     whole = Window.partitionBy(*part)
     combined = combined.withColumn(
         "_span", F.max("_alt_ft").over(span_window) - F.min("_alt_ft").over(span_window)
-    ).withColumn(
-        "_t_last", F.max(F.when(~F.col("_is_grid"), F.col("_ts"))).over(whole)
-    )
+    ).withColumn("_t_last", F.max(F.when(~F.col("_is_grid"), F.col("_ts"))).over(whole))
 
     # A grid point whose window runs past the last sample is not level; it is
     # unmeasured. Without this every track would end in a spurious segment,
     # because a truncated window spans nothing and so always looks flat.
-    level = (
-        (F.col("_span") <= F.lit(config.level_window_height_ft()))
-        & (F.col("_ts") + F.lit(window_s) <= F.col("_t_last") + F.lit(1e-6))
+    level = (F.col("_span") <= F.lit(config.level_window_height_ft())) & (
+        F.col("_ts") + F.lit(window_s) <= F.col("_t_last") + F.lit(1e-6)
     )
     points = combined.filter(F.col("_is_grid")).withColumn(
         "_level", F.coalesce(level, F.lit(False))
@@ -425,9 +413,9 @@ def level_segments_pru(
     else:
         out = out.withColumn("distance_nm", F.lit(None).cast("double"))
 
-    return out.filter(
-        F.col("duration_seconds") >= F.lit(config.level_min_duration_seconds)
-    ).drop("_group", "_s0", "_s1", "_end")
+    return out.filter(F.col("duration_seconds") >= F.lit(config.level_min_duration_seconds)).drop(
+        "_group", "_s0", "_s1", "_end"
+    )
 
 
 def classify_level_offs(
@@ -478,9 +466,7 @@ def classify_level_offs(
     within_descent_radius = _within_radius(segments, config, "dist_ades_nm")
 
     pct = F.lit(config.level_exclusion_box_pct / 100.0)
-    long_enough_to_be_cruise = F.col("duration_seconds") > F.lit(
-        config.level_exclusion_box_seconds
-    )
+    long_enough_to_be_cruise = F.col("duration_seconds") > F.lit(config.level_exclusion_box_seconds)
     in_climb_box = (F.col("level_ft") >= pct * toc_altitude_ft) & long_enough_to_be_cruise
     in_descent_box = (F.col("level_ft") >= pct * tod_altitude_ft) & long_enough_to_be_cruise
 

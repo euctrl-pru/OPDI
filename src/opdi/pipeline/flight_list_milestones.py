@@ -76,15 +76,24 @@ _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 #: to hand consumers the number and let them choose, not to choose for them.
 MOVEMENT_COLUMNS = [
     "TRACK_DURATION_MIN",
-    "SUPERSEDED_DEP", "SUPERSEDED_ARR",   # why a row does not count
-    "MOVEMENT_DEP", "MOVEMENT_ARR",       # whether it counts -- filter on these
+    "SUPERSEDED_DEP",
+    "SUPERSEDED_ARR",  # why a row does not count
+    "MOVEMENT_DEP",
+    "MOVEMENT_ARR",  # whether it counts -- filter on these
 ]
 
 ADDED_COLUMNS = (
     [
-        "ATOT", "ALDT", "AOBT", "AIBT",
-        "RWY_DEP", "RWY_DEP_BEARING_DEG", "RWY_ARR", "RWY_ARR_BEARING_DEG",
-        "STND_DEP", "STND_ARR",
+        "ATOT",
+        "ALDT",
+        "AOBT",
+        "AIBT",
+        "RWY_DEP",
+        "RWY_DEP_BEARING_DEG",
+        "RWY_ARR",
+        "RWY_ARR_BEARING_DEG",
+        "STND_DEP",
+        "STND_ARR",
     ]
     + [f"C{nm}_ARR" for nm in FLIGHT_LIST_RING_RADII_NM]
     + [f"C{nm}_DEP" for nm in FLIGHT_LIST_RING_RADII_NM]
@@ -128,12 +137,16 @@ def _runway_bearing() -> Column:
 
 def _first(cond: Column, value: Column) -> Column:
     """The *value* of the earliest matching event, or NULL if none match."""
-    return F.min(F.when(cond, F.struct(F.col("event_time").alias("t"), value.alias("v")))).getField("v")
+    return F.min(F.when(cond, F.struct(F.col("event_time").alias("t"), value.alias("v")))).getField(
+        "v"
+    )
 
 
 def _last(cond: Column, value: Column) -> Column:
     """The *value* of the latest matching event, or NULL if none match."""
-    return F.max(F.when(cond, F.struct(F.col("event_time").alias("t"), value.alias("v")))).getField("v")
+    return F.max(F.when(cond, F.struct(F.col("event_time").alias("t"), value.alias("v")))).getField(
+        "v"
+    )
 
 
 def _null_ts() -> Column:
@@ -245,16 +258,16 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
             # join, and a row this step does not touch must not change.
             out = out.withColumn(
                 alternatives,
-                F.when(F.col(alternatives).isNull() & ~moved, F.col(alternatives)).otherwise(cleaned),
+                F.when(F.col(alternatives).isNull() & ~moved, F.col(alternatives)).otherwise(
+                    cleaned
+                ),
             )
         out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
 
     return out.drop("_g_id", "_dep_apt", "_arr_apt")
 
 
-def add_movement_columns(
-    flight_list: DataFrame, config: Optional[EventConfig] = None
-) -> DataFrame:
+def add_movement_columns(flight_list: DataFrame, config: Optional[EventConfig] = None) -> DataFrame:
     """Mark the rows that are half of a movement already counted.
 
     A real departure is routinely cut into two tracks -- a ground fragment that
@@ -308,8 +321,10 @@ def add_movement_columns(
     # read in the meantime.
     day = Window.partitionBy("DOF")
     day_processed = (
-        F.sum(F.when(F.col("ATOT").isNotNull() | F.col("ALDT").isNotNull(), 1)
-              .otherwise(0)).over(day) > 0
+        F.sum(F.when(F.col("ATOT").isNotNull() | F.col("ALDT").isNotNull(), 1).otherwise(0)).over(
+            day
+        )
+        > 0
     )
 
     superseded_dep = (
@@ -353,14 +368,8 @@ def add_movement_columns(
     # departure has no take-off and no destination either, and looks exactly
     # like a ramp ghost. The network aggregate still read 0.96x, flattered by
     # one aerodrome's under-count cancelling another's over-count.
-    ghost_dep = (
-        day_processed
-        & F.col("ATOT").isNull() & F.col("ADES").isNull() & left_dep.isNull()
-    )
-    ghost_arr = (
-        day_processed
-        & F.col("ALDT").isNull() & F.col("ADEP").isNull() & came_arr.isNull()
-    )
+    ghost_dep = day_processed & F.col("ATOT").isNull() & F.col("ADES").isNull() & left_dep.isNull()
+    ghost_arr = day_processed & F.col("ALDT").isNull() & F.col("ADEP").isNull() & came_arr.isNull()
 
     # The single question a consumer actually has. Composed here so that
     # counting movements is one predicate rather than three, and so the
@@ -369,8 +378,7 @@ def add_movement_columns(
     movement_arr = F.col("ADES").isNotNull() & ~superseded_arr & ~ghost_arr
 
     return (
-        flight_list
-        .withColumn("TRACK_DURATION_MIN", (last_s - first_s) / F.lit(60.0))
+        flight_list.withColumn("TRACK_DURATION_MIN", (last_s - first_s) / F.lit(60.0))
         # ``coalesce`` to False: a row with no ADEP has no next departure to be
         # superseded by, and NULL there would read as "unknown" when the answer
         # is simply no.
@@ -450,9 +458,7 @@ def enrich_flight_list(
 
     radii = {float(r) for r in config.ring_radii_nm}
     ring_types = [
-        _RING_TYPE.format(nm=nm)
-        for nm in FLIGHT_LIST_RING_RADII_NM
-        if float(nm) in radii
+        _RING_TYPE.format(nm=nm) for nm in FLIGHT_LIST_RING_RADII_NM if float(nm) in radii
     ]
     wanted = [_ATOT, _ALDT, _AOBT, _AIBT, _STAND_EXIT, _STAND_ENTRY] + ring_types
 
@@ -471,7 +477,9 @@ def enrich_flight_list(
     narrowed = (
         events.select(
             F.col(_flight_key(events)).alias("_event_key"),
-            "type", "event_time", "info",
+            "type",
+            "event_time",
+            "info",
         )
         .filter(F.col("type").isin(wanted))
         .join(keys, F.col("_event_key") == F.col("_track_id"), "inner")
@@ -487,16 +495,10 @@ def enrich_flight_list(
             return _null_ts()
         if arrival:
             cond = (
-                (F.col("type") == type_)
-                & (direction == F.lit("inbound"))
-                & (apt == F.col("_ades"))
+                (F.col("type") == type_) & (direction == F.lit("inbound")) & (apt == F.col("_ades"))
             )
             return _last(cond, F.col("event_time"))
-        cond = (
-            (F.col("type") == type_)
-            & (direction == F.lit("outbound"))
-            & (apt == F.col("_adep"))
-        )
+        cond = (F.col("type") == type_) & (direction == F.lit("outbound")) & (apt == F.col("_adep"))
         return _first(cond, F.col("event_time"))
 
     # Departure milestones take the *earliest* matching event and arrival

@@ -64,10 +64,10 @@ def _credentials() -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--yes", action="store_true",
-                    help="actually delete; without it this only reports")
-    ap.add_argument("--prefix", default=PREFIX,
-                    help=f"narrow the target; must sit under {ROOT}")
+    ap.add_argument(
+        "--yes", action="store_true", help="actually delete; without it this only reports"
+    )
+    ap.add_argument("--prefix", default=PREFIX, help=f"narrow the target; must sit under {ROOT}")
     args = ap.parse_args()
 
     prefix = validate_prefix(args.prefix)
@@ -76,12 +76,13 @@ def main() -> int:
 
     creds = _credentials()
     s3 = boto3.client(
-        "s3", endpoint_url=ENDPOINT,
+        "s3",
+        endpoint_url=ENDPOINT,
         aws_access_key_id=creds["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=creds["AWS_SECRET_ACCESS_KEY"])
+        aws_secret_access_key=creds["AWS_SECRET_ACCESS_KEY"],
+    )
 
-    pages = s3.get_paginator("list_objects_v2").paginate(
-        Bucket=BUCKET, Prefix=prefix)
+    pages = s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix)
     keys, total, count = [], 0, 0
     for page in pages:
         objs = page.get("Contents", [])
@@ -102,9 +103,11 @@ def main() -> int:
         return 0
     if not args.yes:
         print("\nDRY RUN. Re-run with --yes to delete.")
-        print("Re-create with: for d in 2026-06-05 2026-06-06 2026-06-07; do "
-              "python benchmarks/run_adsc_day.py --day $d --arm both; "
-              "done  (about 5 h)")
+        print(
+            "Re-create with: for d in 2026-06-05 2026-06-06 2026-06-07; do "
+            "python benchmarks/run_adsc_day.py --day $d --arm both; "
+            "done  (about 5 h)"
+        )
         return 0
 
     # One key per request, not the batch `delete_objects` API.

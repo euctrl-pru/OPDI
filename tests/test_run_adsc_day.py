@@ -42,7 +42,8 @@ def test_every_table_src_uses_is_classified():
     found = set()
     pattern = re.compile(
         r"""(?:read_table|table_ref|table_exists)\(\s*["']([a-z_0-9]+)["']"""
-        r"""|write_table\([^,]+,\s*["']([a-z_0-9]+)["']""")
+        r"""|write_table\([^,]+,\s*["']([a-z_0-9]+)["']"""
+    )
     for p in src.rglob("*.py"):
         if ".ipynb_checkpoints" in str(p):
             continue
@@ -53,15 +54,15 @@ def test_every_table_src_uses_is_classified():
 
 def test_derived_tables_go_to_the_arm_prefix():
     assert r.arm_path("merged", "osn_tracks") == (
-        "s3a://eurocontrol/opdi/research/adsc/merged/osn_tracks")
+        "s3a://eurocontrol/opdi/research/adsc/merged/osn_tracks"
+    )
 
 
 def test_shared_inputs_are_not_per_arm():
     # The scientific claim is that the arms differ in one setting. Sharing the
     # ADS-B state vectors makes that structurally true rather than asserted,
     # and halves the ingest.
-    assert r.arm_path("base", "osn_statevectors_v2") == \
-        r.arm_path("merged", "osn_statevectors_v2")
+    assert r.arm_path("base", "osn_statevectors_v2") == r.arm_path("merged", "osn_statevectors_v2")
     assert "/input/" in r.arm_path("base", "osn_statevectors_v2")
 
 
@@ -73,10 +74,8 @@ def test_an_unknown_arm_is_refused():
 def test_redirect_sends_derived_writes_to_research():
     r.redirect_arm("merged", "s3a://eurocontrol/opdi-prod")
     sm = _manager()
-    assert sm._s3_path("osn_tracks").startswith(
-        "s3a://eurocontrol/opdi/research/adsc/merged/")
-    assert sm._s3_path("oa_airports") == \
-        "s3a://eurocontrol/opdi-prod/oa_airports"
+    assert sm._s3_path("osn_tracks").startswith("s3a://eurocontrol/opdi/research/adsc/merged/")
+    assert sm._s3_path("oa_airports") == "s3a://eurocontrol/opdi-prod/oa_airports"
 
 
 def test_redirect_refuses_an_unknown_table():
@@ -90,8 +89,7 @@ def test_redirect_refuses_an_unknown_table():
 def test_a_write_outside_research_is_refused():
     with pytest.raises(AssertionError, match="research/adsc"):
         r.guard_write_path("s3a://eurocontrol/opdi-prod/osn_tracks")
-    r.guard_write_path(
-        "s3a://eurocontrol/opdi/research/adsc/merged/osn_tracks")
+    r.guard_write_path("s3a://eurocontrol/opdi/research/adsc/merged/osn_tracks")
 
 
 def test_writing_a_passthrough_table_is_refused():
@@ -107,8 +105,7 @@ def test_restore_is_idempotent():
     r.redirect_arm("base", "s3a://eurocontrol/opdi-prod")
     r.restore()
     r.restore()
-    assert _manager()._s3_path("osn_tracks") == \
-        "s3a://eurocontrol/opdi-prod/osn_tracks"
+    assert _manager()._s3_path("osn_tracks") == "s3a://eurocontrol/opdi-prod/osn_tracks"
 
 
 def test_the_merged_arm_is_the_only_one_with_adsc_enabled():
@@ -191,8 +188,7 @@ def test_run_arm_takes_its_coverage_from_the_prefix(_reset_coverage):
 
 def test_the_guard_refuses_a_wrong_prefix_constant(_reset_coverage, monkeypatch):
     # A guard built only from ARM_PREFIX passes whatever ARM_PREFIX says.
-    monkeypatch.setitem(r.ARM_PREFIX_BY_COVERAGE, "europe",
-                        "s3a://eurocontrol/opdi-prod")
+    monkeypatch.setitem(r.ARM_PREFIX_BY_COVERAGE, "europe", "s3a://eurocontrol/opdi-prod")
     with pytest.raises(ValueError, match="refusing"):
         r.set_coverage("europe")
     monkeypatch.setattr(r, "ARM_PREFIX", "s3a://eurocontrol/opdi-prod")
@@ -202,8 +198,7 @@ def test_the_guard_refuses_a_wrong_prefix_constant(_reset_coverage, monkeypatch)
 
 def test_the_guard_needs_a_whole_path_component(_reset_coverage):
     with pytest.raises(AssertionError):
-        r.guard_write_path(
-            "s3a://eurocontrol/opdi/research/adsc_airframes/merged/osn_tracks")
+        r.guard_write_path("s3a://eurocontrol/opdi/research/adsc_airframes/merged/osn_tracks")
 
 
 def test_the_base_arm_may_not_ingest_a_subset():
@@ -240,14 +235,14 @@ def test_each_prefix_has_its_own_logs(_reset_coverage):
 def test_worldwide_writes_under_the_worldwide_warehouse(_reset_coverage):
     r.set_coverage("worldwide")
     assert r.arm_path("merged", "osn_tracks") == (
-        "s3a://eurocontrol/opdi-world/research/adsc/merged/osn_tracks")
+        "s3a://eurocontrol/opdi-world/research/adsc/merged/osn_tracks"
+    )
 
 
 def test_worldwide_cannot_write_into_the_european_prefix(_reset_coverage):
     r.set_coverage("worldwide")
     with pytest.raises(AssertionError, match="opdi-world"):
-        r.guard_write_path(
-            "s3a://eurocontrol/opdi/research/adsc/merged/osn_tracks")
+        r.guard_write_path("s3a://eurocontrol/opdi/research/adsc/merged/osn_tracks")
 
 
 def test_an_unknown_coverage_is_refused(_reset_coverage):
@@ -260,10 +255,10 @@ def test_an_airframe_subset_has_its_own_prefix(_reset_coverage):
     # prefix nothing would say which airframes a table holds.
     r.set_coverage("worldwide", adsc_airframes_only=True)
     assert r.arm_path("base", "osn_tracks") == (
-        "s3a://eurocontrol/opdi-world/research/adsc_airframes/base/osn_tracks")
+        "s3a://eurocontrol/opdi-world/research/adsc_airframes/base/osn_tracks"
+    )
     with pytest.raises(AssertionError):
-        r.guard_write_path(
-            "s3a://eurocontrol/opdi-world/research/adsc/base/osn_tracks")
+        r.guard_write_path("s3a://eurocontrol/opdi-world/research/adsc/base/osn_tracks")
 
 
 def test_resetting_coverage_clears_the_subset(_reset_coverage):
@@ -283,10 +278,8 @@ def test_the_subset_needs_adsc_ingested_before_adsb():
 
 
 def test_subset_keeps_only_airframes_seen_in_adsc(spark, _reset_coverage):
-    adsb = spark.createDataFrame(
-        [("aaa111", 1), ("aaa111", 2), ("bbb222", 3)], ["icao24", "v"])
-    adsc = spark.createDataFrame(
-        [("aaa111", 9), ("aaa111", 8), ("ccc333", 7)], ["icao24", "v"])
+    adsb = spark.createDataFrame([("aaa111", 1), ("aaa111", 2), ("bbb222", 3)], ["icao24", "v"])
+    adsc = spark.createDataFrame([("aaa111", 9), ("aaa111", 8), ("ccc333", 7)], ["icao24", "v"])
     kept = r.keep_adsc_airframes(adsb, adsc)
     assert sorted(x.v for x in kept.collect()) == [1, 2]
     # A semi join: no ADS-C column and no row multiplied by repeat reports.

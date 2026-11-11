@@ -44,14 +44,26 @@ AIRPORT_TYPES = list(CoverageConfig().airport_types)
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out", nargs="+", required=True,
-                    help="one or more destinations; s3a://, s3:// and hdfs:// "
-                         "are written from the executors, anything else is a "
-                         "local directory collected to the driver")
-    ap.add_argument("--batch", type=int, default=150,
-                    help="aerodromes per batch when a local destination is given")
-    ap.add_argument("--max-radius-nm", type=float, default=None,
-                    help="ring reach; defaults to the generator's outermost ring")
+    ap.add_argument(
+        "--out",
+        nargs="+",
+        required=True,
+        help="one or more destinations; s3a://, s3:// and hdfs:// "
+        "are written from the executors, anything else is a "
+        "local directory collected to the driver",
+    )
+    ap.add_argument(
+        "--batch",
+        type=int,
+        default=150,
+        help="aerodromes per batch when a local destination is given",
+    )
+    ap.add_argument(
+        "--max-radius-nm",
+        type=float,
+        default=None,
+        help="ring reach; defaults to the generator's outermost ring",
+    )
     ap.add_argument("--types", nargs="+", default=AIRPORT_TYPES)
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument("--ui-port", type=int, default=4041)

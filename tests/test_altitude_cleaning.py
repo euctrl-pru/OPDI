@@ -27,32 +27,36 @@ FT = 1.0 / 3.28084
 
 
 def _proc(spark, tmp_path):
-    return TrackProcessor(spark, OPDIConfig(),
-                          log_file_path=str(tmp_path / "log.parquet"))
+    return TrackProcessor(spark, OPDIConfig(), log_file_path=str(tmp_path / "log.parquet"))
 
 
 def _climb(spark, feet, step_s=5):
     """One track, one sample every *step_s*, at the given altitudes in feet."""
     t0 = dt.datetime(2026, 6, 10, 16, 21, 24)
-    return spark.createDataFrame([
-        Row(track_id="t1", event_time=t0 + dt.timedelta(seconds=i * step_s),
-            baro_altitude=float(ft) * FT)
-        for i, ft in enumerate(feet)
-    ])
+    return spark.createDataFrame(
+        [
+            Row(
+                track_id="t1",
+                event_time=t0 + dt.timedelta(seconds=i * step_s),
+                baro_altitude=float(ft) * FT,
+            )
+            for i, ft in enumerate(feet)
+        ]
+    )
 
 
 def _clean_ft(proc, df):
     rows = proc._add_clean_altitude(df, "baro_altitude").orderBy("event_time")
-    return [None if r["baro_altitude_c"] is None
-            else round(r["baro_altitude_c"] * 3.28084)
-            for r in rows.collect()]
+    return [
+        None if r["baro_altitude_c"] is None else round(r["baro_altitude_c"] * 3.28084)
+        for r in rows.collect()
+    ]
 
 
 def test_a_normal_jet_climb_survives(spark, tmp_path):
     # The BEL5LY samples: 85 ft/s, over the old 83.3 ft/s bound and well under
     # the 200 ft/s one. Every value must come through untouched.
-    out = _clean_ft(_proc(spark, tmp_path),
-                    _climb(spark, [7200, 7600, 8025, 8400, 8750]))
+    out = _clean_ft(_proc(spark, tmp_path), _climb(spark, [7200, 7600, 8025, 8400, 8750]))
     assert out == [7200, 7600, 8025, 8400, 8750]
 
 
@@ -60,8 +64,7 @@ def test_a_real_spike_is_masked_not_replaced(spark, tmp_path):
     # 8,000 -> 20,000 ft in 5 s is 2,400 ft/s. The sample must become NULL --
     # not a rolling mean, which is a number nothing downstream can tell from a
     # measurement.
-    out = _clean_ft(_proc(spark, tmp_path),
-                    _climb(spark, [8000, 8400, 20000, 9200, 9600]))
+    out = _clean_ft(_proc(spark, tmp_path), _climb(spark, [8000, 8400, 20000, 9200, 9600]))
     assert out[2] is None
     assert out[0] == 8000 and out[4] == 9600
 
@@ -83,21 +86,28 @@ def test_the_first_sample_of_a_track_is_kept(spark, tmp_path):
 
 def test_duplicate_timestamps_do_not_divide_by_zero(spark, tmp_path):
     t0 = dt.datetime(2026, 6, 10, 16, 21, 24)
-    df = spark.createDataFrame([
-        Row(track_id="t1", event_time=t0, baro_altitude=7200.0 * FT),
-        Row(track_id="t1", event_time=t0, baro_altitude=7300.0 * FT),
-    ])
+    df = spark.createDataFrame(
+        [
+            Row(track_id="t1", event_time=t0, baro_altitude=7200.0 * FT),
+            Row(track_id="t1", event_time=t0, baro_altitude=7300.0 * FT),
+        ]
+    )
     out = _clean_ft(_proc(spark, tmp_path), df)
     assert out[0] == 7200
 
 
 def test_geo_altitude_uses_its_own_threshold(spark, tmp_path):
     t0 = dt.datetime(2026, 6, 10, 16, 21, 24)
-    df = spark.createDataFrame([
-        Row(track_id="t1", event_time=t0 + dt.timedelta(seconds=i * 5),
-            geo_altitude=float(ft) * FT)
-        for i, ft in enumerate([7350, 7775, 8225, 8625])
-    ])
+    df = spark.createDataFrame(
+        [
+            Row(
+                track_id="t1",
+                event_time=t0 + dt.timedelta(seconds=i * 5),
+                geo_altitude=float(ft) * FT,
+            )
+            for i, ft in enumerate([7350, 7775, 8225, 8625])
+        ]
+    )
     rows = _proc(spark, tmp_path)._add_clean_altitude(df, "geo_altitude")
     assert all(r["geo_altitude_c"] is not None for r in rows.collect())
 
@@ -105,7 +115,7 @@ def test_geo_altitude_uses_its_own_threshold(spark, tmp_path):
 def test_the_threshold_comes_from_the_cleaning_config(spark, tmp_path):
     # Not a literal in the function, and not the retired ingestion setting.
     cfg = OPDIConfig()
-    cfg.cleaning.baro_altitude_d1_max_ft_s = 10.0      # absurdly strict
+    cfg.cleaning.baro_altitude_d1_max_ft_s = 10.0  # absurdly strict
     proc = TrackProcessor(spark, cfg, log_file_path=str(tmp_path / "l.parquet"))
     out = _clean_ft(proc, _climb(spark, [7200, 7600, 8025]))
     assert out[1] is None and out[2] is None

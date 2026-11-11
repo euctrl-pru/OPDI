@@ -37,7 +37,9 @@ def git_sha(short: bool = True) -> str:
     try:
         out = subprocess.run(
             ["git", "-C", str(REPO), "rev-parse", "--short" if short else "HEAD", "HEAD"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return out.stdout.strip() or "unknown"
     except Exception:
@@ -54,7 +56,9 @@ def git_dirty() -> bool:
     try:
         out = subprocess.run(
             ["git", "-C", str(REPO), "status", "--porcelain", "--untracked-files=no"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         return bool(out.stdout.strip())
     except Exception:
@@ -115,15 +119,16 @@ def s3_identity(prefix: str) -> dict:
     bucket, _, key = path.partition("/")
     try:
         s3 = boto3.client(
-            "s3", endpoint_url=os.environ.get(
-                "OPDI_S3_ENDPOINT", "https://s3.opensky-network.org"),
+            "s3",
+            endpoint_url=os.environ.get("OPDI_S3_ENDPOINT", "https://s3.opensky-network.org"),
             aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
             aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
         )
         n = total = 0
         newest = ""
         for page in s3.get_paginator("list_objects_v2").paginate(
-                Bucket=bucket, Prefix=key.rstrip("/") + "/"):
+            Bucket=bucket, Prefix=key.rstrip("/") + "/"
+        ):
             for o in page.get("Contents", []):
                 # Skip the zero-byte directory marker. MinIO leaves a key like
                 # `research/trend_votes_agl/` behind when a prefix is emptied,
@@ -212,8 +217,9 @@ def inputs_changed(entry: dict, inputs: list) -> str:
             # the safe-looking direction, so it is reported rather than passed.
             return ""
         if now.get("objects") != was.get("objects") or now.get("bytes") != was.get("bytes"):
-            return (f"input {prefix} changed "
-                    f"({was.get('objects')} objects -> {now.get('objects')})")
+            return (
+                f"input {prefix} changed " f"({was.get('objects')} objects -> {now.get('objects')})"
+            )
     return ""
 
 

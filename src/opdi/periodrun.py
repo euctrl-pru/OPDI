@@ -57,8 +57,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #: ``runner.REFERENCE_SUBSTEPS``. Skipping 00 is still possible
 #: (``--steps 01 02 02a 03 04``), and then the reference tables must already
 #: exist, which ``preflight`` checks.
-PERIOD_STEPS: Tuple[str, ...] = (
-    "00", "01", "01b", "02", "02a", "03", "04", "04b")
+PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "01b", "02", "02a", "03", "04", "04b")
 
 #: Steps that run once for the whole window, not per day.
 #:
@@ -105,8 +104,7 @@ def reference_substeps_to_run(storage, force: bool = False) -> Dict[str, bool]:
     if force:
         return {k: True for k in REFERENCE_OUTPUTS}
     return {
-        substep: bool(preflight(storage, tables))
-        for substep, tables in REFERENCE_OUTPUTS.items()
+        substep: bool(preflight(storage, tables)) for substep, tables in REFERENCE_OUTPUTS.items()
     }
 
 
@@ -162,6 +160,7 @@ OPTIONAL_DAY_STEPS: Tuple[str, ...] = ("09",)
 def is_day_step(step: str) -> bool:
     """Whether ``step`` runs once per day rather than once for the whole window."""
     return step in DAY_STEPS or step in OPTIONAL_DAY_STEPS
+
 
 #: Steps that take no date range. Mirrors the same split in ``runner.py``; if
 #: that list changes this one must change with it, which ``test_periodrun``
@@ -255,7 +254,7 @@ def safe_driver_memory(
         return requested
 
     headroom = limit_bytes - used_bytes
-    allowed_gb = int((headroom * fraction) // (1024 ** 3))
+    allowed_gb = int((headroom * fraction) // (1024**3))
 
     if allowed_gb < MIN_DRIVER_HEAP_GB:
         raise ValueError(
@@ -356,9 +355,7 @@ class RunState:
         }
         self.save()
 
-    def matches(
-        self, env: str, start: date, end: date, coverage: str = "europe"
-    ) -> bool:
+    def matches(self, env: str, start: date, end: date, coverage: str = "europe") -> bool:
         """Whether this state describes the window and coverage now being
         asked for.
 
@@ -412,9 +409,7 @@ def resolve_pbf_path(config) -> Optional[str]:
     does not resolve, and refuses outright at this scale. Five of twenty
     aerodromes came back silently empty the last time that path built anything.
     """
-    return os.environ.get("OPDI_OSM_PBF") or getattr(
-        config.h3, "airport_layout_pbf_path", None
-    )
+    return os.environ.get("OPDI_OSM_PBF") or getattr(config.h3, "airport_layout_pbf_path", None)
 
 
 #: Degrees added to ``EUROPE_BBOX`` before checking a worldwide-configured
@@ -651,9 +646,11 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         missing = [d for d in needed if d.isoformat() not in present]
         stale = sorted(present - {d.isoformat() for d in needed})
 
-        print(f"  window {needed[0]} .. {needed[-1]}: "
-              f"{len(needed) - len(missing)} already present, "
-              f"{len(missing)} to fetch, {len(stale)} to drop")
+        print(
+            f"  window {needed[0]} .. {needed[-1]}: "
+            f"{len(needed) - len(missing)} already present, "
+            f"{len(missing)} to fetch, {len(stale)} to drop"
+        )
 
         sv = StateVectorIngestion(spark, config)
         for d in missing:
@@ -693,23 +690,25 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         from opdi.pipeline.tracks import TrackProcessor
 
         TrackProcessor(
-            spark, config,
-            log_file_path=os.path.join(
-                _log_dir(kwargs), "02_osn-tracks-etl-log.parquet"),
+            spark,
+            config,
+            log_file_path=os.path.join(_log_dir(kwargs), "02_osn-tracks-etl-log.parquet"),
         ).process_day(day, skip_if_processed=False)
     elif step == "02a":
         from opdi.cleaning.cleaner import TrackCleaner
 
         TrackCleaner(
-            spark, config,
-            log_file_path=os.path.join(
-                _log_dir(kwargs), "02a_track_cleaning.log"),
+            spark,
+            config,
+            log_file_path=os.path.join(_log_dir(kwargs), "02a_track_cleaning.log"),
         ).process_day(day, skip_if_processed=False)
     elif step == "03":
         from opdi.pipeline.flights import FlightListProcessor
 
         FlightListProcessor(
-            spark, config, log_dir=_log_dir(kwargs),
+            spark,
+            config,
+            log_dir=_log_dir(kwargs),
         ).process_day(
             day,
             airports_hex_path=kwargs.get("airports_hex_path"),
@@ -719,7 +718,9 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         from opdi.pipeline.events import FlightEventProcessor
 
         FlightEventProcessor(
-            spark, config, log_dir=_log_dir(kwargs),
+            spark,
+            config,
+            log_dir=_log_dir(kwargs),
         ).process_day(day, skip_if_processed=False)
     elif step == "04b":
         from opdi.pipeline.flight_list_step import enrich_day
@@ -744,8 +745,7 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         print(f"  published: {counts['flights']:,} flights, {counts['events']:,} events")
     else:
         raise ValueError(
-            f"{step!r} is not a per-day step; expected one of "
-            f"{DAY_STEPS + OPTIONAL_DAY_STEPS}."
+            f"{step!r} is not a per-day step; expected one of " f"{DAY_STEPS + OPTIONAL_DAY_STEPS}."
         )
 
 
@@ -791,18 +791,19 @@ def _session_extras() -> Dict[str, str]:
         # we leave it alone, because creating a bucket prefix is not ours to
         # guess at.
         if eventlog.startswith("file://"):
-            Path(eventlog[len("file://"):]).mkdir(parents=True, exist_ok=True)
+            Path(eventlog[len("file://") :]).mkdir(parents=True, exist_ok=True)
         elif "://" not in eventlog:
             Path(eventlog).mkdir(parents=True, exist_ok=True)
-        extras.update({
-            "spark.eventLog.enabled": "true",
-            "spark.eventLog.dir": eventlog,
-            # Stage-level metrics are the point; without this the log records
-            # that a stage ran but not what it cost.
-            "spark.eventLog.logStageExecutorMetrics": "true",
-        })
+        extras.update(
+            {
+                "spark.eventLog.enabled": "true",
+                "spark.eventLog.dir": eventlog,
+                # Stage-level metrics are the point; without this the log records
+                # that a stage ran but not what it cost.
+                "spark.eventLog.logStageExecutorMetrics": "true",
+            }
+        )
     return extras
-
 
 
 def _describe_memory(limit_bytes: Optional[int], used_bytes: int) -> str:
@@ -893,9 +894,7 @@ def run_period(
             # progress under the old name. Losing sight of it would restart a
             # thirty-day run at day one, so the legacy file is adopted when the
             # new one does not exist yet.
-            legacy = state_path.with_name(
-                f"weekrun_{start_date.isoformat()}_{days}d.json"
-            )
+            legacy = state_path.with_name(f"weekrun_{start_date.isoformat()}_{days}d.json")
             if legacy.exists():
                 print(f"  resuming from pre-rename state file {legacy}")
                 state_path = legacy
@@ -959,9 +958,7 @@ def run_period(
     config.project.warehouse_path = warehouse
     mem = _cgroup_v2_limit()
     limit_bytes, used_bytes = mem if mem else (None, 0)
-    heap = safe_driver_memory(
-        driver_memory or config.spark.driver_memory, limit_bytes, used_bytes
-    )
+    heap = safe_driver_memory(driver_memory or config.spark.driver_memory, limit_bytes, used_bytes)
 
     print("=" * 72)
     print("OPDI period run")
@@ -980,8 +977,10 @@ def run_period(
     last_day_step = next((s for s in reversed(list(steps)) if is_day_step(s)), None)
     keep_set = set(keep_tracks_on)
     if prune_tracks:
-        print(f"  retention   : tracks pruned after {last_day_step}"
-              + (f", kept for {', '.join(str(d) for d in sorted(keep_set))}" if keep_set else ""))
+        print(
+            f"  retention   : tracks pruned after {last_day_step}"
+            + (f", kept for {', '.join(str(d) for d in sorted(keep_set))}" if keep_set else "")
+        )
     print(f"  {_describe_memory(limit_bytes, used_bytes)}")
     if heap != (driver_memory or config.spark.driver_memory):
         print(
@@ -1111,8 +1110,7 @@ def run_period(
                         skipped = [k for k, v in sorted(todo_subs.items()) if not v]
                         if skipped:
                             print(
-                                f"  reference   : skipping {', '.join(skipped)} "
-                                "(already built)"
+                                f"  reference   : skipping {', '.join(skipped)} " "(already built)"
                             )
                 else:
                     missing = preflight(storage)
@@ -1167,8 +1165,8 @@ def run_period(
             else:
                 storage = StorageManager(
                     SparkSessionManager.create_session(
-                        app_name=f"opdi prune {day}", config=config,
-                        distributed=False),
+                        app_name=f"opdi prune {day}", config=config, distributed=False
+                    ),
                     config,
                 )
                 try:

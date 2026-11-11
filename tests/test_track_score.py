@@ -35,15 +35,17 @@ def _matched(spark, pairs, t_source="nm_inferred", t_off=_T0, t_land=_T0 + dt.ti
     for track_id, flight_key, samples in pairs:
         offsets = range(0, samples * 10, 10) if isinstance(samples, int) else samples
         for off in offsets:
-            rows.append(Row(
-                icao24="abc123",
-                event_time=_T0 + dt.timedelta(seconds=off),
-                track_id=track_id,
-                flight_key=flight_key,
-                t_off=t_off,
-                t_land=t_land,
-                t_source=t_source,
-            ))
+            rows.append(
+                Row(
+                    icao24="abc123",
+                    event_time=_T0 + dt.timedelta(seconds=off),
+                    track_id=track_id,
+                    flight_key=flight_key,
+                    t_off=t_off,
+                    t_land=t_land,
+                    t_source=t_source,
+                )
+            )
     return spark.createDataFrame(rows)
 
 
@@ -83,11 +85,16 @@ def test_total_fragmentation_has_homogeneity_one_and_low_completeness(spark):
 
 
 def test_clean_match_counts_only_one_to_one_flights(spark):
-    m = _matched(spark, [
-        ("T1", "F1", 10),                      # clean
-        ("T2", "F2", 6), ("T3", "F2", 4),      # fragmented
-        ("T4", "F3", 5), ("T4", "F4", 5),      # merged (two flights, one track)
-    ])
+    m = _matched(
+        spark,
+        [
+            ("T1", "F1", 10),  # clean
+            ("T2", "F2", 6),
+            ("T3", "F2", 4),  # fragmented
+            ("T4", "F3", 5),
+            ("T4", "F4", 5),  # merged (two flights, one track)
+        ],
+    )
     r = match_rates(m)
     assert r["n_flights"] == 4
     assert r["clean_match_pct"] == pytest.approx(25.0)
@@ -119,9 +126,16 @@ def test_a_dominant_track_with_a_stray_fragment_is_not_clean(spark):
 
 
 BOUNDARY_FIELDS = (
-    "off_err_p50_s", "off_err_p90_s", "land_err_p50_s", "land_err_p90_s",
-    "off_signed_p10_s", "off_signed_p50_s", "off_signed_p90_s",
-    "land_signed_p10_s", "land_signed_p50_s", "land_signed_p90_s",
+    "off_err_p50_s",
+    "off_err_p90_s",
+    "land_err_p50_s",
+    "land_err_p90_s",
+    "off_signed_p10_s",
+    "off_signed_p50_s",
+    "off_signed_p90_s",
+    "land_signed_p10_s",
+    "land_signed_p50_s",
+    "land_signed_p90_s",
 )
 
 
@@ -136,9 +150,15 @@ def test_score_arm_returns_a_flat_row_of_scalars(spark):
     """
     m = _matched(spark, [("T1", "F1", 10)])
     row = score_arm(m, _extents_from(m))
-    assert set(row) >= {"homogeneity", "completeness",
-                        "clean_match_pct", "fragmented_pct", "merged_pct",
-                        "n_flights", "n_tracks"}
+    assert set(row) >= {
+        "homogeneity",
+        "completeness",
+        "clean_match_pct",
+        "fragmented_pct",
+        "merged_pct",
+        "n_flights",
+        "n_tracks",
+    }
     assert row["n_apdf_flights"] == 0
     for f in BOUNDARY_FIELDS:
         assert row[f] is None, f
@@ -208,14 +228,20 @@ def test_boundary_error_reports_the_sign_of_each_overhang(spark):
     flights the two populations sit at opposite ends of the distribution.
     """
     m = _matched(spark, [("T1", "F1", [5]), ("T2", "F2", [5])], t_source="apdf")
-    extents = spark.createDataFrame([
-        Row(track_id="T1",
-            trk_start=_T0 - dt.timedelta(seconds=300),
-            trk_end=_T0 + dt.timedelta(hours=1) + dt.timedelta(seconds=600)),
-        Row(track_id="T2",
-            trk_start=_T0 + dt.timedelta(seconds=120),
-            trk_end=_T0 + dt.timedelta(hours=1) - dt.timedelta(seconds=200)),
-    ])
+    extents = spark.createDataFrame(
+        [
+            Row(
+                track_id="T1",
+                trk_start=_T0 - dt.timedelta(seconds=300),
+                trk_end=_T0 + dt.timedelta(hours=1) + dt.timedelta(seconds=600),
+            ),
+            Row(
+                track_id="T2",
+                trk_start=_T0 + dt.timedelta(seconds=120),
+                trk_end=_T0 + dt.timedelta(hours=1) - dt.timedelta(seconds=200),
+            ),
+        ]
+    )
     e = boundary_error(m, extents)
     assert e["n_apdf_flights"] == 2
     # nearest-rank percentile_approx over two values: p10/p50 -> smaller,
@@ -307,11 +333,15 @@ def test_boundary_error_sees_a_merge_that_extends_past_the_interval(spark):
     assert pre_fix["off_err_p50_s"] == pytest.approx(5.0)
     assert pre_fix["land_err_p50_s"] == pytest.approx(5.0)
 
-    true_extents = spark.createDataFrame([
-        Row(track_id="TMERGED",
-            trk_start=_T0 - dt.timedelta(seconds=1800),
-            trk_end=_T0 + dt.timedelta(hours=1) + dt.timedelta(seconds=1800)),
-    ])
+    true_extents = spark.createDataFrame(
+        [
+            Row(
+                track_id="TMERGED",
+                trk_start=_T0 - dt.timedelta(seconds=1800),
+                trk_end=_T0 + dt.timedelta(hours=1) + dt.timedelta(seconds=1800),
+            ),
+        ]
+    )
     fixed = boundary_error(m, true_extents)
     assert fixed["n_apdf_flights"] == 1
     assert fixed["off_err_p50_s"] == pytest.approx(1800.0)
@@ -334,11 +364,15 @@ def test_a_flight_both_merged_and_fragmented_counts_as_merged(spark):
     meant to catch, except that test's fixture never actually builds a flight
     satisfying both conditions at once.
     """
-    m = _matched(spark, [
-        ("T5a", "F5", 7), ("T5b", "F5", 3),   # F5: fragmented AND (via T5a) merged
-        ("T5a", "F6", 5),                      # F6: shares T5a with F5 -- merged
-        ("Tc", "Fc", 5),                       # control: clean
-    ])
+    m = _matched(
+        spark,
+        [
+            ("T5a", "F5", 7),
+            ("T5b", "F5", 3),  # F5: fragmented AND (via T5a) merged
+            ("T5a", "F6", 5),  # F6: shares T5a with F5 -- merged
+            ("Tc", "Fc", 5),  # control: clean
+        ],
+    )
     r = match_rates(m)
     assert r["n_flights"] == 3
     assert r["merged_pct"] == pytest.approx(200.0 / 3.0)
@@ -369,11 +403,14 @@ def test_tied_dominant_tracks_break_deterministically_toward_merged(spark):
     this right regardless of row order, because production data has no
     controllable order at all.
     """
-    m = _matched(spark, [
-        ("T9zulu", "F7", 5),
-        ("T9zulu", "F8", 5),
-        ("T9alpha", "F7", 5),
-    ])
+    m = _matched(
+        spark,
+        [
+            ("T9zulu", "F7", 5),
+            ("T9zulu", "F8", 5),
+            ("T9alpha", "F7", 5),
+        ],
+    )
     r1 = match_rates(m)
     r2 = match_rates(m)
     assert r1 == r2

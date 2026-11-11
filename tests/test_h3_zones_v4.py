@@ -44,9 +44,7 @@ def test_h3_pyspark_geo_to_h3_is_broken_on_h3_v4(spark):
 
     df = spark.createDataFrame([(50.9014, 4.4844)], ["lat", "lon"])
     with pytest.raises(Exception) as excinfo:
-        df.withColumn(
-            "h3", h3_pyspark.geo_to_h3(F.col("lat"), F.col("lon"), F.lit(9))
-        ).collect()
+        df.withColumn("h3", h3_pyspark.geo_to_h3(F.col("lat"), F.col("lon"), F.lit(9))).collect()
     assert "geo_to_h3" in str(excinfo.value)
 
 
@@ -152,9 +150,11 @@ def test_tracks_h3_index_null_lat_lon_yields_null_cell(spark, tmp_path):
 def test_hex_lat_lon_udfs_match_v4_cell_to_latlng(spark):
     cell = h3.latlng_to_cell(50.9014, 4.4844, 9)
     df = spark.createDataFrame([(cell,)], ["h"])
-    out = df.withColumn("lat", Z._hex_lat_udf("h")).withColumn(
-        "lon", Z._hex_lon_udf("h")
-    ).collect()[0]
+    out = (
+        df.withColumn("lat", Z._hex_lat_udf("h"))
+        .withColumn("lon", Z._hex_lon_udf("h"))
+        .collect()[0]
+    )
 
     exp_lat, exp_lon = h3.cell_to_latlng(cell)
     assert out["lat"] == pytest.approx(exp_lat, abs=1e-5)
@@ -179,9 +179,15 @@ def test_h3_distance_udf_matches_v4_grid_distance(spark):
 #: what generate_circle_polygon produces (json.dumps of [lon, lat] points).
 _ZONE_POLY = {
     "type": "Polygon",
-    "coordinates": [[
-        [4.4, 50.8], [4.5, 50.8], [4.5, 50.9], [4.4, 50.9], [4.4, 50.8],
-    ]],
+    "coordinates": [
+        [
+            [4.4, 50.8],
+            [4.5, 50.8],
+            [4.5, 50.9],
+            [4.4, 50.9],
+            [4.4, 50.8],
+        ]
+    ],
 }
 
 
@@ -196,9 +202,7 @@ def test_polyfill_geojson_udf_matches_h3_helpers_polyfill_geojson(spark):
 
     geojson_str = json.dumps(_ZONE_POLY)
     df = spark.createDataFrame([(geojson_str, 7)], ["poly", "res"])
-    got = df.withColumn(
-        "cells", Z._polyfill_geojson_udf("poly", "res")
-    ).collect()[0]["cells"]
+    got = df.withColumn("cells", Z._polyfill_geojson_udf("poly", "res")).collect()[0]["cells"]
 
     expected = polyfill_geojson(_ZONE_POLY, 7, geo_json_conformant=True)
     assert set(got) == expected
@@ -228,9 +232,7 @@ def test_polyfill_geojson_udf_matches_h3_helpers_polyfill_geojson(spark):
 
 
 #: A small square MultiPolygon WKT around EBBR (lon lat order, as WKT is).
-_AIRSPACE_WKT = (
-    "MULTIPOLYGON (((4.4 50.8, 4.5 50.8, 4.5 50.9, 4.4 50.9, 4.4 50.8)))"
-)
+_AIRSPACE_WKT = "MULTIPOLYGON (((4.4 50.8, 4.5 50.8, 4.5 50.9, 4.4 50.9, 4.4 50.8)))"
 
 
 def test_fill_geometry_matches_h3_helpers_polyfill_geojson():
@@ -245,6 +247,7 @@ def test_fill_geometry_matches_h3_helpers_polyfill_geojson():
 
     geom = shapely.wkt.loads(_AIRSPACE_WKT).geoms.__iter__().__next__()
     import shapely as sh
+
     expected = polyfill_geojson(sh.geometry.mapping(geom), 7, geo_json_conformant=True)
     assert got[0] == expected
 
@@ -256,6 +259,7 @@ def test_fill_geometry_compact_is_smaller_or_equal_and_covers_same_area():
     assert len(compact) > 0
     # Uncompacting must reproduce the full cell set exactly.
     from opdi.utils.h3_helpers import uncompact_h3_set
+
     assert uncompact_h3_set(compact, 8) == full
 
 

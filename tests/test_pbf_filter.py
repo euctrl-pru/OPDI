@@ -7,6 +7,7 @@ is synthetic and targets the one failure mode a real extract cannot be
 trusted to exercise deterministically: a multipolygon apron whose member ways
 carry no ``aeroway`` tag of their own.
 """
+
 import os
 
 import pytest
@@ -35,8 +36,12 @@ def test_the_filtered_extract_yields_the_same_aeroway_features(tmp_path):
 
     before = read_aeroway_features(PBF)
     after = read_aeroway_features(str(dst))
-    assert (after["aeroway"].value_counts().sort_index()
-            .equals(before["aeroway"].value_counts().sort_index()))
+    assert (
+        after["aeroway"]
+        .value_counts()
+        .sort_index()
+        .equals(before["aeroway"].value_counts().sort_index())
+    )
     assert set(zip(after["element"], after["id"])) == set(zip(before["element"], before["id"]))
 
 
@@ -58,9 +63,7 @@ def test_aerodrome_polygons_survive_the_filter(tmp_path):
 def _write_osm(tmp_path, name: str, body: str) -> str:
     path = tmp_path / name
     path.write_text(
-        "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\">\n"
-        + body
-        + "\n</osm>\n"
+        "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\">\n" + body + "\n</osm>\n"
     )
     return str(path)
 

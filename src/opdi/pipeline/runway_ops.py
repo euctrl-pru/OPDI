@@ -182,7 +182,10 @@ TRAVERSAL_KEY = ("track_id", "apt_ident", "rwy_ident", "trace_id")
 #: the aerodrome position. Disjoint from :data:`TRAVERSAL_KEY`, because the two
 #: are concatenated into one ``partition_cols`` list.
 TRAVERSAL_INFO = (
-    "traversal_class", "align_deg", "max_gs_kt", "osn_flight_id",
+    "traversal_class",
+    "align_deg",
+    "max_gs_kt",
+    "osn_flight_id",
     # The runway's true bearing. Functionally dependent on ``rwy_ident``, like
     # everything else here, and it has to ride along rather than be rejoined:
     # ``_info`` builds the published JSON on the far side of
@@ -194,17 +197,19 @@ TRAVERSAL_INFO = (
 #: a disabled configuration can return an empty frame of exactly this shape
 #: rather than ``None``: a caller that unions families must never have to
 #: branch on nullity.
-MILESTONE_SCHEMA = StructType([
-    StructField("track_id", StringType()),
-    StructField("type", StringType()),
-    StructField("event_time", TimestampType()),
-    StructField("lon", DoubleType()),
-    StructField("lat", DoubleType()),
-    StructField("altitude_ft", DoubleType()),
-    StructField("cumulative_distance_nm", DoubleType()),
-    StructField("cumulative_time_s", DoubleType()),
-    StructField("info", StringType()),
-])
+MILESTONE_SCHEMA = StructType(
+    [
+        StructField("track_id", StringType()),
+        StructField("type", StringType()),
+        StructField("event_time", TimestampType()),
+        StructField("lon", DoubleType()),
+        StructField("lat", DoubleType()),
+        StructField("altitude_ft", DoubleType()),
+        StructField("cumulative_distance_nm", DoubleType()),
+        StructField("cumulative_time_s", DoubleType()),
+        StructField("info", StringType()),
+    ]
+)
 
 #: ICAO milestone numbers. ``go-around`` and the two runway crossings have
 #: none, and are absent rather than invented.
@@ -230,8 +235,10 @@ ACDM_NAMES = {"airborne": "ATOT", "touchdown": "ALDT"}
 # Classification
 # ---------------------------------------------------------------------------
 
-def classify_traversal(align_deg, max_gs_kt, entry_height_ft, exit_height_ft,
-                       duration_seconds, config: "EventConfig"):
+
+def classify_traversal(
+    align_deg, max_gs_kt, entry_height_ft, exit_height_ft, duration_seconds, config: "EventConfig"
+):
     """Departure, arrival, crossing -- or NULL, which means abstain.
 
     The three classes cannot overlap: ``runway_align_max_deg`` (30 deg) and
@@ -245,19 +252,14 @@ def classify_traversal(align_deg, max_gs_kt, entry_height_ft, exit_height_ft,
     fast = max_gs_kt > F.lit(config.runway_roll_speed_kt)
     airborne_h = F.lit(config.runway_airborne_height_ft)
 
-    departure = (
-        aligned & fast
-        & (entry_height_ft < airborne_h) & (exit_height_ft >= airborne_h)
-    )
-    arrival = (
-        aligned & fast
-        & (entry_height_ft >= airborne_h) & (exit_height_ft < airborne_h)
-    )
+    departure = aligned & fast & (entry_height_ft < airborne_h) & (exit_height_ft >= airborne_h)
+    arrival = aligned & fast & (entry_height_ft >= airborne_h) & (exit_height_ft < airborne_h)
     crossing = (
         (align_deg >= F.lit(config.runway_cross_min_deg))
         & (max_gs_kt <= F.lit(config.runway_taxi_speed_kt))
         & (duration_seconds <= F.lit(config.runway_crossing_max_seconds))
-        & (entry_height_ft < airborne_h) & (exit_height_ft < airborne_h)
+        & (entry_height_ft < airborne_h)
+        & (exit_height_ft < airborne_h)
     )
     return (
         F.when(departure, F.lit("departure"))
@@ -269,6 +271,7 @@ def classify_traversal(align_deg, max_gs_kt, entry_height_ft, exit_height_ft,
 # ---------------------------------------------------------------------------
 # Traversals
 # ---------------------------------------------------------------------------
+
 
 def _col_or_null(sdf: DataFrame, name: str, dtype: str):
     """``name`` if ``sdf`` carries it, otherwise a typed NULL.
@@ -359,8 +362,7 @@ def runway_traversals(
     # already shrunk it below the broadcast threshold.
     near = sv.join(
         grid_cols,
-        (sv.h3_res_12 == grid_cols.h3_id)
-        & F.array_contains(sv.apt, grid_cols.apt_icao),
+        (sv.h3_res_12 == grid_cols.h3_id) & F.array_contains(sv.apt, grid_cols.apt_icao),
         "inner",
     )
 
@@ -380,23 +382,26 @@ def runway_traversals(
     cand = near.join(
         F.broadcast(dir_thr),
         (F.col("apt_icao") == F.col("_t_apt"))
-        & (
-            (F.col("rwy_ident") == F.col("le_ident"))
-            | (F.col("rwy_ident") == F.col("he_ident"))
-        ),
+        & ((F.col("rwy_ident") == F.col("le_ident")) | (F.col("rwy_ident") == F.col("he_ident"))),
         "inner",
     ).drop("_t_apt")
     cand = cand.withColumn(
         "_along",
         along_track_nm(
-            F.col("lat"), F.col("lon"),
-            F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing"),
+            F.col("lat"),
+            F.col("lon"),
+            F.col("thr_lat"),
+            F.col("thr_lon"),
+            F.col("rwy_bearing"),
         ),
     ).withColumn(
         "_cross",
         cross_track_nm(
-            F.col("lat"), F.col("lon"),
-            F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing"),
+            F.col("lat"),
+            F.col("lon"),
+            F.col("thr_lat"),
+            F.col("thr_lon"),
+            F.col("rwy_bearing"),
         ),
     )
 
@@ -430,15 +435,12 @@ def runway_traversals(
     ordered = Window.partitionBy("track_id", "strip_id", "rwy_ident").orderBy("event_time")
     work = work.withColumn(
         "_gap",
-        F.col("event_time").cast("long")
-        - F.lag(F.col("event_time").cast("long")).over(ordered),
+        F.col("event_time").cast("long") - F.lag(F.col("event_time").cast("long")).over(ordered),
     )
     work = work.withColumn(
         "trace_id",
-        F.sum(
-            F.when(F.col("_gap") > F.lit(config.airport_trace_gap_seconds), 1)
-            .otherwise(0)
-        ).over(ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow))
+        F.sum(F.when(F.col("_gap") > F.lit(config.airport_trace_gap_seconds), 1).otherwise(0))
+        .over(ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow))
         .cast("string"),
     )
 
@@ -448,9 +450,7 @@ def runway_traversals(
     # the higher field, every movement at the lower one has a negative height,
     # `classify_traversal` abstains, and the whole departure or arrival is
     # silently absent. See `elevation.height_above_field_ft`'s warning.
-    work = work.withColumn(
-        "_h_ft", height_above_aerodrome_ft(work, F.col("apt_icao"))
-    )
+    work = work.withColumn("_h_ft", height_above_aerodrome_ft(work, F.col("apt_icao")))
     work = work.withColumn("_gs_kt", F.col("velocity") * F.lit(KT_PER_MPS))
     work = work.withColumn("_alt_ft", F.col("baro_altitude_c") * F.lit(FT_PER_M))
     work = work.withColumn("_flight_id", _col_or_null(sv, "flight_id", "string"))
@@ -464,9 +464,18 @@ def runway_traversals(
     # than from scarce on-runway samples. The callsign is aggregated rather than
     # grouped on for the reason ``calculate_airport_events`` documents at length.
     agg = work.groupBy(
-        "track_id", "apt_icao", "strip_id", "rwy_ident",
-        "thr_lat", "thr_lon", "rwy_bearing", "rwy_length_nm", "rwy_half_width_nm",
-        "le_ident", "he_ident", "trace_id",
+        "track_id",
+        "apt_icao",
+        "strip_id",
+        "rwy_ident",
+        "thr_lat",
+        "thr_lon",
+        "rwy_bearing",
+        "rwy_length_nm",
+        "rwy_half_width_nm",
+        "le_ident",
+        "he_ident",
+        "trace_id",
     ).agg(
         F.min("event_time").alias("entry_time"),
         F.max("event_time").alias("exit_time"),
@@ -485,12 +494,12 @@ def runway_traversals(
         # (This is why an upstream ``baro_altitude_c`` bound hid the bug:
         # ``NULL < x`` is false, so it dropped exactly these ground samples and
         # the endpoints became real-valued by accident.)
-        F.min_by(
-            "_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))
-        ).alias("entry_height_ft"),
-        F.max_by(
-            "_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))
-        ).alias("exit_height_ft"),
+        F.min_by("_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))).alias(
+            "entry_height_ft"
+        ),
+        F.max_by("_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))).alias(
+            "exit_height_ft"
+        ),
         F.min_by("lat", "event_time").alias("entry_lat"),
         F.min_by("lon", "event_time").alias("entry_lon"),
         F.max_by("lat", "event_time").alias("exit_lat"),
@@ -524,8 +533,11 @@ def runway_traversals(
     cand2 = cand2.withColumn(
         "cross_track_nm",
         cross_track_nm(
-            F.col("entry_lat"), F.col("entry_lon"),
-            F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing"),
+            F.col("entry_lat"),
+            F.col("entry_lon"),
+            F.col("thr_lat"),
+            F.col("thr_lon"),
+            F.col("rwy_bearing"),
         ),
     )
     # Rounded to the metre before it is ordered on. Cross-track distance picks
@@ -534,10 +546,17 @@ def runway_traversals(
     # point noise. Unrounded, that noise would decide the direction before the
     # bearing error was ever consulted.
     cand2 = cand2.withColumn("_xt", F.round(F.col("cross_track_nm"), 3))
-    cand2 = cand2.withColumn("class", classify_traversal(
-        F.col("align_deg"), F.col("max_gs_kt"), F.col("entry_height_ft"),
-        F.col("exit_height_ft"), F.col("duration_seconds"), config,
-    ))
+    cand2 = cand2.withColumn(
+        "class",
+        classify_traversal(
+            F.col("align_deg"),
+            F.col("max_gs_kt"),
+            F.col("entry_height_ft"),
+            F.col("exit_height_ft"),
+            F.col("duration_seconds"),
+            config,
+        ),
+    )
     # Classify before the direction pick and drop the abstentions first, so a
     # direction that classifies is never lost to a better-aligned one that
     # abstains. Both directions of a genuine movement classify the same way;
@@ -550,9 +569,7 @@ def runway_traversals(
         F.col("rwy_ident").asc(),
     )
     out = (
-        cand2.withColumn("_r", F.row_number().over(best))
-        .filter(F.col("_r") == 1)
-        .drop("_r", "_xt")
+        cand2.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1).drop("_r", "_xt")
     )
 
     return out.select(
@@ -585,9 +602,11 @@ def runway_traversals(
         F.col("class"),
     )
 
+
 # ---------------------------------------------------------------------------
 # Milestones
 # ---------------------------------------------------------------------------
+
 
 def _session(sdf: DataFrame):
     """The DataFrame's SparkSession, for building an empty frame."""
@@ -619,35 +638,35 @@ def _info(milestone: Optional[str], method: Optional[str] = None):
     NULL on every type with only one source, where there is nothing to
     disambiguate.
     """
-    return F.to_json(F.struct(
-        # ``runway`` is the canonical key: the legacy ATOT/ALDT detector writes
-        # it under that name, and under ``merge_duplicate_milestones`` both
-        # arms publish the same ``type``, so a consumer reading the runway off
-        # an ATOT event must not have to know which arm produced it.
-        # ``rwy_ident`` is kept beside it as the name this family shipped with.
-        F.col("rwy_ident").alias("runway"),
-        F.col("rwy_ident").alias("rwy_ident"),
-        # The centreline's TRUE bearing, from the threshold geometry -- a
-        # property of the pavement, identical for every movement on it. Not a
-        # heading: a heading is magnetic and wind-corrected, so two aircraft
-        # using this runway in the same minute report different ones. The
-        # designator fixes the direction only to the nearest ten degrees, and
-        # is null whenever the runway could not be named, so this is what makes
-        # "which way was the runway used" answerable.
-        F.col("rwy_bearing").cast("double").alias("runway_bearing_deg"),
-        F.col("apt_ident").alias("apt_icao"),
-        F.col("traversal_class").alias("traversal_class"),
-        F.col("align_deg").alias("align_deg"),
-        F.col("max_gs_kt").alias("max_gs_kt"),
-        F.col("osn_flight_id").alias("osn_flight_id"),
-        F.lit(milestone).cast("string").alias("milestone"),
-        F.lit(method).cast("string").alias("method"),
-    ))
+    return F.to_json(
+        F.struct(
+            # ``runway`` is the canonical key: the legacy ATOT/ALDT detector writes
+            # it under that name, and under ``merge_duplicate_milestones`` both
+            # arms publish the same ``type``, so a consumer reading the runway off
+            # an ATOT event must not have to know which arm produced it.
+            # ``rwy_ident`` is kept beside it as the name this family shipped with.
+            F.col("rwy_ident").alias("runway"),
+            F.col("rwy_ident").alias("rwy_ident"),
+            # The centreline's TRUE bearing, from the threshold geometry -- a
+            # property of the pavement, identical for every movement on it. Not a
+            # heading: a heading is magnetic and wind-corrected, so two aircraft
+            # using this runway in the same minute report different ones. The
+            # designator fixes the direction only to the nearest ten degrees, and
+            # is null whenever the runway could not be named, so this is what makes
+            # "which way was the runway used" answerable.
+            F.col("rwy_bearing").cast("double").alias("runway_bearing_deg"),
+            F.col("apt_ident").alias("apt_icao"),
+            F.col("traversal_class").alias("traversal_class"),
+            F.col("align_deg").alias("align_deg"),
+            F.col("max_gs_kt").alias("max_gs_kt"),
+            F.col("osn_flight_id").alias("osn_flight_id"),
+            F.lit(milestone).cast("string").alias("milestone"),
+            F.lit(method).cast("string").alias("method"),
+        )
+    )
 
 
-def _event(
-    sdf: DataFrame, type_: str, time_col: str, method: Optional[str] = None
-) -> DataFrame:
+def _event(sdf: DataFrame, type_: str, time_col: str, method: Optional[str] = None) -> DataFrame:
     """Project onto the standard event frame."""
     return sdf.select(
         F.col("track_id"),
@@ -724,9 +743,7 @@ def _traversal_samples(
         "_window_start",
         F.when(
             F.col("traversal_class") == F.lit("arrival"),
-            F.timestamp_seconds(
-                F.col("entry_time").cast("double") - F.lit(float(lead_seconds))
-            ),
+            F.timestamp_seconds(F.col("entry_time").cast("double") - F.lit(float(lead_seconds))),
         ).otherwise(F.col("entry_time")),
     )
     joined = t.join(
@@ -736,9 +753,7 @@ def _traversal_samples(
         & (F.col("event_time") <= t["exit_time"]),
         "inner",
     ).drop("_s_track", "_window_start")
-    joined = joined.withColumn(
-        "_in_polygon", F.col("event_time") >= F.col("entry_time")
-    )
+    joined = joined.withColumn("_in_polygon", F.col("event_time") >= F.col("entry_time"))
     return joined.withColumn(
         "height_ft", height_above_aerodrome_ft(joined, F.col("apt_ident"))
     ).drop("baro_altitude_c", *carried)
@@ -820,14 +835,21 @@ def _roll_start(sdf: DataFrame, config: "EventConfig") -> DataFrame:
     return (
         work.withColumn("_r", F.row_number().over(ordered))
         .filter(F.col("_r") == 1)
-        .drop("_r", "_fast", "_prev_fast", "_gap", "_new_run", "_run",
-              "_run_start", "_held", "_run_held")
+        .drop(
+            "_r",
+            "_fast",
+            "_prev_fast",
+            "_gap",
+            "_new_run",
+            "_run",
+            "_run_start",
+            "_held",
+            "_run_held",
+        )
     )
 
 
-def _height_crossing(
-    sdf: DataFrame, config: "EventConfig", direction: str
-) -> DataFrame:
+def _height_crossing(sdf: DataFrame, config: "EventConfig", direction: str) -> DataFrame:
     """The interpolated crossing of ``runway_airborne_height_ft``.
 
     ``up`` is the lift-off, ``down`` the touchdown. Same engine, same
@@ -842,8 +864,11 @@ def _height_crossing(
         hysteresis=AIRBORNE_HYSTERESIS_FT,
         partition_cols=list(TRAVERSAL_KEY) + list(TRAVERSAL_INFO),
         interpolate_cols=(
-            "lat", "lon", "altitude_ft",
-            "cumulative_distance_nm", "cumulative_time_s",
+            "lat",
+            "lon",
+            "altitude_ft",
+            "cumulative_distance_nm",
+            "cumulative_time_s",
         ),
         up_label="up",
         down_label="down",
@@ -869,10 +894,12 @@ def _threshold_plane(sdf: DataFrame, config: "EventConfig") -> DataFrame:
     work = sdf.withColumn(
         "along_track_nm",
         haversine_nm(F.col("thr_lat"), F.col("thr_lon"), F.col("lat"), F.col("lon"))
-        * F.cos(F.radians(
-            bearing_deg(F.col("thr_lat"), F.col("thr_lon"), F.col("lat"), F.col("lon"))
-            - F.col("rwy_bearing")
-        )),
+        * F.cos(
+            F.radians(
+                bearing_deg(F.col("thr_lat"), F.col("thr_lon"), F.col("lat"), F.col("lon"))
+                - F.col("rwy_bearing")
+            )
+        ),
     )
     crossings = threshold_crossings(
         work,
@@ -881,8 +908,12 @@ def _threshold_plane(sdf: DataFrame, config: "EventConfig") -> DataFrame:
         hysteresis=THRESHOLD_PLANE_HYSTERESIS_NM,
         partition_cols=list(TRAVERSAL_KEY) + list(TRAVERSAL_INFO),
         interpolate_cols=(
-            "lat", "lon", "altitude_ft", "height_ft",
-            "cumulative_distance_nm", "cumulative_time_s",
+            "lat",
+            "lon",
+            "altitude_ft",
+            "height_ft",
+            "cumulative_distance_nm",
+            "cumulative_time_s",
         ),
         up_label="inbound",
         down_label="outbound",
@@ -895,9 +926,7 @@ def _threshold_plane(sdf: DataFrame, config: "EventConfig") -> DataFrame:
     )
 
 
-def runway_milestones(
-    sv: DataFrame, traversals: DataFrame, config: "EventConfig"
-) -> DataFrame:
+def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig") -> DataFrame:
     """The eight traversal-derived A-CDM milestones, as standard events.
 
     ``sv`` is the state vector frame carrying ``baro_altitude_c``, the two
@@ -958,6 +987,7 @@ def runway_milestones(
 # Go-around
 # ---------------------------------------------------------------------------
 
+
 def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
     """A descent below ``goaround_trigger_height_ft`` near the destination that
     climbs back above ``goaround_recovery_height_ft`` with no touchdown between.
@@ -999,13 +1029,11 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
         # of the two. At a destination lower than the origin the permissive
         # height is negative throughout, the excursion reads as having reached
         # the deck, and the go-around is suppressed as a landing.
-        height_above_elevation_ft(
-            _col_or_null(sv, "elev_ades_ft", "double")
-        ).alias("height_ft"),
+        height_above_elevation_ft(_col_or_null(sv, "elev_ades_ft", "double")).alias("height_ft"),
         (F.col("vert_rate") * F.lit(FTMIN_PER_MPS)).alias("roc_ft_min"),
-        haversine_nm(
-            F.col("lat"), F.col("lon"), F.col("ades_lat"), F.col("ades_lon")
-        ).alias("ades_dist_nm"),
+        haversine_nm(F.col("lat"), F.col("lon"), F.col("ades_lat"), F.col("ades_lon")).alias(
+            "ades_dist_nm"
+        ),
         F.col("cumulative_distance_nm").cast("double").alias("cumulative_distance_nm"),
         F.col("cumulative_time_s").cast("double").alias("cumulative_time_s"),
         _col_or_null(sv, "ades", "string").alias("ades"),
@@ -1015,8 +1043,7 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
     crossings = threshold_crossings(
         work,
         value_col="height_ft",
-        thresholds=[config.goaround_trigger_height_ft,
-                    config.goaround_recovery_height_ft],
+        thresholds=[config.goaround_trigger_height_ft, config.goaround_recovery_height_ft],
         hysteresis=GOAROUND_HYSTERESIS_FT,
         partition_cols=["track_id"],
         interpolate_cols=("lat", "lon"),
@@ -1026,13 +1053,11 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
         all_occurrences=True,
     )
 
-    trigger_down = (
-        (F.col("threshold") == F.lit(float(config.goaround_trigger_height_ft)))
-        & (F.col("direction") == "down")
+    trigger_down = (F.col("threshold") == F.lit(float(config.goaround_trigger_height_ft))) & (
+        F.col("direction") == "down"
     )
-    recovery_up = (
-        (F.col("threshold") == F.lit(float(config.goaround_recovery_height_ft)))
-        & (F.col("direction") == "up")
+    recovery_up = (F.col("threshold") == F.lit(float(config.goaround_recovery_height_ft))) & (
+        F.col("direction") == "up"
     )
     marked = crossings.filter(trigger_down | recovery_up).withColumn(
         "_kind", F.when(trigger_down, F.lit("down")).otherwise(F.lit("up"))
@@ -1042,18 +1067,18 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
     # recovery with no preceding descent is an ordinary climb -- a departure,
     # or a track that was first seen above the trigger -- and pairs with
     # nothing.
-    ordered = Window.partitionBy("track_id").orderBy("event_time").rowsBetween(
-        Window.unboundedPreceding, Window.currentRow
+    ordered = (
+        Window.partitionBy("track_id")
+        .orderBy("event_time")
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
     )
     marked = marked.withColumn(
         "_from",
-        F.last(
-            F.when(F.col("_kind") == "down", F.col("event_time")), ignorenulls=True
-        ).over(ordered),
+        F.last(F.when(F.col("_kind") == "down", F.col("event_time")), ignorenulls=True).over(
+            ordered
+        ),
     )
-    windows = marked.filter(
-        (F.col("_kind") == "up") & F.col("_from").isNotNull()
-    ).select(
+    windows = marked.filter((F.col("_kind") == "up") & F.col("_from").isNotNull()).select(
         F.col("track_id").alias("_w_track"),
         F.col("_from"),
         F.col("event_time").alias("_to"),
@@ -1108,17 +1133,20 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
         F.col("altitude_ft").cast("double").alias("altitude_ft"),
         F.col("cumulative_distance_nm").cast("double").alias("cumulative_distance_nm"),
         F.col("cumulative_time_s").cast("double").alias("cumulative_time_s"),
-        F.to_json(F.struct(
-            F.lit(None).cast("string").alias("rwy_ident"),
-            F.col("ades").alias("apt_icao"),
-            F.lit(None).cast("string").alias("traversal_class"),
-            F.lit(None).cast("double").alias("align_deg"),
-            F.lit(None).cast("double").alias("max_gs_kt"),
-            F.col("osn_flight_id").alias("osn_flight_id"),
-            F.lit(None).cast("string").alias("milestone"),
-            F.col("low_height_ft").alias("low_height_ft"),
-            F.col("max_roc_ft_min").alias("recovery_roc_ft_min"),
-            (F.col("_to").cast("double") - F.col("_from").cast("double"))
-            .alias("excursion_seconds"),
-        )).alias("info"),
+        F.to_json(
+            F.struct(
+                F.lit(None).cast("string").alias("rwy_ident"),
+                F.col("ades").alias("apt_icao"),
+                F.lit(None).cast("string").alias("traversal_class"),
+                F.lit(None).cast("double").alias("align_deg"),
+                F.lit(None).cast("double").alias("max_gs_kt"),
+                F.col("osn_flight_id").alias("osn_flight_id"),
+                F.lit(None).cast("string").alias("milestone"),
+                F.col("low_height_ft").alias("low_height_ft"),
+                F.col("max_roc_ft_min").alias("recovery_roc_ft_min"),
+                (F.col("_to").cast("double") - F.col("_from").cast("double")).alias(
+                    "excursion_seconds"
+                ),
+            )
+        ).alias("info"),
     )

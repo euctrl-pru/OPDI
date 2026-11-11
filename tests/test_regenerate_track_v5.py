@@ -42,11 +42,15 @@ def test_the_paper_dir_is_overridable_by_its_own_variable():
 def test_two_days_runs_the_shipped_setting_with_each_edge_allowance_off_and_on():
     args = _job("two_days").args
     grid = _json_after(args, "--grid-json")
-    assert grid == {**{k: [v] for k, v in SHIPPED.items()},
-                    "link_old_edge_climb": [False, True],
-                    "link_new_edge_descent": [False, True]}
-    assert args[args.index("--days") + 1:args.index("--grid-json")] == [
-        "2026-06-14", "2025-06-14"]
+    assert grid == {
+        **{k: [v] for k, v in SHIPPED.items()},
+        "link_old_edge_climb": [False, True],
+        "link_new_edge_descent": [False, True],
+    }
+    assert args[args.index("--days") + 1 : args.index("--grid-json")] == [
+        "2026-06-14",
+        "2025-06-14",
+    ]
 
 
 def test_the_reasons_are_read_at_the_shipped_setting_so_always_written():
@@ -55,8 +59,13 @@ def test_the_reasons_are_read_at_the_shipped_setting_so_always_written():
     assert job.optional == set()
     for stem in ("link_reasons", "link_positive_reasons", "link_negative_reasons"):
         assert f"{stem}_pooled.csv" in job.outputs
-    for name in ("link_grid_pooled.csv", "link_controls_pooled.csv", "link_recommended.csv",
-                 "link_grid_2026-06-14.csv", "link_grid_2025-06-14.csv"):
+    for name in (
+        "link_grid_pooled.csv",
+        "link_controls_pooled.csv",
+        "link_recommended.csv",
+        "link_grid_2026-06-14.csv",
+        "link_grid_2025-06-14.csv",
+    ):
         assert name in job.outputs
 
 
@@ -82,8 +91,12 @@ def test_every_job_depends_on_the_track_and_detector_code():
         assert set(V4.CORE) <= set(job.code_paths), job.name
         assert set(V4.script_code_paths(job.script)) <= set(job.code_paths), job.name
     paths = _job("pipeline_day").code_paths
-    for needed in ("src/opdi/pipeline/holes.py", "src/opdi/pipeline/events.py",
-                   "src/opdi/pipeline/flights.py", "benchmarks/run_track_link_day.py"):
+    for needed in (
+        "src/opdi/pipeline/holes.py",
+        "src/opdi/pipeline/events.py",
+        "src/opdi/pipeline/flights.py",
+        "benchmarks/run_track_link_day.py",
+    ):
         assert needed in paths
 
 

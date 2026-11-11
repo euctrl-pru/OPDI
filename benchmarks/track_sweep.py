@@ -68,8 +68,7 @@ LOW_ALT_FT = [1000, 2500, 5000, 7500, 10000]
 
 #: The four-column key identifying a grid cell, used for both the CSV
 #: fieldnames' identity and the resume skip-set.
-CELL_KEYS = ("gap_minutes", "low_alt_gap_minutes", "low_alt_ft",
-             "callsign_lookback_minutes")
+CELL_KEYS = ("gap_minutes", "low_alt_gap_minutes", "low_alt_ft", "callsign_lookback_minutes")
 
 
 def cell_key(row: dict) -> tuple:
@@ -107,14 +106,17 @@ def main():
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4059)
     ap.add_argument(
-        "--days", nargs="+", default=None,
+        "--days",
+        nargs="+",
+        default=None,
         help="override the period's day list, e.g. a single day to locate the "
-             "optimum before committing to the full sweep",
+        "optimum before committing to the full sweep",
     )
     ap.add_argument(
-        "--resume", action="store_true",
+        "--resume",
+        action="store_true",
         help="skip grid cells already present in an existing output CSV, and "
-             "append the new cells to it instead of overwriting it",
+        "append the new cells to it instead of overwriting it",
     )
     # Grid overrides. Step 3 requires extending the grid whenever a winning value
     # lands on an edge -- "an optimum at an edge is not an optimum; it is where
@@ -122,19 +124,43 @@ def main():
     # leave the committed defaults disagreeing with the run that produced the
     # results, and nothing in the CSV would say which grid it came from. As
     # arguments, the extension lands in the provenance argv instead.
-    ap.add_argument("--grid-gap", nargs="+", type=int, default=None,
-                    help=f"override GAP_MIN (default {GAP_MIN})")
-    ap.add_argument("--grid-low-alt-gap", nargs="+", type=int, default=None,
-                    help=f"override LOW_ALT_GAP_MIN (default {LOW_ALT_GAP_MIN})")
-    ap.add_argument("--grid-low-alt-ft", nargs="+", type=int, default=None,
-                    help=f"override LOW_ALT_FT (default {LOW_ALT_FT})")
-    ap.add_argument("--method", default="legacy", choices=sorted(ARMS),
-                    help="which arm to sweep; the grid is the same for all of "
-                         "them, but only `recommended` reads --grid-lookback")
-    ap.add_argument("--grid-lookback", nargs="+", type=float, default=None,
-                    help="callsign_lookback_minutes values. Omit to leave it "
-                         "unset, i.e. following gap_minutes -- which is what "
-                         "every cell of the legacy sweep did.")
+    ap.add_argument(
+        "--grid-gap",
+        nargs="+",
+        type=int,
+        default=None,
+        help=f"override GAP_MIN (default {GAP_MIN})",
+    )
+    ap.add_argument(
+        "--grid-low-alt-gap",
+        nargs="+",
+        type=int,
+        default=None,
+        help=f"override LOW_ALT_GAP_MIN (default {LOW_ALT_GAP_MIN})",
+    )
+    ap.add_argument(
+        "--grid-low-alt-ft",
+        nargs="+",
+        type=int,
+        default=None,
+        help=f"override LOW_ALT_FT (default {LOW_ALT_FT})",
+    )
+    ap.add_argument(
+        "--method",
+        default="legacy",
+        choices=sorted(ARMS),
+        help="which arm to sweep; the grid is the same for all of "
+        "them, but only `recommended` reads --grid-lookback",
+    )
+    ap.add_argument(
+        "--grid-lookback",
+        nargs="+",
+        type=float,
+        default=None,
+        help="callsign_lookback_minutes values. Omit to leave it "
+        "unset, i.e. following gap_minutes -- which is what "
+        "every cell of the legacy sweep did.",
+    )
     args = ap.parse_args()
     out_name = args.out_name or f"sweep_{args.period}.csv"
 
@@ -195,22 +221,26 @@ def main():
         try:
             for i, (g, lg, lft, lb) in enumerate(todo, 1):
                 params = SegmentationParams(
-                    gap_minutes=float(g), low_alt_gap_minutes=float(lg),
+                    gap_minutes=float(g),
+                    low_alt_gap_minutes=float(lg),
                     low_alt_ft=float(lft),
                     callsign_lookback_minutes=lb,
                 )
-                assigned = (
-                    assign_track_id(sv, rule, params)
-                    .select("icao24", "event_time", "track_id")
+                assigned = assign_track_id(sv, rule, params).select(
+                    "icao24", "event_time", "track_id"
                 )
                 extents = track_extents(assigned)
                 matched = track_truth.overlap_join(assigned, gt)
                 row = score_arm(matched, extents)
-                row.update({
-                    "gap_minutes": g, "low_alt_gap_minutes": lg, "low_alt_ft": lft,
-                    "callsign_lookback_minutes": lb,
-                    "period": args.period,
-                })
+                row.update(
+                    {
+                        "gap_minutes": g,
+                        "low_alt_gap_minutes": lg,
+                        "low_alt_ft": lft,
+                        "callsign_lookback_minutes": lb,
+                        "period": args.period,
+                    }
+                )
 
                 if writer is None:
                     fieldnames = fieldnames or sorted(row)
@@ -238,12 +268,17 @@ def main():
     if n_gt is not None:
         inputs["gt_flights"] = n_gt
     provenance.record(
-        args.results_dir, out_name,
-        script="benchmarks/track_sweep.py", argv=sys.argv[1:],
-        code_paths=["benchmarks/track_sweep.py", "benchmarks/track_truth.py",
-                    "benchmarks/track_score.py",
-                    "src/opdi/pipeline/segmentation/base.py",
-                    "src/opdi/pipeline/segmentation/methods.py"],
+        args.results_dir,
+        out_name,
+        script="benchmarks/track_sweep.py",
+        argv=sys.argv[1:],
+        code_paths=[
+            "benchmarks/track_sweep.py",
+            "benchmarks/track_truth.py",
+            "benchmarks/track_score.py",
+            "src/opdi/pipeline/segmentation/base.py",
+            "src/opdi/pipeline/segmentation/methods.py",
+        ],
         inputs=inputs,
         input_tables=[PERIODS[args.period]["tracks"]],
     )

@@ -31,8 +31,11 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
 
-_CODE_PATHS = ["benchmarks/fir_consistency.py", "src/opdi/pipeline/fir.py",
-               "src/opdi/reference/h3_airspaces.py"]
+_CODE_PATHS = [
+    "benchmarks/fir_consistency.py",
+    "src/opdi/pipeline/fir.py",
+    "src/opdi/reference/h3_airspaces.py",
+]
 
 
 def exact_membership(samples: pd.DataFrame, volumes: pd.DataFrame) -> pd.Series:
@@ -57,7 +60,9 @@ def exact_membership(samples: pd.DataFrame, volumes: pd.DataFrame) -> pd.Series:
         key = (r["band"], r["area_km2"], r["code"])
         if i not in best or key < best[i]:
             best[i] = key
-    return pd.Series([best[i][2] if i in best else None for i in range(len(samples))], index=samples.index)
+    return pd.Series(
+        [best[i][2] if i in best else None for i in range(len(samples))], index=samples.index
+    )
 
 
 def crossing_times(frame: pd.DataFrame, code_col: str) -> pd.DataFrame:
@@ -80,7 +85,11 @@ def timing_errors(h3_x: pd.DataFrame, exact_x: pd.DataFrame) -> pd.Series:
     same track and pair (NaN when there is none)."""
     out = []
     for _, r in h3_x.iterrows():
-        cand = exact_x[(exact_x.track_id == r.track_id) & (exact_x.fir_from == r.fir_from) & (exact_x.fir_to == r.fir_to)]
+        cand = exact_x[
+            (exact_x.track_id == r.track_id)
+            & (exact_x.fir_from == r.fir_from)
+            & (exact_x.fir_to == r.fir_to)
+        ]
         if cand.empty:
             out.append(float("nan"))
         else:
@@ -88,16 +97,31 @@ def timing_errors(h3_x: pd.DataFrame, exact_x: pd.DataFrame) -> pd.Series:
     return pd.Series(out)
 
 
-def summarise(frame: pd.DataFrame, h3_x: pd.DataFrame, exact_x: pd.DataFrame, errors: pd.Series) -> dict:
+def summarise(
+    frame: pd.DataFrame, h3_x: pd.DataFrame, exact_x: pd.DataFrame, errors: pd.Series
+) -> dict:
     both = frame["fir_code"].notna() & frame["exact_code"].notna()
     return {
         "samples": int(len(frame)),
         "tracks": int(frame["track_id"].nunique()),
-        "agree_pct": round(100.0 * float((frame["fir_code"].fillna("-") == frame["exact_code"].fillna("-")).mean()), 3),
-        "agree_where_both_pct": round(100.0 * float((frame.loc[both, "fir_code"] == frame.loc[both, "exact_code"]).mean()), 3) if both.any() else None,
+        "agree_pct": round(
+            100.0
+            * float((frame["fir_code"].fillna("-") == frame["exact_code"].fillna("-")).mean()),
+            3,
+        ),
+        "agree_where_both_pct": (
+            round(
+                100.0
+                * float((frame.loc[both, "fir_code"] == frame.loc[both, "exact_code"]).mean()),
+                3,
+            )
+            if both.any()
+            else None
+        ),
         "h3_null_pct": round(100.0 * float(frame["fir_code"].isna().mean()), 3),
         "exact_null_pct": round(100.0 * float(frame["exact_code"].isna().mean()), 3),
-        "h3_crossings": int(len(h3_x)), "exact_crossings": int(len(exact_x)),
+        "h3_crossings": int(len(h3_x)),
+        "exact_crossings": int(len(exact_x)),
         "matched_crossings": int(errors.notna().sum()),
         "timing_error_p50_s": float(errors.quantile(0.5)) if errors.notna().any() else None,
         "timing_error_p90_s": float(errors.quantile(0.9)) if errors.notna().any() else None,
@@ -114,7 +138,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     from opdi.pipeline.holes import add_piece
     from opdi.reference.h3_airspaces import DEFAULT_FIR_URLS, dissolve_volumes
 
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--day", required=True)
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--input", choices=("world", "a10"), default="world")
@@ -128,7 +154,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     spark = study_session("fir consistency")
     events = spark.read.parquet(f"{PREFIX}/on/opdi_flight_events").filter(
-        (F.col("dof").cast("date") == F.lit(day).cast("date")) & (F.col("type") == "xing-fir"))
+        (F.col("dof").cast("date") == F.lit(day).cast("date")) & (F.col("type") == "xing-fir")
+    )
     events.cache()
 
     # --- the whole day's crossings -------------------------------------------
@@ -136,41 +163,86 @@ def main(argv: Optional[List[str]] = None) -> int:
     info = pd.DataFrame(list(ev["info"].map(json.loads)))
     ev = pd.concat([ev, info], axis=1)
     per_flight = ev.groupby("flight_id").size()
-    n_tracks_day = spark.read.parquet(f"{inputs}/osn_tracks_clean").filter(
-        F.col("dof").cast("date") == F.lit(day).cast("date")).select("track_id").distinct().count()
-    pairs = ev.groupby(["fir_from", "fir_to"]).size().sort_values(ascending=False).reset_index(name="crossings")
-    day_rows = [{"metric": "tracks_on_day", "value": n_tracks_day},
-                {"metric": "tracks_with_a_crossing", "value": int(per_flight.size)},
-                {"metric": "crossings", "value": int(len(ev))},
-                {"metric": "crossings_per_crossing_track_p50", "value": float(per_flight.median()) if len(per_flight) else None},
-                {"metric": "crossings_per_crossing_track_p90", "value": float(per_flight.quantile(0.9)) if len(per_flight) else None},
-                {"metric": "crossings_per_crossing_track_max", "value": int(per_flight.max()) if len(per_flight) else None},
-                {"metric": "vertical_crossings_same_prefix", "value": int((ev["fir_from"].str[:4] == ev["fir_to"].str[:4]).sum()) if len(ev) else 0},
-                {"metric": "bracket_s_p50", "value": float(ev["bracket_s"].median()) if len(ev) else None},
-                {"metric": "bracket_s_p90", "value": float(ev["bracket_s"].quantile(0.9)) if len(ev) else None},
-                {"metric": "airac_cfmu", "value": ",".join(sorted(ev["airac_cfmu"].astype(str).unique())) if len(ev) else None}]
+    n_tracks_day = (
+        spark.read.parquet(f"{inputs}/osn_tracks_clean")
+        .filter(F.col("dof").cast("date") == F.lit(day).cast("date"))
+        .select("track_id")
+        .distinct()
+        .count()
+    )
+    pairs = (
+        ev.groupby(["fir_from", "fir_to"])
+        .size()
+        .sort_values(ascending=False)
+        .reset_index(name="crossings")
+    )
+    day_rows = [
+        {"metric": "tracks_on_day", "value": n_tracks_day},
+        {"metric": "tracks_with_a_crossing", "value": int(per_flight.size)},
+        {"metric": "crossings", "value": int(len(ev))},
+        {
+            "metric": "crossings_per_crossing_track_p50",
+            "value": float(per_flight.median()) if len(per_flight) else None,
+        },
+        {
+            "metric": "crossings_per_crossing_track_p90",
+            "value": float(per_flight.quantile(0.9)) if len(per_flight) else None,
+        },
+        {
+            "metric": "crossings_per_crossing_track_max",
+            "value": int(per_flight.max()) if len(per_flight) else None,
+        },
+        {
+            "metric": "vertical_crossings_same_prefix",
+            "value": int((ev["fir_from"].str[:4] == ev["fir_to"].str[:4]).sum()) if len(ev) else 0,
+        },
+        {"metric": "bracket_s_p50", "value": float(ev["bracket_s"].median()) if len(ev) else None},
+        {
+            "metric": "bracket_s_p90",
+            "value": float(ev["bracket_s"].quantile(0.9)) if len(ev) else None,
+        },
+        {
+            "metric": "airac_cfmu",
+            "value": ",".join(sorted(ev["airac_cfmu"].astype(str).unique())) if len(ev) else None,
+        },
+    ]
     for _, r in pairs.head(15).iterrows():
         day_rows.append({"metric": f"pair {r.fir_from}->{r.fir_to}", "value": int(r.crossings)})
     name = f"fir_crossings_{args.day}.csv"
     pd.DataFrame(day_rows).to_csv(out / name, index=False)
-    provenance.record(out, name, "benchmarks/fir_consistency.py", argv, [REPO / p for p in _CODE_PATHS],
-                      inputs={"crossings": len(ev)}, input_tables=[f"{PREFIX}/on/opdi_flight_events"])
+    provenance.record(
+        out,
+        name,
+        "benchmarks/fir_consistency.py",
+        argv,
+        [REPO / p for p in _CODE_PATHS],
+        inputs={"crossings": len(ev)},
+        input_tables=[f"{PREFIX}/on/opdi_flight_events"],
+    )
 
     # --- H3 against the exact polygons on a sample of crossing tracks --------
-    sample_ids = [r.flight_id for r in events.select("flight_id").distinct().limit(args.tracks).collect()]
-    tracks = (spark.read.parquet(f"{inputs}/osn_tracks_clean")
-              .filter(F.col("dof").cast("date") == F.lit(day).cast("date"))
-              .filter(F.col("track_id").isin(sample_ids))
-              .select("track_id", "event_time", "lat", "lon", "baro_altitude_c", "h3_res_7")
-              .filter(F.col("lat").isNotNull() & F.col("h3_res_7").isNotNull()))
+    sample_ids = [
+        r.flight_id for r in events.select("flight_id").distinct().limit(args.tracks).collect()
+    ]
+    tracks = (
+        spark.read.parquet(f"{inputs}/osn_tracks_clean")
+        .filter(F.col("dof").cast("date") == F.lit(day).cast("date"))
+        .filter(F.col("track_id").isin(sample_ids))
+        .select("track_id", "event_time", "lat", "lon", "baro_altitude_c", "h3_res_7")
+        .filter(F.col("lat").isNotNull() & F.col("h3_res_7").isNotNull())
+    )
     cfg = EventConfig()
     tracks = add_piece(tracks, cfg.track_hole_seconds)
-    fir_ref = spark.read.parquet(f"{PREFIX}/ref/opdi_h3_airspace_ref").filter("airspace_type = 'FIR'")
+    fir_ref = spark.read.parquet(f"{PREFIX}/ref/opdi_h3_airspace_ref").filter(
+        "airspace_type = 'FIR'"
+    )
     n_in = tracks.count()
     withfir = attach_fir(tracks, fir_ref, cfg)
     frame = withfir.select("track_id", "event_time", "lat", "lon", "_fl", "fir_code").toPandas()
     frame = frame.rename(columns={"_fl": "fl"})
-    volumes = pd.concat([dissolve_volumes(pd.read_parquet(u)) for u in DEFAULT_FIR_URLS], ignore_index=True)
+    volumes = pd.concat(
+        [dissolve_volumes(pd.read_parquet(u)) for u in DEFAULT_FIR_URLS], ignore_index=True
+    )
     frame["exact_code"] = exact_membership(frame, volumes)
     h3_x = crossing_times(frame, "fir_code")
     exact_x = crossing_times(frame, "exact_code")
@@ -178,10 +250,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary = summarise(frame, h3_x, exact_x, errors)
     summary["double_match_rows_dropped"] = int(n_in - len(frame))
     name = f"fir_consistency_{args.day}.csv"
-    pd.DataFrame([{"metric": k, "value": v} for k, v in summary.items()]).to_csv(out / name, index=False)
-    provenance.record(out, name, "benchmarks/fir_consistency.py", argv, [REPO / p for p in _CODE_PATHS],
-                      inputs={"samples": summary["samples"], "tracks": summary["tracks"]},
-                      input_tables=[f"{inputs}/osn_tracks_clean", f"{PREFIX}/ref/opdi_h3_airspace_ref"])
+    pd.DataFrame([{"metric": k, "value": v} for k, v in summary.items()]).to_csv(
+        out / name, index=False
+    )
+    provenance.record(
+        out,
+        name,
+        "benchmarks/fir_consistency.py",
+        argv,
+        [REPO / p for p in _CODE_PATHS],
+        inputs={"samples": summary["samples"], "tracks": summary["tracks"]},
+        input_tables=[f"{inputs}/osn_tracks_clean", f"{PREFIX}/ref/opdi_h3_airspace_ref"],
+    )
     print(pd.DataFrame(day_rows).to_string(index=False))
     print(json.dumps(summary, indent=1))
     spark.stop()

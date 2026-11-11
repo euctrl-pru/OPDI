@@ -21,14 +21,26 @@ def main() -> None:
     ap.add_argument("--zones", required=True, help="directory of generated parquet parts")
     ap.add_argument("--out", required=True, help="output .html")
     ap.add_argument("--aerodromes", nargs="+", default=DEFAULT_AERODROMES)
-    ap.add_argument("--default-max-nm", type=float, default=DEFAULT_MAX_RADIUS_NM,
-                    help="where the radius filter opens (default: the flight "
-                         "list's 30 NM detection radius)")
-    ap.add_argument("--max-radius-nm", type=float, default=None,
-                    help="hard cap on what is loaded at all, to keep the page small")
+    ap.add_argument(
+        "--default-max-nm",
+        type=float,
+        default=DEFAULT_MAX_RADIUS_NM,
+        help="where the radius filter opens (default: the flight " "list's 30 NM detection radius)",
+    )
+    ap.add_argument(
+        "--max-radius-nm",
+        type=float,
+        default=None,
+        help="hard cap on what is loaded at all, to keep the page small",
+    )
     args = ap.parse_args()
-    build(args.zones, args.out, aerodromes=args.aerodromes,
-          default_max_nm=args.default_max_nm, max_radius_nm=args.max_radius_nm)
+    build(
+        args.zones,
+        args.out,
+        aerodromes=args.aerodromes,
+        default_max_nm=args.default_max_nm,
+        max_radius_nm=args.max_radius_nm,
+    )
 
 
 if __name__ == "__main__":

@@ -83,9 +83,7 @@ def redirect_candidates(table: str) -> None:
     orig_path = StorageManager._s3_path
 
     def _s3_path(self, name, *a, **kw):
-        return orig_path(
-            self, table if name == "opdi_endpoint_candidates" else name, *a, **kw
-        )
+        return orig_path(self, table if name == "opdi_endpoint_candidates" else name, *a, **kw)
 
     StorageManager._s3_path = _s3_path
     StorageManager._fl2026_cand_redirect = True
@@ -99,10 +97,11 @@ def main() -> None:
     ap.add_argument("--driver-memory", default="8g")
     ap.add_argument("--ui-port", type=int, default=4058)
     ap.add_argument(
-        "--log-dir", type=Path,
+        "--log-dir",
+        type=Path,
         default=REPO / "benchmarks" / "logs_flight_list_2026",
         help="processing-progress log directory (own, not shared with "
-             "production or another research run)",
+        "production or another research run)",
     )
     args = ap.parse_args()
 
@@ -130,9 +129,7 @@ def main() -> None:
     cfg = OPDIConfig.for_environment("opensky")
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
-    proc = FlightListProcessor(
-        spark, cfg, log_dir=str(args.log_dir), tracks_table=TRACKS_TABLE
-    )
+    proc = FlightListProcessor(spark, cfg, log_dir=str(args.log_dir), tracks_table=TRACKS_TABLE)
     print(
         f"=== flight_list_2026: ADEP={proc.detection.adep_mode} "
         f"ADES={proc.detection.ades_mode} tracks={proc.tracks_table} ==="

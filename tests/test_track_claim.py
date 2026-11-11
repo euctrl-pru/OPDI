@@ -15,6 +15,7 @@ decide one hole differently; see ``required_lookback_hours``. The lookahead has
 to cover the whole duration of a track that starts on D, because that is the only
 direction in which being too short silently truncates.
 """
+
 import datetime as dt
 from dataclasses import replace
 from types import SimpleNamespace
@@ -42,8 +43,9 @@ def _claim(spark, samples, start, end):
 
 
 def test_a_track_starting_inside_the_day_is_kept(spark):
-    out = _claim(spark, [{"t": 0, "track_id": "a"}, {"t": 60, "track_id": "a"}],
-                 _at(-HOUR), _at(HOUR))
+    out = _claim(
+        spark, [{"t": 0, "track_id": "a"}, {"t": 60, "track_id": "a"}], _at(-HOUR), _at(HOUR)
+    )
     assert {r["track_id"] for r in out.collect()} == {"a"}
 
 
@@ -71,7 +73,7 @@ def test_a_kept_track_keeps_every_sample_including_those_past_the_day(spark):
     samples = [
         {"t": 0, "track_id": "a"},
         {"t": HOUR, "track_id": "a"},
-        {"t": 5 * HOUR, "track_id": "a"},      # well past the claim window
+        {"t": 5 * HOUR, "track_id": "a"},  # well past the claim window
     ]
     out = _claim(spark, samples, _at(-HOUR), _at(HOUR))
     assert out.count() == 3
@@ -107,6 +109,7 @@ def test_two_adjacent_days_partition_the_tracks_between_them(spark):
 
 # --- the lookahead, checked against reality ---------------------------------
 
+
 def test_a_track_still_transmitting_at_the_window_edge_is_reported(spark):
     """The only way this scheme loses data, made visible.
 
@@ -122,7 +125,7 @@ def test_a_track_still_transmitting_at_the_window_edge_is_reported(spark):
         {"t": 0, "track_id": "landed"},
         {"t": HOUR, "track_id": "landed"},
         {"t": 0, "track_id": "cut_off"},
-        {"t": 6 * HOUR - 10, "track_id": "cut_off"},   # still going at the edge
+        {"t": 6 * HOUR - 10, "track_id": "cut_off"},  # still going at the edge
     ]
     sv = make_track(spark, samples)
 
@@ -140,6 +143,7 @@ def test_a_run_whose_lookahead_was_enough_reports_nothing(spark):
 
 
 # --- the lookback, under an arm that links across holes -----------------------
+
 
 def _pre_study():
     """The settings these fixtures were sized for: a 6 h gap limit, so a 7 h read."""
@@ -182,7 +186,7 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
     p = SegmentationParams()
     assert required_lookback_hours("cruise_linked", p) == 11
     assert required_lookback_hours("debounced", p) == 3
-    assert required_lookback_hours("standard", p) == 11   # standard is cruise_linked
+    assert required_lookback_hours("standard", p) == 11  # standard is cruise_linked
     assert required_lookback_hours("legacy", p) == 3
 
     p120 = SegmentationParams(link_max_gap_minutes=120.0)
@@ -191,20 +195,14 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
     p241 = SegmentationParams(link_max_gap_minutes=241.0)
     assert required_lookback_hours("cruise_linked", p241) == 6
     # The callsign lookback is added on top, also rounded up, with a floor at 3.
-    p90 = SegmentationParams(
-        link_max_gap_minutes=360.0, link_callsign_lookback_minutes=90.0
-    )
+    p90 = SegmentationParams(link_max_gap_minutes=360.0, link_callsign_lookback_minutes=90.0)
     assert required_lookback_hours("cruise_linked", p90) == 8
     short = SegmentationParams(link_max_gap_minutes=60.0)
     assert required_lookback_hours("cruise_linked", short) == 3
     # The read behind the old edge is the longer of the callsign and position reads.
-    far_position = SegmentationParams(
-        link_max_gap_minutes=360.0, link_edge_position_minutes=90.0
-    )
+    far_position = SegmentationParams(link_max_gap_minutes=360.0, link_edge_position_minutes=90.0)
     assert required_lookback_hours("cruise_linked", far_position) == 8
-    no_callsign = SegmentationParams(
-        link_max_gap_minutes=360.0, link_callsign_lookback_minutes=0.0
-    )
+    no_callsign = SegmentationParams(link_max_gap_minutes=360.0, link_callsign_lookback_minutes=0.0)
     assert required_lookback_hours("cruise_linked", no_callsign) == 7
     neither = SegmentationParams(
         link_max_gap_minutes=360.0,
@@ -278,15 +276,13 @@ def test_a_piece_after_midnight_is_claimed_once(spark):
 
     d_minus_1 = dt.datetime(2024, 6, 1)
     d = dt.datetime(2024, 6, 2)
-    at = lambda moment: (moment - EPOCH).total_seconds()   # noqa: E731
+    at = lambda moment: (moment - EPOCH).total_seconds()  # noqa: E731
     cruise = {"lat": 0.0, "baro_altitude": 11000.0, "vert_rate": 0.0, "callsign": "DLH1"}
 
     old_start = at(d_minus_1 + dt.timedelta(hours=20, minutes=50))
     new_start = at(d + dt.timedelta(minutes=10))
     gap_min = (new_start - (old_start + 5 * 60)) / 60
-    samples = [
-        {**cruise, "t": old_start + i * 60, "lon": 0.0} for i in range(6)
-    ] + [
+    samples = [{**cruise, "t": old_start + i * 60, "lon": 0.0} for i in range(6)] + [
         # 480 kt across the hole, on the equator.
         {**cruise, "t": new_start + i * 60, "lon": 480.0 * gap_min / 60 / 60.04}
         for i in range(11)
@@ -355,7 +351,7 @@ def test_a_callsign_older_than_the_read_cannot_lose_a_piece(spark):
     and link, so the track would start on D-1 and D would not claim it. The piece
     after the hole would then be published by no day.
     """
-    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)  # noqa: E731
     samples = _every(D_MINUS_1 + hours(12), D_MINUS_1 + hours(13), 10, lon=0.0, callsign="DLH1")
     samples += _every(D_MINUS_1 + hours(13, 10), D_MINUS_1 + hours(22), 10, lon=0.0, callsign="")
     samples += _every(D + hours(0, 10), D + hours(0, 30), 2, lon=_lon_after(130), callsign="BAW2")
@@ -364,7 +360,7 @@ def test_a_callsign_older_than_the_read_cannot_lose_a_piece(spark):
 
 def test_a_recent_callsign_splits_in_both_reads(spark):
     """DLH1 until 21:30, so it counts in both reads: D claims the BAW2 piece."""
-    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)  # noqa: E731
     samples = _every(D_MINUS_1 + hours(20), D_MINUS_1 + hours(21, 30), 10, lon=0.0, callsign="DLH1")
     samples += _every(D_MINUS_1 + hours(21, 40), D_MINUS_1 + hours(22), 10, lon=0.0, callsign="")
     samples += _every(D + hours(0, 10), D + hours(0, 30), 2, lon=_lon_after(130), callsign="BAW2")
@@ -377,7 +373,7 @@ def test_the_furthest_evidence_a_hole_can_use_is_inside_the_read(spark):
     Old edge 18:00, DLH1 last seen 17:00, exactly where D's 7 h read begins. Both
     reads must see it, and split.
     """
-    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)  # noqa: E731
     samples = _every(D_MINUS_1 + hours(15), D_MINUS_1 + hours(17), 10, lon=0.0, callsign="DLH1")
     samples += _every(D_MINUS_1 + hours(17, 10), D_MINUS_1 + hours(18), 10, lon=0.0, callsign="")
     samples += _every(D, D + hours(0, 20), 2, lon=_lon_after(360), callsign="BAW2")
@@ -394,9 +390,11 @@ def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookbac
     from opdi.pipeline.tracks import required_lookback_hours
 
     p = PRE_STUDY
-    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)  # noqa: E731
     blank = {"lat": None, "lon": None}
-    samples = _every(D_MINUS_1 + hours(17, 30), D_MINUS_1 + hours(17, 55), 5, lon=0.0, callsign="DLH1")
+    samples = _every(
+        D_MINUS_1 + hours(17, 30), D_MINUS_1 + hours(17, 55), 5, lon=0.0, callsign="DLH1"
+    )
     samples += _every(D_MINUS_1 + hours(17, 56), D_MINUS_1 + hours(18), 1, callsign="DLH1", **blank)
     samples += _every(D, D + hours(0, 4), 1, callsign="DLH1", **blank)
     samples += _every(D + hours(0, 5), D + hours(0, 20), 5, lon=_lon_after(370), callsign="DLH1")
@@ -427,9 +425,7 @@ def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookbac
         ({"link_callsign_lookback_minutes": 0.0}, 5),
     ],
 )
-def test_the_old_edge_position_is_always_inside_the_read(
-    spark, settings, position_min_before_edge
-):
+def test_the_old_edge_position_is_always_inside_the_read(spark, settings, position_min_before_edge):
     """The longest hole, ending at midnight, with the position at the window's limit.
 
     Both reads must see it and link. A lookback an hour shorter starts at or after the
@@ -438,13 +434,15 @@ def test_the_old_edge_position_is_always_inside_the_read(
     from opdi.pipeline.tracks import required_lookback_hours
 
     p = replace(PRE_STUDY, **settings)
-    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)  # noqa: E731
     old_edge = D_MINUS_1 + hours(18)
     position_at = old_edge - dt.timedelta(minutes=position_min_before_edge)
     blank = {"lat": None, "lon": None}
     samples = _every(position_at - hours(0, 10), position_at, 5, lon=0.0, callsign="DLH1")
     samples += _every(position_at + hours(0, 1), old_edge, 1, callsign="DLH1", **blank)
-    new_piece = _every(D, D + hours(0, 20), 5, callsign="DLH1", lon=_lon_after(360 + position_min_before_edge))
+    new_piece = _every(
+        D, D + hours(0, 20), 5, callsign="DLH1", lon=_lon_after(360 + position_min_before_edge)
+    )
     samples += new_piece
     sv = make_track(spark, samples)
 
@@ -468,9 +466,15 @@ def test_a_low_sample_across_an_earlier_break_cannot_lose_a_piece(spark):
     from opdi.pipeline.tracks import required_lookback_hours
 
     p = SegmentationParams()
-    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
-    samples = _every(D_MINUS_1 + hours(11), D_MINUS_1 + hours(11, 2), 1,
-                     lon=0.0, callsign="DLH1", baro_altitude=914.4)
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)  # noqa: E731
+    samples = _every(
+        D_MINUS_1 + hours(11),
+        D_MINUS_1 + hours(11, 2),
+        1,
+        lon=0.0,
+        callsign="DLH1",
+        baro_altitude=914.4,
+    )
     samples += _every(D_MINUS_1 + hours(14), D_MINUS_1 + hours(14, 10), 5, lon=0.0, callsign="DLH1")
     samples += _every(D, D + hours(0, 9), 1, lon=_lon_after(590), callsign="DLH1")
     assert len(samples) == 16
@@ -489,8 +493,8 @@ def test_a_low_sample_across_an_earlier_break_cannot_lose_a_piece(spark):
 @pytest.mark.parametrize(
     "last_altitude_before_edge_min, tracks",
     [
-        (4, 1),     # inside the window, so both reads hold it and link
-        (70, 2),    # past it, and past D's read: neither may use it, so both split
+        (4, 1),  # inside the window, so both reads hold it and link
+        (70, 2),  # past it, and past D's read: neither may use it, so both split
     ],
 )
 def test_two_days_decide_alike_with_blank_altitudes(spark, last_altitude_before_edge_min, tracks):
@@ -504,7 +508,7 @@ def test_two_days_decide_alike_with_blank_altitudes(spark, last_altitude_before_
     from opdi.pipeline.tracks import required_lookback_hours
 
     p = SegmentationParams()
-    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)   # noqa: E731
+    hours = lambda h, m=0: dt.timedelta(hours=h, minutes=m)  # noqa: E731
     old_edge = D_MINUS_1 + hours(14)
     last_altitude = old_edge - dt.timedelta(minutes=last_altitude_before_edge_min)
     assert required_lookback_hours("cruise_linked", p) == 11
@@ -512,7 +516,9 @@ def test_two_days_decide_alike_with_blank_altitudes(spark, last_altitude_before_
     blank = {"lon": 0.0, "callsign": "DLH1", "baro_altitude": None}
     samples = _every(last_altitude - hours(0, 10), last_altitude, 1, lon=0.0, callsign="DLH1")
     samples += _every(last_altitude + hours(0, 1), old_edge, 1, **blank)
-    new_piece = _every(D, D + hours(0, 3), 1, lon=_lon_after(600), callsign="DLH1", baro_altitude=None)
+    new_piece = _every(
+        D, D + hours(0, 3), 1, lon=_lon_after(600), callsign="DLH1", baro_altitude=None
+    )
     new_piece += _every(D + hours(0, 4), D + hours(0, 9), 1, lon=_lon_after(604), callsign="DLH1")
     samples += new_piece
 
@@ -537,13 +543,20 @@ def test_a_low_climbing_old_edge_before_midnight_is_claimed_once(spark):
     p = SegmentationParams()
     old_edge = D - dt.timedelta(minutes=2)
     climb = [
-        {**CRUISE, "lon": 0.0, "callsign": "DLH1", "t": _t(old_edge - dt.timedelta(minutes=m)),
-         "baro_altitude": (8000.0 - 1000.0 * m) * 0.3048, "vert_rate": 1000.0 / 196.850394}
+        {
+            **CRUISE,
+            "lon": 0.0,
+            "callsign": "DLH1",
+            "t": _t(old_edge - dt.timedelta(minutes=m)),
+            "baro_altitude": (8000.0 - 1000.0 * m) * 0.3048,
+            "vert_rate": 1000.0 / 196.850394,
+        }
         for m in range(5, -1, -1)
     ]
     new_edge = old_edge + dt.timedelta(minutes=600)
-    new_piece = _every(new_edge, new_edge + dt.timedelta(minutes=10), 1,
-                       lon=_lon_after(600), callsign="DLH1")
+    new_piece = _every(
+        new_edge, new_edge + dt.timedelta(minutes=10), 1, lon=_lon_after(600), callsign="DLH1"
+    )
     samples = climb + new_piece
 
     _assert_claimed_once(spark, samples, p)
@@ -565,7 +578,7 @@ def _straddling_read_end(spark):
     """
     from pyspark.sql.functions import lit
 
-    hours = lambda h: dt.timedelta(hours=h)     # noqa: E731
+    hours = lambda h: dt.timedelta(hours=h)  # noqa: E731
     samples = _every(D_MINUS_1 + hours(13), D + hours(21), 20, lon=0.0, callsign="DLH1")
     samples += _every(D + hours(25), D + hours(26), 5, lon=_lon_after(240), callsign="DLH1")
     written = _claimed_by_day(make_track(spark, samples), D_MINUS_1, 7)
@@ -580,9 +593,7 @@ def _warning_from_process_day(capsys, written, method, **segmentation):
 
 
 def test_a_hole_straddling_the_read_end_is_reported(spark, capsys):
-    out = _warning_from_process_day(
-        capsys, _straddling_read_end(spark), "cruise_linked"
-    )
+    out = _warning_from_process_day(capsys, _straddling_read_end(spark), "cruise_linked")
     assert "WARNING: 1 track(s)" in out
     assert "covered every track" not in out
 
@@ -590,7 +601,9 @@ def test_a_hole_straddling_the_read_end_is_reported(spark, capsys):
 def test_the_margin_follows_the_longest_linkable_hole(spark, capsys):
     """Allowing only 120 min, a track 3 h short of the edge cannot be waiting on a link."""
     out = _warning_from_process_day(
-        capsys, _straddling_read_end(spark), "cruise_linked",
+        capsys,
+        _straddling_read_end(spark),
+        "cruise_linked",
         link_max_gap_minutes=120.0,
     )
     assert "WARNING" not in out
@@ -600,9 +613,9 @@ def test_the_margin_follows_the_longest_linkable_hole(spark, capsys):
 @pytest.mark.parametrize(
     "lookahead_min, edge_min, warned",
     [
-        (10.0, 5.0, True),      # 175 + 10 reaches the track, 3 h short of the read end
-        (3.0, 8.0, True),       # 175 + 8: the longer of the two is the one added
-        (3.0, 1.0, False),      # 175 + 3 does not
+        (10.0, 5.0, True),  # 175 + 10 reaches the track, 3 h short of the read end
+        (3.0, 8.0, True),  # 175 + 8: the longer of the two is the one added
+        (3.0, 1.0, False),  # 175 + 3 does not
     ],
 )
 def test_the_margin_adds_what_the_decision_reads_past_the_new_edge(
@@ -610,7 +623,9 @@ def test_the_margin_adds_what_the_decision_reads_past_the_new_edge(
 ):
     """The hole's verdict also reads samples after its new edge, which must be in the read."""
     out = _warning_from_process_day(
-        capsys, _straddling_read_end(spark), "cruise_linked",
+        capsys,
+        _straddling_read_end(spark),
+        "cruise_linked",
         link_max_gap_minutes=175.0,
         link_callsign_lookahead_minutes=lookahead_min,
         link_edge_position_minutes=edge_min,
@@ -619,18 +634,14 @@ def test_the_margin_adds_what_the_decision_reads_past_the_new_edge(
 
 
 def test_other_arms_keep_the_60_second_margin(spark, capsys):
-    out = _warning_from_process_day(
-        capsys, _straddling_read_end(spark), "debounced"
-    )
+    out = _warning_from_process_day(capsys, _straddling_read_end(spark), "debounced")
     assert "WARNING" not in out
     assert "covered every track" in out
 
 
 def test_the_wide_margin_says_the_track_may_simply_be_long(spark, capsys):
     """Ten hours of margin catches healthy long tracks too, so it must not claim a loss."""
-    out = _warning_from_process_day(
-        capsys, _straddling_read_end(spark), "cruise_linked"
-    )
+    out = _warning_from_process_day(capsys, _straddling_read_end(spark), "cruise_linked")
     assert "Their tails may be missing, or the track is simply long" in out
 
 
@@ -668,7 +679,7 @@ def _old_piece_then_a_long_hole():
 
     Day D reads from 13:00 on D-1, so it never sees DLH1.
     """
-    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)   # noqa: E731
+    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)  # noqa: E731
     old = _every(D_MINUS_1 + h(12, 30), D_MINUS_1 + h(12, 50), 5, lon=0.0, callsign="DLH1")
     old += _every(D_MINUS_1 + h(12, 55), D_MINUS_1 + h(14, 10), 5, lon=0.0, callsign="")
     return old, _lon_after(595)
@@ -720,7 +731,7 @@ def test_a_callsign_both_reads_hold_still_hides_a_flicker_after_a_hole(spark):
     from opdi.pipeline.segmentation import assign_track_id
     from opdi.pipeline.segmentation.methods import cruise_linked
 
-    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)   # noqa: E731
+    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)  # noqa: E731
     old = _every(D_MINUS_1 + h(13, 30), D_MINUS_1 + h(14, 10), 5, lon=0.0, callsign="DLH1")
     old += _every(D_MINUS_1 + h(14, 15), D_MINUS_1 + h(15, 20), 5, lon=0.0, callsign="")
     lon = _lon_after(525)
@@ -731,13 +742,16 @@ def test_a_callsign_both_reads_hold_still_hides_a_flicker_after_a_hole(spark):
     assert tracks.select("track_id").distinct().count() == 1
 
 
-@pytest.mark.parametrize("overrides", [
-    {},
-    {"link_max_gap_minutes": 120.0},
-    {"link_max_gap_minutes": 241.0},
-    {"link_callsign_lookback_minutes": 0.0, "link_edge_position_minutes": 0.0},
-    {"link_max_gap_minutes": 900.0, "link_callsign_lookback_minutes": 5.0},
-])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"link_max_gap_minutes": 120.0},
+        {"link_max_gap_minutes": 241.0},
+        {"link_callsign_lookback_minutes": 0.0, "link_edge_position_minutes": 0.0},
+        {"link_max_gap_minutes": 900.0, "link_callsign_lookback_minutes": 5.0},
+    ],
+)
 def test_the_callsign_memory_is_inside_every_days_read(overrides):
     """The memory, plus the 30 s a callsign needs to persist, never reaches past the read."""
     from opdi.pipeline.segmentation.methods import callsign_memory_minutes
@@ -757,13 +771,16 @@ def test_debounced_by_name_keeps_its_published_memory(spark):
     from opdi.pipeline.segmentation import assign_track_id
     from opdi.pipeline.segmentation.methods import cruise_linked, debounced
 
-    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)   # noqa: E731
+    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)  # noqa: E731
     samples = _every(D_MINUS_1 + h(1), D_MINUS_1 + h(1, 30), 10, lon=0.0, callsign="DLH1")
     samples += _every(D_MINUS_1 + h(1, 40), D_MINUS_1 + h(12, 30), 10, lon=0.0, callsign="")
     samples += _every(D_MINUS_1 + h(12, 31), D_MINUS_1 + h(12, 31), 1, lon=0.0, callsign="DLH7X")
     samples += _every(
-        D_MINUS_1 + h(12, 31) + dt.timedelta(seconds=5), D_MINUS_1 + h(12, 40), 1,
-        lon=0.0, callsign="DLH1",
+        D_MINUS_1 + h(12, 31) + dt.timedelta(seconds=5),
+        D_MINUS_1 + h(12, 40),
+        1,
+        lon=0.0,
+        callsign="DLH1",
     )
     sv = make_track(spark, samples)
 

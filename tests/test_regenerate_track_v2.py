@@ -22,9 +22,7 @@ import track_continuity as tc  # noqa: E402
 
 
 def test_every_declared_dependency_is_a_file_that_exists():
-    missing = sorted(
-        {p for j in reg.jobs() for p in j.code_paths if not (REPO / p).is_file()}
-    )
+    missing = sorted({p for j in reg.jobs() for p in j.code_paths if not (REPO / p).is_file()})
     assert missing == [], f"declared but absent: {missing}"
 
 
@@ -39,8 +37,11 @@ def test_the_cleaning_modules_are_declared_at_their_real_path():
 def test_the_pipeline_job_declares_the_steps_it_runs():
     """V2's whole difference from V1 is that the steps can move a number."""
     job = next(j for j in reg.jobs() if j.name == "pipeline_2025")
-    for step in ("src/opdi/pipeline/tracks.py", "src/opdi/pipeline/flights.py",
-                 "src/opdi/ingestion/osn_statevectors.py"):
+    for step in (
+        "src/opdi/pipeline/tracks.py",
+        "src/opdi/pipeline/flights.py",
+        "src/opdi/ingestion/osn_statevectors.py",
+    ):
         assert step in job.code_paths
 
 
@@ -48,7 +49,7 @@ def test_the_pipeline_job_runs_all_three_arms_in_ablation_order():
     """Only the ends gives a total the release note cannot decompose."""
     job = next(j for j in reg.jobs() if j.name == "pipeline_2025")
     i = job.args.index("--methods")
-    assert job.args[i + 1:i + 4] == ["legacy", "airframe_only", "standard"]
+    assert job.args[i + 1 : i + 4] == ["legacy", "airframe_only", "standard"]
 
 
 def test_the_pipeline_job_declares_the_extents_the_continuity_job_reads():

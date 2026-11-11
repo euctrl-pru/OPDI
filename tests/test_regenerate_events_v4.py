@@ -104,10 +104,15 @@ def test_the_chain_declares_every_table_the_paper_reads():
     staged = {name for job in v4.jobs() for name in job.outputs.values()}
 
     assert staged == {
-        "bridge_2026.json", "ladder_2026.csv", "inventory_2026.csv",
-        "per_airport_2026.csv", "per_airport_by_detector_2026.csv",
-        "pooling_rules_2026.csv", "rings_2026.csv",
-        "runway_2026.csv", "resolution_2026.csv",
+        "bridge_2026.json",
+        "ladder_2026.csv",
+        "inventory_2026.csv",
+        "per_airport_2026.csv",
+        "per_airport_by_detector_2026.csv",
+        "pooling_rules_2026.csv",
+        "rings_2026.csv",
+        "runway_2026.csv",
+        "resolution_2026.csv",
     }
     assert "floor_2026.csv" not in staged
 

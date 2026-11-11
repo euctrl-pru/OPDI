@@ -63,12 +63,27 @@ FLICKER = (
 
 #: One airframe at cruise, 1,530 NM and 191 minutes across a reception hole: 480 kt.
 #: A9 splits it, and A10 keeps it whole. Selecting A10 must need no patching.
-HOLE = (
-    [{"t": i * 5, "baro_altitude": 11000.0, "lat": 0.0, "lon": 0.0,
-      "vert_rate": 0.0, "callsign": "DLH1"} for i in range(10)]
-    + [{"t": 45 + 191 * 60 + i * 5, "baro_altitude": 11000.0, "lat": 0.0, "lon": 25.48,
-        "vert_rate": 0.0, "callsign": "DLH1"} for i in range(10)]
-)
+HOLE = [
+    {
+        "t": i * 5,
+        "baro_altitude": 11000.0,
+        "lat": 0.0,
+        "lon": 0.0,
+        "vert_rate": 0.0,
+        "callsign": "DLH1",
+    }
+    for i in range(10)
+] + [
+    {
+        "t": 45 + 191 * 60 + i * 5,
+        "baro_altitude": 11000.0,
+        "lat": 0.0,
+        "lon": 25.48,
+        "vert_rate": 0.0,
+        "callsign": "DLH1",
+    }
+    for i in range(10)
+]
 
 
 def test_cruise_linked_is_selectable_through_the_pipeline(spark, tmp_path):

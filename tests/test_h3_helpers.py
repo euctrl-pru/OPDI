@@ -43,9 +43,7 @@ def test_h3_to_parent_matches_v4_cell_to_parent():
 
 def test_h3_to_children_matches_v4_cell_to_children():
     parent_cell = h3.latlng_to_cell(EBBR_LAT, EBBR_LON, RES - 1)
-    assert h3_helpers.h3_to_children(parent_cell, RES) == set(
-        h3.cell_to_children(parent_cell, RES)
-    )
+    assert h3_helpers.h3_to_children(parent_cell, RES) == set(h3.cell_to_children(parent_cell, RES))
 
 
 def test_h3_distance_matches_v4_grid_distance():
@@ -88,9 +86,15 @@ def test_polyfill_geojson_footgun_lat_lng_order():
     # GeoJSON ring: [lon, lat] pairs, as callers already pass in.
     geojson_polygon = {
         "type": "Polygon",
-        "coordinates": [[
-            [4.4, 50.8], [4.5, 50.8], [4.5, 50.9], [4.4, 50.9], [4.4, 50.8],
-        ]],
+        "coordinates": [
+            [
+                [4.4, 50.8],
+                [4.5, 50.8],
+                [4.5, 50.9],
+                [4.4, 50.9],
+                [4.4, 50.8],
+            ]
+        ],
     }
     result = h3_helpers.polyfill_geojson(geojson_polygon, resolution=7, geo_json_conformant=True)
 
@@ -107,9 +111,15 @@ def test_polyfill_geojson_non_conformant_lat_lng_input():
     """geo_json_conformant=False path: caller already passes [lat, lon] pairs."""
     latlng_polygon = {
         "type": "Polygon",
-        "coordinates": [[
-            [50.8, 4.4], [50.8, 4.5], [50.9, 4.5], [50.9, 4.4], [50.8, 4.4],
-        ]],
+        "coordinates": [
+            [
+                [50.8, 4.4],
+                [50.8, 4.5],
+                [50.9, 4.5],
+                [50.9, 4.4],
+                [50.8, 4.4],
+            ]
+        ],
     }
     result = h3_helpers.polyfill_geojson(latlng_polygon, resolution=7, geo_json_conformant=False)
 

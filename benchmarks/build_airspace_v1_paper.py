@@ -21,32 +21,66 @@ import build_track_v4_paper as v4  # noqa: E402
 from build_track_v4_paper import MissingValue, Paper, n, num, one, read_csv, table  # noqa: E402
 from build_track_v5_paper import class_constant  # noqa: E402
 
-PAPER = Path(os.environ.get(
-    "OPDI_PAPER_DIR_AIRSPACE", REPO.parent / "opdi-portal" / "papers" / "airspace-events-v1"))
+PAPER = Path(
+    os.environ.get(
+        "OPDI_PAPER_DIR_AIRSPACE", REPO.parent / "opdi-portal" / "papers" / "airspace-events-v1"
+    )
+)
 
 TITLE = "Holding, point merge and FIR crossings as flight events"
 SUBTITLE = "Three new event families: how each is detected, what it measures, and how well it does"
 
 ALLOWED_LITERALS = {
-    "2019", "01", "10",          # the label day
-    "2026", "06", "14",          # the pipeline day
-    "524",                       # the AIRAC cycle
-    "11", "28", "12", "26", "2024",  # its validity
-    "0.84", "0.70", "0.76",      # the neural detector's bar
-    "61", "23",                  # the catalogue
-    "6",                         # the label window, minutes
-    "2",                         # the window step
-    "1", "3", "4", "5", "7", "8", "9",  # section numbers and small counts stated in prose
-    "60",                        # dwell seconds; candidate radius
-    "360", "300", "330", "80", "15", "2,500", "140", "240", "120",  # holding thresholds
-    "45", "90", "1.5", "600",    # point merge thresholds
-    "0.4",                       # turning floor
-    "195", "245",                # the FIR/UIR split levels
-    "42", "13",                  # merge point to airport distances cited
-    "100",                       # per cent
-    "50",                        # half a window
-    "00", "04",                  # pipeline steps 00c and 04
-    "2023",                      # Melo (2023)
+    "2019",
+    "01",
+    "10",  # the label day
+    "2026",
+    "06",
+    "14",  # the pipeline day
+    "524",  # the AIRAC cycle
+    "11",
+    "28",
+    "12",
+    "26",
+    "2024",  # its validity
+    "0.84",
+    "0.70",
+    "0.76",  # the neural detector's bar
+    "61",
+    "23",  # the catalogue
+    "6",  # the label window, minutes
+    "2",  # the window step
+    "1",
+    "3",
+    "4",
+    "5",
+    "7",
+    "8",
+    "9",  # section numbers and small counts stated in prose
+    "60",  # dwell seconds; candidate radius
+    "360",
+    "300",
+    "330",
+    "80",
+    "15",
+    "2,500",
+    "140",
+    "240",
+    "120",  # holding thresholds
+    "45",
+    "90",
+    "1.5",
+    "600",  # point merge thresholds
+    "0.4",  # turning floor
+    "195",
+    "245",  # the FIR/UIR split levels
+    "42",
+    "13",  # merge point to airport distances cited
+    "100",  # per cent
+    "50",  # half a window
+    "00",
+    "04",  # pipeline steps 00c and 04
+    "2023",  # Melo (2023)
 }
 
 PIPELINE_DAY = "2026-06-14"
@@ -88,17 +122,47 @@ def holding_context(data):
         if apt not in best or float(r["f1"]) > float(best[apt]["f1"]):
             best[apt] = r
     ctx["h_sweep_table"] = table(
-        ["Airport", "Net turn (deg)", "Displacement (NM)", "Min duration (s)", "Precision", "Recall", "F1"],
-        [[a, n(num(b, "holding_net_turn_min_deg")), n(num(b, "holding_max_displacement_nm")),
-          n(num(b, "holding_min_duration_seconds")), _fmt(num(b, "precision")), _fmt(num(b, "recall")),
-          _fmt(num(b, "f1"))] for a, b in sorted(best.items())])
-    ctx["h_sweep_points"] = n(len({(r["holding_net_turn_min_deg"], r["holding_max_displacement_nm"],
-                                    r["holding_min_duration_seconds"]) for r in sweep}))
+        [
+            "Airport",
+            "Net turn (deg)",
+            "Displacement (NM)",
+            "Min duration (s)",
+            "Precision",
+            "Recall",
+            "F1",
+        ],
+        [
+            [
+                a,
+                n(num(b, "holding_net_turn_min_deg")),
+                n(num(b, "holding_max_displacement_nm")),
+                n(num(b, "holding_min_duration_seconds")),
+                _fmt(num(b, "precision")),
+                _fmt(num(b, "recall")),
+                _fmt(num(b, "f1")),
+            ]
+            for a, b in sorted(best.items())
+        ],
+    )
+    ctx["h_sweep_points"] = n(
+        len(
+            {
+                (
+                    r["holding_net_turn_min_deg"],
+                    r["holding_max_displacement_nm"],
+                    r["holding_min_duration_seconds"],
+                )
+                for r in sweep
+            }
+        )
+    )
     f1s = {a: float(b["f1"]) for a, b in best.items()}
     shipped = {a: float(rows[a]["f1"]) for a in ("EGLL", "EIDW")}
     ctx["h_sweep_gain_max"] = _fmt(max(f1s[a] - shipped[a] for a in shipped))
     durations = sorted(float(r["duration_s"]) for r in episodes)
-    ctx["h_episode_median_min"] = _fmt(durations[len(durations) // 2] / 60.0, 1) if durations else "0"
+    ctx["h_episode_median_min"] = (
+        _fmt(durations[len(durations) // 2] / 60.0, 1) if durations else "0"
+    )
     ctx["h_orbits"] = n(sum(1 for r in episodes if r["pattern"] == "orbit"))
     ctx["h_racetracks"] = n(sum(1 for r in episodes if r["pattern"] == "racetrack"))
     return ctx
@@ -117,19 +181,45 @@ def point_merge_context(data):
     }
     top = rows[:15]
     ctx["pm_usage_table"] = table(
-        ["Airport", "Arrivals", "With a leg", "Share", "Median leg distance (NM)", "Median leg level (ft)",
-         "Median leg time (s)", "Merge point, no leg"],
-        [[r["apt_icao"], n(num(r, "arrivals")), n(num(r, "arrivals_with_leg")),
-          (f"{float(r['leg_share_pct']):.1f}%" if r.get("leg_share_pct") not in (None, "") else "-"),
-          (r["median_leg_distance_nm"] or "-"), (r["median_leg_level_ft"] or "-"),
-          (r["median_leg_duration_s"] or "-"), n(num(r, "merge_point_without_leg"))] for r in top])
+        [
+            "Airport",
+            "Arrivals",
+            "With a leg",
+            "Share",
+            "Median leg distance (NM)",
+            "Median leg level (ft)",
+            "Median leg time (s)",
+            "Merge point, no leg",
+        ],
+        [
+            [
+                r["apt_icao"],
+                n(num(r, "arrivals")),
+                n(num(r, "arrivals_with_leg")),
+                (
+                    f"{float(r['leg_share_pct']):.1f}%"
+                    if r.get("leg_share_pct") not in (None, "")
+                    else "-"
+                ),
+                (r["median_leg_distance_nm"] or "-"),
+                (r["median_leg_level_ft"] or "-"),
+                (r["median_leg_duration_s"] or "-"),
+                n(num(r, "merge_point_without_leg")),
+            ]
+            for r in top
+        ],
+    )
     eidw = one(usage, apt_icao="EIDW")
-    ctx["pm_eidw_share"] = f"{float(eidw['leg_share_pct']):.1f}%" if eidw.get("leg_share_pct") else "0%"
+    ctx["pm_eidw_share"] = (
+        f"{float(eidw['leg_share_pct']):.1f}%" if eidw.get("leg_share_pct") else "0%"
+    )
     ctx["pm_eidw_arrivals"] = n(num(eidw, "arrivals"))
     ctx["pm_eidw_with_leg"] = n(num(eidw, "arrivals_with_leg"))
     for apt in ("ENGM", "EGLC", "LPPT", "LTFM"):
         r = one(usage, apt_icao=apt)
-        ctx[f"pm_{apt.lower()}_share"] = f"{float(r['leg_share_pct']):.1f}%" if r.get("leg_share_pct") else "0%"
+        ctx[f"pm_{apt.lower()}_share"] = (
+            f"{float(r['leg_share_pct']):.1f}%" if r.get("leg_share_pct") else "0%"
+        )
     check_path = Path(data) / "point_merge" / "eidw_visual_check.csv"
     if check_path.is_file():
         with check_path.open() as fh:
@@ -137,9 +227,13 @@ def point_merge_context(data):
         det = [r for r in check if r["detected"].lower() in ("true", "1", "yes")]
         und = [r for r in check if r["detected"].lower() not in ("true", "1", "yes")]
         ctx["pm_check_detected"] = n(len(det))
-        ctx["pm_check_detected_real"] = n(sum(1 for r in det if r["judged_real_leg"].lower() == "yes"))
+        ctx["pm_check_detected_real"] = n(
+            sum(1 for r in det if r["judged_real_leg"].lower() == "yes")
+        )
         ctx["pm_check_undetected"] = n(len(und))
-        ctx["pm_check_undetected_missed"] = n(sum(1 for r in und if r["judged_real_leg"].lower() == "yes"))
+        ctx["pm_check_undetected_missed"] = n(
+            sum(1 for r in und if r["judged_real_leg"].lower() == "yes")
+        )
     else:
         raise MissingValue(f"missing {check_path}: the visual check has not been recorded")
     return ctx
@@ -173,8 +267,10 @@ def fir_context(data):
         "fir_airac": str(_metric(cross, "airac_cfmu")),
     }
     pairs = [r for r in cross if r["metric"].startswith("pair ")]
-    ctx["fir_pairs_table"] = table(["Boundary", "Crossings"],
-                                   [[r["metric"][5:].replace("->", " to "), n(num(r, "value"))] for r in pairs[:10]])
+    ctx["fir_pairs_table"] = table(
+        ["Boundary", "Crossings"],
+        [[r["metric"][5:].replace("->", " to "), n(num(r, "value"))] for r in pairs[:10]],
+    )
     return ctx
 
 
@@ -193,7 +289,12 @@ def pipeline_context(data):
     by = {(r["kind"], r["name"]): float(r["count"]) for r in counts}
     ctx["pd_counts_table"] = table(
         ["Event or measurement", "Rows on the day"],
-        [[name, n(c)] for (kind, name), c in sorted(by.items()) if kind in ("event", "measurement")])
+        [
+            [name, n(c)]
+            for (kind, name), c in sorted(by.items())
+            if kind in ("event", "measurement")
+        ],
+    )
     ctx["pd_holding_pairs"] = n(by.get(("event", "holding-start"), 0))
     ctx["pd_leg_pairs"] = n(by.get(("event", "pms-leg-entry"), 0))
     ctx["pd_merge_points"] = n(by.get(("event", "pms-merge-point"), 0))
@@ -204,11 +305,17 @@ def pipeline_context(data):
 
 def shipped_context():
     cfg = "src/opdi/config.py"
-    flags = {f: bool(class_constant("EventConfig", f, cfg))
-             for f in ("emit_holding", "emit_point_merge", "emit_fir_crossings")}
+    flags = {
+        f: bool(class_constant("EventConfig", f, cfg))
+        for f in ("emit_holding", "emit_point_merge", "emit_fir_crossings")
+    }
     on = [k for k, v in flags.items() if v]
     off = [k for k, v in flags.items() if not v]
-    names = {"emit_holding": "holding", "emit_point_merge": "point merge", "emit_fir_crossings": "FIR crossings"}
+    names = {
+        "emit_holding": "holding",
+        "emit_point_merge": "point merge",
+        "emit_fir_crossings": "FIR crossings",
+    }
     return {
         "shipped_on": ", ".join(names[k] for k in on) or "none",
         "shipped_off": ", ".join(names[k] for k in off) or "none",
@@ -247,9 +354,17 @@ def build_context(data):
     return ctx
 
 
-V1 = Paper("airspace-v1", TITLE, SUBTITLE, ALLOWED_LITERALS, build_context, render_default="run",
-           builder="build_airspace_v1_paper.py", pdf_name="airspace-events-v1.pdf",
-           regenerate="regenerate_airspace_v1.py")
+V1 = Paper(
+    "airspace-v1",
+    TITLE,
+    SUBTITLE,
+    ALLOWED_LITERALS,
+    build_context,
+    render_default="run",
+    builder="build_airspace_v1_paper.py",
+    pdf_name="airspace-events-v1.pdf",
+    regenerate="regenerate_airspace_v1.py",
+)
 
 
 def main(argv=None):

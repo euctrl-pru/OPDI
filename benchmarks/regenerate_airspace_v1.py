@@ -36,8 +36,11 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 import provenance  # noqa: E402,F401
 import regenerate_track_v4 as v4  # noqa: E402
 
-PAPER = Path(os.environ.get(
-    "OPDI_PAPER_DIR_AIRSPACE", REPO.parent / "opdi-portal" / "papers" / "airspace-events-v1"))
+PAPER = Path(
+    os.environ.get(
+        "OPDI_PAPER_DIR_AIRSPACE", REPO.parent / "opdi-portal" / "papers" / "airspace-events-v1"
+    )
+)
 DATA = PAPER / "data"
 PIPELINE_DAY = "2026-06-14"
 LABEL_DAY = "2019-10-01"
@@ -55,18 +58,30 @@ def jobs() -> list:
             name="holding",
             script="benchmarks/holding_labels_score.py",
             args=["--day", LABEL_DAY, "--airports", "EGLL", "EIDW", "--data-dir", HOLDING_DATA],
-            outputs={n: n for n in (f"holding_score_{LABEL_DAY}.csv", f"holding_sweep_{LABEL_DAY}.csv",
-                                    f"holding_episodes_{LABEL_DAY}.csv")},
+            outputs={
+                n: n
+                for n in (
+                    f"holding_score_{LABEL_DAY}.csv",
+                    f"holding_sweep_{LABEL_DAY}.csv",
+                    f"holding_episodes_{LABEL_DAY}.csv",
+                )
+            },
             code_paths=CORE + ["src/opdi/pipeline/holding.py"],
             data_root=DATA,
             notes="Shipped holding thresholds and a three-threshold sweep against the hand-corrected "
-                  "2019 labels (one day, EGLL and EIDW), scored as the label paper scores.",
+            "2019 labels (one day, EGLL and EIDW), scored as the label paper scores.",
         ),
         v4.Job(
             name="fir",
             script="benchmarks/fir_consistency.py",
             args=["--day", PIPELINE_DAY],
-            outputs={n: n for n in (f"fir_consistency_{PIPELINE_DAY}.csv", f"fir_crossings_{PIPELINE_DAY}.csv")},
+            outputs={
+                n: n
+                for n in (
+                    f"fir_consistency_{PIPELINE_DAY}.csv",
+                    f"fir_crossings_{PIPELINE_DAY}.csv",
+                )
+            },
             code_paths=CORE + ["src/opdi/pipeline/fir.py", "src/opdi/reference/h3_airspaces.py"],
             data_root=DATA,
             notes="H3 lookup against exact polygons on a sample of crossing tracks; the day's crossings.",
@@ -75,9 +90,15 @@ def jobs() -> list:
             name="point_merge",
             script="benchmarks/point_merge_report.py",
             args=["--day", PIPELINE_DAY],
-            outputs={f"point_merge_usage_{PIPELINE_DAY}.csv": f"point_merge_usage_{PIPELINE_DAY}.csv"},
-            code_paths=CORE + ["src/opdi/pipeline/point_merge.py", "src/opdi/reference/point_merge.py",
-                               "src/opdi/reference/data/point_merge_systems.csv"],
+            outputs={
+                f"point_merge_usage_{PIPELINE_DAY}.csv": f"point_merge_usage_{PIPELINE_DAY}.csv"
+            },
+            code_paths=CORE
+            + [
+                "src/opdi/pipeline/point_merge.py",
+                "src/opdi/reference/point_merge.py",
+                "src/opdi/reference/data/point_merge_systems.csv",
+            ],
             data_root=DATA,
             notes="Arrivals with a sequencing leg per covered airport on the pipeline day.",
         ),

@@ -35,8 +35,15 @@ def truth_crossings(profiles: pd.DataFrame) -> pd.DataFrame:
         prev = None
         for r in g.itertuples(index=False):
             if prev is not None and r.AIRSPACE_ID != prev.AIRSPACE_ID:
-                rows.append({"icao24": str(prev.AIRCRAFT_ADDRESS).lower(), "callsign": str(prev.CALLSIGN).strip(),
-                             "fir_from": prev.AIRSPACE_ID, "fir_to": r.AIRSPACE_ID, "t": pd.Timestamp(prev.EXIT_TIME)})
+                rows.append(
+                    {
+                        "icao24": str(prev.AIRCRAFT_ADDRESS).lower(),
+                        "callsign": str(prev.CALLSIGN).strip(),
+                        "fir_from": prev.AIRSPACE_ID,
+                        "fir_to": r.AIRSPACE_ID,
+                        "t": pd.Timestamp(prev.EXIT_TIME),
+                    }
+                )
             prev = r
     return pd.DataFrame(rows, columns=["icao24", "callsign", "fir_from", "fir_to", "t"])
 
@@ -45,12 +52,15 @@ def opdi_crossings(events: pd.DataFrame) -> pd.DataFrame:
     """``icao24, callsign, fir_from, fir_to, t`` from ``xing-fir`` rows that carry
     ``icao24`` and ``callsign`` (joined from the tracks by the caller)."""
     info = pd.DataFrame(list(events["info"].map(json.loads))) if len(events) else pd.DataFrame()
-    out = pd.DataFrame({
-        "icao24": events["icao24"].str.lower().values, "callsign": events["callsign"].str.strip().values,
-        "fir_from": info.get("fir_from", pd.Series(dtype=str)).values if len(info) else [],
-        "fir_to": info.get("fir_to", pd.Series(dtype=str)).values if len(info) else [],
-        "t": pd.to_datetime(events["event_time"]).values,
-    })
+    out = pd.DataFrame(
+        {
+            "icao24": events["icao24"].str.lower().values,
+            "callsign": events["callsign"].str.strip().values,
+            "fir_from": info.get("fir_from", pd.Series(dtype=str)).values if len(info) else [],
+            "fir_to": info.get("fir_to", pd.Series(dtype=str)).values if len(info) else [],
+            "t": pd.to_datetime(events["event_time"]).values,
+        }
+    )
     return out
 
 
@@ -62,13 +72,18 @@ def score_crossings(opdi: pd.DataFrame, truth: pd.DataFrame, tolerance_s: float 
     cand["dt"] = (cand["t_o"] - cand["t_t"]).dt.total_seconds()
     cand = cand[cand["dt"].abs() <= tolerance_s].sort_values("dt", key=abs)
     matched = cand.drop_duplicates(subset=key + ["t_t"]).drop_duplicates(subset=key + ["t_o"])
-    on_truth_flights = opdi[[tuple(x) in flights_with_truth for x in opdi[["icao24", "callsign"]].values]]
+    on_truth_flights = opdi[
+        [tuple(x) in flights_with_truth for x in opdi[["icao24", "callsign"]].values]
+    ]
     return {
-        "truth_crossings": int(len(truth)), "opdi_crossings": int(len(opdi)),
+        "truth_crossings": int(len(truth)),
+        "opdi_crossings": int(len(opdi)),
         "opdi_crossings_on_truth_flights": int(len(on_truth_flights)),
         "matched": int(len(matched)),
         "recall": float(len(matched) / len(truth)) if len(truth) else float("nan"),
-        "precision": float(len(matched) / len(on_truth_flights)) if len(on_truth_flights) else float("nan"),
+        "precision": (
+            float(len(matched) / len(on_truth_flights)) if len(on_truth_flights) else float("nan")
+        ),
         "offset_p50_s": float(matched["dt"].abs().median()) if len(matched) else None,
         "offset_p90_s": float(matched["dt"].abs().quantile(0.9)) if len(matched) else None,
         "tolerance_s": tolerance_s,
@@ -83,7 +98,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     from pyspark.sql import functions as F
     from run_airspace_events_day import INPUT_WAREHOUSE, PREFIX, study_session
 
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--day", required=True)
     ap.add_argument("--truth", required=True)
     ap.add_argument("--results-dir", required=True)
@@ -93,19 +110,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     day = pd.Timestamp(args.day).date()
     spark = study_session("fir truth")
     events = spark.read.parquet(f"{PREFIX}/on/opdi_flight_events").filter(
-        (F.col("dof").cast("date") == F.lit(day).cast("date")) & (F.col("type") == "xing-fir"))
-    ids = spark.read.parquet(f"{INPUT_WAREHOUSE}/osn_tracks_clean").filter(
-        F.col("dof").cast("date") == F.lit(day).cast("date")).groupBy("track_id").agg(
-        F.first("icao24", ignorenulls=True).alias("icao24"), F.first("callsign", ignorenulls=True).alias("callsign"))
-    ev = events.join(ids, events.flight_id == ids.track_id).select("icao24", "callsign", "event_time", "info").toPandas()
+        (F.col("dof").cast("date") == F.lit(day).cast("date")) & (F.col("type") == "xing-fir")
+    )
+    ids = (
+        spark.read.parquet(f"{INPUT_WAREHOUSE}/osn_tracks_clean")
+        .filter(F.col("dof").cast("date") == F.lit(day).cast("date"))
+        .groupBy("track_id")
+        .agg(
+            F.first("icao24", ignorenulls=True).alias("icao24"),
+            F.first("callsign", ignorenulls=True).alias("callsign"),
+        )
+    )
+    ev = (
+        events.join(ids, events.flight_id == ids.track_id)
+        .select("icao24", "callsign", "event_time", "info")
+        .toPandas()
+    )
     truth = truth_crossings(pd.read_parquet(args.truth))
     result = score_crossings(opdi_crossings(ev), truth, args.tolerance)
     out = Path(args.results_dir)
     out.mkdir(parents=True, exist_ok=True)
     name = f"fir_truth_score_{args.day}.csv"
-    pd.DataFrame([{"metric": k, "value": v} for k, v in result.items()]).to_csv(out / name, index=False)
-    provenance.record(out, name, "benchmarks/fir_truth_score.py", argv,
-                      [REPO / p for p in _CODE_PATHS], inputs=result)
+    pd.DataFrame([{"metric": k, "value": v} for k, v in result.items()]).to_csv(
+        out / name, index=False
+    )
+    provenance.record(
+        out,
+        name,
+        "benchmarks/fir_truth_score.py",
+        argv,
+        [REPO / p for p in _CODE_PATHS],
+        inputs=result,
+    )
     print(json.dumps(result, indent=1))
     spark.stop()
     return 0

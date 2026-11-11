@@ -219,7 +219,9 @@ def h3_to_children(h3_index: str, child_resolution: int) -> Set[str]:
     return set(h3.cell_to_children(h3_index, child_resolution))
 
 
-def _ring_to_latlng(ring: List[List[float]], geo_json_conformant: bool) -> List[Tuple[float, float]]:
+def _ring_to_latlng(
+    ring: List[List[float]], geo_json_conformant: bool
+) -> List[Tuple[float, float]]:
     """
     Convert one GeoJSON coordinate ring to the [lat, lng] tuples h3.LatLngPoly
     expects.
@@ -238,7 +240,9 @@ def _ring_to_latlng(ring: List[List[float]], geo_json_conformant: bool) -> List[
     return [(coord[0], coord[1]) for coord in ring]
 
 
-def polyfill_geojson(geojson_geometry: dict, resolution: int, geo_json_conformant: bool = False) -> Set[str]:
+def polyfill_geojson(
+    geojson_geometry: dict, resolution: int, geo_json_conformant: bool = False
+) -> Set[str]:
     """
     Fill a GeoJSON geometry with H3 hexagons at the specified resolution.
 

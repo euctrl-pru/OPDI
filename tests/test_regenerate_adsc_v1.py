@@ -70,8 +70,7 @@ def test_the_paper_dir_is_the_adsc_paper():
 def test_check_needs_no_credentials(monkeypatch, capsys):
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
-    monkeypatch.setattr("sys.argv", ["regenerate_adsc_v1.py", "--check",
-                                     "--allow-stale"])
+    monkeypatch.setattr("sys.argv", ["regenerate_adsc_v1.py", "--check", "--allow-stale"])
     R.main()
     assert "analysis at" in capsys.readouterr().out
 
@@ -94,6 +93,5 @@ def test_a_change_of_coverage_default_marks_pipeline_jobs_stale():
     # `for_environment` flipped to worldwide in 305fc36 and `--check` went on
     # reporting every output current, because nothing here named the code that
     # chose the coverage. The runner is named too: it builds the arms.
-    for path in ("src/opdi/config.py", "src/opdi/coverage.py",
-                 "benchmarks/run_adsc_day.py"):
+    for path in ("src/opdi/config.py", "src/opdi/coverage.py", "benchmarks/run_adsc_day.py"):
         assert path in R.CORE

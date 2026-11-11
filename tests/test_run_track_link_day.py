@@ -52,10 +52,10 @@ def test_inputs_are_shared_between_arms():
     for t in r.SHARED_INPUTS:
         assert r.arm_path("debounced", t) == r.arm_path("cruise_linked", t)
         assert "/input/" in r.arm_path("debounced", t)
-    assert r.arm_path("debounced", "osn_tracks") != \
-        r.arm_path("cruise_linked", "osn_tracks")
+    assert r.arm_path("debounced", "osn_tracks") != r.arm_path("cruise_linked", "osn_tracks")
     assert r.arm_path("cruise_linked", "osn_tracks") == (
-        "s3a://eurocontrol/opdi-world/research/a10/cruise_linked/osn_tracks")
+        "s3a://eurocontrol/opdi-world/research/a10/cruise_linked/osn_tracks"
+    )
 
 
 def test_an_unknown_arm_is_refused():
@@ -64,14 +64,15 @@ def test_an_unknown_arm_is_refused():
 
 
 def test_a_write_outside_a10_is_refused():
-    for bad in ("s3a://eurocontrol/opdi-world/osn_tracks",
-                "s3a://eurocontrol/opdi/research/a10/cruise_linked/osn_tracks",
-                "s3a://eurocontrol/opdi-world/research/adsc/base/osn_tracks",
-                "s3a://eurocontrol/opdi-world/research/a10_x/osn_tracks"):
+    for bad in (
+        "s3a://eurocontrol/opdi-world/osn_tracks",
+        "s3a://eurocontrol/opdi/research/a10/cruise_linked/osn_tracks",
+        "s3a://eurocontrol/opdi-world/research/adsc/base/osn_tracks",
+        "s3a://eurocontrol/opdi-world/research/a10_x/osn_tracks",
+    ):
         with pytest.raises(AssertionError, match="a10"):
             r.guard_write_path(bad)
-    r.guard_write_path(
-        "s3a://eurocontrol/opdi-world/research/a10/debounced/osn_tracks")
+    r.guard_write_path("s3a://eurocontrol/opdi-world/research/a10/debounced/osn_tracks")
 
 
 def test_the_three_table_sets_are_disjoint_and_complete():
@@ -86,7 +87,8 @@ def test_every_table_src_uses_is_classified():
     found = set()
     pattern = re.compile(
         r"""(?:read_table|table_ref|table_exists)\(\s*["']([a-z_0-9]+)["']"""
-        r"""|write_table\([^,]+,\s*["']([a-z_0-9]+)["']""")
+        r"""|write_table\([^,]+,\s*["']([a-z_0-9]+)["']"""
+    )
     for p in src.rglob("*.py"):
         if ".ipynb_checkpoints" in str(p):
             continue
@@ -105,9 +107,9 @@ def test_redirect_sends_derived_to_a10_and_reference_through():
     r.redirect_arm("cruise_linked")
     sm = _manager()
     assert sm._s3_path("osn_tracks").startswith(
-        "s3a://eurocontrol/opdi-world/research/a10/cruise_linked/")
-    assert sm._s3_path("oa_airports") == \
-        "s3a://eurocontrol/opdi-world/oa_airports"
+        "s3a://eurocontrol/opdi-world/research/a10/cruise_linked/"
+    )
+    assert sm._s3_path("oa_airports") == "s3a://eurocontrol/opdi-world/oa_airports"
 
 
 def test_writing_a_passthrough_table_is_refused():

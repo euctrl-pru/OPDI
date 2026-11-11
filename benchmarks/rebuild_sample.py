@@ -71,13 +71,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--start", default="2025-06-05")
     ap.add_argument("--end", default="2025-06-07")
-    ap.add_argument("--results-dir", default=None, help="unused; accepted so "
-                    "the regeneration chain can call this like any job")
+    ap.add_argument(
+        "--results-dir",
+        default=None,
+        help="unused; accepted so " "the regeneration chain can call this like any job",
+    )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4054)
     ap.add_argument("--skip-ingest", action="store_true")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="report what would be replaced and exit")
+    ap.add_argument("--dry-run", action="store_true", help="report what would be replaced and exit")
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -99,8 +101,7 @@ def main() -> None:
     print("=== targets, before ===")
     for t in ("osn_statevectors_v2", "osn_tracks"):
         i = pv.s3_identity(f"s3a://eurocontrol/opdi/{t}")
-        print(f"  {t:<24}{i.get('objects', 0):>6} objects  "
-              f"{i.get('bytes', 0) / 1e9:>7.2f} GB")
+        print(f"  {t:<24}{i.get('objects', 0):>6} objects  " f"{i.get('bytes', 0) / 1e9:>7.2f} GB")
     if args.dry_run:
         print("\ndry run: nothing written")
         return
@@ -125,10 +126,11 @@ def main() -> None:
     force_first_write_overwrite({"osn_statevectors_v2", "osn_tracks"})
 
     if not args.skip_ingest:
-        print(f"\n=== 01 ingest === {n_days} day(s): {start} .. "
-              f"{end_inclusive} (exclusive end {ingest_end})")
-        StateVectorIngestion(spark, cfg).ingest_from_s3(
-            start_date=start, end_date=ingest_end)
+        print(
+            f"\n=== 01 ingest === {n_days} day(s): {start} .. "
+            f"{end_inclusive} (exclusive end {ingest_end})"
+        )
+        StateVectorIngestion(spark, cfg).ingest_from_s3(start_date=start, end_date=ingest_end)
 
     print("\n=== 02 tracks ===")
     # process_date_range iterates *months*, not days. Passing day-level dates
@@ -142,8 +144,7 @@ def main() -> None:
     print("\n=== targets, after ===")
     for t in ("osn_statevectors_v2", "osn_tracks"):
         i = pv.s3_identity(f"s3a://eurocontrol/opdi/{t}")
-        print(f"  {t:<24}{i.get('objects', 0):>6} objects  "
-              f"{i.get('bytes', 0) / 1e9:>7.2f} GB")
+        print(f"  {t:<24}{i.get('objects', 0):>6} objects  " f"{i.get('bytes', 0) / 1e9:>7.2f} GB")
     spark.stop()
 
 

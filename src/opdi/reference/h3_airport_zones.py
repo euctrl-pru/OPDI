@@ -66,8 +66,9 @@ def _geo_to_h3_udf(lat, lon, res):
             # imported inline here.
             "h3 call {0} failed on this worker: {1}: {2}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
-            "point config.spark.k8s_container_image at the new tag."
-            .format("latlng_to_cell", type(exc).__name__, exc)
+            "point config.spark.k8s_container_image at the new tag.".format(
+                "latlng_to_cell", type(exc).__name__, exc
+            )
         ) from exc
 
 
@@ -85,8 +86,9 @@ def _h3_distance_udf(h1, h2):
             # imported inline here.
             "h3 call {0} failed on this worker: {1}: {2}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
-            "point config.spark.k8s_container_image at the new tag."
-            .format("grid_distance", type(exc).__name__, exc)
+            "point config.spark.k8s_container_image at the new tag.".format(
+                "grid_distance", type(exc).__name__, exc
+            )
         ) from exc
     except Exception:
         # Genuinely unreachable pairs: h3 refuses a grid distance across
@@ -181,8 +183,9 @@ def _polyfill_geojson_udf(geojson_str, resolution):
             # imported inline here.
             "h3 call {0} failed on this worker: {1}: {2}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
-            "point config.spark.k8s_container_image at the new tag."
-            .format("polygon_to_cells/LatLngPoly", type(exc).__name__, exc)
+            "point config.spark.k8s_container_image at the new tag.".format(
+                "polygon_to_cells/LatLngPoly", type(exc).__name__, exc
+            )
         ) from exc
 
 
@@ -236,8 +239,7 @@ def generate_circle_polygon(
         return [lon_new, math.degrees(lat_new_rad)]
 
     points = [
-        calculate_point(lon, lat, radius_km, (360 / num_points) * i)
-        for i in range(num_points)
+        calculate_point(lon, lat, radius_km, (360 / num_points) * i) for i in range(num_points)
     ]
     points.append(points[0])  # Close the polygon
 
@@ -270,7 +272,7 @@ class AirportDetectionZoneGenerator:
 
     #: Rows per partition the 2,000-partition figure implies: 21,712 / 2,000.
     #: Kept as the derived quantity so the two numbers cannot disagree.
-    ZONE_ROWS_PER_TASK = 21712 / 2000    # ~10.9
+    ZONE_ROWS_PER_TASK = 21712 / 2000  # ~10.9
 
     #: Partitions to spread the ring polyfill across, and the floor
     #: :meth:`zone_build_partitions` never goes below.
@@ -318,26 +320,28 @@ class AirportDetectionZoneGenerator:
     not, and no join would report it.
     """
 
-    AIRPORT_SCHEMA = StructType([
-        StructField("id", StringType(), True),
-        StructField("ident", StringType(), True),
-        StructField("type", StringType(), True),
-        StructField("name", StringType(), True),
-        StructField("latitude_deg", FloatType(), True),
-        StructField("longitude_deg", FloatType(), True),
-        StructField("elevation_ft", FloatType(), True),
-        StructField("continent", StringType(), True),
-        StructField("iso_country", StringType(), True),
-        StructField("iso_region", StringType(), True),
-        StructField("municipality", StringType(), True),
-        StructField("scheduled_service", StringType(), True),
-        StructField("gps_code", StringType(), True),
-        StructField("iata_code", StringType(), True),
-        StructField("local_code", StringType(), True),
-        StructField("home_link", StringType(), True),
-        StructField("wikipedia_link", StringType(), True),
-        StructField("keywords", StringType(), True),
-    ])
+    AIRPORT_SCHEMA = StructType(
+        [
+            StructField("id", StringType(), True),
+            StructField("ident", StringType(), True),
+            StructField("type", StringType(), True),
+            StructField("name", StringType(), True),
+            StructField("latitude_deg", FloatType(), True),
+            StructField("longitude_deg", FloatType(), True),
+            StructField("elevation_ft", FloatType(), True),
+            StructField("continent", StringType(), True),
+            StructField("iso_country", StringType(), True),
+            StructField("iso_region", StringType(), True),
+            StructField("municipality", StringType(), True),
+            StructField("scheduled_service", StringType(), True),
+            StructField("gps_code", StringType(), True),
+            StructField("iata_code", StringType(), True),
+            StructField("local_code", StringType(), True),
+            StructField("home_link", StringType(), True),
+            StructField("wikipedia_link", StringType(), True),
+            StructField("keywords", StringType(), True),
+        ]
+    )
 
     def __init__(
         self,
@@ -370,8 +374,8 @@ class AirportDetectionZoneGenerator:
         # endpoint be described as "150 NM from any aerodrome", which is the
         # evidence an out-of-area test needs.
         self.radii_nm = radii_nm or (
-            list(range(0, 45, 5))          # 0-40 NM, 5 NM steps
-            + list(range(50, 120, 10))     # 50-110 NM, 10 NM steps
+            list(range(0, 45, 5))  # 0-40 NM, 5 NM steps
+            + list(range(50, 120, 10))  # 50-110 NM, 10 NM steps
         )
         self._result_df: Optional[pd.DataFrame] = None
         self._result_sdf: Optional[DataFrame] = None
@@ -403,8 +407,10 @@ class AirportDetectionZoneGenerator:
         # never mapped, and the two need completely different responses.
         excluded = [r.ident for r in kept.filter(polar).select("ident").collect()]
         if excluded:
-            print(f"  Excluded {len(excluded)} aerodrome(s) beyond "
-                  f"{self.POLAR_LIMIT_DEG:g} deg latitude: {', '.join(excluded)}")
+            print(
+                f"  Excluded {len(excluded)} aerodrome(s) beyond "
+                f"{self.POLAR_LIMIT_DEG:g} deg latitude: {', '.join(excluded)}"
+            )
         return kept.filter(~polar)
 
     def cell_filter(self, lat_col, lon_col):
@@ -450,11 +456,13 @@ class AirportDetectionZoneGenerator:
 
         # Ensure column types
         df_apt.columns = df_apt.columns.astype(str)
-        df_apt = df_apt.astype({
-            "latitude_deg": "float64",
-            "longitude_deg": "float64",
-            "elevation_ft": "float64",
-        })
+        df_apt = df_apt.astype(
+            {
+                "latitude_deg": "float64",
+                "longitude_deg": "float64",
+                "elevation_ft": "float64",
+            }
+        )
 
         # Type and coverage filter. Both paths must agree, or which source the
         # zones came from changes what is in them.
@@ -475,11 +483,16 @@ class AirportDetectionZoneGenerator:
         # does not carry -- OurAirports adds and drops fields over time and a
         # missing optional column should not fail zone generation.
         present = set(df.columns)
-        return df.select(*[
-            col(f.name).cast(f.dataType).alias(f.name) if f.name in present
-            else lit(None).cast(f.dataType).alias(f.name)
-            for f in self.AIRPORT_SCHEMA.fields
-        ])
+        return df.select(
+            *[
+                (
+                    col(f.name).cast(f.dataType).alias(f.name)
+                    if f.name in present
+                    else lit(None).cast(f.dataType).alias(f.name)
+                )
+                for f in self.AIRPORT_SCHEMA.fields
+            ]
+        )
 
     def _build_ring_config(self) -> DataFrame:
         """
@@ -490,29 +503,31 @@ class AirportDetectionZoneGenerator:
         """
         area_type = [f"C{x + 10}" for x in self.radii_nm]
 
-        df = pd.DataFrame({
-            "max_resolution": self.resolution,
-            "number_of_points_c": self.num_points,
-            "area_type": area_type,
-            "min_c_radius_nm": self.radii_nm,
-        })
-
-        df["max_c_radius_nm"] = (
-            df["min_c_radius_nm"].shift(-1).fillna(np.max(self.radii_nm) + 10)
+        df = pd.DataFrame(
+            {
+                "max_resolution": self.resolution,
+                "number_of_points_c": self.num_points,
+                "area_type": area_type,
+                "min_c_radius_nm": self.radii_nm,
+            }
         )
+
+        df["max_c_radius_nm"] = df["min_c_radius_nm"].shift(-1).fillna(np.max(self.radii_nm) + 10)
         df[["min_c_radius_nm", "max_c_radius_nm"]] = df[
             ["min_c_radius_nm", "max_c_radius_nm"]
         ].astype(float)
         df["m_col"] = 1
 
-        schema = StructType([
-            StructField("max_resolution", IntegerType(), True),
-            StructField("number_of_points_c", IntegerType(), True),
-            StructField("area_type", StringType(), True),
-            StructField("min_c_radius_nm", FloatType(), True),
-            StructField("max_c_radius_nm", FloatType(), True),
-            StructField("m_col", IntegerType(), True),
-        ])
+        schema = StructType(
+            [
+                StructField("max_resolution", IntegerType(), True),
+                StructField("number_of_points_c", IntegerType(), True),
+                StructField("area_type", StringType(), True),
+                StructField("min_c_radius_nm", FloatType(), True),
+                StructField("max_c_radius_nm", FloatType(), True),
+                StructField("m_col", IntegerType(), True),
+            ]
+        )
 
         return self.spark.createDataFrame(df, schema=schema)
 
@@ -552,8 +567,10 @@ class AirportDetectionZoneGenerator:
         # zone_build_partitions. Repartitioning here is what keeps a task's
         # share of the 584 million cells inside the executor's memory.
         n_partitions = self.zone_build_partitions(n_airports, len(self.radii_nm))
-        print(f"  {n_airports:,} aerodromes x {len(self.radii_nm)} rings -> "
-              f"{n_partitions:,} partitions for the ring polyfill")
+        print(
+            f"  {n_airports:,} aerodromes x {len(self.radii_nm)} rings -> "
+            f"{n_partitions:,} partitions for the ring polyfill"
+        )
         airports_m = airports_m.repartition(n_partitions)
 
         print(f"Generating H3 zones at resolution {self.resolution}...")
@@ -578,21 +595,15 @@ class AirportDetectionZoneGenerator:
             )
             .withColumn(
                 "inner_circle_hex_ids",
-                _polyfill_geojson_udf(
-                    col("inner_circle_polygon"), col("max_resolution")
-                ),
+                _polyfill_geojson_udf(col("inner_circle_polygon"), col("max_resolution")),
             )
             .withColumn(
                 "outer_circle_hex_ids",
-                _polyfill_geojson_udf(
-                    col("outer_circle_polygon"), col("max_resolution")
-                ),
+                _polyfill_geojson_udf(col("outer_circle_polygon"), col("max_resolution")),
             )
             .withColumn(
                 "hex_id",
-                array_except(
-                    col("outer_circle_hex_ids"), col("inner_circle_hex_ids")
-                ),
+                array_except(col("outer_circle_hex_ids"), col("inner_circle_hex_ids")),
             )
             .drop(
                 "inner_circle_polygon",
@@ -694,10 +705,18 @@ class AirportDetectionZoneGenerator:
         # narrow it themselves at read time.
 
         # Explode hex arrays and remove nulls
-        df = df[[
-            "ident", "hex_id", "latitude_deg", "longitude_deg",
-            "min_c_radius_nm", "max_c_radius_nm", "type", "scheduled_service",
-        ]].explode("hex_id")
+        df = df[
+            [
+                "ident",
+                "hex_id",
+                "latitude_deg",
+                "longitude_deg",
+                "min_c_radius_nm",
+                "max_c_radius_nm",
+                "type",
+                "scheduled_service",
+            ]
+        ].explode("hex_id")
         df = df[~df.hex_id.isna()]
 
         # Get H3 coordinates for each hex
@@ -770,15 +789,20 @@ class AirportDetectionZoneGenerator:
             airport_types = ["large_airport", "medium_airport", "small_airport"]
 
         sdf = (
-            self._result_sdf
-            .filter(col("type").isin(airport_types))
+            self._result_sdf.filter(col("type").isin(airport_types))
             .filter(col("max_c_radius_nm") <= float(max_radius_nm))
             .select(
-                "ident", "hex_id", "latitude_deg", "longitude_deg",
+                "ident",
+                "hex_id",
+                "latitude_deg",
+                "longitude_deg",
                 # Carried through so consumers can narrow the radius at query
                 # time. Dropping these baked the detection radius into the
                 # table and made it un-sweepable without regenerating.
-                "min_c_radius_nm", "max_c_radius_nm", "type", "scheduled_service",
+                "min_c_radius_nm",
+                "max_c_radius_nm",
+                "type",
+                "scheduled_service",
             )
             .withColumn("hex_id", explode(col("hex_id")))
             .filter(col("hex_id").isNotNull())
@@ -787,9 +811,7 @@ class AirportDetectionZoneGenerator:
             .filter(self.cell_filter(col("lat"), col("lon")))
             .withColumn(
                 "center_hex_id",
-                _geo_to_h3_udf(
-                    col("latitude_deg"), col("longitude_deg"), lit(self.resolution)
-                ),
+                _geo_to_h3_udf(col("latitude_deg"), col("longitude_deg"), lit(self.resolution)),
             )
             .withColumn(
                 "distance_from_center",
@@ -890,7 +912,7 @@ class AirportDetectionZoneGenerator:
 
         total = 0
         for i in range(0, len(idents), batch):
-            chunk = idents[i:i + batch]
+            chunk = idents[i : i + batch]
             sdf = _prepared(airports_df.filter(col("ident").isin(chunk))).cache()
             for d in remote:
                 sdf.write.mode("overwrite" if i == 0 else "append").parquet(d)
@@ -899,8 +921,10 @@ class AirportDetectionZoneGenerator:
                 pdf.to_parquet(d / f"part-{i // batch:04d}.parquet", index=False)
             sdf.unpersist()
             total += len(pdf)
-            print(f"  batch {i // batch + 1:>3}: {len(chunk):>4} aerodromes, "
-                  f"{len(pdf):>9,} rows (total {total:,})")
+            print(
+                f"  batch {i // batch + 1:>3}: {len(chunk):>4} aerodromes, "
+                f"{len(pdf):>9,} rows (total {total:,})"
+            )
         return total
 
     def save_prepared_to_table(

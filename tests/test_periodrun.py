@@ -6,6 +6,7 @@ file pins is the reasoning *around* them -- how big a heap may be, which steps
 still need running, and whether a state file describes the window being asked
 for. Those are the decisions that cost a week of cluster time when wrong.
 """
+
 import json
 import os
 from datetime import date
@@ -25,10 +26,11 @@ from opdi.periodrun import (
 )
 from opdi.runner import STEPS
 
-GIB = 1024 ** 3
+GIB = 1024**3
 
 
 # --- driver heap ------------------------------------------------------------
+
 
 def test_an_unconstrained_container_gets_what_it_asked_for():
     """No cgroup limit means no reason to interfere."""
@@ -76,6 +78,7 @@ def test_an_unparseable_size_is_rejected(bad):
 
 # --- the window -------------------------------------------------------------
 
+
 def test_a_seven_day_window_ends_six_days_later():
     """The steps treat the range as inclusive, so seven days is +6, not +7.
 
@@ -95,6 +98,7 @@ def test_a_zero_day_window_is_rejected():
 
 
 # --- planning ---------------------------------------------------------------
+
 
 def test_every_step_this_module_names_exists_in_the_runner(tmp_path):
     """PERIOD_STEPS is a hand-written list; the registry is the authority.
@@ -131,17 +135,15 @@ def test_the_planned_order_is_the_requested_order_not_sorted(tmp_path):
     """`02a` must follow `02`. Sorting strings happens to put it there today;
     a step named `02b` or `10` would break that and nothing would notice."""
     state = RunState(path=tmp_path / "s.json")
-    assert plan_steps(["01", "02", "02a", "03", "04"], state) == [
-        "01", "02", "02a", "03", "04"
-    ]
+    assert plan_steps(["01", "02", "02a", "03", "04"], state) == ["01", "02", "02a", "03", "04"]
 
 
 # --- state ------------------------------------------------------------------
 
+
 def test_state_round_trips(tmp_path):
     p = tmp_path / "state.json"
-    s = RunState(path=p, run_id="R", env="opensky",
-                 start_date="2026-06-01", end_date="2026-06-07")
+    s = RunState(path=p, run_id="R", env="opensky", start_date="2026-06-01", end_date="2026-06-07")
     s.mark("01", 12.34)
     again = RunState.load(p)
     assert again.completed["01"]["seconds"] == 12.3
@@ -153,8 +155,7 @@ def test_marking_writes_immediately(tmp_path):
     """Batching completions to the end would lose them to the crash they
     exist to survive."""
     p = tmp_path / "state.json"
-    s = RunState(path=p, env="opensky",
-                 start_date="2026-06-01", end_date="2026-06-07")
+    s = RunState(path=p, env="opensky", start_date="2026-06-01", end_date="2026-06-07")
     s.mark("01", 1.0)
     assert "01" in json.loads(p.read_text())["completed"]
 
@@ -167,8 +168,9 @@ def test_a_missing_state_file_is_an_empty_state(tmp_path):
 def test_a_state_file_for_another_window_is_not_reused(tmp_path):
     """The step names are identical across windows, so nothing else would
     catch this -- the run would silently skip work for different dates."""
-    s = RunState(path=tmp_path / "s.json", env="opensky",
-                 start_date="2026-06-01", end_date="2026-06-07")
+    s = RunState(
+        path=tmp_path / "s.json", env="opensky", start_date="2026-06-01", end_date="2026-06-07"
+    )
     s.completed = {"01": {}}
     assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7))
     assert not s.matches("opensky", date(2026, 7, 1), date(2026, 7, 7))
@@ -182,6 +184,7 @@ def test_an_empty_state_matches_any_window(tmp_path):
 
 
 # --- preflight --------------------------------------------------------------
+
 
 class _Storage:
     """Minimal stand-in: `read_table` raises for names not in `present`."""
@@ -224,6 +227,7 @@ def test_the_layout_table_is_preflighted():
 
 # --- fresh-build contract ---------------------------------------------------
 
+
 def test_a_week_run_builds_its_own_reference_tables():
     """Step 00 is part of the run, not a prerequisite of it.
 
@@ -232,6 +236,7 @@ def test_a_week_run_builds_its_own_reference_tables():
     the published warehouse's reference tables as inputs.
     """
     from opdi.periodrun import PERIOD_STEPS as W
+
     assert W[0] == "00"
 
 
@@ -240,6 +245,7 @@ def test_the_default_warehouse_keeps_each_release_in_its_own_folder(monkeypatch)
     the release folder, never beside what is already there."""
     from opdi.config import OPDIConfig
     from opdi.periodrun import DEFAULT_WAREHOUSE
+
     monkeypatch.delenv("OPDI_WAREHOUSE", raising=False)
     assert DEFAULT_WAREHOUSE == "s3a://eurocontrol/opdi"
     cfg = OPDIConfig.for_environment("opensky")
@@ -268,10 +274,12 @@ def test_the_substep_ids_are_unchanged_by_the_reorder():
     """The ids are operator-facing (--no-airport-zones, run-log labels).
     Only the execution order moved."""
     from opdi.runner import REFERENCE_SUBSTEPS
+
     assert set(REFERENCE_SUBSTEPS) == {"00a", "00b", "00c", "00d", "00e", "00f"}
 
 
 # --- the OSM extract --------------------------------------------------------
+
 
 class _H3Cfg:
     def __init__(self, path=None):
@@ -337,8 +345,7 @@ def test_a_real_extract_passes(monkeypatch, tmp_path):
 
 def _write_osm(path, body):
     path.write_text(
-        "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\">\n"
-        + body + "\n</osm>\n"
+        "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\">\n" + body + "\n</osm>\n"
     )
     return str(path)
 
@@ -423,6 +430,7 @@ def test_real_extracts_are_told_apart_by_the_worldwide_check(monkeypatch):
 
 
 # --- the day loop -----------------------------------------------------------
+
 
 def test_the_window_and_day_steps_together_are_the_week_steps():
     """No step may fall between the two lists, or it silently never runs."""
@@ -533,6 +541,7 @@ def test_a_non_day_step_is_rejected_by_the_day_dispatcher():
 
 # --- reference data is built once, not once per day -------------------------
 
+
 def test_the_reference_check_is_complete_not_merely_non_empty():
     """A *partial* reference set means an earlier build died midway, and
     finishing it is what should happen. Only a complete set may be reused."""
@@ -576,16 +585,19 @@ def test_a_table_that_exists_but_is_empty_counts_as_missing():
     pipeline against an empty detection grid -- no ADEP or ADES for any flight,
     and nothing reporting why.
     """
+
     class _EmptyOne(_Storage):
         def read_table(self, name):
             df = super().read_table(name)
             if name == "h3_airport_detection_zones":
+
                 class _Empty:
                     def limit(self, n):
                         return self
 
                     def count(self):
                         return 0
+
                 return _Empty()
             return df
 
@@ -600,6 +612,7 @@ def test_a_populated_set_is_still_complete():
 
 # --- reference substeps are skipped individually ----------------------------
 
+
 def test_a_built_substep_is_skipped_while_a_missing_one_runs():
     """Step 00 was all-or-nothing: once the set was incomplete it ran, and
     every substep ran with it -- so a build that died on the runway grid
@@ -611,11 +624,11 @@ def test_a_built_substep_is_skipped_while_a_missing_one_runs():
     storage = _Storage({"oa_airports", "oa_runways", "osn_aircraft_db"})
     todo = reference_substeps_to_run(storage)
 
-    assert todo["00d"] is False        # OurAirports: built
-    assert todo["00e"] is False        # aircraft DB: built
-    assert todo["00b"] is True         # layouts: missing
-    assert todo["00f"] is True         # runway grid: missing
-    assert todo["00a"] is True         # zones: missing
+    assert todo["00d"] is False  # OurAirports: built
+    assert todo["00e"] is False  # aircraft DB: built
+    assert todo["00b"] is True  # layouts: missing
+    assert todo["00f"] is True  # runway grid: missing
+    assert todo["00a"] is True  # zones: missing
 
 
 def test_force_rebuilds_every_substep():
@@ -683,6 +696,7 @@ def test_the_runner_builds_units_day_major():
 
 
 # --- the ingest window slides rather than refetching ------------------------
+
 
 def test_consecutive_days_overlap_by_two_of_three():
     """Why the sliding window exists at all.
@@ -763,13 +777,11 @@ def test_every_statevector_write_partitions_by_day():
 
     tree = ast.parse(inspect.getsource(osn_statevectors))
     writes = [
-        n for n in ast.walk(tree)
+        n
+        for n in ast.walk(tree)
         if isinstance(n, ast.Call)
         and getattr(n.func, "attr", "") == "write_table"
-        and any(
-            isinstance(a, ast.Constant) and a.value == "osn_statevectors_v2"
-            for a in n.args
-        )
+        and any(isinstance(a, ast.Constant) and a.value == "osn_statevectors_v2" for a in n.args)
     ]
     assert len(writes) >= 2, "expected both write sites to still exist"
     for w in writes:
@@ -782,16 +794,16 @@ def test_every_statevector_write_partitions_by_day():
 
 # --- coverage plumbing -------------------------------------------------------
 
+
 def test_airspaces_run_under_both_coverages():
     """00c's FIR layer is worldwide and feeds the xing-fir family, so the
     substep runs under worldwide coverage as well as European."""
     from opdi.config import OPDIConfig
     from opdi.runner import reference_substeps_for_coverage
-    world = reference_substeps_for_coverage(
-        OPDIConfig.for_environment("opensky", worldwide=True))
+
+    world = reference_substeps_for_coverage(OPDIConfig.for_environment("opensky", worldwide=True))
     assert world["00c"] is True
-    europe = reference_substeps_for_coverage(
-        OPDIConfig.for_environment("opensky", worldwide=False))
+    europe = reference_substeps_for_coverage(OPDIConfig.for_environment("opensky", worldwide=False))
     assert europe["00c"] is True
 
 
@@ -799,25 +811,31 @@ def test_a_period_run_is_worldwide_by_default():
     import inspect
 
     from opdi.periodrun import run_period
+
     assert inspect.signature(run_period).parameters["worldwide"].default is True
 
 
 # --- _resolve_warehouse ------------------------------------------------------
 
+
 def test_resolve_warehouse_uses_the_configured_one_when_omitted():
     from opdi.periodrun import _UNSET, _resolve_warehouse
+
     assert _resolve_warehouse(_UNSET, "s3a://eurocontrol/opdi") == "s3a://eurocontrol/opdi"
 
 
 def test_resolve_warehouse_an_explicit_value_wins():
     from opdi.periodrun import _resolve_warehouse
-    assert _resolve_warehouse(
-        "s3a://eurocontrol/scratch", "s3a://eurocontrol/opdi"
-    ) == "s3a://eurocontrol/scratch"
+
+    assert (
+        _resolve_warehouse("s3a://eurocontrol/scratch", "s3a://eurocontrol/opdi")
+        == "s3a://eurocontrol/scratch"
+    )
 
 
 def test_resolve_warehouse_an_empty_value_counts_as_omitted():
     from opdi.periodrun import _resolve_warehouse
+
     assert _resolve_warehouse("", "s3a://eurocontrol/opdi") == "s3a://eurocontrol/opdi"
 
 
@@ -827,6 +845,7 @@ def test_run_period_still_defaults_the_warehouse_parameter_to_unset():
     import inspect
 
     from opdi.periodrun import _UNSET, run_period
+
     assert inspect.signature(run_period).parameters["warehouse"].default is _UNSET
 
 
@@ -837,9 +856,14 @@ def test_a_worldwide_run_state_does_not_match_a_european_one(tmp_path):
     run report five completed units and skip steps 02-04 entirely."""
     from opdi.periodrun import RunState
 
-    s = RunState(path=tmp_path / "s.json", env="opensky", coverage="europe",
-                 start_date="2026-06-01", end_date="2026-06-07",
-                 completed={"01": {}})
+    s = RunState(
+        path=tmp_path / "s.json",
+        env="opensky",
+        coverage="europe",
+        start_date="2026-06-01",
+        end_date="2026-06-07",
+        completed={"01": {}},
+    )
     assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "europe")
     assert not s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "worldwide")
 
@@ -851,11 +875,17 @@ def test_an_old_state_file_with_no_coverage_field_still_matches_europe(tmp_path)
     from opdi.periodrun import RunState
 
     p = tmp_path / "s.json"
-    p.write_text(json.dumps({
-        "run_id": "R", "env": "opensky",
-        "start_date": "2026-06-01", "end_date": "2026-06-07",
-        "completed": {"01": {}},
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "run_id": "R",
+                "env": "opensky",
+                "start_date": "2026-06-01",
+                "end_date": "2026-06-07",
+                "completed": {"01": {}},
+            }
+        )
+    )
     s = RunState.load(p)
     assert s.coverage == ""
     assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7), "europe")
@@ -870,6 +900,7 @@ def test_an_old_state_file_with_no_coverage_field_still_matches_europe(tmp_path)
 # monkeypatching opdi.periodrun.run_period would not reach it; the patch has
 # to land on the script module's own `run_period` attribute, which is what
 # `main()` actually calls.
+
 
 def _fake_run_period(monkeypatch, script):
     captured = {}
@@ -922,8 +953,9 @@ def test_the_wrapper_script_still_lets_an_explicit_warehouse_win(monkeypatch):
     assert captured["warehouse"] == "s3a://eurocontrol/scratch"
 
     captured.clear()
-    script.main(["--start", "2026-06-01", "--worldwide",
-                 "--warehouse", "s3a://eurocontrol/scratch"])
+    script.main(
+        ["--start", "2026-06-01", "--worldwide", "--warehouse", "s3a://eurocontrol/scratch"]
+    )
     assert captured["warehouse"] == "s3a://eurocontrol/scratch"
 
 
@@ -935,6 +967,7 @@ def test_prune_tracks_drops_only_the_track_tables():
     thing it was run to produce.
     """
     from opdi.periodrun import TRACK_TABLES
+
     assert TRACK_TABLES == ("osn_tracks", "osn_tracks_clean")
 
 
@@ -981,6 +1014,7 @@ def test_run_period_defaults_to_keeping_tracks():
     import inspect
 
     from opdi.periodrun import run_period
+
     sig = inspect.signature(run_period)
     assert sig.parameters["prune_tracks"].default is False
     assert tuple(sig.parameters["keep_tracks_on"].default) == ()
@@ -1001,11 +1035,11 @@ def test_the_log_dir_can_be_redirected():
     wrote."""
     from opdi.periodrun import _log_dir
 
-    assert _log_dir({"log_dir": "OPDI_live/logs/adsc-merged"}) == \
-        "OPDI_live/logs/adsc-merged"
+    assert _log_dir({"log_dir": "OPDI_live/logs/adsc-merged"}) == "OPDI_live/logs/adsc-merged"
 
 
 # --- publishing ---------------------------------------------------------------
+
 
 def test_publishing_is_an_optional_day_step():
     """Step 09 runs once per day when asked for, and never by default."""

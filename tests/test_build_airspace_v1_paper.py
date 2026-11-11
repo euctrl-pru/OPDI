@@ -6,9 +6,12 @@ from pathlib import Path
 import build_airspace_v1_paper as b
 import pytest
 
-PAPER = Path(os.environ.get(
-    "OPDI_PAPER_DIR_AIRSPACE",
-    Path(__file__).resolve().parents[2] / "opdi-portal" / "papers" / "airspace-events-v1"))
+PAPER = Path(
+    os.environ.get(
+        "OPDI_PAPER_DIR_AIRSPACE",
+        Path(__file__).resolve().parents[2] / "opdi-portal" / "papers" / "airspace-events-v1",
+    )
+)
 
 
 def test_the_paper_names_its_own_builder_regenerate_and_pdf():

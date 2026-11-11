@@ -17,15 +17,20 @@ def test_the_ingest_row_report_counts_what_was_written(spark, tmp_path, monkeypa
     download = tmp_path / "download"
     download.mkdir()
     t0 = int(dt.datetime(2024, 6, 1, 12).timestamp())
-    pd.DataFrame({
-        "time": [t0, t0 + 5, t0 + 10],
-        "icao24": ["abc123"] * 3,
-        "lat": [50.0] * 3,
-        "lon": [4.0] * 3,
-    }).to_parquet(download / "part.parquet")
+    pd.DataFrame(
+        {
+            "time": [t0, t0 + 5, t0 + 10],
+            "icao24": ["abc123"] * 3,
+            "lat": [50.0] * 3,
+            "lon": [4.0] * 3,
+        }
+    ).to_parquet(download / "part.parquet")
     ingest = StateVectorIngestion(
-        spark, cfg, local_download_path=str(download),
-        log_file_path=str(tmp_path / "logs" / "01.log"), bbox=None,
+        spark,
+        cfg,
+        local_download_path=str(download),
+        log_file_path=str(tmp_path / "logs" / "01.log"),
+        bbox=None,
     )
     monkeypatch.setenv("OPDI_REPORT_INGEST_ROWS", "1")
 

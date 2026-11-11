@@ -94,7 +94,7 @@ def _days(start: date, end: Optional[date]) -> List[date]:
 
 def _local_path(url: str) -> Optional[str]:
     if url.startswith("file://"):
-        return url[len("file://"):]
+        return url[len("file://") :]
     if "://" not in url:
         return url
     return None
@@ -126,8 +126,10 @@ def _read_one(url: str, columns: Optional[Sequence[str]], filters):
             return pq.read_table(path, filesystem=filesystem, columns=columns, filters=filters)
         except FileNotFoundError as exc:
             raise FileNotFoundError(f"no published file at {url}") from exc
-    raise ValueError(f"cannot read {url}: the address must start with https://, s3:// or "
-                     "file://, or be a local path")
+    raise ValueError(
+        f"cannot read {url}: the address must start with https://, s3:// or "
+        "file://, or be a local path"
+    )
 
 
 def _read(table, start, end, base, columns, filters=None):
@@ -225,16 +227,21 @@ def as_measurements(df):
         if c.name not in df.columns:
             continue
         rows = df.loc[df[c.name].notna(), ["event_id", c.name]]
-        parts.append(pd.DataFrame({
-            "id": rows["event_id"] + MEASUREMENT_SUFFIX[c.source],
-            "event_id": rows["event_id"],
-            "type": c.source,
-            "value": rows[c.name].astype("float64"),
-            "version": MEASUREMENT_VERSION[c.source],
-        }))
+        parts.append(
+            pd.DataFrame(
+                {
+                    "id": rows["event_id"] + MEASUREMENT_SUFFIX[c.source],
+                    "event_id": rows["event_id"],
+                    "type": c.source,
+                    "value": rows[c.name].astype("float64"),
+                    "version": MEASUREMENT_VERSION[c.source],
+                }
+            )
+        )
     if not parts:
-        return pd.DataFrame({name: pd.Series(dtype="object")
-                             for name in CLASSIC_MEASUREMENT_COLUMNS})
+        return pd.DataFrame(
+            {name: pd.Series(dtype="object") for name in CLASSIC_MEASUREMENT_COLUMNS}
+        )
     return pd.concat(parts, ignore_index=True)[list(CLASSIC_MEASUREMENT_COLUMNS)]
 
 
@@ -255,9 +262,9 @@ def as_flight_list_v0(df):
 
 def _duckdb_address(url: str) -> str:
     if url.startswith("file://"):
-        return url[len("file://"):]
+        return url[len("file://") :]
     if url.startswith("s3a://"):
-        return "s3://" + url[len("s3a://"):]
+        return "s3://" + url[len("s3a://") :]
     return url
 
 
@@ -311,7 +318,6 @@ def duckdb_views(
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sql", "views.sql")
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
-    return (
-        text.replace(FLIGHT_LIST_FILES, _duckdb_files("flight_list", base, start, end))
-        .replace(FLIGHT_EVENTS_FILES, _duckdb_files("flight_events", base, start, end))
+    return text.replace(FLIGHT_LIST_FILES, _duckdb_files("flight_list", base, start, end)).replace(
+        FLIGHT_EVENTS_FILES, _duckdb_files("flight_events", base, start, end)
     )

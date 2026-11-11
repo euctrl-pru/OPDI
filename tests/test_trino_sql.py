@@ -18,13 +18,16 @@ def test_the_checked_in_files_equal_a_fresh_render():
 
 @pytest.mark.parametrize(
     "table, columns",
-    [("flight_list", FLIGHT_LIST), ("flight_events", FLIGHT_EVENTS),
-     ("flight_index", FLIGHT_INDEX)],
+    [
+        ("flight_list", FLIGHT_LIST),
+        ("flight_events", FLIGHT_EVENTS),
+        ("flight_index", FLIGHT_INDEX),
+    ],
 )
 def test_every_column_appears_with_its_comment(table, columns):
     text = render.trino_tables()
-    block = text[text.index(f"minio.opdi.{table} ("):]
-    block = block[:block.index(";")]
+    block = text[text.index(f"minio.opdi.{table} (") :]
+    block = block[: block.index(";")]
     for c in columns:
         comment = c.description.replace("'", "''")
         assert f"    {c.name} " in block, c.name

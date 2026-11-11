@@ -86,6 +86,7 @@ ORDERS = ("newest_first", "oldest_first")
 
 # --- planning ---------------------------------------------------------------
 
+
 def days(start: date, end: date, order: str = "newest_first") -> List[date]:
     """Every day from ``start`` to ``end``, both included.
 
@@ -107,6 +108,7 @@ def days(start: date, end: date, order: str = "newest_first") -> List[date]:
 
 # --- configuration and sessions ----------------------------------------------
 
+
 def make_config(warehouse: Optional[str] = None, worldwide: bool = True):
     """The ``opensky`` configuration for ``warehouse`` and the coverage."""
     from opdi.config import OPDIConfig
@@ -127,7 +129,9 @@ def _session(config, name: str, distributed: Optional[bool] = None):
     if distributed is None:
         distributed = bool(config.spark.k8s_master)
     return SparkSessionManager.create_session(
-        app_name=name, config=config, distributed=distributed,
+        app_name=name,
+        config=config,
+        distributed=distributed,
         extra_configs=periodrun._session_extras(),
     )
 
@@ -145,6 +149,7 @@ def _step_kwargs() -> dict:
 
 
 # --- one unit -----------------------------------------------------------------
+
 
 def unit_key(step: str, day: Optional[date]) -> str:
     """Name under which a finished unit is recorded, for example ``02@2026-06-14``."""
@@ -235,8 +240,11 @@ def run_unit(
         else:
             missing = periodrun.preflight(storage) if step in STEPS_NEEDING_REFERENCE else []
             if missing:
-                print("Missing or unreadable reference tables: " + ", ".join(missing)
-                      + ". Run 'python -m opdi.orchestration reference' first.")
+                print(
+                    "Missing or unreadable reference tables: "
+                    + ", ".join(missing)
+                    + ". Run 'python -m opdi.orchestration reference' first."
+                )
                 return 1
             periodrun.run_day_step(spark, config, step, day, kwargs)
 
@@ -312,6 +320,7 @@ def run_day(
 
 # --- free space -----------------------------------------------------------------
 
+
 def _bucket_root(path: str) -> str:
     scheme, rest = path.split("://", 1)
     return f"{scheme}://{rest.split('/', 1)[0]}"
@@ -337,7 +346,7 @@ def free_space_gb(
     config = make_config(warehouse, worldwide)
     root = config.project.release_root
     if root.startswith("file://") or "://" not in root:
-        path = os.path.abspath(root[len("file://"):] if root.startswith("file://") else root)
+        path = os.path.abspath(root[len("file://") :] if root.startswith("file://") else root)
         while not os.path.exists(path):
             path = os.path.dirname(path)
         return shutil.disk_usage(path).free / 1e9
@@ -376,6 +385,7 @@ def check_space(
 
 
 # --- removing internal tables -------------------------------------------------
+
 
 def prune_plan(
     day: date, keep_days: int, present: Dict[str, Sequence[str]]
@@ -474,6 +484,7 @@ def prune_internal(
 
 # --- command line --------------------------------------------------------------
 
+
 def _day(value: str) -> date:
     try:
         return date.fromisoformat(value)
@@ -483,13 +494,23 @@ def _day(value: str) -> date:
 
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--warehouse", default=None,
-                        help="Warehouse to use (default: OPDI_WAREHOUSE if set, else "
-                             "s3a://eurocontrol/opdi).")
-    common.add_argument("--europe", dest="worldwide", action="store_false", default=True,
-                        help="Keep only positions inside the European box.")
-    common.add_argument("--force", action="store_true",
-                        help="Run units again even when they are recorded as finished.")
+    common.add_argument(
+        "--warehouse",
+        default=None,
+        help="Warehouse to use (default: OPDI_WAREHOUSE if set, else " "s3a://eurocontrol/opdi).",
+    )
+    common.add_argument(
+        "--europe",
+        dest="worldwide",
+        action="store_false",
+        default=True,
+        help="Keep only positions inside the European box.",
+    )
+    common.add_argument(
+        "--force",
+        action="store_true",
+        help="Run units again even when they are recorded as finished.",
+    )
 
     parser = argparse.ArgumentParser(
         prog="python -m opdi.orchestration",
@@ -504,18 +525,28 @@ def _parser() -> argparse.ArgumentParser:
 
     day = sub.add_parser("day", parents=[common], help="Run every step of one day.")
     day.add_argument("--day", type=_day, required=True)
-    day.add_argument("--keep-internal", action="store_true",
-                     help="Keep the internal tables of the day after publishing.")
-    day.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB,
-                     help=f"Free space needed to start, in GB (default {DEFAULT_MIN_FREE_GB}). "
-                          "0 skips the check.")
+    day.add_argument(
+        "--keep-internal",
+        action="store_true",
+        help="Keep the internal tables of the day after publishing.",
+    )
+    day.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=DEFAULT_MIN_FREE_GB,
+        help=f"Free space needed to start, in GB (default {DEFAULT_MIN_FREE_GB}). "
+        "0 skips the check.",
+    )
     day.add_argument("--keep-days", type=int, default=DEFAULT_KEEP_DAYS)
 
     space = sub.add_parser("check-space", parents=[common], help="Fail when space is short.")
     space.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
-    space.add_argument("--quota-gb", type=float, default=None,
-                       help=f"Bucket quota in GB (default: {QUOTA_VARIABLE} if set, else "
-                            f"{DEFAULT_QUOTA_GB}).")
+    space.add_argument(
+        "--quota-gb",
+        type=float,
+        default=None,
+        help=f"Bucket quota in GB (default: {QUOTA_VARIABLE} if set, else " f"{DEFAULT_QUOTA_GB}).",
+    )
 
     prune = sub.add_parser("prune", parents=[common], help="Remove old internal day folders.")
     prune.add_argument("--day", type=_day, required=True)
@@ -540,8 +571,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "step":
             return run_unit(args.step, args.day, args.warehouse, args.worldwide, args.force)
         if args.command == "day":
-            return run_day(args.day, args.warehouse, args.worldwide, args.force,
-                           args.keep_internal, args.min_free_gb, args.keep_days)
+            return run_day(
+                args.day,
+                args.warehouse,
+                args.worldwide,
+                args.force,
+                args.keep_internal,
+                args.min_free_gb,
+                args.keep_days,
+            )
         if args.command == "check-space":
             check_space(args.min_free_gb, args.warehouse, args.quota_gb, args.worldwide)
             return 0

@@ -73,9 +73,7 @@ def test_every_crossing_is_reported_not_just_the_first_and_last(spark):
 
     assert [r.crossing_seq for r in fl100] == [1, 2, 3]
     assert [r.direction for r in fl100] == ["up", "down", "up"]
-    assert [_offset_s(r.event_time) for r in fl100] == pytest.approx(
-        [7.5, 22.5, 37.5], abs=0.05
-    )
+    assert [_offset_s(r.event_time) for r in fl100] == pytest.approx([7.5, 22.5, 37.5], abs=0.05)
 
 
 def test_one_sample_interval_spanning_two_levels_reports_both(spark):
@@ -120,10 +118,7 @@ def test_a_descent_is_labelled_down(spark):
 def test_legacy_keeps_only_the_first_and_last_and_does_not_interpolate(spark):
     profile = [9000, 9500, 10500, 11000, 10500, 9500, 9000, 9500, 10500, 11000]
     legacy = EventConfig.legacy()
-    fl100 = [
-        r for r in _crossings(_climb(spark, profile), config=legacy)
-        if r.threshold == 100.0
-    ]
+    fl100 = [r for r in _crossings(_climb(spark, profile), config=legacy) if r.threshold == 100.0]
 
     assert [r.crossing_seq for r in fl100] == [1, 3]
     # Uninterpolated: the confirming samples at t=10 and t=40, which is exactly
@@ -168,8 +163,9 @@ def test_segments_stop_a_crossing_being_inferred_across_a_hole(spark):
         ],
     ).withColumn(
         "segment_id",
-        F.when(F.col("event_time") < F.lit(_EPOCH + dt.timedelta(seconds=300)), "seg-a")
-        .otherwise("seg-b"),
+        F.when(F.col("event_time") < F.lit(_EPOCH + dt.timedelta(seconds=300)), "seg-a").otherwise(
+            "seg-b"
+        ),
     )
 
     with_segments = _crossings(sdf, partition_cols=["track_id", "segment_id"])
@@ -191,16 +187,20 @@ def test_rings_invert_the_sense_of_the_direction_labels(spark):
         "distance_nm double, lat double, lon double, flight_level double",
     )
 
-    out = threshold_crossings(
-        sdf,
-        value_col="distance_nm",
-        thresholds=[40.0, 100.0],
-        hysteresis=1.0,
-        partition_cols=["track_id", "apt_ident"],
-        interpolate_cols=("lat", "lon", "flight_level"),
-        up_label="outbound",
-        down_label="inbound",
-    ).orderBy("threshold", "crossing_seq").collect()
+    out = (
+        threshold_crossings(
+            sdf,
+            value_col="distance_nm",
+            thresholds=[40.0, 100.0],
+            hysteresis=1.0,
+            partition_cols=["track_id", "apt_ident"],
+            interpolate_cols=("lat", "lon", "flight_level"),
+            up_label="outbound",
+            down_label="inbound",
+        )
+        .orderBy("threshold", "crossing_seq")
+        .collect()
+    )
 
     got = [(r.threshold, r.direction, r.crossing_seq) for r in out]
     assert got == [

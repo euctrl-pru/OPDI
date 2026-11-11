@@ -1,4 +1,5 @@
 """The shipped segmentation, asserted where it cannot be quietly reverted."""
+
 from opdi.config import OPDIConfig
 from opdi.pipeline.segmentation.methods import ARMS
 
@@ -68,4 +69,6 @@ def test_a8_stays_reachable_under_its_own_name():
 def test_the_shipped_persistence_guard_is_active_by_default():
     """`standard` == `debounced` only debounces if the hold is non-zero; zero
     collapses it to A8. The shipped default must therefore be the validated 30 s."""
-    assert OPDIConfig.for_environment("opensky").segmentation.callsign_min_persistence_seconds == 30.0
+    assert (
+        OPDIConfig.for_environment("opensky").segmentation.callsign_min_persistence_seconds == 30.0
+    )

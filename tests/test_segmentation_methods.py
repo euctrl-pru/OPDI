@@ -33,12 +33,11 @@ def n_tracks(df):
 def _cruise_over_midnight(spark):
     """A flight airborne across 30 June -> 1 July. One flight, no gaps."""
     off = (dt.datetime(2024, 6, 30, 23, 30, 0) - _EPOCH).total_seconds()
-    return make_track(spark, [
-        {"t": off + i * 300, "baro_altitude": 10000.0} for i in range(8)
-    ])
+    return make_track(spark, [{"t": off + i * 300, "baro_altitude": 10000.0} for i in range(8)])
 
 
 # -- A2: window truncation ---------------------------------------------------
+
 
 def test_legacy_splits_a_flight_at_the_month_boundary(spark):
     """The defect A2 exists to remove. If this ever fails, A2 is pointless."""
@@ -50,15 +49,19 @@ def test_no_month_suffix_keeps_a_midnight_crossing_flight_whole(spark):
 
 
 def test_no_month_suffix_still_splits_on_a_real_gap(spark):
-    df = make_track(spark, [
-        {"t": 0, "baro_altitude": 10000.0},
-        {"t": 60, "baro_altitude": 10000.0},
-        {"t": 60 + 45 * 60, "baro_altitude": 10000.0},   # 45 min gap
-    ])
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "baro_altitude": 10000.0},
+            {"t": 60, "baro_altitude": 10000.0},
+            {"t": 60 + 45 * 60, "baro_altitude": 10000.0},  # 45 min gap
+        ],
+    )
     assert n_tracks(assign_track_id(df, no_month_suffix(), P)) == 2
 
 
 # -- A3: traffic-style -------------------------------------------------------
+
 
 def test_traffic_style_splits_on_its_shorter_default_gap(spark):
     """traffic's default gap is 10 minutes, so a 12 minute gap splits.
@@ -67,10 +70,13 @@ def test_traffic_style_splits_on_its_shorter_default_gap(spark):
     split -- that is what test_traffic_style_condition_suppresses... covers -- so
     a cruise trajectory here would be testing the predicate, not the threshold.
     """
-    df = make_track(spark, [
-        {"t": 0, "baro_altitude": 300.0},
-        {"t": 12 * 60, "baro_altitude": 300.0},
-    ])
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "baro_altitude": 300.0},
+            {"t": 12 * 60, "baro_altitude": 300.0},
+        ],
+    )
     assert n_tracks(assign_track_id(df, traffic_style(), P)) == 2
     # legacy keeps it whole: 12 min is under both its 30 min and its 15 min rule.
     assert n_tracks(assign_track_id(df, legacy(), P)) == 1
@@ -81,11 +87,14 @@ def test_traffic_style_condition_suppresses_a_split_between_two_airborne_samples
 
     A 12 minute reception hole in the cruise is a coverage gap, not a landing.
     """
-    df = make_track(spark, [
-        {"t": 0, "baro_altitude": 10000.0},
-        {"t": 12 * 60, "baro_altitude": 10000.0},
-    ])
-    p = SegmentationParams(low_alt_ft=40000.0)   # everything counts as "low"
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "baro_altitude": 10000.0},
+            {"t": 12 * 60, "baro_altitude": 10000.0},
+        ],
+    )
+    p = SegmentationParams(low_alt_ft=40000.0)  # everything counts as "low"
     assert n_tracks(assign_track_id(df, traffic_style(), p)) == 2
     p_high = SegmentationParams(low_alt_ft=1000.0)  # nothing counts as "low"
     assert n_tracks(assign_track_id(df, traffic_style(), p_high)) == 1
@@ -93,33 +102,43 @@ def test_traffic_style_condition_suppresses_a_split_between_two_airborne_samples
 
 # -- A4: callsign coupling ---------------------------------------------------
 
+
 def test_legacy_splits_a_flight_when_the_callsign_changes_mid_flight(spark):
     """The defect A4 exists to remove."""
-    df = make_track(spark, [
-        {"t": 0, "callsign": "BEL123", "baro_altitude": 10000.0},
-        {"t": 60, "callsign": "BEL123", "baro_altitude": 10000.0},
-        {"t": 120, "callsign": "BEL12", "baro_altitude": 10000.0},   # truncated
-        {"t": 180, "callsign": "BEL12", "baro_altitude": 10000.0},
-    ])
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "callsign": "BEL123", "baro_altitude": 10000.0},
+            {"t": 60, "callsign": "BEL123", "baro_altitude": 10000.0},
+            {"t": 120, "callsign": "BEL12", "baro_altitude": 10000.0},  # truncated
+            {"t": 180, "callsign": "BEL12", "baro_altitude": 10000.0},
+        ],
+    )
     assert n_tracks(assign_track_id(df, legacy(), P)) == 2
 
 
 def test_airframe_only_keeps_a_flight_whole_across_a_callsign_change(spark):
-    df = make_track(spark, [
-        {"t": 0, "callsign": "BEL123", "baro_altitude": 10000.0},
-        {"t": 60, "callsign": "BEL123", "baro_altitude": 10000.0},
-        {"t": 120, "callsign": "BEL12", "baro_altitude": 10000.0},
-        {"t": 180, "callsign": "BEL12", "baro_altitude": 10000.0},
-    ])
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "callsign": "BEL123", "baro_altitude": 10000.0},
+            {"t": 60, "callsign": "BEL123", "baro_altitude": 10000.0},
+            {"t": 120, "callsign": "BEL12", "baro_altitude": 10000.0},
+            {"t": 180, "callsign": "BEL12", "baro_altitude": 10000.0},
+        ],
+    )
     assert n_tracks(assign_track_id(df, airframe_only(), P)) == 1
 
 
 def test_airframe_only_separates_two_airframes(spark):
     """Grouping on icao24 alone must not merge different aircraft."""
-    df = make_track(spark, [
-        {"t": 0, "icao24": "aaa111", "baro_altitude": 10000.0},
-        {"t": 60, "icao24": "bbb222", "baro_altitude": 10000.0},
-    ])
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "icao24": "aaa111", "baro_altitude": 10000.0},
+            {"t": 60, "icao24": "bbb222", "baro_altitude": 10000.0},
+        ],
+    )
     assert n_tracks(assign_track_id(df, airframe_only(), P)) == 2
 
 
@@ -131,10 +150,13 @@ def test_airframe_only_still_splits_a_null_callsign_airframe_on_gaps(spark):
     behaves identically here -- the point is that it does not do *worse*, and the
     legacy assertion below is what proves that rather than asserting it in prose.
     """
-    df = make_track(spark, [
-        {"t": 0, "callsign": None, "baro_altitude": 10000.0},
-        {"t": 45 * 60, "callsign": None, "baro_altitude": 10000.0},
-    ])
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "callsign": None, "baro_altitude": 10000.0},
+            {"t": 45 * 60, "callsign": None, "baro_altitude": 10000.0},
+        ],
+    )
     assert n_tracks(assign_track_id(df, airframe_only(), P)) == 2
     # Legacy on the same fixture: identical, because the null callsign has
     # already collapsed its group key to the airframe. A4 is no worse.
@@ -143,6 +165,7 @@ def test_airframe_only_still_splits_a_null_callsign_airframe_on_gaps(spark):
 
 # -- A5: ground-anchored -----------------------------------------------------
 
+
 def _continuous_turnaround(spark):
     """Two flights with an 8 minute on-ground turnaround and NO data gap.
 
@@ -150,15 +173,16 @@ def _continuous_turnaround(spark):
     fires. This is the case A5 exists for.
     """
     rows = []
-    for i in range(5):                                    # inbound descent
-        rows.append({"t": i * 60, "baro_altitude": 3000.0 - i * 600, "on_ground": False,
-                     "velocity": 100.0})
-    for i in range(8):                                    # 8 min on stand
-        rows.append({"t": 300 + i * 60, "baro_altitude": 0.0, "on_ground": True,
-                     "velocity": 0.0})
-    for i in range(5):                                    # outbound climb
-        rows.append({"t": 780 + i * 60, "baro_altitude": i * 600, "on_ground": False,
-                     "velocity": 100.0})
+    for i in range(5):  # inbound descent
+        rows.append(
+            {"t": i * 60, "baro_altitude": 3000.0 - i * 600, "on_ground": False, "velocity": 100.0}
+        )
+    for i in range(8):  # 8 min on stand
+        rows.append({"t": 300 + i * 60, "baro_altitude": 0.0, "on_ground": True, "velocity": 0.0})
+    for i in range(5):  # outbound climb
+        rows.append(
+            {"t": 780 + i * 60, "baro_altitude": i * 600, "on_ground": False, "velocity": 100.0}
+        )
     return make_track(spark, rows)
 
 
@@ -174,17 +198,24 @@ def test_ground_anchored_splits_a_continuous_turnaround(spark):
 
 def test_ground_anchored_ignores_a_touch_and_go(spark):
     """A 60 second ground contact is not a turnaround, whatever else it is."""
-    rows = [{"t": i * 30, "baro_altitude": 1000.0 - i * 300, "on_ground": False,
-             "velocity": 100.0} for i in range(4)]
-    rows += [{"t": 120 + i * 30, "baro_altitude": 0.0, "on_ground": True,
-              "velocity": 80.0} for i in range(2)]
-    rows += [{"t": 180 + i * 30, "baro_altitude": i * 300, "on_ground": False,
-              "velocity": 100.0} for i in range(4)]
+    rows = [
+        {"t": i * 30, "baro_altitude": 1000.0 - i * 300, "on_ground": False, "velocity": 100.0}
+        for i in range(4)
+    ]
+    rows += [
+        {"t": 120 + i * 30, "baro_altitude": 0.0, "on_ground": True, "velocity": 80.0}
+        for i in range(2)
+    ]
+    rows += [
+        {"t": 180 + i * 30, "baro_altitude": i * 300, "on_ground": False, "velocity": 100.0}
+        for i in range(4)
+    ]
     p = SegmentationParams(ground_dwell_minutes=5.0)
     assert n_tracks(assign_track_id(make_track(spark, rows), ground_anchored(), p)) == 1
 
 
 # -- A6: airport-anchored -----------------------------------------------------
+
 
 def _gapped_dwell(spark, near_airport=True, field_elev_ft=6200.0):
     """Two samples 20 minutes apart, parked at a 6,200 ft aerodrome.
@@ -194,11 +225,20 @@ def _gapped_dwell(spark, near_airport=True, field_elev_ft=6200.0):
     and 1900 m is above its 1524 m low-altitude rule -- which is what makes this
     fixture able to isolate one A6 input at a time.
     """
-    return make_track(spark, [
-        {"t": t, "baro_altitude": 1900.0, "on_ground": True, "velocity": 0.0,
-         "near_airport": near_airport, "field_elev_ft": field_elev_ft}
-        for t in (0, 20 * 60)
-    ])
+    return make_track(
+        spark,
+        [
+            {
+                "t": t,
+                "baro_altitude": 1900.0,
+                "on_ground": True,
+                "velocity": 0.0,
+                "near_airport": near_airport,
+                "field_elev_ft": field_elev_ft,
+            }
+            for t in (0, 20 * 60)
+        ],
+    )
 
 
 def test_airport_anchored_requires_the_break_to_be_at_an_airport(spark):
@@ -214,10 +254,26 @@ def test_airport_anchored_requires_the_break_to_be_at_an_airport(spark):
     split less than that rule does. 20 minutes is under the 30-minute general
     rule, so the floor stays silent and the arm answers for itself.
     """
-    rows = [{"t": 0, "baro_altitude": 100.0, "on_ground": True, "velocity": 0.0,
-             "near_airport": False, "field_elev_ft": 0.0}]
-    rows += [{"t": 20 * 60, "baro_altitude": 100.0, "on_ground": True, "velocity": 0.0,
-              "near_airport": False, "field_elev_ft": 0.0}]
+    rows = [
+        {
+            "t": 0,
+            "baro_altitude": 100.0,
+            "on_ground": True,
+            "velocity": 0.0,
+            "near_airport": False,
+            "field_elev_ft": 0.0,
+        }
+    ]
+    rows += [
+        {
+            "t": 20 * 60,
+            "baro_altitude": 100.0,
+            "on_ground": True,
+            "velocity": 0.0,
+            "near_airport": False,
+            "field_elev_ft": 0.0,
+        }
+    ]
     df = make_track(spark, rows)
     assert n_tracks(assign_track_id(df, airport_anchored(), P)) == 1
     assert n_tracks(assign_track_id(df, legacy(), P)) == 2
@@ -247,7 +303,7 @@ def test_airport_anchored_uses_height_above_field_not_barometric_altitude(spark)
     """
     high_field = _gapped_dwell(spark, field_elev_ft=6200.0)
     sea_level = _gapped_dwell(spark, field_elev_ft=0.0)
-    assert n_tracks(assign_track_id(high_field, legacy(), P)) == 1        # missed
+    assert n_tracks(assign_track_id(high_field, legacy(), P)) == 1  # missed
     assert n_tracks(assign_track_id(high_field, airport_anchored(), P)) == 2  # caught
     assert n_tracks(assign_track_id(sea_level, airport_anchored(), P)) == 1
 
@@ -264,8 +320,12 @@ def test_airport_anchored_still_splits_on_a_long_gap_when_its_inputs_are_missing
     """
     rows = [
         {"t": 0, "baro_altitude": 300.0, "near_airport": None, "field_elev_ft": None},
-        {"t": 45 * 60, "baro_altitude": 300.0,
-         "near_airport": None, "field_elev_ft": None},   # 45 min gap: over 30
+        {
+            "t": 45 * 60,
+            "baro_altitude": 300.0,
+            "near_airport": None,
+            "field_elev_ft": None,
+        },  # 45 min gap: over 30
         {"t": 46 * 60, "baro_altitude": 300.0, "near_airport": None, "field_elev_ft": None},
     ]
     df = make_track(spark, rows)
@@ -282,20 +342,38 @@ def _continuous_parked_turnaround(spark):
     """
     rows = [
         # inbound, airborne and moving
-        {"t": i * 60, "baro_altitude": 3000.0 - i * 600, "on_ground": False,
-         "velocity": 100.0, "near_airport": True, "field_elev_ft": 0.0}
+        {
+            "t": i * 60,
+            "baro_altitude": 3000.0 - i * 600,
+            "on_ground": False,
+            "velocity": 100.0,
+            "near_airport": True,
+            "field_elev_ft": 0.0,
+        }
         for i in range(5)
     ]
     rows += [
         # 30 minutes on stand: low, stopped, at the aerodrome
-        {"t": 300 + i * 60, "baro_altitude": 100.0, "on_ground": True,
-         "velocity": 0.0, "near_airport": True, "field_elev_ft": 0.0}
+        {
+            "t": 300 + i * 60,
+            "baro_altitude": 100.0,
+            "on_ground": True,
+            "velocity": 0.0,
+            "near_airport": True,
+            "field_elev_ft": 0.0,
+        }
         for i in range(30)
     ]
     rows += [
         # outbound, rolling then climbing away
-        {"t": 2100 + i * 60, "baro_altitude": i * 600.0, "on_ground": False,
-         "velocity": 100.0, "near_airport": True, "field_elev_ft": 0.0}
+        {
+            "t": 2100 + i * 60,
+            "baro_altitude": i * 600.0,
+            "on_ground": False,
+            "velocity": 100.0,
+            "near_airport": True,
+            "field_elev_ft": 0.0,
+        }
         for i in range(5)
     ]
     return make_track(spark, rows)
@@ -316,8 +394,8 @@ def test_airport_anchored_splits_a_continuous_parked_run(spark):
     this study exists to avoid.
     """
     df = _continuous_parked_turnaround(spark)
-    assert n_tracks(assign_track_id(df, legacy(), P)) == 1            # cannot see it
-    assert n_tracks(assign_track_id(df, ground_anchored(), P)) == 2   # A5 can
+    assert n_tracks(assign_track_id(df, legacy(), P)) == 1  # cannot see it
+    assert n_tracks(assign_track_id(df, ground_anchored(), P)) == 2  # A5 can
     assert n_tracks(assign_track_id(df, airport_anchored(), P)) == 2  # A6 must too
 
 
@@ -336,11 +414,14 @@ _CLIMB_M = [0, 200, 500, 1000, 2000, 3000, 4000]
 
 def test_vertical_profile_splits_on_a_descent_climb_cycle_with_no_gap_and_no_ground(spark):
     """Ground contact is not always broadcast. The profile still shows two sorties."""
-    rows = [{"t": i * 60, "baro_altitude": float(a), "on_ground": False}
-            for i, a in enumerate(_DESCENT_M)]
-    rows += [{"t": (len(_DESCENT_M) + i) * 60, "baro_altitude": float(a),
-              "on_ground": False}
-             for i, a in enumerate(_CLIMB_M)]
+    rows = [
+        {"t": i * 60, "baro_altitude": float(a), "on_ground": False}
+        for i, a in enumerate(_DESCENT_M)
+    ]
+    rows += [
+        {"t": (len(_DESCENT_M) + i) * 60, "baro_altitude": float(a), "on_ground": False}
+        for i, a in enumerate(_CLIMB_M)
+    ]
     p = SegmentationParams(descent_floor_ft=1500.0)
     out = assign_track_id(make_track(spark, rows), vertical_profile(), p)
     assert n_tracks(out) == 2
@@ -349,8 +430,7 @@ def test_vertical_profile_splits_on_a_descent_climb_cycle_with_no_gap_and_no_gro
     # sub-floor climb rows are the first track. Asserting the sizes is what makes
     # the descent leg load-bearing -- delete it and these numbers change.
     sizes = sorted(
-        r["n"] for r in out.groupBy("track_id").count()
-        .withColumnRenamed("count", "n").collect()
+        r["n"] for r in out.groupBy("track_id").count().withColumnRenamed("count", "n").collect()
     )
     assert sizes == [5, 14]
 
@@ -358,8 +438,7 @@ def test_vertical_profile_splits_on_a_descent_climb_cycle_with_no_gap_and_no_gro
 def test_vertical_profile_does_not_split_a_step_descent_in_the_cruise(spark):
     """FL350 -> FL310 is a level change, not a landing."""
     rows = [{"t": i * 60, "baro_altitude": 10600.0, "on_ground": False} for i in range(5)]
-    rows += [{"t": 300 + i * 60, "baro_altitude": 9400.0, "on_ground": False}
-             for i in range(5)]
+    rows += [{"t": 300 + i * 60, "baro_altitude": 9400.0, "on_ground": False} for i in range(5)]
     p = SegmentationParams(descent_floor_ft=1500.0)
     assert n_tracks(assign_track_id(make_track(spark, rows), vertical_profile(), p)) == 1
 
@@ -379,9 +458,10 @@ def test_vertical_profile_does_not_split_a_departure_climb_with_no_prior_descent
     to the cruise. No gap, no month boundary, so the legacy floor is silent and
     the arm answers for itself. The old code returned 2.
     """
-    rows = [{"t": i * 60, "baro_altitude": float(a), "on_ground": False,
-             "field_elev_ft": 0.0}
-            for i, a in enumerate([0, 100, 200, 500, 1000, 2000, 3000, 4000])]
+    rows = [
+        {"t": i * 60, "baro_altitude": float(a), "on_ground": False, "field_elev_ft": 0.0}
+        for i, a in enumerate([0, 100, 200, 500, 1000, 2000, 3000, 4000])
+    ]
     p = SegmentationParams(descent_floor_ft=1500.0)
     df = make_track(spark, rows)
     assert n_tracks(assign_track_id(df, vertical_profile(), p)) == 1
@@ -403,9 +483,10 @@ def test_vertical_profile_uses_height_above_field_not_barometric_altitude(spark)
     the split is A7's alone. The old code returned 1.
     """
     profile_m = [3000, 2400, 2100, 1900, 1900, 2100, 2400, 3000]
-    rows = [{"t": i * 60, "baro_altitude": float(a), "on_ground": False,
-             "field_elev_ft": 6200.0}
-            for i, a in enumerate(profile_m)]
+    rows = [
+        {"t": i * 60, "baro_altitude": float(a), "on_ground": False, "field_elev_ft": 6200.0}
+        for i, a in enumerate(profile_m)
+    ]
     p = SegmentationParams(descent_floor_ft=1500.0)
     df = make_track(spark, rows)
     assert n_tracks(assign_track_id(df, legacy(), p)) == 1
@@ -413,6 +494,7 @@ def test_vertical_profile_uses_height_above_field_not_barometric_altitude(spark)
 
 
 # -- A8 and the registry -------------------------------------------------------
+
 
 def test_every_registered_arm_runs(spark):
     """``ARMS`` is what a Task-6 runner iterates, so every entry must execute.
@@ -424,12 +506,23 @@ def test_every_registered_arm_runs(spark):
     ``track_id`` over a trajectory that exercises a gap, a ground run and a
     climb, not that any arm produces a particular answer.
     """
-    rows = [{"t": i * 60, "baro_altitude": 3000.0 - i * 600, "on_ground": False,
-             "velocity": 100.0} for i in range(5)]
-    rows += [{"t": 300 + i * 60, "baro_altitude": 100.0, "on_ground": True,
-              "velocity": 0.0} for i in range(8)]
-    rows += [{"t": 900 + 45 * 60 + i * 60, "baro_altitude": i * 600.0,
-              "on_ground": False, "velocity": 100.0} for i in range(5)]
+    rows = [
+        {"t": i * 60, "baro_altitude": 3000.0 - i * 600, "on_ground": False, "velocity": 100.0}
+        for i in range(5)
+    ]
+    rows += [
+        {"t": 300 + i * 60, "baro_altitude": 100.0, "on_ground": True, "velocity": 0.0}
+        for i in range(8)
+    ]
+    rows += [
+        {
+            "t": 900 + 45 * 60 + i * 60,
+            "baro_altitude": i * 600.0,
+            "on_ground": False,
+            "velocity": 100.0,
+        }
+        for i in range(5)
+    ]
     df = make_track(spark, rows)
     for name, factory in ARMS.items():
         out = assign_track_id(df, factory(), P)

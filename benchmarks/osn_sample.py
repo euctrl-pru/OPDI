@@ -138,7 +138,9 @@ def _build_spark_k8s():
     cfg.spark.k8s_driver_port = str(DRIVER_PORT)
     cfg.spark.k8s_driver_block_manager_port = str(DRIVER_BLOCK_MANAGER_PORT)
     return SparkSessionManager.create_session(
-        app_name="opdi-research", config=cfg, distributed=True,
+        app_name="opdi-research",
+        config=cfg,
+        distributed=True,
         extra_configs={
             "spark.dynamicAllocation.maxExecutors": str(RESEARCH_EXECUTORS),
             # -- Spark UI behind the JupyterLab proxy -----------------------
@@ -245,13 +247,19 @@ def main() -> None:
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="9g")
     ap.add_argument("--interval", type=int, default=TIME_INTERVAL)
-    ap.add_argument("--ui-port", type=int, default=UI_PORT,
-                    help="Spark UI port; proxied at /proxy/<port>/")
-    ap.add_argument("--executors", type=int, default=RESEARCH_EXECUTORS,
-                    help=f"K8s executors to request (default {RESEARCH_EXECUTORS}, "
-                         "ceiling ~12 for the namespace quota)")
-    ap.add_argument("--local", action="store_true",
-                    help="run in local[*] mode instead of on the K8s cluster")
+    ap.add_argument(
+        "--ui-port", type=int, default=UI_PORT, help="Spark UI port; proxied at /proxy/<port>/"
+    )
+    ap.add_argument(
+        "--executors",
+        type=int,
+        default=RESEARCH_EXECUTORS,
+        help=f"K8s executors to request (default {RESEARCH_EXECUTORS}, "
+        "ceiling ~12 for the namespace quota)",
+    )
+    ap.add_argument(
+        "--local", action="store_true", help="run in local[*] mode instead of on the K8s cluster"
+    )
     args = ap.parse_args()
 
     # Python buffers stdout when it is a file, so a redirected run shows the
@@ -270,7 +278,6 @@ def main() -> None:
     globals()["RESEARCH_EXECUTORS"] = args.executors
     spark = build_spark(args.cores, args.driver_memory, distributed=not args.local)
     spark.sparkContext.setLogLevel("ERROR")
-
 
     # One day at a time. A whole month in one job means any single S3 timeout
     # discards every partition read so far; per-day output is resumable and
@@ -330,9 +337,7 @@ def _pull_day(spark, day: dt.date, out_day: str, interval: int) -> None:
     if interval > 1:
         df = df.filter((F.col("event_time") % interval) == 0)
 
-    df = df.withColumn(
-        "event_time", F.from_unixtime(F.col("event_time")).cast("timestamp")
-    )
+    df = df.withColumn("event_time", F.from_unixtime(F.col("event_time")).cast("timestamp"))
 
     df.write.mode("overwrite").parquet(out_day)
     n = spark.read.parquet(out_day).count()

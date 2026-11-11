@@ -32,8 +32,10 @@ def summarise(spark, run):
     ids = df.select("ID").distinct().count()
     ades = df.filter(F.col("ADES").isNotNull()).count()
     adep = df.filter(F.col("ADEP").isNotNull()).count()
-    print(f"  {run:<14} rows={n:>7,}  distinct ids={ids:>7,}  "
-          f"ADEP set={adep:>7,}  ADES set={ades:>7,}")
+    print(
+        f"  {run:<14} rows={n:>7,}  distinct ids={ids:>7,}  "
+        f"ADEP set={adep:>7,}  ADES set={ades:>7,}"
+    )
     return df
 
 
@@ -63,14 +65,16 @@ def main() -> None:
     print("\n=== arrivals, merged against trend-only ===")
     agg = j.agg(
         F.count(F.lit(1)).alias("rows"),
-        F.sum(F.when(F.col("ades_merged").isNull() & F.col("ades_alone").isNotNull(), 1)
-              .otherwise(0)).alias("lost_by_merge"),
-        F.sum(F.when(F.col("ades_merged").isNotNull() & F.col("ades_alone").isNull(), 1)
-              .otherwise(0)).alias("gained_by_merge"),
-        F.sum(F.when(F.col("ades_merged") != F.col("ades_alone"), 1)
-              .otherwise(0)).alias("disagree"),
-        F.sum(F.when(F.col("ades_merged") == F.col("ades_alone"), 1)
-              .otherwise(0)).alias("agree"),
+        F.sum(
+            F.when(F.col("ades_merged").isNull() & F.col("ades_alone").isNotNull(), 1).otherwise(0)
+        ).alias("lost_by_merge"),
+        F.sum(
+            F.when(F.col("ades_merged").isNotNull() & F.col("ades_alone").isNull(), 1).otherwise(0)
+        ).alias("gained_by_merge"),
+        F.sum(F.when(F.col("ades_merged") != F.col("ades_alone"), 1).otherwise(0)).alias(
+            "disagree"
+        ),
+        F.sum(F.when(F.col("ades_merged") == F.col("ades_alone"), 1).otherwise(0)).alias("agree"),
     ).first()
     for k in ("rows", "agree", "disagree", "lost_by_merge", "gained_by_merge"):
         print(f"  {k:<16} {agg[k]:>8,}")
@@ -78,7 +82,7 @@ def main() -> None:
     # If the merge duplicates a track, the id appears more than once and any
     # downstream join to ground truth can pick either copy.
     print("\n=== duplicate ids in the merged table ===")
-    dup = (rec.groupBy("ID").count().filter(F.col("count") > 1))
+    dup = rec.groupBy("ID").count().filter(F.col("count") > 1)
     nd = dup.count()
     print(f"  ids appearing more than once: {nd:,}")
     if nd:
@@ -87,21 +91,35 @@ def main() -> None:
     import pandas as pd
 
     rows_rec, rows_p1 = rec.count(), p1.count()
-    pd.DataFrame([
-        {"table": "recommended (ADEP endpoint + ADES trend)", "rows": rows_rec,
-         "adep_set": rec.filter(F.col("ADEP").isNotNull()).count(),
-         "ades_set": rec.filter(F.col("ADES").isNotNull()).count()},
-        {"table": "path1_penalty (trend only, same arrival parameters)",
-         "rows": rows_p1,
-         "adep_set": p1.filter(F.col("ADEP").isNotNull()).count(),
-         "ades_set": p1.filter(F.col("ADES").isNotNull()).count()},
-    ]).to_csv(args.results_dir / "merge_shapes.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "table": "recommended (ADEP endpoint + ADES trend)",
+                "rows": rows_rec,
+                "adep_set": rec.filter(F.col("ADEP").isNotNull()).count(),
+                "ades_set": rec.filter(F.col("ADES").isNotNull()).count(),
+            },
+            {
+                "table": "path1_penalty (trend only, same arrival parameters)",
+                "rows": rows_p1,
+                "adep_set": p1.filter(F.col("ADEP").isNotNull()).count(),
+                "ades_set": p1.filter(F.col("ADES").isNotNull()).count(),
+            },
+        ]
+    ).to_csv(args.results_dir / "merge_shapes.csv", index=False)
 
-    pd.DataFrame([{
-        "rows_joined": agg["rows"], "agree": agg["agree"],
-        "disagree": agg["disagree"], "lost_by_merge": agg["lost_by_merge"],
-        "gained_by_merge": agg["gained_by_merge"], "duplicate_ids": nd,
-    }]).to_csv(args.results_dir / "merge_agreement.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "rows_joined": agg["rows"],
+                "agree": agg["agree"],
+                "disagree": agg["disagree"],
+                "lost_by_merge": agg["lost_by_merge"],
+                "gained_by_merge": agg["gained_by_merge"],
+                "duplicate_ids": nd,
+            }
+        ]
+    ).to_csv(args.results_dir / "merge_agreement.csv", index=False)
     print(f"\nwritten to {args.results_dir}")
 
     spark.stop()

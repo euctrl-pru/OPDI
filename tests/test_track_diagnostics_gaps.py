@@ -6,6 +6,7 @@ it is the absence of one. This counts how often that happens, so section 6.3 can
 say which part of A3's failure is the missing fill and which part is the
 single-threshold design.
 """
+
 import datetime as dt
 
 from track_diagnostics import gap_boundary_nulls
@@ -25,8 +26,7 @@ def test_counts_gaps_whose_boundary_altitude_is_null(spark):
             ("a2", _ts("2025-06-05T10:00:00"), 30000.0, False),
             ("a2", _ts("2025-06-05T10:20:00"), None, False),
         ],
-        "icao24 string, event_time timestamp, baro_altitude_ft double, "
-        "on_ground boolean",
+        "icao24 string, event_time timestamp, baro_altitude_ft double, " "on_ground boolean",
     )
     out = gap_boundary_nulls(sv, gap_minutes=10.0)
     assert out["n_gaps"] == 2
@@ -43,14 +43,15 @@ def test_counts_turnarounds_with_no_gap_at_all(spark):
     5,000 ft. Counting these separates A3's two failure modes.
     """
     sv = spark.createDataFrame(
-        [("b1", _ts("2025-06-05T10:00:00"), 300.0, True),
-         ("b1", _ts("2025-06-05T10:02:00"), 300.0, True),
-         ("b1", _ts("2025-06-05T10:04:00"), 300.0, True),
-         ("b1", _ts("2025-06-05T10:06:00"), 300.0, True),
-         ("b1", _ts("2025-06-05T10:08:00"), 300.0, True),
-         ("b1", _ts("2025-06-05T10:11:00"), 300.0, True)],
-        "icao24 string, event_time timestamp, baro_altitude_ft double, "
-        "on_ground boolean",
+        [
+            ("b1", _ts("2025-06-05T10:00:00"), 300.0, True),
+            ("b1", _ts("2025-06-05T10:02:00"), 300.0, True),
+            ("b1", _ts("2025-06-05T10:04:00"), 300.0, True),
+            ("b1", _ts("2025-06-05T10:06:00"), 300.0, True),
+            ("b1", _ts("2025-06-05T10:08:00"), 300.0, True),
+            ("b1", _ts("2025-06-05T10:11:00"), 300.0, True),
+        ],
+        "icao24 string, event_time timestamp, baro_altitude_ft double, " "on_ground boolean",
     )
     out = gap_boundary_nulls(sv, gap_minutes=10.0)
     assert out["n_gaps"] == 0
@@ -78,13 +79,14 @@ def test_two_short_turnarounds_across_a_real_flight_do_not_merge(spark):
     on_ground never holds continuously for more than 3 minutes at a stretch.
     """
     sv = spark.createDataFrame(
-        [("b2", _ts("2025-06-05T10:00:00"), 300.0, True),
-         ("b2", _ts("2025-06-05T10:02:00"), 300.0, True),
-         ("b2", _ts("2025-06-05T10:05:00"), 5000.0, False),
-         ("b2", _ts("2025-06-05T10:08:00"), 300.0, True),
-         ("b2", _ts("2025-06-05T10:11:00"), 300.0, True)],
-        "icao24 string, event_time timestamp, baro_altitude_ft double, "
-        "on_ground boolean",
+        [
+            ("b2", _ts("2025-06-05T10:00:00"), 300.0, True),
+            ("b2", _ts("2025-06-05T10:02:00"), 300.0, True),
+            ("b2", _ts("2025-06-05T10:05:00"), 5000.0, False),
+            ("b2", _ts("2025-06-05T10:08:00"), 300.0, True),
+            ("b2", _ts("2025-06-05T10:11:00"), 300.0, True),
+        ],
+        "icao24 string, event_time timestamp, baro_altitude_ft double, " "on_ground boolean",
     )
     out = gap_boundary_nulls(sv, gap_minutes=10.0)
     assert out["n_no_gap_turnarounds"] == 0
@@ -113,13 +115,12 @@ def test_pre_gap_stale_signature_separates_boundary_from_baseline(spark):
             ("c2", _ts("2025-06-05T11:01:00"), None, False),
             ("c2", _ts("2025-06-05T11:30:00"), 21000.0, False),
         ],
-        "icao24 string, event_time timestamp, baro_altitude_ft double, "
-        "on_ground boolean",
+        "icao24 string, event_time timestamp, baro_altitude_ft double, " "on_ground boolean",
     )
     out = pre_gap_stale_signature(sv, gap_minutes=10.0)
     assert out["pregap_n"] == 2
-    assert out["pregap_repeat_pct"] == 50.0   # c1's repeat
-    assert out["pregap_null_pct"] == 50.0     # c2's NULL
+    assert out["pregap_repeat_pct"] == 50.0  # c1's repeat
+    assert out["pregap_null_pct"] == 50.0  # c2's NULL
     # baseline: 5 other samples, none a repeat, none NULL
     assert out["other_repeat_pct"] == 0.0
     assert out["other_null_pct"] == 0.0
@@ -138,14 +139,34 @@ def test_gate_interval_summary_reports_coverage_buffers_and_widening(spark):
 
     gt = spark.createDataFrame(
         [
-            ("f1", _ts("2025-06-05T10:00:00"), _ts("2025-06-05T11:00:00"),
-             _ts("2025-06-05T09:50:00"), _ts("2025-06-05T11:05:00"),
-             True, True, _ts("2025-06-05T09:50:00"), _ts("2025-06-05T11:05:00"),
-             True, True, True),
-            ("f2", _ts("2025-06-05T00:05:00"), _ts("2025-06-05T01:00:00"),
-             None, None, False, False,
-             _ts("2025-06-04T23:55:00"), _ts("2025-06-05T01:05:00"),
-             False, False, False),
+            (
+                "f1",
+                _ts("2025-06-05T10:00:00"),
+                _ts("2025-06-05T11:00:00"),
+                _ts("2025-06-05T09:50:00"),
+                _ts("2025-06-05T11:05:00"),
+                True,
+                True,
+                _ts("2025-06-05T09:50:00"),
+                _ts("2025-06-05T11:05:00"),
+                True,
+                True,
+                True,
+            ),
+            (
+                "f2",
+                _ts("2025-06-05T00:05:00"),
+                _ts("2025-06-05T01:00:00"),
+                None,
+                None,
+                False,
+                False,
+                _ts("2025-06-04T23:55:00"),
+                _ts("2025-06-05T01:05:00"),
+                False,
+                False,
+                False,
+            ),
         ],
         "flight_key string, t_off timestamp, t_land timestamp, "
         "aobt timestamp, aibt timestamp, dep_measured boolean, "

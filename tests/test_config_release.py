@@ -73,8 +73,7 @@ def test_the_start_up_lines_name_warehouse_root_and_coverage(monkeypatch):
 
 
 def _opensky(tmp_path, worldwide=True):
-    cfg = OPDIConfig.for_environment(
-        "opensky", worldwide=worldwide, warehouse=str(tmp_path / "wh"))
+    cfg = OPDIConfig.for_environment("opensky", worldwide=worldwide, warehouse=str(tmp_path / "wh"))
     return cfg
 
 

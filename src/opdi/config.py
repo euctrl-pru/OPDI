@@ -39,10 +39,14 @@ class ProjectConfig:
     project_name: str = "project_opdi"
     """Database/catalog name for Iceberg tables."""
 
-    warehouse_path: str = "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged"
+    warehouse_path: str = (
+        "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged"
+    )
     """Warehouse path for Iceberg catalog."""
 
-    hadoop_filesystem: str = "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged"
+    hadoop_filesystem: str = (
+        "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged"
+    )
     """Hadoop filesystem path for Kerberos access."""
 
     release: str = RELEASE
@@ -101,7 +105,9 @@ class SparkConfig:
     ui_show_console_progress: str = "false"
 
     # Iceberg-specific settings
-    iceberg_jar_path: str = "/opt/spark/optional-lib/iceberg-spark-runtime-3.5_2.12-1.5.2.1.23.17218.0-1.jar"
+    iceberg_jar_path: str = (
+        "/opt/spark/optional-lib/iceberg-spark-runtime-3.5_2.12-1.5.2.1.23.17218.0-1.jar"
+    )
     """Path to Iceberg Spark runtime JAR."""
 
     handle_timestamp_without_timezone: str = "true"
@@ -146,42 +152,46 @@ class SparkConfig:
 
         # S3 configs (opensky environment)
         if self.s3_endpoint:
-            configs.update({
-                "spark.jars.packages": self.spark_packages,
-                "spark.hadoop.fs.s3a.endpoint": self.s3_endpoint,
-                "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
-                "spark.hadoop.fs.s3a.path.style.access": "true",
-                "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
-                "spark.driver.memory": self.driver_memory,
-                "spark.driver.maxResultSize": self.driver_max_result_size,
-            })
+            configs.update(
+                {
+                    "spark.jars.packages": self.spark_packages,
+                    "spark.hadoop.fs.s3a.endpoint": self.s3_endpoint,
+                    "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+                    "spark.hadoop.fs.s3a.path.style.access": "true",
+                    "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+                    "spark.driver.memory": self.driver_memory,
+                    "spark.driver.maxResultSize": self.driver_max_result_size,
+                }
+            )
 
         # Iceberg / Azure / Hive configs (dev, live environments)
         if self.enable_iceberg:
-            configs.update({
-                "spark.ui.showConsoleProgress": self.ui_show_console_progress,
-                "spark.driver.cores": self.driver_cores,
-                "spark.driver.memory": self.driver_memory,
-                "spark.executor.memory": self.executor_memory,
-                "spark.executor.memoryOverhead": self.executor_memory_overhead,
-                "spark.executor.cores": self.executor_cores,
-                "spark.executor.instances": self.executor_instances,
-                "spark.dynamicAllocation.maxExecutors": self.dynamic_allocation_max_executors,
-                "spark.network.timeout": self.network_timeout,
-                "spark.executor.heartbeatInterval": self.executor_heartbeat_interval,
-                "spark.driver.maxResultSize": self.driver_max_result_size,
-                "spark.shuffle.compress": self.shuffle_compress,
-                "spark.shuffle.spill.compress": self.shuffle_spill_compress,
-                "spark.hadoop.fs.azure.ext.cab.required.group": self.hadoop_group,
-                "spark.kerberos.access.hadoopFileSystems": project_config.hadoop_filesystem,
-                "spark.jars": self.iceberg_jar_path,
-                "spark.executor.extraClassPath": self.iceberg_jar_path,
-                "spark.driver.extraClassPath": self.iceberg_jar_path,
-                "spark.sql.catalog.spark_catalog.type": "hive",
-                "spark.sql.catalog.spark_catalog": "org.apache.iceberg.spark.SparkSessionCatalog",
-                "spark.sql.iceberg.handle-timestamp-without-timezone": self.handle_timestamp_without_timezone,
-                "spark.sql.catalog.spark_catalog.warehouse": project_config.warehouse_path,
-            })
+            configs.update(
+                {
+                    "spark.ui.showConsoleProgress": self.ui_show_console_progress,
+                    "spark.driver.cores": self.driver_cores,
+                    "spark.driver.memory": self.driver_memory,
+                    "spark.executor.memory": self.executor_memory,
+                    "spark.executor.memoryOverhead": self.executor_memory_overhead,
+                    "spark.executor.cores": self.executor_cores,
+                    "spark.executor.instances": self.executor_instances,
+                    "spark.dynamicAllocation.maxExecutors": self.dynamic_allocation_max_executors,
+                    "spark.network.timeout": self.network_timeout,
+                    "spark.executor.heartbeatInterval": self.executor_heartbeat_interval,
+                    "spark.driver.maxResultSize": self.driver_max_result_size,
+                    "spark.shuffle.compress": self.shuffle_compress,
+                    "spark.shuffle.spill.compress": self.shuffle_spill_compress,
+                    "spark.hadoop.fs.azure.ext.cab.required.group": self.hadoop_group,
+                    "spark.kerberos.access.hadoopFileSystems": project_config.hadoop_filesystem,
+                    "spark.jars": self.iceberg_jar_path,
+                    "spark.executor.extraClassPath": self.iceberg_jar_path,
+                    "spark.driver.extraClassPath": self.iceberg_jar_path,
+                    "spark.sql.catalog.spark_catalog.type": "hive",
+                    "spark.sql.catalog.spark_catalog": "org.apache.iceberg.spark.SparkSessionCatalog",
+                    "spark.sql.iceberg.handle-timestamp-without-timezone": self.handle_timestamp_without_timezone,
+                    "spark.sql.catalog.spark_catalog.warehouse": project_config.warehouse_path,
+                }
+            )
 
         return configs
 
@@ -256,7 +266,9 @@ class IngestionConfig:
     minio_endpoint: str = "https://s3.opensky-network.org"
     """MinIO endpoint for OpenSky Network data."""
 
-    osn_aircraft_db_url: str = "https://s3.opensky-network.org/data-samples/metadata/aircraft-database-complete-2024-10.csv"
+    osn_aircraft_db_url: str = (
+        "https://s3.opensky-network.org/data-samples/metadata/aircraft-database-complete-2024-10.csv"
+    )
     """URL for OpenSky Network aircraft database."""
 
     decimation: str = "bucket"
@@ -288,14 +300,16 @@ class IngestionConfig:
     ourairports_base_url: str = "https://ourairports.com/data/"
     """Base URL for OurAirports CSV datasets."""
 
-    ourairports_datasets: Dict[str, str] = field(default_factory=lambda: {
-        'airports': 'airports.csv',
-        'runways': 'runways.csv',
-        'navaids': 'navaids.csv',
-        'airport-frequencies': 'airport-frequencies.csv',
-        'countries': 'countries.csv',
-        'regions': 'regions.csv',
-    })
+    ourairports_datasets: Dict[str, str] = field(
+        default_factory=lambda: {
+            "airports": "airports.csv",
+            "runways": "runways.csv",
+            "navaids": "navaids.csv",
+            "airport-frequencies": "airport-frequencies.csv",
+            "countries": "countries.csv",
+            "regions": "regions.csv",
+        }
+    )
     """OurAirports dataset filenames."""
 
     # Batch processing
@@ -1714,9 +1728,7 @@ class EventConfig:
 
     def __post_init__(self) -> None:
         if self.merge_duplicate_milestones is None:
-            object.__setattr__(
-                self, "merge_duplicate_milestones", self.emit_runway_milestones
-            )
+            object.__setattr__(self, "merge_duplicate_milestones", self.emit_runway_milestones)
         elif self.merge_duplicate_milestones and not self.emit_runway_milestones:
             raise ValueError(
                 "merge_duplicate_milestones=True requires emit_runway_milestones. "
@@ -1733,9 +1745,7 @@ class EventConfig:
                 "at all, which reads as a coverage failure rather than a typo."
             )
         if self.level_anchor not in ("pru", "phase"):
-            raise ValueError(
-                f"level_anchor must be 'pru' or 'phase', got {self.level_anchor!r}."
-            )
+            raise ValueError(f"level_anchor must be 'pru' or 'phase', got {self.level_anchor!r}.")
 
     def level_window_height_ft(self) -> float:
         """PRU's window height, derived rather than stored.
@@ -2122,8 +2132,7 @@ class OPDIConfig:
                     # the whole pipeline into a parallel prefix without
                     # touching a production table, which is what makes a
                     # from-scratch rebuild safe to attempt.
-                    warehouse_path=os.environ.get(WAREHOUSE_VARIABLE)
-                    or OPENSKY_DEFAULT_WAREHOUSE,
+                    warehouse_path=os.environ.get(WAREHOUSE_VARIABLE) or OPENSKY_DEFAULT_WAREHOUSE,
                     hadoop_filesystem="",
                 ),
                 spark=SparkConfig(
@@ -2168,7 +2177,9 @@ class OPDIConfig:
                 ),
             )
         else:
-            raise ValueError(f"Unknown environment: {env}. Use 'dev', 'live', 'local', or 'opensky'.")
+            raise ValueError(
+                f"Unknown environment: {env}. Use 'dev', 'live', 'local', or 'opensky'."
+            )
 
         if worldwide:
             config.coverage = CoverageConfig(bbox=None)

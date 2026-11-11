@@ -22,9 +22,7 @@ def main(argv=None):
         prog="opdi",
         description="OPDI - Open Performance Data Initiative pipeline runner",
     )
-    parser.add_argument(
-        "--version", action="store_true", help="Show package version and exit."
-    )
+    parser.add_argument("--version", action="store_true", help="Show package version and exit.")
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -50,8 +48,8 @@ def main(argv=None):
         "--step",
         default=None,
         help="Run only this step, 00-08 -- including the lettered ones, "
-             "01b (ADS-C ingestion) and 02a (trajectory cleaning). "
-             "Omit to run all steps.",
+        "01b (ADS-C ingestion) and 02a (trajectory cleaning). "
+        "Omit to run all steps.",
     )
     run_parser.add_argument(
         "--no-airport-zones",
@@ -88,14 +86,14 @@ def main(argv=None):
         choices=["trend", "endpoint", "nearest"],
         default=None,
         help="Detection algorithm for departures (step 03). Defaults to the "
-             "value in DetectionConfig.",
+        "value in DetectionConfig.",
     )
     run_parser.add_argument(
         "--ades-mode",
         choices=["trend", "endpoint", "nearest"],
         default=None,
         help="Detection algorithm for arrivals (step 03). The two roles take "
-             "different rules because they are not equally hard.",
+        "different rules because they are not equally hard.",
     )
     run_parser.add_argument(
         "--airports-hex-path",
@@ -109,23 +107,24 @@ def main(argv=None):
         action="store_true",
         default=True,
         help="Run worldwide (the default; kept so existing commands still "
-             "parse). No coverage filter is applied to ingest, detection or "
-             "reference geometry. In the opensky environment the coverage does "
-             "not change the warehouse; a run whose coverage differs from the "
-             "one that built the warehouse is refused at step 00.",
+        "parse). No coverage filter is applied to ingest, detection or "
+        "reference geometry. In the opensky environment the coverage does "
+        "not change the warehouse; a run whose coverage differs from the "
+        "one that built the warehouse is refused at step 00.",
     )
     coverage.add_argument(
         "--europe",
         dest="worldwide",
         action="store_false",
         help="Apply the published European bounding box. In the dev, live and "
-             "local environments this also selects the European warehouse.",
+        "local environments this also selects the European warehouse.",
     )
 
     args = parser.parse_args(argv)
 
     if args.version:
         from opdi import __version__
+
         print(f"opdi {__version__}")
         return 0
 

@@ -223,8 +223,7 @@ def require_headroom(s3, label: str) -> float:
     used = bucket_total_gb(s3)
     free = BUCKET_QUOTA_GB - used
     print(
-        f"bucket ({label}): {used:.2f} GB used of ~{BUCKET_QUOTA_GB:.0f} GB, "
-        f"{free:.2f} GB free"
+        f"bucket ({label}): {used:.2f} GB used of ~{BUCKET_QUOTA_GB:.0f} GB, " f"{free:.2f} GB free"
     )
     if free < MIN_FREE_GB:
         raise SystemExit(
@@ -286,8 +285,9 @@ def release_assignment(s3, arm_name, period, out, keep_assignments, failed=False
         print(f"  !! ORPHAN LEFT at {assign_prefix(arm_name, period)}: {exc}")
 
 
-def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments,
-            score=score_arm, path_arm=None):
+def run_arm(
+    spark, s3, arm_name, period, sv, gt, params, keep_assignments, score=score_arm, path_arm=None
+):
     """Build one arm's assignment table, derive something from it, delete it.
 
     **The orchestration lives here once**, and the two optional parameters are
@@ -332,11 +332,7 @@ def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments,
     rule = ARMS[arm_name]()
     assigned = assign_track_id(sv, rule, params)
     out = f"{ASSIGN_BASE}/{path_arm}/{period}"
-    (
-        assigned.select("icao24", "event_time", "track_id")
-        .write.mode("overwrite")
-        .parquet(out)
-    )
+    (assigned.select("icao24", "event_time", "track_id").write.mode("overwrite").parquet(out))
     n_obj, n_bytes = prefix_size(s3, assign_prefix(path_arm, period))
     print(f"  -> {out} ({n_obj} objects, {n_bytes / 1e9:.3f} GB)")
 
@@ -361,8 +357,10 @@ def run_arm(spark, s3, arm_name, period, sv, gt, params, keep_assignments,
 
     release_assignment(s3, path_arm, period, out, keep_assignments)
     return result, {
-        "arm": arm_name, "period": period,
-        "assign_objects": n_obj, "assign_bytes": n_bytes,
+        "arm": arm_name,
+        "period": period,
+        "assign_objects": n_obj,
+        "assign_bytes": n_bytes,
     }
 
 
@@ -375,13 +373,16 @@ def main():
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4058)
     ap.add_argument(
-        "--days", nargs="+", default=None,
+        "--days",
+        nargs="+",
+        default=None,
         help="override the period's day list, e.g. a single day for a smoke test",
     )
     ap.add_argument(
-        "--keep-assignments", action="store_true",
+        "--keep-assignments",
+        action="store_true",
         help="do not delete each arm's assignment table after scoring it "
-             "(default: delete -- see module docstring)",
+        "(default: delete -- see module docstring)",
     )
     args = ap.parse_args()
 
@@ -445,9 +446,7 @@ def main():
     # `assign` is the unfiltered assignment table, handed over precisely so a
     # scorer can re-match on a different interval without re-reading it from S3.
     def _score_with_gate(matched, extents, assign):
-        matched_gate = track_truth.overlap_join(
-            assign, gt, bounds=("t_off_block", "t_in_block")
-        )
+        matched_gate = track_truth.overlap_join(assign, gt, bounds=("t_off_block", "t_in_block"))
         return score_arm_gated(matched, extents, matched_gate)
 
     rows = []
@@ -458,8 +457,15 @@ def main():
             print(f"\n=== {arm} ({args.period}) ===")
             require_headroom(s3, f"arm {arm}")
             row, meta = run_arm(
-                spark, s3, arm, args.period, sv, gt, params,
-                args.keep_assignments, score=_score_with_gate,
+                spark,
+                s3,
+                arm,
+                args.period,
+                sv,
+                gt,
+                params,
+                args.keep_assignments,
+                score=_score_with_gate,
             )
             row.update(meta)
             rows.append(row)
@@ -491,8 +497,7 @@ def main():
     )
     print(f"\n-> {out}")
     print(
-        f"bucket: {bucket_total_gb(s3):.2f} GB used of ~{BUCKET_QUOTA_GB:.0f} GB "
-        "after this run"
+        f"bucket: {bucket_total_gb(s3):.2f} GB used of ~{BUCKET_QUOTA_GB:.0f} GB " "after this run"
     )
     spark.stop()
 

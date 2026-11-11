@@ -123,7 +123,8 @@ def guard_write_path(path: str) -> None:
         raise AssertionError(
             f"refusing to write {path!r}: every table this script writes must "
             f"sit under {ARM_PREFIX!r} (research/a10). A passthrough table is "
-            f"read-only.")
+            f"read-only."
+        )
 
 
 def log_dir_name(arm: str) -> str:
@@ -138,15 +139,17 @@ def sample_airframes(df):
     return df.where(F.abs(F.xxhash64("icao24")) % 10 == 0)
 
 
-def check_free_space(used_gb: float, quota_gb: float = QUOTA_GB,
-                     floor_gb: float = FLOOR_GB) -> None:
+def check_free_space(
+    used_gb: float, quota_gb: float = QUOTA_GB, floor_gb: float = FLOOR_GB
+) -> None:
     """Raise if the bucket has less than *floor_gb* free."""
     free = quota_gb - used_gb
     if free < floor_gb:
         raise RuntimeError(
             f"only {free:.1f} GB free in {BUCKET} ({used_gb:.1f} of "
             f"{quota_gb:.0f} GB used); need {floor_gb:.0f} GB. Delete scratch "
-            f"in the spec's order before running.")
+            f"in the spec's order before running."
+        )
 
 
 def bucket_used_gb() -> float:
@@ -163,9 +166,11 @@ def bucket_used_gb() -> float:
             key, _, value = line.partition("=")
             creds[key.strip()] = value.strip()
     s3 = boto3.client(
-        "s3", endpoint_url=ENDPOINT,
+        "s3",
+        endpoint_url=ENDPOINT,
         aws_access_key_id=creds["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=creds["AWS_SECRET_ACCESS_KEY"])
+        aws_secret_access_key=creds["AWS_SECRET_ACCESS_KEY"],
+    )
     total = 0
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET):
         total += sum(o["Size"] for o in page.get("Contents", []))
@@ -184,13 +189,13 @@ def build_config(arm: str, link_params=None, executors: int = 8) -> OPDIConfig:
     cfg.spark.executor_instances = str(executors)
     cfg.segmentation.method = arm
     if link_params:
-        valid = {f.name for f in dataclasses.fields(cfg.segmentation)
-                 if f.name.startswith("link_")}
+        valid = {f.name for f in dataclasses.fields(cfg.segmentation) if f.name.startswith("link_")}
         bad = sorted(set(link_params) - valid)
         if bad:
             raise ValueError(
                 f"only link_* segmentation fields may be overridden; got {bad}. "
-                f"Valid: {sorted(valid)}")
+                f"Valid: {sorted(valid)}"
+            )
         for k, v in link_params.items():
             setattr(cfg.segmentation, k, v)
     return cfg
@@ -214,15 +219,14 @@ def redirect_arm(arm: str) -> None:
             return arm_path(arm, table_name)
         raise RuntimeError(
             f"unclassified table {table_name!r}: add it to PASSTHROUGH, "
-            f"SHARED_INPUTS or DERIVED in benchmarks/run_track_link_day.py.")
+            f"SHARED_INPUTS or DERIVED in benchmarks/run_track_link_day.py."
+        )
 
-    def write_table(self, df, table_name, mode="append", partition_by=None,
-                    partition_values=None):
+    def write_table(self, df, table_name, mode="append", partition_by=None, partition_values=None):
         guard_write_path(_s3_path(self, table_name))
         if table_name == "osn_statevectors_v2":
             df = sample_airframes(df)
-        return orig_write(self, df, table_name, mode, partition_by,
-                          partition_values)
+        return orig_write(self, df, table_name, mode, partition_by, partition_values)
 
     def drop_partitions(self, table_name, column, values):
         # Deleting is writing. A passthrough table resolves to the reference warehouse,
@@ -271,8 +275,9 @@ def record_timing(path, arm: str, step: str, seconds: float) -> None:
             out.writerow([a, s, value])
 
 
-def run_arm(arm: str, day: date, executors: int, steps=STEPS,
-            link_params=None, timings_csv=None) -> None:
+def run_arm(
+    arm: str, day: date, executors: int, steps=STEPS, link_params=None, timings_csv=None
+) -> None:
     """One arm, one day, through the real per-day entry points."""
     cfg = build_config(arm, link_params, executors)
     seg = cfg.segmentation
@@ -296,11 +301,13 @@ def run_arm(arm: str, day: date, executors: int, steps=STEPS,
 
     redirect_arm(arm)
     spark = SparkSessionManager.create_session(
-        app_name=f"a10 {arm} {day}", config=cfg, distributed=True)
+        app_name=f"a10 {arm} {day}", config=cfg, distributed=True
+    )
     try:
         kwargs = {
             "airports_hex_path": str(
-                REPO / "data" / "airport_hex" / "zones_res7_processed.parquet"),
+                REPO / "data" / "airport_hex" / "zones_res7_processed.parquet"
+            ),
             "log_dir": str(REPO / "OPDI_live" / "logs" / log_dir_name(arm)),
         }
         storage = StorageManager(spark, cfg)
@@ -308,8 +315,9 @@ def run_arm(arm: str, day: date, executors: int, steps=STEPS,
         if problem:
             raise RuntimeError(problem)
         for step in steps:
-            print(f"\n{'-' * 72}\n>>> arm {arm}  step {step}  day {day}\n"
-                  f"{'-' * 72}", flush=True)
+            print(
+                f"\n{'-' * 72}\n>>> arm {arm}  step {step}  day {day}\n" f"{'-' * 72}", flush=True
+            )
             started = time.monotonic()
             run_day_step(spark, cfg, step, day, kwargs)
             if timings_csv:
@@ -323,19 +331,24 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--day", required=True, help="YYYY-MM-DD")
     ap.add_argument("--arm", choices=ARMS, required=True)
-    ap.add_argument("--steps", nargs="+", default=list(STEPS),
-                    choices=STEPS, help="per-day steps, in order")
+    ap.add_argument(
+        "--steps", nargs="+", default=list(STEPS), choices=STEPS, help="per-day steps, in order"
+    )
     ap.add_argument("--executors", type=int, default=8)
-    ap.add_argument("--link-params-json", default=None,
-                    help="JSON object of link_* SegmentationConfig overrides")
-    ap.add_argument("--timings-csv", default=None,
-                    help="write each step's duration here (one row per arm and step)")
+    ap.add_argument(
+        "--link-params-json",
+        default=None,
+        help="JSON object of link_* SegmentationConfig overrides",
+    )
+    ap.add_argument(
+        "--timings-csv",
+        default=None,
+        help="write each step's duration here (one row per arm and step)",
+    )
     args = ap.parse_args()
-    link_params = json.loads(args.link_params_json) \
-        if args.link_params_json else None
+    link_params = json.loads(args.link_params_json) if args.link_params_json else None
     day = date.fromisoformat(args.day)
-    run_arm(args.arm, day, args.executors, args.steps, link_params,
-            timings_csv=args.timings_csv)
+    run_arm(args.arm, day, args.executors, args.steps, link_params, timings_csv=args.timings_csv)
     print(f"\nDone. {args.arm} written for {day} under {ARM_PREFIX}")
     return 0
 

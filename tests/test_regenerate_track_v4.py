@@ -57,8 +57,10 @@ def test_final_grid_arguments():
     assert grid["link_max_gap_minutes"] == [360, 480, 600]
     assert grid["link_old_edge_climb"] == [True]
     assert grid["link_new_edge_descent"] == [False]
-    assert args[args.index("--days") + 1:args.index("--grid-json")] == [
-        "2026-06-14", "2025-06-14"]
+    assert args[args.index("--days") + 1 : args.index("--grid-json")] == [
+        "2026-06-14",
+        "2025-06-14",
+    ]
 
 
 def test_final_edges_arguments():
@@ -100,8 +102,7 @@ def test_paper_dir_is_overridable_and_is_v4():
 def test_check_needs_no_credentials(monkeypatch, capsys):
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
-    monkeypatch.setattr("sys.argv", ["regenerate_track_v4.py", "--check",
-                                     "--allow-stale"])
+    monkeypatch.setattr("sys.argv", ["regenerate_track_v4.py", "--check", "--allow-stale"])
     R.main()
     assert "analysis at" in capsys.readouterr().out
 
@@ -122,8 +123,7 @@ def test_changed_arguments_mark_a_job_stale(tmp_path, monkeypatch):
     assert set(job.stale().values()) == {"arguments changed"}
 
 
-def test_missing_optional_reasons_are_not_stale_but_a_recorded_one_is(
-        tmp_path, monkeypatch):
+def test_missing_optional_reasons_are_not_stale_but_a_recorded_one_is(tmp_path, monkeypatch):
     job = _job("final_grid")
     assert job.optional <= set(job.outputs)
     monkeypatch.setattr(job, "data", tmp_path)
@@ -143,5 +143,4 @@ def test_the_paper_inputs_are_declared():
     names = set(_job("final_grid").outputs)
     for stem in ("link_reasons", "link_positive_reasons", "link_negative_reasons"):
         assert f"{stem}_pooled.csv" in names
-    assert set(_job("final_edges").outputs) == {
-        "link_grid_pooled.csv", "link_controls_pooled.csv"}
+    assert set(_job("final_edges").outputs) == {"link_grid_pooled.csv", "link_controls_pooled.csv"}

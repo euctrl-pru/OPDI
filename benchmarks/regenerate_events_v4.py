@@ -142,7 +142,7 @@ class Stage:
 
     def __init__(self, name, cmd, produces, code_paths, notes="", inputs=()):
         self.name = name
-        self.cmd = cmd            # argv, run from the repo root
+        self.cmd = cmd  # argv, run from the repo root
         self.produces = produces  # S3 prefix this stage fills
         self.code_paths = list(code_paths)
         self.notes = notes
@@ -196,11 +196,15 @@ class Stage:
         if stale_input:
             print(f"  {stale_input} -- rebuilding rather than recording")
         if present:
-            print(f"  {self.produces}\n  present: {ident['objects']:,} objects, "
-                  f"{ident['bytes'] / 1e9:.2f} GB -- recording, not rebuilding")
-            note = (note + " | PRE-EXISTING: identity recorded without a "
-                    "rebuild, so the command below is how it is built, not "
-                    "necessarily how this copy was built.").strip(" |")
+            print(
+                f"  {self.produces}\n  present: {ident['objects']:,} objects, "
+                f"{ident['bytes'] / 1e9:.2f} GB -- recording, not rebuilding"
+            )
+            note = (
+                note + " | PRE-EXISTING: identity recorded without a "
+                "rebuild, so the command below is how it is built, not "
+                "necessarily how this copy was built."
+            ).strip(" |")
         else:
             cmd = [str(x) for x in self.cmd]
             print(f"  absent -- building\n  {' '.join(cmd)}", flush=True)
@@ -209,8 +213,13 @@ class Stage:
                 raise SystemExit(f"{self.name} failed with exit {r.returncode}")
         DATA.mkdir(parents=True, exist_ok=True)
         provenance.record(
-            DATA, self.key, self.script, self.args, self.code_paths,
-            notes=note, input_tables=[self.produces] + self.inputs,
+            DATA,
+            self.key,
+            self.script,
+            self.args,
+            self.code_paths,
+            notes=note,
+            input_tables=[self.produces] + self.inputs,
         )
         print(f"  recorded {self.key}")
 
@@ -229,9 +238,7 @@ class Job:
 
     def stale(self):
         for produced, staged in self.outputs.items():
-            is_stale, why = provenance.is_stale(
-                DATA, staged, self.code_paths, self.inputs
-            )
+            is_stale, why = provenance.is_stale(DATA, staged, self.code_paths, self.inputs)
             if is_stale:
                 return f"{staged}: {why}"
         return ""
@@ -253,13 +260,17 @@ class Job:
                 src = Path(tmp) / produced
                 if not src.is_file():
                     raise SystemExit(
-                        f"{self.name}: expected {produced!r} but the job did not "
-                        f"produce it"
+                        f"{self.name}: expected {produced!r} but the job did not " f"produce it"
                     )
                 shutil.copy2(src, DATA / staged)
                 provenance.record(
-                    DATA, staged, self.script, self.args, self.code_paths,
-                    notes=self.notes, input_tables=self.inputs,
+                    DATA,
+                    staged,
+                    self.script,
+                    self.args,
+                    self.code_paths,
+                    notes=self.notes,
+                    input_tables=self.inputs,
                 )
 
 
@@ -280,11 +291,13 @@ def stages() -> list:
     return [
         Stage(
             "flight_list_2026",
-            [sys.executable, "-u", "benchmarks/flight_list_2026.py",
-             "--executors", "12"],
+            [sys.executable, "-u", "benchmarks/flight_list_2026.py", "--executors", "12"],
             T_FLIGHT_LIST,
-            ["benchmarks/flight_list_2026.py", "src/opdi/pipeline/flights.py",
-             "src/opdi/config.py"],
+            [
+                "benchmarks/flight_list_2026.py",
+                "src/opdi/pipeline/flights.py",
+                "src/opdi/config.py",
+            ],
             "the 2026 flight list, through step 03's own process_dai. Every "
             "aerodrome-anchored family -- airport events, rings, the runway "
             "milestones, the PRU tops -- resolves ADEP/ADES through it, and "
@@ -322,13 +335,27 @@ def jobs(reuse_rungs=(), reuse_newer_than=None) -> list:
             Job(
                 f"ladder_{period}",
                 "benchmarks/event_bench.py",
-                ["--period", period, "--ladder", "v4", "--airports", "study",
-                 "--out-name", f"ladder_{period}.csv", "--executors", "12"]
-                + (["--reuse-table", *reuse_rungs,
-                    "--reuse-newer-than", reuse_newer_than]
-                   if reuse_rungs else []),
-                {f"ladder_{period}.csv": f"ladder_{period}.csv",
-                 f"inventory_{period}.csv": f"inventory_{period}.csv"},
+                [
+                    "--period",
+                    period,
+                    "--ladder",
+                    "v4",
+                    "--airports",
+                    "study",
+                    "--out-name",
+                    f"ladder_{period}.csv",
+                    "--executors",
+                    "12",
+                ]
+                + (
+                    ["--reuse-table", *reuse_rungs, "--reuse-newer-than", reuse_newer_than]
+                    if reuse_rungs
+                    else []
+                ),
+                {
+                    f"ladder_{period}.csv": f"ladder_{period}.csv",
+                    f"inventory_{period}.csv": f"inventory_{period}.csv",
+                },
                 DETECT,
                 "the cumulative ladder from the reconstructed v0.1.0 "
                 "configuration to the shipped one, one behaviour per rung, "
@@ -345,8 +372,18 @@ def jobs(reuse_rungs=(), reuse_newer_than=None) -> list:
             Job(
                 f"compare_{period}",
                 "benchmarks/events_compare.py",
-                ["--period", period, "--ladder", "v4", "--rung", SHIPPED_RUNG,
-                 "--airports", "study", "--executors", "12"],
+                [
+                    "--period",
+                    period,
+                    "--ladder",
+                    "v4",
+                    "--rung",
+                    SHIPPED_RUNG,
+                    "--airports",
+                    "study",
+                    "--executors",
+                    "12",
+                ],
                 # Every CSV `events_compare.py` writes, not the subset the
                 # paper happened to need first. An output this job produces but
                 # does not declare is not copied into the paper's data/ -- so
@@ -356,21 +393,22 @@ def jobs(reuse_rungs=(), reuse_newer_than=None) -> list:
                 # pooling_rules and rings came to be read from a manual run
                 # made at 39093a1, three commits before the on_ground fix,
                 # while the tables beside them were current.
-                {f"per_airport_{period}.csv": f"per_airport_{period}.csv",
-                 f"per_airport_by_detector_{period}.csv":
-                     f"per_airport_by_detector_{period}.csv",
-                 f"pooling_rules_{period}.csv": f"pooling_rules_{period}.csv",
-                 f"rings_{period}.csv": f"rings_{period}.csv",
-                 # `floor_{period}.csv` is deliberately NOT declared. The
-                 # inter-source floor needs the _CTFM columns of the *full*
-                 # APDF extract, and apdf_full_202606 has never been
-                 # extracted -- so the floor comes back empty for 2026 and
-                 # `write_csv` writes no file at all. Declaring it fails the
-                 # job with "expected floor_2026.csv but the job did not
-                 # produce it", which is the correct behaviour and the reason
-                 # this comment exists rather than a silent omission.
-                 f"runway_{period}.csv": f"runway_{period}.csv",
-                 f"resolution_{period}.csv": f"resolution_{period}.csv"},
+                {
+                    f"per_airport_{period}.csv": f"per_airport_{period}.csv",
+                    f"per_airport_by_detector_{period}.csv": f"per_airport_by_detector_{period}.csv",
+                    f"pooling_rules_{period}.csv": f"pooling_rules_{period}.csv",
+                    f"rings_{period}.csv": f"rings_{period}.csv",
+                    # `floor_{period}.csv` is deliberately NOT declared. The
+                    # inter-source floor needs the _CTFM columns of the *full*
+                    # APDF extract, and apdf_full_202606 has never been
+                    # extracted -- so the floor comes back empty for 2026 and
+                    # `write_csv` writes no file at all. Declaring it fails the
+                    # job with "expected floor_2026.csv but the job did not
+                    # produce it", which is the correct behaviour and the reason
+                    # this comment exists rather than a silent omission.
+                    f"runway_{period}.csv": f"runway_{period}.csv",
+                    f"resolution_{period}.csv": f"resolution_{period}.csv",
+                },
                 SCORE + ["benchmarks/events_compare.py", "benchmarks/event_bench.py"],
                 "the shipped rung split three ways: per aerodrome (the network "
                 "figure is an average over aerodromes differing in size by a "
@@ -398,13 +436,19 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="report staleness, run nothing")
     ap.add_argument("--force", action="store_true", help="run everything")
     ap.add_argument("--only", nargs="*", default=None)
-    ap.add_argument("--skip-stages", action="store_true",
-                    help="leave the upstream 2026 flight list out of the chain. "
-                         "On by default nowhere: unlike V6's stages, this one "
-                         "builds a table no production run ever writes, so a "
-                         "chain without it is not reproducible.")
     ap.add_argument(
-        "--reuse-rungs", nargs="*", default=[], metavar="RUNG",
+        "--skip-stages",
+        action="store_true",
+        help="leave the upstream 2026 flight list out of the chain. "
+        "On by default nowhere: unlike V6's stages, this one "
+        "builds a table no production run ever writes, so a "
+        "chain without it is not reproducible.",
+    )
+    ap.add_argument(
+        "--reuse-rungs",
+        nargs="*",
+        default=[],
+        metavar="RUNG",
         help=(
             "Score these ladder rungs from the event tables already on S3 "
             "rather than recomputing them, for resuming a ladder that died "
@@ -416,12 +460,17 @@ def main() -> int:
         ),
     )
     ap.add_argument(
-        "--reuse-newer-than", default=None, metavar="ISO8601",
+        "--reuse-newer-than",
+        default=None,
+        metavar="ISO8601",
         help="A reused rung table is accepted only if written after this instant.",
     )
-    ap.add_argument("--rebuild-stage", nargs="*", default=[],
-                    help="force these stages to rebuild their table rather "
-                         "than record it")
+    ap.add_argument(
+        "--rebuild-stage",
+        nargs="*",
+        default=[],
+        help="force these stages to rebuild their table rather " "than record it",
+    )
     args = ap.parse_args()
 
     if args.reuse_rungs and not args.reuse_newer_than:

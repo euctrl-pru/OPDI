@@ -37,16 +37,20 @@ def _joined(spark, rows, step_s=30):
     """
     data = []
     for i, (apt, elev, alt_m) in enumerate(rows):
-        data.append((
-            _EPOCH + dt.timedelta(seconds=step_s * i),
-            "trk-1", "abc123", "KLM1",
-            apt,
-            None if elev is None else float(elev),
-            float(alt_m),
-            int(alt_m * FT_PER_M / 100),
-            1.0,
-            "yes",
-        ))
+        data.append(
+            (
+                _EPOCH + dt.timedelta(seconds=step_s * i),
+                "trk-1",
+                "abc123",
+                "KLM1",
+                apt,
+                None if elev is None else float(elev),
+                float(alt_m),
+                int(alt_m * FT_PER_M / 100),
+                1.0,
+                "yes",
+            )
+        )
     return spark.createDataFrame(data, _JOINED)
 
 
@@ -60,9 +64,9 @@ def test_a_climb_above_a_high_field_is_counted_at_the_field_cap(spark):
     rows = [("LTCE", 5763.0, 3960.0 + 60 * i) for i in range(6)]
     got = add_height_votes(_joined(spark, rows)).first()
 
-    assert got["up_agl_12000"] == 5      # five deltas across six samples
+    assert got["up_agl_12000"] == 5  # five deltas across six samples
     assert got["dn_agl_12000"] == 0
-    assert got["up_agl_4000"] == 0       # all of it is above 4,000 ft AGL
+    assert got["up_agl_4000"] == 0  # all of it is above 4,000 ft AGL
 
 
 def test_the_field_cap_admits_what_the_flight_level_cap_excludes(spark):
@@ -75,12 +79,12 @@ def test_the_field_cap_admits_what_the_flight_level_cap_excludes(spark):
     rows = [("LTCE", 5763.0, ft / FT_PER_M) for ft in alt_ft]
     got = add_height_votes(_joined(spark, rows)).first()
 
-    assert got["up_60"] == 0             # sea-level datum: nothing qualifies
+    assert got["up_60"] == 0  # sea-level datum: nothing qualifies
     # Two, not three. The centred five-sample mean over four samples gives the
     # two middle rows the same value, so the delta between them is exactly
     # zero and votes neither way. That is the smoothing behaving correctly on
     # a short series, not a lost vote.
-    assert got["up_agl_6100"] == 2       # field datum: the climb is seen
+    assert got["up_agl_6100"] == 2  # field datum: the climb is seen
 
 
 def test_the_cap_columns_exist_for_every_declared_cap(spark):

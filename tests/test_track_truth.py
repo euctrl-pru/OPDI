@@ -30,40 +30,99 @@ def _assign(spark, rows):
 
 
 def test_overlap_join_matches_a_sample_inside_the_interval(spark):
-    gt = _gt(spark, [{"flight_key": "F1", "icao24": "abc123",
-                      "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
-                      "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=2)}])
-    a = _assign(spark, [{"icao24": "abc123", "event_time": _T0 + dt.timedelta(minutes=30),
-                         "track_id": "T1"}])
+    gt = _gt(
+        spark,
+        [
+            {
+                "flight_key": "F1",
+                "icao24": "abc123",
+                "gt_adep": "EBBR",
+                "gt_ades": "BIKF",
+                "t_source": "apdf",
+                "t_off": _T0,
+                "t_land": _T0 + dt.timedelta(hours=2),
+            }
+        ],
+    )
+    a = _assign(
+        spark,
+        [{"icao24": "abc123", "event_time": _T0 + dt.timedelta(minutes=30), "track_id": "T1"}],
+    )
     out = overlap_join(a, gt).collect()
     assert len(out) == 1 and out[0]["flight_key"] == "F1"
 
 
 def test_overlap_join_excludes_a_sample_outside_every_interval(spark):
-    gt = _gt(spark, [{"flight_key": "F1", "icao24": "abc123",
-                      "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
-                      "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=2)}])
-    a = _assign(spark, [{"icao24": "abc123", "event_time": _T0 - dt.timedelta(hours=1),
-                         "track_id": "T1"}])
+    gt = _gt(
+        spark,
+        [
+            {
+                "flight_key": "F1",
+                "icao24": "abc123",
+                "gt_adep": "EBBR",
+                "gt_ades": "BIKF",
+                "t_source": "apdf",
+                "t_off": _T0,
+                "t_land": _T0 + dt.timedelta(hours=2),
+            }
+        ],
+    )
+    a = _assign(
+        spark, [{"icao24": "abc123", "event_time": _T0 - dt.timedelta(hours=1), "track_id": "T1"}]
+    )
     assert overlap_join(a, gt).count() == 0
 
 
 def test_overlap_join_ignores_callsign_entirely(spark):
     """A4's whole premise. If this test ever needs callsign, the join is wrong."""
-    gt = _gt(spark, [{"flight_key": "F1", "icao24": "abc123", "callsign": "BEL123",
-                      "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
-                      "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=2)}])
-    a = _assign(spark, [{"icao24": "abc123", "callsign": "TOTALLY_DIFFERENT",
-                         "event_time": _T0 + dt.timedelta(minutes=30), "track_id": "T1"}])
+    gt = _gt(
+        spark,
+        [
+            {
+                "flight_key": "F1",
+                "icao24": "abc123",
+                "callsign": "BEL123",
+                "gt_adep": "EBBR",
+                "gt_ades": "BIKF",
+                "t_source": "apdf",
+                "t_off": _T0,
+                "t_land": _T0 + dt.timedelta(hours=2),
+            }
+        ],
+    )
+    a = _assign(
+        spark,
+        [
+            {
+                "icao24": "abc123",
+                "callsign": "TOTALLY_DIFFERENT",
+                "event_time": _T0 + dt.timedelta(minutes=30),
+                "track_id": "T1",
+            }
+        ],
+    )
     assert overlap_join(a, gt).count() == 1
 
 
 def test_overlap_join_does_not_cross_airframes(spark):
-    gt = _gt(spark, [{"flight_key": "F1", "icao24": "abc123",
-                      "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
-                      "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=2)}])
-    a = _assign(spark, [{"icao24": "zzz999", "event_time": _T0 + dt.timedelta(minutes=30),
-                         "track_id": "T1"}])
+    gt = _gt(
+        spark,
+        [
+            {
+                "flight_key": "F1",
+                "icao24": "abc123",
+                "gt_adep": "EBBR",
+                "gt_ades": "BIKF",
+                "t_source": "apdf",
+                "t_off": _T0,
+                "t_land": _T0 + dt.timedelta(hours=2),
+            }
+        ],
+    )
+    a = _assign(
+        spark,
+        [{"icao24": "zzz999", "event_time": _T0 + dt.timedelta(minutes=30), "track_id": "T1"}],
+    )
     assert overlap_join(a, gt).count() == 0
 
 
@@ -79,11 +138,21 @@ def test_overlap_join_keeps_duplicate_state_vectors(spark):
     them undercounts the contingency table every metric in ``track_score.py`` is
     computed from.
     """
-    gt = _gt(spark, [{"flight_key": "F1", "icao24": "abc123",
-                      "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
-                      "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=2)}])
-    dup = {"icao24": "abc123", "event_time": _T0 + dt.timedelta(minutes=30),
-           "track_id": "T1"}
+    gt = _gt(
+        spark,
+        [
+            {
+                "flight_key": "F1",
+                "icao24": "abc123",
+                "gt_adep": "EBBR",
+                "gt_ades": "BIKF",
+                "t_source": "apdf",
+                "t_off": _T0,
+                "t_land": _T0 + dt.timedelta(hours=2),
+            }
+        ],
+    )
+    dup = {"icao24": "abc123", "event_time": _T0 + dt.timedelta(minutes=30), "track_id": "T1"}
     assert overlap_join(_assign(spark, [dup, dict(dup)]), gt).count() == 2
 
 
@@ -94,32 +163,64 @@ def test_overlap_join_still_deduplicates_across_touching_intervals(spark):
     output row, assigned to the earlier leg. This is the property the old
     sample-keyed window got right for the wrong reason.
     """
-    gt = _gt(spark, [
-        {"flight_key": "F1", "icao24": "abc123",
-         "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
-         "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=1)},
-        {"flight_key": "F2", "icao24": "abc123",
-         "gt_adep": "BIKF", "gt_ades": "EBBR", "t_source": "apdf",
-         "t_off": _T0 + dt.timedelta(hours=1), "t_land": _T0 + dt.timedelta(hours=2)},
-    ])
-    a = _assign(spark, [{"icao24": "abc123", "event_time": _T0 + dt.timedelta(hours=1),
-                         "track_id": "T1"}])
+    gt = _gt(
+        spark,
+        [
+            {
+                "flight_key": "F1",
+                "icao24": "abc123",
+                "gt_adep": "EBBR",
+                "gt_ades": "BIKF",
+                "t_source": "apdf",
+                "t_off": _T0,
+                "t_land": _T0 + dt.timedelta(hours=1),
+            },
+            {
+                "flight_key": "F2",
+                "icao24": "abc123",
+                "gt_adep": "BIKF",
+                "gt_ades": "EBBR",
+                "t_source": "apdf",
+                "t_off": _T0 + dt.timedelta(hours=1),
+                "t_land": _T0 + dt.timedelta(hours=2),
+            },
+        ],
+    )
+    a = _assign(
+        spark, [{"icao24": "abc123", "event_time": _T0 + dt.timedelta(hours=1), "track_id": "T1"}]
+    )
     out = overlap_join(a, gt).collect()
     assert len(out) == 1 and out[0]["flight_key"] == "F1"
 
 
 def test_overlap_join_assigns_a_sample_to_only_one_flight_when_intervals_touch(spark):
     """Back-to-back legs must not double-count the sample at the boundary."""
-    gt = _gt(spark, [
-        {"flight_key": "F1", "icao24": "abc123",
-         "gt_adep": "EBBR", "gt_ades": "BIKF", "t_source": "apdf",
-         "t_off": _T0, "t_land": _T0 + dt.timedelta(hours=1)},
-        {"flight_key": "F2", "icao24": "abc123",
-         "gt_adep": "BIKF", "gt_ades": "EBBR", "t_source": "apdf",
-         "t_off": _T0 + dt.timedelta(hours=1), "t_land": _T0 + dt.timedelta(hours=2)},
-    ])
-    a = _assign(spark, [{"icao24": "abc123", "event_time": _T0 + dt.timedelta(hours=1),
-                         "track_id": "T1"}])
+    gt = _gt(
+        spark,
+        [
+            {
+                "flight_key": "F1",
+                "icao24": "abc123",
+                "gt_adep": "EBBR",
+                "gt_ades": "BIKF",
+                "t_source": "apdf",
+                "t_off": _T0,
+                "t_land": _T0 + dt.timedelta(hours=1),
+            },
+            {
+                "flight_key": "F2",
+                "icao24": "abc123",
+                "gt_adep": "BIKF",
+                "gt_ades": "EBBR",
+                "t_source": "apdf",
+                "t_off": _T0 + dt.timedelta(hours=1),
+                "t_land": _T0 + dt.timedelta(hours=2),
+            },
+        ],
+    )
+    a = _assign(
+        spark, [{"icao24": "abc123", "event_time": _T0 + dt.timedelta(hours=1), "track_id": "T1"}]
+    )
     assert overlap_join(a, gt).count() == 1
 
 
@@ -128,6 +229,7 @@ def test_overlap_join_assigns_a_sample_to_only_one_flight_when_intervals_touch(s
 # were added after review found the two-sided APDF join, the t_source
 # branching, and flight_key construction had zero coverage despite being the
 # riskiest logic in the file and never having been run end-to-end.
+
 
 def test_load_apdf_times_resolves_real_columns_and_returns_dep_and_arr_unjoined(spark):
     dep, arr = load_apdf_times(spark, months=["202506"], reference_base=_LOCAL_REFERENCE)
@@ -199,11 +301,7 @@ def test_load_flight_intervals_attaches_apdf_dep_time_to_the_correct_leg(spark):
     gt = load_flight_intervals(
         spark, months=["202506"], days=["2025-06-05"], reference_base=_LOCAL_REFERENCE
     )
-    legs = (
-        gt.filter((gt.icao24 == "4cae87") & (gt.callsign == "ABR1CE"))
-        .orderBy("t_off")
-        .collect()
-    )
+    legs = gt.filter((gt.icao24 == "4cae87") & (gt.callsign == "ABR1CE")).orderBy("t_off").collect()
     assert len(legs) == 2
     assert legs[0]["gt_adep"] == "LFMN" and legs[0]["t_off"].hour < 12
     assert legs[1]["gt_adep"] == "LFLL" and legs[1]["t_off"].hour >= 18
@@ -242,42 +340,60 @@ _SYNTH_APDF_SCHEMA = StructType(
     ]
 )
 
-def _nm_row(sam_id, icao24, callsign, aobt, arvt, taxi=10, adep="EBBR",
-            ades="BIKF"):
-    return Row(ID=sam_id, AIRCRAFT_ADDRESS=icao24, AIRCRAFT_ID=callsign,
-               ADEP=adep, ADES=ades, AOBT_3=aobt, ARVT_3=arvt,
-               TAXI_TIME_3=taxi)
+
+def _nm_row(sam_id, icao24, callsign, aobt, arvt, taxi=10, adep="EBBR", ades="BIKF"):
+    return Row(
+        ID=sam_id,
+        AIRCRAFT_ADDRESS=icao24,
+        AIRCRAFT_ID=callsign,
+        ADEP=adep,
+        ADES=ades,
+        AOBT_3=aobt,
+        ARVT_3=arvt,
+        TAXI_TIME_3=taxi,
+    )
 
 
-def _apdf_row(sam_id, phase, mvt, callsign="X", adep="EBBR", ades="BIKF",
-              block=None):
-    return Row(ID=sam_id, AP_C_FLTID=callsign, ADEP_ICAO=adep, ADES_ICAO=ades,
-               SRC_PHASE=phase, MVT_TIME_UTC=mvt, BLOCK_TIME_UTC=block)
+def _apdf_row(sam_id, phase, mvt, callsign="X", adep="EBBR", ades="BIKF", block=None):
+    return Row(
+        ID=sam_id,
+        AP_C_FLTID=callsign,
+        ADEP_ICAO=adep,
+        ADES_ICAO=ades,
+        SRC_PHASE=phase,
+        MVT_TIME_UTC=mvt,
+        BLOCK_TIME_UTC=block,
+    )
 
 
-def _write(spark, tmp_path, nm_rows, apdf_rows, tag="200002",
-           days=("2025-06-05",)):
+def _write(spark, tmp_path, nm_rows, apdf_rows, tag="200002", days=("2025-06-05",)):
     spark.createDataFrame(nm_rows, schema=_SYNTH_FLIGHTS_SCHEMA).write.parquet(
         str(tmp_path / f"flights_{tag}.parquet")
     )
     spark.createDataFrame(apdf_rows, schema=_SYNTH_APDF_SCHEMA).write.parquet(
         str(tmp_path / f"apdf_{tag}.parquet")
     )
-    return load_flight_intervals(
-        spark, months=[tag], days=list(days), reference_base=str(tmp_path)
-    )
+    return load_flight_intervals(spark, months=[tag], days=list(days), reference_base=str(tmp_path))
 
 
 def test_apdf_is_attached_by_samad_id(spark, tmp_path):
     """The join key is NM's ``ID``, which APDF carries as the same value."""
     gt = _write(
-        spark, tmp_path,
-        [_nm_row(1, "aaa111", "SYN1", dt.datetime(2025, 6, 5, 8, 0),
-                 dt.datetime(2025, 6, 5, 10, 0))],
-        [_apdf_row(1, "DEP", dt.datetime(2025, 6, 5, 8, 12),
-                   block=dt.datetime(2025, 6, 5, 8, 0)),
-         _apdf_row(1, "ARR", dt.datetime(2025, 6, 5, 9, 55),
-                   block=dt.datetime(2025, 6, 5, 10, 3))],
+        spark,
+        tmp_path,
+        [
+            _nm_row(
+                1, "aaa111", "SYN1", dt.datetime(2025, 6, 5, 8, 0), dt.datetime(2025, 6, 5, 10, 0)
+            )
+        ],
+        [
+            _apdf_row(
+                1, "DEP", dt.datetime(2025, 6, 5, 8, 12), block=dt.datetime(2025, 6, 5, 8, 0)
+            ),
+            _apdf_row(
+                1, "ARR", dt.datetime(2025, 6, 5, 9, 55), block=dt.datetime(2025, 6, 5, 10, 3)
+            ),
+        ],
     ).collect()
     assert len(gt) == 1
     r = gt[0]
@@ -298,13 +414,24 @@ def test_the_id_join_survives_a_callsign_that_does_not_match(spark, tmp_path):
     that needs them.
     """
     gt = _write(
-        spark, tmp_path,
-        [_nm_row(7, "bbb222", "DLH400", dt.datetime(2025, 6, 5, 8, 0),
-                 dt.datetime(2025, 6, 5, 10, 0))],
+        spark,
+        tmp_path,
+        [
+            _nm_row(
+                7, "bbb222", "DLH400", dt.datetime(2025, 6, 5, 8, 0), dt.datetime(2025, 6, 5, 10, 0)
+            )
+        ],
         # APDF's own identifier for the same flight, entirely different.
-        [_apdf_row(7, "DEP", dt.datetime(2025, 6, 5, 8, 12), callsign="4Y002"),
-         _apdf_row(7, "ARR", dt.datetime(2025, 6, 5, 9, 55), callsign="4Y002",
-                   block=dt.datetime(2025, 6, 5, 10, 3))],
+        [
+            _apdf_row(7, "DEP", dt.datetime(2025, 6, 5, 8, 12), callsign="4Y002"),
+            _apdf_row(
+                7,
+                "ARR",
+                dt.datetime(2025, 6, 5, 9, 55),
+                callsign="4Y002",
+                block=dt.datetime(2025, 6, 5, 10, 3),
+            ),
+        ],
     ).collect()
     assert gt[0]["t_source"] == "apdf"
     assert gt[0]["t_off"] == dt.datetime(2025, 6, 5, 8, 12)
@@ -315,13 +442,24 @@ def test_the_id_join_survives_a_taxi_crossing_midnight(spark, tmp_path):
     movement entirely -- once producing a 26.9-hour ground-truth interval. An
     equality join on a unique id cannot express the problem."""
     gt = _write(
-        spark, tmp_path,
-        [_nm_row(9, "ccc333", "SYN9", dt.datetime(2025, 6, 5, 23, 52),
-                 dt.datetime(2025, 6, 6, 3, 16), taxi=10)],
-        [_apdf_row(9, "DEP", dt.datetime(2025, 6, 6, 0, 2, 15)),
-         # A movement by the same callsign the night before, which the
-         # off-block-day key used to prefer.
-         _apdf_row(99, "DEP", dt.datetime(2025, 6, 5, 0, 20, 3))],
+        spark,
+        tmp_path,
+        [
+            _nm_row(
+                9,
+                "ccc333",
+                "SYN9",
+                dt.datetime(2025, 6, 5, 23, 52),
+                dt.datetime(2025, 6, 6, 3, 16),
+                taxi=10,
+            )
+        ],
+        [
+            _apdf_row(9, "DEP", dt.datetime(2025, 6, 6, 0, 2, 15)),
+            # A movement by the same callsign the night before, which the
+            # off-block-day key used to prefer.
+            _apdf_row(99, "DEP", dt.datetime(2025, 6, 5, 0, 20, 3)),
+        ],
         # Both days: the flight lands after midnight, and the window filter
         # requires the whole interval inside the sample -- which is a separate,
         # correct rule from the join being tested here.
@@ -334,9 +472,13 @@ def test_the_id_join_survives_a_taxi_crossing_midnight(spark, tmp_path):
 
 def test_an_apdf_row_for_another_flight_is_not_attached(spark, tmp_path):
     gt = _write(
-        spark, tmp_path,
-        [_nm_row(3, "ddd444", "SYN3", dt.datetime(2025, 6, 5, 8, 0),
-                 dt.datetime(2025, 6, 5, 10, 0))],
+        spark,
+        tmp_path,
+        [
+            _nm_row(
+                3, "ddd444", "SYN3", dt.datetime(2025, 6, 5, 8, 0), dt.datetime(2025, 6, 5, 10, 0)
+            )
+        ],
         [_apdf_row(4, "DEP", dt.datetime(2025, 6, 5, 8, 12))],
     ).collect()
     assert gt[0]["t_source"] == "nm_inferred"
@@ -352,17 +494,26 @@ def test_flight_key_distinguishes_same_day_same_route_legs(spark, tmp_path):
     that cannot be merged with itself.
     """
     gt = _write(
-        spark, tmp_path,
-        [_nm_row(11, "eee555", "SYN2", dt.datetime(2025, 6, 5, 8, 0),
-                 dt.datetime(2025, 6, 5, 10, 0)),
-         _nm_row(12, "eee555", "SYN2", dt.datetime(2025, 6, 5, 14, 0),
-                 dt.datetime(2025, 6, 5, 16, 0))],
-        [_apdf_row(11, "DEP", dt.datetime(2025, 6, 5, 8, 5)),
-         _apdf_row(11, "ARR", dt.datetime(2025, 6, 5, 10, 5),
-                   block=dt.datetime(2025, 6, 5, 10, 12)),
-         _apdf_row(12, "DEP", dt.datetime(2025, 6, 5, 14, 7)),
-         _apdf_row(12, "ARR", dt.datetime(2025, 6, 5, 16, 5),
-                   block=dt.datetime(2025, 6, 5, 16, 12))],
+        spark,
+        tmp_path,
+        [
+            _nm_row(
+                11, "eee555", "SYN2", dt.datetime(2025, 6, 5, 8, 0), dt.datetime(2025, 6, 5, 10, 0)
+            ),
+            _nm_row(
+                12, "eee555", "SYN2", dt.datetime(2025, 6, 5, 14, 0), dt.datetime(2025, 6, 5, 16, 0)
+            ),
+        ],
+        [
+            _apdf_row(11, "DEP", dt.datetime(2025, 6, 5, 8, 5)),
+            _apdf_row(
+                11, "ARR", dt.datetime(2025, 6, 5, 10, 5), block=dt.datetime(2025, 6, 5, 10, 12)
+            ),
+            _apdf_row(12, "DEP", dt.datetime(2025, 6, 5, 14, 7)),
+            _apdf_row(
+                12, "ARR", dt.datetime(2025, 6, 5, 16, 5), block=dt.datetime(2025, 6, 5, 16, 12)
+            ),
+        ],
     )
     rows = gt.orderBy("t_off").collect()
     assert len(rows) == 2
@@ -397,10 +548,12 @@ def test_endpoint_provenance_is_finer_than_t_source(spark):
     apdf = gt.filter(F.col("t_source") == "apdf")
     assert both.count() <= apdf.count()
     # The whole of the difference is missing AIBT -- nothing else.
-    assert apdf.filter(
-        ~(F.col("dep_measured") & F.col("arr_measured"))
-        & F.col("aibt").isNotNull()
-    ).count() == 0
+    assert (
+        apdf.filter(
+            ~(F.col("dep_measured") & F.col("arr_measured")) & F.col("aibt").isNotNull()
+        ).count()
+        == 0
+    )
 
     # And the flags are strictly finer: some arrivals are measured on rows
     # t_source calls inferred. If this ever reaches zero the split has gone
@@ -426,23 +579,24 @@ def test_arvt3_is_derived_from_aobt_not_observed(spark):
     Asserted against the committed extract, not a fixture, because the claim is
     about the source data rather than about this module.
     """
-    nm = spark.read.parquet(f"{_LOCAL_REFERENCE}/flights_202506.parquet").select(
-        "AOBT_3", "ARVT_3", "TAXI_TIME_3", "FLT_DUR_3"
-    ).filter(
-        F.col("AOBT_3").isNotNull() & F.col("ARVT_3").isNotNull()
-        & F.col("TAXI_TIME_3").isNotNull() & F.col("FLT_DUR_3").isNotNull()
+    nm = (
+        spark.read.parquet(f"{_LOCAL_REFERENCE}/flights_202506.parquet")
+        .select("AOBT_3", "ARVT_3", "TAXI_TIME_3", "FLT_DUR_3")
+        .filter(
+            F.col("AOBT_3").isNotNull()
+            & F.col("ARVT_3").isNotNull()
+            & F.col("TAXI_TIME_3").isNotNull()
+            & F.col("FLT_DUR_3").isNotNull()
+        )
     )
-    predicted = (
-        F.unix_timestamp("AOBT_3")
-        + F.col("TAXI_TIME_3") * 60
-        + F.col("FLT_DUR_3") * 60
-    )
+    predicted = F.unix_timestamp("AOBT_3") + F.col("TAXI_TIME_3") * 60 + F.col("FLT_DUR_3") * 60
     resid = F.abs(F.unix_timestamp("ARVT_3") - predicted)
     row = nm.select(
         F.count(F.lit(1)).alias("n"),
-        F.expr("percentile_approx(%s, 0.5)" % "abs(unix_timestamp(ARVT_3) - "
-               "(unix_timestamp(AOBT_3) + TAXI_TIME_3*60 + FLT_DUR_3*60))")
-        .alias("p50"),
+        F.expr(
+            "percentile_approx(%s, 0.5)" % "abs(unix_timestamp(ARVT_3) - "
+            "(unix_timestamp(AOBT_3) + TAXI_TIME_3*60 + FLT_DUR_3*60))"
+        ).alias("p50"),
         F.max(resid).alias("worst"),
     ).first()
 

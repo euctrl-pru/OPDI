@@ -107,12 +107,8 @@ def keep_tracks_starting_in(df, claim_start, claim_end):
     # WHERE clause, and the obvious one-liner fails with a message that names
     # the clause rather than the cause.
     tmp = "_track_first_sample"
-    out = df.withColumn(
-        tmp, f_min("event_time").over(Window.partitionBy("track_id"))
-    )
-    return out.filter(
-        (col(tmp) >= lit(claim_start)) & (col(tmp) < lit(claim_end))
-    ).drop(tmp)
+    out = df.withColumn(tmp, f_min("event_time").over(Window.partitionBy("track_id")))
+    return out.filter((col(tmp) >= lit(claim_start)) & (col(tmp) < lit(claim_end))).drop(tmp)
 
 
 def tracks_touching_window_end(df, read_end, margin_seconds=60):
@@ -133,9 +129,7 @@ def tracks_touching_window_end(df, read_end, margin_seconds=60):
     ``cruise_linked``. There a hole can straddle ``read_end``, which leaves the last
     read sample far from the edge while the rest of the track waits beyond it.
     """
-    per_track = df.groupBy("track_id").agg(
-        f_max("event_time").alias("_track_last_sample")
-    )
+    per_track = df.groupBy("track_id").agg(f_max("event_time").alias("_track_last_sample"))
     cutoff = lit(read_end) - expr(f"INTERVAL {int(margin_seconds)} SECONDS")
     return per_track.filter(col("_track_last_sample") >= cutoff)
 
@@ -265,17 +259,13 @@ class TrackProcessor:
         that touches storage.
         """
         ref = self.storage.table_ref(self.config.adsc.table)
-        return self.spark.sql(
-            f"""
+        return self.spark.sql(f"""
             SELECT * FROM {ref}
             WHERE (event_time >= TIMESTAMP('{start_time_str}'))
               AND (event_time < TIMESTAMP('{end_time_str}'));
-        """
-        )
+        """)
 
-    def _merge_adsc(
-        self, df_sv: DataFrame, start_time_str: str, end_time_str: str
-    ) -> DataFrame:
+    def _merge_adsc(self, df_sv: DataFrame, start_time_str: str, end_time_str: str) -> DataFrame:
         """Union ADS-C into the state-vector frame, before segmentation.
 
         **Before**, deliberately. The question this fusion exists to answer is
@@ -308,9 +298,7 @@ class TrackProcessor:
             )
 
         df_adsc = self._read_adsc(start_time_str, end_time_str)
-        kept = shadow_filter(df_adsc, df_sv,
-                             cfg.shadow_before_seconds,
-                             cfg.shadow_after_seconds)
+        kept = shadow_filter(df_adsc, df_sv, cfg.shadow_before_seconds, cfg.shadow_after_seconds)
 
         # The partition column of the table `process_month` read back. ADS-C
         # rows must carry their own day, not NULL: `process_month` selects
@@ -319,9 +307,8 @@ class TrackProcessor:
         if "event_time_day" in df_sv.columns:
             kept = kept.withColumn("event_time_day", to_date(col("event_time")))
 
-        return (
-            df_sv.withColumn("source", lit(ADSB_SOURCE))
-            .unionByName(kept, allowMissingColumns=True)
+        return df_sv.withColumn("source", lit(ADSB_SOURCE)).unionByName(
+            kept, allowMissingColumns=True
         )
 
     def _add_track_id(self, df: DataFrame) -> DataFrame:
@@ -411,8 +398,14 @@ class TrackProcessor:
         )
 
         # Clean up temporary columns
-        df = df.drop("event_time_ts", "group_id", "prev_event_time_ts",
-                     "time_gap_minutes", "new_group_flag", "offset")
+        df = df.drop(
+            "event_time_ts",
+            "group_id",
+            "prev_event_time_ts",
+            "time_gap_minutes",
+            "new_group_flag",
+            "offset",
+        )
 
         return df
 
@@ -445,9 +438,7 @@ class TrackProcessor:
         resolved = _resolve_segmentation_method(method)
         if resolved not in ARMS:
             known = sorted(set(ARMS) | {"standard"})
-            raise ValueError(
-                f"unknown segmentation method {method!r}; known: {', '.join(known)}"
-            )
+            raise ValueError(f"unknown segmentation method {method!r}; known: {', '.join(known)}")
         params = SegmentationParams.from_config(self.config.segmentation)
         return assign_track_id(df, ARMS[resolved](), params)
 
@@ -524,9 +515,7 @@ class TrackProcessor:
         )
 
         # Drop temporary columns
-        df = df.drop(
-            "lat_rad", "lon_rad", "prev_lat_rad", "prev_lon_rad", "a", "c", "distance_km"
-        )
+        df = df.drop("lat_rad", "lon_rad", "prev_lat_rad", "prev_lon_rad", "a", "c", "distance_km")
 
         return df
 
@@ -574,9 +563,7 @@ class TrackProcessor:
         """
         window_spec = Window.partitionBy("track_id").orderBy("event_time")
 
-        seconds = unix_timestamp("event_time") - unix_timestamp(
-            lag("event_time").over(window_spec)
-        )
+        seconds = unix_timestamp("event_time") - unix_timestamp(lag("event_time").over(window_spec))
         # A zero or absent gap yields NULL rather than a division error, and a
         # NULL rate does not trip the comparison below -- the first sample of
         # a track has nothing to be implausible against.
@@ -586,14 +573,10 @@ class TrackProcessor:
             / F.nullif(seconds.cast("double"), lit(0.0))
         )
 
-        threshold = getattr(
-            self.config.cleaning, f"{col_name}_d1_max_ft_s"
-        )
+        threshold = getattr(self.config.cleaning, f"{col_name}_d1_max_ft_s")
         return df.withColumn(
             f"{col_name}_c",
-            when(rate_ft_s > lit(threshold), lit(None).cast("double")).otherwise(
-                col(col_name)
-            ),
+            when(rate_ft_s > lit(threshold), lit(None).cast("double")).otherwise(col(col_name)),
         )
 
     def process_month(
@@ -649,13 +632,11 @@ class TrackProcessor:
 
         # Read raw state vectors for the month
         sv_ref = self.storage.table_ref("osn_statevectors_v2")
-        df_month = self.spark.sql(
-            f"""
+        df_month = self.spark.sql(f"""
             SELECT * FROM {sv_ref}
             WHERE (event_time >= TIMESTAMP('{start_time_str}'))
               AND (event_time < TIMESTAMP('{end_time_str}'));
-        """
-        )
+        """)
 
         # Before `original_columns`, so `source` survives the select below,
         # and before `_add_track_id`, so segmentation sees both feeds.
@@ -710,7 +691,10 @@ class TrackProcessor:
         # days present are replaced, so re-running a day stops duplicating it
         # while a run over fresh days behaves exactly as append did.
         self.storage.write_table(
-            df_month, "osn_tracks", mode="overwrite", partition_by=["dof"],
+            df_month,
+            "osn_tracks",
+            mode="overwrite",
+            partition_by=["dof"],
             # A claimed batch holds exactly the day it claimed, so the
             # partition is known without evaluating the frame to ask.
             partition_values=([{"dof": claim[0].date()}] if claim is not None else None),
@@ -723,9 +707,7 @@ class TrackProcessor:
         # Mark as processed
         self._mark_month_processed(month)
 
-        print(
-            f"Month {month.strftime('%Y-%m')} processing complete. ({datetime.now()})"
-        )
+        print(f"Month {month.strftime('%Y-%m')} processing complete. ({datetime.now()})")
 
     #: Hours read before the day, so a track overlapping midnight can be told
     #: from one that genuinely starts just after it. Only has to exceed the gap
@@ -790,9 +772,7 @@ class TrackProcessor:
                 f"hours a linked track can reach back: samples after midnight could "
                 f"be claimed by two days or by none"
             )
-        lookahead = (
-            self.DEFAULT_LOOKAHEAD_HOURS if lookahead_hours is None else lookahead_hours
-        )
+        lookahead = self.DEFAULT_LOOKAHEAD_HOURS if lookahead_hours is None else lookahead_hours
 
         claim_start = datetime(day.year, day.month, day.day)
         claim_end = claim_start + timedelta(days=1)
@@ -817,9 +797,7 @@ class TrackProcessor:
         # was cut off by the window, not by landing -- and nothing downstream
         # can tell, because the track is present and simply stops. Tomorrow
         # will not pick it up either: it did not start tomorrow.
-        written = self.storage.read_table("osn_tracks").filter(
-            col("dof") == lit(day)
-        )
+        written = self.storage.read_table("osn_tracks").filter(col("dof") == lit(day))
         # Under a link the last sample can be a whole hole short of the read end, and
         # the verdict on that hole also reads this far past its new edge.
         margin_seconds = (

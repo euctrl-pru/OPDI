@@ -12,6 +12,7 @@ Reading a Geofabrik extract removes both services. The file is read once, all
 ``aeroway`` features are kept, and each is assigned to an aerodrome from
 reference data we already hold. See ``docs/industrialization-plan.md`` §3.
 """
+
 import math
 import re
 import warnings
@@ -101,11 +102,7 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
     # `with_areas()` makes osmium assemble multipolygon relations and closed
     # ways into areas, which is how OSM encodes an apron. Without it those
     # features arrive as bare ways and an apron becomes a thin buffered line.
-    fp = (
-        osmium.FileProcessor(pbf_path)
-        .with_areas()
-        .with_filter(osmium.filter.KeyFilter("aeroway"))
-    )
+    fp = osmium.FileProcessor(pbf_path).with_areas().with_filter(osmium.filter.KeyFilter("aeroway"))
     for obj in fp:
         tag = obj.tags.get("aeroway")
         if tag not in AEROWAY_TAGS:
@@ -133,14 +130,11 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
             continue
         if geom is None or geom.is_empty:
             continue
-        rows.append({"element": element, "id": int(oid), "geometry": geom,
-                     **_tags_of(obj)})
+        rows.append({"element": element, "id": int(oid), "geometry": geom, **_tags_of(obj)})
 
     if build_failures:
         total = sum(build_failures.values())
-        breakdown = ", ".join(
-            f"{t}: {c}" for t, c in sorted(build_failures.items())
-        )
+        breakdown = ", ".join(f"{t}: {c}" for t, c in sorted(build_failures.items()))
         print(
             f"read_aeroway_features: skipped {total} feature(s) in {pbf_path} "
             f"whose geometry could not be built ({breakdown})"
@@ -155,9 +149,7 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
     # the docstring. Only ways whose id collides with a *way-derived* area's
     # orig_id are affected; open ways (taxiway/runway centrelines) and ways
     # that merely share a numeric id with an unrelated relation survive.
-    is_duplicate_way = (df["element"] == "way") & df["id"].isin(
-        way_derived_area_ids
-    )
+    is_duplicate_way = (df["element"] == "way") & df["id"].isin(way_derived_area_ids)
     df = df[~is_duplicate_way]
 
     return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
@@ -190,11 +182,7 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     candidate_way_ids: dict = {}  # way id -> [icao, ...], for failed-assembly detection
     build_failures: Counter = Counter()
 
-    fp = (
-        osmium.FileProcessor(pbf_path)
-        .with_areas()
-        .with_filter(osmium.filter.KeyFilter("aeroway"))
-    )
+    fp = osmium.FileProcessor(pbf_path).with_areas().with_filter(osmium.filter.KeyFilter("aeroway"))
     for obj in fp:
         if obj.tags.get("aeroway") != "aerodrome":
             continue
@@ -217,8 +205,15 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
             # code, all sharing this same geometry -- see
             # `_split_icao_codes`. Almost always a single-element list.
             for code in codes:
-                rows.append({"icao": code, "name": obj.tags.get("name"),
-                             "element": "area", "id": int(oid), "geometry": geom})
+                rows.append(
+                    {
+                        "icao": code,
+                        "name": obj.tags.get("name"),
+                        "element": "area",
+                        "id": int(oid),
+                        "geometry": geom,
+                    }
+                )
         elif isinstance(obj, osmium.osm.Way):
             # The raw closed way behind an assembled Area, or -- if
             # assembly failed -- the only trace of this aerodrome's
@@ -249,7 +244,8 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     if not rows:
         return gpd.GeoDataFrame(
             columns=["icao", "name", "element", "id", "geometry"],
-            geometry="geometry", crs="EPSG:4326",
+            geometry="geometry",
+            crs="EPSG:4326",
         )
 
     df = pd.DataFrame(rows)
@@ -339,8 +335,13 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
     )
     rwy = (
         storage.read_table("oa_runways")
-        .select("airport_ident", "le_latitude_deg", "le_longitude_deg",
-                "he_latitude_deg", "he_longitude_deg")
+        .select(
+            "airport_ident",
+            "le_latitude_deg",
+            "le_longitude_deg",
+            "he_latitude_deg",
+            "he_longitude_deg",
+        )
         .toPandas()
     )
     lat = pd.concat([rwy["le_latitude_deg"], rwy["he_latitude_deg"]])
@@ -350,8 +351,12 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
         pd.DataFrame({"ident": ident, "lat": lat, "lon": lon})
         .dropna()
         .groupby("ident")
-        .agg(lat_min=("lat", "min"), lat_max=("lat", "max"),
-             lon_min=("lon", "min"), lon_max=("lon", "max"))
+        .agg(
+            lat_min=("lat", "min"),
+            lat_max=("lat", "max"),
+            lon_min=("lon", "min"),
+            lon_max=("lon", "max"),
+        )
         .reset_index()
     )
     out = apt.merge(ext, on="ident", how="left")
@@ -360,12 +365,8 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
     m_lat = BOX_MARGIN_KM / _KM_PER_DEG_LAT
     out.loc[have, "lat_min"] -= m_lat
     out.loc[have, "lat_max"] += m_lat
-    out.loc[have, "lon_min"] -= [
-        _deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]
-    ]
-    out.loc[have, "lon_max"] += [
-        _deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]
-    ]
+    out.loc[have, "lon_min"] -= [_deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]]
+    out.loc[have, "lon_max"] += [_deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]]
 
     # No runway coordinates: a square around the aerodrome point, so it is
     # still built rather than silently absent from the table.
@@ -390,8 +391,10 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
     # handful of extra candidate features and cannot lose any.
     wrapped = (out["lon_max"] > 180.0) | (out["lon_min"] < -180.0)
     if wrapped.any():
-        print(f"  {int(wrapped.sum())} aerodrome box(es) cross the antimeridian; "
-              "widening their longitude range to the full circle.")
+        print(
+            f"  {int(wrapped.sum())} aerodrome box(es) cross the antimeridian; "
+            "widening their longitude range to the full circle."
+        )
         out.loc[wrapped, "lon_min"] = -180.0
         out.loc[wrapped, "lon_max"] = 180.0
     return out
@@ -402,8 +405,7 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
 #: tolerates the join artefacts `geopandas.sjoin` or the helper columns below
 #: add, so every return path -- including the empty ones -- is restricted to
 #: exactly this list before it leaves the class.
-_OUTPUT_COLUMNS = ["element", "id", "geometry", "aeroway", "width", "ref",
-                    "surface", "length"]
+_OUTPUT_COLUMNS = ["element", "id", "geometry", "aeroway", "width", "ref", "surface", "length"]
 
 
 class PbfLayoutSource:
@@ -452,7 +454,8 @@ class PbfLayoutSource:
         if aerodromes is not None and len(aerodromes):
             rep_points = gpd.GeoDataFrame(
                 geometry=feats.geometry.representative_point(),
-                index=feats.index, crs=feats.crs,
+                index=feats.index,
+                crs=feats.crs,
             )
             ad = aerodromes[["icao", "geometry"]].copy()
             # Area in degrees^2 is not a physical area, but it is a valid
@@ -494,9 +497,9 @@ class PbfLayoutSource:
             lat = reps.y
             lon = reps.x
             b = self._boxes  # nearest-guard compares against every box, not
-                              # just the box-only ones, so a polygon aerodrome
-                              # whose own boundary missed the point still
-                              # keeps a closer neighbour's box from claiming it
+            # just the box-only ones, so a polygon aerodrome
+            # whose own boundary missed the point still
+            # keeps a closer neighbour's box from claiming it
             for _, r in box_only.iterrows():
                 # `r.lon_min`/`r.lon_max` may be -180/180 here -- `airport_boxes`
                 # widens a box that straddles the antimeridian to the full
@@ -511,9 +514,7 @@ class PbfLayoutSource:
                 # wrap-aware interval test instead (`lon >= lon_min OR
                 # lon <= lon_max`), not stay a widened box with no guard
                 # behind it.
-                inside = lat.between(r.lat_min, r.lat_max) & lon.between(
-                    r.lon_min, r.lon_max
-                )
+                inside = lat.between(r.lat_min, r.lat_max) & lon.between(r.lon_min, r.lon_max)
                 if not inside.any():
                     continue
                 idx = lat.index[inside]
@@ -523,8 +524,7 @@ class PbfLayoutSource:
                 nearest = pd.Series(True, index=idx)
                 for _, o in b[b["ident"] != r.ident].iterrows():
                     d_other = (lat.loc[idx] - o.apt_lat) ** 2 + (
-                        (lon.loc[idx] - o.apt_lon)
-                        * math.cos(math.radians(o.apt_lat))
+                        (lon.loc[idx] - o.apt_lon) * math.cos(math.radians(o.apt_lat))
                     ) ** 2
                     nearest &= d_this <= d_other
                 claim = idx[nearest.to_numpy()]
@@ -562,8 +562,11 @@ class PbfLayoutSource:
                 method = "bbox"
             else:
                 method = "none"
-            rows.append({
-                "icao": ident, "method": method,
-                "n_features": int(counts.get(ident, 0)),
-            })
+            rows.append(
+                {
+                    "icao": ident,
+                    "method": method,
+                    "n_features": int(counts.get(ident, 0)),
+                }
+            )
         return pd.DataFrame(rows)

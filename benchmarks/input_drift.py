@@ -74,8 +74,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--out-name", default="input_drift.csv")
-    ap.add_argument("--baseline", type=Path, required=True,
-                    help="the baseline study's _manifest.json")
+    ap.add_argument(
+        "--baseline", type=Path, required=True, help="the baseline study's _manifest.json"
+    )
     args = ap.parse_args()
 
     base = baseline_identities(args.baseline)
@@ -87,16 +88,18 @@ def main() -> None:
         old = base[prefix]
         new = provenance.s3_identity(prefix)
         verdict = classify(old, new)
-        rows.append({
-            "table": prefix.replace("s3a://eurocontrol/opdi/", ""),
-            "baseline_objects": old.get("objects"),
-            "now_objects": new.get("objects"),
-            "baseline_bytes": old.get("bytes"),
-            "now_bytes": new.get("bytes"),
-            "baseline_newest": str(old.get("newest", ""))[:19],
-            "now_newest": str(new.get("newest", ""))[:19],
-            "verdict": verdict,
-        })
+        rows.append(
+            {
+                "table": prefix.replace("s3a://eurocontrol/opdi/", ""),
+                "baseline_objects": old.get("objects"),
+                "now_objects": new.get("objects"),
+                "baseline_bytes": old.get("bytes"),
+                "now_bytes": new.get("bytes"),
+                "baseline_newest": str(old.get("newest", ""))[:19],
+                "now_newest": str(new.get("newest", ""))[:19],
+                "verdict": verdict,
+            }
+        )
         print(f"  {rows[-1]['table']:38s} {verdict}")
 
     args.results_dir.mkdir(parents=True, exist_ok=True)

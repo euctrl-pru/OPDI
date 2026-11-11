@@ -15,8 +15,7 @@ def test_adsc_is_off_in_every_environment(env):
 
 def test_defaults_name_the_readsb_topic():
     cfg = AdscConfig()
-    assert cfg.s3_base == (
-        "s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro")
+    assert cfg.s3_base == ("s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro")
     assert cfg.table == "osn_adsc_statevectors"
 
 

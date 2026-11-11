@@ -27,16 +27,26 @@ def _grid(tmp_path, rows):
 
 
 #: main's configuration as a grid row.
-BASE = {"run": "grid_h6000_r30_m0", "trend_ceiling": "6000",
-        "trend_radius_nm": "30", "trend_vote_margin": "0",
-        "trend_sched_penalty_nm": "10", "ades_score": "100"}
+BASE = {
+    "run": "grid_h6000_r30_m0",
+    "trend_ceiling": "6000",
+    "trend_radius_nm": "30",
+    "trend_vote_margin": "0",
+    "trend_sched_penalty_nm": "10",
+    "ades_score": "100",
+}
 
 #: The swept optimum, scoring higher.
-BETTER = dict(BASE, run="grid_h6100_r20_m2", trend_ceiling="6100",
-              trend_radius_nm="20", trend_vote_margin="2", ades_score="200")
+BETTER = dict(
+    BASE,
+    run="grid_h6100_r20_m2",
+    trend_ceiling="6100",
+    trend_radius_nm="20",
+    trend_vote_margin="2",
+    ades_score="200",
+)
 
-MAIN_CFG = {"trend_max_height_ft": 6000.0, "trend_radius_nm": 30.0,
-            "trend_vote_margin": 0}
+MAIN_CFG = {"trend_max_height_ft": 6000.0, "trend_radius_nm": 30.0, "trend_vote_margin": 0}
 
 
 def test_best_cell_is_the_highest_scoring_row(tmp_path):
@@ -65,27 +75,43 @@ def test_matching_config_reports_no_differences(tmp_path):
 def test_differing_config_names_each_parameter(tmp_path):
     p = _grid(tmp_path, [BASE, BETTER])
     diffs, report = parity.config_parity(p, MAIN_CFG)
-    assert set(diffs) == {"trend_max_height_ft", "trend_radius_nm",
-                          "trend_vote_margin"}
-    assert report["rank"] == 2      # main's cell is still located
-    assert report["gap"] == 100     # 200 - 100
+    assert set(diffs) == {"trend_max_height_ft", "trend_radius_nm", "trend_vote_margin"}
+    assert report["rank"] == 2  # main's cell is still located
+    assert report["gap"] == 100  # 200 - 100
 
 
 def test_a_dirty_figure_is_reported(tmp_path):
     m = tmp_path / "_manifest.json"
-    m.write_text(json.dumps({
-        "a.csv": {"git_sha": "deadbee", "git_dirty": True,
-                  "script": "benchmarks/x.py", "code_paths": []}}))
+    m.write_text(
+        json.dumps(
+            {
+                "a.csv": {
+                    "git_sha": "deadbee",
+                    "git_dirty": True,
+                    "script": "benchmarks/x.py",
+                    "code_paths": [],
+                }
+            }
+        )
+    )
     bad = parity.shas_on_main(m, ref="HEAD", repo=Path.cwd())
     assert any("dirty" in b for b in bad)
 
 
 def test_a_missing_path_is_reported(tmp_path):
     m = tmp_path / "_manifest.json"
-    m.write_text(json.dumps({
-        "a.csv": {"git_sha": "HEAD", "git_dirty": False,
-                  "script": "benchmarks/definitely_not_a_real_file.py",
-                  "code_paths": []}}))
+    m.write_text(
+        json.dumps(
+            {
+                "a.csv": {
+                    "git_sha": "HEAD",
+                    "git_dirty": False,
+                    "script": "benchmarks/definitely_not_a_real_file.py",
+                    "code_paths": [],
+                }
+            }
+        )
+    )
     repo = Path(__file__).resolve().parent.parent
     missing = parity.code_on_main(m, ref="HEAD", repo=repo)
     assert missing == ["benchmarks/definitely_not_a_real_file.py"]

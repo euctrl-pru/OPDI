@@ -72,8 +72,10 @@ def _turn_series(df: DataFrame, config: EventConfig) -> DataFrame:
     raw = _wrap_deg(col("heading") - col("_prev_hdg"))
     rate = F.abs(raw) / dt
     d_hdg = F.when(
-        col("heading").isNotNull() & col("_prev_hdg").isNotNull()
-        & (dt > 0) & (dt <= config.holding_max_sample_gap_seconds)
+        col("heading").isNotNull()
+        & col("_prev_hdg").isNotNull()
+        & (dt > 0)
+        & (dt <= config.holding_max_sample_gap_seconds)
         & (rate <= config.holding_turn_rate_spike_deg),
         raw,
     )
@@ -114,7 +116,12 @@ def _window_flag(df: DataFrame, config: EventConfig, placement: str, name: str) 
         df = (
             df.withColumn("_cum_turn", F.sum(F.coalesce(col("d_hdg"), lit(0.0))).over(run))
             .withColumn("_cum_gross", F.sum(F.coalesce(F.abs(col("d_hdg")), lit(0.0))).over(run))
-            .withColumn("_cum_alt", F.sum(F.coalesce(F.abs(col("_alt_ft") - F.lag("_alt_ft").over(w)), lit(0.0))).over(run))
+            .withColumn(
+                "_cum_alt",
+                F.sum(F.coalesce(F.abs(col("_alt_ft") - F.lag("_alt_ft").over(w)), lit(0.0))).over(
+                    run
+                ),
+            )
             .withColumn("_cum_turning", F.sum(col("turning").cast("int")).over(run))
             .withColumn("_row", F.row_number().over(w))
         )
@@ -159,13 +166,20 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
     )
     df = df.withColumn("_hold", F.coalesce(bridged, lit(False)))
     starts = col("_hold") & ~F.coalesce(F.lag("_hold").over(w), lit(False))
-    df = df.withColumn("_ep", F.sum(starts.cast("int")).over(w.rowsBetween(Window.unboundedPreceding, 0)))
+    df = df.withColumn(
+        "_ep", F.sum(starts.cast("int")).over(w.rowsBetween(Window.unboundedPreceding, 0))
+    )
     flagged = df.filter(col("_hold"))
     we = Window.partitionBy("track_id", PIECE, "_ep")
     core_start = F.min(F.when(col("turning"), col("_ts"))).over(we)
     core_end = F.max(F.when(col("turning"), col("_ts"))).over(we)
-    core = flagged.withColumn("_core_start", core_start).withColumn("_core_end", core_end).filter(
-        col("_core_start").isNotNull() & col("_ts").between(col("_core_start"), col("_core_end"))
+    core = (
+        flagged.withColumn("_core_start", core_start)
+        .withColumn("_core_end", core_end)
+        .filter(
+            col("_core_start").isNotNull()
+            & col("_ts").between(col("_core_start"), col("_core_end"))
+        )
     )
     agg = core.groupBy("track_id", PIECE, "_ep").agg(
         F.min("_ts").alias("start_ts"),
@@ -224,11 +238,14 @@ def calculate_holding_events(
     # Speed from the last sample that had one: cleaning blanks velocity
     # together with heading on a repeated broadcast, and a NULL speed must
     # not punch a hole in an episode.
-    known = Window.partitionBy("track_id", PIECE).orderBy("_ts").rowsBetween(Window.unboundedPreceding, 0)
+    known = (
+        Window.partitionBy("track_id", PIECE)
+        .orderBy("_ts")
+        .rowsBetween(Window.unboundedPreceding, 0)
+    )
     speed_kt = F.last("velocity", ignorenulls=True).over(known) * KT_PER_MS
-    gates = (
-        ((col("_alt_ft") - col("_elev_ft")) >= config.holding_min_height_ft)
-        & (speed_kt >= config.holding_min_speed_kt)
+    gates = ((col("_alt_ft") - col("_elev_ft")) >= config.holding_min_height_ft) & (
+        speed_kt >= config.holding_min_speed_kt
     )
     df = df.withColumn(
         "_in_hold",
@@ -237,9 +254,8 @@ def calculate_holding_events(
     episodes = _episodes(df, config)
 
     if go_arounds is not None:
-        ga = (
-            go_arounds.filter(col("type") == "go-around")
-            .select(col("track_id").alias("_ga_track"), col("event_time").cast("double").alias("_ga_ts"))
+        ga = go_arounds.filter(col("type") == "go-around").select(
+            col("track_id").alias("_ga_track"), col("event_time").cast("double").alias("_ga_ts")
         )
         near = (col("track_id") == col("_ga_track")) & (
             (F.abs(col("start_ts") - col("_ga_ts")) <= config.holding_goaround_exclusion_seconds)
@@ -255,17 +271,19 @@ def calculate_holding_events(
         & (F.abs(col("turn_deg")) < config.holding_orbit_max_turn_deg),
         lit("orbit"),
     ).otherwise(lit("racetrack"))
-    info = F.to_json(F.struct(
-        col("holding_seq"),
-        pattern.alias("pattern"),
-        F.when(col("turn_deg") > 0, lit("R")).otherwise(lit("L")).alias("direction"),
-        F.round(F.abs(col("turn_deg")) / 360.0, 1).alias("circuits"),
-        col("duration_s"),
-        F.round(col("end_dist_nm") - col("start_dist_nm"), 2).alias("distance_nm"),
-        F.round(col("start_alt_ft"), 0).alias("altitude_start_ft"),
-        F.round(col("end_alt_ft"), 0).alias("altitude_end_ft"),
-        straight_pct.alias("straight_pct"),
-    ))
+    info = F.to_json(
+        F.struct(
+            col("holding_seq"),
+            pattern.alias("pattern"),
+            F.when(col("turn_deg") > 0, lit("R")).otherwise(lit("L")).alias("direction"),
+            F.round(F.abs(col("turn_deg")) / 360.0, 1).alias("circuits"),
+            col("duration_s"),
+            F.round(col("end_dist_nm") - col("start_dist_nm"), 2).alias("distance_nm"),
+            F.round(col("start_alt_ft"), 0).alias("altitude_start_ft"),
+            F.round(col("end_alt_ft"), 0).alias("altitude_end_ft"),
+            straight_pct.alias("straight_pct"),
+        )
+    )
     episodes = episodes.withColumn("info", info)
 
     def _row(kind: str) -> DataFrame:

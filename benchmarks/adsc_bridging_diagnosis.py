@@ -42,8 +42,12 @@ def classify_hole(n_adsc: int, residual_min: float, end_alt_ft, joined: bool) ->
         return "no_adsc_in_hole"
     if residual_min > GAP_MINUTES:
         return "adsc_too_sparse"
-    if (residual_min > LOW_ALT_GAP_MINUTES and end_alt_ft is not None
-            and not pd.isna(end_alt_ft) and end_alt_ft < LOW_ALT_FT):
+    if (
+        residual_min > LOW_ALT_GAP_MINUTES
+        and end_alt_ft is not None
+        and not pd.isna(end_alt_ft)
+        and end_alt_ft < LOW_ALT_FT
+    ):
         return "low_altitude_rule"
     return "dense_enough_but_split"
 
@@ -51,12 +55,13 @@ def classify_hole(n_adsc: int, residual_min: float, end_alt_ft, joined: bool) ->
 def holes_in_flights(holes: pd.DataFrame, truth: pd.DataFrame) -> pd.DataFrame:
     """Holes wholly inside one flight's block window, with that flight's fields."""
     j = holes.merge(truth, on="icao24")
-    return j[(j["hole_start"] >= j["t_off"] - OVERLAP_SLACK)
-             & (j["hole_end"] <= j["t_on"] + OVERLAP_SLACK)]
+    return j[
+        (j["hole_start"] >= j["t_off"] - OVERLAP_SLACK)
+        & (j["hole_end"] <= j["t_on"] + OVERLAP_SLACK)
+    ]
 
 
-def diagnose(holes: pd.DataFrame, adsc_raw: pd.DataFrame,
-             adsc_clean: pd.DataFrame) -> pd.DataFrame:
+def diagnose(holes: pd.DataFrame, adsc_raw: pd.DataFrame, adsc_clean: pd.DataFrame) -> pd.DataFrame:
     """One row per hole: ADS-C inside it, what gap is left, and the verdict."""
     raw = adsc_raw.groupby("icao24")["event_time"].apply(list).to_dict()
     clean = adsc_clean.groupby("icao24")["event_time"].apply(list).to_dict()
@@ -66,15 +71,22 @@ def diagnose(holes: pd.DataFrame, adsc_raw: pd.DataFrame,
         s_cl = [t for t in clean.get(h.icao24, []) if h.hole_start < t < h.hole_end]
         res_raw = largest_remaining_gap_min(h.hole_start, h.hole_end, s_raw)
         res_cl = largest_remaining_gap_min(h.hole_start, h.hole_end, s_cl)
-        rows.append({
-            "flight_key": h.flight_key, "icao24": h.icao24, "flow": h.flow,
-            "hole_min": (h.hole_end - h.hole_start).total_seconds() / 60.0,
-            "adsc_raw": len(s_raw), "adsc_clean": len(s_cl),
-            "residual_raw_min": res_raw, "residual_clean_min": res_cl,
-            "start_alt_ft": h.start_alt_ft, "end_alt_ft": h.end_alt_ft,
-            "joined": bool(h.joined),
-            "why": classify_hole(len(s_cl), res_cl, h.end_alt_ft, bool(h.joined)),
-        })
+        rows.append(
+            {
+                "flight_key": h.flight_key,
+                "icao24": h.icao24,
+                "flow": h.flow,
+                "hole_min": (h.hole_end - h.hole_start).total_seconds() / 60.0,
+                "adsc_raw": len(s_raw),
+                "adsc_clean": len(s_cl),
+                "residual_raw_min": res_raw,
+                "residual_clean_min": res_cl,
+                "start_alt_ft": h.start_alt_ft,
+                "end_alt_ft": h.end_alt_ft,
+                "joined": bool(h.joined),
+                "why": classify_hole(len(s_cl), res_cl, h.end_alt_ft, bool(h.joined)),
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -89,22 +101,40 @@ def summarise(d: pd.DataFrame) -> pd.DataFrame:
         {"metric": "hole_median_min", "value": d["hole_min"].median()},
         {"metric": "hole_p90_min", "value": d["hole_min"].quantile(0.9)},
         {"metric": "holes_with_any_adsc", "value": int((d["adsc_clean"] > 0).sum())},
-        {"metric": "adsc_per_hour_in_hole_median",
-         "value": (d["adsc_clean"] / (d["hole_min"] / 60)).median()},
+        {
+            "metric": "adsc_per_hour_in_hole_median",
+            "value": (d["adsc_clean"] / (d["hole_min"] / 60)).median(),
+        },
     ]
     has = d[d["adsc_clean"] > 0]
     if len(has):
         rows += [
-            {"metric": "residual_median_min_when_adsc", "value": has["residual_clean_min"].median()},
-            {"metric": "share_of_hole_left_median_when_adsc",
-             "value": (has["residual_clean_min"] / has["hole_min"]).median()},
+            {
+                "metric": "residual_median_min_when_adsc",
+                "value": has["residual_clean_min"].median(),
+            },
+            {
+                "metric": "share_of_hole_left_median_when_adsc",
+                "value": (has["residual_clean_min"] / has["hole_min"]).median(),
+            },
         ]
     for limit in (30, 45, 60, 90, 120, 180):
-        rows.append({"metric": f"holes_residual_le_{limit}_min",
-                     "value": int((d["residual_clean_min"] <= limit).sum())})
-    rows.append({"metric": "holes_raw_would_close_clean_does_not",
-                 "value": int(((d["residual_raw_min"] <= GAP_MINUTES)
-                               & (d["residual_clean_min"] > GAP_MINUTES)).sum())})
+        rows.append(
+            {
+                "metric": f"holes_residual_le_{limit}_min",
+                "value": int((d["residual_clean_min"] <= limit).sum()),
+            }
+        )
+    rows.append(
+        {
+            "metric": "holes_raw_would_close_clean_does_not",
+            "value": int(
+                (
+                    (d["residual_raw_min"] <= GAP_MINUTES) & (d["residual_clean_min"] > GAP_MINUTES)
+                ).sum()
+            ),
+        }
+    )
     return pd.DataFrame(rows)
 
 
@@ -130,34 +160,55 @@ def main() -> int:
     spark.sparkContext.setLogLevel("ERROR")
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     try:
-        merged = (spark.read.parquet(f"{args.prefix}/merged/osn_tracks_clean")
-                  .where(F.col("dof").cast("string") == args.day)
-                  .withColumn("icao24", F.lower("icao24")))
+        merged = (
+            spark.read.parquet(f"{args.prefix}/merged/osn_tracks_clean")
+            .where(F.col("dof").cast("string") == args.day)
+            .withColumn("icao24", F.lower("icao24"))
+        )
         adsb = merged.where(F.col("source") == "ADS-B").select(
-            "icao24", "track_id", "event_time", "baro_altitude")
+            "icao24", "track_id", "event_time", "baro_altitude"
+        )
         w = Window.partitionBy("icao24").orderBy("event_time")
-        holes = (adsb
-                 .withColumn("hole_start", F.lag("event_time").over(w))
-                 .withColumn("prev_track", F.lag("track_id").over(w))
-                 .withColumn("prev_alt", F.lag("baro_altitude").over(w))
-                 .where(F.col("event_time").cast("long") - F.col("hole_start").cast("long")
-                        > GAP_MINUTES * 60)
-                 .select("icao24", "hole_start", F.col("event_time").alias("hole_end"),
-                         (F.col("prev_track") == F.col("track_id")).alias("joined"),
-                         (F.col("prev_alt") * FT_PER_M).alias("start_alt_ft"),
-                         (F.col("baro_altitude") * FT_PER_M).alias("end_alt_ft"))
-                 .toPandas())
+        holes = (
+            adsb.withColumn("hole_start", F.lag("event_time").over(w))
+            .withColumn("prev_track", F.lag("track_id").over(w))
+            .withColumn("prev_alt", F.lag("baro_altitude").over(w))
+            .where(
+                F.col("event_time").cast("long") - F.col("hole_start").cast("long")
+                > GAP_MINUTES * 60
+            )
+            .select(
+                "icao24",
+                "hole_start",
+                F.col("event_time").alias("hole_end"),
+                (F.col("prev_track") == F.col("track_id")).alias("joined"),
+                (F.col("prev_alt") * FT_PER_M).alias("start_alt_ft"),
+                (F.col("baro_altitude") * FT_PER_M).alias("end_alt_ft"),
+            )
+            .toPandas()
+        )
         airframes = [r[0] for r in merged.select("icao24").distinct().collect()]
-        adsc_clean = (merged.where(F.col("source") == "ADS-C")
-                      .select("icao24", "event_time").toPandas())
-        adsc_raw = (spark.read.parquet(f"{args.prefix}/input/osn_adsc_statevectors")
-                    .select(F.lower("icao24").alias("icao24"), "event_time").toPandas())
+        adsc_clean = (
+            merged.where(F.col("source") == "ADS-C").select("icao24", "event_time").toPandas()
+        )
+        adsc_raw = (
+            spark.read.parquet(f"{args.prefix}/input/osn_adsc_statevectors")
+            .select(F.lower("icao24").alias("icao24"), "event_time")
+            .toPandas()
+        )
         min_lon, min_lat, max_lon, max_lat = EUROPE_BBOX
         apt = spark.read.parquet("s3a://eurocontrol/opdi-world/oa_airports")
-        in_box = {r[0] for r in apt.where(
-            (F.col("longitude_deg") >= min_lon) & (F.col("longitude_deg") <= max_lon)
-            & (F.col("latitude_deg") >= min_lat) & (F.col("latitude_deg") <= max_lat)
-        ).select("ident").collect()}
+        in_box = {
+            r[0]
+            for r in apt.where(
+                (F.col("longitude_deg") >= min_lon)
+                & (F.col("longitude_deg") <= max_lon)
+                & (F.col("latitude_deg") >= min_lat)
+                & (F.col("latitude_deg") <= max_lat)
+            )
+            .select("ident")
+            .collect()
+        }
     finally:
         spark.stop()
 
@@ -167,8 +218,10 @@ def main() -> int:
     truth = truth[truth["flow"].isin(["outside_to_europe", "europe_to_outside"])]
     d = diagnose(holes_in_flights(holes, truth), adsc_raw, adsc_clean)
     s = summarise(d)
-    s = pd.concat([pd.DataFrame([{"metric": "boundary_flights_landing_same_day",
-                                  "value": len(truth)}]), s], ignore_index=True)
+    s = pd.concat(
+        [pd.DataFrame([{"metric": "boundary_flights_landing_same_day", "value": len(truth)}]), s],
+        ignore_index=True,
+    )
     print(s.to_string(index=False))
 
     out = Path(args.results_dir)
@@ -178,14 +231,22 @@ def main() -> int:
 
     import provenance
     from regenerate_adsc_v1 import CORE
+
     for n in ("adsc_bridging_summary.csv", "adsc_bridging_holes.csv"):
         provenance.record(
-            out, n, "benchmarks/adsc_bridging_diagnosis.py", sys.argv[1:],
-            ["benchmarks/adsc_bridging_diagnosis.py",
-             "benchmarks/adsc_flight_list_truth.py", *CORE],
+            out,
+            n,
+            "benchmarks/adsc_bridging_diagnosis.py",
+            sys.argv[1:],
+            [
+                "benchmarks/adsc_bridging_diagnosis.py",
+                "benchmarks/adsc_flight_list_truth.py",
+                *CORE,
+            ],
             inputs={"day": args.day, "flights": len(truth)},
             notes="Holes over 30 min in the ADS-B of NM flights crossing the "
-                  "European box and landing on the day.")
+            "European box and landing on the day.",
+        )
     return 0
 
 

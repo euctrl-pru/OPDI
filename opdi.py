@@ -52,10 +52,10 @@ def main(argv=None):
         choices=["dev", "live", "local", "opensky"],
         default="dev",
         help="Target environment (default: dev). NOTE: this script and "
-             "`opdi run` build a local-only Spark session -- they call "
-             "create_session without distributed=True -- so --env opensky "
-             "here does not attach to the Kubernetes cluster. A real "
-             "cluster run goes through run_period.py.",
+        "`opdi run` build a local-only Spark session -- they call "
+        "create_session without distributed=True -- so --env opensky "
+        "here does not attach to the Kubernetes cluster. A real "
+        "cluster run goes through run_period.py.",
     )
     parser.add_argument(
         "--start",
@@ -95,17 +95,17 @@ def main(argv=None):
         action="store_true",
         default=True,
         help="Run worldwide (the default; kept so existing commands still "
-             "parse). No coverage filter is applied to ingest, detection or "
-             "reference geometry. In the opensky environment the coverage does "
-             "not change the warehouse; a run whose coverage differs from the "
-             "one that built the warehouse is refused at step 00.",
+        "parse). No coverage filter is applied to ingest, detection or "
+        "reference geometry. In the opensky environment the coverage does "
+        "not change the warehouse; a run whose coverage differs from the "
+        "one that built the warehouse is refused at step 00.",
     )
     coverage.add_argument(
         "--europe",
         dest="worldwide",
         action="store_false",
         help="Apply the published European bounding box. In the dev, live and "
-             "local environments this also selects the European warehouse.",
+        "local environments this also selects the European warehouse.",
     )
 
     args = parser.parse_args(argv)

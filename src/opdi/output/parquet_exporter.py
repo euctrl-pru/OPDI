@@ -189,7 +189,9 @@ class ParquetExporter:
             ... )
         """
         file_start = month_start.strftime("%Y%m")
-        file_path = os.path.join(self.output_dir, "flight_list", f"flight_list_{file_start}.parquet")
+        file_path = os.path.join(
+            self.output_dir, "flight_list", f"flight_list_{file_start}.parquet"
+        )
 
         if os.path.isfile(file_path) and not overwrite:
             print(f"Skipping FLIGHT_LIST {file_start} (already exists)")
@@ -258,9 +260,7 @@ class ParquetExporter:
         file_start = start_date.strftime("%Y%m%d")
         file_end = end_date.strftime("%Y%m%d")
         file_path = os.path.join(
-            self.output_dir,
-            "flight_events",
-            f"flight_events_{file_start}_{file_end}.parquet"
+            self.output_dir, "flight_events", f"flight_events_{file_start}_{file_end}.parquet"
         )
 
         if os.path.isfile(file_path) and not overwrite:
@@ -291,7 +291,7 @@ class ParquetExporter:
         # table was partitioned, with nothing in the export to show why.
         df = df.drop("dof")
         df = df.withColumn("id", F.xxhash64("id"))
-        df = df.withColumn("flight_id", F.xxhash64('flight_id'))
+        df = df.withColumn("flight_id", F.xxhash64("flight_id"))
         pdf = self.safe_to_pandas(df)
 
         pdf.to_parquet(file_path)
@@ -324,9 +324,7 @@ class ParquetExporter:
         file_start = start_date.strftime("%Y%m%d")
         file_end = end_date.strftime("%Y%m%d")
         file_path = os.path.join(
-            self.output_dir,
-            "measurements",
-            f"measurements_{file_start}_{file_end}.parquet"
+            self.output_dir, "measurements", f"measurements_{file_start}_{file_end}.parquet"
         )
 
         if os.path.isfile(file_path) and not overwrite:
@@ -364,7 +362,7 @@ class ParquetExporter:
         )
 
         df = df.withColumn("id", F.xxhash64("id"))
-        df = df.withColumn("event_id", F.xxhash64('event_id'))
+        df = df.withColumn("event_id", F.xxhash64("event_id"))
 
         pdf = self.safe_to_pandas(df)
         pdf.to_parquet(file_path)
@@ -417,47 +415,41 @@ class ParquetExporter:
                 start_date = cutoff_date
 
         stats = {
-            'flight_list_files': 0,
-            'event_files': 0,
-            'measurement_files': 0,
+            "flight_list_files": 0,
+            "event_files": 0,
+            "measurement_files": 0,
         }
 
         # Export flight lists (monthly intervals)
         if export_flight_list:
             month_intervals = self.generate_month_intervals(start_date, end_date)
             if last_n_months:
-                month_intervals = [
-                    (s, e) for s, e in month_intervals
-                    if e > cutoff_date
-                ]
+                month_intervals = [(s, e) for s, e in month_intervals if e > cutoff_date]
 
             print(f"\nExporting {len(month_intervals)} flight list files...")
             for month_start, month_end in month_intervals:
                 result = self.export_flight_list(month_start, month_end, version, overwrite)
                 if result:
-                    stats['flight_list_files'] += 1
+                    stats["flight_list_files"] += 1
 
         # Export events and measurements (N-day intervals)
         day_intervals = self.generate_intervals(start_date, end_date, self.interval_days)
         if last_n_months:
-            day_intervals = [
-                (s, e) for s, e in day_intervals
-                if e > cutoff_date
-            ]
+            day_intervals = [(s, e) for s, e in day_intervals if e > cutoff_date]
 
         if export_flight_events:
             print(f"\nExporting {len(day_intervals)} flight event files...")
             for interval_start, interval_end in day_intervals:
                 result = self.export_flight_events(interval_start, interval_end, version, overwrite)
                 if result:
-                    stats['event_files'] += 1
+                    stats["event_files"] += 1
 
         if export_measurements:
             print(f"\nExporting {len(day_intervals)} measurement files...")
             for interval_start, interval_end in day_intervals:
                 result = self.export_measurements(interval_start, interval_end, version, overwrite)
                 if result:
-                    stats['measurement_files'] += 1
+                    stats["measurement_files"] += 1
 
         print("\n" + "=" * 60)
         print("EXPORT SUMMARY")

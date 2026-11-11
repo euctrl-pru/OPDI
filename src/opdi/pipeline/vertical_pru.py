@@ -64,9 +64,7 @@ ATTACHED_GEOMETRY_COLS = (
 )
 
 
-def attach_aerodrome_geometry(
-    sdf: DataFrame, month: date, storage: "StorageManager"
-) -> DataFrame:
+def attach_aerodrome_geometry(sdf: DataFrame, month: date, storage: "StorageManager") -> DataFrame:
     """Attach each track's ADEP and ADES with their position and elevation.
 
     The same join as :func:`opdi.pipeline.elevation.attach_field_elevation`,
@@ -101,8 +99,7 @@ def attach_aerodrome_geometry(
     fl = (
         storage.read_table("opdi_flight_list")
         .filter(
-            (col("dof") >= to_timestamp(lit(start_ts)))
-            & (col("dof") < to_timestamp(lit(end_ts)))
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
         )
         .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
     )
@@ -150,9 +147,7 @@ def _assert_unique_flight_ids(fl: DataFrame, month: date) -> None:
     anyway. The alternative is a silent fan-out that only shows up as a
     benchmark that will not reconcile.
     """
-    n, distinct = fl.select(
-        F.count(col("_fl_id")), F.countDistinct(col("_fl_id"))
-    ).first()
+    n, distinct = fl.select(F.count(col("_fl_id")), F.countDistinct(col("_fl_id"))).first()
     if n != distinct:
         raise ValueError(
             f"the flight list for {month:%Y-%m} has {n} rows but only "
@@ -180,9 +175,7 @@ def aerodrome_distances(sdf: DataFrame) -> DataFrame:
             continue
         sdf = sdf.withColumn(
             out,
-            haversine_nm(
-                col("lat"), col("lon"), col(f"{prefix}_lat"), col(f"{prefix}_lon")
-            ),
+            haversine_nm(col("lat"), col("lon"), col(f"{prefix}_lat"), col(f"{prefix}_lon")),
         )
     return sdf
 
@@ -242,21 +235,19 @@ def pru_tops(
     in_descent = F.col("_t") >= F.col("_t_a200")
     work = work.withColumn(
         "_toc_alt", F.max(F.when(in_climb, F.col("_alt_ft"))).over(whole)
-    ).withColumn(
-        "_tod_alt", F.max(F.when(in_descent, F.col("_alt_ft"))).over(whole)
-    )
+    ).withColumn("_tod_alt", F.max(F.when(in_descent, F.col("_alt_ft"))).over(whole))
 
     # First and last: a plateau at the top of the climb is entered once and
     # left once, and PRU names the entry in climb and the exit in descent.
     tops = work.groupBy("track_id").agg(
         F.first("_toc_alt").alias("toc_d200_alt_ft"),
         F.first("_tod_alt").alias("tod_a200_alt_ft"),
-        F.min(
-            F.when(in_climb & (F.col("_alt_ft") == F.col("_toc_alt")), F.col("_t"))
-        ).alias("toc_d200_time"),
-        F.max(
-            F.when(in_descent & (F.col("_alt_ft") == F.col("_tod_alt")), F.col("_t"))
-        ).alias("tod_a200_time"),
+        F.min(F.when(in_climb & (F.col("_alt_ft") == F.col("_toc_alt")), F.col("_t"))).alias(
+            "toc_d200_time"
+        ),
+        F.max(F.when(in_descent & (F.col("_alt_ft") == F.col("_tod_alt")), F.col("_t"))).alias(
+            "tod_a200_time"
+        ),
     )
 
     return _relocate(tops, segments, config)
@@ -353,9 +344,7 @@ def pru_top_events(
         return session.createDataFrame([], MILESTONE_SCHEMA)
 
     if tops is None:
-        tops = pru_tops(
-            sdf, segments, config, altitude_col=altitude_col, time_col=time_col
-        )
+        tops = pru_tops(sdf, segments, config, altitude_col=altitude_col, time_col=time_col)
 
     # Under the merge the PRU arm is the only top published, so it takes the
     # plain names; the fuzzy arm is dropped in

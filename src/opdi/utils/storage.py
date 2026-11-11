@@ -182,9 +182,7 @@ class StorageManager:
                 # state file will not have marked it done -- whereas the
                 # alternative, appending without deleting, silently doubles the
                 # day and nothing reports it.
-                persisted = self._delete_partitions(
-                    df, path, partition_by, partition_values
-                )
+                persisted = self._delete_partitions(df, path, partition_by, partition_values)
                 s3_mode = "append"
             else:
                 persisted = False
@@ -265,9 +263,7 @@ class StorageManager:
         jvm = self.spark._jvm
         hconf = self.spark._jsc.hadoopConfiguration()
         for row in values:
-            parts = "/".join(
-                f"{c}={_partition_dir_value(row[c])}" for c in partition_by
-            )
+            parts = "/".join(f"{c}={_partition_dir_value(row[c])}" for c in partition_by)
             target = jvm.org.apache.hadoop.fs.Path(f"{path}/{parts}")
             fs = target.getFileSystem(hconf)
             if fs.exists(target):
@@ -345,8 +341,7 @@ class StorageManager:
         # create_table_if_not_exists() first. The marker has no dedicated
         # processor class to hold that method, so it is inlined here; a no-op
         # in S3 mode, same as every other create_table call.
-        self.create_table(
-            f"""
+        self.create_table(f"""
             CREATE TABLE IF NOT EXISTS `{self.project}`.`{self.COVERAGE_MARKER}` (
               coverage STRING COMMENT 'Coverage label this warehouse was written under: europe, worldwide, or custom',
               bbox ARRAY<DOUBLE> COMMENT 'min_lon, min_lat, max_lon, max_lat degrees; NULL for worldwide',
@@ -354,13 +349,16 @@ class StorageManager:
             )
             USING iceberg
             COMMENT 'One row: which coverage wrote this warehouse. Not a data product -- nothing reads it at query time.'
-            """
-        )
+            """)
         cov = self.config.coverage
         df = self.spark.createDataFrame(
-            [(cov.label,
-              [float(x) for x in cov.bbox] if cov.bbox else None,
-              list(cov.airport_types))],
+            [
+                (
+                    cov.label,
+                    [float(x) for x in cov.bbox] if cov.bbox else None,
+                    list(cov.airport_types),
+                )
+            ],
             "coverage string, bbox array<double>, airport_types array<string>",
         )
         self.write_table(df, self.COVERAGE_MARKER, mode="overwrite")
@@ -454,9 +452,12 @@ class StorageManager:
         fs, p = self._hadoop_path(self._done_path(key))
         out = fs.create(p, True)
         try:
-            body = json.dumps({"seconds": round(float(seconds), 1),
-                               "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                            time.gmtime())})
+            body = json.dumps(
+                {
+                    "seconds": round(float(seconds), 1),
+                    "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            )
             out.write(bytearray(body.encode("utf-8")))
         finally:
             out.close()
@@ -517,7 +518,9 @@ class StorageManager:
             if not os.path.isfile(source) or name.endswith(".crc"):
                 continue
             fs.copyFromLocalFile(
-                False, True, jvm.org.apache.hadoop.fs.Path("file://" + source),
+                False,
+                True,
+                jvm.org.apache.hadoop.fs.Path("file://" + source),
                 jvm.org.apache.hadoop.fs.Path(f"{self._logs_path()}/{name}"),
             )
             n += 1

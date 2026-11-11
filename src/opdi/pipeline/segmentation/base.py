@@ -174,9 +174,7 @@ class SegmentationParams:
         seg = getattr(config, "segmentation", config)
         missing = [f.name for f in fields(cls) if not hasattr(seg, f.name)]
         if missing:
-            raise TypeError(
-                f"{type(seg).__name__} is missing segmentation fields: {missing}"
-            )
+            raise TypeError(f"{type(seg).__name__} is missing segmentation fields: {missing}")
         return cls(**{f.name: getattr(seg, f.name) for f in fields(cls)})
 
 
@@ -221,9 +219,7 @@ class BreakRule:
             )
 
 
-def assign_track_id(
-    df: DataFrame, rule: BreakRule, params: SegmentationParams
-) -> DataFrame:
+def assign_track_id(df: DataFrame, rule: BreakRule, params: SegmentationParams) -> DataFrame:
     """Add ``track_id`` to state vectors according to *rule*.
 
     The frozen algorithm hashes its group key; the engine does too, so ids are
@@ -232,9 +228,7 @@ def assign_track_id(
     """
     out = (
         df.withColumn(_TS, F.to_timestamp("event_time"))
-        .withColumn(
-            _GRP, F.substring(F.sha2(F.concat_ws("", *rule.group_cols), 256), 1, 16)
-        )
+        .withColumn(_GRP, F.substring(F.sha2(F.concat_ws("", *rule.group_cols), 256), 1, 16))
         .withColumn(_ALT_FT, F.col("baro_altitude") * FT_PER_M)
         .withColumn(_SPD_KT, F.col("velocity") * KT_PER_MPS)
     )
@@ -269,8 +263,10 @@ def assign_track_id(
         parts = [F.col(_GRP), F.lit("_"), F.col("_offset")]
         if rule.month_suffix:
             parts += [
-                F.lit("_"), F.year(_TS).cast("string"),
-                F.lit("_"), F.month(_TS).cast("string"),
+                F.lit("_"),
+                F.year(_TS).cast("string"),
+                F.lit("_"),
+                F.month(_TS).cast("string"),
             ]
         out = out.withColumn("track_id", F.concat(*parts))
 

@@ -78,18 +78,20 @@ def redirect(cand_table: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--days", nargs="+",
-                    default=["2024-06-05", "2024-06-06", "2024-06-07"])
-    ap.add_argument("--results-dir", default=None,
-                    help="unused; accepted so the regeneration chain can call "
-                         "this like any other job")
+    ap.add_argument("--days", nargs="+", default=["2024-06-05", "2024-06-06", "2024-06-07"])
+    ap.add_argument(
+        "--results-dir",
+        default=None,
+        help="unused; accepted so the regeneration chain can call " "this like any other job",
+    )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4053)
-    ap.add_argument("--tracks", default=TRACKS_2024,
-                    help=f"track table to reduce to endpoints (default "
-                         f"{TRACKS_2024})")
-    ap.add_argument("--skip-ends", action="store_true",
-                    help="reuse an existing endpoint table")
+    ap.add_argument(
+        "--tracks",
+        default=TRACKS_2024,
+        help=f"track table to reduce to endpoints (default " f"{TRACKS_2024})",
+    )
+    ap.add_argument("--skip-ends", action="store_true", help="reuse an existing endpoint table")
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -108,31 +110,34 @@ def main() -> None:
         import h3_pyspark
 
         print(f"reducing {args.tracks} to endpoints")
-        tr = (spark.read.parquet(args.tracks)
-              .filter(F.to_date("event_time").isin(args.days))
-              .dropna(subset=["lat", "lon", "track_id"]))
+        tr = (
+            spark.read.parquet(args.tracks)
+            .filter(F.to_date("event_time").isin(args.days))
+            .dropna(subset=["lat", "lon", "track_id"])
+        )
         w = Window.partitionBy("track_id").orderBy("event_time")
-        ends = (tr.withColumn("_rn", F.row_number().over(w))
-                .withColumn("_rr", F.row_number().over(
-                    w.orderBy(F.col("event_time").desc())))
-                .filter((F.col("_rn") == 1) | (F.col("_rr") == 1))
-                .drop("_rn", "_rr"))
+        ends = (
+            tr.withColumn("_rn", F.row_number().over(w))
+            .withColumn("_rr", F.row_number().over(w.orderBy(F.col("event_time").desc())))
+            .filter((F.col("_rn") == 1) | (F.col("_rr") == 1))
+            .drop("_rn", "_rr")
+        )
         # Index only what survives: two rows per track rather than 5.8 GB.
-        ends = (ends.withColumn("_res", F.lit(7))
-                .withColumn("h3_res_7",
-                            h3_pyspark.geo_to_h3("lat", "lon", "_res"))
-                .drop("_res"))
+        ends = (
+            ends.withColumn("_res", F.lit(7))
+            .withColumn("h3_res_7", h3_pyspark.geo_to_h3("lat", "lon", "_res"))
+            .drop("_res")
+        )
         if "on_ground" not in ends.columns:
             ends = ends.withColumn("on_ground", F.lit(False))
         n = ends.count()
         print(f"endpoint rows for {len(args.days)} days: {n:,}")
-        (ends.write.mode("overwrite")
-         .parquet(f"s3a://eurocontrol/opdi/{ENDS_2024}"))
+        (ends.write.mode("overwrite").parquet(f"s3a://eurocontrol/opdi/{ENDS_2024}"))
 
     redirect(CAND_2024)
     proc = FlightListProcessor(
-        spark, cfg, log_dir=str(REPO / "OPDI_live" / "logs" / "cand2024"),
-        tracks_table=ENDS_2024)
+        spark, cfg, log_dir=str(REPO / "OPDI_live" / "logs" / "cand2024"), tracks_table=ENDS_2024
+    )
     print(f"  reading endpoints from {proc.tracks_table}")
     proc.build_endpoint_candidates(date(2024, 6, 1), rebuild=True)
 

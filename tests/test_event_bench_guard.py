@@ -79,8 +79,11 @@ def pristine_storage():
     saved = {
         name: getattr(StorageManager, name, None)
         for name in (
-            "write_table", "_s3_path",
-            "_events_guarded", "_events_orig_write", "_events_orig_path",
+            "write_table",
+            "_s3_path",
+            "_events_guarded",
+            "_events_orig_write",
+            "_events_orig_path",
         )
     }
     yield StorageManager
@@ -136,8 +139,7 @@ def test_the_v4_baseline_is_v0_1_0_and_nothing_else():
     shipped = EventConfig()
 
     differing = {
-        f for f in EventConfig().__dataclass_fields__
-        if getattr(base, f) != getattr(shipped, f)
+        f for f in EventConfig().__dataclass_fields__ if getattr(base, f) != getattr(shipped, f)
     }
 
     assert differing == set(V4_BASE)
@@ -224,8 +226,7 @@ def test_runway_identity_types_never_mix_the_two_vocabularies():
     plan = build_plan(ladder="v4")
 
     assert runway_identity_types(plan["V00_v3_shipped"]) == {"ATOT": "ATOT", "ALDT": "ALDT"}
-    assert runway_identity_types(plan["V07_v020"]) == {
-        "airborne": "ATOT", "touchdown": "ALDT"}
+    assert runway_identity_types(plan["V07_v020"]) == {"airborne": "ATOT", "touchdown": "ALDT"}
 
 
 # ---------------------------------------------------------------------------
@@ -264,15 +265,12 @@ def test_the_scorer_resolves_the_periods_own_flight_list(spark):
     """
     import events_compare
 
-    fl = spark.createDataFrame(
-        [], "ID string, ICAO24 string, FLT_ID string, FIRST_SEEN timestamp"
-    )
+    fl = spark.createDataFrame([], "ID string, ICAO24 string, FLT_ID string, FIRST_SEEN timestamp")
     tracks = spark.createDataFrame(
         [], "track_id string, icao24 string, callsign string, event_time timestamp"
     )
 
-    for period, expected in (("2026", "research/flight_list_2026"),
-                             ("2025", "opdi_flight_list")):
+    for period, expected in (("2026", "research/flight_list_2026"), ("2025", "opdi_flight_list")):
         storage = _RecordingStorage(fl)
         events_compare._identity(spark, storage, period, "osn_tracks_clean")
         assert storage.asked == [expected], period
@@ -284,38 +282,29 @@ def test_the_scorer_resolves_the_periods_own_flight_list(spark):
     assert storage.asked == ["research/tracks_clean"]
 
 
-def test_the_2026_redirect_sends_the_flight_list_read_to_the_research_copy(
-    spark, pristine_storage
-):
+def test_the_2026_redirect_sends_the_flight_list_read_to_the_research_copy(spark, pristine_storage):
     """Step 04 asks for `opdi_flight_list` by name. Without this the 2026 run
     joins against a 2025-only table, finds no aerodrome for any track, and
     reports every aerodrome-anchored family as empty rather than as broken."""
     from opdi.config import OPDIConfig
 
     storage = pristine_storage(spark, OPDIConfig.for_environment("local"))
-    redirect_event_tables("research/events_2026_V07_shipped",
-                          flight_list=flight_list_table("2026"))
+    redirect_event_tables("research/events_2026_V07_shipped", flight_list=flight_list_table("2026"))
 
     assert "research/flight_list_2026" in str(storage._s3_path("opdi_flight_list"))
-    assert "research/events_2026_V07_shipped" in str(
-        storage._s3_path("opdi_flight_events"))
+    assert "research/events_2026_V07_shipped" in str(storage._s3_path("opdi_flight_events"))
 
 
-def test_a_period_without_an_override_leaves_the_flight_list_alone(
-    spark, pristine_storage
-):
+def test_a_period_without_an_override_leaves_the_flight_list_alone(spark, pristine_storage):
     from opdi.config import OPDIConfig
 
     storage = pristine_storage(spark, OPDIConfig.for_environment("local"))
-    redirect_event_tables("research/events_2025_L13_shipped",
-                          flight_list=flight_list_table("2025"))
+    redirect_event_tables("research/events_2025_L13_shipped", flight_list=flight_list_table("2025"))
 
     assert str(storage._s3_path("opdi_flight_list")).endswith("opdi_flight_list")
 
 
-def test_the_flight_list_redirect_does_not_relax_its_write_mode(
-    spark, pristine_storage
-):
+def test_the_flight_list_redirect_does_not_relax_its_write_mode(spark, pristine_storage):
     """The redirect exists for a *read*. Forcing overwrite on it too would be a
     loaded gun pointed at whatever table it happens to name."""
     from opdi.config import OPDIConfig
@@ -329,8 +318,7 @@ def test_the_flight_list_redirect_does_not_relax_its_write_mode(
     # Patched *before* the redirect, so the redirect wraps this and the mode it
     # decided is what arrives here.
     pristine_storage.write_table = record
-    redirect_event_tables("research/events_2026_V07_shipped",
-                          flight_list=flight_list_table("2026"))
+    redirect_event_tables("research/events_2026_V07_shipped", flight_list=flight_list_table("2026"))
     df = spark.createDataFrame([(1,)], "x int")
 
     storage.write_table(df, "opdi_flight_list", "append")
@@ -351,21 +339,36 @@ def _event_rows(spark):
     t = dt.datetime(2026, 6, 5, 10, 0, 0)
     rows = [
         # The A-CDM family names its runway `rwy_ident`, not `runway`.
-        ("trk-1", "touchdown", t, 50.9, 4.5,
-         '{"rwy_ident": "25L", "apt_icao": "EBBR", "milestone": "T17"}'),
+        (
+            "trk-1",
+            "touchdown",
+            t,
+            50.9,
+            4.5,
+            '{"rwy_ident": "25L", "apt_icao": "EBBR", "milestone": "T17"}',
+        ),
         # ICAO T16: the threshold plane, which APDF does not record.
-        ("trk-1", "landing", t - dt.timedelta(seconds=20), 50.9, 4.4,
-         '{"rwy_ident": "25L", "apt_icao": "EBBR", "milestone": "T16"}'),
+        (
+            "trk-1",
+            "landing",
+            t - dt.timedelta(seconds=20),
+            50.9,
+            4.4,
+            '{"rwy_ident": "25L", "apt_icao": "EBBR", "milestone": "T16"}',
+        ),
         # v0.1.0's key, still readable so the baseline rung scores.
         ("trk-2", "ALDT", t, 50.9, 4.5, '{"runway": "07R", "apt_icao": "EBBR"}'),
     ]
     df = spark.createDataFrame(
-        rows, "flight_id string, type string, event_time timestamp, "
-              "latitude double, longitude double, info string")
+        rows,
+        "flight_id string, type string, event_time timestamp, "
+        "latitude double, longitude double, info string",
+    )
     df.createOrReplaceTempView("v4_events_under_test")
     tracks = spark.createDataFrame(
         [("trk-1", "ABC123", "BEL123 ", t), ("trk-2", "DEF456", "DLH8  ", t)],
-        "track_id string, icao24 string, callsign string, event_time timestamp")
+        "track_id string, icao24 string, callsign string, event_time timestamp",
+    )
     return tracks
 
 
@@ -391,7 +394,10 @@ def test_the_shipped_mapping_drops_landing_from_the_scored_frame(spark):
     shipped = build_plan(ladder="v4")["V07_v020"]
 
     got = detected_events(
-        spark, "v4_events_under_test", tracks=tracks, identity="tracks",
+        spark,
+        "v4_events_under_test",
+        tracks=tracks,
+        identity="tracks",
         mapping=milestone_map(shipped),
     ).collect()
 
@@ -410,7 +416,10 @@ def test_the_baseline_mapping_keeps_landing_on_the_same_frame(spark):
     baseline = build_plan(ladder="v4")["V00_v3_shipped"]
 
     got = detected_events(
-        spark, "v4_events_under_test", tracks=tracks, identity="tracks",
+        spark,
+        "v4_events_under_test",
+        tracks=tracks,
+        identity="tracks",
         mapping=milestone_map(baseline),
     ).collect()
 

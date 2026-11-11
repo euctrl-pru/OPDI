@@ -4,10 +4,18 @@ import free_adsc_scratch as f
 import pytest
 
 
-@pytest.mark.parametrize("bad", [
-    "", "opdi-prod/", "opdi-world/research/adsc/", "opdi/research/adsc",
-    "opdi/research/adsc_airframes/", "opdi/", "opdi/research/",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "opdi-prod/",
+        "opdi-world/research/adsc/",
+        "opdi/research/adsc",
+        "opdi/research/adsc_airframes/",
+        "opdi/",
+        "opdi/research/",
+    ],
+)
 def test_a_prefix_outside_the_study_is_refused(bad):
     with pytest.raises(SystemExit, match="refusing"):
         f.validate_prefix(bad)
@@ -29,5 +37,6 @@ def test_the_checks_are_not_asserts():
     # `python -O` strips asserts, and with them the only thing between a typo
     # and deleting production.
     from pathlib import Path
+
     src = Path(f.__file__).read_text()
     assert "assert " not in src.replace("assert_in_scope", "")

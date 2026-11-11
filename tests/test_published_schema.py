@@ -26,8 +26,20 @@ SNAKE = re.compile(r"^[a-z][a-z0-9_]*$")
 SPARK_TYPES = {"string", "date", "timestamp", "double", "boolean", "bigint", "array<string>"}
 #: Internal or vague wording that must not reach a published description.
 BANNED = (
-    "ladder", "rung", "study", "a8", "a9", "a10", "gate", "guard", "arm", "pin",
-    "load-bearing", "surface", "robust", "leverage",
+    "ladder",
+    "rung",
+    "study",
+    "a8",
+    "a9",
+    "a10",
+    "gate",
+    "guard",
+    "arm",
+    "pin",
+    "load-bearing",
+    "surface",
+    "robust",
+    "leverage",
 )
 STANDARD_MEASURES = ("Distance flown (NM)", "Time Passed (s)")
 
@@ -72,7 +84,7 @@ def test_flight_list_order_starts_and_ends_as_declared():
         f"c{nm}_dep" for nm in (40, 50, 60, 100, 110, 120)
     ]
     start = names.index("c40_arr")
-    assert names[start:start + 12] == rings
+    assert names[start : start + 12] == rings
 
 
 def test_every_flight_list_source_is_a_working_table_column():
@@ -109,9 +121,7 @@ def test_measurement_versions_match_the_event_step():
 
 
 def test_flight_events_is_events_measurements_then_flight_columns():
-    flight_part = [
-        c.name for c in FLIGHT_LIST if c.name not in ("flight_id", "version", "release")
-    ]
+    flight_part = [c.name for c in FLIGHT_LIST if c.name not in ("flight_id", "version", "release")]
     expected = (
         [c.name for c in EVENT_COLUMNS]
         + [c.name for c in MEASUREMENT_COLUMNS]
@@ -120,15 +130,31 @@ def test_flight_events_is_events_measurements_then_flight_columns():
     )
     assert [c.name for c in FLIGHT_EVENTS] == expected
     assert [c.name for c in EVENT_COLUMNS] == [
-        "event_id", "flight_id", "type", "event_time", "longitude", "latitude",
-        "altitude_ft", "h3_res_5", "source", "version", "info",
+        "event_id",
+        "flight_id",
+        "type",
+        "event_time",
+        "longitude",
+        "latitude",
+        "altitude_ft",
+        "h3_res_5",
+        "source",
+        "version",
+        "info",
     ]
 
 
 def test_index_columns():
     assert [c.name for c in FLIGHT_INDEX] == [
-        "flight_id", "icao24", "flt_id", "adep", "ades", "first_seen", "last_seen",
-        "dof", "file",
+        "flight_id",
+        "icao24",
+        "flt_id",
+        "adep",
+        "ades",
+        "first_seen",
+        "last_seen",
+        "dof",
+        "file",
     ]
 
 

@@ -125,12 +125,16 @@ def block_times(
     picked up mid-taxi would be reported as its off-block, which is not the
     same event and would look like a very short taxi rather than a miss.
     """
-    exits = airport_events.filter(F.col("type") == "exit-parking_position").groupBy(
-        "track_id"
-    ).agg(F.min("event_time").alias("stand_exit"))
-    entries = airport_events.filter(F.col("type") == "entry-parking_position").groupBy(
-        "track_id"
-    ).agg(F.max("event_time").alias("stand_entry"))
+    exits = (
+        airport_events.filter(F.col("type") == "exit-parking_position")
+        .groupBy("track_id")
+        .agg(F.min("event_time").alias("stand_exit"))
+    )
+    entries = (
+        airport_events.filter(F.col("type") == "entry-parking_position")
+        .groupBy("track_id")
+        .agg(F.max("event_time").alias("stand_entry"))
+    )
 
     out = movements.join(exits, "track_id", "left").join(entries, "track_id", "left")
     return out.select(

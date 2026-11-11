@@ -24,6 +24,7 @@ row per label, so ``regenerate_track_v3.py`` can declare this as a job.
 
 Reads committed reference data and the published flight list. No Spark.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -69,8 +70,17 @@ def _s3():
 
 def flight_list(days, bucket="eurocontrol", warehouse="opdi-prod") -> pd.DataFrame:
     s3 = _s3()
-    cols = ["ID", "ADEP", "ADES", "ATOT", "ALDT", "SUPERSEDED_DEP", "SUPERSEDED_ARR",
-            "MOVEMENT_DEP", "MOVEMENT_ARR"]
+    cols = [
+        "ID",
+        "ADEP",
+        "ADES",
+        "ATOT",
+        "ALDT",
+        "SUPERSEDED_DEP",
+        "SUPERSEDED_ARR",
+        "MOVEMENT_DEP",
+        "MOVEMENT_ARR",
+    ]
     frames = []
     for day in days:
         prefix = f"{warehouse}/opdi_flight_list/DOF={day}/"
@@ -128,10 +138,14 @@ def measure(label: str, warehouse: str, days, month: str) -> dict:
     print(f"\n=== {label}  (warehouse={warehouse}) ===")
     print(f"days {', '.join(days)}   aerodromes reported by APDF: {len(covered):,}")
     print(f"  APDF                       dep {nd:8,}          arr {na:8,}")
-    print(f"  OPDI, every row            dep {raw[0]:8,} ({raw[0]/nd:5.2f}x)  "
-          f"arr {raw[1]:8,} ({raw[1]/na:5.2f}x)   baseline {BASELINE['dep_raw']}x / {BASELINE['arr_raw']}x")
-    print(f"  OPDI, fragments removed    dep {kept[0]:8,} ({kept[0]/nd:5.2f}x)  "
-          f"arr {kept[1]:8,} ({kept[1]/na:5.2f}x)   baseline {BASELINE['dep_kept']}x / {BASELINE['arr_kept']}x")
+    print(
+        f"  OPDI, every row            dep {raw[0]:8,} ({raw[0]/nd:5.2f}x)  "
+        f"arr {raw[1]:8,} ({raw[1]/na:5.2f}x)   baseline {BASELINE['dep_raw']}x / {BASELINE['arr_raw']}x"
+    )
+    print(
+        f"  OPDI, fragments removed    dep {kept[0]:8,} ({kept[0]/nd:5.2f}x)  "
+        f"arr {kept[1]:8,} ({kept[1]/na:5.2f}x)   baseline {BASELINE['dep_kept']}x / {BASELINE['arr_kept']}x"
+    )
 
     # The rule's central claim, restated as a check rather than a memory.
     # The claim under test is narrow and must stay narrow: *the rules* discard
@@ -140,15 +154,21 @@ def measure(label: str, warehouse: str, days, month: str) -> dict:
     # count it at, which is an upstream gap and a different problem. Conflating
     # the two made this print REGRESSION for 50 departures the rules never
     # touched.
-    rule_dep = (opdi["ATOT"].notna() & opdi["ADEP"].notna()
-                & ~opdi["MOVEMENT_DEP"].fillna(False)).sum()
-    rule_arr = (opdi["ALDT"].notna() & opdi["ADES"].notna()
-                & ~opdi["MOVEMENT_ARR"].fillna(False)).sum()
+    rule_dep = (
+        opdi["ATOT"].notna() & opdi["ADEP"].notna() & ~opdi["MOVEMENT_DEP"].fillna(False)
+    ).sum()
+    rule_arr = (
+        opdi["ALDT"].notna() & opdi["ADES"].notna() & ~opdi["MOVEMENT_ARR"].fillna(False)
+    ).sum()
     verdict = "OK" if rule_dep == rule_arr == 0 else "REGRESSION"
-    print(f"\n  flew, has an aerodrome, excluded by a rule: dep {rule_dep:,}  "
-          f"arr {rule_arr:,}   [{verdict}]")
-    print("  (the rules' whole claim is that these are zero; a non-zero value "
-          "means they are\n   now discarding real movements and should be revisited)")
+    print(
+        f"\n  flew, has an aerodrome, excluded by a rule: dep {rule_dep:,}  "
+        f"arr {rule_arr:,}   [{verdict}]"
+    )
+    print(
+        "  (the rules' whole claim is that these are zero; a non-zero value "
+        "means they are\n   now discarding real movements and should be revisited)"
+    )
 
     # Surfaced separately rather than folded in: these are movements OPDI saw
     # happen and cannot attribute to an aerodrome, so they are missing from
@@ -169,8 +189,10 @@ def measure(label: str, warehouse: str, days, month: str) -> dict:
         print(f"    {apt}  APDF {ref:6,}  OPDI {got:6,}  {r:5.2f}x")
 
     print(f"\n  flew but no aerodrome named  : dep {orphan_dep:,}  arr {orphan_arr:,}")
-    print("  (an upstream ADEP/ADES gap, not a counting rule -- these movements "
-          "are real\n   and are absent from every per-aerodrome figure)")
+    print(
+        "  (an upstream ADEP/ADES gap, not a counting rule -- these movements "
+        "are real\n   and are absent from every per-aerodrome figure)"
+    )
 
     max_abs_err = max((w[4] for w in worst), default=float("nan"))
     return {
@@ -201,14 +223,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--days", nargs="+", required=True, help="YYYY-MM-DD ...")
     ap.add_argument("--month", default=None, help="APDF month, YYYYMM (default: from --days)")
-    ap.add_argument("--warehouses", nargs="+", default=DEFAULT_WAREHOUSES,
-                     help="one or more LABEL=WAREHOUSE pairs, each scored "
-                          "against the same APDF days")
-    ap.add_argument("--results-dir", type=Path, default=None,
-                     help="stage one row per label here as a CSV, if "
-                          "--out-name is also given")
-    ap.add_argument("--out-name", default=None,
-                     help="CSV filename under --results-dir")
+    ap.add_argument(
+        "--warehouses",
+        nargs="+",
+        default=DEFAULT_WAREHOUSES,
+        help="one or more LABEL=WAREHOUSE pairs, each scored " "against the same APDF days",
+    )
+    ap.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="stage one row per label here as a CSV, if " "--out-name is also given",
+    )
+    ap.add_argument("--out-name", default=None, help="CSV filename under --results-dir")
     args = ap.parse_args()
     month = args.month or args.days[0][:7].replace("-", "")
 

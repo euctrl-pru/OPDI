@@ -116,6 +116,7 @@ class PublishedLayout:
 
 # --- building the tables ----------------------------------------------------
 
+
 def build_flight_list(flight_list: DataFrame) -> DataFrame:
     """The published flight list from the pipeline's working flight list.
 
@@ -178,9 +179,9 @@ def build_flight_events(
     """
     measured = measurements.groupBy(F.col("milestone_id").alias("_milestone_id")).agg(
         *[
-            F.first(
-                F.when(F.col("type") == F.lit(c.source), F.col("value")), ignorenulls=True
-            ).cast("double").alias(c.name)
+            F.first(F.when(F.col("type") == F.lit(c.source), F.col("value")), ignorenulls=True)
+            .cast("double")
+            .alias(c.name)
             for c in MEASUREMENT_COLUMNS
         ]
     )
@@ -214,6 +215,7 @@ def build_flight_events(
 
 
 # --- writing ------------------------------------------------------------------
+
 
 def _fs(spark: SparkSession, path: str):
     jvm = spark._jvm
@@ -286,8 +288,7 @@ def write_single_file(
     parts = [
         s.getPath()
         for s in fs.listStatus(tmp_path)
-        if s.getPath().getName().startswith("part-")
-        and s.getPath().getName().endswith(".parquet")
+        if s.getPath().getName().startswith("part-") and s.getPath().getName().endswith(".parquet")
     ]
     if len(parts) != 1:
         raise RuntimeError(f"expected one data file in {tmp}, found {len(parts)}")
@@ -300,6 +301,7 @@ def write_single_file(
 
 
 # --- index and catalogue ------------------------------------------------------
+
 
 def _month_files(spark: SparkSession, layout: PublishedLayout, month: dt.date) -> list:
     folder = f"{layout.root}/flight_list"
@@ -341,7 +343,9 @@ def update_index(spark: SparkSession, layout: PublishedLayout, month: dt.date) -
         index = spark.createDataFrame([], _ddl(FLIGHT_INDEX))
     index = index.select(*[F.col(c.name).cast(c.dtype) for c in FLIGHT_INDEX])
     write_single_file(
-        index, layout.flight_index(month), sort_by=("flight_id",),
+        index,
+        layout.flight_index(month),
+        sort_by=("flight_id",),
         bloom_filters=("flight_id", "icao24", "flt_id"),
     )
     return spark.read.parquet(layout.flight_index(month)).count()
@@ -385,6 +389,7 @@ def update_catalogue(
 
 
 # --- one day ----------------------------------------------------------------
+
 
 def _day_rows(storage, table: str, column: str, first: dt.date, last: dt.date) -> DataFrame:
     if not storage.table_exists(table):
@@ -468,14 +473,17 @@ def publish_day(
     event_rows, measurement_rows, nearby_flights = _day_events(storage, day)
 
     write_single_file(
-        build_flight_list(flight_rows), layout.flight_list(day),
-        sort_by=FLIGHT_LIST_SORT, bloom_filters=FLIGHT_LIST_BLOOM,
+        build_flight_list(flight_rows),
+        layout.flight_list(day),
+        sort_by=FLIGHT_LIST_SORT,
+        bloom_filters=FLIGHT_LIST_BLOOM,
         row_group_rows=row_group_rows,
     )
     write_single_file(
         build_flight_events(event_rows, measurement_rows, nearby_flights),
         layout.flight_events(day),
-        sort_by=FLIGHT_EVENTS_SORT, bloom_filters=FLIGHT_EVENTS_BLOOM,
+        sort_by=FLIGHT_EVENTS_SORT,
+        bloom_filters=FLIGHT_EVENTS_BLOOM,
         row_group_rows=row_group_rows,
     )
 
@@ -483,8 +491,9 @@ def publish_day(
     # describes exactly what was published.
     fl = spark.read.parquet(layout.flight_list(day))
     ev = spark.read.parquet(layout.flight_events(day))
-    fl_versions = sorted(r["version"] for r in fl.select("version").distinct().collect()
-                         if r["version"] is not None)
+    fl_versions = sorted(
+        r["version"] for r in fl.select("version").distinct().collect() if r["version"] is not None
+    )
     ev_stats = ev.agg(
         F.count(F.lit(1)).alias("n"),
         F.min("event_time").alias("first"),
@@ -521,15 +530,23 @@ def pipeline_commit() -> str:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=os.path.dirname(os.path.abspath(__file__)),
-            capture_output=True, text=True, timeout=10, check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
         )
         return out.stdout.strip() or "unknown"
     except (OSError, subprocess.SubprocessError):
         return "unknown"
 
 
-def publish_range(spark: SparkSession, config, start: dt.date, end: dt.date,
-                  layout: Optional[PublishedLayout] = None) -> None:
+def publish_range(
+    spark: SparkSession,
+    config,
+    start: dt.date,
+    end: dt.date,
+    layout: Optional[PublishedLayout] = None,
+) -> None:
     """Publish every day from ``start`` to ``end``, both included.
 
     Args:
@@ -548,6 +565,8 @@ def publish_range(spark: SparkSession, config, start: dt.date, end: dt.date,
     day = start
     while day <= end:
         counts = publish_day(spark, storage, day, layout, commit)
-        print(f"  published {day}: {counts['flights']:,} flights, "
-              f"{counts['events']:,} events -> {layout.root}")
+        print(
+            f"  published {day}: {counts['flights']:,} flights, "
+            f"{counts['events']:,} events -> {layout.root}"
+        )
         day += dt.timedelta(days=1)

@@ -49,16 +49,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     for r in ms.groupBy("type").count().collect():
         if r["type"].startswith(NEW_MEASURES):
             rows.append({"kind": "measurement", "name": r["type"], "count": r["count"]})
-    n_tracks = dof(spark.read.parquet(f"{inputs}/osn_tracks_clean")).select("track_id").distinct().count()
+    n_tracks = (
+        dof(spark.read.parquet(f"{inputs}/osn_tracks_clean")).select("track_id").distinct().count()
+    )
     rows.append({"kind": "input", "name": "tracks", "count": n_tracks})
     rows.append({"kind": "input", "name": "events_all_types", "count": ev.count()})
     out = Path(args.results_dir)
     out.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows).sort_values(["kind", "name"])
     df.to_csv(out / "counts.csv", index=False)
-    provenance.record(out, "counts.csv", "benchmarks/airspace_counts.py", argv,
-                      [REPO / p for p in _CODE_PATHS], inputs={"rows": len(df)},
-                      input_tables=[f"{PREFIX}/on/opdi_flight_events", f"{PREFIX}/on/opdi_measurements"])
+    provenance.record(
+        out,
+        "counts.csv",
+        "benchmarks/airspace_counts.py",
+        argv,
+        [REPO / p for p in _CODE_PATHS],
+        inputs={"rows": len(df)},
+        input_tables=[f"{PREFIX}/on/opdi_flight_events", f"{PREFIX}/on/opdi_measurements"],
+    )
     print(df.to_string(index=False))
     spark.stop()
     return 0

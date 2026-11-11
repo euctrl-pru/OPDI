@@ -11,6 +11,7 @@ committed an empty `h3_airport_detection_zones` with a `_SUCCESS` marker. The
 pipeline had no detection grid and would have reported no ADEP or ADES for any
 flight -- a coverage result rather than a broken build.
 """
+
 import re
 from pathlib import Path
 
@@ -20,8 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 #: Names the codebase calls that exist only in h3 v4.
 V4_ONLY = (
-    "polygon_to_cells", "LatLngPoly", "latlng_to_cell",
-    "grid_distance", "cell_to_latlng", "is_valid_cell",
+    "polygon_to_cells",
+    "LatLngPoly",
+    "latlng_to_cell",
+    "grid_distance",
+    "cell_to_latlng",
+    "is_valid_cell",
 )
 
 
@@ -56,9 +61,14 @@ def test_the_raised_error_names_the_cause_and_the_fix():
     assert "k8s_container_image" in src
 
 
-@pytest.mark.parametrize("udf_name", [
-    "_geo_to_h3_udf", "_h3_distance_udf", "_polyfill_geojson_udf",
-])
+@pytest.mark.parametrize(
+    "udf_name",
+    [
+        "_geo_to_h3_udf",
+        "_h3_distance_udf",
+        "_polyfill_geojson_udf",
+    ],
+)
 def test_no_udf_swallows_an_attribute_error(udf_name):
     """Each of the three used `except Exception: return None`."""
     import inspect
@@ -66,9 +76,9 @@ def test_no_udf_swallows_an_attribute_error(udf_name):
     from opdi.reference import h3_airport_zones as z
 
     src = inspect.getsource(getattr(z, udf_name).func)
-    assert "except AttributeError" in src, (
-        f"{udf_name} must re-raise an h3 API mismatch rather than nulling it"
-    )
+    assert (
+        "except AttributeError" in src
+    ), f"{udf_name} must re-raise an h3 API mismatch rather than nulling it"
 
 
 def test_the_project_and_the_image_ask_for_the_same_h3_major():

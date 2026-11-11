@@ -1,4 +1,5 @@
 """Choosing a batch: a month by time, a day by the track it belongs to."""
+
 import datetime as dt
 
 import pytest

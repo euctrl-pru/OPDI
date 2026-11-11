@@ -52,15 +52,17 @@ def test_an_unknown_datum_is_refused_not_defaulted():
         flight_list_v62.trend_ceiling_kwargs({"datum": "agl", "fl_cap": "6100"})
 
 
-@pytest.mark.parametrize("row", [
-    {"datum": "field", "fl_cap": "6100"},
-    {"datum": "msl", "fl_cap": "60"},
-])
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"datum": "field", "fl_cap": "6100"},
+        {"datum": "msl", "fl_cap": "60"},
+    ],
+)
 def test_the_kwargs_are_accepted_by_the_real_config(row):
     """A helper that returns keys DetectionConfig rejects is worse than no
     helper: it fails hours in, inside a Spark job."""
-    cfg = dataclasses.replace(DetectionConfig(),
-                              **flight_list_v62.trend_ceiling_kwargs(row))
+    cfg = dataclasses.replace(DetectionConfig(), **flight_list_v62.trend_ceiling_kwargs(row))
     assert cfg.trend_max_datum in ("field", "msl")
 
 
@@ -123,8 +125,9 @@ def test_mains_whole_configuration_is_a_cell_of_the_grid():
     assert c.trend_vote_margin in flight_list_v62.GRID_MARGINS
 
 
-@pytest.mark.parametrize("fl,ft", [(40, 4100.0), (60, 6100.0), (80, 8100.0),
-                                   (100, 10100.0), (200, 20100.0)])
+@pytest.mark.parametrize(
+    "fl,ft", [(40, 4100.0), (60, 6100.0), (80, 8100.0), (100, 10100.0), (200, 20100.0)]
+)
 def test_the_msl_equivalent_is_the_top_of_the_flight_level_not_its_face_value(fl, ft):
     """The cut is `flight_level <= fl` on an integer cast, so it reaches
     (fl + 1) * 100 ft. Using fl * 100 would shave 100 ft off the band and
@@ -135,8 +138,7 @@ def test_the_msl_equivalent_is_the_top_of_the_flight_level_not_its_face_value(fl
 def test_the_datum_arm_ceiling_is_derived_not_typed():
     """Tying the constant to the rule is what stops the two drifting when a
     different sea-level optimum is chosen."""
-    assert (flight_list_v62.DATUM_ARM_CEILING_FT
-            == flight_list_v62.msl_equivalent_height_ft(60))
+    assert flight_list_v62.DATUM_ARM_CEILING_FT == flight_list_v62.msl_equivalent_height_ft(60)
 
 
 def test_a_field_sweep_cannot_supply_the_path_walks_lower_rungs():
@@ -147,6 +149,5 @@ def test_a_field_sweep_cannot_supply_the_path_walks_lower_rungs():
     `trend_ceiling_kwargs` is what the walk uses to decide, so the guard is
     that a field row is recognisable as such.
     """
-    field = flight_list_v62.trend_ceiling_kwargs({"datum": "field",
-                                                 "fl_cap": "6100"})
+    field = flight_list_v62.trend_ceiling_kwargs({"datum": "field", "fl_cap": "6100"})
     assert field["trend_max_datum"] != "msl"

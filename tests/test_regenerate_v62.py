@@ -48,7 +48,8 @@ def test_only_the_named_checks_may_even_mention_v6s_directory():
         if "adep-ades-detection-v6/" in joined:
             assert job.name in V6_READERS, (
                 f"{job.name} names V6's directory; only {sorted(V6_READERS)} "
-                f"may, and only to read it")
+                f"may, and only to read it"
+            )
 
 
 def test_the_drift_check_reads_v6s_manifest():
@@ -59,7 +60,7 @@ def test_the_drift_check_reads_v6s_manifest():
     args = " ".join(_args(jobs["input_drift"]))
     assert "_manifest.json" in args
     assert "adep-ades-detection-v6/" in args
-    assert "--executors" not in args      # no cluster needed
+    assert "--executors" not in args  # no cluster needed
 
 
 def test_every_output_is_staged_by_name_not_by_path():
@@ -103,9 +104,11 @@ def test_no_job_runs_v6s_or_v61s_scripts():
         assert "flight_list_v61.py" not in job.script, job.name
         assert job.script != "benchmarks/trend_sweep.py", job.name
         for path in job.code_paths:
-            assert path not in ("benchmarks/flight_list_v6.py",
-                                "benchmarks/flight_list_v61.py",
-                                "benchmarks/trend_sweep.py"), job.name
+            assert path not in (
+                "benchmarks/flight_list_v6.py",
+                "benchmarks/flight_list_v61.py",
+                "benchmarks/trend_sweep.py",
+            ), job.name
 
 
 def test_the_retired_trend_sweeps_are_gone():
@@ -171,11 +174,18 @@ def test_the_pipeline_arms_are_2025_only():
     pipeline on 2025 alone.
     """
     names = {j.name for j in regenerate_v62.jobs()}
-    for arm in ("datum_swap", "elevation_bands", "modes", "trend_grid",
-                "pipeline_path", "pipeline_path_ring"):
+    for arm in (
+        "datum_swap",
+        "elevation_bands",
+        "modes",
+        "trend_grid",
+        "pipeline_path",
+        "pipeline_path_ring",
+    ):
         assert f"{arm}_2025" in names, arm
-        assert f"{arm}_2024" not in names, (
-            f"{arm}_2024 cannot run: the 2024 tracks carry no h3_res_7")
+        assert (
+            f"{arm}_2024" not in names
+        ), f"{arm}_2024 cannot run: the 2024 tracks carry no h3_res_7"
 
 
 def test_every_staged_output_name_is_unique():
@@ -204,8 +214,9 @@ def test_the_pipeline_gets_a_relative_track_name_not_a_uri():
         if "--tracks" not in args:
             continue
         value = args[args.index("--tracks") + 1]
-        assert not value.startswith(("s3a://", "s3://")), (
-            f"{job.name} passes a URI to the pipeline: {value!r}")
+        assert not value.startswith(
+            ("s3a://", "s3://")
+        ), f"{job.name} passes a URI to the pipeline: {value!r}"
 
 
 def test_the_sweep_gets_a_uri_not_a_relative_name():
@@ -282,23 +293,22 @@ def test_the_grid_runs_match_the_declared_grid():
 
     def values_after(flag):
         out = []
-        for a in args[args.index(flag) + 1:]:
-            if a.startswith("--"):   # the next flag ends this list
+        for a in args[args.index(flag) + 1 :]:
+            if a.startswith("--"):  # the next flag ends this list
                 break
             out.append(a)
         return out
 
-    assert sorted(map(int, values_after("--grid-height"))) == \
-        sorted(flight_list_v62.GRID_HEIGHT_CAPS)
-    assert sorted(map(int, values_after("--grid-margin"))) == \
-        sorted(flight_list_v62.GRID_MARGINS)
+    assert sorted(map(int, values_after("--grid-height"))) == sorted(
+        flight_list_v62.GRID_HEIGHT_CAPS
+    )
+    assert sorted(map(int, values_after("--grid-margin"))) == sorted(flight_list_v62.GRID_MARGINS)
     for cap in flight_list_v62.GRID_HEIGHT_CAPS:
         assert any(a.startswith(f"grid_h{cap}_") for a in args), cap
 
     # Every cell named, not merely every value mentioned somewhere: the count
     # is what catches a run list that dropped a dimension.
-    expected = (len(flight_list_v62.GRID_HEIGHT_CAPS) * 2
-                * len(flight_list_v62.GRID_MARGINS))
+    expected = len(flight_list_v62.GRID_HEIGHT_CAPS) * 2 * len(flight_list_v62.GRID_MARGINS)
     named = [a for a in args if a.startswith("grid_h")]
     assert len(named) == expected, f"{len(named)} runs named, expected {expected}"
     assert len(set(named)) == len(named), "duplicate run names"
@@ -308,6 +318,7 @@ def test_the_grid_brackets_the_shipped_ceiling():
     """The shipped default was never on the sweep grid, so the claim that the
     ceiling is tuned rested on a grid missing the tuned value."""
     from opdi.config import DetectionConfig
+
     assert DetectionConfig().trend_max_height_ft in flight_list_v62.GRID_HEIGHT_CAPS
     assert 6100 in flight_list_v62.GRID_HEIGHT_CAPS
 
@@ -328,18 +339,21 @@ def test_every_flag_a_job_passes_exists_in_the_script_it_runs():
     for job in regenerate_v62.jobs():
         src = _script_source(job)
         for flag in (a for a in _args(job) if a.startswith("--")):
-            assert f'"{flag}"' in src, (
-                f"{job.name} passes {flag}, which {job.script} does not define")
+            assert (
+                f'"{flag}"' in src
+            ), f"{job.name} passes {flag}, which {job.script} does not define"
 
 
 def test_every_required_flag_is_supplied():
     """The mirror image: a missing required flag is the same failure, and the
     same delay before anyone finds out."""
     import re
+
     for job in regenerate_v62.jobs():
         src = _script_source(job)
-        required = set(re.findall(
-            r'add_argument\(\s*"(--[a-z0-9-]+)"[^)]*required=True', src, re.S))
+        required = set(
+            re.findall(r'add_argument\(\s*"(--[a-z0-9-]+)"[^)]*required=True', src, re.S)
+        )
         passed = {a for a in _args(job) if a.startswith("--")}
         # `--results-dir` is supplied by the runner, not by the job.
         missing = required - passed - {"--results-dir"}
@@ -354,8 +368,9 @@ def test_every_expected_output_is_a_filename_the_script_writes():
     for job in regenerate_v62.jobs():
         src = _script_source(job)
         for produced in job.outputs:
-            assert produced in src, (
-                f"{job.name} expects {produced}, which {job.script} never writes")
+            assert (
+                produced in src
+            ), f"{job.name} expects {produced}, which {job.script} never writes"
 
 
 def test_arm_c_consumes_what_arm_a_produces():
@@ -367,6 +382,7 @@ def test_arm_c_consumes_what_arm_a_produces():
     assert "per_airport_datum_2025.csv" in produced
     consumed = " ".join(_args(jobs["elevation_bands_2025"]))
     assert "per_airport_datum_2025.csv" in consumed
+
 
 def test_no_job_reads_a_cache_it_did_not_declare():
     """A declared input that is not the real one reads as verified and is not.
@@ -381,6 +397,7 @@ def test_no_job_reads_a_cache_it_did_not_declare():
     the module owning that cache.
     """
     import re
+
     repo = Path(__file__).resolve().parent.parent
     owner = {
         "research/trend_votes_agl": "trend_sweep_agl",
@@ -393,9 +410,11 @@ def test_no_job_reads_a_cache_it_did_not_declare():
         src = (repo / job.script).read_text()
         imports_cache = re.search(r"from (\w+) import [^\n]*\bCACHE\b", src)
         if not imports_cache:
-            continue          # the job names its cache on the command line
-        want = owner["research/trend_votes_agl" if "_agl" in declared[0]
-                     else "research/trend_votes"]
+            continue  # the job names its cache on the command line
+        want = owner[
+            "research/trend_votes_agl" if "_agl" in declared[0] else "research/trend_votes"
+        ]
         assert imports_cache.group(1) == want, (
             f"{job.name} declares {declared[0]} but {job.script} imports "
-            f"CACHE from {imports_cache.group(1)}")
+            f"CACHE from {imports_cache.group(1)}"
+        )

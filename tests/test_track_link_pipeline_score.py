@@ -3,6 +3,7 @@
 Tracks here are flights on the equator at 480 kt with one sample a minute, so the
 distance over a hole is known exactly from its length.
 """
+
 import datetime as dt
 import math
 from dataclasses import replace
@@ -100,10 +101,20 @@ def test_flights_inside_the_day_only():
         {
             "flight_key": [0, 1, 2, 3],
             "t_off": pd.to_datetime(
-                ["2026-06-14 01:00:00", "2026-06-14 23:00:00", "2026-06-13 23:30:00", "2026-06-14 23:59:59"]
+                [
+                    "2026-06-14 01:00:00",
+                    "2026-06-14 23:00:00",
+                    "2026-06-13 23:30:00",
+                    "2026-06-14 23:59:59",
+                ]
             ),
             "t_on": pd.to_datetime(
-                ["2026-06-14 09:00:00", "2026-06-15 01:00:00", "2026-06-14 02:00:00", "2026-06-14 23:59:59"]
+                [
+                    "2026-06-14 09:00:00",
+                    "2026-06-15 01:00:00",
+                    "2026-06-14 02:00:00",
+                    "2026-06-14 23:59:59",
+                ]
             ),
         }
     )
@@ -177,13 +188,36 @@ def test_the_flight_list_is_paired_with_each_arm_named_in_plain_words():
     columns = ["icao24", "callsign", "adep", "ades", "first_seen", "last_seen"]
     split = pd.DataFrame(
         [
-            ("aaa", "DLH1", "KJFK", None, pd.Timestamp("2026-06-14 01:10"), pd.Timestamp("2026-06-14 03:00")),
-            ("aaa", "DLH1", None, "EDDF", pd.Timestamp("2026-06-14 06:00"), pd.Timestamp("2026-06-14 08:50")),
+            (
+                "aaa",
+                "DLH1",
+                "KJFK",
+                None,
+                pd.Timestamp("2026-06-14 01:10"),
+                pd.Timestamp("2026-06-14 03:00"),
+            ),
+            (
+                "aaa",
+                "DLH1",
+                None,
+                "EDDF",
+                pd.Timestamp("2026-06-14 06:00"),
+                pd.Timestamp("2026-06-14 08:50"),
+            ),
         ],
         columns=columns,
     )
     linked = pd.DataFrame(
-        [("aaa", "DLH1", "KJFK", "EDDF", pd.Timestamp("2026-06-14 01:10"), pd.Timestamp("2026-06-14 08:50"))],
+        [
+            (
+                "aaa",
+                "DLH1",
+                "KJFK",
+                "EDDF",
+                pd.Timestamp("2026-06-14 01:10"),
+                pd.Timestamp("2026-06-14 08:50"),
+            )
+        ],
         columns=columns,
     )
     pairs, both = s.score_flight_list(truth, split, linked)
@@ -256,7 +290,9 @@ def test_events_are_compared_on_linked_airframes_inside_scored_flights(spark):
     holes = _holes(spark, ("L1", "abc123", 2 * HOUR, 3 * HOUR))
     flights = _flights(spark, (0, "abc123", 0, 5 * HOUR), (1, "fff000", 0, 5 * HOUR))
 
-    rows = s.compare_events(debounced_events, debounced_tracks, linked_events, linked_tracks, holes, flights)
+    rows = s.compare_events(
+        debounced_events, debounced_tracks, linked_events, linked_tracks, holes, flights
+    )
 
     assert rows == [
         {"type": "ATOT", "debounced_events": 0, "cruise_linked_events": 1, "change": 1},
@@ -275,7 +311,9 @@ def test_an_event_in_two_flights_slack_counts_once(spark):
         (1, "abc123", 2 * HOUR + 600, 4 * HOUR),
     )
     rows = s.compare_events(events, tracks, events, tracks, holes, flights)
-    assert rows == [{"type": "first_seen", "debounced_events": 1, "cruise_linked_events": 1, "change": 0}]
+    assert rows == [
+        {"type": "first_seen", "debounced_events": 1, "cruise_linked_events": 1, "change": 0}
+    ]
 
 
 def test_a_level_segment_spanning_a_hole_is_counted(spark):
@@ -334,7 +372,9 @@ def test_a_start_before_and_an_end_after_are_not_enough(spark):
 def test_events_on_the_edges_of_a_hole(spark, events, expected):
     holes = _holes(spark, ("T1", "abc123", 2 * HOUR, 4 * HOUR))
     frame = _events(spark, *[("T1", kind, t) for kind, t in events])
-    assert _family(s.level_across_holes(frame, holes), "level")["segments_across_a_hole"] == expected
+    assert (
+        _family(s.level_across_holes(frame, holes), "level")["segments_across_a_hole"] == expected
+    )
 
 
 def test_one_segment_across_two_holes_is_one_segment_and_two_holes(spark):
@@ -477,7 +517,9 @@ def test_the_distance_summary_reads_median_and_p95_of_the_difference():
 
 def test_the_distance_summary_of_nothing_is_empty():
     got = s.summarise_distance(
-        pd.DataFrame({"difference_nm": pd.Series(dtype=float), "edge_masked": pd.Series(dtype=bool)}),
+        pd.DataFrame(
+            {"difference_nm": pd.Series(dtype=float), "edge_masked": pd.Series(dtype=bool)}
+        ),
         holes_scored=0,
     )
     assert got["holes_compared"] == 0
@@ -779,7 +821,11 @@ def test_movements_are_counted_for_the_scored_flights_only(spark):
         "gt_time timestamp",
     )
     scored = pd.DataFrame(
-        {"icao24": ["abc123"], "callsign": ["DLH1"], "t_off": pd.to_datetime(["2026-06-14 08:00:00"])}
+        {
+            "icao24": ["abc123"],
+            "callsign": ["DLH1"],
+            "t_off": pd.to_datetime(["2026-06-14 08:00:00"]),
+        }
     )
 
     def detected(*milestones):
@@ -908,17 +954,23 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
         ids = [r["track_id"] for r in tracks.select("track_id").distinct().collect()]
         rows = []
         for t in ids:
-            times = tracks.filter(F.col("track_id") == t).agg(
-                F.min("event_time").alias("a"), F.max("event_time").alias("b")
-            ).first()
+            times = (
+                tracks.filter(F.col("track_id") == t)
+                .agg(F.min("event_time").alias("a"), F.max("event_time").alias("b"))
+                .first()
+            )
             rows += [
                 (f"{t}|level-start", t, "level-start", times["a"]),
                 (f"{t}|level-end", t, "level-end", times["b"]),
                 (f"{t}|last_seen", t, "last_seen", times["b"]),
             ]
-        return spark.createDataFrame(
-            rows, "id string, flight_id string, type string, event_time timestamp"
-        ).withColumn("info", F.lit("{}")).withColumn("dof", F.to_date(F.lit(day)))
+        return (
+            spark.createDataFrame(
+                rows, "id string, flight_id string, type string, event_time timestamp"
+            )
+            .withColumn("info", F.lit("{}"))
+            .withColumn("dof", F.to_date(F.lit(day)))
+        )
 
     def measurements_of(events):
         return events.select(
@@ -932,7 +984,10 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
         """A row per track, in time order, as the pipeline writes one."""
         ids = [
             r["track_id"]
-            for r in tracks.groupBy("track_id").agg(F.min("event_time").alias("a")).orderBy("a").collect()
+            for r in tracks.groupBy("track_id")
+            .agg(F.min("event_time").alias("a"))
+            .orderBy("a")
+            .collect()
         ]
         assert len(ids) == len(rows)
         return spark.createDataFrame(
@@ -1010,7 +1065,10 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
     )
 
     assert set(written) == set(s.OUTPUTS)
-    assert list(pd.DataFrame(written["link_both_ends.csv"])["debounced_rows_per_flight"]) == [2.0, 2.0]
+    assert list(pd.DataFrame(written["link_both_ends.csv"])["debounced_rows_per_flight"]) == [
+        2.0,
+        2.0,
+    ]
     assert list(pd.DataFrame(written["link_both_ends.csv"])["cruise_linked_both_right"]) == [1, 1]
     assert written["link_partition_check.csv"][0]["passed"] is True
     assert written["link_partition_check.csv"][0]["removed_at_a_linked_hole"] == 1
@@ -1031,7 +1089,11 @@ def test_the_job_writes_every_table_from_the_arms_tables(spark, tmp_path):
     labels = {r["label"]: r for r in written["link_truth_all_flights.csv"]}
     assert labels["true_link"]["holes"] == 1
     assert {r["movement"] for r in written["link_movements.csv"]} == {"ATOT", "ALDT", "all"}
-    assert {r["type"] for r in written["link_events.csv"]} == {"level-start", "level-end", "last_seen"}
+    assert {r["type"] for r in written["link_events.csv"]} == {
+        "level-start",
+        "level-end",
+        "last_seen",
+    }
     assert list(written)[1] == "link_consistency.csv"
     consistency = written["link_consistency.csv"][0]
     assert consistency["debounced_rows_without_a_track"] == 0
@@ -1084,9 +1146,7 @@ def _tracks(spark, *spans):
 
 def test_a_flight_list_row_without_a_track_is_counted(spark):
     tracks = _tracks(spark, ("T1", "abc123", 0, 600))
-    rows = _flight_list(
-        spark, ("T1", "EDDF", None, "", ""), ("T9", "EGLL", None, "", "")
-    )
+    rows = _flight_list(spark, ("T1", "EDDF", None, "", ""), ("T9", "EGLL", None, "", ""))
     assert s.rows_without_a_track(rows, tracks) == 1
 
 
@@ -1104,7 +1164,9 @@ def test_a_named_airport_among_its_own_alternatives_is_counted(spark):
 def test_tracks_the_same_under_both_rules_are_paired(spark):
     # Airframe abc123 is split in one arm and whole in the other; def456 is the same.
     split = _tracks(
-        spark, ("S1", "abc123", 0, 600), ("S2", "abc123", 2 * HOUR, 2 * HOUR + 600),
+        spark,
+        ("S1", "abc123", 0, 600),
+        ("S2", "abc123", 2 * HOUR, 2 * HOUR + 600),
         ("S3", "def456", 0, 600),
     )
     linked = _tracks(spark, ("L1", "abc123", 0, 600), ("L3", "def456", 0, 600))
@@ -1127,7 +1189,7 @@ def test_an_unchanged_track_with_another_airport_or_event_is_counted(spark):
         "unchanged_tracks": 2,
         "unchanged_tracks_with_other_airports": 1,
         "unchanged_tracks_with_other_events": 1,
-        "unchanged_tracks_with_other_event_info": 0,   # these fixtures carry no info
+        "unchanged_tracks_with_other_event_info": 0,  # these fixtures carry no info
     }
 
 
@@ -1137,11 +1199,15 @@ def test_an_unchanged_track_whose_events_differ_only_in_info_is_counted(spark):
     split = _tracks(spark, ("S1", "abc123", 0, 600))
     linked = _tracks(spark, ("L1", "abc123", 0, 600))
     rows = _flight_list(spark, ("S1", "EDDF", None, "", ""), ("L1", "EDDF", None, "", ""))
-    a = _events(spark, ("S1", "level-off-climb-start", 0)).withColumn("info", F.lit('{"distance_nm": 10}'))
-    b = _events(spark, ("L1", "level-off-climb-start", 0)).withColumn("info", F.lit('{"distance_nm": 12}'))
+    a = _events(spark, ("S1", "level-off-climb-start", 0)).withColumn(
+        "info", F.lit('{"distance_nm": 10}')
+    )
+    b = _events(spark, ("L1", "level-off-climb-start", 0)).withColumn(
+        "info", F.lit('{"distance_nm": 12}')
+    )
     row = s.unchanged_track_row(s.unchanged_tracks(split, linked), rows, rows, a, b)
-    assert row["unchanged_tracks_with_other_events"] == 0        # same types and times
-    assert row["unchanged_tracks_with_other_event_info"] == 1    # but not the same info
+    assert row["unchanged_tracks_with_other_events"] == 0  # same types and times
+    assert row["unchanged_tracks_with_other_event_info"] == 1  # but not the same info
 
 
 def test_unchanged_tracks_that_agree_count_nothing(spark):
@@ -1158,9 +1224,7 @@ def test_unchanged_tracks_that_agree_count_nothing(spark):
 def test_distance_on_tracks_without_a_hole_compares_the_two_methods(spark):
     # Five samples a degree apart on the equator, the middle position blank: the
     # released method lost the two segments around it.
-    samples = [
-        {"t": i * 60, "lat": 0.0, "lon": float(i), "track_id": "T1"} for i in range(5)
-    ]
+    samples = [{"t": i * 60, "lat": 0.0, "lon": float(i), "track_id": "T1"} for i in range(5)]
     samples[2]["lat"] = samples[2]["lon"] = None
     whole = [{"t": i * 60, "lat": 0.0, "lon": float(i), "track_id": "T2"} for i in range(5)]
     tracks = make_track(spark, samples + whole).select("track_id", "event_time", "lat", "lon")
@@ -1184,7 +1248,17 @@ def test_a_day_with_no_scored_flights_is_refused(spark):
         }
     )
     with pytest.raises(SystemExit, match="no truth flights"):
-        s.score_day(spark, "2024-06-01", read=None, truth=truth, p=P, apdf=None, detected=None, write=None, truth_path=None)
+        s.score_day(
+            spark,
+            "2024-06-01",
+            read=None,
+            truth=truth,
+            p=P,
+            apdf=None,
+            detected=None,
+            write=None,
+            truth_path=None,
+        )
 
 
 # --- every Network Manager flight --------------------------------------------
@@ -1193,7 +1267,10 @@ def test_a_day_with_no_scored_flights_is_refused(spark):
 def _label(holes, nm, pieces=(), events=()):
     def frame(rows, cols):
         return pd.DataFrame(
-            [(a, *[pd.Timestamp(_at(x)) if isinstance(x, (int, float)) else x for x in r]) for a, *r in rows],
+            [
+                (a, *[pd.Timestamp(_at(x)) if isinstance(x, (int, float)) else x for x in r])
+                for a, *r in rows
+            ],
             columns=cols,
         )
 
@@ -1245,14 +1322,20 @@ def test_events_are_counted_on_the_piece_they_sit_on():
 
 def test_the_summary_has_a_row_per_label_even_when_empty():
     labelled = pd.DataFrame(
-        {"label": ["true_link", "true_link"], "landing_on_older": [True, False],
-         "take_off_on_newer": [True, True]}
+        {
+            "label": ["true_link", "true_link"],
+            "landing_on_older": [True, False],
+            "take_off_on_newer": [True, True],
+        }
     )
     rows = {r["label"]: r for r in s.summarise_hole_labels(labelled)}
     assert list(rows) == list(s.HOLE_LABELS)
     assert rows["true_link"] == {
-        "label": "true_link", "holes": 2, "landing_on_older": 1,
-        "take_off_on_newer": 2, "both": 1,
+        "label": "true_link",
+        "holes": 2,
+        "landing_on_older": 1,
+        "take_off_on_newer": 2,
+        "both": 1,
     }
     assert rows["false_join"]["holes"] == 0
 
@@ -1269,8 +1352,8 @@ def test_load_all_flights_reads_zoned_times_as_utc(tmp_path):
     pd.DataFrame(
         {
             "AIRCRAFT_ADDRESS": [" ABC123 ", "zzz999"],
-            "AOBT_3": pd.to_datetime(["2026-06-14 12:00"]*2).tz_localize("Europe/Paris"),
-            "ARVT_3": pd.to_datetime(["2026-06-14 14:00"]*2).tz_localize("Europe/Paris"),
+            "AOBT_3": pd.to_datetime(["2026-06-14 12:00"] * 2).tz_localize("Europe/Paris"),
+            "ARVT_3": pd.to_datetime(["2026-06-14 14:00"] * 2).tz_localize("Europe/Paris"),
         }
     ).to_parquet(path)
     got = s.load_all_flights(path, {"abc123"})

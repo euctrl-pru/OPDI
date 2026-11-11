@@ -58,8 +58,7 @@ class CSVExporter:
             parquet_size = os.path.getsize(parquet_path)
             csv_size = os.path.getsize(csv_path)
 
-            if (parquet_size > self.size_threshold_bytes and
-                csv_size > self.size_threshold_bytes):
+            if parquet_size > self.size_threshold_bytes and csv_size > self.size_threshold_bytes:
                 return True
 
         return False

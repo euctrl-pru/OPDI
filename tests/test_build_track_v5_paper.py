@@ -59,7 +59,14 @@ def test_every_term_is_defined_once_before_use():
     text = _template()
     words = text.find("## 3. Words used in this report")
     assert words > 0
-    for term in ("**track**", "**hole**", "**edges**", "**piece**", "**linked hole**", "**false join**"):
+    for term in (
+        "**track**",
+        "**hole**",
+        "**edges**",
+        "**piece**",
+        "**linked hole**",
+        "**false join**",
+    ):
         assert text.count(term) == 1, term
         assert text.find(term) > words
 

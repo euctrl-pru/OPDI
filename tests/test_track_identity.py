@@ -15,6 +15,7 @@ collision every *day*, which is what these tests pin shut.
 The fix keys the id on the track's own first sample. Same track, same id, no
 matter who computes it or what else is in the frame.
 """
+
 import datetime as dt
 
 from conftest import make_track
@@ -113,5 +114,5 @@ def test_legacy_identity_is_untouched(spark):
     out = _segment(spark, [{"t": 0}, {"t": 60}], arm="legacy")
     tid = out.select("track_id").first()["track_id"]
     parts = tid.split("_")
-    assert len(parts) == 4, tid          # hash _ offset _ year _ month
-    assert parts[1] == "0"               # the running counter, still counting
+    assert len(parts) == 4, tid  # hash _ offset _ year _ month
+    assert parts[1] == "0"  # the running counter, still counting

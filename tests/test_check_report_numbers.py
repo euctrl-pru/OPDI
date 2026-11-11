@@ -35,7 +35,7 @@ def test_one_line_can_carry_both():
 
 
 def test_numbers_inside_r_chunks_are_ignored():
-    qmd = '```{r}\nx <- 12345\n```\nProse with no number.\n'
+    qmd = "```{r}\nx <- 12345\n```\nProse with no number.\n"
     assert crn.typed_numbers(qmd) == []
 
 
@@ -44,9 +44,15 @@ def test_small_integers_and_years_are_exempt():
     assert crn.typed_numbers(qmd) == []
 
 
-@pytest.mark.parametrize("text", [
-    "gained 0.12%", "fell 0.15 pp", "at 6,100 ft", "within 20 NM",
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gained 0.12%",
+        "fell 0.15 pp",
+        "at 6,100 ft",
+        "within 20 NM",
+    ],
+)
 def test_a_unit_bearing_number_is_never_exempt(text):
     """0.12% is small but it is a result. The exemption is for bare counts."""
     assert crn.typed_numbers(text + "\n"), text
@@ -60,8 +66,8 @@ def test_identifiers_that_contain_digits_are_not_measurements():
 def test_an_allowlisted_value_passes(tmp_path):
     allow = tmp_path / "constants.yml"
     allow.write_text(
-        '- value: "6,100"\n'
-        '  why: "A definition: FL60 admits everything below 6,100 ft."\n')
+        '- value: "6,100"\n' '  why: "A definition: FL60 admits everything below 6,100 ft."\n'
+    )
     qmd = tmp_path / "p.qmd"
     qmd.write_text("The cut reaches 6,100 ft.\n")
     assert crn.check(qmd, allow) == []
@@ -80,13 +86,12 @@ def test_a_context_restricts_where_an_exemption_applies(tmp_path):
     allow.write_text(
         '- value: "110"\n'
         '  context: "candidate"\n'
-        '  why: "The candidate search radius in NM."\n')
+        '  why: "The candidate search radius in NM."\n'
+    )
     qmd = tmp_path / "p.qmd"
-    qmd.write_text("Every candidate within 110 NM.\n"
-                   "Dropping the busiest leaves +110 correct.\n")
+    qmd.write_text("Every candidate within 110 NM.\n" "Dropping the busiest leaves +110 correct.\n")
     bad = crn.check(qmd, allow)
-    assert [f.line for f in bad] == [2], \
-        "the radius is exempt; the result on line 2 is not"
+    assert [f.line for f in bad] == [2], "the radius is exempt; the result on line 2 is not"
 
 
 def test_an_entry_without_a_context_applies_everywhere(tmp_path):
@@ -146,7 +151,8 @@ def test_the_real_paper_has_no_undeclared_numbers():
         pytest.skip(f"paper not found at {PAPER}")
     bad = crn.check(PAPER / "index.qmd", PAPER / "constants.yml")
     assert not bad, "undeclared numbers:\n" + "\n".join(
-        f"  line {f.line}: {f.value} -- {f.text}" for f in bad)
+        f"  line {f.line}: {f.value} -- {f.text}" for f in bad
+    )
 
 
 def test_the_papers_allowlist_is_well_formed():
@@ -160,9 +166,11 @@ def test_the_papers_allowlist_is_well_formed():
 def test_yaml_front_matter_is_not_prose():
     """The subtitle carries the version number. Front matter is metadata the
     author sets deliberately, not a claim about the data."""
-    qmd = ('---\ntitle: "A paper"\n'
-           'subtitle: "Version 6.2 — the consolidated study"\n---\n'
-           'Real prose with no number.\n')
+    qmd = (
+        '---\ntitle: "A paper"\n'
+        'subtitle: "Version 6.2 — the consolidated study"\n---\n'
+        "Real prose with no number.\n"
+    )
     assert crn.typed_numbers(qmd) == []
 
 

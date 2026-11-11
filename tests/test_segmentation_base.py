@@ -60,29 +60,33 @@ def _frozen_track_ids(spark, df, tmp_path):
 #: samples are interleaved in time with group 1's and spaced 10 minutes apart,
 #: which is under both legacy thresholds -- so collapsing the two onto ``icao24``
 #: alone yields one unbroken track where the correct key yields four.
-SAMPLES = [
-    # -- group 1: abc123 / TEST123, one flight then two gap-driven splits -----
-    {"t": 0, "baro_altitude": 300.0},
-    {"t": 60, "baro_altitude": 5000.0},
-    {"t": 120, "baro_altitude": 10000.0},
-    # 40 min gap at altitude -> splits on the 30 min rule
-    {"t": 120 + 40 * 60, "baro_altitude": 10000.0},
-    {"t": 180 + 40 * 60, "baro_altitude": 9000.0},
-    # 20 min gap below 1524 m -> splits on the low-altitude rule
-    {"t": 180 + 60 * 60, "baro_altitude": 200.0},
-    # 20 min gap above 1524 m -> does NOT split
-    {"t": 180 + 80 * 60, "baro_altitude": 8000.0},
-] + [
-    # -- group 2: the SAME airframe on a second callsign ----------------------
-    # 10 min spacing: neither legacy rule fires, so this is one track on its own
-    # and part of one merged track if the callsign is dropped from the key.
-    {"t": 30 + i * 600, "callsign": "TEST999", "baro_altitude": 10000.0}
-    for i in range(9)
-] + [
-    # -- group 3: a second airframe on the first callsign ---------------------
-    {"t": 0, "icao24": "def456", "baro_altitude": 10000.0},
-    {"t": 45 * 60, "icao24": "def456", "baro_altitude": 10000.0},   # 45 min gap
-]
+SAMPLES = (
+    [
+        # -- group 1: abc123 / TEST123, one flight then two gap-driven splits -----
+        {"t": 0, "baro_altitude": 300.0},
+        {"t": 60, "baro_altitude": 5000.0},
+        {"t": 120, "baro_altitude": 10000.0},
+        # 40 min gap at altitude -> splits on the 30 min rule
+        {"t": 120 + 40 * 60, "baro_altitude": 10000.0},
+        {"t": 180 + 40 * 60, "baro_altitude": 9000.0},
+        # 20 min gap below 1524 m -> splits on the low-altitude rule
+        {"t": 180 + 60 * 60, "baro_altitude": 200.0},
+        # 20 min gap above 1524 m -> does NOT split
+        {"t": 180 + 80 * 60, "baro_altitude": 8000.0},
+    ]
+    + [
+        # -- group 2: the SAME airframe on a second callsign ----------------------
+        # 10 min spacing: neither legacy rule fires, so this is one track on its own
+        # and part of one merged track if the callsign is dropped from the key.
+        {"t": 30 + i * 600, "callsign": "TEST999", "baro_altitude": 10000.0}
+        for i in range(9)
+    ]
+    + [
+        # -- group 3: a second airframe on the first callsign ---------------------
+        {"t": 0, "icao24": "def456", "baro_altitude": 10000.0},
+        {"t": 45 * 60, "icao24": "def456", "baro_altitude": 10000.0},  # 45 min gap
+    ]
+)
 
 #: What ``legacy()`` must produce on :data:`SAMPLES`: 3 + 1 + 2.
 EXPECTED_LOCK_TRACKS = 6
@@ -113,7 +117,7 @@ def test_the_lock_rejects_the_wrong_group_key(spark, tmp_path):
     wrong_key = BreakRule(
         name="wrong_key",
         break_expr=legacy().break_expr,
-        group_cols=["icao24"],          # not production's (icao24, callsign)
+        group_cols=["icao24"],  # not production's (icao24, callsign)
         month_suffix=True,
     )
     engine = assign_track_id(df, wrong_key, SegmentationParams())
@@ -129,12 +133,15 @@ def test_engine_reproduces_frozen_algorithm_across_a_month_boundary(spark, tmp_p
     base = dt.datetime(2024, 6, 30, 23, 30, 0)
     epoch = dt.datetime(2024, 6, 1, 12, 0, 0)
     off = (base - epoch).total_seconds()
-    df = make_track(spark, [
-        {"t": off, "baro_altitude": 10000.0},
-        {"t": off + 600, "baro_altitude": 10000.0},
-        {"t": off + 1800, "baro_altitude": 10000.0},   # 00:00 on 1 July
-        {"t": off + 2400, "baro_altitude": 10000.0},
-    ])
+    df = make_track(
+        spark,
+        [
+            {"t": off, "baro_altitude": 10000.0},
+            {"t": off + 600, "baro_altitude": 10000.0},
+            {"t": off + 1800, "baro_altitude": 10000.0},  # 00:00 on 1 July
+            {"t": off + 2400, "baro_altitude": 10000.0},
+        ],
+    )
     frozen = _frozen_track_ids(spark, df, tmp_path)
     engine = assign_track_id(df, legacy(), SegmentationParams())
     assert _partition(engine, "track_id") == _partition(frozen, "track_id")
@@ -156,9 +163,9 @@ def test_break_rule_requires_a_break_expression():
     naming neither the rule nor the missing field.
     """
     with pytest.raises(TypeError):
-        BreakRule(name="no_expr")                              # type: ignore[call-arg]
+        BreakRule(name="no_expr")  # type: ignore[call-arg]
     with pytest.raises(TypeError, match="break_expr must be callable"):
-        BreakRule(name="not_callable", break_expr="nope")      # type: ignore[arg-type]
+        BreakRule(name="not_callable", break_expr="nope")  # type: ignore[arg-type]
 
 
 def test_segmentation_config_and_params_agree_field_by_field():
@@ -179,8 +186,9 @@ def test_segmentation_config_and_params_agree_field_by_field():
     # considered here instead of slipping through a loophole.
     SELECTORS = {"method"}
 
-    cfg_fields = {f.name: f.default for f in dataclasses.fields(SegmentationConfig)
-                  if f.name not in SELECTORS}
+    cfg_fields = {
+        f.name: f.default for f in dataclasses.fields(SegmentationConfig) if f.name not in SELECTORS
+    }
     par_fields = {f.name: f.default for f in dataclasses.fields(SegmentationParams)}
     assert cfg_fields == par_fields
 

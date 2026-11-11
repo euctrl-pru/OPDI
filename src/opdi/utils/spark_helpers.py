@@ -195,5 +195,8 @@ def get_spark(
         >>> spark = get_spark("opensky", distributed=True, container_image="my-registry/opdi-spark:v4.1.1")
     """
     return SparkSessionManager.create_session(
-        app_name=app_name, env=env, distributed=distributed, container_image=container_image,
+        app_name=app_name,
+        env=env,
+        distributed=distributed,
+        container_image=container_image,
     )

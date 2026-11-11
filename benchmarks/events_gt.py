@@ -43,9 +43,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 #: Mirrored to S3 because executors cannot read the driver's filesystem.
-REFERENCE_BASE = os.environ.get(
-    "OPDI_REFERENCE_BASE", "s3a://eurocontrol/opdi/research/reference"
-)
+REFERENCE_BASE = os.environ.get("OPDI_REFERENCE_BASE", "s3a://eurocontrol/opdi/research/reference")
 
 PERIODS = {
     # The V4 period. It is the only month whose APDF extract covers all twenty
@@ -62,8 +60,26 @@ PERIODS = {
 #: paper is an upper bound on network-wide performance, not a typical case. The
 #: paper says so; this comment exists so the next reader of the code knows too.
 STUDY_AIRPORTS = (
-    "EBBR", "LSZH", "EICK", "EFHK", "LEIB", "EDDS", "LFLL", "LHBP", "LFPO", "LPFR",
-    "ESSA", "ENVA", "LOWW", "LKPR", "EDDP", "LPPT", "EGGD", "EGNT", "EGCC", "UGKO",
+    "EBBR",
+    "LSZH",
+    "EICK",
+    "EFHK",
+    "LEIB",
+    "EDDS",
+    "LFLL",
+    "LHBP",
+    "LFPO",
+    "LPFR",
+    "ESSA",
+    "ENVA",
+    "LOWW",
+    "LKPR",
+    "EDDP",
+    "LPPT",
+    "EGGD",
+    "EGNT",
+    "EGCC",
+    "UGKO",
 )
 
 #: Milestones APDF can score, and how to recover each from the long form.
@@ -150,9 +166,7 @@ def gt_airport_col():
     left the bridge rate network-wide -- two numbers the paper reads together,
     over different denominators, with nothing in either saying so.
     """
-    return F.when(F.col("SRC_PHASE") == "DEP", F.col("ADEP_ICAO")).otherwise(
-        F.col("ADES_ICAO")
-    )
+    return F.when(F.col("SRC_PHASE") == "DEP", F.col("ADEP_ICAO")).otherwise(F.col("ADES_ICAO"))
 
 
 def _reach(df: DataFrame) -> dict:
@@ -189,9 +203,7 @@ def bridge_report(bridged: DataFrame, airports: str = "all") -> dict:
     if airports != "study":
         return dict(network, scope="all")
     scoped = _reach(
-        _filter_study_airports(
-            bridged.withColumn("gt_airport", gt_airport_col()), "study"
-        )
+        _filter_study_airports(bridged.withColumn("gt_airport", gt_airport_col()), "study")
     )
     return dict(scoped, scope="study", network=network)
 
@@ -235,7 +247,12 @@ def milestones(bridged: DataFrame, days, airports: str = "all") -> DataFrame:
             b.filter(F.col("SRC_PHASE") == phase)
             .filter(F.col(column).isNotNull())
             .select(
-                "icao24", "callsign", "day", "gt_aobt", "gt_adep", "gt_ades",
+                "icao24",
+                "callsign",
+                "day",
+                "gt_aobt",
+                "gt_adep",
+                "gt_ades",
                 F.lit(name).alias("milestone"),
                 F.col(column).alias("gt_time"),
                 gt_airport_col().alias("gt_airport"),
@@ -307,13 +324,17 @@ def build(spark: SparkSession, period: str, full: bool = True, airports: str = "
     bridged = bridge(apdf, flights).cache()
 
     report = bridge_report(bridged, airports)
-    print(f"  bridge ({report['scope']}): {report['reached_icao24']:,} of "
-          f"{report['movements']:,} movements reach icao24 "
-          f"({report['reach_pct']}%)")
+    print(
+        f"  bridge ({report['scope']}): {report['reached_icao24']:,} of "
+        f"{report['movements']:,} movements reach icao24 "
+        f"({report['reach_pct']}%)"
+    )
     if "network" in report:
         net = report["network"]
-        print(f"  bridge (network, context only): {net['reached_icao24']:,} of "
-              f"{net['movements']:,} ({net['reach_pct']}%)")
+        print(
+            f"  bridge (network, context only): {net['reached_icao24']:,} of "
+            f"{net['movements']:,} ({net['reach_pct']}%)"
+        )
 
     return (
         milestones(bridged, spec["days"], airports),
@@ -333,9 +354,9 @@ def main() -> int:
         # --airports study explicitly.
         default="all",
         help="Restrict ground truth to the twenty-aerodrome study set "
-             "(STUDY_AIRPORTS) rather than every APDF airport. The bridge "
-             "report is scoped with it, because a ceiling computed over one "
-             "population cannot cap coverage computed over another.",
+        "(STUDY_AIRPORTS) rather than every APDF airport. The bridge "
+        "report is scoped with it, because a ceiling computed over one "
+        "population cannot cap coverage computed over another.",
     )
     ap.add_argument("--results-dir", default=None)
     ap.add_argument("--executors", type=int, default=10)

@@ -95,11 +95,7 @@ def _step_00a_airport_zones(spark, config, **kwargs):
     from opdi.utils.storage import StorageManager
 
     storage = StorageManager(spark, config)
-    airports_df = (
-        storage.read_table("oa_airports")
-        if storage.table_exists("oa_airports")
-        else None
-    )
+    airports_df = storage.read_table("oa_airports") if storage.table_exists("oa_airports") else None
     zone_gen.generate(airports_df=airports_df)
     # The local raw parquet is deliberately not written here.
     #
@@ -149,8 +145,7 @@ def _step_00a_airport_zones(spark, config, **kwargs):
     # and the log line said "Generated 21712" every time. Reading the table
     # back costs one count and makes the log evidence rather than narration.
     written = storage.read_table(table_name).count()
-    print(f"  Wrote {written:,} zone rows -> table {table_name} "
-          f"(rings to {max_radius:g} NM).")
+    print(f"  Wrote {written:,} zone rows -> table {table_name} " f"(rings to {max_radius:g} NM).")
     if written == 0:
         raise RuntimeError(
             f"{table_name} was written with 0 rows. A zone table with no cells "
@@ -204,19 +199,22 @@ def _prepare_layout_extract(pbf_path: str) -> str:
 
     dst = src.with_name(_AEROWAY_EXTRACT_PREFIX + src.name)
     if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
-        print(f"  Using cached aeroway extract {dst.name} "
-              f"({_fmt_size(dst.stat().st_size)}).")
+        print(f"  Using cached aeroway extract {dst.name} " f"({_fmt_size(dst.stat().st_size)}).")
         return str(dst)
 
     from opdi.reference.pbf_filter import filter_aeroway_pbf
 
-    print(f"  Filtering {src.name} ({_fmt_size(src.stat().st_size)}) "
-          f"to aeroway geometry -> {dst.name} ...")
+    print(
+        f"  Filtering {src.name} ({_fmt_size(src.stat().st_size)}) "
+        f"to aeroway geometry -> {dst.name} ..."
+    )
     stats = filter_aeroway_pbf(str(src), str(dst))
-    print(f"  Filtered in {stats['seconds']:.0f} s: "
-          f"{_fmt_size(stats['bytes_in'])} -> {_fmt_size(stats['bytes_out'])} "
-          f"({stats['nodes']:,} nodes, {stats['ways']:,} ways, "
-          f"{stats['relations']:,} relations).")
+    print(
+        f"  Filtered in {stats['seconds']:.0f} s: "
+        f"{_fmt_size(stats['bytes_in'])} -> {_fmt_size(stats['bytes_out'])} "
+        f"({stats['nodes']:,} nodes, {stats['ways']:,} ways, "
+        f"{stats['relations']:,} relations)."
+    )
     return str(dst)
 
 
@@ -239,8 +237,10 @@ def _step_00b_airport_layouts(spark, config, **kwargs):
         pbf_path = _prepare_layout_extract(pbf_path)
         print(f"  Source: local OSM extract {pbf_path}")
     else:
-        print("  Source: public Overpass API (no extract configured). This "
-              "cannot build the full network -- see readme.md, step 00b.")
+        print(
+            "  Source: public Overpass API (no extract configured). This "
+            "cannot build the full network -- see readme.md, step 00b."
+        )
 
     layout_gen = AirportLayoutGenerator(spark, config, pbf_path=pbf_path)
     layout_gen.create_table_if_not_exists()
@@ -363,8 +363,10 @@ def _step_00_reference_data(spark, config, **kwargs):
 
     for substep_id, (label, fn) in REFERENCE_SUBSTEPS.items():
         if not coverage_ref.get(substep_id, True):
-            print(f"\n  Skipping {substep_id} ({label}): sources are "
-                  "European and nothing reads the table")
+            print(
+                f"\n  Skipping {substep_id} ({label}): sources are "
+                "European and nothing reads the table"
+            )
             continue
         if not run_ref.get(substep_id, True):
             print(f"\n  Skipping {substep_id} ({label})")
@@ -404,8 +406,7 @@ def _step_01b_ingest_adsc(spark, config, start_date, end_date, **kwargs):
     flag is set is a step nobody remembers to run.
     """
     if not config.adsc.enabled:
-        print("\nSTEP 01b - ADS-C ingestion: disabled "
-              "(config.adsc.enabled is False)")
+        print("\nSTEP 01b - ADS-C ingestion: disabled " "(config.adsc.enabled is False)")
         return
 
     print("\n" + "=" * 70)
@@ -414,8 +415,7 @@ def _step_01b_ingest_adsc(spark, config, start_date, end_date, **kwargs):
 
     from opdi.ingestion.osn_adsc import AdscIngestion
 
-    AdscIngestion(spark, config).ingest_from_s3(
-        start_date=start_date, end_date=end_date)
+    AdscIngestion(spark, config).ingest_from_s3(start_date=start_date, end_date=end_date)
 
 
 def _step_02_process_tracks(spark, config, start_date, end_date, **kwargs):
@@ -691,8 +691,9 @@ def run_pipeline(
     }
     skip_all_ref = not any(run_reference.values())
 
-    step_label = step or ("ALL (01-08, incl. 01b/02a)" if skip_all_ref
-                          else "ALL (00-08, incl. 01b/02a)")
+    step_label = step or (
+        "ALL (01-08, incl. 01b/02a)" if skip_all_ref else "ALL (00-08, incl. 01b/02a)"
+    )
     print(f"  Step        : {step_label}")
     if step is None:
         skipped = [k for k, v in run_reference.items() if not v]

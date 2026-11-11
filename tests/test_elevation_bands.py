@@ -32,16 +32,16 @@ def test_bands_are_contiguous_and_ordered():
 @pytest.mark.parametrize(
     "elev,expected",
     [
-        (-11.0, "<500"),        # Schiphol, below sea level
+        (-11.0, "<500"),  # Schiphol, below sea level
         (0.0, "<500"),
         (499.9, "<500"),
-        (500.0, "500-1500"),    # boundary belongs to the upper band
+        (500.0, "500-1500"),  # boundary belongs to the upper band
         (1499.9, "500-1500"),
         (1500.0, "1500-3000"),
         (1998.0, "1500-3000"),  # Madrid
         (2999.9, "1500-3000"),
         (3000.0, ">3000"),
-        (5763.0, ">3000"),      # Erzurum
+        (5763.0, ">3000"),  # Erzurum
     ],
 )
 def test_band_boundaries(spark, elev, expected):

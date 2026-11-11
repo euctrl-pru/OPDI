@@ -57,7 +57,7 @@ SAMPLE_TAGS = {"2024-06": "3d-2024-06-05", "2025-06": "3d-2025-06-05"}
 #: ablations sit beside the main result instead of in a separate file.
 VARIANTS = {
     "cleaned": "{sample}_large_medium_r30_fl40_clean",
-    "strict-aircraft": None,     # written under the same tag; see --variant
+    "strict-aircraft": None,  # written under the same tag; see --variant
 }
 
 
@@ -103,13 +103,13 @@ def annotate_airports(df, s3):
     a["longitude_deg"] = pd.to_numeric(a["longitude_deg"], errors="coerce")
     out = df.merge(a, on="airport", how="left")
     min_lon, min_lat, max_lon, max_lat = BBOX
-    out["in_bbox"] = (
-        out.longitude_deg.between(min_lon, max_lon)
-        & out.latitude_deg.between(min_lat, max_lat)
+    out["in_bbox"] = out.longitude_deg.between(min_lon, max_lon) & out.latitude_deg.between(
+        min_lat, max_lat
     )
     out["in_set"] = out.apt_type.isin(["large_airport", "medium_airport"])
     out["in_scope"] = out.in_bbox & out.in_set
     return out
+
 
 PAPERS = REPO.parent / "opdi-portal" / "papers"
 DEFAULT_PAPER = "adep-ades-detection-v2"
@@ -136,18 +136,22 @@ def read_prefix(s3, prefix: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--paper", default=DEFAULT_PAPER,
-                    help="paper folder under opdi-portal/papers to write into")
+    ap.add_argument(
+        "--paper", default=DEFAULT_PAPER, help="paper folder under opdi-portal/papers to write into"
+    )
     ap.add_argument("--out", type=Path, default=None)
-    ap.add_argument("--tag", default=DEFAULT_TAG,
-                    help=f"run tag to publish (default {DEFAULT_TAG})")
-    ap.add_argument("--all-samples", action="store_true", default=True,
-                    help="export every sample in SAMPLES into combined CSVs "
-                         "carrying a month column (the default)")
-    ap.add_argument("--single", dest="all_samples", action="store_false",
-                    help="export only --tag")
-    ap.add_argument("--list", action="store_true",
-                    help="list the run tags present in S3 and exit")
+    ap.add_argument(
+        "--tag", default=DEFAULT_TAG, help=f"run tag to publish (default {DEFAULT_TAG})"
+    )
+    ap.add_argument(
+        "--all-samples",
+        action="store_true",
+        default=True,
+        help="export every sample in SAMPLES into combined CSVs "
+        "carrying a month column (the default)",
+    )
+    ap.add_argument("--single", dest="all_samples", action="store_false", help="export only --tag")
+    ap.add_argument("--list", action="store_true", help="list the run tags present in S3 and exit")
     args = ap.parse_args()
 
     load_dotenv()
@@ -201,13 +205,13 @@ def main() -> None:
         dest = args.out / name
         out = pd.concat(frames, ignore_index=True)
         out.to_csv(dest, index=False)
-        print(f"  {len(out):5d} rows, {out.month.nunique()} month(s) -> "
-              f"{dest.relative_to(REPO.parent)}")
+        print(
+            f"  {len(out):5d} rows, {out.month.nunique()} month(s) -> "
+            f"{dest.relative_to(REPO.parent)}"
+        )
 
     if missing:
-        sys.exit(
-            f"\n{len(missing)} prefix(es) absent -- run adep_ades.py to produce them first."
-        )
+        sys.exit(f"\n{len(missing)} prefix(es) absent -- run adep_ades.py to produce them first.")
 
 
 if __name__ == "__main__":

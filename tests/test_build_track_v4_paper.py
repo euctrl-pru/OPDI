@@ -15,8 +15,13 @@ import build_track_v4_paper as B  # noqa: E402
 PAPER = Path(
     os.environ.get(
         "OPDI_PAPER_DIR",
-        REPO.parents[3] / "opdi-portal" / ".claude" / "worktrees" / "track-construction-v4"
-        / "papers" / "track-construction-v4",
+        REPO.parents[3]
+        / "opdi-portal"
+        / ".claude"
+        / "worktrees"
+        / "track-construction-v4"
+        / "papers"
+        / "track-construction-v4",
     )
 )
 needs_paper = pytest.mark.skipif(
@@ -140,9 +145,7 @@ def test_a_grid_without_the_read_through_count_stops_the_build_and_names_it():
 
 
 def test_the_share_of_holes_read_through_a_blank_is_of_all_holes():
-    values = B.blank_edge_values(
-        {"real_holes_edge_read_through_blank": "25", "real_holes": "100"}
-    )
+    values = B.blank_edge_values({"real_holes_edge_read_through_blank": "25", "real_holes": "100"})
     assert values == {"blank_edge_holes": "25", "blank_edge_share": "25.0%"}
 
 
@@ -157,15 +160,29 @@ def test_the_low_edge_count_is_of_tests_the_setting_allows():
 
 def _edges(**verdicts):
     base = {"off": "True", "climb": "True", "descent": "False", "both": "False", **verdicts}
-    rows = {k: {"within_limits": v, "crossing_flights_in_one_track": "1", "linked_false_join": "1",
-                "negative_limit_false_joins": "1", "real_by_climb_status": "insufficient",
-                "real_by_descent_status": "over_limit"} for k, v in base.items()}
+    rows = {
+        k: {
+            "within_limits": v,
+            "crossing_flights_in_one_track": "1",
+            "linked_false_join": "1",
+            "negative_limit_false_joins": "1",
+            "real_by_climb_status": "insufficient",
+            "real_by_descent_status": "over_limit",
+        }
+        for k, v in base.items()
+    }
     return rows
 
 
-_PICK = {"status": "recommended_provisional", "provisional": "True", "link_old_edge_climb": "True",
-         "link_new_edge_descent": "False", "crossing_flights_in_one_track": "1",
-         "linked_false_join": "1", "negative_limit_false_joins": "1"}
+_PICK = {
+    "status": "recommended_provisional",
+    "provisional": "True",
+    "link_old_edge_climb": "True",
+    "link_new_edge_descent": "False",
+    "crossing_flights_in_one_track": "1",
+    "linked_false_join": "1",
+    "negative_limit_false_joins": "1",
+}
 
 
 def test_the_edge_decision_holds_on_what_the_prose_says():
@@ -178,18 +195,26 @@ def test_a_rejected_edge_setting_passing_stops_the_build(name):
         B.check_edge_decision(_PICK, _edges(**{name: "True"}))
 
 
-@pytest.mark.parametrize("change", [
-    {"status": "recommended"}, {"provisional": "False"}, {"link_old_edge_climb": "False"},
-    {"link_new_edge_descent": "True"},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": "recommended"},
+        {"provisional": "False"},
+        {"link_old_edge_climb": "False"},
+        {"link_new_edge_descent": "True"},
+    ],
+)
 def test_a_different_pick_stops_the_build(change):
     with pytest.raises(B.MissingValue, match="rewriting"):
         B.check_edge_decision({**_PICK, **change}, _edges())
 
 
 def test_each_edge_setting_must_have_its_own_row():
-    rows = [{"link_old_edge_climb": a, "link_new_edge_descent": b, "id": a + b}
-            for a in ("True", "False") for b in ("True", "False")]
+    rows = [
+        {"link_old_edge_climb": a, "link_new_edge_descent": b, "id": a + b}
+        for a in ("True", "False")
+        for b in ("True", "False")
+    ]
     assert B.edge_rows(rows)["climb"]["id"] == "TrueFalse"
     with pytest.raises(B.MissingValue):
         B.edge_rows(rows[:3])
@@ -205,12 +230,14 @@ def test_the_bound_on_none_of_n_has_its_closed_form():
 def test_the_bound_is_the_one_the_study_computes():
     _skip_until_the_grid_is_rerun()
     rec = _recommended()
-    assert B.upper_95(num := B.num(rec, "negative_limit_false_joins"), B.num(rec, "negative_limit_controls")) \
-        == pytest.approx(B.num(rec, "negative_false_join_upper_95"), rel=1e-6)
+    assert B.upper_95(
+        num := B.num(rec, "negative_limit_false_joins"), B.num(rec, "negative_limit_controls")
+    ) == pytest.approx(B.num(rec, "negative_false_join_upper_95"), rel=1e-6)
     assert num > 0
-    assert B.upper_95(B.num(rec, "same_callsign_low_edge_false_joins"),
-                      B.num(rec, "same_callsign_low_edge_controls")) \
-        == pytest.approx(B.num(rec, "same_callsign_low_edge_upper_95"), rel=1e-6)
+    assert B.upper_95(
+        B.num(rec, "same_callsign_low_edge_false_joins"),
+        B.num(rec, "same_callsign_low_edge_controls"),
+    ) == pytest.approx(B.num(rec, "same_callsign_low_edge_upper_95"), rel=1e-6)
 
 
 def test_the_chances_of_all_falling_on_one_side():
@@ -230,8 +257,10 @@ def test_the_constants_read_from_source_are_the_real_ones():
             assert B.code_constant(name, relative) == getattr(methods, name)
     import track_link_controls
 
-    assert B.code_constant("EVENT_NEAR_EDGE_MIN", "benchmarks/track_link_controls.py") \
+    assert (
+        B.code_constant("EVENT_NEAR_EDGE_MIN", "benchmarks/track_link_controls.py")
         == track_link_controls.EVENT_NEAR_EDGE_MIN
+    )
 
 
 def test_a_constant_gone_from_the_source_stops_the_build():

@@ -155,6 +155,7 @@ def at_border(lat: Column, lon: Column, margin_nm: float = BORDER_MARGIN_NM) -> 
 # Inputs
 # ---------------------------------------------------------------------------
 
+
 def load_airports(spark: SparkSession, airport_set: str) -> DataFrame:
     types = AIRPORT_SETS[airport_set]
     apt = (
@@ -191,9 +192,7 @@ def load_state_vectors(spark: SparkSession, days: list) -> DataFrame:
     return spark.read.parquet(*paths)
 
 
-def filter_to_aeroplanes(
-    spark: SparkSession, sv: DataFrame, strict: bool = False
-) -> DataFrame:
+def filter_to_aeroplanes(spark: SparkSession, sv: DataFrame, strict: bool = False) -> DataFrame:
     """Drop confirmed non-aeroplanes, keeping anything unidentified.
 
     Two independent signals, both denylists:
@@ -264,6 +263,7 @@ def build_tracks(spark: SparkSession, sv: DataFrame, clean: bool = False) -> Dat
 # Track/airport proximity
 # ---------------------------------------------------------------------------
 
+
 def haversine_nm(lat1, lon1, lat2, lon2):
     dlat = F.radians(lat2 - lat1)
     dlon = F.radians(lon2 - lon1)
@@ -274,9 +274,7 @@ def haversine_nm(lat1, lon1, lat2, lon2):
     return F.lit(2 * EARTH_R_NM) * F.asin(F.sqrt(F.least(a, F.lit(1.0))))
 
 
-def nearby_airports(
-    sv: DataFrame, apt: DataFrame, radius_nm: float, max_fl: float
-) -> DataFrame:
+def nearby_airports(sv: DataFrame, apt: DataFrame, radius_nm: float, max_fl: float) -> DataFrame:
     """Samples within *radius_nm* of an airport and below *max_fl*."""
     low = sv.withColumn("fl", F.col("baro_altitude") * 3.28084 / 100.0)
     if max_fl is not None:
@@ -293,6 +291,7 @@ def nearby_airports(
 # ---------------------------------------------------------------------------
 # Methodologies -- each returns (track_id, adep, ades)
 # ---------------------------------------------------------------------------
+
 
 def endpoint_candidates(
     sv: DataFrame, apt: DataFrame, sched_penalty_nm: float = SCHED_PENALTY_NM
@@ -364,9 +363,9 @@ def m1_traffic_endpoints(sv: DataFrame, apt: DataFrame, **kw) -> DataFrame:
     """
     # sched_penalty_nm=0: M1 must stay a faithful recreation of traffic's
     # nearest-aerodrome rule, which knows nothing about scheduled service.
-    return pivot_endpoints(
-        endpoint_candidates(sv, apt, sched_penalty_nm=0.0)
-    ).select("track_id", "adep", "ades")
+    return pivot_endpoints(endpoint_candidates(sv, apt, sched_penalty_nm=0.0)).select(
+        "track_id", "adep", "ades"
+    )
 
 
 def m7_endpoint_abstain(
@@ -445,9 +444,7 @@ def m7_endpoint_abstain(
             # longer pre-empts an aerodrome match.
             p = p.withColumn(
                 side,
-                F.when(ok, F.col(side)).otherwise(
-                    F.when(F.col(f"{side}_at_border"), F.lit(OOA))
-                ),
+                F.when(ok, F.col(side)).otherwise(F.when(F.col(f"{side}_at_border"), F.lit(OOA))),
             )
         else:
             p = p.withColumn(side, F.when(ok, F.col(side)))
@@ -524,13 +521,13 @@ def m8_extrapolated_endpoint(
 
     # Project along the track. Departures project backwards, hence the reversal.
     brg = F.radians(
-        F.when(F.col("role") == "adep", F.col("heading") + F.lit(180.0)).otherwise(
-            F.col("heading")
-        )
+        F.when(F.col("role") == "adep", F.col("heading") + F.lit(180.0)).otherwise(F.col("heading"))
     )
     dlat = reach_nm * F.cos(brg) / NM_PER_DEG
-    dlon = reach_nm * F.sin(brg) / (
-        NM_PER_DEG * F.greatest(F.cos(F.radians(F.col("lat"))), F.lit(0.1))
+    dlon = (
+        reach_nm
+        * F.sin(brg)
+        / (NM_PER_DEG * F.greatest(F.cos(F.radians(F.col("lat"))), F.lit(0.1)))
     )
     g = (
         g.withColumn("proj_nm", F.coalesce(reach_nm, F.lit(0.0)))
@@ -562,9 +559,7 @@ def m8_extrapolated_endpoint(
         expr = F.when(ok, F.col(side))
         if ooa:
             # Same precedence as m7: aerodrome first, border as fallback.
-            expr = expr.otherwise(
-                F.when(F.col(f"{side}_at_border"), F.lit(OOA))
-            )
+            expr = expr.otherwise(F.when(F.col(f"{side}_at_border"), F.lit(OOA)))
         p = p.withColumn(side, expr)
     return p.select("track_id", "adep", "ades")
 
@@ -603,12 +598,8 @@ def m2_on_ground(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.0, **k
     arr = ground.filter(F.col("event_time") > F.col("t_air_last"))
 
     # Nearest airport at the last pre-flight / first post-flight surface sample.
-    wd = Window.partitionBy("track_id").orderBy(
-        F.col("event_time").desc(), F.col("dist_nm").asc()
-    )
-    wa = Window.partitionBy("track_id").orderBy(
-        F.col("event_time").asc(), F.col("dist_nm").asc()
-    )
+    wd = Window.partitionBy("track_id").orderBy(F.col("event_time").desc(), F.col("dist_nm").asc())
+    wa = Window.partitionBy("track_id").orderBy(F.col("event_time").asc(), F.col("dist_nm").asc())
     dep = (
         dep.withColumn("_r", F.row_number().over(wd))
         .filter(F.col("_r") == 1)
@@ -640,11 +631,15 @@ def m3_vert_rate(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.0, **k
     arr = agg.filter(F.col("score") < 0)
     wd = Window.partitionBy("track_id").orderBy(F.col("score").desc(), F.col("dist_nm"))
     wa = Window.partitionBy("track_id").orderBy(F.col("score").asc(), F.col("dist_nm"))
-    dep = dep.withColumn("_r", F.row_number().over(wd)).filter(F.col("_r") == 1).select(
-        "track_id", F.col("apt").alias("adep")
+    dep = (
+        dep.withColumn("_r", F.row_number().over(wd))
+        .filter(F.col("_r") == 1)
+        .select("track_id", F.col("apt").alias("adep"))
     )
-    arr = arr.withColumn("_r", F.row_number().over(wa)).filter(F.col("_r") == 1).select(
-        "track_id", F.col("apt").alias("ades")
+    arr = (
+        arr.withColumn("_r", F.row_number().over(wa))
+        .filter(F.col("_r") == 1)
+        .select("track_id", F.col("apt").alias("ades"))
     )
     return dep.join(arr, "track_id", "full_outer")
 
@@ -665,9 +660,7 @@ def m5_min_alt_closest(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.
     best = Window.partitionBy("track_id", "role").orderBy(
         F.col("baro_altitude").asc_nulls_last(), F.col("dist_nm").asc()
     )
-    return _pivot_roles(
-        near.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1)
-    )
+    return _pivot_roles(near.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1))
 
 
 def m0_current(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.0, **kw):
@@ -689,11 +682,15 @@ def m0_current(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.0, **kw)
     arr = agg.filter(F.col("margin") < -4)
     wd = Window.partitionBy("track_id").orderBy(F.col("margin").desc(), F.col("dist_nm"))
     wa = Window.partitionBy("track_id").orderBy(F.col("margin").asc(), F.col("dist_nm"))
-    dep = dep.withColumn("_r", F.row_number().over(wd)).filter(F.col("_r") == 1).select(
-        "track_id", F.col("apt").alias("adep")
+    dep = (
+        dep.withColumn("_r", F.row_number().over(wd))
+        .filter(F.col("_r") == 1)
+        .select("track_id", F.col("apt").alias("adep"))
     )
-    arr = arr.withColumn("_r", F.row_number().over(wa)).filter(F.col("_r") == 1).select(
-        "track_id", F.col("apt").alias("ades")
+    arr = (
+        arr.withColumn("_r", F.row_number().over(wa))
+        .filter(F.col("_r") == 1)
+        .select("track_id", F.col("apt").alias("ades"))
     )
     return dep.join(arr, "track_id", "full_outer")
 
@@ -756,9 +753,7 @@ def cascade_wide(
             *[F.when(F.col(f"{side}_{t}").isNotNull(), F.lit(t)) for t in ladder]
         ).alias(f"{side}_src")
 
-    return out.select(
-        "*", pick("adep"), pick("ades"), src("adep"), src("ades")
-    )
+    return out.select("*", pick("adep"), pick("ades"), src("adep"), src("ades"))
 
 
 def m6_cascade(sv: DataFrame, apt: DataFrame, radius_nm=30.0, max_fl=40.0, ladder=None, **kw):
@@ -813,14 +808,13 @@ METHODS = {
 #: the last sample of a track is more often a loss of reception during descent
 #: than a landing, and that happens well above 5,000 ft.
 ABSTAIN_DIST_NM = (1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 40.0, 1e9)
-ABSTAIN_AGL_FT = (
-    0.0, 500.0, 1000.0, 2000.0, 5000.0, 8000.0, 10000.0, 15000.0, 20000.0, 1e9
-)
+ABSTAIN_AGL_FT = (0.0, 500.0, 1000.0, 2000.0, 5000.0, 8000.0, 10000.0, 15000.0, 20000.0, 1e9)
 
 
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
+
 
 def track_identity(sv: DataFrame) -> DataFrame:
     """(track_id -> icao24, callsign, date) for joining to ground truth."""
@@ -888,15 +882,11 @@ def label_ground_truth(gt: DataFrame, apt_loc: DataFrame) -> DataFrame:
             )
             .withColumn(
                 f"gt_{side}_in_area",
-                F.coalesce(
-                    _in_area(F.col(f"_{side}_lat"), F.col(f"_{side}_lon")), F.lit(False)
-                ),
+                F.coalesce(_in_area(F.col(f"_{side}_lat"), F.col(f"_{side}_lon")), F.lit(False)),
             )
             .withColumn(
                 f"gt_{side}",
-                F.when(F.col(f"gt_{side}_in_area"), F.col(f"gt_{side}")).otherwise(
-                    F.lit(OOA)
-                ),
+                F.when(F.col(f"gt_{side}_in_area"), F.col(f"gt_{side}")).otherwise(F.lit(OOA)),
             )
             .drop(f"_{side}_apt", f"_{side}_lat", f"_{side}_lon")
         )
@@ -993,25 +983,17 @@ def score(pred: DataFrame, ident: DataFrame, gt: DataFrame, k: float = 2.0) -> d
             expr
             for side in ("adep", "ades")
             for expr in (
-                F.sum(F.when(F.col(f"gt_{side}") == OOA, 1).otherwise(0)).alias(
-                    f"{side}_gt_ooa"
-                ),
-                F.sum(F.when(F.col(side) == OOA, 1).otherwise(0)).alias(
-                    f"{side}_pred_ooa"
-                ),
+                F.sum(F.when(F.col(f"gt_{side}") == OOA, 1).otherwise(0)).alias(f"{side}_gt_ooa"),
+                F.sum(F.when(F.col(side) == OOA, 1).otherwise(0)).alias(f"{side}_pred_ooa"),
                 F.sum(
-                    F.when(
-                        (F.col(side) == OOA) & (F.col(f"gt_{side}") == OOA), 1
-                    ).otherwise(0)
+                    F.when((F.col(side) == OOA) & (F.col(f"gt_{side}") == OOA), 1).otherwise(0)
                 ).alias(f"{side}_ooa_hit"),
                 # In-area: ground truth names a real aerodrome.
                 F.sum(F.when(F.col(f"gt_{side}") != OOA, 1).otherwise(0)).alias(
                     f"{side}_gt_inarea"
                 ),
                 F.sum(
-                    F.when(
-                        (F.col(f"gt_{side}") != OOA) & F.col(side).isNotNull(), 1
-                    ).otherwise(0)
+                    F.when((F.col(f"gt_{side}") != OOA) & F.col(side).isNotNull(), 1).otherwise(0)
                 ).alias(f"{side}_inarea_any"),
                 F.sum(
                     F.when(
@@ -1040,9 +1022,7 @@ def score(pred: DataFrame, ident: DataFrame, gt: DataFrame, k: float = 2.0) -> d
             for key, val in {
                 f"{side}_correct": agg[f"{side}_ok"],
                 f"{side}_wrong": agg[f"{side}_any"] - agg[f"{side}_ok"],
-                f"{side}_score": agg[f"{side}_ok"] - k * (
-                    agg[f"{side}_any"] - agg[f"{side}_ok"]
-                ),
+                f"{side}_score": agg[f"{side}_ok"] - k * (agg[f"{side}_any"] - agg[f"{side}_ok"]),
             }.items()
         },
         **{
@@ -1052,20 +1032,22 @@ def score(pred: DataFrame, ident: DataFrame, gt: DataFrame, k: float = 2.0) -> d
                 f"{side}_gt_ooa_share": agg[f"{side}_gt_ooa"] / n,
                 f"{side}_pred_ooa_share": agg[f"{side}_pred_ooa"] / n,
                 f"{side}_ooa_recall": (
-                    agg[f"{side}_ooa_hit"] / agg[f"{side}_gt_ooa"]
-                    if agg[f"{side}_gt_ooa"] else 0.0
+                    agg[f"{side}_ooa_hit"] / agg[f"{side}_gt_ooa"] if agg[f"{side}_gt_ooa"] else 0.0
                 ),
                 f"{side}_ooa_precision": (
                     agg[f"{side}_ooa_hit"] / agg[f"{side}_pred_ooa"]
-                    if agg[f"{side}_pred_ooa"] else 0.0
+                    if agg[f"{side}_pred_ooa"]
+                    else 0.0
                 ),
                 f"{side}_inarea_coverage": (
                     agg[f"{side}_inarea_any"] / agg[f"{side}_gt_inarea"]
-                    if agg[f"{side}_gt_inarea"] else 0.0
+                    if agg[f"{side}_gt_inarea"]
+                    else 0.0
                 ),
                 f"{side}_inarea_accuracy": (
                     agg[f"{side}_inarea_ok"] / agg[f"{side}_inarea_any"]
-                    if agg[f"{side}_inarea_any"] else 0.0
+                    if agg[f"{side}_inarea_any"]
+                    else 0.0
                 ),
             }.items()
         },
@@ -1114,9 +1096,7 @@ def diagnose_cascade(
             agg.withColumn("side", F.lit(side))
             .withColumn("share_of_gt", F.col("n_answered") / F.lit(n_gt))
             .withColumn("accuracy", F.col("n_correct") / F.col("n_answered"))
-            .withColumn(
-                "fallback_accuracy", F.col("n_fallback_correct") / F.col("n_answered")
-            )
+            .withColumn("fallback_accuracy", F.col("n_fallback_correct") / F.col("n_answered"))
             .withColumn("lift", F.col("accuracy") - F.col("fallback_accuracy"))
         )
 
@@ -1181,7 +1161,9 @@ def per_airport_counts(pred: DataFrame, ident: DataFrame, gt: DataFrame) -> Data
             .agg(
                 F.count(F.lit(1)).alias("n_truth"),
                 F.sum(F.when(F.col(side).isNotNull(), 1).otherwise(0)).alias("n_predicted_here"),
-                F.sum(F.when(F.col(side) == F.col(f"gt_{side}"), 1).otherwise(0)).alias("n_correct"),
+                F.sum(F.when(F.col(side) == F.col(f"gt_{side}"), 1).otherwise(0)).alias(
+                    "n_correct"
+                ),
             )
             .filter(F.col("airport").isNotNull())
         )
@@ -1253,7 +1235,9 @@ def per_type_counts(
             .agg(
                 F.count(F.lit(1)).alias("n_truth"),
                 F.sum(F.when(F.col(side).isNotNull(), 1).otherwise(0)).alias("n_answered"),
-                F.sum(F.when(F.col(side) == F.col(f"gt_{side}"), 1).otherwise(0)).alias("n_correct"),
+                F.sum(F.when(F.col(side) == F.col(f"gt_{side}"), 1).otherwise(0)).alias(
+                    "n_correct"
+                ),
                 F.countDistinct(F.col(f"gt_{side}")).alias("n_aerodromes"),
             )
             .withColumn("role", F.lit(role))
@@ -1266,11 +1250,7 @@ def per_type_counts(
             )
             .withColumn("overall", F.col("n_correct") / F.col("n_truth"))
         )
-    return (
-        frames[0]
-        .unionByName(frames[1])
-        .orderBy(F.col("role"), F.col("n_truth").desc())
-    )
+    return frames[0].unionByName(frames[1]).orderBy(F.col("role"), F.col("n_truth").desc())
 
 
 def error_pairs(
@@ -1293,9 +1273,9 @@ def error_pairs(
     # *kind* of aerodrome involved, not just its code. Six of the seven most
     # frequent confusions turned out to be a scheduled civil airport losing to
     # an adjacent air base, which is invisible if only ICAO codes are reported.
-    loc = apt.select(
-        "apt", "apt_lat", "apt_lon", "apt_scheduled", "apt_type"
-    ).dropDuplicates(["apt"])
+    loc = apt.select("apt", "apt_lat", "apt_lon", "apt_scheduled", "apt_type").dropDuplicates(
+        ["apt"]
+    )
     frames = []
     for side in ("adep", "ades"):
         e = j.filter(
@@ -1342,8 +1322,15 @@ def error_pairs(
                 (F.col("t_scheduled") == "yes") & (F.col("p_scheduled") != "yes"),
             )
             .select(
-                "side", "truth", "predicted", "n", "apart_nm",
-                "t_scheduled", "p_scheduled", "t_type", "p_type",
+                "side",
+                "truth",
+                "predicted",
+                "n",
+                "apart_nm",
+                "t_scheduled",
+                "p_scheduled",
+                "t_type",
+                "p_type",
                 "sched_to_unsched",
             )
         )
@@ -1401,9 +1388,7 @@ def _materialise_tracks(spark: SparkSession, args) -> DataFrame:
         print(f"tracks {d}: building{' + cleaning' if args.clean else ''} ...")
         sv = load_state_vectors(spark, [d])
         sv = filter_to_aeroplanes(spark, sv, strict=getattr(args, "strict_aircraft", False))
-        build_tracks(spark, sv, clean=args.clean).write.mode("overwrite").parquet(
-            f"{out}/day={d}"
-        )
+        build_tracks(spark, sv, clean=args.clean).write.mode("overwrite").parquet(f"{out}/day={d}")
     paths = [f"{out}/day={d}" for d in args.days]
     df = spark.read.parquet(*paths)
     print(f"tracks ready: {df.count():,} state vectors")
@@ -1446,56 +1431,104 @@ def main() -> None:
     ap.add_argument("--airport-set", default="large_medium", choices=list(AIRPORT_SETS))
     ap.add_argument("--radius-nm", type=float, default=30.0)
     ap.add_argument("--max-fl", type=float, default=40.0)
-    ap.add_argument("--strict-aircraft", action="store_true",
-                    help="keep only confirmed L/A airframes (the v1 allowlist) "
-                         "instead of dropping only confirmed non-aeroplanes")
+    ap.add_argument(
+        "--strict-aircraft",
+        action="store_true",
+        help="keep only confirmed L/A airframes (the v1 allowlist) "
+        "instead of dropping only confirmed non-aeroplanes",
+    )
     ap.add_argument("--adep-dist-nm", type=float, default=None)
     ap.add_argument("--adep-agl-ft", type=float, default=None)
     ap.add_argument("--ades-dist-nm", type=float, default=None)
-    ap.add_argument("--ades-agl-ft", type=float, default=None,
-                    help="per-side abstention thresholds; each falls back to "
-                         "--radius-nm/--max-fl style defaults when unset")
-    ap.add_argument("--results-dir", default=None,
-                    help="write result tables to this local directory as CSV "
-                         "instead of S3 parquet; use when the bucket is at quota")
-    ap.add_argument("--sched-penalty-nm", type=float, default=SCHED_PENALTY_NM,
-                    help="distance penalty for aerodromes without scheduled "
-                         "service (0 disables the tie-break)")
-    ap.add_argument("--no-ooa", action="store_true",
-                    help="score out-of-area aerodromes as misses, as v1 did, "
-                         "instead of labelling them OOA on both sides")
-    ap.add_argument("--clean", action="store_true",
-                    help="apply the step-02a cleaning stages to the tracks "
-                         "before detection (ablation; writes a separate prefix)")
-    ap.add_argument("--ladder", nargs="+", default=list(DEFAULT_LADDER),
-                    choices=list(RUNGS),
-                    help="cascade order for M6, most precise first")
-    ap.add_argument("--diagnose-cascade", action="store_true",
-                    help="attribute the cascade's answers to the rung that "
-                         "supplied them and report lift over the control")
-    ap.add_argument("--error-pairs", default=None, choices=list(METHODS),
-                    help="report the (truth, predicted) confusions this method "
-                         "makes, with the distance between the two aerodromes")
-    ap.add_argument("--per-airport", default=None, choices=list(METHODS),
-                    help="write per-aerodrome departure/arrival counts for this "
-                         "method against APDF")
-    ap.add_argument("--sweep-abstain", action="store_true",
-                    help="sweep M7's endpoint distance x height grid and write "
-                         "the coverage/accuracy curve")
-    ap.add_argument("--control", default=None, choices=list(RUNGS),
-                    help="rung to measure each rung's lift against on the "
-                         "flights it claimed. Defaults to the last rung; set "
-                         "it to the strongest single method to test whether a "
-                         "rung earns its place at all.")
-    ap.add_argument("--ui-port", type=int, default=4041,
-                    help="Spark UI port; proxied at /proxy/<port>/. Set it if a "
-                         "stale UI still holds 4040/4041, since Spark falls back "
-                         "silently and the proxy path is fixed. It does NOT allow "
-                         "a concurrent job -- see DATASETS.md.")
+    ap.add_argument(
+        "--ades-agl-ft",
+        type=float,
+        default=None,
+        help="per-side abstention thresholds; each falls back to "
+        "--radius-nm/--max-fl style defaults when unset",
+    )
+    ap.add_argument(
+        "--results-dir",
+        default=None,
+        help="write result tables to this local directory as CSV "
+        "instead of S3 parquet; use when the bucket is at quota",
+    )
+    ap.add_argument(
+        "--sched-penalty-nm",
+        type=float,
+        default=SCHED_PENALTY_NM,
+        help="distance penalty for aerodromes without scheduled "
+        "service (0 disables the tie-break)",
+    )
+    ap.add_argument(
+        "--no-ooa",
+        action="store_true",
+        help="score out-of-area aerodromes as misses, as v1 did, "
+        "instead of labelling them OOA on both sides",
+    )
+    ap.add_argument(
+        "--clean",
+        action="store_true",
+        help="apply the step-02a cleaning stages to the tracks "
+        "before detection (ablation; writes a separate prefix)",
+    )
+    ap.add_argument(
+        "--ladder",
+        nargs="+",
+        default=list(DEFAULT_LADDER),
+        choices=list(RUNGS),
+        help="cascade order for M6, most precise first",
+    )
+    ap.add_argument(
+        "--diagnose-cascade",
+        action="store_true",
+        help="attribute the cascade's answers to the rung that "
+        "supplied them and report lift over the control",
+    )
+    ap.add_argument(
+        "--error-pairs",
+        default=None,
+        choices=list(METHODS),
+        help="report the (truth, predicted) confusions this method "
+        "makes, with the distance between the two aerodromes",
+    )
+    ap.add_argument(
+        "--per-airport",
+        default=None,
+        choices=list(METHODS),
+        help="write per-aerodrome departure/arrival counts for this " "method against APDF",
+    )
+    ap.add_argument(
+        "--sweep-abstain",
+        action="store_true",
+        help="sweep M7's endpoint distance x height grid and write " "the coverage/accuracy curve",
+    )
+    ap.add_argument(
+        "--control",
+        default=None,
+        choices=list(RUNGS),
+        help="rung to measure each rung's lift against on the "
+        "flights it claimed. Defaults to the last rung; set "
+        "it to the strongest single method to test whether a "
+        "rung earns its place at all.",
+    )
+    ap.add_argument(
+        "--ui-port",
+        type=int,
+        default=4041,
+        help="Spark UI port; proxied at /proxy/<port>/. Set it if a "
+        "stale UI still holds 4040/4041, since Spark falls back "
+        "silently and the proxy path is fixed. It does NOT allow "
+        "a concurrent job -- see DATASETS.md.",
+    )
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="9g")
-    ap.add_argument("--executors", type=int, default=osn_sample.RESEARCH_EXECUTORS,
-                    help="K8s executors to request (ceiling ~12 for the quota)")
+    ap.add_argument(
+        "--executors",
+        type=int,
+        default=osn_sample.RESEARCH_EXECUTORS,
+        help="K8s executors to request (ceiling ~12 for the quota)",
+    )
     args = ap.parse_args()
 
     # Line-buffer stdout: redirected to a log, the per-method result lines
@@ -1519,11 +1552,10 @@ def main() -> None:
     gt = load_ground_truth(spark, args.months, args.days)
     if not args.no_ooa:
         gt = label_ground_truth(gt, airport_locations(spark)).cache()
-        n_ooa = gt.filter(
-            (F.col("gt_adep") == OOA) | (F.col("gt_ades") == OOA)
-        ).count()
-        print(f"ground-truth flights: {gt.count():,} "
-              f"({n_ooa:,} with an out-of-area ADEP or ADES)")
+        n_ooa = gt.filter((F.col("gt_adep") == OOA) | (F.col("gt_ades") == OOA)).count()
+        print(
+            f"ground-truth flights: {gt.count():,} " f"({n_ooa:,} with an out-of-area ADEP or ADES)"
+        )
     else:
         print(f"ground-truth flights: {gt.count():,}")
 
@@ -1545,10 +1577,14 @@ def main() -> None:
         + (["strict"] if getattr(args, "strict_aircraft", False) else [])
         + (["noooa"] if getattr(args, "no_ooa", False) else [])
         + ([f"sp{int(args.sched_penalty_nm)}"] if args.sched_penalty_nm else [])
-        + (["perside"] if any(
-            getattr(args, n, None) is not None
-            for n in ("adep_dist_nm", "adep_agl_ft", "ades_dist_nm", "ades_agl_ft")
-        ) else [])
+        + (
+            ["perside"]
+            if any(
+                getattr(args, n, None) is not None
+                for n in ("adep_dist_nm", "adep_agl_ft", "ades_dist_nm", "ades_agl_ft")
+            )
+            else []
+        )
     )
 
     if args.sweep_abstain:
@@ -1589,13 +1625,17 @@ def main() -> None:
         control = args.control or args.ladder[-1]
         ladder = list(args.ladder)
         if control not in ladder:
-            ladder.append(control)   # needed as a column, not as a rung that fires
+            ladder.append(control)  # needed as a column, not as a rung that fires
         diag = diagnose_cascade(
             sv, apt, ident, gt, ladder, args.radius_nm, args.max_fl, control
         ).cache()
         _print_diagnosis(diag.collect(), control)
-        emit(diag, f"{OUT_BASE}/cascade_diag/{tag}_{'-'.join(ladder)}_vs_{control}",
-             args, f"cascade_diag__{tag}")
+        emit(
+            diag,
+            f"{OUT_BASE}/cascade_diag/{tag}_{'-'.join(ladder)}_vs_{control}",
+            args,
+            f"cascade_diag__{tag}",
+        )
 
     if args.error_pairs:
         kw = {"ladder": args.ladder} if args.error_pairs == "M6_cascade" else {}

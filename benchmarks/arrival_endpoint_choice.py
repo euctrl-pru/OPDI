@@ -52,8 +52,7 @@ BEARING_GATES = (None, 0.10, 0.25, 1.0)
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--months", nargs="+", default=["202506"])
-    ap.add_argument("--days", nargs="+",
-                    default=["2025-06-05", "2025-06-06", "2025-06-07"])
+    ap.add_argument("--days", nargs="+", default=["2025-06-05", "2025-06-06", "2025-06-07"])
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument("--ui-port", type=int, default=4041)
@@ -70,61 +69,90 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     cand = spark.read.parquet(CANDIDATES)
-    apt = (spark.read.parquet(AIRPORTS)
-           .select(F.col("ident").alias("apt_ident"),
-                   F.col("latitude_deg").cast("double").alias("apt_lat"),
-                   F.col("longitude_deg").cast("double").alias("apt_lon"))
-           .dropDuplicates(["apt_ident"]))
-    ends = (cand.select("track_id", "role", F.col("event_time").alias("t_end"))
-            .dropDuplicates(["track_id", "role"]))
+    apt = (
+        spark.read.parquet(AIRPORTS)
+        .select(
+            F.col("ident").alias("apt_ident"),
+            F.col("latitude_deg").cast("double").alias("apt_lat"),
+            F.col("longitude_deg").cast("double").alias("apt_lon"),
+        )
+        .dropDuplicates(["apt_ident"])
+    )
+    ends = cand.select("track_id", "role", F.col("event_time").alias("t_end")).dropDuplicates(
+        ["track_id", "role"]
+    )
     crs = courses(spark, ends)
 
     pen = F.when(F.col("apt_scheduled") == "yes", F.lit(0.0)).otherwise(F.lit(PENALTY_NM))
-    c = (cand.join(F.broadcast(apt), "apt_ident", "left")
-         .join(crs, ["track_id", "role"], "left")
-         .withColumn("_eff", F.col("dist_nm") + pen)
-         .withColumn("align_deg",
-                     angle_between(F.col("course"),
-                                   bearing_deg(F.col("y_far"), F.col("x_far"),
-                                               F.col("apt_lat"), F.col("apt_lon")))))
+    c = (
+        cand.join(F.broadcast(apt), "apt_ident", "left")
+        .join(crs, ["track_id", "role"], "left")
+        .withColumn("_eff", F.col("dist_nm") + pen)
+        .withColumn(
+            "align_deg",
+            angle_between(
+                F.col("course"),
+                bearing_deg(F.col("y_far"), F.col("x_far"), F.col("apt_lat"), F.col("apt_lon")),
+            ),
+        )
+    )
     w = Window.partitionBy("track_id", "role").orderBy(F.col("_eff").asc_nulls_last())
     best = c.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1).cache()
     print(f"best candidates: {best.count():,}")
 
     ident = identities_from_candidates(cand)
-    gt = label_ground_truth(load_ground_truth(spark, args.months, args.days),
-                            airport_locations(spark)).cache()
+    gt = label_ground_truth(
+        load_ground_truth(spark, args.months, args.days), airport_locations(spark)
+    ).cache()
     N = gt.count()
     print(f"ground-truth flights: {N:,}\n")
 
     rows = []
-    print(f"{'setting':<34}{'cov':>8}{'acc':>8}{'correct':>9}{'wrong':>8}"
-          f"{'k=1':>9}{'k=2':>9}{'k=3':>9}")
+    print(
+        f"{'setting':<34}{'cov':>8}{'acc':>8}{'correct':>9}{'wrong':>8}"
+        f"{'k=1':>9}{'k=2':>9}{'k=3':>9}"
+    )
     for radius, height in BASES:
         gate = (F.col("dist_nm") <= float(radius)) & (
-            F.col("on_ground") | (F.col("elev_known")
-                                  & (F.col("agl_ft") <= float(height))))
+            F.col("on_ground") | (F.col("elev_known") & (F.col("agl_ft") <= float(height)))
+        )
         for deg in BEARING_GATES:
-            accept = gate if deg is None else (
-                gate | F.coalesce(F.col("align_deg") <= deg, F.lit(False)))
-            apt_col = (F.when(accept, F.col("apt_ident"))
-                       .when(F.col("at_border"), F.lit("OOA")))
-            pred = (best.withColumn("apt", apt_col)
-                    .groupBy("track_id").pivot("role", ["adep", "ades"])
-                    .agg(F.first("apt")))
+            accept = (
+                gate
+                if deg is None
+                else (gate | F.coalesce(F.col("align_deg") <= deg, F.lit(False)))
+            )
+            apt_col = F.when(accept, F.col("apt_ident")).when(F.col("at_border"), F.lit("OOA"))
+            pred = (
+                best.withColumn("apt", apt_col)
+                .groupBy("track_id")
+                .pivot("role", ["adep", "ades"])
+                .agg(F.first("apt"))
+            )
             m = score(pred, ident, gt)
             n_gt = m["n_ground_truth"]
             cor = round(m["ades_overall"] * n_gt)
             wr = round(m["ades_coverage"] * n_gt) - cor
             lab = f"{radius} NM / {height:,} ft" + ("" if deg is None else f" + {deg}deg")
-            rows.append({"radius_nm": radius, "height_ft": height,
-                         "bearing_deg": -1.0 if deg is None else deg,
-                         "coverage": m["ades_coverage"], "accuracy": m["ades_accuracy"],
-                         "overall": m["ades_overall"], "correct": cor, "wrong": wr,
-                         "score_k1": cor - wr, "score_k2": cor - 2 * wr,
-                         "score_k3": cor - 3 * wr})
-            print(f"{lab:<34}{m['ades_coverage']:>8.2%}{m['ades_accuracy']:>8.2%}"
-                  f"{cor:>9,}{wr:>8,}{cor-wr:>9,}{cor-2*wr:>9,}{cor-3*wr:>9,}")
+            rows.append(
+                {
+                    "radius_nm": radius,
+                    "height_ft": height,
+                    "bearing_deg": -1.0 if deg is None else deg,
+                    "coverage": m["ades_coverage"],
+                    "accuracy": m["ades_accuracy"],
+                    "overall": m["ades_overall"],
+                    "correct": cor,
+                    "wrong": wr,
+                    "score_k1": cor - wr,
+                    "score_k2": cor - 2 * wr,
+                    "score_k3": cor - 3 * wr,
+                }
+            )
+            print(
+                f"{lab:<34}{m['ades_coverage']:>8.2%}{m['ades_accuracy']:>8.2%}"
+                f"{cor:>9,}{wr:>8,}{cor-wr:>9,}{cor-2*wr:>9,}{cor-3*wr:>9,}"
+            )
 
     spark.createDataFrame(rows).toPandas().to_csv(out / "arrival_choice.csv", index=False)
     print(f"\nwritten to {out}")

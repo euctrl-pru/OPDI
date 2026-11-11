@@ -31,17 +31,19 @@ def _gt(spark, flights):
     rows = []
     for f in flights:
         key, t_off, t_land = f[0], f[1], f[2]
-        rows.append(Row(
-            flight_key=key,
-            icao24="abc123",
-            callsign="TST1",
-            gt_adep="EBBR",
-            gt_ades="LFPG",
-            t_off=t_off,
-            t_land=t_land,
-            t_source=f[3] if len(f) > 3 else "apdf",
-            day=t_off.date(),
-        ))
+        rows.append(
+            Row(
+                flight_key=key,
+                icao24="abc123",
+                callsign="TST1",
+                gt_adep="EBBR",
+                gt_ades="LFPG",
+                t_off=t_off,
+                t_land=t_land,
+                t_source=f[3] if len(f) > 3 else "apdf",
+                day=t_off.date(),
+            )
+        )
     return spark.createDataFrame(rows)
 
 
@@ -53,13 +55,17 @@ def _hour(day, h, m=0):
 # containment census
 # --------------------------------------------------------------------------
 
+
 def test_census_splits_kept_from_clipped_at_each_edge(spark):
     """One flight of each kind, so every counter is checkable by hand."""
-    gt = _gt(spark, [
-        ("F_in", _hour(5, 8), _hour(5, 10)),        # wholly inside
-        ("F_cs", _hour(4, 23), _hour(5, 1)),        # departed before the window
-        ("F_ce", _hour(7, 23), _hour(8, 1)),        # lands after the window
-    ])
+    gt = _gt(
+        spark,
+        [
+            ("F_in", _hour(5, 8), _hour(5, 10)),  # wholly inside
+            ("F_cs", _hour(4, 23), _hour(5, 1)),  # departed before the window
+            ("F_ce", _hour(7, 23), _hour(8, 1)),  # lands after the window
+        ],
+    )
     c = containment_census(gt, WS, WE)
     assert c["n_gt_flights"] == 3
     assert c["n_wholly_inside"] == 1
@@ -78,14 +84,15 @@ def test_census_reads_string_and_datetime_bounds_identically(spark):
     returns NULL without it: the job either dies or reports a blank
     observed-fraction with nothing saying why.
     """
-    gt = _gt(spark, [
-        ("F_in", _hour(5, 8), _hour(5, 10)),
-        ("F_cs", _hour(4, 23), _hour(5, 1)),
-    ])
-    as_str = containment_census(gt, WS, WE)
-    as_dt = containment_census(
-        gt, dt.datetime(2025, 6, 5), dt.datetime(2025, 6, 8)
+    gt = _gt(
+        spark,
+        [
+            ("F_in", _hour(5, 8), _hour(5, 10)),
+            ("F_cs", _hour(4, 23), _hour(5, 1)),
+        ],
     )
+    as_str = containment_census(gt, WS, WE)
+    as_dt = containment_census(gt, dt.datetime(2025, 6, 5), dt.datetime(2025, 6, 8))
     assert as_str == as_dt
     assert as_str["median_observed_fraction_clipped"] == pytest.approx(0.5)
 
@@ -104,10 +111,13 @@ def test_census_treats_the_upper_bound_as_exclusive(spark):
 
 
 def test_census_on_an_all_inside_sample_keeps_everything(spark):
-    gt = _gt(spark, [
-        ("F1", _hour(5, 8), _hour(5, 10)),
-        ("F2", _hour(6, 8), _hour(6, 12)),
-    ])
+    gt = _gt(
+        spark,
+        [
+            ("F1", _hour(5, 8), _hour(5, 10)),
+            ("F2", _hour(6, 8), _hour(6, 12)),
+        ],
+    )
     c = containment_census(gt, WS, WE)
     assert c["pct_kept"] == pytest.approx(100.0)
     assert c["n_clipped_start"] == c["n_clipped_end"] == 0
@@ -131,6 +141,7 @@ def test_census_ground_truth_refuses_to_pad_into_an_unloaded_month():
 # boundary histogram
 # --------------------------------------------------------------------------
 
+
 def _matched_and_extents(spark, flights):
     """flights: list of (flight_key, track_id, off_s, land_s[, t_source]).
 
@@ -143,20 +154,24 @@ def _matched_and_extents(spark, flights):
         src = f[4] if len(f) > 4 else "apdf"
         t_off, t_land = _T0, _T0 + dt.timedelta(hours=2)
         for i in range(3):
-            m_rows.append(Row(
-                icao24="abc123",
-                event_time=t_off + dt.timedelta(minutes=10 * i + 1),
+            m_rows.append(
+                Row(
+                    icao24="abc123",
+                    event_time=t_off + dt.timedelta(minutes=10 * i + 1),
+                    track_id=tid,
+                    flight_key=key,
+                    t_off=t_off,
+                    t_land=t_land,
+                    t_source=src,
+                )
+            )
+        e_rows.append(
+            Row(
                 track_id=tid,
-                flight_key=key,
-                t_off=t_off,
-                t_land=t_land,
-                t_source=src,
-            ))
-        e_rows.append(Row(
-            track_id=tid,
-            trk_start=t_off + dt.timedelta(seconds=off_s),
-            trk_end=t_land + dt.timedelta(seconds=land_s),
-        ))
+                trk_start=t_off + dt.timedelta(seconds=off_s),
+                trk_end=t_land + dt.timedelta(seconds=land_s),
+            )
+        )
     return spark.createDataFrame(m_rows), spark.createDataFrame(e_rows)
 
 
@@ -221,11 +236,14 @@ def test_histogram_covers_the_same_sample_as_the_percentiles(spark):
     restriction and the dominant-track pick, both of which change the
     denominator without changing the shape.
     """
-    m, e = _matched_and_extents(spark, [
-        ("F1", "T1", -90, 400),
-        ("F2", "T2", 30, 120),
-        ("F3", "T3", 10, 10, "nm_inferred"),   # excluded from both
-    ])
+    m, e = _matched_and_extents(
+        spark,
+        [
+            ("F1", "T1", -90, 400),
+            ("F2", "T2", 30, 120),
+            ("F3", "T3", 10, 10, "nm_inferred"),  # excluded from both
+        ],
+    )
     rows = boundary_histogram(m, e)
     n = boundary_error(m, e)["n_apdf_flights"]
     assert n == 2

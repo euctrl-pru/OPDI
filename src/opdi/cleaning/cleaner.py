@@ -65,18 +65,14 @@ class TrackCleaner:
 
     # -- processing ------------------------------------------------------
 
-    def process_day(
-        self, day: date, skip_if_processed: bool = True, report: bool = True
-    ) -> None:
+    def process_day(self, day: date, skip_if_processed: bool = True, report: bool = True) -> None:
         """Clean the tracks that started on ``day``, whole.
 
         The tracks were already claimed by their start day when step 02 wrote
         them, so there is no window to re-derive here -- this reads the day's
         partition and cleans exactly what it holds.
         """
-        self.process_month(
-            month=day, skip_if_processed=skip_if_processed, report=report, day=day
-        )
+        self.process_month(month=day, skip_if_processed=skip_if_processed, report=report, day=day)
 
     def process_month(
         self,
@@ -123,13 +119,11 @@ class TrackCleaner:
             end_str = datetime.utcfromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S")
 
             source = self.storage.table_ref(SOURCE_TABLE)
-            df = self.spark.sql(
-                f"""
+            df = self.spark.sql(f"""
                 SELECT * FROM {source}
                 WHERE (event_time >= TIMESTAMP('{start_str}'))
                   AND (event_time < TIMESTAMP('{end_str}'));
-                """
-            )
+                """)
 
         cleaned = clean_tracks(df, self.cleaning)
 
@@ -146,7 +140,10 @@ class TrackCleaner:
             # and leaves every other day alone. Re-cleaning a day is therefore
             # idempotent rather than duplicating it.
             self.storage.write_table(
-                cleaned, TARGET_TABLE, mode="overwrite", partition_by=["dof"],
+                cleaned,
+                TARGET_TABLE,
+                mode="overwrite",
+                partition_by=["dof"],
                 # Known, so the partition does not have to be rediscovered by
                 # evaluating the frame a second time.
                 partition_values=[{"dof": day}],
@@ -189,8 +186,7 @@ class TrackCleaner:
 
     def create_table_if_not_exists(self) -> None:
         """Create ``osn_tracks_clean``: the ``osn_tracks`` schema plus ``segment_id``."""
-        self.storage.create_table(
-            f"""
+        self.storage.create_table(f"""
         CREATE TABLE IF NOT EXISTS `{self.project}`.`{TARGET_TABLE}` (
             event_time TIMESTAMP COMMENT 'Timestamp for which the state vector was valid.',
             icao24 STRING COMMENT '24-bit ICAO transponder ID.',
@@ -226,6 +222,5 @@ class TrackCleaner:
             'write.distribution.mode'='hash'
         )
         COMMENT '`{self.project}`.`{SOURCE_TABLE}` after native trajectory cleaning (step 02a). Bad values are masked to NULL, rows are preserved.';
-        """
-        )
+        """)
         print(f"Table {self.project}.{TARGET_TABLE} created/verified.")

@@ -101,6 +101,7 @@ def test_a_turnaround_gets_both(spark):
 # Position-derived groundspeed (velocity absent or NULLed)
 # ---------------------------------------------------------------------------
 
+
 def test_position_derived_groundspeed_recovers_movement_when_velocity_is_null(spark):
     """`velocity` is NULL throughout -- the case cleaning's stale-broadcast
     mask produces for a genuinely stationary-then-pushing aircraft. The

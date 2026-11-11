@@ -283,9 +283,7 @@ def _plain_arm_names(table: pd.DataFrame) -> pd.DataFrame:
     return table.rename(columns=renamed)
 
 
-def score_flight_list(
-    truth: pd.DataFrame, split: pd.DataFrame, linked: pd.DataFrame
-) -> tuple:
+def score_flight_list(truth: pd.DataFrame, split: pd.DataFrame, linked: pd.DataFrame) -> tuple:
     """``(per view and end, both ends on one row)``, from the paired scorer.
 
     ``match_one_record`` is an upper bound, fair only for both ends on one row, so it
@@ -391,9 +389,8 @@ def level_across_holes(events: DataFrame, holes: DataFrame) -> List[Dict]:
     ``(time, is_end)`` says so: the maximum before takes the end, the minimum after takes
     the start.
     """
-    family = (
-        F.when(F.col("type").isin("level-start", "level-end"), "level")
-        .when(F.col("type").rlike("^level-off-.*-(start|end)$"), "level_off")
+    family = F.when(F.col("type").isin("level-start", "level-end"), "level").when(
+        F.col("type").rlike("^level-off-.*-(start|end)$"), "level_off"
     )
     marks = events.select(
         F.col("flight_id").alias("track_id"),
@@ -443,7 +440,12 @@ def level_across_holes(events: DataFrame, holes: DataFrame) -> List[Dict]:
                 "scored_tracks": len(tracks),
                 "segments_across_a_hole": len(
                     {
-                        (r["family"], r["track_id"], r["before"]["event_time"], r["after"]["event_time"])
+                        (
+                            r["family"],
+                            r["track_id"],
+                            r["before"]["event_time"],
+                            r["after"]["event_time"],
+                        )
                         for r in spanned
                     }
                 ),
@@ -599,9 +601,11 @@ def distance_without_holes(tracks: DataFrame) -> Dict:
         "tracks": len(per_track),
         "released_total_nm": float(per_track["released_nm"].sum()),
         "new_total_nm": float(per_track["new_nm"].sum()),
-        "share_of_distance_missing": float(short.sum() / per_track["new_nm"].sum())
-        if len(per_track) and per_track["new_nm"].sum()
-        else None,
+        "share_of_distance_missing": (
+            float(short.sum() / per_track["new_nm"].sum())
+            if len(per_track) and per_track["new_nm"].sum()
+            else None
+        ),
         "tracks_short_by_over_1_nm": off,
         "share_of_tracks_short_by_over_1_nm": off / len(per_track) if len(per_track) else None,
         "median_short_nm": quantile(short, 0.5),
@@ -686,12 +690,18 @@ def unchanged_track_row(
         pairs.join(airports(split_flight_list, "split_id", "split"), on="split_id", how="left")
         .join(airports(linked_flight_list, "linked_id", "linked"), on="linked_id", how="left")
         .join(event_set(split_events, "split_id", "split_events", False), on="split_id", how="left")
-        .join(event_set(linked_events, "linked_id", "linked_events", False), on="linked_id", how="left")
+        .join(
+            event_set(linked_events, "linked_id", "linked_events", False),
+            on="linked_id",
+            how="left",
+        )
     )
     if with_info:
         joined = joined.join(
             event_set(split_events, "split_id", "split_full", True), on="split_id", how="left"
-        ).join(event_set(linked_events, "linked_id", "linked_full", True), on="linked_id", how="left")
+        ).join(
+            event_set(linked_events, "linked_id", "linked_full", True), on="linked_id", how="left"
+        )
     other_airports = ~(
         F.col("split_adep").eqNullSafe(F.col("linked_adep"))
         & F.col("split_ades").eqNullSafe(F.col("linked_ades"))
@@ -741,8 +751,11 @@ def debounced_with_a10_memory() -> BreakRule:
         return debounced_callsign_change(p, callsign_memory_minutes(p)) | legacy().break_expr(p)
 
     return BreakRule(
-        name="debounced_with_memory", group_cols=["icao24"], break_expr=expr,
-        month_suffix=False, id_from_start_time=True,
+        name="debounced_with_memory",
+        group_cols=["icao24"],
+        break_expr=expr,
+        month_suffix=False,
+        id_from_start_time=True,
     )
 
 
@@ -1016,9 +1029,7 @@ def label_holes_all_flights(
                 ((flights["t_off"] > h.t_old_edge) & (flights["t_off"] < h.t_new_edge))
                 | ((flights["t_on"] > h.t_old_edge) & (flights["t_on"] < h.t_new_edge))
             ).any()
-            within = (
-                (flights["t_off"] <= h.t_old_edge) & (flights["t_on"] >= h.t_new_edge)
-            ).any()
+            within = ((flights["t_off"] <= h.t_old_edge) & (flights["t_on"] >= h.t_new_edge)).any()
             label = "false_join" if parked else "true_link" if within else "unknown"
         rows.append(
             {
@@ -1114,14 +1125,19 @@ def score_day(
     # First, as it reads the state vectors, the table a short bucket gives up soonest.
     samples = arm_read_window(
         read(split_name, "osn_statevectors_v2").select(
-            "event_time", "icao24", "lat", "lon", "baro_altitude", "velocity", "vert_rate", "callsign"
+            "event_time",
+            "icao24",
+            "lat",
+            "lon",
+            "baro_altitude",
+            "velocity",
+            "vert_rate",
+            "callsign",
         ),
         day,
         p,
     ).cache()
-    write(
-        "link_partition_check.csv", [partition_row(samples, tracks[linked_name], p, day)]
-    )
+    write("link_partition_check.csv", [partition_row(samples, tracks[linked_name], p, day)])
     samples.unpersist()
 
     # Next, as everything below is meaningless when an arm's tables do not belong together.
@@ -1135,9 +1151,7 @@ def score_day(
         consistency[f"{arm}_rows_without_a_track"] = rows_without_a_track(
             flight_lists[arm], tracks[arm]
         )
-        consistency[f"{arm}_named_among_alternatives"] = named_among_alternatives(
-            flight_lists[arm]
-        )
+        consistency[f"{arm}_named_among_alternatives"] = named_among_alternatives(flight_lists[arm])
     consistency.update(
         unchanged_track_row(
             unchanged_tracks(tracks[split_name], tracks[linked_name]),
@@ -1172,8 +1186,12 @@ def score_day(
     write(
         "link_events.csv",
         compare_events(
-            events[split_name], tracks[split_name], events[linked_name], tracks[linked_name],
-            holes, flights,
+            events[split_name],
+            tracks[split_name],
+            events[linked_name],
+            tracks[linked_name],
+            holes,
+            flights,
         ),
     )
     linked_everywhere = {
@@ -1267,7 +1285,10 @@ def main() -> int:
         table = pd.DataFrame(rows)
         table.to_csv(args.results_dir / name, index=False)
         provenance.record(
-            args.results_dir, name, "benchmarks/track_link_pipeline_score.py", sys.argv[1:],
+            args.results_dir,
+            name,
+            "benchmarks/track_link_pipeline_score.py",
+            sys.argv[1:],
             _CODE_PATHS,
             inputs={
                 "day": args.day,
