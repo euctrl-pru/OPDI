@@ -27,7 +27,7 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from opdi.pipeline.flights import haversine_nm
+from opdi.utils.geometry import haversine_nm
 
 if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig

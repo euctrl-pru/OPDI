@@ -24,6 +24,7 @@ from pyspark.sql.functions import col, lit
 from opdi.config import EventConfig
 from opdi.pipeline.holding import FT_PER_M, _haversine_nm, _wrap_deg
 from opdi.pipeline.holes import PIECE
+from opdi.utils.geometry import bearing_deg as _bearing_deg
 from opdi.versions import PMS_VERSION  # stamped on the events and measurements
 
 #: The measurements read off ``pms-leg-exit``'s info (see ``events.EXTRA_MEASURES``).
@@ -34,15 +35,6 @@ PMS_MEASURES = [
 ]
 
 _KEY = ["track_id", PIECE, "pms_id", "merge_point"]
-
-
-def _bearing_deg(lat1, lon1, lat2, lon2):
-    """Initial bearing from point 1 to point 2, degrees in [0, 360)."""
-    p1, p2 = F.radians(lat1), F.radians(lat2)
-    dl = F.radians(lon2 - lon1)
-    y = F.sin(dl) * F.cos(p2)
-    x = F.cos(p1) * F.sin(p2) - F.sin(p1) * F.cos(p2) * F.cos(dl)
-    return (F.degrees(F.atan2(y, x)) + 360.0) % 360.0
 
 
 def _candidates(geo: DataFrame, pms_ref: DataFrame, config: EventConfig) -> DataFrame:

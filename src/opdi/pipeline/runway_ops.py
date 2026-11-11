@@ -86,8 +86,8 @@ from opdi.pipeline.elevation import (
     height_above_aerodrome_ft,
     height_above_elevation_ft,
 )
-from opdi.pipeline.flights import angle_between, bearing_deg, haversine_nm
 from opdi.pipeline.runways import cross_track_nm
+from opdi.utils.geometry import angle_between, bearing_deg, haversine_nm
 
 FT_PER_M = 3.28084
 FTMIN_PER_MPS = 196.850394

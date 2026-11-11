@@ -26,7 +26,6 @@ from pyspark.sql import functions as F
 from pyspark.sql.window import WindowSpec
 
 from opdi.config import STUDY_SEGMENTATION_METHODS
-from opdi.pipeline.flights import haversine_nm
 from opdi.pipeline.segmentation.base import (
     FPM_PER_MPS,
     BreakRule,
@@ -36,6 +35,7 @@ from opdi.pipeline.segmentation.base import (
     segment_window,
     speed_kt,
 )
+from opdi.utils.geometry import haversine_nm
 
 __all__ = [
     "legacy",

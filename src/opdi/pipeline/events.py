@@ -75,7 +75,7 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
-from opdi.pipeline.flights import bearing_deg, haversine_nm, resolve_flight_id
+from opdi.pipeline.flights import resolve_flight_id
 from opdi.pipeline.ground import block_times, movement_window
 from opdi.pipeline.holding import calculate_holding_events
 from opdi.pipeline.holes import PIECE, add_piece
@@ -100,6 +100,7 @@ from opdi.pipeline.vertical_pru import (
 )
 from opdi.reference.point_merge import point_merge_systems_for_day
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
+from opdi.utils.geometry import bearing_deg, haversine_nm
 from opdi.utils.storage import StorageManager
 from opdi.versions import DISTANCE_VERSION, LEGACY_DISTANCE_VERSION, TIME_VERSION
 
