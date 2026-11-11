@@ -47,7 +47,7 @@ LABEL_DAY = "2019-10-01"
 HOLDING_DATA = os.environ.get("OPDI_HOLDING_DATA_DIR", str(Path.home() / "holding_data"))
 
 CORE = [
-    "src/opdi/config.py",
+    "src/opdi/config",
     "src/opdi/pipeline/holes.py",
 ]
 

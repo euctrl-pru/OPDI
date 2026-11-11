@@ -22,7 +22,7 @@ import track_continuity as tc  # noqa: E402
 
 
 def test_every_declared_dependency_is_a_file_that_exists():
-    missing = sorted({p for j in reg.jobs() for p in j.code_paths if not (REPO / p).is_file()})
+    missing = sorted({p for j in reg.jobs() for p in j.code_paths if not (REPO / p).exists()})
     assert missing == [], f"declared but absent: {missing}"
 
 

@@ -94,7 +94,7 @@ CORE = [
     "src/opdi/ingestion/osn_adsc.py",
     "src/opdi/pipeline/tracks.py",
     "src/opdi/cleaning/native.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "src/opdi/coverage.py",
     "benchmarks/run_adsc_day.py",
 ]

@@ -32,7 +32,7 @@ def test_the_jobs_and_where_they_stage():
         assert job.data == R.DATA / job.name
         assert job.outputs, f"{job.name} stages nothing"
         for p in job.code_paths:
-            assert (Path(R.REPO) / p).is_file(), f"{job.name}: missing {p}"
+            assert (Path(R.REPO) / p).exists(), f"{job.name}: missing {p}"
 
 
 def test_the_paper_dir_is_overridable_by_its_own_variable():

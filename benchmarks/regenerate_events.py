@@ -54,7 +54,7 @@ SCORE = GT + ["benchmarks/events_score.py"]
 #: other than what it names.
 DETECT = SCORE + [
     "benchmarks/event_bench.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "src/opdi/pipeline/events.py",
     "src/opdi/pipeline/crossings.py",
     "src/opdi/pipeline/level_segments.py",

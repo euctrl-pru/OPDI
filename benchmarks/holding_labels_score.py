@@ -47,7 +47,7 @@ from opdi.pipeline.holes import add_piece  # noqa: E402
 _CODE_PATHS = [
     "benchmarks/holding_labels_score.py",
     "src/opdi/pipeline/holding.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
 ]
 
 #: Aerodrome elevations (ft) for the labelled airports, from OurAirports.

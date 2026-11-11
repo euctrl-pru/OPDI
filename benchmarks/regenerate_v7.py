@@ -58,7 +58,7 @@ FL_CAPS = sorted({40, 60} | set(range(25, 301, 25)))
 CORE = ["benchmarks/adep_ades.py", "benchmarks/osn_sample.py"]
 PIPE = CORE + [
     "src/opdi/pipeline/flights.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "benchmarks/flight_list_v7.py",
     "benchmarks/study_variants/detection.py",
 ]
@@ -79,7 +79,7 @@ T_REF = "s3a://eurocontrol/opdi/research/reference"
 #: invocation resolves `opdi` to ``opdi.py`` at the repo root, which shadows the
 #: package in ``src/`` and fails with a bare ModuleNotFoundError.
 OPDI = [str(REPO / ".venv310" / "bin" / "opdi"), "run", "--env", "opensky"]
-PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config.py"]
+PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config"]
 
 
 class Stage:
@@ -289,7 +289,7 @@ def stages() -> list:
                 "benchmarks/rebuild_sample.py",
                 "src/opdi/ingestion/osn_statevectors.py",
                 "src/opdi/pipeline/tracks.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
             ],
             "ingest and track building with the bin-based sampler. Replaces "
             "rather than appends, because the rows being replaced were made "
@@ -311,7 +311,7 @@ def stages() -> list:
                 "benchmarks/clean_tracks.py",
                 "src/opdi/cleaning/cleaner.py",
                 "src/opdi/cleaning/native.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
             ],
             "trajectory cleaning -- the step the flight list now reads. In "
             "V6 this table existed and nothing read it",
@@ -333,7 +333,7 @@ def stages() -> list:
                 "benchmarks/clean_tracks.py",
                 "src/opdi/cleaning/cleaner.py",
                 "src/opdi/cleaning/native.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
             ],
             "the same for the second period, so both are measured on the " "same input treatment",
             inputs=[T_TRACKS24],
@@ -353,7 +353,7 @@ def stages() -> list:
             [
                 "benchmarks/build_candidates.py",
                 "src/opdi/pipeline/flights.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
             ],
             "first/last fix per track against every aerodrome within 110 NM; "
             "the cache the endpoint sweeps filter",

@@ -79,7 +79,7 @@ SEG = [
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/segmentation/methods.py",
     "benchmarks/study_variants/segmentation.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
 ]
 SCORE = ["benchmarks/track_truth.py", "benchmarks/track_score.py", "benchmarks/osn_sample.py"]
 #: ``track_methods.py`` is a dependency of four other jobs, not just the ladder

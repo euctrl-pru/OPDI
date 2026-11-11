@@ -77,7 +77,7 @@ CORE = [
     "src/opdi/pipeline/segmentation/methods.py",
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/tracks.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "src/opdi/coverage.py",
 ]
 

@@ -93,7 +93,7 @@ SEG = [
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/segmentation/methods.py",
     "benchmarks/study_variants/segmentation.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
 ]
 #: V2 runs the real steps, so the steps are dependencies. V1 did not need
 #: these: it read a track table someone else had built. That difference is the

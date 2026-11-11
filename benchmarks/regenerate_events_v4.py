@@ -107,7 +107,7 @@ SCORE = GT + ["benchmarks/events_score.py"]
 #: are exactly the code the V4 rungs switch on.
 DETECT = SCORE + [
     "benchmarks/event_bench.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "src/opdi/pipeline/events.py",
     "src/opdi/pipeline/crossings.py",
     "src/opdi/pipeline/level_segments.py",
@@ -296,7 +296,7 @@ def stages() -> list:
             [
                 "benchmarks/flight_list_2026.py",
                 "src/opdi/pipeline/flights.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
             ],
             "the 2026 flight list, through step 03's own process_dai. Every "
             "aerodrome-anchored family -- airport events, rings, the runway "

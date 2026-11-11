@@ -87,7 +87,7 @@ DAYS_2024 = ["2024-06-05", "2024-06-06", "2024-06-07"]
 CORE = ["benchmarks/adep_ades.py", "benchmarks/osn_sample.py"]
 PIPE = CORE + [
     "src/opdi/pipeline/flights.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "benchmarks/flight_list_v62.py",
     "benchmarks/study_variants/detection.py",
 ]
@@ -294,7 +294,7 @@ T_TRACKS24_NAME = "research/tracks"
 #: invocation resolves `opdi` to ``opdi.py`` at the repo root, which shadows the
 #: package in ``src/`` and fails with a bare ModuleNotFoundError.
 OPDI = [str(REPO / ".venv310" / "bin" / "opdi"), "run", "--env", "opensky"]
-PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config.py"]
+PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config"]
 
 
 def stages() -> list:
@@ -325,7 +325,7 @@ def stages() -> list:
                 "benchmarks/rebuild_sample.py",
                 "src/opdi/ingestion/osn_statevectors.py",
                 "src/opdi/pipeline/tracks.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
             ],
             "ingest and track building with the configured sampler. Replaces "
             "rather than appends, because the rows being replaced were made "
@@ -355,7 +355,7 @@ def stages() -> list:
             [
                 "benchmarks/build_candidates.py",
                 "src/opdi/pipeline/flights.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
             ],
             "first/last fix per track against every aerodrome within 110 NM; "
             "the cache the endpoint sweeps filter",
@@ -874,7 +874,7 @@ def jobs() -> list:
             CORE
             + [
                 "src/opdi/pipeline/flights.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
                 "benchmarks/flight_list_v62.py",
             ],
             "FL60 against 6,100 ft above field, through process_dai itself. "

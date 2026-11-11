@@ -62,7 +62,7 @@ _CODE_PATHS = [
     "benchmarks/track_link_grid.py",
     "src/opdi/pipeline/segmentation/methods.py",
     "src/opdi/pipeline/segmentation/base.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
 ]
 
 HOLE_COLUMNS = [

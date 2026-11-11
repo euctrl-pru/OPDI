@@ -14,7 +14,7 @@ def test_every_job_declares_its_outputs_and_dependencies():
     for job in R.jobs():
         assert job.outputs, f"{job.name} stages nothing"
         for p in job.code_paths:
-            assert (Path(R.REPO) / p).is_file(), f"{job.name}: missing {p}"
+            assert (Path(R.REPO) / p).exists(), f"{job.name}: missing {p}"
 
 
 def test_job_names_are_unique():

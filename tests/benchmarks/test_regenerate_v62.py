@@ -150,7 +150,7 @@ def test_every_pipeline_job_fingerprints_the_pipeline():
         if "flight_list_v62" not in job.script:
             continue
         assert "src/opdi/pipeline/flights.py" in job.code_paths, job.name
-        assert "src/opdi/config.py" in job.code_paths, job.name
+        assert "src/opdi/config" in job.code_paths, job.name
         assert "benchmarks/flight_list_v62.py" in job.code_paths, job.name
 
 

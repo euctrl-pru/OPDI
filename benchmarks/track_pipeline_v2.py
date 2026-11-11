@@ -659,7 +659,7 @@ def main() -> None:
                 "src/opdi/pipeline/segmentation/__init__.py",
                 "src/opdi/pipeline/segmentation/base.py",
                 "src/opdi/pipeline/segmentation/methods.py",
-                "src/opdi/config.py",
+                "src/opdi/config",
             ],
             notes=f"Real pipeline steps 02, 02a per method, 03 for "
             f"{FLIGHT_LIST_METHODS} only. Scored airborne and "

@@ -12,7 +12,7 @@ def test_every_job_declares_its_outputs_and_dependencies():
         # it), so an empty declared set is legal -- `census` reads the raw
         # topic and no pipeline code can change its answer.
         for p in job.code_paths:
-            assert (Path(R.REPO) / p).is_file(), f"{job.name}: missing {p}"
+            assert (Path(R.REPO) / p).exists(), f"{job.name}: missing {p}"
 
 
 def test_job_names_are_unique():
@@ -93,5 +93,5 @@ def test_a_change_of_coverage_default_marks_pipeline_jobs_stale():
     # `for_environment` flipped to worldwide in 305fc36 and `--check` went on
     # reporting every output current, because nothing here named the code that
     # chose the coverage. The runner is named too: it builds the arms.
-    for path in ("src/opdi/config.py", "src/opdi/coverage.py", "benchmarks/run_adsc_day.py"):
+    for path in ("src/opdi/config", "src/opdi/coverage.py", "benchmarks/run_adsc_day.py"):
         assert path in R.CORE

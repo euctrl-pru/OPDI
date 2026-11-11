@@ -76,7 +76,13 @@ def fingerprint(paths) -> str:
     for p in sorted(str(x) for x in paths):
         f = REPO / p
         h.update(p.encode())
-        h.update(f.read_bytes() if f.is_file() else b"<missing>")
+        if f.is_dir():
+            # A package folder (for example src/opdi/config): every module in it.
+            for g in sorted(f.rglob("*.py")):
+                h.update(str(g.relative_to(REPO)).encode())
+                h.update(g.read_bytes())
+        else:
+            h.update(f.read_bytes() if f.is_file() else b"<missing>")
     return h.hexdigest()[:16]
 
 

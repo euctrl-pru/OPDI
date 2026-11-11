@@ -114,7 +114,7 @@ def class_constant(cls, name, relative):
 
 def descent_shipped():
     """Whether the code ships with the descending-edge allowance on."""
-    return bool(class_constant("SegmentationConfig", "link_new_edge_descent", "src/opdi/config.py"))
+    return bool(class_constant("SegmentationConfig", "link_new_edge_descent", "src/opdi/config"))
 
 
 def _shipped(grid):
