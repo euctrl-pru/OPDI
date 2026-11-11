@@ -1,5 +1,4 @@
-"""
-H3 runway + approach-corridor grid, from ``oa_runways``.
+"""H3 runway + approach-corridor grid, from ``oa_runways``.
 
 Universal runway coverage: rasterises *every* large+medium airport's runway
 rectangle and approach corridor to H3 resolution-12 cells, purely from
@@ -133,7 +132,8 @@ def _is_missing(x) -> bool:
     """True for None/NaN/NaT -- the shapes a value from a ``.toPandas()``
     column (float64 with nulls, or a plain Python None from a dict row) can
     take. ``pd.isna`` handles all of them; it only raises for array-likes,
-    which never reach here (every caller passes a scalar)."""
+    which never reach here (every caller passes a scalar).
+    """
     try:
         return bool(pd.isna(x))
     except (TypeError, ValueError):
@@ -583,7 +583,8 @@ class RunwayGridGenerator:
 
     def create_table_if_not_exists(self) -> None:
         """Create the ``h3_runway_zones`` Iceberg table if it doesn't exist.
-        No-op in S3 mode (``StorageManager.create_table``)."""
+        No-op in S3 mode (``StorageManager.create_table``).
+        """
         create_sql = f"""
         CREATE TABLE IF NOT EXISTS `{self.project}`.`{self.table_name}` (
             h3_id STRING COMMENT 'H3 cell id at resolution 12',

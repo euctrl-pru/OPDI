@@ -1,5 +1,4 @@
-"""
-Native Spark trajectory cleaning (pipeline step 02a).
+"""Native Spark trajectory cleaning (pipeline step 02a).
 
 Ported from the 2024 PRC Data Challenge winning solution (Alligier & Gianazza,
 ENAC), ``filterclassic.py``. Every stage here is a pure ``DataFrame ->

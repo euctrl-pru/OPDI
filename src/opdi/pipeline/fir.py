@@ -40,7 +40,8 @@ _RES_MASK = 0xF << _RES_SHIFT
 
 def h3_parent_expr(cell_col, res: int):
     """The lower-case hex index of ``cell_col``'s ancestor at ``res`` (0..7),
-    as a native column expression (no UDF)."""
+    as a native column expression (no UDF).
+    """
     idx = F.conv(cell_col, 16, 10).cast("long")
     cleared = idx.bitwiseAND(lit(~_RES_MASK))
     with_res = cleared.bitwiseOR(lit(res << _RES_SHIFT))
@@ -53,7 +54,8 @@ def load_fir_reference(storage) -> Optional[DataFrame]:
     """The FIR layer of ``opdi_h3_airspace_ref``, or None when the table is
     absent or still has the earlier port's per-cell schema (``h3_res_7``
     columns, no ``h3_cell``/``h3_res``): that table was overwritten once per
-    polygon and holds one country, and step 00c must be re-run first."""
+    polygon and holds one country, and step 00c must be re-run first.
+    """
     if not storage.table_exists(AIRSPACE_TABLE):
         print(f"{AIRSPACE_TABLE} not found; xing-fir will not be computed.")
         return None

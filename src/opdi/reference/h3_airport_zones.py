@@ -1,5 +1,4 @@
-"""
-H3 airport detection zone generator.
+"""H3 airport detection zone generator.
 
 Creates concentric hexagonal rings around airports for flight detection.
 Each airport gets rings at configurable radii (default: 0-40 NM) encoded
@@ -64,7 +63,7 @@ def _geo_to_h3_udf(lat, lon, res):
             # module-level function forces the worker to import ``opdi``,
             # which it cannot do -- the same constraint that keeps ``h3``
             # imported inline here.
-            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "h3 call {} failed on this worker: {}: {}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
             "point config.spark.k8s_container_image at the new tag.".format(
                 "latlng_to_cell", type(exc).__name__, exc
@@ -84,7 +83,7 @@ def _h3_distance_udf(h1, h2):
             # module-level function forces the worker to import ``opdi``,
             # which it cannot do -- the same constraint that keeps ``h3``
             # imported inline here.
-            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "h3 call {} failed on this worker: {}: {}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
             "point config.spark.k8s_container_image at the new tag.".format(
                 "grid_distance", type(exc).__name__, exc
@@ -181,7 +180,7 @@ def _polyfill_geojson_udf(geojson_str, resolution):
             # module-level function forces the worker to import ``opdi``,
             # which it cannot do -- the same constraint that keeps ``h3``
             # imported inline here.
-            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "h3 call {} failed on this worker: {}: {}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
             "point config.spark.k8s_container_image at the new tag.".format(
                 "polygon_to_cells/LatLngPoly", type(exc).__name__, exc
@@ -192,8 +191,7 @@ def _polyfill_geojson_udf(geojson_str, resolution):
 def generate_circle_polygon(
     lon: float, lat: float, radius_nautical_miles: float, num_points: int = 360
 ) -> str:
-    """
-    Generate a GeoJSON polygon approximating a circle around a point.
+    """Generate a GeoJSON polygon approximating a circle around a point.
 
     Uses the destination-point formula to compute points along a circle
     at a given radius from a center coordinate.
@@ -247,8 +245,7 @@ def generate_circle_polygon(
 
 
 class AirportDetectionZoneGenerator:
-    """
-    Generates H3 hexagonal detection zones around airports.
+    """Generates H3 hexagonal detection zones around airports.
 
     Creates concentric rings around each airport at configurable radii,
     encoded as H3 hexagons. These zones are used by the flight list
@@ -436,8 +433,7 @@ class AirportDetectionZoneGenerator:
         airports_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
         airports_df: Optional[DataFrame] = None,
     ) -> DataFrame:
-        """
-        Load airport data from OurAirports and filter to this run's coverage.
+        """Load airport data from OurAirports and filter to this run's coverage.
 
         Args:
             airports_url: URL to OurAirports airports CSV.
@@ -495,8 +491,7 @@ class AirportDetectionZoneGenerator:
         )
 
     def _build_ring_config(self) -> DataFrame:
-        """
-        Build Spark DataFrame defining concentric ring boundaries.
+        """Build Spark DataFrame defining concentric ring boundaries.
 
         Returns:
             Spark DataFrame with ring configuration (area_type, min/max radii).
@@ -536,8 +531,7 @@ class AirportDetectionZoneGenerator:
         airports_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
         airports_df: Optional[DataFrame] = None,
     ) -> pd.DataFrame:
-        """
-        Generate H3 detection zones for all airports in the European bounding box.
+        """Generate H3 detection zones for all airports in the European bounding box.
 
         Each airport-ring combination produces a set of H3 hex IDs formed by
         subtracting the inner circle hexagons from the outer circle hexagons,
@@ -651,8 +645,7 @@ class AirportDetectionZoneGenerator:
         return self._result_df
 
     def save_to_parquet(self, output_path: str) -> None:
-        """
-        Save generated detection zones to a parquet file.
+        """Save generated detection zones to a parquet file.
 
         Args:
             output_path: Path to output parquet file.
@@ -669,8 +662,7 @@ class AirportDetectionZoneGenerator:
         max_radius_nm: float = 30.0,
         airport_types: Optional[List[str]] = None,
     ) -> pd.DataFrame:
-        """
-        Prepare detection zone data for use by the flight list pipeline.
+        """Prepare detection zone data for use by the flight list pipeline.
 
         Filters zones to the specified maximum radius and airport types,
         explodes hex arrays, adds H3 coordinates, and computes distance
@@ -775,8 +767,7 @@ class AirportDetectionZoneGenerator:
         max_radius_nm: float = 30.0,
         airport_types: Optional[List[str]] = None,
     ) -> DataFrame:
-        """
-        Spark-native version of prepare_for_flight_list.
+        """Spark-native version of prepare_for_flight_list.
 
         Does all heavy work (explode, h3 lookups, bbox filter, distance) on
         executors and returns a Spark DataFrame. Use this when the result is
@@ -933,8 +924,7 @@ class AirportDetectionZoneGenerator:
         airport_types: Optional[List[str]] = None,
         table_name: str = "h3_airport_detection_zones",
     ) -> None:
-        """
-        Run prepare_for_flight_list and write the result to a StorageManager table.
+        """Run prepare_for_flight_list and write the result to a StorageManager table.
 
         Uses the Spark-native pipeline so the driver never has to materialize
         the exploded hex DataFrame.

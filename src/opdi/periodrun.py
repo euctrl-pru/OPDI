@@ -42,7 +42,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, Sequence
 
 #: Steps a data run performs, in execution order.
 #:
@@ -57,7 +57,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 #: ``runner.REFERENCE_SUBSTEPS``. Skipping 00 is still possible
 #: (``--steps 01 02 02a 03 04``), and then the reference tables must already
 #: exist, which ``preflight`` checks.
-PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "01b", "02", "02a", "03", "04", "04b")
+PERIOD_STEPS: tuple[str, ...] = ("00", "01", "01b", "02", "02a", "03", "04", "04b")
 
 #: Steps that run once for the whole window, not per day.
 #:
@@ -67,10 +67,10 @@ PERIOD_STEPS: Tuple[str, ...] = ("00", "01", "01b", "02", "02a", "03", "04", "04
 #: because day D reads into D+1 to finish the flights that start on D. Running
 #: ingestion per day would have each day depend on the next day's ingest, which
 #: is an ordering knot with nothing to gain.
-WINDOW_STEPS: Tuple[str, ...] = ("00",)
+WINDOW_STEPS: tuple[str, ...] = ("00",)
 
 #: Steps that run once per day, on the tracks that day owns.
-DAY_STEPS: Tuple[str, ...] = ("01", "01b", "02", "02a", "03", "04", "04b")
+DAY_STEPS: tuple[str, ...] = ("01", "01b", "02", "02a", "03", "04", "04b")
 
 #: What each reference substep produces.
 #:
@@ -93,7 +93,7 @@ REFERENCE_OUTPUTS = {
 }
 
 
-def reference_substeps_to_run(storage, force: bool = False) -> Dict[str, bool]:
+def reference_substeps_to_run(storage, force: bool = False) -> dict[str, bool]:
     """Which reference substeps still have work to do.
 
     A substep is skipped when everything it produces is present *and
@@ -149,11 +149,11 @@ def _resolve_warehouse(warehouse, configured: str) -> str:
 
 #: Steps available but not run by default. Publishing is a release action; a
 #: test period should be inspected before anything is published from it.
-OPTIONAL_STEPS: Tuple[str, ...] = ("09",)
+OPTIONAL_STEPS: tuple[str, ...] = ("09",)
 
 #: Optional steps that run once per day, like :data:`DAY_STEPS`. Step 09
 #: publishes the day's flight list and flight events files; put it last.
-OPTIONAL_DAY_STEPS: Tuple[str, ...] = ("09",)
+OPTIONAL_DAY_STEPS: tuple[str, ...] = ("09",)
 
 
 def is_day_step(step: str) -> bool:
@@ -170,7 +170,7 @@ UNDATED_STEPS: frozenset = frozenset({"00"})
 #: not fail fast -- it produces empty joins and reports them as coverage
 #: failures, which is the most expensive kind of wrong answer because it looks
 #: like a result. Sources, in order: 00d, 00f, 00e, 00b, 00f, 00a.
-REQUIRED_REFERENCE_TABLES: Tuple[str, ...] = (
+REQUIRED_REFERENCE_TABLES: tuple[str, ...] = (
     "oa_airports",
     "oa_runways",
     "osn_aircraft_db",
@@ -195,7 +195,7 @@ HEAP_FRACTION_OF_HEADROOM = 0.55
 MIN_DRIVER_HEAP_GB = 2
 
 
-def _cgroup_v2_limit() -> Optional[Tuple[int, int]]:
+def _cgroup_v2_limit() -> tuple[int, int] | None:
     """``(limit_bytes, anon_bytes)`` from cgroup v2, or ``None``.
 
     ``memory.max`` is the literal string ``max`` when no limit is set, which is
@@ -221,7 +221,7 @@ def _cgroup_v2_limit() -> Optional[Tuple[int, int]]:
 
 def safe_driver_memory(
     requested: str,
-    limit_bytes: Optional[int] = None,
+    limit_bytes: int | None = None,
     used_bytes: int = 0,
     fraction: float = HEAP_FRACTION_OF_HEADROOM,
 ) -> str:
@@ -275,7 +275,7 @@ def _parse_size_gb(size: str) -> int:
     raise ValueError(f"cannot parse memory size {size!r}; use e.g. '6g'")
 
 
-def period_window(start: date, days: int = 7) -> Tuple[date, date]:
+def period_window(start: date, days: int = 7) -> tuple[date, date]:
     """The half-open window ``[start, start + days)`` as inclusive dates.
 
     The pipeline's steps take ``start_date``/``end_date`` and treat them as an
@@ -310,10 +310,10 @@ class RunState:
     written before this field existed described a European run, since
     worldwide coverage did not exist yet, so an old file must keep matching a
     European re-invocation rather than suddenly refusing it."""
-    completed: Dict[str, dict] = field(default_factory=dict)
+    completed: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: Path) -> "RunState":
+    def load(cls, path: Path) -> RunState:
         path = Path(path)
         if not path.exists():
             return cls(path=path)
@@ -384,7 +384,7 @@ def plan_steps(
     requested: Sequence[str],
     state: RunState,
     force: bool = False,
-) -> List[str]:
+) -> list[str]:
     """Which of ``requested`` still need to run, in order.
 
     Order is ``requested``'s, not sorted: ``"02a"`` must follow ``"02"`` and
@@ -397,7 +397,7 @@ def plan_steps(
     return [s for s in requested if s not in state.completed]
 
 
-def resolve_pbf_path(config) -> Optional[str]:
+def resolve_pbf_path(config) -> str | None:
     """The OSM extract step 00b will read, by the same precedence runner uses.
 
     ``OPDI_OSM_PBF`` beats the configured value, matching
@@ -420,14 +420,14 @@ def resolve_pbf_path(config) -> Optional[str]:
 _GREATER_EUROPE_MARGIN_DEG = 10.0
 
 
-def preflight_fresh_build(config) -> List[str]:
+def preflight_fresh_build(config) -> list[str]:
     """Problems that would make a from-scratch reference build fail or lie.
 
     Returns human-readable problems, empty when there are none. Checked before
     a session is created, because every one of these is knowable without the
     cluster and each costs hours if discovered later.
     """
-    problems: List[str] = []
+    problems: list[str] = []
     pbf = resolve_pbf_path(config)
     if not pbf:
         problems.append(
@@ -480,7 +480,7 @@ def preflight_fresh_build(config) -> List[str]:
     return problems
 
 
-def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> List[str]:
+def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> list[str]:
     """Names of required reference tables that are missing or unreadable.
 
     Returns a list rather than raising so the caller can report every problem
@@ -494,14 +494,14 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
     in tests that has no ``check_coverage``; that case is treated the same as
     "no problem", not as a failure.
     """
-    problems: List[str] = []
+    problems: list[str] = []
     check_coverage = getattr(storage, "check_coverage", None)
     if check_coverage is not None:
         coverage_problem = check_coverage()
         if coverage_problem is not None:
             problems.append(coverage_problem)
 
-    missing: List[str] = []
+    missing: list[str] = []
     for name in tables:
         try:
             if storage.read_table(name).limit(1).count() == 0:
@@ -531,7 +531,7 @@ def preflight(storage, tables: Iterable[str] = REQUIRED_REFERENCE_TABLES) -> Lis
 #: measurements combined. They are inputs to steps 03 and 04, so they cannot be
 #: skipped at write time; retention is therefore a decision made AFTER the
 #: dependent steps land, not a flag on the write.
-TRACK_TABLES: Tuple[str, ...] = ("osn_tracks", "osn_tracks_clean")
+TRACK_TABLES: tuple[str, ...] = ("osn_tracks", "osn_tracks_clean")
 
 
 def prune_tracks_for_day(storage, day: date) -> int:
@@ -757,12 +757,12 @@ def day_state_key(step: str, day: date) -> str:
     return f"{step}@{day.isoformat()}"
 
 
-def days_in(start: date, end: date) -> List[date]:
+def days_in(start: date, end: date) -> list[date]:
     """Every day from ``start`` to ``end`` inclusive."""
     return [start + timedelta(days=n) for n in range((end - start).days + 1)]
 
 
-def _session_extras() -> Dict[str, str]:
+def _session_extras() -> dict[str, str]:
     """Spark settings applied to every step's session.
 
     The retained-state caps are permanent: a driver keeps stage, job, task and
@@ -805,7 +805,7 @@ def _session_extras() -> Dict[str, str]:
     return extras
 
 
-def _describe_memory(limit_bytes: Optional[int], used_bytes: int) -> str:
+def _describe_memory(limit_bytes: int | None, used_bytes: int) -> str:
     if limit_bytes is None:
         return "container memory: unconstrained"
     return (
@@ -817,13 +817,13 @@ def _describe_memory(limit_bytes: Optional[int], used_bytes: int) -> str:
 
 def run_period(
     env: str = "opensky",
-    start: Optional[date] = None,
+    start: date | None = None,
     days: int = 7,
     steps: Sequence[str] = PERIOD_STEPS,
-    state_path: Optional[Path] = None,
+    state_path: Path | None = None,
     force: bool = False,
-    driver_memory: Optional[str] = None,
-    executors: Optional[int] = None,
+    driver_memory: str | None = None,
+    executors: int | None = None,
     skip_preflight: bool = False,
     dry_run: bool = False,
     warehouse: str = _UNSET,
@@ -935,7 +935,7 @@ def run_period(
     # Day-major also means a failure costs one day rather than a phase, and a
     # half-finished campaign holds whole days rather than every day's tracks
     # and no day's events.
-    units: List[Tuple[str, Optional[date]]] = []
+    units: list[tuple[str, date | None]] = []
     units.extend((step, None) for step in steps if not is_day_step(step))
     for d in all_days:
         units.extend((step, d) for step in steps if is_day_step(step))

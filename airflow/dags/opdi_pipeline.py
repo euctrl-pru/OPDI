@@ -21,12 +21,13 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from airflow import DAG
 from airflow.models import Variable
 from airflow.models.param import Param
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
+
+from airflow import DAG
 
 #: The Airflow Variables this file reads, with the value used when a Variable
 #: is not set.
@@ -97,7 +98,7 @@ START = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
 def _var(name: str) -> str:
     """Jinja text that reads an Airflow Variable when the task runs."""
-    return "{{ var.value.get('%s', '%s') }}" % (name, VARIABLE_DEFAULTS[name])
+    return f"{{{{ var.value.get('{name}', '{VARIABLE_DEFAULTS[name]}') }}}}"
 
 
 COMMAND = _var("opdi_command_prefix") + " python -m opdi.orchestration"

@@ -1,5 +1,4 @@
-"""
-OPDI - Open Performance Data Initiative
+"""OPDI - Open Performance Data Initiative
 ========================================
 
 A Python package for processing OpenSky Network aviation data through

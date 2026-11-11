@@ -1,5 +1,4 @@
-"""
-H3 airport ground layout generator.
+"""H3 airport ground layout generator.
 
 Retrieves airport infrastructure data (runways, taxiways, aprons, hangars)
 from OpenStreetMap via osmnx, converts geometries to H3 hexagons at
@@ -89,8 +88,7 @@ COLUMN_TYPES: Dict[str, type] = {
 
 
 def retrieve_osm_data(icao_code: str) -> "gpd.GeoDataFrame":
-    """
-    Retrieve aeroway features from OpenStreetMap for an airport.
+    """Retrieve aeroway features from OpenStreetMap for an airport.
 
     Args:
         icao_code: ICAO airport code (e.g., 'EBBR').
@@ -111,8 +109,7 @@ def retrieve_osm_data(icao_code: str) -> "gpd.GeoDataFrame":
 
 
 def buffer_geometry(line: LineString, width_m: float, always_xy: bool = True) -> Polygon:
-    """
-    Buffer a LineString geometry to create a Polygon with a specified width.
+    """Buffer a LineString geometry to create a Polygon with a specified width.
 
     Projects to EPSG:3395 (meters), applies the buffer, then projects back
     to EPSG:4326 (degrees).
@@ -144,8 +141,7 @@ def is_number(s) -> bool:
 
 
 def safe_convert_to_float(s) -> Optional[float]:
-    """
-    Safely convert a string to float, stripping non-numeric characters.
+    """Safely convert a string to float, stripping non-numeric characters.
 
     Args:
         s: Value to convert.
@@ -165,8 +161,7 @@ def safe_convert_to_float(s) -> Optional[float]:
 
 
 def fill_missing_width(aeroway: str, width_m) -> Optional[float]:
-    """
-    Fill missing width values based on aeroway type defaults.
+    """Fill missing width values based on aeroway type defaults.
 
     Args:
         aeroway: Type of aeroway (runway, taxiway, etc.).
@@ -181,8 +176,7 @@ def fill_missing_width(aeroway: str, width_m) -> Optional[float]:
 
 
 def convert_to_polygon(geometry, geom_type: str, width_m: float) -> List[Polygon]:
-    """
-    Convert a geometry to a list of Polygons, buffering if necessary.
+    """Convert a geometry to a list of Polygons, buffering if necessary.
 
     Args:
         geometry: Input geometry (Polygon, MultiPolygon, LineString, or Point).
@@ -203,8 +197,7 @@ def convert_to_polygon(geometry, geom_type: str, width_m: float) -> List[Polygon
 
 
 def _polyfill_latlng(ring: List[Tuple[float, float]], resolution: int) -> Set[str]:
-    """
-    Fill a single [lat, lng] ring with H3 hexagons at the given resolution.
+    """Fill a single [lat, lng] ring with H3 hexagons at the given resolution.
 
     THE FOOTGUN: h3 v3's ``polyfill(geojson, res)`` consumed GeoJSON-ordered
     ``[lng, lat]`` rings. v4's ``h3.LatLngPoly`` always takes ``[lat, lng]``
@@ -224,8 +217,7 @@ def _polyfill_latlng(ring: List[Tuple[float, float]], resolution: int) -> Set[st
 
 
 def polygon_to_h3(poly: Polygon, resolution: int) -> Set[str]:
-    """
-    Convert a Polygon to a set of H3 hexagon indices.
+    """Convert a Polygon to a set of H3 hexagon indices.
 
     Args:
         poly: Shapely Polygon.
@@ -241,8 +233,7 @@ def polygon_to_h3(poly: Polygon, resolution: int) -> Set[str]:
 
 
 def clean_str(s) -> str:
-    """
-    Clean a string value, converting feet/miles to meters.
+    """Clean a string value, converting feet/miles to meters.
 
     Args:
         s: Input string potentially containing unit suffixes.
@@ -274,8 +265,7 @@ def clean_str(s) -> str:
 
 
 def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.DataFrame:
-    """
-    Process a single airport: fetch OSM data, create polygons, convert to H3.
+    """Process a single airport: fetch OSM data, create polygons, convert to H3.
 
     Args:
         apt_icao: ICAO airport code.
@@ -351,8 +341,7 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.D
 
 
 class AirportLayoutGenerator:
-    """
-    Generates H3 hexagonal representations of airport ground infrastructure.
+    """Generates H3 hexagonal representations of airport ground infrastructure.
 
     Retrieves aeroway features (runways, taxiways, aprons, hangars) from
     OpenStreetMap for each airport, converts them to H3 hexagons at
@@ -484,8 +473,7 @@ class AirportLayoutGenerator:
         return airports_df
 
     def process_airport(self, apt_icao: str) -> Optional[pd.DataFrame]:
-        """
-        Build the H3 layout rows for one airport. **Writes nothing.**
+        """Build the H3 layout rows for one airport. **Writes nothing.**
 
         This used to write ``hexaero_airport_layouts`` itself, with
         ``mode="overwrite"`` -- so calling it in a loop left the table holding
@@ -523,8 +511,7 @@ class AirportLayoutGenerator:
         airport_types: Optional[List[str]] = None,
         troublesome_airports: Optional[List[str]] = None,
     ) -> Tuple[List[str], List[str]]:
-        """
-        Process all airports, skipping already-processed ones.
+        """Process all airports, skipping already-processed ones.
 
         Args:
             airports_url: URL to OurAirports airports CSV.

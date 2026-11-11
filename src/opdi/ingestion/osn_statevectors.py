@@ -1,5 +1,4 @@
-"""
-OpenSky Network state vectors ingestion module.
+"""OpenSky Network state vectors ingestion module.
 
 Downloads and processes state vector data from OpenSky Network's MinIO server
 and writes to Iceberg tables with proper partitioning.
@@ -30,8 +29,7 @@ _UNSET = object()
 
 
 class StateVectorIngestion:
-    """
-    Handles ingestion of OpenSky Network state vectors from MinIO storage.
+    """Handles ingestion of OpenSky Network state vectors from MinIO storage.
 
     This class manages the complete workflow of downloading state vector parquet files
     from OpenSky's S3-compatible MinIO server, processing them, and writing to
@@ -69,8 +67,7 @@ class StateVectorIngestion:
         time_interval: int = 5,
         decimation: Optional[str] = None,
     ):
-        """
-        Initialize state vector ingestion.
+        """Initialize state vector ingestion.
 
         Args:
             spark: Active SparkSession
@@ -176,8 +173,7 @@ class StateVectorIngestion:
         )
 
     def _execute_shell_command(self, command: str) -> tuple[str, str]:
-        """
-        Execute a shell command and return stdout and stderr.
+        """Execute a shell command and return stdout and stderr.
 
         Args:
             command: Shell command to execute
@@ -192,8 +188,7 @@ class StateVectorIngestion:
         return stdout.decode().strip(), stderr.decode().strip()
 
     def setup_minio_client(self) -> bool:
-        """
-        Set up MinIO client (mc) for accessing OpenSky Network data.
+        """Set up MinIO client (mc) for accessing OpenSky Network data.
 
         Requires OSN_USERNAME and OSN_KEY environment variables to be set.
 
@@ -204,7 +199,7 @@ class StateVectorIngestion:
             EnvironmentError: If OSN credentials are not set
         """
         if "OSN_USERNAME" not in os.environ or "OSN_KEY" not in os.environ:
-            raise EnvironmentError(
+            raise OSError(
                 "OSN_USERNAME and OSN_KEY environment variables must be set. "
                 "Obtain credentials from OpenSky Network."
             )
@@ -229,8 +224,7 @@ class StateVectorIngestion:
         start_date: date,
         end_date: date,
     ) -> List[str]:
-        """
-        List available state vector files on OpenSky MinIO server.
+        """List available state vector files on OpenSky MinIO server.
 
         Files are named ``states_YYYY-MM-DD-HH.parquet``.  Only files
         whose date falls within ``[start_date, end_date)`` are returned.
@@ -265,20 +259,18 @@ class StateVectorIngestion:
         return filtered_files
 
     def load_processed_files(self) -> Set[str]:
-        """
-        Load the set of already processed files from log.
+        """Load the set of already processed files from log.
 
         Returns:
             Set of processed file names
         """
         if os.path.exists(self.log_file_path):
-            with open(self.log_file_path, "r") as f:
+            with open(self.log_file_path) as f:
                 return set(f.read().splitlines())
         return set()
 
     def mark_files_processed(self, file_names: List[str]) -> None:
-        """
-        Mark files as processed by appending to log file.
+        """Mark files as processed by appending to log file.
 
         Args:
             file_names: List of file names to mark as processed
@@ -288,8 +280,7 @@ class StateVectorIngestion:
                 f.write(file_name + "\n")
 
     def remove_partial_files(self) -> None:
-        """
-        Remove partially downloaded files (``*.parquet.part.minio``).
+        """Remove partially downloaded files (``*.parquet.part.minio``).
 
         MinIO creates ``.part`` files during download that may remain if
         download is interrupted. This cleans them up before processing.
@@ -306,8 +297,7 @@ class StateVectorIngestion:
                 print(f"Removed partial file: {filename}")
 
     def download_files(self, file_paths: List[str]) -> List[str]:
-        """
-        Download files from MinIO to local storage.
+        """Download files from MinIO to local storage.
 
         Args:
             file_paths: List of full MinIO file paths to download
@@ -336,8 +326,7 @@ class StateVectorIngestion:
         return downloaded_files
 
     def process_and_write_batch(self, file_names: List[str]) -> None:
-        """
-        Process downloaded files and write to Iceberg table.
+        """Process downloaded files and write to Iceberg table.
 
         Args:
             file_names: List of file names to process (must be in local_download_path)
@@ -409,8 +398,7 @@ class StateVectorIngestion:
             )
 
     def cleanup_local_files(self, file_names: List[str]) -> None:
-        """
-        Delete local files after successful processing to save disk space.
+        """Delete local files after successful processing to save disk space.
 
         Args:
             file_names: List of file names to delete
@@ -426,8 +414,7 @@ class StateVectorIngestion:
         end_date: date,
         dry_run: bool = False,
     ) -> Dict[str, int]:
-        """
-        Run the complete ingestion workflow.
+        """Run the complete ingestion workflow.
 
         Downloads state vectors in batches, processes them, and writes to Iceberg.
 
@@ -522,8 +509,7 @@ class StateVectorIngestion:
         end_date: date,
         s3_base_path: str = "s3a://opensky-hdfs-backup/tables_v4/state_vectors",
     ) -> int:
-        """
-        Ingest state vectors by reading directly from the OpenSky S3 bucket.
+        """Ingest state vectors by reading directly from the OpenSky S3 bucket.
 
         This method bypasses the MinIO CLI download and reads parquet
         partitions directly via Spark's S3A filesystem. Intended for
@@ -597,8 +583,7 @@ class StateVectorIngestion:
         return row_count
 
     def create_table_if_not_exists(self) -> None:
-        """
-        Create the osn_statevectors_v2 Iceberg table if it doesn't exist.
+        """Create the osn_statevectors_v2 Iceberg table if it doesn't exist.
 
         This should be run once before first ingestion.
         """

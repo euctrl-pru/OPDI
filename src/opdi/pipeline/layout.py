@@ -101,8 +101,7 @@ def calculate_airport_events(
     storage: "StorageManager",
     config: Optional[EventConfig] = None,
 ) -> DataFrame:
-    """
-    Detect airport infrastructure entry/exit events using H3 layout matching.
+    """Detect airport infrastructure entry/exit events using H3 layout matching.
 
     Matches low-altitude track points against airport layout H3 hexagons
     (resolution 12) to detect when aircraft enter and exit runways,

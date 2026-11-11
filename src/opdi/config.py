@@ -1,5 +1,4 @@
-"""
-Configuration management for OPDI pipeline.
+"""Configuration management for OPDI pipeline.
 
 Provides centralized configuration using dataclasses for project settings,
 Spark configurations, H3 parameters, and ingestion settings.
@@ -140,8 +139,7 @@ class SparkConfig:
     enable_iceberg: bool = True
 
     def to_spark_config(self, project_config: ProjectConfig) -> Dict[str, str]:
-        """
-        Convert to Spark configuration dictionary.
+        """Convert to Spark configuration dictionary.
 
         Args:
             project_config: Project configuration for warehouse paths
@@ -203,8 +201,7 @@ class SparkConfig:
         return configs
 
     def to_distributed_config(self) -> Dict[str, str]:
-        """
-        Return Kubernetes distributed-mode Spark configuration.
+        """Return Kubernetes distributed-mode Spark configuration.
 
         Includes executor resource settings that only apply when running
         with K8s executors.

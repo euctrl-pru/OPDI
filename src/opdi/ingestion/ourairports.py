@@ -1,5 +1,4 @@
-"""
-OurAirports reference data ingestion.
+"""OurAirports reference data ingestion.
 
 Downloads and loads airport reference datasets from OurAirports into
 Spark tables. Covers airports, runways, navaids, frequencies, countries,
@@ -155,8 +154,7 @@ SCHEMAS: Dict[str, StructType] = {
 
 
 class OurAirportsIngestion:
-    """
-    ETL pipeline for OurAirports reference data.
+    """ETL pipeline for OurAirports reference data.
 
     Downloads CSV datasets from OurAirports, loads them into Spark
     DataFrames with proper schemas, and writes them to database tables.
@@ -267,8 +265,7 @@ class OurAirportsIngestion:
         name: str,
         url: Optional[str] = None,
     ) -> int:
-        """
-        Download and ingest a single OurAirports dataset.
+        """Download and ingest a single OurAirports dataset.
 
         Args:
             name: Dataset name (airports, runways, navaids, etc.).
@@ -296,8 +293,7 @@ class OurAirportsIngestion:
         self,
         urls: Optional[Dict[str, str]] = None,
     ) -> Dict[str, int]:
-        """
-        Download and ingest all OurAirports datasets.
+        """Download and ingest all OurAirports datasets.
 
         Tables are created if they don't exist, then overwritten with
         fresh data.

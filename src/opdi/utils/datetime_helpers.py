@@ -1,5 +1,4 @@
-"""
-Date and time utility functions for OPDI pipeline.
+"""Date and time utility functions for OPDI pipeline.
 
 Provides functions for generating date ranges, converting dates to Unix timestamps,
 and filtering Spark DataFrames by time windows.
@@ -14,8 +13,7 @@ from pyspark.sql import functions as F
 
 
 def generate_months(start_date: date, end_date: date) -> List[date]:
-    """
-    Generate a list of dates corresponding to the first day of each month between two dates.
+    """Generate a list of dates corresponding to the first day of each month between two dates.
 
     Args:
         start_date: The starting date
@@ -45,8 +43,7 @@ def generate_months(start_date: date, end_date: date) -> List[date]:
 def generate_intervals(
     start_date: date, end_date: date, step_days: int = 10
 ) -> List[Tuple[date, date]]:
-    """
-    Generate a list of date intervals with specified step size.
+    """Generate a list of date intervals with specified step size.
 
     Args:
         start_date: The starting date
@@ -74,8 +71,7 @@ def generate_intervals(
 
 
 def get_start_end_of_month(dt: date) -> Tuple[float, float]:
-    """
-    Return Unix timestamps for the first and last second of the given month.
+    """Return Unix timestamps for the first and last second of the given month.
 
     Args:
         dt: Date object for the desired month
@@ -104,8 +100,7 @@ def get_data_within_timeframe(
     time_col: str = "event_time",
     unix_time: bool = True,
 ) -> DataFrame:
-    """
-    Retrieve records from a Spark table within the given monthly timeframe.
+    """Retrieve records from a Spark table within the given monthly timeframe.
 
     Args:
         spark: Active SparkSession object
@@ -148,8 +143,7 @@ def get_data_within_interval(
     time_col: str = "event_time",
     unix_time: bool = True,
 ) -> DataFrame:
-    """
-    Retrieve records from a Spark table within a specific date interval.
+    """Retrieve records from a Spark table within a specific date interval.
 
     Args:
         spark: Active SparkSession object

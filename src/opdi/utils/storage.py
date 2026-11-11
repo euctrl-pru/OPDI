@@ -1,5 +1,4 @@
-"""
-Storage abstraction layer for OPDI pipeline.
+"""Storage abstraction layer for OPDI pipeline.
 
 Provides environment-aware table read/write operations. In Iceberg mode
 (the ``local`` environment by default) tables are managed via the catalog. In
@@ -42,8 +41,7 @@ def _partition_dir_value(value):
 
 
 class StorageManager:
-    """
-    Abstracts table I/O so pipeline steps work against both
+    """Abstracts table I/O so pipeline steps work against both
     Iceberg catalogs and plain S3 parquet directories.
     """
 
@@ -59,8 +57,7 @@ class StorageManager:
         return f"{self.base_path}/{table_name}"
 
     def table_ref(self, table_name: str) -> str:
-        """
-        Return a reference usable in ``spark.sql()`` queries.
+        """Return a reference usable in ``spark.sql()`` queries.
 
         * Iceberg mode: returns backtick-quoted ```project`.`table```
         * S3 mode: reads parquet from S3, registers a temp view, returns the view name
@@ -102,8 +99,7 @@ class StorageManager:
         partition_by: Optional[Sequence[str]] = None,
         partition_values: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
-        """
-        Write *df* to *table_name*.
+        """Write *df* to *table_name*.
 
         Args:
             df: Spark DataFrame to persist.

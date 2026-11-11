@@ -1,5 +1,4 @@
-"""
-Flight list generation module.
+"""Flight list generation module.
 
 Creates flight-level summaries from processed tracks by:
 1. Detecting departures and arrivals using H3 airport zones
@@ -356,8 +355,7 @@ def resolve_flight_id(sv: DataFrame, track_col: str = "track_id") -> DataFrame:
 
 
 class FlightListProcessor:
-    """
-    Generates the OPDI flight list from processed track data.
+    """Generates the OPDI flight list from processed track data.
 
     The flight list is produced in two phases:
 
@@ -565,8 +563,7 @@ class FlightListProcessor:
         return resolve_flight_id(df)
 
     def _load_airports_hex(self, airports_hex_path: Optional[str] = None) -> DataFrame:
-        """
-        Load the airport hex detection zone reference data.
+        """Load the airport hex detection zone reference data.
 
         Reads from the StorageManager table ``h3_airport_detection_zones``
         if available, otherwise falls back to a local parquet file.
@@ -801,8 +798,7 @@ class FlightListProcessor:
         print(f"  endpoint candidates for {month:%Y-%m} written")
 
     def _fetch_and_label_sv(self, month: date, sdf_apt: DataFrame) -> DataFrame:
-        """
-        Fetch track data and label state vectors near airports.
+        """Fetch track data and label state vectors near airports.
 
         Steps:
         1. Fetch tracks for the month
@@ -1035,8 +1031,7 @@ class FlightListProcessor:
         smooth_half_window: int = 2,
         vote_margin: int = 4,
     ) -> DataFrame:
-        """
-        Classify each track-airport pair as take-off, landing, or ambiguous.
+        """Classify each track-airport pair as take-off, landing, or ambiguous.
 
         Uses a smoothed altitude change analysis: if the altitude is mostly
         increasing near the airport, it's a take-off; if decreasing, it's a
@@ -1173,8 +1168,7 @@ class FlightListProcessor:
         bearing_tiebreak_nm: float = 0.0,
         version: str = FLIGHT_LIST_VERSION,
     ) -> DataFrame:
-        """
-        Create the flight table from classified tracks.
+        """Create the flight table from classified tracks.
 
         For each track with a take-off or landing classification:
         1. Find the state vector closest to the airport center
@@ -1519,8 +1513,7 @@ class FlightListProcessor:
         )
 
     def _add_osn_aircraft_db_data(self, flight_table: DataFrame) -> DataFrame:
-        """
-        Enrich the flight table with aircraft metadata from the OSN database.
+        """Enrich the flight table with aircraft metadata from the OSN database.
 
         Args:
             flight_table: Flight table DataFrame.
@@ -1573,8 +1566,7 @@ class FlightListProcessor:
     # ------------------------------------------------------------------
 
     def _fetch_overflights(self, month: date) -> DataFrame:
-        """
-        Identify overflights: tracks not in the DAI flight list.
+        """Identify overflights: tracks not in the DAI flight list.
 
         Overflights are tracks with ADS-B signals lasting >= 5 minutes
         that don't already appear in the flight list.
@@ -1786,8 +1778,7 @@ class FlightListProcessor:
         write_mode: str = "overwrite",
         rebuild_candidates: bool = False,
     ) -> None:
-        """
-        Process Departures/Arrivals/Internal flights for a month.
+        """Process Departures/Arrivals/Internal flights for a month.
 
         Args:
             month: Month to process.
@@ -1903,8 +1894,7 @@ class FlightListProcessor:
         month: date,
         skip_if_processed: bool = True,
     ) -> None:
-        """
-        Process overflight records for a month.
+        """Process overflight records for a month.
 
         Args:
             month: Month to process.
@@ -1938,8 +1928,7 @@ class FlightListProcessor:
         adep_mode: Optional[str] = None,
         ades_mode: Optional[str] = None,
     ) -> None:
-        """
-        Process the complete flight list for a range of months.
+        """Process the complete flight list for a range of months.
 
         Runs DAI processing first, then overflight processing for each month.
 

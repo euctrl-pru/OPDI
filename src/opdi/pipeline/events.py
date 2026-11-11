@@ -1,5 +1,4 @@
-"""
-Flight events and measurements ETL module.
+"""Flight events and measurements ETL module.
 
 Detects and records flight events (milestones) from track data.
 
@@ -737,8 +736,7 @@ def calculate_ring_crossing_events(
 def calculate_horizontal_segment_events(
     sdf_input: DataFrame, config: Optional[EventConfig] = None
 ) -> DataFrame:
-    """
-    Detect flight phase transitions and horizontal segment events.
+    """Detect flight phase transitions and horizontal segment events.
 
     Uses fuzzy logic membership functions to classify each state vector
     into flight phases (GND, CL, DE, CR, LVL) based on altitude,
@@ -1093,8 +1091,7 @@ def calculate_horizontal_segment_events(
 
 
 def calculate_vertical_crossing_events(sdf_input: DataFrame) -> DataFrame:
-    """
-    Detect flight level crossing events (FL50, FL70, FL100, FL245).
+    """Detect flight level crossing events (FL50, FL70, FL100, FL245).
 
     For each track, identifies the first and last time the aircraft
     crosses each monitored flight level boundary.
@@ -1194,8 +1191,7 @@ def calculate_vertical_crossing_events(sdf_input: DataFrame) -> DataFrame:
 
 
 def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
-    """
-    Calculate first_seen and last_seen events for each track.
+    """Calculate first_seen and last_seen events for each track.
 
     Args:
         sdf_input: Input DataFrame with track data.
@@ -1287,7 +1283,8 @@ EXTRA_MEASURES: List[Tuple[str, str, str, str]] = []
 def _register_family_measures() -> None:
     """Collect the families' measurement entries. Imported lazily so the
     family modules, which import ``EventConfig``, never import this module
-    at load time."""
+    at load time.
+    """
     from opdi.pipeline.holding import HOLDING_MEASURES
     from opdi.pipeline.point_merge import PMS_MEASURES
 
@@ -1303,7 +1300,8 @@ def measurement_suffix(measurement_type: str) -> str:
     """The id suffix of an extra measurement: ``_m`` plus six hex characters of
     the measurement type's hash. Keyed on the type, not on the position in
     ``EXTRA_MEASURES``, so adding or reordering an entry cannot renumber ids
-    already published."""
+    already published.
+    """
     import hashlib
 
     return "_m" + hashlib.sha256(measurement_type.encode("utf-8")).hexdigest()[:6]
@@ -1376,8 +1374,7 @@ def distance_version(config: EventConfig) -> str:
 
 
 def add_distance_measure(df: DataFrame, last_known_position: bool = True) -> DataFrame:
-    """
-    Calculate segment and cumulative distance (NM) using Haversine formula.
+    """Calculate segment and cumulative distance (NM) using Haversine formula.
 
     Uses native PySpark functions for distributed computation.
 
@@ -1463,8 +1460,7 @@ def _distance_from_last_known_position(df: DataFrame, ordered) -> DataFrame:
 
 
 class FlightEventProcessor:
-    """
-    Orchestrates the extraction of flight events and measurements.
+    """Orchestrates the extraction of flight events and measurements.
 
     Combines horizontal (phase), vertical (FL crossing), airport, and
     first/last-seen event detection into a single processing pipeline.
@@ -1670,8 +1666,7 @@ class FlightEventProcessor:
         calc_seen: bool = True,
         calc_navigation: bool = True,
     ) -> None:
-        """
-        Core ETL: calculate events and measurements, write to tables.
+        """Core ETL: calculate events and measurements, write to tables.
 
         Args:
             sdf_input: Input tracks DataFrame.
@@ -2005,8 +2000,7 @@ class FlightEventProcessor:
         self.process_month(day, skip_if_processed=skip_if_processed, day=day)
 
     def process_month(self, month: date, skip_if_processed: bool = True, day: date = None) -> None:
-        """
-        Process all flight events for a single month.
+        """Process all flight events for a single month.
 
         Args:
             month: Month to process.
@@ -2092,8 +2086,7 @@ class FlightEventProcessor:
         end_month: date,
         skip_if_processed: bool = True,
     ) -> None:
-        """
-        Process flight events for a range of months.
+        """Process flight events for a range of months.
 
         Args:
             start_month: First month to process.

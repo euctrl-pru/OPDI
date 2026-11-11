@@ -1,5 +1,4 @@
-"""
-H3 hexagonal indexing utility functions for OPDI pipeline.
+"""H3 hexagonal indexing utility functions for OPDI pipeline.
 
 Provides helper functions for working with H3 geospatial indices,
 including column name generation, coordinate extraction, and set operations.
@@ -16,8 +15,7 @@ import h3
 
 
 def h3_list_prep(h3_resolutions: List[int]) -> List[str]:
-    """
-    Generate H3 column names for a list of resolutions.
+    """Generate H3 column names for a list of resolutions.
 
     Args:
         h3_resolutions: List of H3 resolution levels (e.g., [7, 12])
@@ -36,8 +34,7 @@ def h3_list_prep(h3_resolutions: List[int]) -> List[str]:
 
 
 def get_h3_coords(h3_index: str) -> Tuple[float, float]:
-    """
-    Get latitude and longitude coordinates for an H3 index.
+    """Get latitude and longitude coordinates for an H3 index.
 
     Args:
         h3_index: H3 hexagon index string
@@ -54,8 +51,7 @@ def get_h3_coords(h3_index: str) -> Tuple[float, float]:
 
 
 def compact_h3_set(h3_set: Set[str]) -> Set[str]:
-    """
-    Compact a set of H3 indices by merging child hexagons into parents where possible.
+    """Compact a set of H3 indices by merging child hexagons into parents where possible.
 
     This reduces the number of hexagons needed to represent the same area,
     improving storage and query performance.
@@ -80,8 +76,7 @@ def compact_h3_set(h3_set: Set[str]) -> Set[str]:
 
 
 def uncompact_h3_set(h3_set: Set[str], target_resolution: int) -> Set[str]:
-    """
-    Uncompact a set of H3 indices to a target resolution.
+    """Uncompact a set of H3 indices to a target resolution.
 
     Expands parent hexagons into their children at the specified resolution.
 
@@ -102,8 +97,7 @@ def uncompact_h3_set(h3_set: Set[str], target_resolution: int) -> Set[str]:
 
 
 def h3_distance(h3_index1: str, h3_index2: str) -> int:
-    """
-    Calculate the grid distance between two H3 indices.
+    """Calculate the grid distance between two H3 indices.
 
     Grid distance is the number of hexagon steps between two indices.
     Both indices must be at the same resolution.
@@ -123,8 +117,7 @@ def h3_distance(h3_index1: str, h3_index2: str) -> int:
 
 
 def get_h3_resolution(h3_index: str) -> int:
-    """
-    Get the resolution level of an H3 index.
+    """Get the resolution level of an H3 index.
 
     Args:
         h3_index: H3 hexagon index string
@@ -141,8 +134,7 @@ def get_h3_resolution(h3_index: str) -> int:
 
 
 def k_ring(h3_index: str, k: int) -> Set[str]:
-    """
-    Get all hexagons within k steps of the given hexagon (including the center).
+    """Get all hexagons within k steps of the given hexagon (including the center).
 
     Args:
         h3_index: Center H3 hexagon index
@@ -161,8 +153,7 @@ def k_ring(h3_index: str, k: int) -> Set[str]:
 
 
 def hex_ring(h3_index: str, k: int) -> Set[str]:
-    """
-    Get hexagons exactly k steps away from the given hexagon (hollow ring).
+    """Get hexagons exactly k steps away from the given hexagon (hollow ring).
 
     Args:
         h3_index: Center H3 hexagon index
@@ -181,8 +172,7 @@ def hex_ring(h3_index: str, k: int) -> Set[str]:
 
 
 def h3_to_parent(h3_index: str, parent_resolution: int) -> str:
-    """
-    Get the parent hexagon at a coarser resolution.
+    """Get the parent hexagon at a coarser resolution.
 
     Args:
         h3_index: Child H3 index
@@ -200,8 +190,7 @@ def h3_to_parent(h3_index: str, parent_resolution: int) -> str:
 
 
 def h3_to_children(h3_index: str, child_resolution: int) -> Set[str]:
-    """
-    Get all child hexagons at a finer resolution.
+    """Get all child hexagons at a finer resolution.
 
     Args:
         h3_index: Parent H3 index
@@ -222,8 +211,7 @@ def h3_to_children(h3_index: str, child_resolution: int) -> Set[str]:
 def _ring_to_latlng(
     ring: List[List[float]], geo_json_conformant: bool
 ) -> List[Tuple[float, float]]:
-    """
-    Convert one GeoJSON coordinate ring to the [lat, lng] tuples h3.LatLngPoly
+    """Convert one GeoJSON coordinate ring to the [lat, lng] tuples h3.LatLngPoly
     expects.
 
     THE FOOTGUN: v3's ``polyfill(..., geo_json_conformant=True)`` consumed
@@ -243,8 +231,7 @@ def _ring_to_latlng(
 def polyfill_geojson(
     geojson_geometry: dict, resolution: int, geo_json_conformant: bool = False
 ) -> Set[str]:
-    """
-    Fill a GeoJSON geometry with H3 hexagons at the specified resolution.
+    """Fill a GeoJSON geometry with H3 hexagons at the specified resolution.
 
     Args:
         geojson_geometry: GeoJSON geometry dict (Polygon or MultiPolygon)
@@ -285,8 +272,7 @@ def polyfill_geojson(
 
 
 def is_valid_h3_index(h3_index: str) -> bool:
-    """
-    Check if a string is a valid H3 index.
+    """Check if a string is a valid H3 index.
 
     Args:
         h3_index: String to validate

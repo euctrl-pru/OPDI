@@ -118,7 +118,7 @@ def threshold_crossings(
         When False, keep only the first and last crossing of each threshold,
         as the published detector did.
 
-    Returns
+    Returns:
     -------
     One row per crossing, carrying ``partition_cols`` plus ``threshold``,
     ``direction``, ``crossing_seq``, the (possibly interpolated) ``time_col``
@@ -247,7 +247,8 @@ def _empty_result(
     interpolate_cols: Sequence[str],
 ) -> DataFrame:
     """Shape-correct empty frame, so a caller configured with no thresholds
-    (``EventConfig.legacy()`` has no rings) still unions cleanly."""
+    (``EventConfig.legacy()`` has no rings) still unions cleanly.
+    """
     cols = (
         [F.col(c) for c in partition_cols]
         + [

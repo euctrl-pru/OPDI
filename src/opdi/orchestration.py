@@ -36,7 +36,7 @@ import sys
 import time
 import traceback
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Sequence
 
 #: The steps of one day, in the order they run.
 #:
@@ -60,7 +60,7 @@ REFERENCE_STEP = "00"
 #: Internal tables that may be removed once a day is published, with the
 #: column their files are split by (one folder per day). Nothing else is ever
 #: removed.
-INTERNAL_TABLES: Dict[str, str] = {
+INTERNAL_TABLES: dict[str, str] = {
     "osn_statevectors_v2": "event_time_day",
     "osn_tracks": "dof",
     "osn_tracks_clean": "dof",
@@ -73,7 +73,7 @@ INTERNAL_TABLES: Dict[str, str] = {
 #: :data:`DEFAULT_WORKING_KEEP_DAYS` days, are removed. The working flight
 #: list (``opdi_flight_list``) is never removed: building a later day reads
 #: it.
-WORKING_TABLES: Dict[str, str] = {
+WORKING_TABLES: dict[str, str] = {
     "opdi_flight_events": "dof",
     "opdi_measurements": "dof",
 }
@@ -104,7 +104,7 @@ ORDERS = ("newest_first", "oldest_first")
 # --- planning ---------------------------------------------------------------
 
 
-def days(start: date, end: date, order: str = "newest_first") -> List[date]:
+def days(start: date, end: date, order: str = "newest_first") -> list[date]:
     """Every day from ``start`` to ``end``, both included.
 
     Args:
@@ -126,14 +126,14 @@ def days(start: date, end: date, order: str = "newest_first") -> List[date]:
 # --- configuration and sessions ----------------------------------------------
 
 
-def make_config(warehouse: Optional[str] = None, worldwide: bool = True):
+def make_config(warehouse: str | None = None, worldwide: bool = True):
     """The ``opensky`` configuration for ``warehouse`` and the coverage."""
     from opdi.config import OPDIConfig
 
     return OPDIConfig.for_environment("opensky", worldwide=worldwide, warehouse=warehouse)
 
 
-def _session(config, name: str, distributed: Optional[bool] = None):
+def _session(config, name: str, distributed: bool | None = None):
     """A Spark session for one unit, with a driver heap that fits the machine."""
     from opdi import periodrun
     from opdi.utils.spark_helpers import SparkSessionManager
@@ -168,14 +168,14 @@ def _step_kwargs() -> dict:
 # --- one unit -----------------------------------------------------------------
 
 
-def unit_key(step: str, day: Optional[date]) -> str:
+def unit_key(step: str, day: date | None) -> str:
     """Name under which a finished unit is recorded, for example ``02@2026-06-14``."""
     from opdi.periodrun import day_state_key
 
     return step if day is None else day_state_key(step, day)
 
 
-def _check_unit(step: str, day: Optional[date]) -> None:
+def _check_unit(step: str, day: date | None) -> None:
     if step == REFERENCE_STEP:
         if day is not None:
             raise ValueError("step 00 builds the reference tables and takes no day")
@@ -190,8 +190,8 @@ def _check_unit(step: str, day: Optional[date]) -> None:
 
 def run_unit(
     step: str,
-    day: Optional[date],
-    warehouse: Optional[str] = None,
+    day: date | None,
+    warehouse: str | None = None,
     worldwide: bool = True,
     force: bool = False,
 ) -> int:
@@ -277,9 +277,7 @@ def run_unit(
         spark.stop()
 
 
-def unfinished_steps(
-    day: date, warehouse: Optional[str] = None, worldwide: bool = True
-) -> List[str]:
+def unfinished_steps(day: date, warehouse: str | None = None, worldwide: bool = True) -> list[str]:
     """The steps of ``day`` not yet recorded as finished in the warehouse.
 
     Uses a small local Spark session, so that checking a finished day costs
@@ -298,7 +296,7 @@ def unfinished_steps(
 
 def run_day(
     day: date,
-    warehouse: Optional[str] = None,
+    warehouse: str | None = None,
     worldwide: bool = True,
     force: bool = False,
     keep_internal: bool = False,
@@ -355,8 +353,8 @@ def _bucket_root(path: str) -> str:
 
 
 def free_space_gb(
-    warehouse: Optional[str] = None,
-    quota_gb: Optional[float] = None,
+    warehouse: str | None = None,
+    quota_gb: float | None = None,
     worldwide: bool = True,
 ) -> float:
     """Free space where the warehouse is, in GB (10^9 bytes).
@@ -394,8 +392,8 @@ def free_space_gb(
 
 def check_space(
     min_free_gb: float,
-    warehouse: Optional[str] = None,
-    quota_gb: Optional[float] = None,
+    warehouse: str | None = None,
+    quota_gb: float | None = None,
     worldwide: bool = True,
 ) -> None:
     """Fail when less than ``min_free_gb`` GB are free where the warehouse is.
@@ -416,8 +414,8 @@ def check_space(
 
 
 def prune_plan(
-    day: date, keep_days: int, present: Dict[str, Sequence[str]]
-) -> Dict[str, List[str]]:
+    day: date, keep_days: int, present: dict[str, Sequence[str]]
+) -> dict[str, list[str]]:
     """Which day folders of the internal tables :func:`prune_internal` removes.
 
     The folders from ``keep_days - 1`` days before ``day`` to ``keep_days``
@@ -437,7 +435,7 @@ def prune_plan(
         raise ValueError("keep_days must be at least 1: the next day needs the last one")
     oldest_kept = day - timedelta(days=keep_days - 1)
     newest_kept = day + timedelta(days=keep_days)
-    plan: Dict[str, List[str]] = {}
+    plan: dict[str, list[str]] = {}
     for table, values in present.items():
         if table not in INTERNAL_TABLES:
             continue
@@ -456,9 +454,9 @@ def prune_plan(
 def working_prune_plan(
     day: date,
     keep_days: int,
-    present: Dict[str, Sequence[str]],
-    published: Set[date],
-) -> Dict[str, List[str]]:
+    present: dict[str, Sequence[str]],
+    published: set[date],
+) -> dict[str, list[str]]:
     """Which day folders of the working events and measurements may be removed.
 
     A day folder is removed only when its day is published (both files and a
@@ -479,7 +477,7 @@ def working_prune_plan(
         raise ValueError("keep_days must be 0 or more")
     oldest_kept = day - timedelta(days=keep_days)
     newest_kept = day + timedelta(days=keep_days)
-    plan: Dict[str, List[str]] = {}
+    plan: dict[str, list[str]] = {}
     for table, values in present.items():
         if table not in WORKING_TABLES:
             continue
@@ -496,7 +494,7 @@ def working_prune_plan(
     return plan
 
 
-def published_days(storage) -> Set[date]:
+def published_days(storage) -> set[date]:
     """The days whose two published files and catalogue row all exist.
 
     Args:
@@ -520,7 +518,7 @@ def published_days(storage) -> Set[date]:
 def prune_internal(
     day: date,
     keep_days: int = DEFAULT_KEEP_DAYS,
-    warehouse: Optional[str] = None,
+    warehouse: str | None = None,
     worldwide: bool = True,
     storage=None,
     drop_published_working: bool = False,
@@ -693,7 +691,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Run one command; see the module description. Returns the exit code."""
     args = _parser().parse_args(argv)
     try:

@@ -1,5 +1,4 @@
-"""
-Track cleaning processor -- pipeline step 02a.
+"""Track cleaning processor -- pipeline step 02a.
 
 Reads ``osn_tracks`` (step 02), applies :func:`opdi.cleaning.native.clean_tracks`,
 and writes ``osn_tracks_clean``.

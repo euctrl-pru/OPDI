@@ -22,7 +22,7 @@ longer has anything to do with the one being replaced.
 from __future__ import annotations
 
 from datetime import date
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from opdi.pipeline.flight_list_milestones import enrich_flight_list
 
@@ -48,11 +48,11 @@ def _days_between(start_date: date, end_date: date) -> list:
 
 
 def enrich_day(
-    storage: "StorageManager",
-    config: "EventConfig",
+    storage: StorageManager,
+    config: EventConfig,
     start_date: date,
     end_date: date,
-) -> Optional[int]:
+) -> int | None:
     """Enrich the flight list against the events written so far.
 
     ``start_date``/``end_date`` are kept for the runner's uniform step

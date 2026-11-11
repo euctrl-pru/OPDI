@@ -1,5 +1,4 @@
-"""
-Command-line interface for the OPDI pipeline.
+"""Command-line interface for the OPDI pipeline.
 
 Provides an ``opdi`` CLI command (registered via pyproject.toml
 ``[project.scripts]``) that dispatches to individual pipeline stages

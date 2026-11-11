@@ -1,5 +1,4 @@
-"""
-Geospatial utility functions for OPDI pipeline.
+"""Geospatial utility functions for OPDI pipeline.
 
 Provides functions for distance calculations, coordinate transformations,
 and geometry operations used throughout the aviation data pipeline.
@@ -23,8 +22,7 @@ METERS_TO_NM = 1.0 / 1852.0
 def haversine_distance(
     lat1: float, lon1: float, lat2: float, lon2: float, unit: str = "nm"
 ) -> float:
-    """
-    Calculate the great circle distance between two points on Earth using the Haversine formula.
+    """Calculate the great circle distance between two points on Earth using the Haversine formula.
 
     Args:
         lat1: Latitude of first point in degrees
@@ -76,8 +74,7 @@ def add_cumulative_distance(
     track_id_col: str = "track_id",
     time_col: str = "event_time",
 ) -> DataFrame:
-    """
-    Calculate the great circle distance between consecutive points and cumulative distance.
+    """Calculate the great circle distance between consecutive points and cumulative distance.
 
     Uses native PySpark functions for distributed computation of distances along tracks.
 
@@ -138,8 +135,7 @@ def add_cumulative_distance(
 
 
 def calculate_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Calculate the initial bearing (forward azimuth) between two points.
+    """Calculate the initial bearing (forward azimuth) between two points.
 
     Args:
         lat1: Latitude of first point in degrees
@@ -180,8 +176,7 @@ def calculate_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
 def destination_point(
     lat: float, lon: float, bearing: float, distance_nm: float
 ) -> Tuple[float, float]:
-    """
-    Calculate destination point given start point, bearing, and distance.
+    """Calculate destination point given start point, bearing, and distance.
 
     Args:
         lat: Starting latitude in degrees
@@ -226,8 +221,7 @@ def destination_point(
 
 
 def meters_to_flight_level(meters: float) -> int:
-    """
-    Convert altitude in meters to flight level.
+    """Convert altitude in meters to flight level.
 
     Flight level is altitude in hundreds of feet, so FL100 = 10,000 feet.
 
@@ -246,8 +240,7 @@ def meters_to_flight_level(meters: float) -> int:
 
 
 def flight_level_to_meters(flight_level: int) -> float:
-    """
-    Convert flight level to altitude in meters.
+    """Convert flight level to altitude in meters.
 
     Args:
         flight_level: Flight level (e.g., 100 for FL100)

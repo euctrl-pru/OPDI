@@ -1,5 +1,4 @@
-"""
-Track processing and enrichment module.
+"""Track processing and enrichment module.
 
 Transforms raw state vectors into structured flight tracks with:
 - Track ID generation (SHA256-based)
@@ -176,8 +175,7 @@ def required_lookback_hours(method: str, p) -> int:
 
 
 class TrackProcessor:
-    """
-    Processes raw state vectors into structured flight tracks.
+    """Processes raw state vectors into structured flight tracks.
 
     This class implements the core track creation logic including:
     - Unique track ID generation using SHA256 hashing
@@ -210,8 +208,7 @@ class TrackProcessor:
         config: OPDIConfig,
         log_file_path: str = "OPDI_live/logs/02_osn-tracks-etl-log.parquet",
     ):
-        """
-        Initialize track processor.
+        """Initialize track processor.
 
         Args:
             spark: Active SparkSession
@@ -309,8 +306,7 @@ class TrackProcessor:
         )
 
     def _add_track_id(self, df: DataFrame) -> DataFrame:
-        """
-        Add unique track ID to each state vector.
+        """Add unique track ID to each state vector.
 
         Dispatches on ``config.segmentation.method``.
 
@@ -438,8 +434,7 @@ class TrackProcessor:
         return assign_track_id(df, ARMS[resolved](), params)
 
     def _add_h3_encoding(self, df: DataFrame) -> DataFrame:
-        """
-        Add H3 hexagonal grid indices at configured resolutions.
+        """Add H3 hexagonal grid indices at configured resolutions.
 
         Args:
             df: DataFrame with lat/lon columns
@@ -460,8 +455,7 @@ class TrackProcessor:
         return df
 
     def _add_cumulative_distance(self, df: DataFrame) -> DataFrame:
-        """
-        Calculate segment and cumulative distances using Haversine formula.
+        """Calculate segment and cumulative distances using Haversine formula.
 
         Uses PySpark native functions for distributed computation.
 
@@ -581,8 +575,7 @@ class TrackProcessor:
         window: tuple = None,
         claim: tuple = None,
     ) -> None:
-        """
-        Process tracks for a single month.
+        """Process tracks for a single month.
 
         Args:
             month: Date representing the first day of the month to process
@@ -827,8 +820,7 @@ class TrackProcessor:
     def process_date_range(
         self, start_month: date, end_month: date, skip_if_processed: bool = True
     ) -> None:
-        """
-        Process tracks for a range of months.
+        """Process tracks for a range of months.
 
         Args:
             start_month: First month to process (first day of month)
@@ -855,8 +847,7 @@ class TrackProcessor:
         print(f"Completed processing {len(months)} months.")
 
     def create_table_if_not_exists(self) -> None:
-        """
-        Create the osn_tracks Iceberg table if it doesn't exist.
+        """Create the osn_tracks Iceberg table if it doesn't exist.
 
         This should be run once before first track processing.
         """

@@ -1,5 +1,4 @@
-"""
-OPDI full pipeline runner.
+"""OPDI full pipeline runner.
 
 Executes the OPDI pipeline steps in order, over a date range.
 
@@ -536,8 +535,7 @@ def run_pipeline(
     ades_mode: Optional[str] = None,
     worldwide: bool = True,
 ) -> int:
-    """
-    Run the OPDI pipeline end-to-end or a single step.
+    """Run the OPDI pipeline end-to-end or a single step.
 
     Args:
         env: Environment name (``"opensky"`` or ``"local"``).

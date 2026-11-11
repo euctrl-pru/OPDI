@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-"""
-OPDI full pipeline script.
+"""OPDI full pipeline script.
 
 Runs the OPDI data processing pipeline from start to finish.
 

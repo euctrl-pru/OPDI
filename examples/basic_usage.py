@@ -20,8 +20,10 @@ def main():
 
     print("OPDI Configuration:")
     print(f"  Project: {config.project.project_name}")
-    print(f"  H3 resolutions: detection={config.h3.airport_detection_resolution}, "
-          f"layout={config.h3.airport_layout_resolution}")
+    print(
+        f"  H3 resolutions: detection={config.h3.airport_detection_resolution}, "
+        f"layout={config.h3.airport_layout_resolution}"
+    )
 
     spark = SparkSessionManager.create_session(app_name="OPDI Pipeline", config=config)
     print(f"  Spark version: {spark.version}\n")

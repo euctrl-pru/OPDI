@@ -536,7 +536,8 @@ class PbfLayoutSource:
 
     def features_for(self, apt_icao: str) -> gpd.GeoDataFrame:
         """Features assigned to *apt_icao*, by polygon containment or --
-        where the aerodrome has no polygon -- the runway-extent box."""
+        where the aerodrome has no polygon -- the runway-extent box.
+        """
         self._load()
         out = self._features.loc[self._assigned_icao == apt_icao, _OUTPUT_COLUMNS]
         return gpd.GeoDataFrame(out, geometry="geometry", crs=self._features.crs)

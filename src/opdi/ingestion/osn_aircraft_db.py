@@ -1,5 +1,4 @@
-"""
-OpenSky Network aircraft database ingestion module.
+"""OpenSky Network aircraft database ingestion module.
 
 Downloads aircraft metadata from OpenSky Network and loads into Iceberg tables.
 """
@@ -15,8 +14,7 @@ from opdi.utils.storage import StorageManager
 
 
 class AircraftDatabaseIngestion:
-    """
-    Handles ingestion of OpenSky Network aircraft database.
+    """Handles ingestion of OpenSky Network aircraft database.
 
     The aircraft database contains metadata about aircraft including:
     - ICAO 24-bit address
@@ -31,8 +29,7 @@ class AircraftDatabaseIngestion:
         config: OPDIConfig,
         url: Optional[str] = None,
     ):
-        """
-        Initialize aircraft database ingestion.
+        """Initialize aircraft database ingestion.
 
         Args:
             spark: Active SparkSession
@@ -46,8 +43,7 @@ class AircraftDatabaseIngestion:
         self.url = url or config.ingestion.osn_aircraft_db_url
 
     def download_and_convert(self) -> DataFrame:
-        """
-        Download aircraft database CSV and convert to Spark DataFrame.
+        """Download aircraft database CSV and convert to Spark DataFrame.
 
         Returns:
             Spark DataFrame with aircraft metadata
@@ -106,8 +102,7 @@ class AircraftDatabaseIngestion:
         return cleaned_df
 
     def write_to_table(self, df: DataFrame, mode: str = "append") -> None:
-        """
-        Write aircraft database to table.
+        """Write aircraft database to table.
 
         Args:
             df: DataFrame to write
@@ -117,8 +112,7 @@ class AircraftDatabaseIngestion:
         print(f"Written {df.count()} records to osn_aircraft_db (mode: {mode}).")
 
     def create_table_if_not_exists(self) -> None:
-        """
-        Create the osn_aircraft_db Iceberg table if it doesn't exist.
+        """Create the osn_aircraft_db Iceberg table if it doesn't exist.
 
         This should be run once before first ingestion.
         """
@@ -139,8 +133,7 @@ class AircraftDatabaseIngestion:
         print(f"Table {self.project}.osn_aircraft_db created/verified.")
 
     def ingest(self, mode: str = "append") -> int:
-        """
-        Run the complete ingestion workflow.
+        """Run the complete ingestion workflow.
 
         Downloads the aircraft database and writes to Iceberg table.
 
@@ -173,8 +166,7 @@ class AircraftDatabaseIngestion:
         return record_count
 
     def get_aircraft_info(self, icao24: str) -> Optional[dict]:
-        """
-        Look up aircraft information by ICAO 24-bit address.
+        """Look up aircraft information by ICAO 24-bit address.
 
         Args:
             icao24: ICAO 24-bit transponder ID (e.g., "a12b34")

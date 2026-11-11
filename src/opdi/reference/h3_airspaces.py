@@ -1,5 +1,4 @@
-"""
-H3 airspace encoding (step 00c).
+"""H3 airspace encoding (step 00c).
 
 Turns airspace volumes (FIRs worldwide, ANSP areas, country boundaries) from
 PRU Atlas into a **compact** H3 reference: each polygon is filled at
@@ -115,7 +114,8 @@ def _shift_east(poly: Polygon) -> Polygon:
 
 def _polygons(geom) -> List[Polygon]:
     """The polygon parts of any geometry, dropping lines and points a cut or a
-    union can leave behind (a boundary that touches the cut line is one)."""
+    union can leave behind (a boundary that touches the cut line is one).
+    """
     if geom is None or geom.is_empty:
         return []
     if isinstance(geom, Polygon):
@@ -128,7 +128,8 @@ def _polygons(geom) -> List[Polygon]:
 def split_antimeridian(geom):
     """Split every polygon whose ring jumps across 180 degrees into a western
     and an eastern part, each inside [-180, 180]. Other geometry is returned
-    as is. ``h3.polygon_to_cells`` fills the complement of such a ring."""
+    as is. ``h3.polygon_to_cells`` fills the complement of such a ring.
+    """
     out = []
     for poly in _polygons(geom):
         if not _crosses_antimeridian(poly):
@@ -173,7 +174,8 @@ def compact_cells(geometry_wkt: str, res: int) -> List[Tuple[str, int]]:
 
 def fill_geometry(geometry_wkt: str, res: int = 7) -> list:
     """Full polyfill per sub-polygon of a WKT MultiPolygon (kept for callers
-    of the earlier port; the generator itself uses ``compact_cells``)."""
+    of the earlier port; the generator itself uses ``compact_cells``).
+    """
     return [
         polyfill_geojson(shapely.geometry.mapping(x), res, geo_json_conformant=True)
         for x in shapely.from_wkt(geometry_wkt).geoms
@@ -277,7 +279,8 @@ def dissolve_volumes(df: pd.DataFrame) -> pd.DataFrame:
 
 def fill_volumes(volumes: pd.DataFrame, res: int) -> pd.DataFrame:
     """One row per compact cell of every volume: the volume columns plus
-    ``h3_cell`` and ``h3_res``."""
+    ``h3_cell`` and ``h3_res``.
+    """
     out = []
     for r in volumes.itertuples(index=False):
         for cell, cell_res in compact_cells(r.geometry_wkt, res):
@@ -389,7 +392,8 @@ def _country_frame(df: pd.DataFrame) -> pd.DataFrame:
 class AirspaceH3Generator:
     """Builds ``opdi_h3_airspace_ref``: one layer per airspace type, each
     written once, partitioned by ``airspace_type`` so the layers do not
-    clobber each other."""
+    clobber each other.
+    """
 
     def __init__(self, spark: SparkSession, config: OPDIConfig, storage=None):
         self.spark = spark
@@ -404,7 +408,8 @@ class AirspaceH3Generator:
         """The earlier port's table (per-cell ``h3_res_7`` columns, unpartitioned,
         one polygon surviving) cannot take a partitioned write of the new
         columns. Deleting a table is not this step's to do silently: stop and
-        name it."""
+        name it.
+        """
         if not self.storage.table_exists(TABLE):
             return
         columns = set(self.storage.read_table(TABLE).columns)

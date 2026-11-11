@@ -1,5 +1,4 @@
-"""
-Spark session management utilities for OPDI pipeline.
+"""Spark session management utilities for OPDI pipeline.
 
 Provides centralized Spark session creation with consistent configuration
 across all pipeline components.
@@ -13,8 +12,7 @@ from opdi.config import OPDIConfig
 
 
 class SparkSessionManager:
-    """
-    Factory for creating and managing Spark sessions with OPDI configurations.
+    """Factory for creating and managing Spark sessions with OPDI configurations.
 
     This class centralizes all Spark configuration logic, eliminating duplication
     across pipeline scripts and enabling environment-specific settings.
@@ -29,8 +27,7 @@ class SparkSessionManager:
         distributed: bool = False,
         container_image: Optional[str] = None,
     ) -> SparkSession:
-        """
-        Create a new Spark session with OPDI configuration.
+        """Create a new Spark session with OPDI configuration.
 
         Args:
             app_name: Name for the Spark application
@@ -85,8 +82,7 @@ class SparkSessionManager:
         env: str = "opensky",
         distributed: bool = False,
     ) -> SparkSession:
-        """
-        Get existing Spark session or create new one if none exists.
+        """Get existing Spark session or create new one if none exists.
 
         Args:
             app_name: Name for the Spark application
@@ -111,8 +107,7 @@ class SparkSessionManager:
 
     @staticmethod
     def stop_session(spark: SparkSession) -> None:
-        """
-        Stop the given Spark session and clean up resources.
+        """Stop the given Spark session and clean up resources.
 
         Args:
             spark: SparkSession to stop
@@ -131,8 +126,7 @@ class SparkSessionManager:
         master: str = "local[*]",
         extra_configs: Optional[Dict[str, str]] = None,
     ) -> SparkSession:
-        """
-        Create a lightweight Spark session for local testing.
+        """Create a lightweight Spark session for local testing.
 
         This creates a minimal Spark session without Iceberg, Hive, or Azure dependencies,
         suitable for unit testing and local development.
@@ -177,8 +171,7 @@ def get_spark(
     distributed: bool = False,
     container_image: Optional[str] = None,
 ) -> SparkSession:
-    """
-    Convenience function to get a Spark session with OPDI configuration.
+    """Convenience function to get a Spark session with OPDI configuration.
 
     This is a shorthand for SparkSessionManager.create_session().
 
