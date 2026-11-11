@@ -22,10 +22,9 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+from adsc_coverage_gain import arm_summary  # noqa: E402
 from pyspark.sql import DataFrame, Window  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
-
-from adsc_coverage_gain import arm_summary  # noqa: E402
 
 PREFIX = "s3a://eurocontrol/opdi-world/research/adsc_airframes"
 FULL_TRACKS = "s3a://eurocontrol/opdi-world/osn_tracks_clean"

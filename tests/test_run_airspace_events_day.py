@@ -1,7 +1,6 @@
 """The pipeline-day runner writes only under its own prefix and flips only the three flags."""
 
 import pytest
-
 import run_airspace_events_day as r
 
 

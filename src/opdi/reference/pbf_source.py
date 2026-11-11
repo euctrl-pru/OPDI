@@ -12,6 +12,7 @@ Reading a Geofabrik extract removes both services. The file is read once, all
 ``aeroway`` features are kept, and each is assigned to an aerodrome from
 reference data we already hold. See ``docs/industrialization-plan.md`` §3.
 """
+import math
 import re
 import warnings
 from collections import Counter
@@ -20,6 +21,7 @@ from typing import List, Optional
 import geopandas as gpd
 import osmium
 import pandas as pd
+from pyspark.sql import functions as F
 from shapely import wkb as shapely_wkb
 
 from opdi.reference.h3_airport_layouts import AEROWAY_TAGS
@@ -302,10 +304,6 @@ def pbf_has_aerodrome_outside_bbox(pbf_path: str, bbox) -> bool:
             return True
     return False
 
-
-import math
-
-from pyspark.sql import functions as F
 
 #: Margin around the runway extent, in kilometres. Aprons, stands and hangars
 #: sit off the runway axis; 1.5 km covers them at the largest aerodromes without

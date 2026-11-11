@@ -18,7 +18,8 @@ Read-only. Writes nothing.
 """
 import argparse
 
-from pyspark.sql import functions as F, Window
+from pyspark.sql import Window
+from pyspark.sql import functions as F
 
 from opdi.config import OPDIConfig, SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
@@ -95,7 +96,7 @@ def analyze_arm(sv, arm_name: str, hold: float, params_base):
     print(f"  total tracks: {n_tracks:,}")
     print(f"  tracks with 2+ refined-dense genuine-merge callsigns"
           f" (span>={SPAN_FLOOR_S}s, samples>={SAMPLE_FLOOR}, lev>2 & not prefix): {n_genuine:,}")
-    print(f"  sample genuine-merge tracks (up to 5):")
+    print("  sample genuine-merge tracks (up to 5):")
     pair.select("track_id", "cs1", "n1", "span1", "cs2", "n2", "span2", "lev").orderBy(
         F.desc("span1")
     ).show(5, False)

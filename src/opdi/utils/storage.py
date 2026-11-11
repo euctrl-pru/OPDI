@@ -11,10 +11,10 @@ import os
 import time
 from typing import Any, Mapping, Optional, Sequence
 
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from opdi.config import OPDIConfig
 
+from opdi.config import OPDIConfig
 
 #: Local folder for the progress records when the tables are in a catalog
 #: rather than in a warehouse folder.

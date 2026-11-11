@@ -160,7 +160,6 @@ def detection_config_from(repo) -> dict:
     So the caller names the checkout and this loads from it, evicting any
     already-imported `opdi` first.
     """
-    import importlib
 
     repo = Path(repo).resolve()
     src = str(repo / "src")

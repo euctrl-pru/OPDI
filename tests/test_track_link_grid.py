@@ -6,11 +6,11 @@ limit tests hand ``with_verdicts`` plain counts, which is all the verdicts read.
 """
 import csv
 import datetime as dt
-from dataclasses import replace
-from functools import reduce
 import json
 import math
 import re
+from dataclasses import replace
+from functools import reduce
 
 import adsc_flight_list_truth
 import pandas as pd
@@ -37,13 +37,13 @@ from track_link_controls import (
 )
 from track_link_grid import (
     COUNT_FIELDS,
+    GRID_BASE,
     ONE_VALUE_PER_RUN,
     REAL_FALSE_JOIN_LIMIT,
     SAME_CALLSIGN_MIN_CONTROLS,
     flight_base_tracks,
     flight_track_counts,
     grid_from_json,
-    GRID_BASE,
     grid_points,
     holes_inside_flights,
     lowest_bound_point,

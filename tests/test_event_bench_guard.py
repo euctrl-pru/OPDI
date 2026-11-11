@@ -11,17 +11,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
-import pytest
-
 import event_bench
+import pytest
 from event_bench import (
     LADDER,
-    detected_events,
     LADDER_V4,
     PERIOD_TRACKS,
     V4_BASE,
     V4_NOOP_EXEMPT,
     build_plan,
+    detected_events,
     flight_list_table,
     guard_writes,
     milestone_map,
@@ -30,6 +29,7 @@ from event_bench import (
     verify_plan,
     verify_plan_v4,
 )
+
 from opdi.config import EventConfig
 
 

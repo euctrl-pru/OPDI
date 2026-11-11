@@ -18,16 +18,20 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import osn_sample
+from adep_ades import (
+    airport_locations,
+    airport_types,
+    label_ground_truth,
+    load_ground_truth,
+    per_airport_counts,
+    per_type_counts,
+    score,
+)
+from osn_sample import build_spark, load_dotenv
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
-
-import osn_sample
-from tables import table, fixed
-from osn_sample import build_spark, load_dotenv
-from adep_ades import (
-    airport_locations, airport_types, label_ground_truth, load_ground_truth,
-    score, per_airport_counts, per_type_counts, error_pairs,
-)
+from tables import table
 
 FL_BASE = table("research/flight_list_{mode}")
 #: Default candidate cache. Overridable with --candidates so the same sweeps

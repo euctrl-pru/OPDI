@@ -16,8 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 import datetime as dt
 
 import pytest
-from pyspark.sql import functions as F
-
 from events_gt import (
     PERIODS,
     STUDY_AIRPORTS,

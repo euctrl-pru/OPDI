@@ -19,10 +19,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F
-
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+from pyspark.sql import functions as F
 
 BASE = "s3a://eurocontrol/opdi/research/flight_list_v6_{run}"
 

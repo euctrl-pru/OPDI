@@ -31,11 +31,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F
-
 import osn_sample
+from abstained_vertical import CANDIDATES, M_S_TO_FT_MIN, M_TO_FT, TRACKS, best_candidate
 from osn_sample import build_spark, load_dotenv
-from abstained_vertical import best_candidate, CANDIDATES, TRACKS, M_S_TO_FT_MIN, M_TO_FT
+from pyspark.sql import functions as F
 
 WINDOWS_MIN = (5, 10, 20)
 

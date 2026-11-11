@@ -1,9 +1,7 @@
 """Tests for the ground movement milestones (T04 off-block, T21 on-block)."""
 
-import pytest
-from pyspark.sql import functions as F
-
 from conftest import _EPOCH, make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline.ground import block_times, movement_window

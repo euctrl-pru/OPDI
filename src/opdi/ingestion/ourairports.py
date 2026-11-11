@@ -12,7 +12,6 @@ from datetime import datetime
 from typing import Dict, Optional
 
 import pandas as pd
-
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     BooleanType,

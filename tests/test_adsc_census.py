@@ -1,9 +1,8 @@
 """The census aggregation, on a frame small enough to reason about."""
 
+import adsc_census
 import pytest
 from pyspark.sql import Row
-
-import adsc_census
 
 EUROPE_BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)
 

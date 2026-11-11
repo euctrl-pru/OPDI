@@ -19,7 +19,7 @@ rings out to 110 NM cover.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 import pandas as pd
 

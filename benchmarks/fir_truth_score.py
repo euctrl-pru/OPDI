@@ -80,7 +80,6 @@ _CODE_PATHS = ["benchmarks/fir_truth_score.py"]
 
 def main(argv: Optional[List[str]] = None) -> int:
     import provenance
-    from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
     from run_airspace_events_day import INPUT_WAREHOUSE, PREFIX, study_session
 

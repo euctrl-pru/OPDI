@@ -8,23 +8,22 @@ for. Those are the decisions that cost a week of cluster time when wrong.
 """
 import json
 import os
+from datetime import date
 
 import pytest
 
-from opdi.runner import STEPS
 from opdi.periodrun import (
     MIN_DRIVER_HEAP_GB,
+    PERIOD_STEPS,
     REQUIRED_REFERENCE_TABLES,
     UNDATED_STEPS,
-    PERIOD_STEPS,
     RunState,
+    period_window,
     plan_steps,
     preflight,
     safe_driver_memory,
-    period_window,
 )
-
-from datetime import date
+from opdi.runner import STEPS
 
 GIB = 1024 ** 3
 
@@ -427,7 +426,8 @@ def test_real_extracts_are_told_apart_by_the_worldwide_check(monkeypatch):
 
 def test_the_window_and_day_steps_together_are_the_week_steps():
     """No step may fall between the two lists, or it silently never runs."""
-    from opdi.periodrun import DAY_STEPS, PERIOD_STEPS as W, WINDOW_STEPS
+    from opdi.periodrun import DAY_STEPS, WINDOW_STEPS
+    from opdi.periodrun import PERIOD_STEPS as W
 
     assert set(WINDOW_STEPS) | set(DAY_STEPS) == set(W)
     assert set(WINDOW_STEPS).isdisjoint(DAY_STEPS)
@@ -546,9 +546,10 @@ def test_the_reference_check_is_complete_not_merely_non_empty():
 def test_the_state_file_is_scoped_to_its_window():
     """Which is why reference reuse cannot rely on it: day 2 gets a different
     file and so has no record that day 1 built anything."""
-    from opdi.periodrun import run_period  # noqa: F401  (documents the coupling)
     import inspect
+
     from opdi import periodrun
+    from opdi.periodrun import run_period  # noqa: F401  (documents the coupling)
 
     src = inspect.getsource(periodrun.run_period)
     assert "periodrun_{start_date.isoformat()}_{days}d.json" in src
@@ -558,6 +559,7 @@ def test_the_first_unit_comparison_uses_a_step_day_pair():
     """`todo` holds (step, day) pairs. Comparing the bare step name to
     `todo[0]` is always False, which silently disabled the preflight."""
     import inspect
+
     from opdi import periodrun
 
     src = inspect.getsource(periodrun.run_period)
@@ -783,8 +785,8 @@ def test_every_statevector_write_partitions_by_day():
 def test_airspaces_run_under_both_coverages():
     """00c's FIR layer is worldwide and feeds the xing-fir family, so the
     substep runs under worldwide coverage as well as European."""
-    from opdi.runner import reference_substeps_for_coverage
     from opdi.config import OPDIConfig
+    from opdi.runner import reference_substeps_for_coverage
     world = reference_substeps_for_coverage(
         OPDIConfig.for_environment("opensky", worldwide=True))
     assert world["00c"] is True
@@ -795,6 +797,7 @@ def test_airspaces_run_under_both_coverages():
 
 def test_a_period_run_is_worldwide_by_default():
     import inspect
+
     from opdi.periodrun import run_period
     assert inspect.signature(run_period).parameters["worldwide"].default is True
 
@@ -802,7 +805,7 @@ def test_a_period_run_is_worldwide_by_default():
 # --- _resolve_warehouse ------------------------------------------------------
 
 def test_resolve_warehouse_uses_the_configured_one_when_omitted():
-    from opdi.periodrun import _resolve_warehouse, _UNSET
+    from opdi.periodrun import _UNSET, _resolve_warehouse
     assert _resolve_warehouse(_UNSET, "s3a://eurocontrol/opdi") == "s3a://eurocontrol/opdi"
 
 
@@ -822,7 +825,8 @@ def test_run_period_still_defaults_the_warehouse_parameter_to_unset():
     """An omitted `warehouse` is the sentinel, so the configured warehouse
     (OPDI_WAREHOUSE or the default) applies."""
     import inspect
-    from opdi.periodrun import run_period, _UNSET
+
+    from opdi.periodrun import _UNSET, run_period
     assert inspect.signature(run_period).parameters["warehouse"].default is _UNSET
 
 
@@ -936,6 +940,7 @@ def test_prune_tracks_drops_only_the_track_tables():
 
 def test_prune_tracks_for_day_drops_that_day_in_both_tables():
     from datetime import date
+
     from opdi.periodrun import prune_tracks_for_day
 
     calls = []
@@ -960,6 +965,7 @@ def test_prune_failure_does_not_propagate():
     runs; raising here would turn a complete day into a failed one.
     """
     from datetime import date
+
     from opdi.periodrun import prune_tracks_for_day
 
     class _Broken:
@@ -973,6 +979,7 @@ def test_run_period_defaults_to_keeping_tracks():
     """Retention is opt-in. A plain run must behave exactly as before, or every
     existing caller silently starts deleting its own intermediates."""
     import inspect
+
     from opdi.periodrun import run_period
     sig = inspect.signature(run_period)
     assert sig.parameters["prune_tracks"].default is False

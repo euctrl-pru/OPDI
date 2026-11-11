@@ -53,7 +53,6 @@ def test_package_version_needs_no_pyspark():
 def test_public_names_still_resolve():
     import opdi
     import opdi.output
-
     from opdi import H3Config, IngestionConfig, OPDIConfig, ProjectConfig, SparkConfig
     from opdi.output import CSVExporter, ParquetExporter, clean_and_save_data
 

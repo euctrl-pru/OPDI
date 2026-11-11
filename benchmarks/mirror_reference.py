@@ -34,8 +34,9 @@ from pathlib import Path
 # Importing the config loads .env, which is where the S3 credentials live.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import opdi.config  # noqa: F401  -- imported for its .env side effect
 import provenance
+
+import opdi.config  # noqa: F401  -- imported for its .env side effect
 
 REPO = Path(__file__).resolve().parent.parent
 LOCAL_DIR = REPO / "reference"

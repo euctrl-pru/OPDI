@@ -4,6 +4,7 @@ import sys
 
 import pandas as pd
 import pytest
+from test_published_build import DAY, NEXT, _Storage, _working_tables
 
 from opdi import published
 from opdi.output.published import PublishedLayout, publish_day
@@ -16,7 +17,6 @@ from opdi.output.schema import (
     MEASUREMENT_SUFFIX,
     MEASUREMENT_VERSION,
 )
-from test_published_build import DAY, NEXT, _Storage, _working_tables
 
 
 @pytest.fixture(scope="module")

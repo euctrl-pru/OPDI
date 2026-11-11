@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+
 from opdi.coverage import CoverageConfig
 
 AIRPORTS_TABLE = "s3a://eurocontrol/opdi/oa_airports"

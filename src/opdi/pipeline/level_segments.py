@@ -40,7 +40,7 @@ segment cannot continue, then forward-fill the anchor within the resulting
 groups -- rather than with a UDF.
 """
 
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F

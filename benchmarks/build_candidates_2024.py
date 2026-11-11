@@ -30,11 +30,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 sys.path.insert(0, str(REPO / "src"))
 
-from pyspark.sql import Window
-from pyspark.sql import functions as F
-
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+from pyspark.sql import Window
+from pyspark.sql import functions as F
 
 #: The second period's tracks. **Cleaned**, since v4.0.0: the flight list
 #: reads cleaned tracks, so candidates built from raw ones would give the two

@@ -11,6 +11,7 @@ never the public names, signatures, or return types callers already rely on.
 """
 
 from typing import List, Set, Tuple
+
 import h3
 
 

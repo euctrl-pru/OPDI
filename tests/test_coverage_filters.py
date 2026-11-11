@@ -63,8 +63,8 @@ def test_an_explicit_none_means_worldwide_not_the_default(spark):
 
 
 def test_no_reference_generator_keeps_a_private_box():
-    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
     from opdi.reference.h3_airport_layouts import AirportLayoutGenerator
+    from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
     from opdi.reference.h3_runway_grid import RunwayGridGenerator
     for cls in (AirportDetectionZoneGenerator, AirportLayoutGenerator,
                 RunwayGridGenerator):

@@ -35,21 +35,22 @@ this sweep and the code that ships.
 
 import argparse
 import sys
-from datetime import date
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import osn_sample
+from adep_ades import (
+    airport_locations,
+    label_ground_truth,
+    load_ground_truth,
+    score,
+)
+from osn_sample import build_spark, load_dotenv
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
-
-import osn_sample
-from tables import table, fixed
-from osn_sample import build_spark, load_dotenv
-from adep_ades import (
-    airport_locations, label_ground_truth, load_ground_truth, score,
-)
+from tables import fixed, table
 
 TRACKS = table("osn_tracks")
 ZONES = table("h3_airport_detection_zones")

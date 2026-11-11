@@ -65,13 +65,13 @@ def crossing_times(frame: pd.DataFrame, code_col: str) -> pd.DataFrame:
     consecutive non-null samples of a track (no debounce)."""
     rows = []
     for tid, g in frame.sort_values(["track_id", "event_time"]).groupby("track_id"):
-        prev_code, prev_t = None, None
+        prev_code = None
         for code, t in zip(g[code_col], g["event_time"]):
             if code is None or (isinstance(code, float) and pd.isna(code)):
                 continue
             if prev_code is not None and code != prev_code:
                 rows.append({"track_id": tid, "fir_from": prev_code, "fir_to": code, "t": t})
-            prev_code, prev_t = code, t
+            prev_code = code
     return pd.DataFrame(rows, columns=["track_id", "fir_from", "fir_to", "t"])
 
 
@@ -106,14 +106,13 @@ def summarise(frame: pd.DataFrame, h3_x: pd.DataFrame, exact_x: pd.DataFrame, er
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
+    from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX, study_session
 
     from opdi.config import EventConfig
     from opdi.pipeline.fir import attach_fir
     from opdi.pipeline.holes import add_piece
     from opdi.reference.h3_airspaces import DEFAULT_FIR_URLS, dissolve_volumes
-    from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX, study_session
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--day", required=True)

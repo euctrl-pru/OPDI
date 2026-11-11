@@ -12,19 +12,47 @@ Transforms raw state vectors into structured flight tracks with:
 import math
 import os
 from datetime import date, datetime, timedelta
-from typing import List, Optional
-import pandas as pd
+from typing import List
 
-from pyspark.sql import SparkSession, DataFrame, Window
+import h3
+import pandas as pd
+from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql.functions import (
-    lit, lag, when, to_date, concat, avg, abs as f_abs, col,
-    unix_timestamp, to_timestamp, substring, sha2, concat_ws,
-    year, month, sin, cos, radians, atan2, sqrt, sum as f_sum, udf,
-    min as f_min, max as f_max, expr,
+    abs as f_abs,
+)
+from pyspark.sql.functions import (
+    atan2,
+    col,
+    concat,
+    concat_ws,
+    cos,
+    expr,
+    lag,
+    lit,
+    month,
+    radians,
+    sha2,
+    sin,
+    sqrt,
+    substring,
+    to_date,
+    to_timestamp,
+    udf,
+    unix_timestamp,
+    when,
+    year,
+)
+from pyspark.sql.functions import (
+    max as f_max,
+)
+from pyspark.sql.functions import (
+    min as f_min,
+)
+from pyspark.sql.functions import (
+    sum as f_sum,
 )
 from pyspark.sql.types import StringType
-import h3
 
 from opdi.cleaning.native import AVIATION_UNIT_FACTOR
 from opdi.config import OPDIConfig
@@ -848,8 +876,8 @@ class TrackProcessor:
 
         print(f"Processing {len(months)} months: {start_month} to {end_month}")
 
-        for month in months:
-            self.process_month(month, skip_if_processed=skip_if_processed)
+        for first_day in months:
+            self.process_month(first_day, skip_if_processed=skip_if_processed)
 
         print(f"Completed processing {len(months)} months.")
 

@@ -6,17 +6,15 @@ dropped, and the NULL handling that let an incomplete fuzzy rule win -- plus
 the crossing path that now routes through ``pipeline/crossings.py``.
 """
 
-import pytest
+from conftest import make_track
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from conftest import make_track
-
 from opdi.config import EventConfig
 from opdi.pipeline.events import (
+    _smooth_phase,
     calculate_horizontal_segment_events,
     calculate_threshold_crossing_events,
-    _smooth_phase,
 )
 
 FT_PER_M = 3.28084

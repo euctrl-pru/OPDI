@@ -38,20 +38,24 @@ production flight list and a mistyped argument would otherwise overwrite it.
 import argparse
 import csv
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F
-
 import osn_sample
-from osn_sample import build_spark, load_dotenv
 from adep_ades import (
-    airport_locations, airport_types, label_ground_truth, load_ground_truth,
-    score, per_airport_counts, per_type_counts,
+    airport_locations,
+    airport_types,
+    label_ground_truth,
+    load_ground_truth,
+    per_airport_counts,
+    per_type_counts,
+    score,
 )
+from osn_sample import build_spark, load_dotenv
+from pyspark.sql import functions as F
 
 #: Where the pipeline's flight lists land. Suffixed and under research/, so the
 #: published flight list is never the target.

@@ -2,14 +2,12 @@
 
 import csv
 import json
-from dataclasses import replace
 
 import pytest
+import track_link_descent as d
 from conftest import make_track
 from pyspark.sql import functions as F
 from test_track_link_controls import CRUISE_KT, _flight, _truth
-
-import track_link_descent as d
 
 from opdi.pipeline.segmentation import SegmentationParams
 from opdi.pipeline.segmentation.base import FT_PER_M

@@ -6,9 +6,9 @@ Provides the main data transformation pipeline:
 - Flight event detection (phases, crossings, airport events)
 """
 
-from opdi.pipeline.tracks import TrackProcessor
-from opdi.pipeline.flights import FlightListProcessor
 from opdi.pipeline.events import FlightEventProcessor
+from opdi.pipeline.flights import FlightListProcessor
+from opdi.pipeline.tracks import TrackProcessor
 
 __all__ = [
     "TrackProcessor",

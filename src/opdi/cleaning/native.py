@@ -46,7 +46,7 @@ PRC challenges, not oversights:
   ``get_wind`` call is commented out (``resqu/preprocessor.py:616-617``).
 """
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F

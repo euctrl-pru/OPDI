@@ -82,11 +82,10 @@ def test_generate_does_not_collect_to_the_driver():
     strings into driver memory -- the driver was SIGKILLed (exit 137) every
     run. It went unnoticed while the polyfill was broken, because collecting
     21,712 empty arrays is free."""
+    import ast
     import inspect
 
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator as G
-
-    import ast
 
     tree = ast.parse(inspect.getsource(G.generate).lstrip())
     calls = [
@@ -126,11 +125,10 @@ def test_step_00a_refuses_to_report_an_empty_zone_table_as_success():
     """The table committed empty, with _SUCCESS, through several runs while the
     log cheerfully printed "Generated 21712" -- the pre-explode ring count,
     which is the same whether the polyfill produced cells or NULLs."""
+    import ast
     import inspect
 
     from opdi import runner
-
-    import ast
 
     src = inspect.getsource(runner._step_00a_airport_zones)
     tree = ast.parse(src.lstrip())

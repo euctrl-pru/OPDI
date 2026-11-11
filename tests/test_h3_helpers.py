@@ -6,7 +6,6 @@ fails loudly rather than silently returning an empty or shifted result.
 """
 
 import h3
-import pytest
 
 from opdi.utils import h3_helpers
 

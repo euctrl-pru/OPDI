@@ -5,12 +5,12 @@ Provides centralized configuration using dataclasses for project settings,
 Spark configurations, H3 parameters, and ingestion settings.
 """
 
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
-import os
+from typing import Dict, List, Optional, Tuple
 
-from opdi.coverage import EUROPE_BBOX, CoverageConfig
+from opdi.coverage import CoverageConfig
 from opdi.output.schema import RELEASE
 
 

@@ -17,9 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
 import datetime as dt
 
-import pytest
-
 import provenance
+import pytest
 
 
 class _FakeS3:

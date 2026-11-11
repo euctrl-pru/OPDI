@@ -31,11 +31,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import Column, DataFrame, SparkSession, Window
-from pyspark.sql import functions as F
-
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+from pyspark.sql import Column, DataFrame, SparkSession, Window
+from pyspark.sql import functions as F
 
 SV_BASE = "s3a://eurocontrol/opdi/research/statevectors"
 AIRPORTS = "s3a://eurocontrol/opdi/oa_airports"

@@ -3,7 +3,6 @@
 import json
 import math
 
-import pytest
 from navigation_fixtures import fly
 from pyspark.sql import functions as F
 

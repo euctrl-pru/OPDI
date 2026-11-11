@@ -7,8 +7,6 @@ all of them at cruise with a median implied speed of 421 kt across the gap.
 """
 from dataclasses import fields
 
-import pytest
-
 from opdi.config import SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams
 
@@ -43,9 +41,9 @@ def test_the_config_value_reaches_the_params():
     assert SegmentationParams.from_config(cfg).callsign_min_persistence_seconds == 30.0
 
 
-import datetime as dt
 
 from conftest import make_track
+
 from opdi.pipeline.segmentation import assign_track_id
 from opdi.pipeline.segmentation.methods import debounced, recommended
 
@@ -62,7 +60,8 @@ def _with_callsigns(spark, callsigns, step_s=5):
     df = make_track(spark, [
         {"t": i * step_s, "baro_altitude": 10000.0} for i in range(len(callsigns))
     ])
-    from pyspark.sql import functions as F, Window
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
     return df.withColumn(
         "callsign",
         F.element_at(

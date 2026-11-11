@@ -116,8 +116,9 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 # Tests and study scripts are not documented as an API.
-"tests/**" = ["D", "N802"]
-"benchmarks/**" = ["D"]
+# Tests and study scripts put their own folders on sys.path before importing.
+"tests/**" = ["D", "N802", "E402"]
+"benchmarks/**" = ["D", "E402"]
 "tools/**" = ["D"]
 
 [tool.mypy]

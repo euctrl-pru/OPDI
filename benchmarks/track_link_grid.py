@@ -162,11 +162,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import provenance
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.storagelevel import StorageLevel
-
-import provenance
 from track_fragmentation import measure
 from track_link_controls import (
     LOW_EDGE_FAMILIES,

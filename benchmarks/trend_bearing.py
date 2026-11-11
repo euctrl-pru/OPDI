@@ -39,15 +39,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import osn_sample
+from abstained_vertical import TRACKS, angle_between, bearing_deg
+from adep_ades import (
+    AIRPORTS,
+    airport_locations,
+    label_ground_truth,
+    load_ground_truth,
+    score,
+)
+from osn_sample import build_spark, load_dotenv
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
-import osn_sample
-from osn_sample import build_spark, load_dotenv
-from adep_ades import (
-    airport_locations, label_ground_truth, load_ground_truth, score, AIRPORTS,
-)
-from abstained_vertical import bearing_deg, angle_between, TRACKS
 # The paired cache, not v6's `research/trend_votes`.
 #
 # This job needs `up_60` / `dn_60` / `dist_60`, and the paired cache carries
@@ -59,7 +63,7 @@ from abstained_vertical import bearing_deg, angle_between, TRACKS
 # until v6's cache was deleted from the bucket and this job died on
 # PATH_NOT_FOUND. A declared dependency that is not the real one is worse than
 # an undeclared one, because it reads as verified.
-from trend_sweep_agl import CACHE, haversine_nm
+from trend_sweep_agl import CACHE
 
 #: The shipped trend configuration, which this is trying to improve on.
 FL_CAP, MARGIN, RADIUS_NM, PENALTY_NM = 60, 2, 20.0, 10.0

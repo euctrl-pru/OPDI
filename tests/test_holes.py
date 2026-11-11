@@ -13,9 +13,8 @@ track without a hole gives exactly the events it gave before.
 import datetime as dt
 
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig, SegmentationConfig
 from opdi.pipeline.events import (

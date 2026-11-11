@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
 import pandas as pd
 import pytest
-
 from elevation_arms import band_summary, per_airport_delta
 
 

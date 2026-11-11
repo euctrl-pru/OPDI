@@ -13,9 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
-import pytest
-
 import check_main_parity as parity
+import pytest
 
 
 def _grid(tmp_path, rows):

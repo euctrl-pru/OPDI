@@ -8,7 +8,6 @@ flight-events-v4 campaign: the published table went from twenty airports to one.
 These tests pin the two properties that prevent it.
 """
 import pandas as pd
-import pytest
 
 from opdi.config import OPDIConfig
 from opdi.reference.h3_airport_layouts import AirportLayoutGenerator, clean_str

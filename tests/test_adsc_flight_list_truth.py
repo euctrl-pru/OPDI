@@ -1,8 +1,7 @@
 """The paired far-end scorer: pure pandas, no cluster."""
 
-import pandas as pd
-
 import adsc_flight_list_truth as t
+import pandas as pd
 
 
 def _truth(rows):

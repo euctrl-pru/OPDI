@@ -5,12 +5,10 @@ The runway name is the one part of this family APDF can score directly, via
 the benchmark is meant to measure rather than assume.
 """
 
-import datetime as dt
 
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline.runways import detect_runway_movements, runway_thresholds

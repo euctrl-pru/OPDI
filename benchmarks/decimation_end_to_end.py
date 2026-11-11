@@ -22,15 +22,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F
-
 import osn_sample
-from osn_sample import build_spark, load_dotenv
 from adep_ades import (
-    airport_locations, airport_types, label_ground_truth, load_ground_truth,
-    score, per_airport_counts, per_type_counts,
+    airport_locations,
+    airport_types,
+    label_ground_truth,
+    load_ground_truth,
+    per_type_counts,
+    score,
 )
-from benchmark_modes import predictions_from_candidates, identities_from_candidates
+from benchmark_modes import identities_from_candidates, predictions_from_candidates
+from osn_sample import build_spark, load_dotenv
+from pyspark.sql import functions as F
 
 #: Where the bucket arm's intermediate tables go. Suffixed, under research/,
 #: so a production prefix can never be the target of this experiment.
@@ -133,9 +136,9 @@ def main() -> None:
     if not args.skip_build:
         redirect_storage()
         from opdi.config import OPDIConfig
-        from opdi.ingestion.osn_statevectors import StateVectorIngestion, DECIMATION_BUCKET
-        from opdi.pipeline.tracks import TrackProcessor
+        from opdi.ingestion.osn_statevectors import DECIMATION_BUCKET, StateVectorIngestion
         from opdi.pipeline.flights import FlightListProcessor
+        from opdi.pipeline.tracks import TrackProcessor
 
         cfg = OPDIConfig.for_environment("opensky")
         # Separate processed-month logs. Sharing production's would let this

@@ -7,8 +7,8 @@ have, and would do so invisibly.
 
 import datetime as dt
 
-from pyspark.sql import functions as F
 from pyspark.sql import Row
+from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType, TimestampType
 from track_truth import load_apdf_times, load_flight_intervals, overlap_join
 

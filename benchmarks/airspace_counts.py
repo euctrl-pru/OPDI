@@ -27,7 +27,6 @@ NEW_MEASURES = ("Holding ", "Point merge ")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
     from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX, study_session
 

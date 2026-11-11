@@ -8,12 +8,12 @@ and writes to Iceberg tables with proper partitioning.
 import os
 import subprocess
 import time
-from typing import List, Optional, Set, Dict, Tuple
-
 from datetime import date
-from pyspark.sql import SparkSession, DataFrame
+from typing import Dict, List, Optional, Set, Tuple
+
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.functions import col, to_date, from_unixtime
+from pyspark.sql.functions import col, from_unixtime, to_date
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
@@ -511,7 +511,7 @@ class StateVectorIngestion:
                 # Can be retried on next run
                 raise
 
-        print(f"\n=== Ingestion complete ===")
+        print("\n=== Ingestion complete ===")
         print(f"Files processed: {files_processed}")
 
         return {

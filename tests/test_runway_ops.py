@@ -10,6 +10,7 @@ import json
 import math
 
 import pytest
+from conftest import _EPOCH, make_track
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     DoubleType,
@@ -19,8 +20,6 @@ from pyspark.sql.types import (
     TimestampType,
 )
 from pyspark.sql.window import Window
-
-from conftest import _EPOCH, make_track
 
 from opdi.config import EventConfig
 from opdi.pipeline.runway_ops import (

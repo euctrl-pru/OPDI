@@ -172,6 +172,7 @@ def test_the_cli_accepts_worldwide(monkeypatch):
 
 def test_run_pipeline_takes_worldwide():
     import inspect
+
     from opdi.runner import run_pipeline
     sig = inspect.signature(run_pipeline)
     assert sig.parameters["worldwide"].default is True
@@ -179,6 +180,7 @@ def test_run_pipeline_takes_worldwide():
 
 def test_run_period_takes_worldwide():
     import inspect
+
     from opdi.periodrun import run_period
     assert inspect.signature(run_period).parameters["worldwide"].default is True
 

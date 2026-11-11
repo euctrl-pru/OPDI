@@ -1046,9 +1046,17 @@ def to_pdf(md, out_path, paper=None):
         from reportlab.lib.units import mm
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
-        from reportlab.platypus import (ListFlowable, ListItem, Paragraph, Preformatted,
-                                        SimpleDocTemplate, Spacer, Table, TableStyle,
-                                        KeepTogether)
+        from reportlab.platypus import (
+            KeepTogether,
+            ListFlowable,
+            ListItem,
+            Paragraph,
+            Preformatted,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
     except ImportError as e:
         raise SystemExit(
             "--pdf needs reportlab, which the project does not depend on: install it into "

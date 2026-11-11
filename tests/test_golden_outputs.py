@@ -16,11 +16,10 @@ import math
 import os
 from pathlib import Path
 
+import golden_pipeline
 import numpy as np
 import pandas as pd
 import pytest
-
-import golden_pipeline
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 CONFIGURATIONS = ("default", "v002")

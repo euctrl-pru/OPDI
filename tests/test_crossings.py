@@ -9,7 +9,6 @@ so the interpolated instant has an exact arithmetic answer, which is what makes
 import datetime as dt
 
 import pytest
-
 from conftest import _EPOCH, make_track
 from pyspark.sql import functions as F
 

@@ -10,20 +10,18 @@ import datetime as dt
 import json
 import tempfile
 
+# The ladder's own reconstruction of the v0.1.0 configuration, imported rather
+# than restated: a test that hand-builds "v0.1.0" proves only that the hand-built
+# thing behaves, not that the rung the paper reports does.
+import event_bench
 import pytest
 from pyspark.sql import functions as F
 
-from conftest import make_track
 # The great-circle offset helper, imported rather than copied: the arrival
 # geometry below has to be the same geometry ``test_runway_ops`` asserts the
 # threshold-plane timing against, or the two would be testing different
 # runways under the same name.
 from test_runway_ops import _dest
-
-# The ladder's own reconstruction of the v0.1.0 configuration, imported rather
-# than restated: a test that hand-builds "v0.1.0" proves only that the hand-built
-# thing behaves, not that the rung the paper reports does.
-import event_bench
 
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.events import FlightEventProcessor
@@ -361,6 +359,7 @@ def stub_storage(spark):
     # are off under every reconstructed configuration, which the ladder's base
     # pins, so the older runs are unaffected.
     import h3
+
     from opdi.reference.h3_airspaces import AIRSPACE_SCHEMA
 
     cell_a = h3.latlng_to_cell(50.9, 4.48, 7)
@@ -750,9 +749,8 @@ def test_events_and_measurements_carry_the_track_s_start_day(spark, stub_storage
     run would write into its neighbour's day and could not be re-run in
     isolation. Keyed on the track, a day owns every row its tracks produce.
     """
-    import json
 
-    out = _run(spark, stub_storage, EventConfig())
+    _run(spark, stub_storage, EventConfig())
     events = stub_storage.written["opdi_flight_events"]
     measurements = stub_storage.written["opdi_measurements"]
 
@@ -774,7 +772,7 @@ def test_a_measurement_inherits_the_day_from_its_parent_event(spark, stub_storag
     measurement hangs off, which is why it is joined rather than derived."""
     from pyspark.sql import functions as SF
 
-    out = _run(spark, stub_storage, EventConfig())
+    _run(spark, stub_storage, EventConfig())
     events = stub_storage.written["opdi_flight_events"].select(
         SF.col("id").alias("_ev_id"), SF.col("dof").alias("_ev_dof")
     )

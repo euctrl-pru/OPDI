@@ -3,7 +3,12 @@
 import pytest
 from pyspark.sql import Row
 from pyspark.sql.types import (
-    BooleanType, DoubleType, IntegerType, StringType, StructField, StructType,
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
 )
 
 from opdi.ingestion.osn_adsc import ADSC_SOURCE, to_opdi_schema

@@ -22,9 +22,8 @@ import datetime as dt
 import json
 
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import _EPOCH, make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline.elevation import attach_field_elevation

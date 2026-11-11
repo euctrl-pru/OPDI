@@ -10,9 +10,8 @@ by construction.
 import datetime as dt
 
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import _EPOCH, make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline import level_segments as level_segments_module

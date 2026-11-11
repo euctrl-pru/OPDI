@@ -15,28 +15,30 @@ from datetime import date, datetime
 from typing import List, Optional
 
 import pandas as pd
-
-from pyspark.sql import SparkSession, DataFrame, Column
+from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.functions import (
+    atan2,
     broadcast,
     col,
     collect_list,
     concat_ws,
+    cos,
     expr,
     lit,
-    max as f_max,
-    min as f_min,
     radians,
     row_number,
     sin,
-    cos,
     sqrt,
-    atan2,
     to_date,
-    to_timestamp,
     unix_timestamp,
     when,
+)
+from pyspark.sql.functions import (
+    max as f_max,
+)
+from pyspark.sql.functions import (
+    min as f_min,
 )
 from pyspark.sql.window import Window
 
@@ -44,10 +46,8 @@ from opdi.config import OPDIConfig
 from opdi.coverage import EUROPE_BBOX
 from opdi.utils.datetime_helpers import (
     generate_months,
-    get_start_end_of_month,
 )
 from opdi.utils.storage import StorageManager
-
 
 #: Default box for :func:`at_border`, kept so the two existing callers in the
 #: tests read unchanged. Production passes ``config.coverage.bbox`` explicitly

@@ -14,8 +14,9 @@ import pytest
 
 pytest.importorskip("osmium")
 
-from opdi.reference.pbf_source import read_aeroway_features
 from opdi.reference.h3_airport_layouts import AEROWAY_TAGS
+from opdi.reference.pbf_source import read_aeroway_features
+
 AEROWAY_TAGS_SET = set(AEROWAY_TAGS)
 
 PBF = "/home/jupyter/work/osm/luxembourg-latest.osm.pbf"
@@ -87,8 +88,9 @@ def test_no_tag_is_silently_dropped_by_element_type_branching():
     not evidence the reader is broken -- see the AEROWAY_TAGS test above for
     `threshold`/`deicing_pad`, which are exactly that case.
     """
-    import osmium
     from collections import Counter
+
+    import osmium
 
     from opdi.reference.h3_airport_layouts import AEROWAY_TAGS
 

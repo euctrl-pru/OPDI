@@ -1,8 +1,7 @@
 """The hole verdicts: does ADS-C leave a gap the segmentation would still split on?"""
 
-import pandas as pd
-
 import adsc_bridging_diagnosis as b
+import pandas as pd
 
 
 def _t(s):

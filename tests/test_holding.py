@@ -3,7 +3,6 @@
 import datetime as dt
 import json
 
-import pytest
 from conftest import _EPOCH, make_track
 from navigation_fixtures import fly, legs_to_samples, measured, racetrack
 from pyspark.sql import functions as F

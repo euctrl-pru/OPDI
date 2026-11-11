@@ -1,10 +1,9 @@
 """The exact-polygon check behind the FIR consistency figures."""
 
+import fir_consistency as fc
 import pandas as pd
 import shapely
 from shapely.geometry import box
-
-import fir_consistency as fc
 
 T0 = pd.Timestamp("2026-06-14 10:00:00")
 

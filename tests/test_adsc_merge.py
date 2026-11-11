@@ -5,8 +5,15 @@ import datetime as dt
 import pytest
 from pyspark.sql import Row
 from pyspark.sql.types import (
-    ArrayType, BooleanType, DateType, DoubleType, IntegerType, StringType,
-    StructField, StructType, TimestampType,
+    ArrayType,
+    BooleanType,
+    DateType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
 
 from opdi.config import OPDIConfig

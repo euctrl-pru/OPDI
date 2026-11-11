@@ -37,11 +37,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
-
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
 ARCHIVE = "s3a://opensky-hdfs-backup/tables_v4/state_vectors"
 
@@ -248,7 +247,7 @@ def main() -> None:
     print(f"  erased entirely by modulo: {lost:,} ({lost/max(n_ac,1):.2%})")
     print(f"  lag of modulo's last row: mean {mean_lag:.1f} s, "
           f"median {q[0]:.0f} s, p90 {q[1]:.0f} s, p99 {q[2]:.0f} s")
-    print(f"  lag of bucket's last row: 0 s by construction")
+    print("  lag of bucket's last row: 0 s by construction")
     spark.createDataFrame([{
         "aircraft": n_ac, "erased_by_modulo": lost,
         "erased_share": lost / max(n_ac, 1), "lag_mean_s": float(mean_lag),

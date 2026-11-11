@@ -24,12 +24,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F
-
 import osn_sample
 from adep_ades import OOA, airport_locations, label_ground_truth, load_ground_truth
 from elevation_bands import BANDS, airport_elevations, elevation_band
 from osn_sample import build_spark, load_dotenv
+from pyspark.sql import functions as F
 
 DAYS_2025 = ["2025-06-05", "2025-06-06", "2025-06-07"]
 DAYS_2024 = ["2024-06-05", "2024-06-06", "2024-06-07"]

@@ -7,9 +7,9 @@ and geometry operations used throughout the aviation data pipeline.
 
 import math
 from typing import Tuple
+
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
-
 
 # Earth radius constants
 EARTH_RADIUS_KM = 6371.0

@@ -22,54 +22,45 @@ from datetime import date, datetime
 from typing import List, Optional, Tuple
 
 import pandas as pd
-
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.functions import (
     abs as f_abs,
-    avg,
+)
+from pyspark.sql.functions import (
     col,
     concat,
     concat_ws,
     explode,
-    filter,
     lag,
     lead,
     lit,
-    max as f_max,
-    min as f_min,
     monotonically_increasing_id,
     row_number,
-    split,
     struct,
-    sum as f_sum,
     to_json,
     to_timestamp,
     when,
+)
+from pyspark.sql.functions import (
+    max as f_max,
+)
+from pyspark.sql.functions import (
+    min as f_min,
+)
+from pyspark.sql.functions import (
+    sum as f_sum,
 )
 from pyspark.sql.types import DoubleType
 from pyspark.sql.window import Window
 
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
-from opdi.pipeline.flights import bearing_deg, haversine_nm, resolve_flight_id
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
+from opdi.pipeline.flights import bearing_deg, haversine_nm, resolve_flight_id
+from opdi.pipeline.ground import block_times, movement_window
 from opdi.pipeline.holding import calculate_holding_events
 from opdi.pipeline.holes import PIECE, add_piece
-from opdi.pipeline.point_merge import calculate_point_merge_events
-from opdi.reference.point_merge import point_merge_systems_for_day
-from opdi.pipeline.level_segments import LEVEL_ARMS, classify_level_offs
-from opdi.pipeline.ground import block_times, movement_window
-from opdi.pipeline.runway_ops import go_arounds, runway_milestones, runway_traversals
-from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
-from opdi.pipeline.vertical_pru import (
-    aerodrome_distances,
-    attach_aerodrome_geometry,
-    pru_top_events,
-    pru_tops,
-)
-from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
-from opdi.utils.storage import StorageManager
 
 # ``calculate_airport_events`` (with its ``LEGACY_EVENTS_VERSION`` guard and
 # the ``height_above_field_ft`` helper it uses) moved to ``layout.py``
@@ -80,12 +71,24 @@ from opdi.utils.storage import StorageManager
 # ``FlightEventProcessor`` and this module's existing callers/tests keep
 # importing these names from ``opdi.pipeline.events``.
 from opdi.pipeline.layout import (  # noqa: E402
-    LEGACY_EVENTS_VERSION,
+    LEGACY_EVENTS_VERSION,  # noqa: F401  (imported from here by callers)
     calculate_airport_events,
     flight_aerodrome_sets,
-    height_above_field_ft,
+    height_above_field_ft,  # noqa: F401  (imported from here by callers)
 )
-
+from opdi.pipeline.level_segments import LEVEL_ARMS, classify_level_offs
+from opdi.pipeline.point_merge import calculate_point_merge_events
+from opdi.pipeline.runway_ops import go_arounds, runway_milestones, runway_traversals
+from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
+from opdi.pipeline.vertical_pru import (
+    aerodrome_distances,
+    attach_aerodrome_geometry,
+    pru_top_events,
+    pru_tops,
+)
+from opdi.reference.point_merge import point_merge_systems_for_day
+from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
+from opdi.utils.storage import StorageManager
 
 #: Columns step 04 reads from the track table. Named rather than inlined
 #: because a detector that *feature-gates* on a column -- ``if "x" in

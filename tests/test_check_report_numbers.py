@@ -12,9 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
-import pytest
-
 import check_report_numbers as crn
+import pytest
 
 
 def test_a_typed_result_is_caught():

@@ -3,7 +3,6 @@
 import json
 
 import pandas as pd
-
 import point_merge_report as pr
 
 

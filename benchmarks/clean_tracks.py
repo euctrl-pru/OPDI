@@ -101,8 +101,8 @@ def redirect(source: str, target: str) -> None:
     reads it. Only the first write, so a multi-month loop still extends rather
     than keeping only the last month.
     """
-    from opdi.utils.storage import StorageManager
     from opdi.cleaning import cleaner as cl
+    from opdi.utils.storage import StorageManager
 
     if getattr(StorageManager, "_v7_clean_redirect", False):
         return
@@ -174,8 +174,8 @@ def main() -> None:
     spark = build_spark(6, "10g", distributed=True)
     spark.sparkContext.setLogLevel("ERROR")
 
-    from opdi.config import OPDIConfig
     from opdi.cleaning.cleaner import TrackCleaner
+    from opdi.config import OPDIConfig
 
     cfg = OPDIConfig.for_environment("opensky")
     print(f"\ncleaning enabled={cfg.cleaning.enabled} "

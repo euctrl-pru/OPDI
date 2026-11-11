@@ -5,8 +5,9 @@ Provides deduplication and export functionality for converting
 parquet files to compressed CSV format.
 """
 
-import os
 import glob
+import os
+
 import pandas as pd
 
 

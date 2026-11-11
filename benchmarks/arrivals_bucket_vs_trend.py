@@ -27,16 +27,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import osn_sample
+from abstained_vertical import angle_between, bearing_deg
+from adep_ades import (
+    AIRPORTS,
+    airport_locations,
+    label_ground_truth,
+    load_ground_truth,
+    score,
+)
+from benchmark_modes import from_flight_list, identities_from_candidates
+from osn_sample import build_spark, load_dotenv
 from pyspark.sql import Window
 from pyspark.sql import functions as F
-
-import osn_sample
-from osn_sample import build_spark, load_dotenv
-from adep_ades import (
-    airport_locations, label_ground_truth, load_ground_truth, score, AIRPORTS,
-)
-from benchmark_modes import identities_from_candidates, from_flight_list
-from abstained_vertical import bearing_deg, angle_between
 
 MODULO_CAND = "s3a://eurocontrol/opdi/opdi_endpoint_candidates"
 MODULO_TRACKS = "s3a://eurocontrol/opdi/osn_tracks"
@@ -126,8 +129,11 @@ def main() -> None:
     def run(label, pred, ident):
         m = score(pred, ident, gt)
         n = m["n_ground_truth"]
-        cor = round(m["ades_overall"] * n); wr = round(m["ades_coverage"] * n) - cor
-        m["model"] = label; m["ades_correct"] = cor; m["ades_wrong"] = wr
+        cor = round(m["ades_overall"] * n)
+        wr = round(m["ades_coverage"] * n) - cor
+        m["model"] = label
+        m["ades_correct"] = cor
+        m["ades_wrong"] = wr
         rows.append(m)
         print(f"  {label:<44}{m['ades_coverage']:>8.2%}{m['ades_accuracy']:>8.2%}"
               f"{cor:>9,}{wr:>8,}{cor-2*wr:>10,}")

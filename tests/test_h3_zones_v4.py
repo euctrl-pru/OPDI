@@ -25,7 +25,6 @@ from opdi.pipeline.tracks import TrackProcessor
 from opdi.reference import h3_airport_zones as Z
 from opdi.reference import h3_airspaces as A
 
-
 # ---------------------------------------------------------------------------
 # h3_pyspark is broken on h3 4.5.0 -- pin the failure mode down so a future
 # h3_pyspark upgrade that silently fixes this doesn't leave a dead assumption
@@ -236,6 +235,7 @@ _AIRSPACE_WKT = (
 
 def test_fill_geometry_matches_h3_helpers_polyfill_geojson():
     import shapely.wkt
+
     from opdi.utils.h3_helpers import polyfill_geojson
 
     got = A.fill_geometry(_AIRSPACE_WKT, res=7)

@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 import run_track_link_day as r
+
 from opdi.utils.storage import StorageManager
 
 

@@ -2,9 +2,8 @@
 
 import json
 
-import pandas as pd
-
 import fir_truth_score as ft
+import pandas as pd
 
 T0 = pd.Timestamp("2026-06-14 10:00:00")
 

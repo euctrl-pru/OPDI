@@ -41,9 +41,9 @@ is and still drives the V3 paper):
 """
 
 import argparse
+import os
 import shutil
 import subprocess
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -53,6 +53,7 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
 from event_bench import LADDER_V4  # noqa: E402
+
 
 def _find_portal() -> Path:
     """Locate the opdi-portal checkout that owns this paper.

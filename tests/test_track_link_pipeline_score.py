@@ -10,10 +10,10 @@ from dataclasses import replace
 import events_gt
 import pandas as pd
 import pytest
+import track_link_pipeline_score as s
 from conftest import _EPOCH, make_track
 from pyspark.sql import functions as F
 
-import track_link_pipeline_score as s
 from opdi.pipeline.flights import EARTH_R_NM
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.base import KT_PER_MPS

@@ -39,8 +39,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pyspark.sql import functions as F
-
 import events_gt
 import events_score
 from event_bench import (
@@ -53,6 +51,7 @@ from event_bench import (
     redirect_tracks,
     runway_identity_types,
 )
+from pyspark.sql import functions as F
 
 #: Ring event types, and the truth milestone each corresponds to. Kept here
 #: rather than added to `event_bench.TYPE_TO_MILESTONE`: that module's outputs

@@ -1,11 +1,9 @@
 """The holding rule scored against the Olive et al. 2019 label set."""
 
-import datetime as dt
-
-import pandas as pd
-import pytest
 
 import holding_labels_score as hs
+import pandas as pd
+import pytest
 
 T0 = pd.Timestamp("2019-10-01 08:00:00", tz="UTC")
 

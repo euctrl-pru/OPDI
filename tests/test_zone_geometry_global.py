@@ -76,9 +76,9 @@ def test_a_pole_aerodrome_is_excluded_rather_than_built_wrong(spark):
     nothing, depending on vertex order. Excluding it is honest; building it is
     a zone that claims to be somewhere it is not.
     """
+
     from opdi.config import OPDIConfig
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
-    from pyspark.sql import functions as F
 
     gen = AirportDetectionZoneGenerator(
         spark, OPDIConfig.for_environment("opensky", worldwide=True))

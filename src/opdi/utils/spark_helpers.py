@@ -5,10 +5,11 @@ Provides centralized Spark session creation with consistent configuration
 across all pipeline components.
 """
 
-import os
 from typing import Dict, Optional
+
 from pyspark.sql import SparkSession
-from opdi.config import OPDIConfig, SparkConfig, ProjectConfig
+
+from opdi.config import OPDIConfig
 
 
 class SparkSessionManager:

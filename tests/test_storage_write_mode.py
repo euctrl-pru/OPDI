@@ -58,7 +58,6 @@ def test_an_unpartitioned_iceberg_overwrite_passes_a_condition():
     exercises.
     """
     from pyspark.sql import Column
-    from pyspark.sql import functions as F
 
     from opdi.config import OPDIConfig
 

@@ -30,10 +30,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pyspark.sql import functions as F
-
 import events_gt
 import events_score
+from pyspark.sql import functions as F
+
 from opdi.config import EventConfig, OPDIConfig
 
 #: Where a benchmark run may write. Anything else is a bug, loudly.

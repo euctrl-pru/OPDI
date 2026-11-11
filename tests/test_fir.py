@@ -4,7 +4,6 @@ import json
 import random
 
 import h3
-import pytest
 from navigation_fixtures import fly, legs_to_samples, make_track, measured
 from pyspark.sql import functions as F
 

@@ -16,10 +16,9 @@ a decision that can be made on evidence.
 
 import os
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
+from pyspark.sql import SparkSession
 
 from opdi.cleaning.native import clean_tracks, null_rate_report
 from opdi.config import OPDIConfig

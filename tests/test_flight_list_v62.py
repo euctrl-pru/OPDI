@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
 import dataclasses
 
+import flight_list_v62
 import pytest
 
-import flight_list_v62
 from opdi.config import DetectionConfig
 
 

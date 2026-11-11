@@ -130,8 +130,9 @@ def main(argv=None):
         return 0
 
     if args.command == "run":
-        from opdi.runner import run_pipeline
         from datetime import date
+
+        from opdi.runner import run_pipeline
 
         start = date.fromisoformat(args.start)
         end = date.fromisoformat(args.end)

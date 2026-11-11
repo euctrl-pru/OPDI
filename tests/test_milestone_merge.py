@@ -10,8 +10,6 @@ recoverable.
 import datetime as dt
 import json
 
-import pytest
-
 from opdi.config import EventConfig
 from opdi.pipeline.events import merge_milestone_duplicates
 

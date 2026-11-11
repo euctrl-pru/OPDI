@@ -51,10 +51,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from opdi.periodrun import (  # noqa: E402
+    _UNSET,
     DEFAULT_WAREHOUSE,
     OPTIONAL_STEPS,
     PERIOD_STEPS,
-    _UNSET,
     run_period,
 )
 

@@ -123,6 +123,7 @@ def build_spark(cores: int, driver_memory: str, distributed: bool = True):
 
 def _build_spark_k8s():
     import os as _os
+
     from opdi.config import OPDIConfig
     from opdi.utils.spark_helpers import SparkSessionManager
 
@@ -270,7 +271,6 @@ def main() -> None:
     spark = build_spark(args.cores, args.driver_memory, distributed=not args.local)
     spark.sparkContext.setLogLevel("ERROR")
 
-    from pyspark.sql import functions as F
 
     # One day at a time. A whole month in one job means any single S3 timeout
     # discards every partition read so far; per-day output is resumable and

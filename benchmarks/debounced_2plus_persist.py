@@ -10,7 +10,8 @@ Read-only. Writes nothing.
 """
 import argparse
 
-from pyspark.sql import functions as F, Window
+from pyspark.sql import Window
+from pyspark.sql import functions as F
 
 from opdi.config import OPDIConfig, SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id

@@ -33,9 +33,9 @@ from opdi.pipeline.segmentation.methods import (
     debounced_callsign_change,
     link_checks,
     link_feature_columns,
-    select_link_features,
     linkable,
     recommended,
+    select_link_features,
     stable_callsign,
 )
 

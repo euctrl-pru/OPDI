@@ -42,17 +42,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import DataFrame, Window
-from pyspark.sql import functions as F
-
 import osn_sample
-from tables import table, fixed
-from osn_sample import build_spark, load_dotenv
 from adep_ades import (
-    airport_locations, label_ground_truth, load_ground_truth, align_to_ground_truth,
     AIRPORTS,
+    airport_locations,
+    align_to_ground_truth,
+    label_ground_truth,
+    load_ground_truth,
 )
 from benchmark_modes import identities_from_candidates
+from osn_sample import build_spark, load_dotenv
+from pyspark.sql import DataFrame, Window
+from pyspark.sql import functions as F
+from tables import table
 
 CANDIDATES = table("opdi_endpoint_candidates")
 TRACKS = table("osn_tracks")

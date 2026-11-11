@@ -3,12 +3,15 @@
 import datetime as dt
 
 import pytest
+from adsc_coverage_gain import arm_summary, bridged_holes, extension_by_airframe
 from pyspark.sql import Row
 from pyspark.sql.types import (
-    DoubleType, StringType, StructField, StructType, TimestampType,
+    DoubleType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
-
-from adsc_coverage_gain import arm_summary, bridged_holes, extension_by_airframe
 
 T0 = dt.datetime(2026, 6, 5, 12, 0, 0)
 

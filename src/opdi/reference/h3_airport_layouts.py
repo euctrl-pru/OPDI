@@ -18,9 +18,6 @@ import h3
 import osmnx as ox
 import pandas as pd
 from pyproj import Transformer
-from shapely.geometry import LineString, MultiPolygon, Point, Polygon
-from shapely.ops import transform
-
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -31,10 +28,11 @@ from pyspark.sql.types import (
     StructField,
     StructType,
 )
+from shapely.geometry import LineString, Polygon
+from shapely.ops import transform
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
-
 
 # Default buffer widths (meters) by aeroway type
 DEFAULT_AEROWAY_WIDTHS: Dict[str, float] = {

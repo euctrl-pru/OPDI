@@ -1,7 +1,5 @@
 """The track-construction V5 report builder: v4's generic parts with v5's context."""
 
-import os
-import re
 import sys
 from pathlib import Path
 

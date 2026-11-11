@@ -12,9 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
 import pytest
-from pyspark.sql import functions as F
-
 from elevation_bands import BANDS, elevation_band
+from pyspark.sql import functions as F
 
 
 def _band_of(spark, elev):

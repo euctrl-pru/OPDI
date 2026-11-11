@@ -126,7 +126,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    from pyspark.sql import SparkSession
 
     from opdi.reference.point_merge import point_merge_systems_for_day
 

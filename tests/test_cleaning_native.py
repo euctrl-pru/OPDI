@@ -6,6 +6,7 @@ local Spark session -- no cluster, no credentials.
 """
 
 import pytest
+from conftest import column_values, make_track
 
 from opdi.cleaning.native import (
     add_segment_id,
@@ -18,8 +19,6 @@ from opdi.cleaning.native import (
     null_rate_report,
 )
 from opdi.config import CleaningConfig
-
-from conftest import column_values, make_track
 
 
 @pytest.fixture

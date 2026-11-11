@@ -5,9 +5,9 @@ east, and a low descent, with one sample a minute. The climb and descent stand
 still, so the distance over any cut is exactly the cruise flown beyond it.
 """
 import datetime as dt
-from dataclasses import replace
 import math
 import re
+from dataclasses import replace
 
 import pytest
 from conftest import _EPOCH, make_track

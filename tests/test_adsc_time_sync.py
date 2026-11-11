@@ -4,9 +4,9 @@ import datetime as dt
 import math
 
 import pytest
-from pyspark.sql import Row, functions as F
-
 from adsc_time_sync import bracket, decompose, per_airframe
+from pyspark.sql import Row
+from pyspark.sql import functions as F
 
 T0 = dt.datetime(2026, 6, 5, 12, 0, 0)
 

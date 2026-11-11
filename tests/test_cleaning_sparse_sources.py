@@ -2,15 +2,20 @@
 
 import datetime as dt
 
-import pytest
 from pyspark.sql import Row
 from pyspark.sql.types import (
-    BooleanType, DoubleType, StringType, StructField, StructType,
+    BooleanType,
+    DoubleType,
+    StringType,
+    StructField,
+    StructType,
     TimestampType,
 )
 
 from opdi.cleaning.native import (
-    clean_tracks, drop_duplicate_statevectors, mask_isolated_points,
+    clean_tracks,
+    drop_duplicate_statevectors,
+    mask_isolated_points,
     mask_stale_broadcasts,
 )
 from opdi.config import CleaningConfig

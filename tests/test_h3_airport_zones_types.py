@@ -13,7 +13,6 @@ pipeline is tuned against, which is both a silent change to the ADEP/ADES
 candidate set and, at H3 resolution 7 out to 110 NM, enough data to OOM every
 executor in the namespace.
 """
-import pytest
 
 from opdi.config import OPDIConfig
 from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator

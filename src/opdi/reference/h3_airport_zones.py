@@ -13,20 +13,23 @@ import math
 import os
 from typing import List, Optional
 
+import h3
 import numpy as np
 import pandas as pd
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.functions import udf, col, lit, array_except, explode
+from pyspark.sql.functions import array_except, col, explode, lit, udf
 from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType,
-    IntegerType,
-    FloatType,
     ArrayType,
+    FloatType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
 )
-import h3
+
+from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 @udf(returnType=FloatType())
@@ -181,9 +184,6 @@ def _polyfill_geojson_udf(geojson_str, resolution):
             "point config.spark.k8s_container_image at the new tag."
             .format("polygon_to_cells/LatLngPoly", type(exc).__name__, exc)
         ) from exc
-
-from opdi.config import OPDIConfig
-from opdi.utils.storage import StorageManager
 
 
 def generate_circle_polygon(

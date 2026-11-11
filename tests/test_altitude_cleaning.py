@@ -17,7 +17,6 @@ derivative the vote-based filter in ``cleaning.native`` already uses.
 
 import datetime as dt
 
-import pytest
 from pyspark.sql import Row
 
 from opdi.config import OPDIConfig

@@ -23,8 +23,6 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING, Optional
 
-from pyspark.sql import DataFrame, functions as F
-
 from opdi.pipeline.flight_list_milestones import enrich_flight_list
 
 if TYPE_CHECKING:  # pragma: no cover

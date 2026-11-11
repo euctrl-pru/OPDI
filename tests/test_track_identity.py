@@ -17,7 +17,6 @@ matter who computes it or what else is in the frame.
 """
 import datetime as dt
 
-import pytest
 from conftest import make_track
 
 from opdi.config import SegmentationConfig

@@ -1,8 +1,7 @@
 """The delete script's scope. Nothing here touches S3."""
 
-import pytest
-
 import free_adsc_scratch as f
+import pytest
 
 
 @pytest.mark.parametrize("bad", [

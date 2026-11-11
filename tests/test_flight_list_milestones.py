@@ -17,8 +17,8 @@ from pyspark.sql import functions as F
 from opdi.config import EventConfig
 from opdi.pipeline.flight_list_milestones import (
     ADDED_COLUMNS,
-    MOVEMENT_COLUMNS,
     FLIGHT_LIST_RING_RADII_NM,
+    MOVEMENT_COLUMNS,
     enrich_flight_list,
 )
 

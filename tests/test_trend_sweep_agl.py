@@ -16,8 +16,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
 import pytest
-from pyspark.sql import functions as F
-
 from trend_sweep_agl import FL_CAPS, HEIGHT_CAPS, add_height_votes, predictions
 
 _EPOCH = dt.datetime(2025, 6, 5, 12, 0, 0)

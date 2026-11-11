@@ -28,7 +28,6 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
 import pandas as pd
-
 from elevation_bands import BANDS
 
 #: The two runs compared. Named here rather than passed, because reversing them
@@ -155,9 +154,8 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     import osn_sample
-    from osn_sample import build_spark, load_dotenv
-
     from elevation_bands import airport_elevations
+    from osn_sample import build_spark, load_dotenv
 
     load_dotenv()
     osn_sample.UI_PORT = args.ui_port

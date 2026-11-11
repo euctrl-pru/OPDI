@@ -9,7 +9,6 @@ one stage, 200 tasks, 94 minutes, while a neighbouring stage moved the same
 Asking the same question of the reversed ordering turns the shrinking frame
 into a growing one, which Spark maintains incrementally.
 """
-import pytest
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
@@ -90,11 +89,10 @@ def test_tracks_do_not_leak_into_each_other(spark):
 def test_no_shrinking_frame_remains():
     """The whole point. A reintroduced unboundedFollowing frame would be
     correct and quadratic -- passing tests, failing the cluster."""
+    import ast
     import inspect
 
     from opdi.cleaning import native
-
-    import ast
 
     tree = ast.parse(inspect.getsource(native._next_valid).lstrip())
     # The name appears in the docstring explaining its removal; what matters is

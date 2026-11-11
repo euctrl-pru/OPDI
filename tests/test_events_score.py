@@ -12,8 +12,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
 import pytest
-from pyspark.sql import functions as F
-
 from events_score import (
     align,
     align_by_detector,
@@ -24,6 +22,7 @@ from events_score import (
     score_by_truth_resolution,
     score_runways,
 )
+from pyspark.sql import functions as F
 
 T0 = dt.datetime(2024, 6, 5, 10, 0, 0)
 DAY = dt.date(2024, 6, 5)

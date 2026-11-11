@@ -10,7 +10,6 @@ ordering keys are reversed, so the order is exactly inverted -- which matters,
 because the ordering deliberately places a real sample before the grid instant
 it coincides with.
 """
-import pytest
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
@@ -71,7 +70,9 @@ def test_ties_between_a_real_sample_and_its_grid_instant_are_preserved(spark):
 
 
 def test_no_shrinking_frame_remains_in_the_interpolation():
-    import ast, inspect
+    import ast
+    import inspect
+
     from opdi.pipeline import level_segments
 
     src = inspect.getsource(level_segments)

@@ -3,9 +3,8 @@
 import os
 from pathlib import Path
 
-import pytest
-
 import build_airspace_v1_paper as b
+import pytest
 
 PAPER = Path(os.environ.get(
     "OPDI_PAPER_DIR_AIRSPACE",

@@ -15,7 +15,8 @@ import argparse
 import csv
 from pathlib import Path
 
-from pyspark.sql import functions as F, Window
+from pyspark.sql import Window
+from pyspark.sql import functions as F
 
 from opdi.config import OPDIConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id

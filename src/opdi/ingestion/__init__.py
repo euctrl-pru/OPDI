@@ -6,8 +6,8 @@ and OurAirports.
 """
 
 from opdi.ingestion.osn_adsc import AdscIngestion
-from opdi.ingestion.osn_statevectors import StateVectorIngestion
 from opdi.ingestion.osn_aircraft_db import AircraftDatabaseIngestion
+from opdi.ingestion.osn_statevectors import StateVectorIngestion
 from opdi.ingestion.ourairports import OurAirportsIngestion
 
 __all__ = [

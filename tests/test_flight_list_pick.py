@@ -18,11 +18,9 @@ always intended; these tests pin that it is the one reported.
 import datetime as dt
 import random
 
-from pyspark.sql import functions as F
+from test_flight_detection import _EPOCH, CLASSIFIED
 
 from opdi.pipeline.flights import FlightListProcessor
-
-from test_flight_detection import CLASSIFIED, _EPOCH
 
 
 def _landings(spark, aerodromes, tracks=1, n=2, seed=None):

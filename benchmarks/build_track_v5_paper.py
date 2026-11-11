@@ -21,6 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import build_track_v4_paper as v4  # noqa: E402
 from build_track_v4_paper import (  # noqa: E402
     CODE_CONSTANTS,
     MissingValue,
@@ -36,7 +37,6 @@ from build_track_v4_paper import (  # noqa: E402
     upper_95,
     where,
 )
-import build_track_v4_paper as v4  # noqa: E402
 
 #: ``OPDI_PAPER_DIR_V5``, not the v4 builder's ``OPDI_PAPER_DIR``: one shared
 #: name would point both builders at one paper.

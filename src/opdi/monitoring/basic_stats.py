@@ -5,7 +5,8 @@ Provides simple row count and basic statistics for monitoring
 data pipeline health and completeness.
 """
 
-from typing import List, Dict
+from typing import Dict, List
+
 from pyspark.sql import SparkSession
 
 from opdi.config import OPDIConfig

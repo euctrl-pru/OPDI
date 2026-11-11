@@ -255,7 +255,7 @@ def test_other_arms_keep_their_explicit_lookback(spark):
 
 def _claimed_by_day(sv, day_start, lookback_hours, p=None):
     """One day of `process_day`: read wide, segment, keep the tracks starting in it."""
-    from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
+    from opdi.pipeline.segmentation import assign_track_id
     from opdi.pipeline.segmentation.methods import cruise_linked
 
     day_end = day_start + dt.timedelta(days=1)
@@ -274,7 +274,6 @@ def test_a_piece_after_midnight_is_claimed_once(spark):
     starting on D, and claims it while D-1 claims the same samples inside the
     linked track: published twice under two ids.
     """
-    from opdi.pipeline.segmentation import SegmentationParams
     from opdi.pipeline.tracks import required_lookback_hours
 
     d_minus_1 = dt.datetime(2024, 6, 1)
@@ -392,7 +391,6 @@ def test_positions_read_through_blank_edges_decide_alike_at_the_required_lookbac
     D's 7 h read begins at 17:00, so both reads see that position, link, and D claims
     nothing.
     """
-    from opdi.pipeline.segmentation import SegmentationParams
     from opdi.pipeline.tracks import required_lookback_hours
 
     p = PRE_STUDY
@@ -437,7 +435,6 @@ def test_the_old_edge_position_is_always_inside_the_read(
     Both reads must see it and link. A lookback an hour shorter starts at or after the
     position, so D would take the new piece for a new track while D-1 claims it too.
     """
-    from opdi.pipeline.segmentation import SegmentationParams
     from opdi.pipeline.tracks import required_lookback_hours
 
     p = replace(PRE_STUDY, **settings)

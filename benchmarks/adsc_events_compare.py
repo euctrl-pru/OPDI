@@ -37,11 +37,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F  # noqa: E402
-
 import events_gt  # noqa: E402
 import events_score  # noqa: E402
 from event_bench import detected_events, milestone_map  # noqa: E402
+from pyspark.sql import functions as F  # noqa: E402
 
 #: The warehouse the ``opensky`` environment resolves relative table names
 #: against. Named because :func:`arm_tables` has to express one of its two

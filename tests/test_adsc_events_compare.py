@@ -1,8 +1,7 @@
 """The two-arm scorer's wiring. The arithmetic is events_score's own tests."""
 
-import pytest
-
 import adsc_events_compare as a
+import pytest
 
 
 def test_arm_tables_point_at_the_arm_prefix():

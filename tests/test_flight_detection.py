@@ -27,8 +27,8 @@ from pyspark.sql.types import (
 )
 
 from opdi.pipeline.flights import (
-    FlightListProcessor,
     OOA,
+    FlightListProcessor,
     angle_between,
     at_border,
     bearing_deg,

@@ -4,10 +4,11 @@ OpenSky Network aircraft database ingestion module.
 Downloads aircraft metadata from OpenSky Network and loads into Iceberg tables.
 """
 
-import pandas as pd
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, when, trim
 from typing import Optional
+
+import pandas as pd
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import col, trim, when
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager

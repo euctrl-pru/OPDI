@@ -37,14 +37,16 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import DataFrame, SparkSession, Window
-from pyspark.sql import functions as F
-
 import osn_sample
-from osn_sample import build_spark, load_dotenv
 from adep_ades import (
-    OUT_BASE, TRACKS_BASE, load_ground_truth, track_identity,
+    OUT_BASE,
+    TRACKS_BASE,
+    load_ground_truth,
+    track_identity,
 )
+from osn_sample import build_spark, load_dotenv
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
 OUT = f"{OUT_BASE}/track_quality"
 
