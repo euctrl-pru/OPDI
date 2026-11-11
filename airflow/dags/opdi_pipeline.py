@@ -61,6 +61,7 @@ DAY_STEPS = (
 
 #: The tasks of the daily DAG, in the order they run.
 DAILY_TASK_ORDER = [
+    "previous_run_finished",
     "reference",
     "check_space",
     "ingest",
@@ -136,6 +137,29 @@ def _variable(name: str) -> str:
     return Variable.get(name, default_var=VARIABLE_DEFAULTS[name])
 
 
+def _previous_run_finished(**context) -> None:
+    """Fail when the previous daily run did not succeed.
+
+    A failed day keeps the folders it reads (the position reports of the day
+    before and after it, its tracks) until it is published. While it is not,
+    the next day must not run: its step 01 would fetch and keep yet more
+    days, and the operator must look at the failure first. With
+    ``max_active_runs=1`` a run whose task waits for a retry is still
+    running, so the next run waits; once that task has failed for good, the
+    next run starts and stops here.
+
+    Raises:
+        RuntimeError: If the previous run of the DAG did not succeed.
+    """
+    previous = context["dag_run"].get_previous_dagrun()
+    if previous is not None and previous.state != "success":
+        raise RuntimeError(
+            f"the previous run of this DAG ended as {previous.state!r}, not 'success'. "
+            "Fix and clear its failed task first; once that run has succeeded, clear "
+            "this task (see 'When a day fails' in airflow/README.md)."
+        )
+
+
 def _backfill_commands(**context) -> list:
     """One shell command per day of the backfill, in the order asked for."""
     params = context["params"]
@@ -176,8 +200,11 @@ that are no longer needed (unless `opdi_keep_internal` is `true`). With
 and measurements of days already published.
 
 Each task records its result in the warehouse. Clearing a failed task and
-running it again continues where it stopped. Missed days are not caught up
-automatically: start `opdi_backfill` for them.
+running it again continues where it stopped. While a run has failed, the
+next run stops at its first task, `previous_run_finished`: fix and clear the
+failed run first, then clear `previous_run_finished` of the runs after it,
+oldest first. Missed days are not caught up automatically: start
+`opdi_backfill` for them.
 """
 
 BACKFILL_DOC = """
@@ -211,6 +238,11 @@ with DAG(
     tags=["opdi"],
 ) as daily:
     tasks = [
+        PythonOperator(
+            task_id="previous_run_finished",
+            python_callable=_previous_run_finished,
+            retries=0,
+        ),
         BashOperator(task_id="reference", bash_command=f"{COMMAND} reference{WAREHOUSE}"),
         BashOperator(
             task_id="check_space",
@@ -283,6 +315,10 @@ with DAG(
     process_day = BashOperator.partial(
         task_id="process_day",
         max_active_tis_per_dag=1,
+        # No retry: a task that waits for its retry does not count as running,
+        # so the next day would start in the meantime. A failed day is run
+        # again by hand (airflow/README.md, "When a day fails").
+        retries=0,
         execution_timeout=DAY_TIMEOUT,
     ).expand(bash_command=plan.output)
     done = EmptyOperator(task_id="done")

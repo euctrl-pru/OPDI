@@ -100,6 +100,164 @@ DEFAULT_MIN_FREE_GB = 5.0
 
 ORDERS = ("newest_first", "oldest_first")
 
+#: The step that writes the day folders of each working table. When a step
+#: of a day finds a folder it reads missing, the day is built again from the
+#: step that writes it.
+PRODUCERS: dict[str, str] = {
+    "osn_statevectors_v2": "01",
+    "osn_tracks": "02",
+    "osn_tracks_clean": "02a",
+    "opdi_flight_list": "03",
+    "opdi_flight_events": "04",
+    "opdi_measurements": "04",
+}
+
+
+def _tracks_read_by(step: str, config) -> str:
+    """The track table step 03 or 04 reads under ``config``.
+
+    The same rule as the steps themselves: the cleaned tracks when cleaning
+    is on and the step is set to read them, else the tracks of step 02.
+    """
+    cleaning = config.cleaning
+    if step == "03":
+        clean = cleaning.enabled and cleaning.feeds_flight_list
+    else:
+        clean = cleaning.enabled and config.events.feeds_from_clean_tracks
+    return "osn_tracks_clean" if clean else "osn_tracks"
+
+
+def step_inputs(step: str, day: date, config) -> list[tuple[str, str, str]]:
+    """The day folders that ``step`` reads for ``day``.
+
+    Each is given as (table, partition column, value), for example
+    ``("osn_tracks", "dof", "2026-06-14")``. Step 01 reads the OpenSky
+    archive, not the warehouse, so it has none.
+
+    * 02 reads the position reports of D-1, D and D+1.
+    * 02a reads the tracks of D (none when cleaning is off).
+    * 03 and 04 read the cleaned tracks of D, or the tracks of step 02 when
+      the configuration says so.
+    * 04b reads the flight list and the events of D.
+    * 09 reads the flight list, the events and the measurements of D.
+    """
+    d = day.isoformat()
+    if step == "01":
+        return []
+    if step == "02":
+        return [
+            ("osn_statevectors_v2", "event_time_day", (day + timedelta(days=k)).isoformat())
+            for k in (-1, 0, 1)
+        ]
+    if step == "02a":
+        return [("osn_tracks", "dof", d)] if config.cleaning.enabled else []
+    if step in ("03", "04"):
+        return [(_tracks_read_by(step, config), "dof", d)]
+    if step == "04b":
+        return [("opdi_flight_list", "DOF", d), ("opdi_flight_events", "dof", d)]
+    if step == "09":
+        return [
+            ("opdi_flight_list", "DOF", d),
+            ("opdi_flight_events", "dof", d),
+            ("opdi_measurements", "dof", d),
+        ]
+    raise ValueError(f"unknown step {step!r}")
+
+
+def _present(storage, cache: dict, table: str, column: str) -> set:
+    if (table, column) not in cache:
+        try:
+            cache[(table, column)] = set(storage.list_partitions(table, column))
+        except Exception:  # noqa: BLE001 - a missing table has no folders
+            cache[(table, column)] = set()
+    return cache[(table, column)]
+
+
+def missing_inputs(storage, step: str, day: date, cache: dict | None = None) -> list[tuple]:
+    """The day folders ``step`` reads for ``day`` that are not in the warehouse.
+
+    Args:
+        storage: A :class:`~opdi.utils.storage.StorageManager`.
+        step: One of :data:`DAY_STEPS`.
+        day: The day.
+        cache: Folder listings already made, reused and filled in.
+    """
+    cache = {} if cache is None else cache
+    return [
+        (table, column, value)
+        for table, column, value in step_inputs(step, day, storage.config)
+        if value not in _present(storage, cache, table, column)
+    ]
+
+
+def _describe(folders) -> str:
+    return ", ".join(f"{table} {column}={value}" for table, column, value in folders)
+
+
+def restart_step(storage, day: date, first: str) -> tuple[str, list[tuple]]:
+    """The step from which ``day`` must run when its next step is ``first``.
+
+    Steps before ``first`` are recorded as finished and will not run. When a
+    folder that ``first`` or a later step reads is missing and is written by
+    one of those earlier steps, the day must start again from that earlier
+    step; the check is repeated from there, so a chain of missing folders
+    leads back to the step whose inputs are all present (at the latest step
+    01, which reads the OpenSky archive).
+
+    Returns:
+        The step to start from and the missing folders found.
+    """
+    cache: dict = {}
+    start = DAY_STEPS.index(first)
+    found: list[tuple] = []
+    while True:
+        earlier = []
+        for step in DAY_STEPS[start:]:
+            for folder in missing_inputs(storage, step, day, cache):
+                producer = DAY_STEPS.index(PRODUCERS[folder[0]])
+                if producer < start:
+                    earlier.append(producer)
+                    if folder not in found:
+                        found.append(folder)
+        if not earlier:
+            return DAY_STEPS[start], found
+        start = min(earlier)
+
+
+def days_in_progress(storage) -> set[date]:
+    """The days that have started but are not published.
+
+    A day has started when at least one of its steps is recorded as
+    finished, and is published when its step 09 is. The folders such a day
+    reads are never removed, whatever order the days run in.
+    """
+    started: set[date] = set()
+    published: set[date] = set()
+    for key in storage.done_keys():
+        step, _, value = key.partition("@")
+        try:
+            day = date.fromisoformat(value)
+        except ValueError:
+            continue
+        started.add(day)
+        if step == "09":
+            published.add(day)
+    return started - published
+
+
+def needed_folders(days: Sequence[date] | set[date], config=None) -> dict[str, set[str]]:
+    """Table -> the day values of the internal tables that ``days`` read.
+
+    The position reports of D-1 to D+1 and the tracks of D, for every day D.
+    """
+    needed: dict[str, set[str]] = {table: set() for table in INTERNAL_TABLES}
+    for day in days:
+        for k in (-1, 0, 1):
+            needed["osn_statevectors_v2"].add((day + timedelta(days=k)).isoformat())
+        needed["osn_tracks"].add(day.isoformat())
+        needed["osn_tracks_clean"].add(day.isoformat())
+    return needed
+
 
 # --- planning ---------------------------------------------------------------
 
@@ -232,9 +390,20 @@ def run_unit(
             print(f"Refused: {problem}")
             return 1
         key = unit_key(step, day)
-        if not force and storage.is_done(key):
+        # Step 01 is never skipped on its mark: it lists the report folders
+        # of its three days and fetches only the missing ones.
+        if not force and step != "01" and storage.is_done(key):
             print(f"  {label} is already finished; skipped (pass --force to run it again)")
             return 0
+        if day is not None:
+            gone = missing_inputs(storage, step, day)
+            if gone:
+                print(
+                    f"Not started: {label} reads {_describe(gone)}, which is not in the "
+                    "warehouse (removed, or never written). Build the day again from "
+                    f"step 01 with: python -m opdi.orchestration day --day {day} --force"
+                )
+                return 1
 
         kwargs = _step_kwargs()
         if step == REFERENCE_STEP:
@@ -294,6 +463,36 @@ def unfinished_steps(day: date, warehouse: str | None = None, worldwide: bool = 
         spark.stop()
 
 
+def _resume_plan(day: date, first: str, warehouse: str | None, worldwide: bool) -> list[str]:
+    """The steps to run for ``day``, whose first unfinished step is ``first``.
+
+    When a folder that a remaining step reads is gone (removed by pruning,
+    for example, while the day waited to be run again), the marks of the day
+    are cleared from the step that writes that folder onwards, and the day
+    starts again from step 01. Step 01 then lists its folders and fetches
+    only the missing days, and the steps whose outputs are still there keep
+    their marks and are skipped.
+    """
+    from opdi.utils.storage import StorageManager
+
+    config = make_config(warehouse, worldwide)
+    spark = _session(config, f"OPDI check {day}", distributed=False)
+    try:
+        storage = StorageManager(spark, config)
+        start, gone = restart_step(storage, day, first)
+        if start == first:
+            return list(DAY_STEPS[DAY_STEPS.index(first) :])
+        print(
+            f"  day {day}: {_describe(gone)} is no longer in the warehouse; "
+            f"the day runs again from step 01 (marks cleared from step {start})"
+        )
+        for step in DAY_STEPS[DAY_STEPS.index(start) :]:
+            storage.clear_done(unit_key(step, day))
+        return list(DAY_STEPS)
+    finally:
+        spark.stop()
+
+
 def run_day(
     day: date,
     warehouse: str | None = None,
@@ -318,10 +517,14 @@ def run_day(
     Returns:
         0 when every step succeeded, 1 at the first failure.
     """
-    todo = list(DAY_STEPS) if force else unfinished_steps(day, warehouse, worldwide)
-    if not todo:
-        print(f"  day {day} is already finished; skipped (pass --force to run it again)")
-        return 0
+    if force:
+        todo = list(DAY_STEPS)
+    else:
+        todo = unfinished_steps(day, warehouse, worldwide)
+        if not todo:
+            print(f"  day {day} is already finished; skipped (pass --force to run it again)")
+            return 0
+        todo = _resume_plan(day, todo[0], warehouse, worldwide)
     if min_free_gb > 0:
         try:
             check_space(min_free_gb, warehouse=warehouse, worldwide=worldwide)
@@ -414,18 +617,25 @@ def check_space(
 
 
 def prune_plan(
-    day: date, keep_days: int, present: dict[str, Sequence[str]]
+    day: date,
+    keep_days: int,
+    present: dict[str, Sequence[str]],
+    in_progress: Sequence[date] | set[date] = (),
 ) -> dict[str, list[str]]:
     """Which day folders of the internal tables :func:`prune_internal` removes.
 
     The folders from ``keep_days - 1`` days before ``day`` to ``keep_days``
     days after it are kept; the others are removed. The window reaches both
-    ways because a backfill can process the days newest first.
+    ways because a backfill can process the days newest first. The folders
+    that a day in ``in_progress`` reads (see :func:`needed_folders`) are
+    always kept, so a day that failed can be run again.
 
     Args:
         day: The day just published.
         keep_days: Size of the window kept; see :data:`DEFAULT_KEEP_DAYS`.
         present: Table name -> the day values of its folders.
+        in_progress: Days that have started and are not published (see
+            :func:`days_in_progress`).
 
     Returns:
         Table name -> the day values to remove, only for tables in
@@ -435,12 +645,15 @@ def prune_plan(
         raise ValueError("keep_days must be at least 1: the next day needs the last one")
     oldest_kept = day - timedelta(days=keep_days - 1)
     newest_kept = day + timedelta(days=keep_days)
+    needed = needed_folders(in_progress)
     plan: dict[str, list[str]] = {}
     for table, values in present.items():
         if table not in INTERNAL_TABLES:
             continue
         old = []
         for value in values:
+            if str(value)[:10] in needed[table]:
+                continue
             try:
                 if not oldest_kept <= date.fromisoformat(str(value)[:10]) <= newest_kept:
                     old.append(value)
@@ -573,7 +786,7 @@ def prune_internal(
                 present[table] = storage.list_partitions(table, column)
             except Exception:  # noqa: BLE001 - a missing table has nothing to prune
                 present[table] = []
-        plan = prune_plan(day, keep_days, present)
+        plan = prune_plan(day, keep_days, present, days_in_progress(storage))
         if drop_published_working:
             working = {}
             for table, column in WORKING_TABLES.items():

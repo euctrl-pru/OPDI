@@ -523,13 +523,25 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         # the reports of D-1 to D+1, so consecutive days share two of their
         # three days. Only the days not already in the table are fetched, and
         # only the days the window has passed are removed, so each calendar
-        # day is fetched once and the table holds three days.
+        # day is fetched once and the table holds three days. The reports of
+        # a day that has started and is not yet published (it failed, and
+        # waits to be run again) are kept as well: see
+        # opdi.orchestration.days_in_progress.
+        from opdi.orchestration import days_in_progress, needed_folders
+
         needed = [day - timedelta(days=1), day, day + timedelta(days=1)]
         storage = StorageManager(spark, config)
         present = set(storage.list_partitions("osn_statevectors_v2", "event_time_day"))
+        unfinished = days_in_progress(storage) - {day}
+        kept = needed_folders(unfinished)["osn_statevectors_v2"]
 
         missing = [d for d in needed if d.isoformat() not in present]
-        stale = sorted(present - {d.isoformat() for d in needed})
+        stale = sorted(present - {d.isoformat() for d in needed} - kept)
+        if unfinished:
+            print(
+                "  kept for days not yet published: "
+                + ", ".join(sorted(present & kept - {d.isoformat() for d in needed}))
+            )
 
         print(
             f"  window {needed[0]} .. {needed[-1]}: "

@@ -27,6 +27,7 @@ ALLOWED_MODULES = {
     "json",
 }
 DAILY_TASKS = [
+    "previous_run_finished",
     "reference",
     "check_space",
     "ingest",
@@ -95,7 +96,7 @@ def test_the_daily_tasks_in_order(tree):
     steps = _constant(tree, "DAY_STEPS")
     assert [step for _, step in steps] == list(orchestration.DAY_STEPS)
     assert _constant(tree, "DAILY_TASK_ORDER") == DAILY_TASKS
-    assert [name for name, _ in steps] == DAILY_TASKS[2:-1]
+    assert [name for name, _ in steps] == DAILY_TASKS[3:-1]
 
 
 def test_the_backfill_is_mapped_over_days_one_at_a_time(tree):

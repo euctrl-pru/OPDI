@@ -416,6 +416,18 @@ class StorageManager:
         fs, p = self._hadoop_path(self._done_path(key))
         return bool(fs.exists(p))
 
+    def done_keys(self) -> list:
+        """The names of every unit recorded as finished, for example ``02@2026-06-14``."""
+        fs, folder = self._hadoop_path(f"{self.state_path}/done")
+        if not fs.exists(folder):
+            return []
+        names = []
+        for status in fs.listStatus(folder):
+            name = status.getPath().getName()
+            if status.isFile() and name.endswith(".json"):
+                names.append(name[: -len(".json")])
+        return sorted(names)
+
     def clear_done(self, key: str) -> None:
         """Forget that the unit ``key`` was finished, so that it runs again."""
         fs, p = self._hadoop_path(self._done_path(key))

@@ -10,6 +10,15 @@ from opdi import orchestration as o
 D = date(2026, 6, 14)
 
 
+@pytest.fixture(autouse=True)
+def _inputs_are_present(monkeypatch):
+    """These tests replace the units; the folder checks are tested in
+    test_orchestration_inputs.py against a real warehouse."""
+    monkeypatch.setattr(
+        o, "_resume_plan", lambda day, first, *a: list(o.DAY_STEPS[o.DAY_STEPS.index(first) :])
+    )
+
+
 def test_day_steps_end_with_publishing():
     assert o.DAY_STEPS == ("01", "02", "02a", "03", "04", "04b", "09")
 
@@ -206,6 +215,9 @@ class _Storage:
 
     def list_partitions(self, table, column):
         return ["2026-06-01", "2026-06-14"]
+
+    def done_keys(self):
+        return []
 
     def drop_partitions(self, table, column, values):
         self.dropped.append((f"{self.base_path}/{table}", column, list(values)))
