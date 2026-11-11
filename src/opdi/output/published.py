@@ -634,7 +634,9 @@ def update_catalogue(
         counts["flight_list_version"],
         list(counts["event_versions"]),
         commit,
-        dt.datetime.now(dt.timezone.utc).replace(tzinfo=None),
+        # With its zone, so that Spark stores this instant whatever the zone
+        # of the machine.
+        dt.datetime.now(dt.timezone.utc),
     )
     new = spark.createDataFrame([row], _ddl(CATALOGUE))
     if _exists(spark, layout.catalogue):
@@ -737,11 +739,20 @@ def publish_day(
     Raises:
         ValueError: If the day's flight list has rows but no working event is
             stored under the day (the events were removed, or step 04 did not
-            run), or if a published file with rows would be replaced by an
-            empty one and ``allow_empty`` is not set.
+            run), if a published file with rows would be replaced by an empty
+            one and ``allow_empty`` is not set, or if the session's time zone
+            is not UTC.
         PublishLockedError: If another publish into the same release holds the
             lock, or a stopped one left it (see :class:`PublishLock`).
     """
+    zone = spark.conf.get("spark.sql.session.timeZone")
+    if zone not in ("UTC", "Etc/UTC", "Z", "+00:00"):
+        raise ValueError(
+            f"the Spark session works in the time zone {zone!r}, not UTC: the days of the "
+            "published files would not be UTC days. Create the session with "
+            "opdi.utils.spark_helpers.SparkSessionManager, or set "
+            "spark.sql.session.timeZone to UTC."
+        )
     with PublishLock(spark, layout):
         return _publish_day(spark, storage, day, layout, commit, row_group_rows, allow_empty)
 

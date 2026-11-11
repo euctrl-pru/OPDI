@@ -5,6 +5,9 @@ from typing import Dict
 
 from opdi.config.project import ProjectConfig
 
+#: Time zone of every Spark session of the pipeline.
+SESSION_TIME_ZONE = "UTC"
+
 
 @dataclass
 class SparkConfig:
@@ -122,7 +125,10 @@ class SparkConfig:
         Returns:
             Spark configuration keys and values.
         """
-        configs: Dict[str, str] = {}
+        # The days of OPDI are UTC days, and Spark turns times into dates in
+        # the session's time zone. Every session therefore works in UTC,
+        # whatever the zone of the machine.
+        configs: Dict[str, str] = {"spark.sql.session.timeZone": SESSION_TIME_ZONE}
 
         # S3 access (opensky environment)
         if self.s3_endpoint:

@@ -151,6 +151,7 @@ class SparkSessionManager:
             "spark.executor.memory": "2G",
             "spark.sql.shuffle.partitions": "4",
             "spark.ui.showConsoleProgress": "false",
+            "spark.sql.session.timeZone": "UTC",
         }
 
         # Apply default configs
