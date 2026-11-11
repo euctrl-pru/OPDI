@@ -112,6 +112,7 @@ Set them under Admin > Variables. All are optional.
 | `opdi_min_free_gb`    | `5`       | Free space, in GB, a day needs before it starts. |
 | `opdi_lag_days`       | `2`       | How many days the daily run stays behind the run date. |
 | `opdi_keep_internal`  | `false`   | `true` keeps the internal tables of each day after publishing (needs much more space). |
+| `opdi_keep_working`   | `true`    | `false` also removes the working events and measurements of days that are already published, except the 7 days on each side of the day just run. See "How disk space is protected". |
 
 Every command prints the warehouse, the release root and the coverage when
 it starts, and warns when `OPDI_WAREHOUSE` points elsewhere. Check the first
@@ -216,11 +217,30 @@ free space is the quota minus the bytes stored in the whole bucket.
   `osn_tracks` and cleaned tracks `osn_tracks_clean`) that lie outside a
   window from one day before to two days after the day just published. That
   window holds what the next day needs, whichever order the days run in.
+- **Kept by default, removed on request:** the working events and
+  measurements tables (`opdi_flight_events`, `opdi_measurements`). Keeping
+  them lets a day be published again without running steps 04 and 04b
+  again, but they take about three times the space of the published files.
+  Set the Variable `opdi_keep_working` to `false` (or pass
+  `--drop-published-working` to the `prune` and `day` commands) to remove
+  their day folders once a day is published. A day folder is removed only
+  when both published files of that day and its catalogue row exist, and
+  only when the day is more than 7 days (`--working-keep-days`) before or
+  after the day just run. A day that is not yet published is never touched.
+  To publish a removed day again, run steps 04, 04b and 09 for it again.
 - **Never removed:** the published files, the reference tables, the
-  progress records and the working flight list, events and measurements
-  tables (which allow a day to be published again without rebuilding it).
-- With `opdi_keep_internal` set to `true` nothing is removed; plan for about
-  20 GB per worldwide day in that case, mostly tracks.
+  progress records and the working flight list (`opdi_flight_list`), which
+  the flight list of later days is built against.
+- With `opdi_keep_internal` set to `true` nothing is removed, whatever
+  `opdi_keep_working` says; plan for about 20 GB per worldwide day in that
+  case, mostly tracks.
+
+To remove the working events and measurements of every published day older
+than a week in one go, without running a day:
+
+```bash
+python -m opdi.orchestration prune --day 2026-11-09 --drop-published-working
+```
 
 To see what is used:
 
@@ -247,12 +267,18 @@ What this means for the bucket:
 
 - **Published files:** about 0.42 GB per day, so about 155 GB per year of
   worldwide data.
-- **Working tables that are kept** (flight list, events, measurements): about
-  1.3 GB per day on top of that.
+- **Working tables** (flight list, events, measurements): about 1.3 GB per
+  day on top of that when they are kept, which is the default. Almost all of
+  it is events and measurements; with `opdi_keep_working` set to `false`
+  only the working flight list stays for days older than a week, a small
+  part of the 1.3 GB.
+- So a worldwide day costs about 1.7 GB with the default settings and a
+  little over 0.42 GB with `opdi_keep_working` set to `false`.
 - The first backfill (January 2025 to November 2026, about 680 days) therefore
-  needs roughly 290 GB for the published files alone. This is more than a
-  200 GB quota. Raise the quota, or publish to a larger warehouse (see
-  "Changing the warehouse"), before starting it.
+  needs roughly 290 GB for the published files alone, and about 1.2 TB with
+  the working tables kept. Both are more than a 200 GB quota. Raise the
+  quota, or publish to a larger warehouse (see "Changing the warehouse"),
+  and set `opdi_keep_working` to `false`, before starting it.
 
 In that check 3,442 events (0.05%) belonged to tracks with no row in the
 flight list. They are published with empty flight columns.

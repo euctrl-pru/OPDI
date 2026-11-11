@@ -114,7 +114,14 @@ def test_variables_have_defaults(tree):
         "opdi_min_free_gb": "5",
         "opdi_lag_days": "2",
         "opdi_keep_internal": "false",
+        "opdi_keep_working": "true",
     }
+
+
+def test_the_working_tables_are_kept_unless_the_variable_says_otherwise(tree):
+    source = DAG_FILE.read_text()
+    assert "--drop-published-working" in source
+    assert "opdi_keep_working" in source
 
 
 def test_the_day_planning_matches_the_package(tree):

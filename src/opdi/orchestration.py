@@ -9,6 +9,7 @@ such unit and is meant to be called as a command::
     python -m opdi.orchestration day --day 2026-06-14             # every step of a day
     python -m opdi.orchestration check-space --min-free-gb 5
     python -m opdi.orchestration prune --day 2026-06-14
+    python -m opdi.orchestration prune --day 2026-06-14 --drop-published-working
     python -m opdi.orchestration plan --start 2025-01-01 --end 2026-11-09
 
 Each command ends with exit code 0 when it succeeded and 1 when it failed.
@@ -35,7 +36,7 @@ import sys
 import time
 import traceback
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Set
 
 #: The steps of one day, in the order they run.
 #:
@@ -64,6 +65,22 @@ INTERNAL_TABLES: Dict[str, str] = {
     "osn_tracks": "dof",
     "osn_tracks_clean": "dof",
 }
+
+#: Working tables of events and measurements, with the column their files are
+#: split by. They are kept by default, so a published day can be published
+#: again without being rebuilt. With ``--drop-published-working`` the day
+#: folders of days that are already published, and lie outside a window of
+#: :data:`DEFAULT_WORKING_KEEP_DAYS` days, are removed. The working flight
+#: list (``opdi_flight_list``) is never removed: building a later day reads
+#: it.
+WORKING_TABLES: Dict[str, str] = {
+    "opdi_flight_events": "dof",
+    "opdi_measurements": "dof",
+}
+
+#: Days of working events and measurements kept on each side of the day just
+#: published when ``--drop-published-working`` is used.
+DEFAULT_WORKING_KEEP_DAYS = 7
 
 #: Days of internal tables kept around the day just published by
 #: :func:`prune_internal`. With 2, the folders from one day before it to two
@@ -287,6 +304,8 @@ def run_day(
     keep_internal: bool = False,
     min_free_gb: float = DEFAULT_MIN_FREE_GB,
     keep_days: int = DEFAULT_KEEP_DAYS,
+    drop_published_working: bool = False,
+    working_keep_days: int = DEFAULT_WORKING_KEEP_DAYS,
 ) -> int:
     """Run every step of ``day`` in order, publishing last.
 
@@ -294,7 +313,9 @@ def run_day(
     are skipped, so running a failed day again continues where it stopped.
     After publishing, the day folders of the internal tables outside a window
     of ``keep_days`` days around ``day`` are removed (see :func:`prune_plan`),
-    unless ``keep_internal`` is set.
+    unless ``keep_internal`` is set. With ``drop_published_working``, the
+    working events and measurements of published days are pruned as well;
+    see :func:`prune_internal`.
 
     Returns:
         0 when every step succeeded, 1 at the first failure.
@@ -314,7 +335,14 @@ def run_day(
         if rc != 0:
             return rc
     if not keep_internal:
-        prune_internal(day, keep_days, warehouse=warehouse, worldwide=worldwide)
+        prune_internal(
+            day,
+            keep_days,
+            warehouse=warehouse,
+            worldwide=worldwide,
+            drop_published_working=drop_published_working,
+            working_keep_days=working_keep_days,
+        )
     return 0
 
 
@@ -425,18 +453,87 @@ def prune_plan(
     return plan
 
 
+def working_prune_plan(
+    day: date,
+    keep_days: int,
+    present: Dict[str, Sequence[str]],
+    published: Set[date],
+) -> Dict[str, List[str]]:
+    """Which day folders of the working events and measurements may be removed.
+
+    A day folder is removed only when its day is published (both files and a
+    catalogue row exist, see :func:`published_days`) and lies more than
+    ``keep_days`` days before or after ``day``.
+
+    Args:
+        day: The day just published.
+        keep_days: Days kept on each side of ``day``; 0 keeps only ``day``.
+        present: Table name -> the day values of its folders.
+        published: The days that are published.
+
+    Returns:
+        Table name -> the day values to remove, only for tables in
+        :data:`WORKING_TABLES`.
+    """
+    if keep_days < 0:
+        raise ValueError("keep_days must be 0 or more")
+    oldest_kept = day - timedelta(days=keep_days)
+    newest_kept = day + timedelta(days=keep_days)
+    plan: Dict[str, List[str]] = {}
+    for table, values in present.items():
+        if table not in WORKING_TABLES:
+            continue
+        old = []
+        for value in values:
+            try:
+                value_day = date.fromisoformat(str(value)[:10])
+            except ValueError:
+                continue
+            if value_day in published and not oldest_kept <= value_day <= newest_kept:
+                old.append(value)
+        if old:
+            plan[table] = sorted(old)
+    return plan
+
+
+def published_days(storage) -> Set[date]:
+    """The days whose two published files and catalogue row all exist.
+
+    Args:
+        storage: A :class:`~opdi.utils.storage.StorageManager` (only its
+            ``spark`` session and ``base_path`` are used).
+    """
+    from opdi.output.published import PublishedLayout, _exists
+
+    spark = storage.spark
+    layout = PublishedLayout.for_storage(storage)
+    if not _exists(spark, layout.catalogue):
+        return set()
+    catalogued = {r["day"] for r in spark.read.parquet(layout.catalogue).select("day").collect()}
+    return {
+        d
+        for d in catalogued
+        if _exists(spark, layout.flight_list(d)) and _exists(spark, layout.flight_events(d))
+    }
+
+
 def prune_internal(
     day: date,
     keep_days: int = DEFAULT_KEEP_DAYS,
     warehouse: Optional[str] = None,
     worldwide: bool = True,
     storage=None,
+    drop_published_working: bool = False,
+    working_keep_days: int = DEFAULT_WORKING_KEEP_DAYS,
 ) -> int:
     """Remove the day folders of the internal tables that are no longer needed.
 
-    Only the tables in :data:`INTERNAL_TABLES` are touched. The working flight
-    list, events and measurements tables and everything under ``published/``
-    are kept.
+    The tables in :data:`INTERNAL_TABLES` are pruned to a window around
+    ``day``. With ``drop_published_working``, the working events and
+    measurements (:data:`WORKING_TABLES`) of published days outside a wider
+    window are removed too (see :func:`working_prune_plan`). The working
+    flight list, the reference tables and everything under ``published/``
+    are always kept.
 
     Args:
         day: The day just published.
@@ -445,6 +542,10 @@ def prune_internal(
         worldwide: Coverage, used only to build the configuration.
         storage: A :class:`~opdi.utils.storage.StorageManager` to use instead
             of opening a session.
+        drop_published_working: Also remove the working events and
+            measurements of days that are already published.
+        working_keep_days: Days of working events and measurements kept on
+            each side of ``day`` when ``drop_published_working`` is set.
 
     Returns:
         The number of day folders removed.
@@ -461,7 +562,10 @@ def prune_internal(
         spark = _session(config, f"OPDI prune {day}", distributed=False)
         storage = StorageManager(spark, config)
     try:
-        for table in INTERNAL_TABLES:
+        tables = dict(INTERNAL_TABLES)
+        if drop_published_working:
+            tables.update(WORKING_TABLES)
+        for table in tables:
             path = f"{storage.base_path.rstrip('/')}/{table}"
             if "/published/" in path + "/":
                 raise RuntimeError(f"refusing to prune {path}: it is inside a published folder")
@@ -471,9 +575,20 @@ def prune_internal(
                 present[table] = storage.list_partitions(table, column)
             except Exception:  # noqa: BLE001 - a missing table has nothing to prune
                 present[table] = []
+        plan = prune_plan(day, keep_days, present)
+        if drop_published_working:
+            working = {}
+            for table, column in WORKING_TABLES.items():
+                try:
+                    working[table] = storage.list_partitions(table, column)
+                except Exception:  # noqa: BLE001 - a missing table has nothing to prune
+                    working[table] = []
+            plan.update(
+                working_prune_plan(day, working_keep_days, working, published_days(storage))
+            )
         removed = 0
-        for table, values in prune_plan(day, keep_days, present).items():
-            n = storage.drop_partitions(table, INTERNAL_TABLES[table], values)
+        for table, values in plan.items():
+            n = storage.drop_partitions(table, tables[table], values)
             print(f"  removed {n} day folder(s) of {table}: {', '.join(values)}")
             removed += n
         return removed
@@ -490,6 +605,23 @@ def _day(value: str) -> date:
         return date.fromisoformat(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"expected a date as YYYY-MM-DD, got {value!r}")
+
+
+def _working_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--drop-published-working",
+        action="store_true",
+        help="Also remove the working events and measurements of days that are "
+        "already published (both files and a catalogue row). The working flight "
+        "list is always kept.",
+    )
+    parser.add_argument(
+        "--working-keep-days",
+        type=int,
+        default=DEFAULT_WORKING_KEEP_DAYS,
+        help="Days of working events and measurements kept on each side of the day "
+        f"(default {DEFAULT_WORKING_KEEP_DAYS}).",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -538,6 +670,7 @@ def _parser() -> argparse.ArgumentParser:
         "0 skips the check.",
     )
     day.add_argument("--keep-days", type=int, default=DEFAULT_KEEP_DAYS)
+    _working_arguments(day)
 
     space = sub.add_parser("check-space", parents=[common], help="Fail when space is short.")
     space.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
@@ -551,6 +684,7 @@ def _parser() -> argparse.ArgumentParser:
     prune = sub.add_parser("prune", parents=[common], help="Remove old internal day folders.")
     prune.add_argument("--day", type=_day, required=True)
     prune.add_argument("--keep-days", type=int, default=DEFAULT_KEEP_DAYS)
+    _working_arguments(prune)
 
     plan = sub.add_parser("plan", help="Print the days of a range as a JSON list.")
     plan.add_argument("--start", type=_day, required=True)
@@ -579,12 +713,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 args.keep_internal,
                 args.min_free_gb,
                 args.keep_days,
+                args.drop_published_working,
+                args.working_keep_days,
             )
         if args.command == "check-space":
             check_space(args.min_free_gb, args.warehouse, args.quota_gb, args.worldwide)
             return 0
         if args.command == "prune":
-            prune_internal(args.day, args.keep_days, args.warehouse, args.worldwide)
+            prune_internal(
+                args.day,
+                args.keep_days,
+                args.warehouse,
+                args.worldwide,
+                drop_published_working=args.drop_published_working,
+                working_keep_days=args.working_keep_days,
+            )
             return 0
     except Exception as exc:  # noqa: BLE001 - every failure is an exit code
         print(f"Failed: {exc}", file=sys.stderr)

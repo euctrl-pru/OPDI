@@ -240,3 +240,83 @@ def test_the_module_imports_without_spark():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
+
+
+# --- removing the working events and measurements of published days -----------
+
+
+def test_working_prune_plan_removes_only_published_days_outside_the_window():
+    present = {
+        "opdi_flight_events": ["2026-06-01", "2026-06-02", "2026-06-10", "2026-06-14"],
+        "opdi_measurements": ["2026-06-01", "2026-06-03", "__HIVE_DEFAULT_PARTITION__"],
+        "opdi_flight_list": ["2026-06-01"],
+        "osn_tracks": ["2026-06-01"],
+    }
+    published = {date(2026, 6, 1), date(2026, 6, 10), date(2026, 6, 14)}
+    plan = o.working_prune_plan(D, 7, present, published)
+    # 2026-06-02 and 2026-06-03 are not published; 2026-06-10 and 2026-06-14
+    # are inside the window of 7 days. The flight list is never in the plan.
+    assert plan == {"opdi_flight_events": ["2026-06-01"], "opdi_measurements": ["2026-06-01"]}
+    with pytest.raises(ValueError):
+        o.working_prune_plan(D, -1, present, published)
+
+
+def test_the_working_flight_list_is_never_pruned():
+    assert "opdi_flight_list" not in o.WORKING_TABLES
+    assert "opdi_flight_list" not in o.INTERNAL_TABLES
+
+
+class _WorkingStorage(_Storage):
+    def list_partitions(self, table, column):
+        return ["2026-05-01", "2026-05-02", "2026-06-14"]
+
+
+def test_prune_keeps_the_working_tables_by_default(monkeypatch):
+    monkeypatch.setattr(o, "published_days", lambda storage: pytest.fail("not needed"))
+    storage = _WorkingStorage("s3a://eurocontrol/opdi/v2.0.0")
+    o.prune_internal(D, 2, storage=storage)
+    assert not [p for p, _, _ in storage.dropped if p.endswith(tuple(o.WORKING_TABLES))]
+
+
+def test_prune_drops_working_days_only_when_published(monkeypatch):
+    monkeypatch.setattr(o, "published_days", lambda storage: {date(2026, 5, 1)})
+    storage = _WorkingStorage("s3a://eurocontrol/opdi/v2.0.0")
+    o.prune_internal(D, 2, storage=storage, drop_published_working=True, working_keep_days=7)
+    working = {(p.rsplit("/", 1)[1], tuple(v)) for p, _, v in storage.dropped}
+    assert ("opdi_flight_events", ("2026-05-01",)) in working
+    assert ("opdi_measurements", ("2026-05-01",)) in working
+    assert not [v for p, _, v in storage.dropped if "2026-05-02" in v and "opdi_" in p]
+
+
+def test_published_days_needs_both_files_and_a_catalogue_row(spark, tmp_path):
+    from opdi.output.published import PublishedLayout
+
+    class S:
+        base_path = str(tmp_path)
+
+    S.spark = spark
+    layout = PublishedLayout.for_storage(S)
+    assert o.published_days(S) == set()
+    spark.createDataFrame([(date(2026, 6, 1),), (date(2026, 6, 2),)], "day date").coalesce(
+        1
+    ).write.parquet(layout.catalogue)
+    for d in (date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)):
+        spark.createDataFrame([(1,)], "x int").write.parquet(layout.flight_list(d))
+    spark.createDataFrame([(1,)], "x int").write.parquet(layout.flight_events(date(2026, 6, 1)))
+    # 06-02 has no flight events file; 06-03 has no catalogue row.
+    assert o.published_days(S) == {date(2026, 6, 1)}
+
+
+def test_the_prune_command_takes_the_opt_in(monkeypatch):
+    seen = {}
+
+    def fake(day, keep_days, warehouse, worldwide, **kw):
+        seen.update(kw)
+        return 0
+
+    monkeypatch.setattr(o, "prune_internal", fake)
+    assert o.main(["prune", "--day", "2026-06-14"]) == 0
+    assert seen.get("drop_published_working") is False
+    assert o.main(["prune", "--day", "2026-06-14", "--drop-published-working"]) == 0
+    assert seen["drop_published_working"] is True
+    assert seen["working_keep_days"] == o.DEFAULT_WORKING_KEEP_DAYS
