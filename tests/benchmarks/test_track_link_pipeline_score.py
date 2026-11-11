@@ -14,11 +14,12 @@ import pytest
 import track_link_pipeline_score as s
 from conftest import _EPOCH, make_track
 from pyspark.sql import functions as F
+from study_variants.segmentation import debounced
 
 from opdi.pipeline.flights import EARTH_R_NM
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.base import KT_PER_MPS
-from opdi.pipeline.segmentation.methods import cruise_linked, debounced
+from opdi.pipeline.segmentation.methods import cruise_linked
 
 #: These tests were written at the pre-study settings (the grid's base), so they pass
 #: them explicitly; the shipped defaults are pinned in test_segmentation_cruise_linked.

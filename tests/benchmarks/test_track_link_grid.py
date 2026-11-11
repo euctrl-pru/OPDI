@@ -26,6 +26,7 @@ from pyspark.sql.types import (
     StructField,
     StructType,
 )
+from study_variants.segmentation import debounced
 from track_fragmentation import measure
 from track_link_controls import (
     control_funnel,
@@ -73,7 +74,7 @@ from track_link_grid import (
 from opdi.pipeline.flights import EARTH_R_NM
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.base import FPM_PER_MPS, FT_PER_M, KT_PER_MPS
-from opdi.pipeline.segmentation.methods import cruise_linked, debounced
+from opdi.pipeline.segmentation.methods import cruise_linked
 
 #: These tests were written at the pre-study settings (the grid's base), so they pass
 #: them explicitly; the shipped defaults are pinned in test_segmentation_cruise_linked.
