@@ -317,10 +317,12 @@ free space is the quota minus the bytes stored in the whole bucket.
   again, but they take about three times the space of the published files.
   Set the Variable `opdi_keep_working` to `false` (or pass
   `--drop-published-working` to the `prune` and `day` commands) to remove
-  their day folders once a day is published. A day folder is removed only
-  when both published files of that day and its catalogue row exist, and
-  only when the day is more than 7 days (`--working-keep-days`) before or
-  after the day just run. A day that is not yet published is never touched.
+  their day folders once a day is published. Publishing a day reads the
+  working events of the day before and after it as well, so the folder of a
+  day is removed only when that day and both days beside it are published
+  (both files and a catalogue row exist), and only when the day is more than
+  7 days (`--working-keep-days`) before or after the day just run. A day that
+  is not yet published, and the days beside it, are never touched.
   The events of a day are only published again after the day is built again
   from step 01 (`day --day ... --force`): its tracks are removed as well.
 - **Never removed:** the published files, the reference tables, the

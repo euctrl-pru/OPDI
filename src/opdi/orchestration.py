@@ -690,9 +690,14 @@ def working_prune_plan(
 ) -> dict[str, list[str]]:
     """Which day folders of the working events and measurements may be removed.
 
-    A day folder is removed only when its day is published (both files and a
-    catalogue row exist, see :func:`published_days`) and lies more than
-    ``keep_days`` days before or after ``day``.
+    Publishing day E reads the working events and measurements of E-1, E and
+    E+1 (an event is stored under the day of its track, which can differ by
+    one day from the day of its flight). The folder of day E is therefore
+    removed only when E-1, E and E+1 are all published (both files and a
+    catalogue row exist, see :func:`published_days`), and when E lies more
+    than ``keep_days`` days before or after ``day``. The first and the last
+    day of a run of published days keep their folders until the day beyond
+    them is published too; that costs at most two days of working tables.
 
     Args:
         day: The day just published.
@@ -718,7 +723,9 @@ def working_prune_plan(
                 value_day = date.fromisoformat(str(value)[:10])
             except ValueError:
                 continue
-            if value_day in published and not oldest_kept <= value_day <= newest_kept:
+            one = timedelta(days=1)
+            neighbours = {value_day - one, value_day, value_day + one}
+            if neighbours <= published and not oldest_kept <= value_day <= newest_kept:
                 old.append(value)
         if old:
             plan[table] = sorted(old)

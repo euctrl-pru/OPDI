@@ -264,10 +264,17 @@ def test_working_prune_plan_removes_only_published_days_outside_the_window():
         "opdi_flight_list": ["2026-06-01"],
         "osn_tracks": ["2026-06-01"],
     }
-    published = {date(2026, 6, 1), date(2026, 6, 10), date(2026, 6, 14)}
+    published = {
+        date(2026, 5, 31),
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+        date(2026, 6, 10),
+        date(2026, 6, 14),
+    }
     plan = o.working_prune_plan(D, 7, present, published)
-    # 2026-06-02 and 2026-06-03 are not published; 2026-06-10 and 2026-06-14
-    # are inside the window of 7 days. The flight list is never in the plan.
+    # 2026-06-02 waits for 2026-06-03, which is not published; 2026-06-10
+    # and 2026-06-14 are inside the window of 7 days. The flight list is
+    # never in the plan.
     assert plan == {"opdi_flight_events": ["2026-06-01"], "opdi_measurements": ["2026-06-01"]}
     with pytest.raises(ValueError):
         o.working_prune_plan(D, -1, present, published)
@@ -291,7 +298,9 @@ def test_prune_keeps_the_working_tables_by_default(monkeypatch):
 
 
 def test_prune_drops_working_days_only_when_published(monkeypatch):
-    monkeypatch.setattr(o, "published_days", lambda storage: {date(2026, 5, 1)})
+    monkeypatch.setattr(
+        o, "published_days", lambda storage: {date(2026, 4, 30), date(2026, 5, 1), date(2026, 5, 2)}
+    )
     storage = _WorkingStorage("s3a://eurocontrol/opdi/v2.0.0")
     o.prune_internal(D, 2, storage=storage, drop_published_working=True, working_keep_days=7)
     working = {(p.rsplit("/", 1)[1], tuple(v)) for p, _, v in storage.dropped}
@@ -347,3 +356,20 @@ def test_allow_empty_reaches_the_publishing_step(monkeypatch):
 
 def test_the_free_space_floor_leaves_room_for_a_worldwide_day():
     assert o.DEFAULT_MIN_FREE_GB == 25.0
+
+
+def test_working_events_stay_while_a_neighbouring_day_is_not_published():
+    """Publishing day E reads the working events of E-1 to E+1."""
+    from datetime import timedelta
+
+    one = timedelta(days=1)
+    days = [date(2026, 5, 1) + k * one for k in range(10)]
+    present = {"opdi_flight_events": [d.isoformat() for d in days]}
+    # Published: May 1-4 and May 6-10; May 5 failed and waits.
+    published = set(days) - {date(2026, 5, 5)}
+    plan = o.working_prune_plan(date(2026, 6, 14), 7, present, published)
+    removed = plan["opdi_flight_events"]
+    # May 1 and May 10 are kept: May 1's neighbour April 30 and May 10's
+    # neighbour May 11 are not published (the edges of the published days).
+    # May 4 and May 6 are kept for May 5.
+    assert removed == ["2026-05-02", "2026-05-03", "2026-05-07", "2026-05-08", "2026-05-09"]
