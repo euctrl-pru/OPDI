@@ -24,6 +24,11 @@ def test_as_track_frame_converts_units_and_thins_to_five_seconds(spark):
     sdf = hs.as_track_frame(spark, _traj(10), elevation_ft=83.0, step_s=5.0)
     rows = sdf.orderBy("event_time").collect()
     assert [r.event_time.second for r in rows] == [0, 5]
+    # A 4 s cadence keeps one sample per 5 s bin, not one per 20 s.
+    four = _traj(10)
+    four["timestamp"] = [T0 + pd.Timedelta(seconds=4 * i) for i in range(10)]
+    kept = hs.as_track_frame(spark, four, elevation_ft=83.0, step_s=5.0).orderBy("event_time").collect()
+    assert [r.event_time.second for r in kept] == [0, 8, 12, 16, 20, 28, 32, 36]
     assert rows[0].track_id == "BAW123_7"
     assert rows[0].baro_altitude_c == pytest.approx(10000.0 / 3.28084)
     assert rows[0].velocity == pytest.approx(250.0 / 1.94384)

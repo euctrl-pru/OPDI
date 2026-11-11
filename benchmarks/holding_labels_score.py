@@ -73,7 +73,11 @@ def as_track_frame(spark, traj: pd.DataFrame, elevation_ft: float, step_s: float
     df = traj.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     secs = (df["timestamp"] - pd.Timestamp("1970-01-01", tz="UTC")).dt.total_seconds()
-    df = df[(secs % step_s) < 1.0]
+    # One sample per step_s bin, the first: the pipeline's thinning. The EGLL
+    # file is not sampled at 1 s, so keeping only timestamps on a multiple of
+    # step_s would leave a 20 s cadence there.
+    df = df.assign(_bin=(secs // step_s).astype("int64")).sort_values(["flight_id", "timestamp"])
+    df = df.drop_duplicates(["flight_id", "_bin"]).drop(columns="_bin")
     out = pd.DataFrame({
         "track_id": df["flight_id"].astype(str),
         "icao24": df["icao24"].astype(str),
