@@ -136,13 +136,23 @@ ignore = [
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-# Tests and study scripts are not documented as an API.
-# Tests and study scripts put their own folders on sys.path before importing.
-"tests/**" = ["D", "N802", "E402"]
-"benchmarks/**" = ["D", "E402"]
+# Tests and study scripts are checked for errors, warnings and import order
+# (E, F, W, I) only: they are not an API, so the naming, docstring, bug-risk
+# and modern-syntax rules (N, D, B, UP) do not apply. They put their own
+# folders on sys.path before importing (E402).
+"tests/**" = ["D", "N", "B", "UP", "E402"]
+"benchmarks/**" = ["D", "N", "B", "UP", "E402"]
 # The report's style sheet is one literal string with long CSS rules.
-"benchmarks/build_track_v4_paper.py" = ["D", "E402", "E501"]
+"benchmarks/build_track_v4_paper.py" = ["D", "N", "B", "UP", "E402", "E501"]
 "tools/**" = ["D"]
+# The Sphinx configuration is not part of the package.
+"docs/**" = ["D"]
+# The example builds each object to show how it is made; the calls that run
+# a step are commented out, so the objects are not used (F841).
+"examples/**" = ["D", "N", "B", "UP", "E402", "F841"]
+# Notebooks import in the cell where they first need a module (E402), and
+# their cells hold long lines of output-like code (E501).
+"notebooks/**" = ["D", "N", "B", "UP", "E402", "E501"]
 
 [tool.mypy]
 python_version = "3.10"
