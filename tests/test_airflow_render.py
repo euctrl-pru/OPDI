@@ -5,7 +5,6 @@ the DAG file builds, and renders each templated command with Jinja the way
 Airflow does. The tests check the commands a task would run.
 """
 
-import shlex
 import types
 from pathlib import Path
 

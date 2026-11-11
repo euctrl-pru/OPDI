@@ -517,7 +517,6 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
 
     if step == "01":
         from opdi.ingestion.osn_statevectors import StateVectorIngestion
-        from opdi.utils.storage import StorageManager
 
         # A sliding window of three days, not a new fetch. Day D is built from
         # the reports of D-1 to D+1, so consecutive days share two of their
@@ -528,6 +527,7 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         # waits to be run again) are kept as well: see
         # opdi.orchestration.days_in_progress.
         from opdi.orchestration import days_in_progress, needed_folders
+        from opdi.utils.storage import StorageManager
 
         needed = [day - timedelta(days=1), day, day + timedelta(days=1)]
         storage = StorageManager(spark, config)
