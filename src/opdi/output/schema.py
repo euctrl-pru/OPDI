@@ -785,9 +785,18 @@ MEASUREMENT_VERSION: Dict[str, str] = {
 }
 
 
-#: The classic events table of release v0.0.2, which kept events and
-#: measurements in separate files: published column -> classic column, in the
-#: classic order.
+#: How the three tables in the layout of release v0.0.2 are described, in
+#: the docstrings, the SQL comments and the documentation.
+LAYOUT_V0_NOTE = (
+    "The separate flight list, events and measurements tables in the layout of "
+    "release v0.0.2: the same table and column names, in the same order. The "
+    "identifiers are text and do not match the identifiers of release v0.0.2, which "
+    "were 64-bit integers. The version column holds the version of the method that "
+    "produced each row, not the release name."
+)
+
+#: The events table in the layout of release v0.0.2: published column ->
+#: column of release v0.0.2, in the order of release v0.0.2.
 CLASSIC_EVENT_COLUMNS: Dict[str, str] = {
     "event_id": "id",
     "flight_id": "flight_id",
@@ -801,13 +810,20 @@ CLASSIC_EVENT_COLUMNS: Dict[str, str] = {
     "info": "info",
 }
 
-#: The columns of the classic measurements table, one row per measured value.
+#: The columns of the measurements table in the layout of release v0.0.2,
+#: one row per measurement.
 CLASSIC_MEASUREMENT_COLUMNS: Tuple[str, ...] = ("id", "event_id", "type", "value", "version")
 
-#: The classic flight list of release v0.0.2: published column -> classic
-#: column name in upper case, in the classic order.
+#: The measurement types of release v0.0.2. Release v0.0.2 wrote one row of
+#: each per event, also when its value was empty (NULL), and the
+#: measurements table in its layout does the same. The other types get a row
+#: only when they have a value, as in the pipeline's own measurements table.
+CLASSIC_MEASUREMENTS_ALWAYS: Tuple[str, ...] = (_DISTANCE, _TIME)
+
+#: The flight list in the layout of release v0.0.2: published column ->
+#: column of release v0.0.2 (lower case), in the order of release v0.0.2.
 CLASSIC_FLIGHT_LIST: Dict[str, str] = {
-    name: name.upper().replace("FLIGHT_ID", "ID")
+    name: "id" if name == "flight_id" else name
     for name in (
         "flight_id",
         "icao24",

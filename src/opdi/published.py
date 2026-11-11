@@ -8,8 +8,12 @@ every column):
 * ``flight_events/flight_events_YYYYMMDD.parquet``: one row per event of those
   flights, with the event's measurements and its flight's columns.
 
-This module reads them into pandas tables and gives back the classic shapes
-of release v0.0.2, in which events and measurements were separate tables. It
+This module reads them into pandas tables and gives back the separate flight
+list, events and measurements tables in the layout of release v0.0.2
+(:func:`as_flight_list_v0`, :func:`as_events`, :func:`as_measurements`). In
+those tables the identifiers are text and do not match the identifiers of
+release v0.0.2, which were 64-bit integers, and the ``version`` column holds
+the version of the method that produced each row. It
 needs pyarrow and pandas, and DuckDB only for :func:`duckdb_views`. It does
 not need Spark. Install everything with ``pip install "opdi[reader]"``.
 
@@ -39,6 +43,7 @@ from opdi.output.schema import (
     CLASSIC_EVENT_COLUMNS,
     CLASSIC_FLIGHT_LIST,
     CLASSIC_MEASUREMENT_COLUMNS,
+    CLASSIC_MEASUREMENTS_ALWAYS,
     MEASUREMENT_COLUMNS,
     MEASUREMENT_SUFFIX,
     MEASUREMENT_VERSION,
@@ -194,7 +199,10 @@ def read_flight_events(
 
 
 def as_events(df):
-    """The events alone, in the shape of release v0.0.2.
+    """The events table in the layout of release v0.0.2.
+
+    The identifiers are text and do not match those of release v0.0.2, and
+    ``version`` holds the version of the method of each event type.
 
     Args:
         df: Rows read with :func:`read_flight_events`.
@@ -208,18 +216,23 @@ def as_events(df):
 
 
 def as_measurements(df):
-    """The measurements, one row per measured value, in the shape of release v0.0.2.
+    """The measurements table in the layout of release v0.0.2: one row per measurement.
 
-    An empty (NULL) measurement gives no row. The ``id`` of a row is the
-    event id followed by the suffix of its measurement type, as in release
-    v0.0.2.
+    As in release v0.0.2, every event has one row for the distance flown and
+    one for the time passed, also when the value is empty (NULL). The other
+    measurement types, which release v0.0.2 did not have, give a row only
+    when they have a value. The ``id`` of a row is the event id followed by
+    the suffix of its measurement type. The identifiers are text and do not
+    match those of release v0.0.2, and ``version`` holds the version of the
+    method of each measurement type.
 
     Args:
         df: Rows read with :func:`read_flight_events`.
 
     Returns:
         A pandas DataFrame with the columns ``id``, ``event_id``, ``type``,
-        ``value`` and ``version``.
+        ``value`` and ``version``, in the order of the measurement columns
+        and then of the rows of ``df``.
     """
     import pandas as pd
 
@@ -227,7 +240,10 @@ def as_measurements(df):
     for c in MEASUREMENT_COLUMNS:
         if c.name not in df.columns:
             continue
-        rows = df.loc[df[c.name].notna(), ["event_id", c.name]]
+        keep = df[c.name].notna()
+        if c.source in CLASSIC_MEASUREMENTS_ALWAYS:
+            keep = df["event_id"].notna()
+        rows = df.loc[keep, ["event_id", c.name]]
         parts.append(
             pd.DataFrame(
                 {
@@ -247,16 +263,18 @@ def as_measurements(df):
 
 
 def as_flight_list_v0(df):
-    """The flight list with the columns and upper-case names of release v0.0.2.
+    """The flight list in the layout of release v0.0.2.
+
+    The columns of release v0.0.2, lower case and in its order: ``id``,
+    ``icao24``, ``flt_id``, ``dof``, ``adep``, ``ades``, ``adep_p``,
+    ``ades_p``, ``registration``, ``model``, ``typecode``,
+    ``icao_aircraft_class``, ``icao_operator``, ``first_seen``,
+    ``last_seen`` and ``version``. The ``id`` is text and does not match the
+    identifiers of release v0.0.2, and ``version`` holds the version of the
+    flight list method.
 
     Args:
         df: Rows read with :func:`read_flight_list`.
-
-    Returns:
-        A pandas DataFrame with the columns ``ID``, ``ICAO24``, ``FLT_ID``,
-        ``DOF``, ``ADEP``, ``ADES``, ``ADEP_P``, ``ADES_P``, ``REGISTRATION``,
-        ``MODEL``, ``TYPECODE``, ``ICAO_AIRCRAFT_CLASS``, ``ICAO_OPERATOR``,
-        ``FIRST_SEEN``, ``LAST_SEEN`` and ``VERSION``.
     """
     return df[list(CLASSIC_FLIGHT_LIST)].rename(columns=CLASSIC_FLIGHT_LIST)
 
@@ -314,8 +332,10 @@ def duckdb_views(
     * ``flight_list`` and ``flight_events``: the files as published.
     * ``flight_index``: the monthly flight index, which tells which daily
       file holds a flight. Left out when a local folder has no index.
-    * ``events``, ``measurements`` and ``flight_list_v0``: the classic
-      shapes of release v0.0.2.
+    * ``flight_list_v0``, ``events`` and ``measurements``: the separate
+      flight list, events and measurements tables in the layout of release
+      v0.0.2 (see :func:`as_flight_list_v0`, :func:`as_events` and
+      :func:`as_measurements`, which give the same rows).
 
     Run the text in a DuckDB connection::
 

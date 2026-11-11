@@ -74,10 +74,21 @@ from opdi import published
 flights = published.read_flight_list(date(2026, 6, 14))
 events = published.read_flight_events(date(2026, 6, 14), types=["ATOT", "ALDT"])
 
-# The shapes of release v0.0.2, where events and measurements were separate tables
+# The separate flight list, events and measurements tables in the layout of
+# release v0.0.2
+flights_v0 = published.as_flight_list_v0(flights)
 events_v0 = published.as_events(events)
 measurements_v0 = published.as_measurements(events)
 ```
+
+These three tables have the table and column names of release v0.0.2, in
+the same order. The identifiers are text and do not match the identifiers of
+release v0.0.2, which were 64-bit integers. The `version` column holds the
+version of the method that produced each row (for example `events_v0.3.0`),
+not the release name. As in release v0.0.2, the measurements table has a
+distance flown row and a time passed row for every event, also when the
+value is empty; the newer measurement types have a row only when they have a
+value.
 
 The files are read from `published.PUBLISHED_BASE_URL` by default; set the
 environment variable `OPDI_PUBLISHED_URL`, or pass `base=`, to read from a
@@ -85,7 +96,9 @@ local folder (`/data/opdi/v2.0.0/`) or an S3 address (`s3://bucket/folder/`).
 
 For SQL, `published.duckdb_views()` defines DuckDB views with the same names as
 the Trino tables: `flight_list`, `flight_events`, `flight_index`, and the
-release v0.0.2 shapes `events`, `measurements` and `flight_list_v0`:
+separate flight list, events and measurements tables in the layout of release
+v0.0.2, `flight_list_v0`, `events` and `measurements` (the same rows as the
+pandas functions above):
 
 ```python
 import duckdb

@@ -1,13 +1,14 @@
-"""SQL definitions of the published tables and of their classic views.
+"""SQL definitions of the published tables and of views in the layout of release v0.0.2.
 
 The published OPDI files can be queried with SQL without downloading them:
 
 * **Trino** (a distributed SQL engine) reads them where they are stored.
   :func:`trino_tables` defines one external table per published folder (a
   table whose rows are the Parquet files of that folder) and
-  :func:`trino_views` defines views that give back the classic shapes of
-  release v0.0.2: separate events and measurements tables and the old flight
-  list columns.
+  :func:`trino_views` defines views that give the separate flight list,
+  events and measurements tables in the layout of release v0.0.2. In them
+  the identifiers are text and do not match the identifiers of release
+  v0.0.2, and ``version`` holds the version of the method of each row.
 * **DuckDB** (an SQL engine that runs inside a Python or R session) reads
   the files directly from a folder or over the web.
   :func:`duckdb_views_template` gives the views; :func:`opdi.published.duckdb_views`
@@ -28,6 +29,7 @@ from typing import Iterable, List
 from opdi.output.schema import (
     CLASSIC_EVENT_COLUMNS,
     CLASSIC_FLIGHT_LIST,
+    CLASSIC_MEASUREMENTS_ALWAYS,
     FLIGHT_EVENTS,
     FLIGHT_INDEX,
     FLIGHT_LIST,
@@ -146,26 +148,54 @@ def trino_tables(
     return "\n".join(parts)
 
 
-def _measurement_arrays(columns: Iterable[Column]) -> List[str]:
-    columns = list(columns)
-    return [
-        "ARRAY[" + ", ".join(_quote(c.source) for c in columns) + "]",
-        "ARRAY[" + ", ".join(_quote(MEASUREMENT_SUFFIX[c.source]) for c in columns) + "]",
-        "ARRAY[" + ", ".join(f"e.{c.name}" for c in columns) + "]",
-        "ARRAY[" + ", ".join(_quote(MEASUREMENT_VERSION[c.source]) for c in columns) + "]",
-    ]
+def _measurements_query(source: str, columns: Iterable[Column]) -> str:
+    """The rows of the measurements view, one SELECT per measurement type.
+
+    Plain SQL that Trino and DuckDB run the same way. The types of release
+    v0.0.2 give a row for every event; the others only where they have a
+    value.
+    """
+    parts = []
+    for c in columns:
+        where = "" if c.source in CLASSIC_MEASUREMENTS_ALWAYS else f"\nWHERE {c.name} IS NOT NULL"
+        parts.append(
+            "SELECT\n"
+            f"    event_id || {_quote(MEASUREMENT_SUFFIX[c.source])} AS id,\n"
+            "    event_id,\n"
+            f"    {_quote(c.source)} AS type,\n"
+            f"    CAST({c.name} AS DOUBLE) AS value,\n"
+            f"    {_quote(MEASUREMENT_VERSION[c.source])} AS version\n"
+            f"FROM {source}{where}"
+        )
+    return "\nUNION ALL\n".join(parts)
+
+
+#: The SQL comment above the three views in the layout of release v0.0.2.
+_V0_COMMENT = (
+    "-- The separate flight list, events and measurements tables in the layout of\n"
+    "-- release v0.0.2. The identifiers are text and do not match the identifiers of\n"
+    "-- release v0.0.2, which were 64-bit integers. The version column holds the\n"
+    "-- version of the method that produced each row.\n"
+)
 
 
 def trino_views(catalog: str = DEFAULT_CATALOG, schema: str = DEFAULT_SCHEMA) -> str:
-    """Trino statements that define the classic views over the published tables.
+    """Trino statements that define three views in the layout of release v0.0.2.
 
+    The separate flight list, events and measurements tables of release
+    v0.0.2, over the published tables. The identifiers are text and do not
+    match the identifiers of release v0.0.2, and ``version`` holds the
+    version of the method that produced each row.
+
+    * ``flight_list_v0``: the columns of the v0.0.2 flight list, with their
+      v0.0.2 names (lower case) in their v0.0.2 order.
     * ``events``: the events alone, with the ten columns of release v0.0.2.
-    * ``measurements``: one row per measured value, with the columns ``id``,
-      ``event_id``, ``type``, ``value`` and ``version`` of release v0.0.2. An
-      empty measurement is left out. The ``id`` is the event id followed by
+    * ``measurements``: one row per measurement, with the columns ``id``,
+      ``event_id``, ``type``, ``value`` and ``version`` of release v0.0.2.
+      As in release v0.0.2, every event has a distance flown row and a time
+      passed row, also when the value is empty; the other types give a row
+      only when they have a value. The ``id`` is the event id followed by
       the suffix of the measurement type.
-    * ``flight_list_v0``: the columns of the v0.0.2 flight list under their
-      old names. Trino shows every column name in lower case.
 
     Args:
         catalog: Trino catalog of the tables.
@@ -180,28 +210,20 @@ def trino_views(catalog: str = DEFAULT_CATALOG, schema: str = DEFAULT_SCHEMA) ->
         for name, classic in CLASSIC_EVENT_COLUMNS.items()
     )
     flights = ",\n".join(
-        f"    {name} AS {classic}" for name, classic in CLASSIC_FLIGHT_LIST.items()
+        f"    {name} AS {classic}" if name != classic else f"    {name}"
+        for name, classic in CLASSIC_FLIGHT_LIST.items()
     )
-    arrays = ",\n".join(f"    {a}" for a in _measurement_arrays(MEASUREMENT_COLUMNS))
     return "\n".join(
         [
-            _trino_header(catalog, schema),
-            f"-- Events in the shape of release v0.0.2.\n"
+            _trino_header(catalog, schema) + _V0_COMMENT,
+            f"-- Events in the layout of release v0.0.2.\n"
             f"CREATE OR REPLACE VIEW {prefix}.events AS\nSELECT\n{events}\n"
             f"FROM {prefix}.flight_events;\n",
-            "-- Measurements in the shape of release v0.0.2: one row per measured value.\n"
+            "-- Measurements in the layout of release v0.0.2: one row per measurement.\n"
+            "-- Every event has a distance and a time row, also when empty, as in v0.0.2.\n"
             f"CREATE OR REPLACE VIEW {prefix}.measurements AS\n"
-            "SELECT\n"
-            "    e.event_id || m.suffix AS id,\n"
-            "    e.event_id AS event_id,\n"
-            "    m.type AS type,\n"
-            "    m.value AS value,\n"
-            "    m.version AS version\n"
-            f"FROM {prefix}.flight_events AS e\n"
-            f"CROSS JOIN UNNEST(\n{arrays}\n) AS m (type, suffix, value, version)\n"
-            "WHERE m.value IS NOT NULL;\n",
-            "-- The flight list with the columns and names of release v0.0.2. Trino shows\n"
-            "-- every column name in lower case.\n"
+            f"{_measurements_query(f'{prefix}.flight_events', MEASUREMENT_COLUMNS)};\n",
+            "-- The flight list in the layout of release v0.0.2: its column names and order.\n"
             f"CREATE OR REPLACE VIEW {prefix}.flight_list_v0 AS\nSELECT\n{flights}\n"
             f"FROM {prefix}.flight_list;\n",
         ]
@@ -215,11 +237,10 @@ def duckdb_views_template() -> str:
 
     * ``flight_list``: the flight list files.
     * ``flight_events``: the flight events files as published.
-    * ``events``: the events alone, in the shape of release v0.0.2.
-    * ``measurements``: one row per measured value, in the shape of
-      release v0.0.2.
-    * ``flight_list_v0``: the flight list with the columns and upper-case
-      names of release v0.0.2.
+    * ``flight_list_v0``, ``events`` and ``measurements``: the separate
+      flight list, events and measurements tables in the layout of release
+      v0.0.2, with the same rows as the Trino views (see
+      :func:`trino_views`).
     * ``flight_index``: the monthly flight index files. This is the last
       statement and starts at the line :data:`FLIGHT_INDEX_VIEW_START`.
 
@@ -233,16 +254,8 @@ def duckdb_views_template() -> str:
         for name, classic in CLASSIC_EVENT_COLUMNS.items()
     )
     flights = ",\n".join(
-        f"    {name} AS {classic}" for name, classic in CLASSIC_FLIGHT_LIST.items()
-    )
-    structs = ",\n".join(
-        "        {"
-        f"'type': {_quote(c.source)}, "
-        f"'suffix': {_quote(MEASUREMENT_SUFFIX[c.source])}, "
-        f"'value': {c.name}, "
-        f"'version': {_quote(MEASUREMENT_VERSION[c.source])}"
-        "}"
-        for c in MEASUREMENT_COLUMNS
+        f"    {name} AS {classic}" if name != classic else f"    {name}"
+        for name, classic in CLASSIC_FLIGHT_LIST.items()
     )
     return "\n".join(
         [
@@ -256,25 +269,14 @@ def duckdb_views_template() -> str:
             "-- The flight events files, as published.\n"
             "CREATE OR REPLACE VIEW flight_events AS\n"
             f"SELECT * FROM read_parquet({FLIGHT_EVENTS_FILES}, union_by_name = true);\n",
-            "-- Events in the shape of release v0.0.2.\n"
+            _V0_COMMENT + "-- Events in the layout of release v0.0.2.\n"
             f"CREATE OR REPLACE VIEW events AS\nSELECT\n{events}\n"
             "FROM flight_events;\n",
-            "-- Measurements in the shape of release v0.0.2: one row per measured value.\n"
+            "-- Measurements in the layout of release v0.0.2: one row per measurement.\n"
+            "-- Every event has a distance and a time row, also when empty, as in v0.0.2.\n"
             "CREATE OR REPLACE VIEW measurements AS\n"
-            "SELECT\n"
-            "    event_id || m.suffix AS id,\n"
-            "    event_id,\n"
-            "    m.type AS type,\n"
-            "    m.value AS value,\n"
-            "    m.version AS version\n"
-            "FROM (\n"
-            "    SELECT event_id, UNNEST([\n"
-            f"{structs}\n"
-            "    ]) AS m\n"
-            "    FROM flight_events\n"
-            ")\n"
-            "WHERE m.value IS NOT NULL;\n",
-            "-- The flight list with the columns and names of release v0.0.2.\n"
+            f"{_measurements_query('flight_events', MEASUREMENT_COLUMNS)};\n",
+            "-- The flight list in the layout of release v0.0.2: its column names and order.\n"
             f"CREATE OR REPLACE VIEW flight_list_v0 AS\nSELECT\n{flights}\n"
             "FROM flight_list;\n",
             f"{FLIGHT_INDEX_VIEW_START} Left out when the folder has no index.\n"

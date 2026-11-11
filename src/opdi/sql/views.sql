@@ -10,7 +10,11 @@ SELECT * FROM read_parquet(__FLIGHT_LIST_FILES__, union_by_name = true);
 CREATE OR REPLACE VIEW flight_events AS
 SELECT * FROM read_parquet(__FLIGHT_EVENTS_FILES__, union_by_name = true);
 
--- Events in the shape of release v0.0.2.
+-- The separate flight list, events and measurements tables in the layout of
+-- release v0.0.2. The identifiers are text and do not match the identifiers of
+-- release v0.0.2, which were 64-bit integers. The version column holds the
+-- version of the method that produced each row.
+-- Events in the layout of release v0.0.2.
 CREATE OR REPLACE VIEW events AS
 SELECT
     event_id AS id,
@@ -25,48 +29,98 @@ SELECT
     info
 FROM flight_events;
 
--- Measurements in the shape of release v0.0.2: one row per measured value.
+-- Measurements in the layout of release v0.0.2: one row per measurement.
+-- Every event has a distance and a time row, also when empty, as in v0.0.2.
 CREATE OR REPLACE VIEW measurements AS
 SELECT
-    event_id || m.suffix AS id,
+    event_id || '_d' AS id,
     event_id,
-    m.type AS type,
-    m.value AS value,
-    m.version AS version
-FROM (
-    SELECT event_id, UNNEST([
-        {'type': 'Distance flown (NM)', 'suffix': '_d', 'value': distance_flown_nm, 'version': 'distance_v0.0.3'},
-        {'type': 'Time Passed (s)', 'suffix': '_t', 'value': time_passed_s, 'version': 'time_v0.0.1'},
-        {'type': 'Holding duration (s)', 'suffix': '_ma46319', 'value': holding_duration_s, 'version': 'holding_v0.1.0'},
-        {'type': 'Holding distance (NM)', 'suffix': '_m9a9c44', 'value': holding_distance_nm, 'version': 'holding_v0.1.0'},
-        {'type': 'Holding circuits', 'suffix': '_m345087', 'value': holding_circuits, 'version': 'holding_v0.1.0'},
-        {'type': 'Point merge leg time (s)', 'suffix': '_m8dc3fb', 'value': pms_leg_time_s, 'version': 'pms_v0.1.0'},
-        {'type': 'Point merge leg distance (NM)', 'suffix': '_m602fff', 'value': pms_leg_distance_nm, 'version': 'pms_v0.1.0'},
-        {'type': 'Point merge direct-to distance (NM)', 'suffix': '_mead295', 'value': pms_direct_to_distance_nm, 'version': 'pms_v0.1.0'}
-    ]) AS m
-    FROM flight_events
-)
-WHERE m.value IS NOT NULL;
+    'Distance flown (NM)' AS type,
+    CAST(distance_flown_nm AS DOUBLE) AS value,
+    'distance_v0.0.3' AS version
+FROM flight_events
+UNION ALL
+SELECT
+    event_id || '_t' AS id,
+    event_id,
+    'Time Passed (s)' AS type,
+    CAST(time_passed_s AS DOUBLE) AS value,
+    'time_v0.0.1' AS version
+FROM flight_events
+UNION ALL
+SELECT
+    event_id || '_ma46319' AS id,
+    event_id,
+    'Holding duration (s)' AS type,
+    CAST(holding_duration_s AS DOUBLE) AS value,
+    'holding_v0.1.0' AS version
+FROM flight_events
+WHERE holding_duration_s IS NOT NULL
+UNION ALL
+SELECT
+    event_id || '_m9a9c44' AS id,
+    event_id,
+    'Holding distance (NM)' AS type,
+    CAST(holding_distance_nm AS DOUBLE) AS value,
+    'holding_v0.1.0' AS version
+FROM flight_events
+WHERE holding_distance_nm IS NOT NULL
+UNION ALL
+SELECT
+    event_id || '_m345087' AS id,
+    event_id,
+    'Holding circuits' AS type,
+    CAST(holding_circuits AS DOUBLE) AS value,
+    'holding_v0.1.0' AS version
+FROM flight_events
+WHERE holding_circuits IS NOT NULL
+UNION ALL
+SELECT
+    event_id || '_m8dc3fb' AS id,
+    event_id,
+    'Point merge leg time (s)' AS type,
+    CAST(pms_leg_time_s AS DOUBLE) AS value,
+    'pms_v0.1.0' AS version
+FROM flight_events
+WHERE pms_leg_time_s IS NOT NULL
+UNION ALL
+SELECT
+    event_id || '_m602fff' AS id,
+    event_id,
+    'Point merge leg distance (NM)' AS type,
+    CAST(pms_leg_distance_nm AS DOUBLE) AS value,
+    'pms_v0.1.0' AS version
+FROM flight_events
+WHERE pms_leg_distance_nm IS NOT NULL
+UNION ALL
+SELECT
+    event_id || '_mead295' AS id,
+    event_id,
+    'Point merge direct-to distance (NM)' AS type,
+    CAST(pms_direct_to_distance_nm AS DOUBLE) AS value,
+    'pms_v0.1.0' AS version
+FROM flight_events
+WHERE pms_direct_to_distance_nm IS NOT NULL;
 
--- The flight list with the columns and names of release v0.0.2.
+-- The flight list in the layout of release v0.0.2: its column names and order.
 CREATE OR REPLACE VIEW flight_list_v0 AS
 SELECT
-    flight_id AS ID,
-    icao24 AS ICAO24,
-    flt_id AS FLT_ID,
-    dof AS DOF,
-    adep AS ADEP,
-    ades AS ADES,
-    adep_p AS ADEP_P,
-    ades_p AS ADES_P,
-    registration AS REGISTRATION,
-    model AS MODEL,
-    typecode AS TYPECODE,
-    icao_aircraft_class AS ICAO_AIRCRAFT_CLASS,
-    icao_operator AS ICAO_OPERATOR,
-    first_seen AS FIRST_SEEN,
-    last_seen AS LAST_SEEN,
-    version AS VERSION
+    flight_id AS id,
+    icao24,
+    flt_id,
+    dof,
+    adep,
+    ades,
+    adep_p,
+    ades_p,
+    registration,
+    model,
+    typecode,
+    icao_aircraft_class,
+    icao_operator,
+    first_seen,
+    last_seen,
+    version
 FROM flight_list;
 
 -- The monthly flight index. Left out when the folder has no index.
