@@ -31,14 +31,18 @@ How the files are written, so that readers can find rows quickly:
   stored with a dictionary (a list of the distinct values, which each row then
   refers to), and the dictionary already tells a reader which values a block
   holds.
-* A file is first written under a temporary name and then renamed, so a reader
-  never sees a half-written file. Publishing a day again replaces its files,
-  its catalogue row and its index rows.
+* A file is first written completely under ``<release root>/_state/tmp/`` and
+  then moved into place, so a reader never sees a partly written file. While
+  a file is replaced it is missing for a moment, and between the two moves of
+  a day a reader can see the new flight list beside the old events file.
+  Publishing a day again replaces its files, its catalogue row and its index
+  rows, and after a stop part way it ends in the correct state.
 """
 
 import datetime as dt
 import os
 import subprocess
+import uuid
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Sequence
 
@@ -112,6 +116,21 @@ class PublishedLayout:
     def catalogue(self) -> str:
         """Path of the catalogue."""
         return f"{self.root}/catalogue.parquet"
+
+    @property
+    def state(self) -> str:
+        """The progress folder beside the published folder, ``<release root>/_state``."""
+        return f"{self.root.rstrip('/').rsplit('/', 1)[0]}/_state"
+
+    @property
+    def tmp(self) -> str:
+        """Folder of the temporary files of publishing, ``<release root>/_state/tmp``.
+
+        Outside the published folder, so a reader of the published folders
+        never sees a temporary file, and in the same bucket, so moving a file
+        from there into place stays a copy inside the storage.
+        """
+        return f"{self.state}/tmp"
 
 
 # --- building the tables ----------------------------------------------------
@@ -223,9 +242,42 @@ def _fs(spark: SparkSession, path: str):
     return p.getFileSystem(spark._jsc.hadoopConfiguration()), p
 
 
+class _Files:
+    """The file operations of publishing, on any Hadoop file system.
+
+    Every change to a published folder goes through :meth:`rename` and
+    :meth:`delete`, so a test can make one of them fail and check that
+    publishing again repairs the result.
+    """
+
+    def __init__(self, spark: SparkSession):
+        self.spark = spark
+
+    def exists(self, path: str) -> bool:
+        fs, p = _fs(self.spark, path)
+        return bool(fs.exists(p))
+
+    def rename(self, source: str, target: str) -> None:
+        fs, src = _fs(self.spark, source)
+        _, dst = _fs(self.spark, target)
+        fs.mkdirs(dst.getParent())
+        if not fs.rename(src, dst):
+            raise RuntimeError(f"could not move {source} to {target}")
+
+    def delete(self, path: str, recursive: bool = False) -> None:
+        fs, p = _fs(self.spark, path)
+        if fs.exists(p):
+            fs.delete(p, recursive)
+
+    def list_names(self, folder: str) -> list:
+        fs, p = _fs(self.spark, folder)
+        if not fs.exists(p):
+            return []
+        return sorted(s.getPath().getName() for s in fs.listStatus(p))
+
+
 def _exists(spark: SparkSession, path: str) -> bool:
-    fs, p = _fs(spark, path)
-    return fs.exists(p)
+    return _Files(spark).exists(path)
 
 
 def _size(spark: SparkSession, path: str) -> int:
@@ -233,38 +285,35 @@ def _size(spark: SparkSession, path: str) -> int:
     return int(fs.getFileStatus(p).getLen())
 
 
-def write_single_file(
+def _rows(spark: SparkSession, path: str) -> int:
+    """The number of rows of a Parquet file, read from its footer."""
+    return spark.read.parquet(path).count()
+
+
+def write_temporary_file(
     df: DataFrame,
-    path: str,
+    folder: str,
     sort_by: Sequence[str] = (),
     bloom_filters: Sequence[str] = (),
     row_group_rows: int = ROW_GROUP_ROWS,
-) -> None:
-    """Write ``df`` as exactly one Parquet file at ``path``.
-
-    The rows are written into ``<path>.tmp/`` first. The single file found
-    there is then moved to ``path``, replacing any file already there, and the
-    temporary folder is removed. An empty frame gives an empty file that still
-    has all the columns.
+) -> str:
+    """Write ``df`` as exactly one Parquet file into the new folder ``folder``.
 
     Args:
         df: The rows to write.
-        path: The final file path.
+        folder: A folder that does not exist yet; it is created.
         sort_by: Columns to sort the rows by.
         bloom_filters: Columns to store a Bloom filter for. These columns are
             stored without a dictionary; every other column keeps one.
         row_group_rows: Number of rows per row group.
 
+    Returns:
+        The path of the file written.
+
     Raises:
-        RuntimeError: If the temporary folder does not hold exactly one file.
+        RuntimeError: If the folder does not end up holding exactly one file.
     """
     spark = df.sparkSession
-    tmp = f"{path}.tmp"
-    fs, final = _fs(spark, path)
-    tmp_path = spark._jvm.org.apache.hadoop.fs.Path(tmp)
-    if fs.exists(tmp_path):
-        fs.delete(tmp_path, True)
-
     out = df.coalesce(1)
     if sort_by:
         out = out.sortWithinPartitions(*sort_by)
@@ -283,21 +332,226 @@ def write_single_file(
         writer = writer.option(f"parquet.bloom.filter.enabled#{c}", "true")
         writer = writer.option(f"parquet.bloom.filter.expected.ndv#{c}", str(int(row_group_rows)))
         writer = writer.option(f"parquet.enable.dictionary#{c}", "false")
-    writer.parquet(tmp)
+    writer.parquet(folder)
 
     parts = [
-        s.getPath()
-        for s in fs.listStatus(tmp_path)
-        if s.getPath().getName().startswith("part-") and s.getPath().getName().endswith(".parquet")
+        name
+        for name in _Files(spark).list_names(folder)
+        if name.startswith("part-") and name.endswith(".parquet")
     ]
     if len(parts) != 1:
-        raise RuntimeError(f"expected one data file in {tmp}, found {len(parts)}")
-    if fs.exists(final):
-        fs.delete(final, False)
-    fs.mkdirs(final.getParent())
-    if not fs.rename(parts[0], final):
-        raise RuntimeError(f"could not move {parts[0]} to {path}")
-    fs.delete(tmp_path, True)
+        raise RuntimeError(f"expected one data file in {folder}, found {len(parts)}")
+    return f"{folder}/{parts[0]}"
+
+
+def _aside(path: str, tmp_root: str) -> str:
+    """Where the old file at ``path`` is kept while the new one replaces it."""
+    return f"{tmp_root}/aside/{path.rsplit('/', 1)[1]}"
+
+
+def recover(files: _Files, path: str, tmp_root: str) -> None:
+    """Finish a replacement of ``path`` that stopped part way.
+
+    When an old file was moved aside and the new one never arrived, the old
+    file is put back. When both are there, the old one is removed.
+    """
+    aside = _aside(path, tmp_root)
+    if not files.exists(aside):
+        return
+    if files.exists(path):
+        files.delete(aside)
+    else:
+        files.rename(aside, path)
+
+
+def replace_file(files: _Files, new: str, path: str, tmp_root: str) -> None:
+    """Move the file ``new`` to ``path``, replacing the file already there.
+
+    The old file is first moved aside (under ``tmp_root``), then the new one
+    is moved in, and only then is the old one removed. When moving the new
+    file in fails, the old one is moved back. ``path`` is therefore missing
+    only for the short time between the two moves.
+    """
+    recover(files, path, tmp_root)
+    aside = _aside(path, tmp_root)
+    had_old = files.exists(path)
+    if had_old:
+        files.rename(path, aside)
+    try:
+        files.rename(new, path)
+    except Exception:
+        if had_old and not files.exists(path):
+            files.rename(aside, path)
+        raise
+    if had_old:
+        files.delete(aside)
+
+
+def _tmp_folder(tmp_root: str, label: str) -> str:
+    return f"{tmp_root}/{label}-{uuid.uuid4().hex}"
+
+
+def write_single_file(
+    df: DataFrame,
+    path: str,
+    sort_by: Sequence[str] = (),
+    bloom_filters: Sequence[str] = (),
+    row_group_rows: int = ROW_GROUP_ROWS,
+    tmp_root: Optional[str] = None,
+) -> None:
+    """Write ``df`` as exactly one Parquet file at ``path``.
+
+    The rows are written into a new temporary folder first, under
+    ``tmp_root`` (by default beside ``path``), with a name of its own so that
+    two writers never share it. The single file found there then replaces
+    any file at ``path`` (see :func:`replace_file`), and the temporary
+    folder is removed. An empty frame gives an empty file that still has all
+    the columns.
+
+    Args:
+        df: The rows to write.
+        path: The final file path.
+        sort_by: Columns to sort the rows by.
+        bloom_filters: Columns to store a Bloom filter for.
+        row_group_rows: Number of rows per row group.
+        tmp_root: Folder for the temporary files.
+
+    Raises:
+        RuntimeError: If the temporary folder does not hold exactly one file.
+    """
+    files = _Files(df.sparkSession)
+    if tmp_root is None:
+        tmp_root = path.rsplit("/", 1)[0] + "/_tmp"
+    folder = _tmp_folder(tmp_root, path.rsplit("/", 1)[1])
+    try:
+        part = write_temporary_file(df, folder, sort_by, bloom_filters, row_group_rows)
+        replace_file(files, part, path, tmp_root)
+    finally:
+        files.delete(folder, True)
+
+
+# --- one publisher at a time ------------------------------------------------------
+
+#: Name of the lock file, in ``<release root>/_state/``.
+LOCK_NAME = "publish.lock"
+
+#: Age in hours after which a lock is reported as left behind by a stopped
+#: run. Publishing one day takes minutes; the Airflow tasks stop after six
+#: hours at most.
+STALE_LOCK_HOURS = 6.0
+
+#: The command that removes a lock left behind.
+CLEAR_LOCK_COMMAND = "python -m opdi.orchestration clear-lock"
+
+
+class PublishLockedError(RuntimeError):
+    """Another publish holds the lock of the release, or a stopped one left it."""
+
+
+def _lock_path(layout: PublishedLayout) -> str:
+    return f"{layout.state}/{LOCK_NAME}"
+
+
+def _read_lock(spark: SparkSession, path: str) -> dict:
+    import json
+
+    fs, p = _fs(spark, path)
+    stream = fs.open(p)
+    try:
+        scanner = spark._jvm.java.util.Scanner(stream, "UTF-8").useDelimiter("\\A")
+        text = scanner.next() if scanner.hasNext() else ""
+    finally:
+        stream.close()
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {}
+
+
+class PublishLock:
+    """Hold the lock of a release while publishing.
+
+    The lock is a file, ``<release root>/_state/publish.lock``, created only
+    when no such file exists. A second publish into the same release fails
+    while it is there. A lock older than :data:`STALE_LOCK_HOURS` is reported
+    with the command that removes it (:data:`CLEAR_LOCK_COMMAND`); it is
+    never removed without that command, because the run that holds it may
+    still be writing.
+
+    Used as ``with PublishLock(spark, layout): ...``.
+    """
+
+    def __init__(self, spark: SparkSession, layout: PublishedLayout):
+        self.spark = spark
+        self.layout = layout
+        self.path = _lock_path(layout)
+
+    def __enter__(self):
+        """Take the lock, or raise :class:`PublishLockedError`."""
+        import json
+        import socket
+
+        now = dt.datetime.now(dt.timezone.utc)
+        fs, p = _fs(self.spark, self.path)
+        fs.mkdirs(p.getParent())
+        body = json.dumps(
+            {"host": socket.gethostname(), "pid": os.getpid(), "since": now.isoformat()}
+        )
+        try:
+            out = fs.create(p, False)
+        except Exception as exc:  # noqa: BLE001 - the file exists: someone holds it
+            holder = _read_lock(self.spark, self.path) if fs.exists(p) else {}
+            raise PublishLockedError(self._message(holder, now)) from exc
+        try:
+            out.write(bytearray(body.encode("utf-8")))
+        finally:
+            out.close()
+        # The lock is held: temporary folders left by a publish that stopped
+        # are removed. The old files kept aside are not: they are put back by
+        # the next replacement of their file (see recover).
+        files = _Files(self.spark)
+        for name in files.list_names(self.layout.tmp):
+            if name != "aside":
+                files.delete(f"{self.layout.tmp}/{name}", True)
+        return self
+
+    def _message(self, holder: dict, now: dt.datetime) -> str:
+        since = holder.get("since")
+        age = None
+        if since:
+            try:
+                age = (now - dt.datetime.fromisoformat(since)).total_seconds() / 3600
+            except ValueError:
+                age = None
+        who = f"host {holder.get('host', '?')}, process {holder.get('pid', '?')}"
+        if age is None or age >= STALE_LOCK_HOURS:
+            return (
+                f"the lock {self.path} ({who}, since {since or 'an unknown time'}) is older "
+                f"than {STALE_LOCK_HOURS:g} hours: a publish probably stopped without "
+                "removing it. Check that no OPDI command is still running, then remove it "
+                f"with: {CLEAR_LOCK_COMMAND} (with the same --warehouse)"
+            )
+        return (
+            f"another publish holds the lock {self.path} ({who}, since {since}, "
+            f"{age * 60:.0f} minutes ago). Run one publish at a time."
+        )
+
+    def __exit__(self, *exc):
+        """Release the lock, also when publishing failed."""
+        fs, p = _fs(self.spark, self.path)
+        if fs.exists(p):
+            fs.delete(p, False)
+        return False
+
+
+def clear_lock(spark: SparkSession, layout: PublishedLayout) -> bool:
+    """Remove the publish lock of a release. Returns whether there was one."""
+    files = _Files(spark)
+    path = _lock_path(layout)
+    if not files.exists(path):
+        return False
+    files.delete(path)
+    return True
 
 
 # --- index and catalogue ------------------------------------------------------
@@ -347,6 +601,7 @@ def update_index(spark: SparkSession, layout: PublishedLayout, month: dt.date) -
         layout.flight_index(month),
         sort_by=("flight_id",),
         bloom_filters=("flight_id", "icao24", "flt_id"),
+        tmp_root=layout.tmp,
     )
     return spark.read.parquet(layout.flight_index(month)).count()
 
@@ -385,7 +640,7 @@ def update_catalogue(
     if _exists(spark, layout.catalogue):
         old = spark.read.parquet(layout.catalogue).filter(F.col("day") != F.lit(day))
         new = old.select(*[c.name for c in CATALOGUE]).unionByName(new)
-    write_single_file(new, layout.catalogue, sort_by=("day",))
+    write_single_file(new, layout.catalogue, sort_by=("day",), tmp_root=layout.tmp)
 
 
 # --- one day ----------------------------------------------------------------
@@ -445,14 +700,22 @@ def publish_day(
     layout: PublishedLayout,
     commit: str,
     row_group_rows: int = ROW_GROUP_ROWS,
+    allow_empty: bool = False,
 ) -> Dict:
     """Publish the flights that started on ``day``.
 
-    Reads the day's rows of the working tables, writes the day's flight list
-    and flight events files (the events of exactly the flights in the flight
-    list file, see :func:`_day_events`), then rebuilds the month's flight index and
-    replaces the day's catalogue row. Both files are written also when the day
-    has no flights; they are then empty but have all their columns.
+    Reads the day's rows of the working tables and writes the day's flight
+    list and flight events files (the events of exactly the flights in the
+    flight list file, see :func:`_day_events`), then rebuilds the month's
+    flight index and replaces the day's catalogue row.
+
+    Both files are first written to temporary files under
+    :attr:`PublishedLayout.tmp`. Only when both are complete are they moved
+    into place, one after the other (see :func:`replace_file`). A file is
+    therefore missing for a moment while it is replaced, and for that moment
+    a reader can see the new flight list beside the old events file. When
+    publishing stops part way, publishing the day again ends in the correct
+    state.
 
     Args:
         spark: The Spark session.
@@ -462,30 +725,81 @@ def publish_day(
         layout: Where the published files go.
         commit: Identifier of the software version that publishes the day.
         row_group_rows: Number of rows per row group.
+        allow_empty: Replace a published file that has rows with an empty
+            one. Without it, that is refused.
 
     Returns:
         The day's figures: ``flights``, ``events``, ``first_event``,
         ``last_event``, ``flight_list_bytes``, ``flight_events_bytes``,
         ``flight_list_version``, ``event_versions`` and ``index_flights`` (the
         number of flights in the month's index).
+
+    Raises:
+        ValueError: If the day's flight list has rows but no working event is
+            stored under the day (the events were removed, or step 04 did not
+            run), or if a published file with rows would be replaced by an
+            empty one and ``allow_empty`` is not set.
+        PublishLockedError: If another publish into the same release holds the
+            lock, or a stopped one left it (see :class:`PublishLock`).
     """
+    with PublishLock(spark, layout):
+        return _publish_day(spark, storage, day, layout, commit, row_group_rows, allow_empty)
+
+
+def _publish_day(spark, storage, day, layout, commit, row_group_rows, allow_empty) -> Dict:
+    files = _Files(spark)
     flight_rows = _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", day, day)
     event_rows, measurement_rows, nearby_flights = _day_events(storage, day)
 
-    write_single_file(
-        build_flight_list(flight_rows),
-        layout.flight_list(day),
-        sort_by=FLIGHT_LIST_SORT,
-        bloom_filters=FLIGHT_LIST_BLOOM,
-        row_group_rows=row_group_rows,
-    )
-    write_single_file(
-        build_flight_events(event_rows, measurement_rows, nearby_flights),
-        layout.flight_events(day),
-        sort_by=FLIGHT_EVENTS_SORT,
-        bloom_filters=FLIGHT_EVENTS_BLOOM,
-        row_group_rows=row_group_rows,
-    )
+    flights_count = flight_rows.count()
+    if flights_count:
+        stored = _day_rows(storage, EVENTS_TABLE, "dof", day, day).limit(1).count()
+        if not stored:
+            raise ValueError(
+                f"the flight list of {day} has {flights_count:,} flights, but the working "
+                f"events of that day ({EVENTS_TABLE} dof={day}) are missing: they were "
+                "removed, or step 04 did not run. Publishing now would give a flight "
+                "events file without them. Build the day again with: "
+                f"python -m opdi.orchestration day --day {day} --force"
+            )
+
+    targets = {"flight_list": layout.flight_list(day), "flight_events": layout.flight_events(day)}
+    for path in targets.values():
+        recover(files, path, layout.tmp)
+
+    folder = _tmp_folder(layout.tmp, f"publish-{day:%Y%m%d}")
+    try:
+        new = {
+            "flight_list": write_temporary_file(
+                build_flight_list(flight_rows),
+                f"{folder}/flight_list",
+                sort_by=FLIGHT_LIST_SORT,
+                bloom_filters=FLIGHT_LIST_BLOOM,
+                row_group_rows=row_group_rows,
+            ),
+            "flight_events": write_temporary_file(
+                build_flight_events(event_rows, measurement_rows, nearby_flights),
+                f"{folder}/flight_events",
+                sort_by=FLIGHT_EVENTS_SORT,
+                bloom_filters=FLIGHT_EVENTS_BLOOM,
+                row_group_rows=row_group_rows,
+            ),
+        }
+        if not allow_empty:
+            for name, path in targets.items():
+                if files.exists(path) and _rows(spark, new[name]) == 0:
+                    old_rows = _rows(spark, path)
+                    if old_rows:
+                        raise ValueError(
+                            f"refusing to replace {path} ({old_rows:,} rows) with an empty "
+                            f"file: the working tables hold no {name.replace('_', ' ')} "
+                            f"for {day}. If the day really is empty, publish it with "
+                            "allow_empty=True (--allow-empty on the command line)."
+                        )
+        for name, path in targets.items():
+            replace_file(files, new[name], path, layout.tmp)
+    finally:
+        files.delete(folder, True)
 
     # The figures are read back from the written files, which is cheap and
     # describes exactly what was published.

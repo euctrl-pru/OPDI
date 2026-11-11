@@ -61,3 +61,9 @@ def test_a_failed_backfill_day_is_not_retried(dags):
     day = backfill.tasks["process_day"]
     assert day.args["retries"] == 0
     assert day.kwargs["max_active_tis_per_dag"] == 1
+
+
+def test_every_task_runs_in_the_one_slot_opdi_pool(dags):
+    for dag in dags.values():
+        for task in dag.tasks.values():
+            assert task.args.get("pool") == "opdi", (dag.dag_id, task.task_id)

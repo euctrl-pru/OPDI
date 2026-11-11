@@ -84,8 +84,15 @@ BACKFILL_PARAMS = {
     "keep_internal": False,
 }
 
+#: The Airflow pool of every OPDI task. Created once with one slot (see
+#: airflow/README.md), it lets only one OPDI command run at a time across both
+#: DAGs. A task whose pool does not exist is never started: it stays in the
+#: "scheduled" state until the pool is created.
+POOL = "opdi"
+
 DEFAULT_ARGS = {
     "owner": "opdi",
+    "pool": POOL,
     "retries": 2,
     "retry_delay": timedelta(minutes=10),
     "execution_timeout": timedelta(hours=6),

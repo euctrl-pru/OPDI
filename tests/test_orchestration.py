@@ -332,3 +332,14 @@ def test_the_prune_command_takes_the_opt_in(monkeypatch):
     assert o.main(["prune", "--day", "2026-06-14", "--drop-published-working"]) == 0
     assert seen["drop_published_working"] is True
     assert seen["working_keep_days"] == o.DEFAULT_WORKING_KEEP_DAYS
+
+
+def test_allow_empty_reaches_the_publishing_step(monkeypatch):
+    calls = []
+    monkeypatch.setattr(o, "run_unit", lambda *a, **k: calls.append((a, k)) or 0)
+    assert o.main(["step", "--step", "09", "--day", "2026-06-14", "--allow-empty"]) == 0
+    assert calls[-1][1] == {"allow_empty": True}
+    seen = {}
+    monkeypatch.setattr(o, "run_day", lambda *a: seen.update(args=a) or 0)
+    assert o.main(["day", "--day", "2026-06-14", "--allow-empty"]) == 0
+    assert seen["args"][-1] is True

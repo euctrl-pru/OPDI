@@ -10,6 +10,7 @@ such unit and is meant to be called as a command::
     python -m opdi.orchestration check-space --min-free-gb 5
     python -m opdi.orchestration prune --day 2026-06-14
     python -m opdi.orchestration prune --day 2026-06-14 --drop-published-working
+    python -m opdi.orchestration clear-lock                       # after a stopped publish
     python -m opdi.orchestration plan --start 2025-01-01 --end 2026-11-09
 
 Each command ends with exit code 0 when it succeeded and 1 when it failed.
@@ -352,6 +353,7 @@ def run_unit(
     warehouse: str | None = None,
     worldwide: bool = True,
     force: bool = False,
+    allow_empty: bool = False,
 ) -> int:
     """Run one step for one day, or step 00 when ``day`` is None.
 
@@ -364,6 +366,8 @@ def run_unit(
         warehouse: The warehouse; see :meth:`opdi.config.OPDIConfig.for_environment`.
         worldwide: Process the whole world (the default) or only the European box.
         force: Run the unit even when it is recorded as finished.
+        allow_empty: For step 09, replace published files that have rows
+            with empty ones (see :func:`opdi.output.published.publish_day`).
 
     Returns:
         0 when the unit succeeded or was already finished, 1 when it failed.
@@ -432,6 +436,7 @@ def run_unit(
                     + ". Run 'python -m opdi.orchestration reference' first."
                 )
                 return 1
+            kwargs["allow_empty"] = allow_empty
             periodrun.run_day_step(spark, config, step, day, kwargs)
 
         elapsed = time.time() - started
@@ -503,6 +508,7 @@ def run_day(
     keep_days: int = DEFAULT_KEEP_DAYS,
     drop_published_working: bool = False,
     working_keep_days: int = DEFAULT_WORKING_KEEP_DAYS,
+    allow_empty: bool = False,
 ) -> int:
     """Run every step of ``day`` in order, publishing last.
 
@@ -532,7 +538,14 @@ def run_day(
             print(f"Not started: {exc}")
             return 1
     for step in todo:
-        rc = run_unit(step, day, warehouse=warehouse, worldwide=worldwide, force=force)
+        rc = run_unit(
+            step,
+            day,
+            warehouse=warehouse,
+            worldwide=worldwide,
+            force=force,
+            allow_empty=allow_empty,
+        )
         if rc != 0:
             return rc
     if not keep_internal:
@@ -808,6 +821,29 @@ def prune_internal(
             spark.stop()
 
 
+# --- the publish lock -------------------------------------------------------------
+
+
+def clear_publish_lock(warehouse: str | None = None, worldwide: bool = True) -> bool:
+    """Remove the publish lock that a stopped publish left behind.
+
+    Check first that no OPDI command still runs against the warehouse.
+    Returns whether there was a lock.
+    """
+    from opdi.output.published import PublishedLayout, clear_lock
+    from opdi.utils.storage import StorageManager
+
+    config = make_config(warehouse, worldwide)
+    spark = _session(config, "OPDI clear lock", distributed=False)
+    try:
+        layout = PublishedLayout.for_storage(StorageManager(spark, config))
+        removed = clear_lock(spark, layout)
+        print(f"  publish lock {'removed' if removed else 'not found'} in {layout.state}")
+        return removed
+    finally:
+        spark.stop()
+
+
 # --- command line --------------------------------------------------------------
 
 
@@ -832,6 +868,15 @@ def _working_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_WORKING_KEEP_DAYS,
         help="Days of working events and measurements kept on each side of the day "
         f"(default {DEFAULT_WORKING_KEEP_DAYS}).",
+    )
+
+
+def _allow_empty_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Step 09: replace published files that have rows with empty ones. "
+        "Without it, publishing an empty day over a published one is refused.",
     )
 
 
@@ -865,6 +910,7 @@ def _parser() -> argparse.ArgumentParser:
     step = sub.add_parser("step", parents=[common], help="Run one step for one day.")
     step.add_argument("--step", required=True, choices=DAY_STEPS)
     step.add_argument("--day", type=_day, required=True)
+    _allow_empty_argument(step)
 
     day = sub.add_parser("day", parents=[common], help="Run every step of one day.")
     day.add_argument("--day", type=_day, required=True)
@@ -882,6 +928,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     day.add_argument("--keep-days", type=int, default=DEFAULT_KEEP_DAYS)
     _working_arguments(day)
+    _allow_empty_argument(day)
 
     space = sub.add_parser("check-space", parents=[common], help="Fail when space is short.")
     space.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
@@ -890,6 +937,12 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=f"Bucket quota in GB (default: {QUOTA_VARIABLE} if set, else " f"{DEFAULT_QUOTA_GB}).",
+    )
+
+    sub.add_parser(
+        "clear-lock",
+        parents=[common],
+        help="Remove the publish lock left by a publish that stopped.",
     )
 
     prune = sub.add_parser("prune", parents=[common], help="Remove old internal day folders.")
@@ -914,6 +967,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "reference":
             return run_unit(REFERENCE_STEP, None, args.warehouse, args.worldwide, args.force)
         if args.command == "step":
+            if args.allow_empty:
+                return run_unit(
+                    args.step,
+                    args.day,
+                    args.warehouse,
+                    args.worldwide,
+                    args.force,
+                    allow_empty=True,
+                )
             return run_unit(args.step, args.day, args.warehouse, args.worldwide, args.force)
         if args.command == "day":
             return run_day(
@@ -926,9 +988,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.keep_days,
                 args.drop_published_working,
                 args.working_keep_days,
+                args.allow_empty,
             )
         if args.command == "check-space":
             check_space(args.min_free_gb, args.warehouse, args.quota_gb, args.worldwide)
+            return 0
+        if args.command == "clear-lock":
+            clear_publish_lock(args.warehouse, args.worldwide)
             return 0
         if args.command == "prune":
             prune_internal(

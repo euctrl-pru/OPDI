@@ -617,8 +617,9 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         from opdi.pipeline.flight_list_step import enrich_day
         from opdi.utils.storage import StorageManager
 
-        # Only the day this unit owns: the step rewrites the flight list day
-        # folder it reads.
+        # Only the day of this unit: the step replaces the flight list folder
+        # of that day and reads the events of that day and the days on each
+        # side of it. The flight lists of other days are not touched.
         written = enrich_day(StorageManager(spark, config), config.events, day, day)
         if written is not None:
             print(f"  flight list enriched: {written:,} rows")
@@ -630,7 +631,12 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         # published folder, then updates the month's index and the catalogue.
         storage = StorageManager(spark, config)
         counts = publish_day(
-            spark, storage, day, PublishedLayout.for_storage(storage), pipeline_commit()
+            spark,
+            storage,
+            day,
+            PublishedLayout.for_storage(storage),
+            pipeline_commit(),
+            allow_empty=bool(kwargs.get("allow_empty")),
         )
         print(f"  published: {counts['flights']:,} flights, {counts['events']:,} events")
     else:

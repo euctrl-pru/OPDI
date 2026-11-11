@@ -104,6 +104,24 @@ Airflow itself needs nothing beyond its core: the DAG file uses only
 Copy `dags/opdi_pipeline.py` into the Airflow DAG folder. Both DAGs appear
 paused; set the Variables first.
 
+Create the pool `opdi` with one slot, once:
+
+```bash
+airflow pools set opdi 1 "OPDI: one pipeline command at a time"
+```
+
+Every task of both DAGs runs in this pool, so only one OPDI command runs at a
+time, whichever DAG it belongs to. The DAG file loads without the pool, but
+Airflow does not start a task whose pool does not exist: the tasks stay in the
+"scheduled" state until the pool is created.
+
+Publishing also takes a lock file, `_state/publish.lock` in the release root,
+so two publishes into one release never run at once even outside Airflow. A
+publish that is stopped from outside (a killed process) leaves the lock. The
+next publish then fails with a message; when the lock is older than six hours
+the message says to remove it, after checking that no OPDI command is still
+running, with `python -m opdi.orchestration clear-lock`.
+
 ## Variables
 
 Set them under Admin > Variables. All are optional.
@@ -185,26 +203,66 @@ place.
 
 ## When a day fails
 
-1. Open the log of the failed task. The last lines name the step, the day
-   and the error.
-2. Fix the cause (for example credentials, free space, a cluster that was
-   down). Airflow already retries each task twice, ten minutes apart.
-3. Clear the failed task in Airflow. It runs again and skips every step that
-   is already finished, so the day continues where it stopped.
-4. To build a finished step again (for example after a correction), run it
-   by hand with `--force`:
+Every step records in the warehouse that it finished (`_state/done/`). Before
+a step runs, it checks that the day folders it reads are there: step 02 reads
+the position reports of the day before, the day and the day after; steps
+02a, 03 and 04 read the day's tracks; steps 04b and 09 read the day's flight
+list and events. A day that has started but is not yet published keeps these
+folders: neither `prune` nor the step 01 of another day removes them.
 
-   ```bash
-   python -m opdi.orchestration step --step 04 --day 2026-11-09 --force
-   python -m opdi.orchestration step --step 09 --day 2026-11-09 --force
-   ```
+**In the daily DAG** a failed task is retried twice, ten minutes apart. While
+it waits for a retry the run is still running, and the next morning's run
+waits (`max_active_runs=1`). When the task has failed for good, the next run
+starts but stops at its first task, `previous_run_finished`, so that no later
+day runs while a day is broken. To release it:
 
-   Publishing a day again replaces its two files, its index rows and its
-   catalogue row; readers never see a half-written file.
+1. Open the log of the failed task. The last lines name the step, the day and
+   the error. Fix the cause (credentials, free space, a cluster that was
+   down).
+2. Clear the failed task. It runs again, skips the steps that are finished
+   and continues where the day stopped.
+3. When that run has succeeded, clear `previous_run_finished` of each run
+   after it that stopped there, oldest first. (Clearing the whole later run
+   works as well.)
 
-A failed day in a backfill does not stop the other days. Run the failed
-days again afterwards with a backfill over just those days, or with
-`python -m opdi.orchestration day --day ...`.
+To give up on a day instead, mark its failed run as successful in Airflow and
+process the day later with `opdi_backfill` or `day --day ...`.
+
+**In the backfill DAG** a day is not retried (`retries=0`): a task that waits
+for a retry does not count as running, so the next day would start in the
+meantime. A failed day stays failed and the other days go on. Run the failed
+days again afterwards, deliberately, with a backfill over just those days or
+with `python -m opdi.orchestration day --day ...`.
+
+What to run, by the step that failed (replace the day):
+
+| Failed at | Run |
+|---|---|
+| any step, nothing removed since | Clear the task, or `python -m opdi.orchestration day --day 2026-11-09`. The day continues where it stopped. |
+| any step, and the day's folders were removed since (for example by hand) | `python -m opdi.orchestration day --day 2026-11-09`. The day sees which folder is gone, clears its marks from the step that writes it and starts again from step 01, which fetches only the missing report days. |
+| `publish` (09), with the message about a lock | A publish stopped without removing its lock. Check that no OPDI command is running, then `python -m opdi.orchestration clear-lock` and run step 09 again. |
+| `publish` (09), "refusing to replace ... with an empty file" | The working tables hold nothing for that day, but a published file has rows. Find out why first. Only when the day really is empty, publish it with `python -m opdi.orchestration step --step 09 --day 2026-11-09 --allow-empty`. |
+| `publish` (09), "the working events of that day are missing" | The day's working events were removed (`--drop-published-working`). Build the day again from step 01: `python -m opdi.orchestration day --day 2026-11-09 --force`. |
+
+A single step whose input folders are gone does not run: `step --step 04 --day
+...` then fails, names the missing folder and prints the command that builds
+the day again.
+
+To build a finished day again (for example after a correction), use
+`--force`. A published day whose internal data were removed is rebuilt from
+step 01 with `day --force`:
+
+```bash
+python -m opdi.orchestration day --day 2026-11-09 --force
+```
+
+Publishing a day again replaces its two files, its index rows and its
+catalogue row. Both new files are written completely first, under
+`_state/tmp/`, and then moved into place one after the other. A file is
+therefore missing for a moment while it is replaced, and for that moment a
+reader can see the new flight list beside the old events file; a reader never
+sees a partly written file. If publishing stops part way, publishing the day
+again ends in the correct state.
 
 ## How disk space is protected
 
@@ -230,7 +288,8 @@ free space is the quota minus the bytes stored in the whole bucket.
   when both published files of that day and its catalogue row exist, and
   only when the day is more than 7 days (`--working-keep-days`) before or
   after the day just run. A day that is not yet published is never touched.
-  To publish a removed day again, run steps 04, 04b and 09 for it again.
+  The events of a day are only published again after the day is built again
+  from step 01 (`day --day ... --force`): its tracks are removed as well.
 - **Never removed:** the published files, the reference tables, the
   progress records and the working flight list (`opdi_flight_list`), which
   the flight list of later days is built against.
