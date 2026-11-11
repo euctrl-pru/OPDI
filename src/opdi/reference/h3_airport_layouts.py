@@ -392,7 +392,7 @@ class AirportLayoutGenerator:
         self.log_dir = log_dir
 
         # When set, step 00b reads this local extract instead of the public
-        # Overpass API. See docs/industrialization-plan.md §3.
+        # Overpass API.
         self.pbf_path = pbf_path
         self._pbf_source = None
 

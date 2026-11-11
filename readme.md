@@ -172,10 +172,6 @@ first, so a name that does not resolve returns no data rather than an error,
 and at ~1,350 aerodromes the public endpoint refuses outright. Every aerodrome
 published before 2026-09-07 came from that path.
 
-**Publishing.** `publish_layouts.py` copies a gated build over the published
-table, refusing to run if the source fails its checks and re-reading the
-result afterwards rather than trusting the write.
-
 ## OpenSky Network environment
 
 The `opensky` environment connects directly to the OpenSky Network S3 bucket and stores pipeline output as parquet on S3 (`s3a://eurocontrol/opdi/`). It does not require Hive or Iceberg.

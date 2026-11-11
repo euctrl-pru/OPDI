@@ -10,7 +10,7 @@ demonstrably has stands. At 1,353 aerodromes the public endpoint simply refuses.
 
 Reading a Geofabrik extract removes both services. The file is read once, all
 ``aeroway`` features are kept, and each is assigned to an aerodrome from
-reference data we already hold. See ``docs/industrialization-plan.md`` §3.
+reference data we already hold.
 """
 
 import math
