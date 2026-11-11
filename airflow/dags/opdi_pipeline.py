@@ -125,15 +125,31 @@ DROP_WORKING = (
 )
 
 
+#: Most days one backfill run may hold. Airflow refuses to map a task over
+#: more than ``max_map_length`` values (1024 by default), so a longer range
+#: would fail after its reference task.
+MAX_BACKFILL_DAYS = 1000
+
+
 def plan_days(start: str, end: str, order: str = "newest_first") -> list:
     """Every day from ``start`` to ``end`` (YYYY-MM-DD, both included), in order.
 
     The same rule as ``opdi.orchestration.days``, repeated here so that this
     file needs no OPDI import.
+
+    Raises:
+        ValueError: If the range is reversed, the order unknown, or the range
+            holds more than :data:`MAX_BACKFILL_DAYS` days.
     """
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     if last < first:
         raise ValueError(f"end_date {end} is before start_date {start}")
+    count = (last - first).days + 1
+    if count > MAX_BACKFILL_DAYS:
+        raise ValueError(
+            f"{start} to {end} is {count} days, more than the {MAX_BACKFILL_DAYS} one "
+            "backfill run can hold. Split the range by year: one run per year."
+        )
     if order not in ("newest_first", "oldest_first"):
         raise ValueError(f"order must be newest_first or oldest_first, not {order!r}")
     result = [(first + timedelta(days=n)).isoformat() for n in range((last - first).days + 1)]
@@ -228,9 +244,10 @@ w/ config" and set:
   `opdi_warehouse` Variable.
 * `keep_internal`: keep the internal tables of every day.
 
-To reach back to 2019, trigger it again with `start_date` 2019-01-01 and
-`end_date` the day before the earliest day already done. Days already
-finished are skipped, so overlapping ranges cost only a quick check.
+One run holds at most 1,000 days. To reach back to 2019, trigger it once
+per year (for example `start_date` 2024-01-01, `end_date` 2024-12-31), newest
+year first. Days already finished are skipped, so overlapping ranges cost
+only a quick check.
 """
 
 with DAG(

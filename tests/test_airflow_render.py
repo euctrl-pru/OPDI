@@ -67,3 +67,9 @@ def test_every_task_runs_in_the_one_slot_opdi_pool(dags):
     for dag in dags.values():
         for task in dag.tasks.values():
             assert task.args.get("pool") == "opdi", (dag.dag_id, task.task_id)
+
+
+def test_a_backfill_of_more_than_1000_days_is_refused_with_advice(module):
+    assert len(module.plan_days("2024-01-01", "2026-09-26")) == 1000
+    with pytest.raises(ValueError, match="Split the range by year"):
+        module.plan_days("2019-01-01", "2024-12-31")

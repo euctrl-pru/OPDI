@@ -131,7 +131,7 @@ def test_the_day_planning_matches_the_package(tree):
     namespace = {}
     exec(
         compile(ast.Module(body=[fn], type_ignores=[]), str(DAG_FILE), "exec"),
-        {"date": date, "timedelta": __import__("datetime").timedelta},
+        {"date": date, "timedelta": __import__("datetime").timedelta, "MAX_BACKFILL_DAYS": 1000},
         namespace,
     )
     plan = namespace["plan_days"]

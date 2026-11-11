@@ -180,11 +180,22 @@ python -m opdi.orchestration day --day 2026-11-09
 
 ## Extending back to 2019
 
-Trigger `opdi_backfill` again with the older range, for example:
+Trigger `opdi_backfill` again for the older days, one year per run, newest
+year first. One run holds at most 1,000 days (Airflow maps a task over at
+most 1,024 values), and a longer range is refused by `plan_days` with a
+message. For example, six runs, one after the other:
 
 ```json
-{"start_date": "2019-01-01", "end_date": "2024-12-31", "order": "newest_first"}
+{"start_date": "2024-01-01", "end_date": "2024-12-31", "order": "newest_first"}
+{"start_date": "2023-01-01", "end_date": "2023-12-31", "order": "newest_first"}
+{"start_date": "2022-01-01", "end_date": "2022-12-31", "order": "newest_first"}
+{"start_date": "2021-01-01", "end_date": "2021-12-31", "order": "newest_first"}
+{"start_date": "2020-01-01", "end_date": "2020-12-31", "order": "newest_first"}
+{"start_date": "2019-01-01", "end_date": "2019-12-31", "order": "newest_first"}
 ```
+
+The first backfill, 2025-01-01 to the latest complete day, stays under 1,000
+days until September 2027; split it by year as well after that.
 
 Each `process_day` first reads which steps of its day are finished, with a
 small local Spark session, and skips a finished day in well under a minute.
