@@ -378,4 +378,6 @@ What this means for the bucket:
   and set `opdi_keep_working` to `false`, before starting it.
 
 In that check 3,442 events (0.05%) belonged to tracks with no row in the
-flight list. They are published with empty flight columns.
+flight list. They are published with empty flight columns, as are the events
+whose flight is in the flight list of a day two or more days away from the
+day stored on the event.

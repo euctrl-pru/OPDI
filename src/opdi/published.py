@@ -31,6 +31,11 @@ Example::
 Files are found under a base address, which can be a web address
 (``https://...``), an S3 address (``s3://bucket/folder/``, also written
 ``s3a://``) or a local folder (``/data/opdi/`` or ``file:///data/opdi/``).
+
+Over a web address each file is downloaded whole before it is read, also
+when only some columns or event types are asked for (a flight events file is
+about 400 MB for a worldwide day). From S3 or a local folder only the parts
+needed are read.
 """
 
 import glob

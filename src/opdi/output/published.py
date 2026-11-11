@@ -7,9 +7,13 @@ For each day, this step writes two files into the published folder:
 * ``flight_events/flight_events_YYYYMMDD.parquet``: one row per event of those
   flights. Each row carries the event's measurements as columns and the columns
   of its flight. A flight keeps all its events in the file of the day it
-  started, also the events that happen after midnight. An event whose flight is
-  not in any flight list is published in the file of the date stored on the
-  event, with empty (NULL) flight columns.
+  started, also the events that happen after midnight. An event is stored
+  under the day of its track, and the file of a day looks for the flights of
+  its events in the flight lists of that day and of the days before and after
+  it. An event whose flight is in none of those three (its flight is not in
+  any flight list, or in the flight list of a day two or more days away) is
+  published in the file of the day stored on the event, with empty (NULL)
+  flight columns.
 
 It also keeps two small files up to date: a monthly flight index
 (``index/flight_index_YYYYMM.parquet``), which tells which file holds a flight,

@@ -93,6 +93,9 @@ value.
 The files are read from `published.PUBLISHED_BASE_URL` by default; set the
 environment variable `OPDI_PUBLISHED_URL`, or pass `base=`, to read from a
 local folder (`/data/opdi/v2.0.0/`) or an S3 address (`s3://bucket/folder/`).
+Over a web address each file is downloaded whole before it is read (about
+400 MB for a worldwide day of flight events), also when only some columns are
+asked for; from S3 or a local folder only the parts needed are read.
 
 For SQL, `published.duckdb_views()` defines DuckDB views with the same names as
 the Trino tables: `flight_list`, `flight_events`, `flight_index`, and the
@@ -110,7 +113,12 @@ con.sql("select type, count(*) from events group by type").show()
 ```
 
 The Trino definitions of the same tables and views are in
-`src/opdi/sql/trino/` (regenerate them with `python -m opdi.sql.render`). Every
+`src/opdi/sql/trino/` (regenerate them with `python -m opdi.sql.render`). The
+catalogue (`catalogue.parquet`, one row per published day) has no Trino table:
+it is a single file at the top of the published folder, and a Trino table
+needs a folder of its own; read it with DuckDB or pandas. Column descriptions
+longer than 256 characters are shortened in the Trino comments; the full text
+is in the schema. Every
 column, with its type, unit and meaning, is declared once in
 `src/opdi/output/schema.py`, and the website's data dictionary is built from
 it.
