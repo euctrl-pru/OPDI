@@ -92,6 +92,34 @@ _TABLES = (
 )
 
 
+#: Most characters of a comment that the Hive metastore behind Trino keeps.
+COMMENT_LIMIT = 256
+
+
+def short_comment(text: str, limit: int = COMMENT_LIMIT) -> str:
+    """``text`` cut to fit a Trino column comment.
+
+    As many whole sentences from the start as fit in ``limit`` characters.
+    When even the first sentence is longer, it is cut at a word and ends
+    with ``...``. The full text stays in :mod:`opdi.output.schema` and on the
+    OPDI website.
+    """
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    sentences = [part if part.endswith(".") else part + "." for part in text.split(". ")]
+    out = ""
+    for sentence in sentences:
+        candidate = f"{out} {sentence}".strip()
+        if len(candidate) > limit:
+            break
+        out = candidate
+    if out:
+        return out
+    cut = text[: limit - 3].rsplit(" ", 1)[0]
+    return cut + "..."
+
+
 def _quote(text: str) -> str:
     """``text`` as an SQL string literal."""
     return "'" + text.replace("'", "''") + "'"
@@ -116,7 +144,10 @@ def trino_tables(
 
     One external table for each of the folders ``flight_list``,
     ``flight_events`` and ``index``. Trino reads every Parquet file in the
-    folder, so a newly published day is visible at once.
+    folder, so a newly published day is visible at once. The catalogue has
+    no table: it is a single file at the top of the published folder, and a
+    Trino table needs a folder of its own. Read it with DuckDB, pandas or
+    Spark (``published/catalogue.parquet``).
 
     Args:
         catalog: Trino catalog of the tables.
@@ -124,7 +155,9 @@ def trino_tables(
         location: The published folder of the release.
 
     Returns:
-        The ``CREATE TABLE`` statements, with a comment on every column.
+        The ``CREATE TABLE`` statements, with a comment on every column. A
+        description longer than the 256 characters the Hive metastore keeps
+        is shortened to its first sentences (see :func:`short_comment`).
     """
     location = location.rstrip("/")
     parts = [_trino_header(catalog, schema) + f"-- Location of the published files: {location}\n"]
@@ -132,14 +165,15 @@ def trino_tables(
         folder = "index" if table == "flight_index" else table
         width = max(len(c.name) for c in columns)
         lines = [
-            f"    {c.name.ljust(width)} {_TRINO_TYPES[c.dtype]} COMMENT {_quote(c.description)}"
+            f"    {c.name.ljust(width)} {_TRINO_TYPES[c.dtype]} "
+            f"COMMENT {_quote(short_comment(c.description))}"
             for c in columns
         ]
         parts.append(
             f"CREATE TABLE IF NOT EXISTS {catalog}.{schema}.{table} (\n"
             + ",\n".join(lines)
             + "\n)\n"
-            + f"COMMENT {_quote(comment)}\n"
+            + f"COMMENT {_quote(short_comment(comment))}\n"
             + "WITH (\n"
             + f"    external_location = {_quote(f'{location}/{folder}')},\n"
             + "    format = 'PARQUET'\n"

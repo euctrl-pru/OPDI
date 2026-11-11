@@ -29,7 +29,7 @@ def test_every_column_appears_with_its_comment(table, columns):
     block = text[text.index(f"minio.opdi.{table} (") :]
     block = block[: block.index(";")]
     for c in columns:
-        comment = c.description.replace("'", "''")
+        comment = render.short_comment(c.description).replace("'", "''")
         assert f"    {c.name} " in block, c.name
         assert f"COMMENT '{comment}'" in block, c.name
     folder = "index" if table == "flight_index" else table
@@ -66,3 +66,23 @@ def test_the_duckdb_template_parses():
     text = text.replace(render.FLIGHT_INDEX_FILES, "['c.parquet']")
     statements = [s for s in sqlglot.parse(text, read="duckdb") if s is not None]
     assert len(statements) == 6
+
+
+def test_every_comment_fits_the_metastore_limit():
+    """The Hive metastore keeps at most 256 characters of a comment."""
+    import re
+
+    text = render.trino_tables()
+    comments = [c.replace("''", "'") for c in re.findall(r"COMMENT '((?:[^']|'')*)'", text)]
+    assert comments and max(len(c) for c in comments) <= render.COMMENT_LIMIT == 256
+    long = next(c for c in FLIGHT_LIST if c.name == "adep_source")
+    assert len(long.description) > 256
+    short = render.short_comment(long.description)
+    assert long.description.startswith(short.rstrip("."))
+    assert short.endswith(".") and len(short) <= 256
+
+
+def test_a_comment_without_a_short_sentence_is_cut_at_a_word():
+    text = "word " * 80
+    short = render.short_comment(text)
+    assert len(short) <= 256 and short.endswith("...") and " wor..." not in short
