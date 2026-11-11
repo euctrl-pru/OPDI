@@ -1,0 +1,26 @@
+[
+ [
+  "id",
+  "string"
+ ],
+ [
+  "milestone_id",
+  "string"
+ ],
+ [
+  "type",
+  "string"
+ ],
+ [
+  "value",
+  "double"
+ ],
+ [
+  "version",
+  "string"
+ ],
+ [
+  "dof",
+  "date"
+ ]
+]
