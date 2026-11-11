@@ -2,7 +2,7 @@ r"""Every name the repository imports from ``opdi`` stays importable from the sa
 
 The lists below were generated from the repository by reading every Python
 file under ``src/``, ``tests/``, ``benchmarks/``, ``examples/``, ``tools/`` and
-``airflow/``, and the root scripts ``run_period.py`` and ``opdi.py``, and
+``airflow/``, and the root script ``run_period.py``, and
 collecting each absolute ``from opdi... import name`` and ``import opdi...``
 statement (with Python's ``ast`` module; the equivalent grep is
 ``grep -rhoE "^\s*(from opdi[.a-z_0-9]* import|import opdi[.a-z_0-9]*)" ...``).

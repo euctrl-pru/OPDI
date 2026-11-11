@@ -180,7 +180,7 @@ Two ways, both day by day:
 
   Running the same command again after a failure continues where it stopped.
 
-`opdi run` (and `python opdi.py`) runs the steps over a date range in one local
+`opdi run` (and `python -m opdi`, with the same arguments) runs the steps over a date range in one local
 Spark session, without the cluster; it is meant for small tests.
 
 ## Where the output goes

@@ -110,12 +110,9 @@ def _polyfill_geojson_udf(geojson_str, resolution):
     order wrong gives an empty or wrong set of cells.
 
     The same operation as ``opdi.utils.h3_helpers.polyfill_geojson``, written
-    out here rather than imported: on a Spark worker the repository's
-    top-level ``opdi.py`` hides the ``opdi`` package, so a UDF that refers to
-    any ``opdi`` function fails there with ``ModuleNotFoundError``
-    (``tests/test_h3_zones_v4.py`` reproduces this). The UDF therefore only
-    uses the ``h3`` package. ``tests/test_h3_zones_v4.py`` also checks that
-    its result equals ``h3_helpers.polyfill_geojson``.
+    out here rather than imported, so that the UDF needs only the ``h3``
+    package on a Spark worker. ``tests/test_h3_zones_v4.py`` checks that its
+    result equals ``h3_helpers.polyfill_geojson``.
     """
     if geojson_str is None or resolution is None:
         return None

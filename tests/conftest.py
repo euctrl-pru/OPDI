@@ -20,6 +20,13 @@ import pytest
 # suite, before any SparkSession is built.
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
+# The workers are separate Python processes: they get src/ on their path from
+# PYTHONPATH, so a UDF that refers to an opdi function imports the code under
+# test, not some other installed copy.
+_SRC = str(Path(__file__).resolve().parent.parent / "src")
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    [_SRC] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p and p != _SRC]
+)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (

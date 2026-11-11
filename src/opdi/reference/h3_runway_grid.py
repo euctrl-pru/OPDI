@@ -19,17 +19,13 @@ Two zones per physical runway ("strip"):
   ``APPROACH_FAR_HALF_WIDTH_NM`` at the far end. Both ends get one, since
   arrivals can use either direction of a runway.
 
-Built on the driver, not in a Spark UDF, on purpose: the repository's
-top-level ``opdi.py`` hides ``src/opdi`` on the Spark workers' ``sys.path``,
-so a UDF that refers to any ``opdi`` function fails there with
-``ModuleNotFoundError``
-(reproduced in ``tests/test_h3_zones_v4.py::
-test_udf_closing_over_opdi_symbol_fails_on_worker_local_spark``). The
-generator sidesteps this the way ``h3_airport_layouts.AirportLayoutGenerator``
-does: iterate airports/runways in plain Python/pandas on the driver, and only
-hand Spark a already-built list of rows via ``spark.createDataFrame``. Every
-function in this module that touches geometry (``runway_cells``, the
-``opdi.utils.geospatial`` calls it makes) runs on the driver only.
+Built on the driver, not in a Spark UDF, as
+``h3_airport_layouts.AirportLayoutGenerator`` is: the airports and runways
+are iterated in plain Python and pandas, and Spark is handed the finished
+rows with ``spark.createDataFrame``. Every function in this module that
+touches geometry (``runway_cells``, the ``opdi.utils.geospatial`` calls it
+makes) runs on the driver only, so the Spark workers need none of the
+geometry packages.
 """
 
 import os

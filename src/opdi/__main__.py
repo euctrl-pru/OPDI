@@ -1,20 +1,20 @@
-#!/usr/bin/env python
 """Run the OPDI pipeline over a range of dates, in one Spark session.
 
-The same as ``opdi run`` after ``pip install``. It uses a local Spark
-session; to process days on the OpenSky cluster, use ``run_period.py`` or
-``python -m opdi.orchestration`` instead.
+Started with ``python -m opdi``; the same as ``opdi run`` after ``pip
+install``. It uses a local Spark session; to process days on the OpenSky
+cluster, use ``python -m opdi.periodrun`` or ``python -m opdi.orchestration``
+instead.
 
 Usage::
 
     # Every step, default settings
-    python opdi.py --start 2024-01-01 --end 2024-06-01
+    python -m opdi --start 2024-01-01 --end 2024-06-01
 
     # The local environment
-    python opdi.py --env local --start 2024-01-01 --end 2024-02-01
+    python -m opdi --env local --start 2024-01-01 --end 2024-02-01
 
     # One step
-    python opdi.py --step 02 --start 2024-01-01 --end 2024-02-01
+    python -m opdi --step 02 --start 2024-01-01 --end 2024-02-01
 
 Pipeline steps
 --------------
@@ -36,6 +36,7 @@ from datetime import date
 def main(argv=None):
     """Run the command line; returns the exit code."""
     parser = argparse.ArgumentParser(
+        prog="python -m opdi",
         description="OPDI v2.0.0: run the pipeline over a range of dates.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -45,7 +46,7 @@ def main(argv=None):
         choices=["local", "opensky"],
         default="opensky",
         help="Environment (default: opensky). The Spark session is local in "
-        "both; a run on the cluster goes through run_period.py.",
+        "both; a run on the cluster goes through python -m opdi.periodrun.",
     )
     parser.add_argument(
         "--start",

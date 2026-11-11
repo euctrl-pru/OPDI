@@ -192,26 +192,13 @@ def test_run_period_takes_worldwide():
     assert inspect.signature(run_period).parameters["worldwide"].default is True
 
 
-def test_opdi_py_script_accepts_worldwide(monkeypatch):
-    """The repo-root `opdi.py` is documented in CLAUDE.md as one of three ways
-    to run the pipeline, alongside `opdi run` (covered above) and
-    `run_period.py`. Its own argparse `main()` had no `--worldwide` and never
-    forwarded `worldwide=` to `run_pipeline` -- found by trying to actually
-    run it (progress.md), not by reading the diff.
+def test_python_dash_m_opdi_accepts_worldwide(monkeypatch):
+    """``python -m opdi`` (``src/opdi/__main__.py``) forwards the coverage.
 
-    Loaded via `importlib` from the file path rather than `import opdi`:
-    that name resolves to the *installed package* here (`src/opdi/__init__.py`
-    wins over the repo-root script under `python -m pytest`'s sys.path), so a
-    plain `import opdi` would silently test the wrong module and this
-    regression would pass even with the flag missing.
+    It is one of the ways to run the pipeline, alongside ``opdi run``
+    (covered above) and ``python -m opdi.periodrun``.
     """
-    import importlib.util
-    from pathlib import Path
-
-    script_path = Path(__file__).resolve().parent.parent / "opdi.py"
-    spec = importlib.util.spec_from_file_location("opdi_root_script", script_path)
-    opdi_script = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(opdi_script)
+    from opdi import __main__ as opdi_script
 
     captured = {}
 

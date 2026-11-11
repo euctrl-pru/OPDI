@@ -49,37 +49,14 @@ def test_h3_pyspark_geo_to_h3_is_broken_on_h3_v4(spark):
 
 
 # ---------------------------------------------------------------------------
-# The worker sys.path shadowing constraint that justifies why
-# h3_airport_zones._polyfill_geojson_udf (and every other UDF in that module)
-# is self-contained and never closes over an opdi.utils.h3_helpers symbol.
-# This is CASE (a): the failure reproduces under the local `spark` fixture
-# (master="local[1]") -- it is not a cluster-only concern. Regression-tested
-# directly rather than left as an unverified docstring claim.
+# A Spark worker imports the opdi package. Nothing at the repository root is
+# named opdi, and conftest.py puts src/ on the workers' PYTHONPATH, so a UDF
+# that refers to an opdi function runs on a local worker.
 # ---------------------------------------------------------------------------
 
 
-def test_udf_closing_over_opdi_symbol_fails_on_worker_local_spark(spark):
-    """A Spark UDF whose closure references a symbol imported from
-    ``opdi.utils.h3_helpers`` fails on the worker, even under the local
-    ``spark`` fixture used by this whole suite (``master("local[1]")``).
-
-    Root cause: this worktree has a top-level ``opdi.py`` script (the CLI
-    entrypoint) that shadows the ``src/opdi`` package. The driver resolves
-    ``opdi`` correctly because pytest's ``pythonpath = ["src"]`` (see
-    pyproject.toml) prepends ``src/`` to *its* sys.path -- but a Spark
-    worker is a separate Python subprocess that does not inherit that
-    prepend (only PYSPARK_PYTHON is pinned; PYTHONPATH is not exported with
-    ``src/`` in it -- see conftest.py). cloudpickle pickles a UDF's
-    referenced globals *by reference* when they are (or resolve to) another
-    named function or an imported symbol, which requires the worker to
-    re-import that symbol's home module to reconstruct it. On this worker,
-    that re-import finds ``opdi.py`` first and fails.
-
-    This is why ``h3_airport_zones.py``'s UDFs (including
-    ``_polyfill_geojson_udf``) are all self-contained around the
-    third-party ``h3`` package only, instead of delegating to
-    ``h3_helpers.polyfill_geojson`` as ``h3_airspaces.py`` does driver-side.
-    """
+def test_udf_closing_over_opdi_symbol_runs_on_a_local_worker(spark):
+    """A UDF that calls ``opdi.utils.h3_helpers`` runs on the local worker."""
     from pyspark.sql import functions as F
     from pyspark.sql.types import IntegerType
 
@@ -92,13 +69,7 @@ def test_udf_closing_over_opdi_symbol_fails_on_worker_local_spark(spark):
     cell = h3.latlng_to_cell(50.9014, 4.4844, 9)
     neighbor = next(iter(h3.grid_ring(cell, 1)))
     df = spark.createDataFrame([(cell, neighbor)], ["h1", "h2"])
-
-    with pytest.raises(Exception) as excinfo:
-        df.withColumn("d", _dist_udf(F.col("h1"), F.col("h2"))).collect()
-
-    msg = str(excinfo.value)
-    assert "ModuleNotFoundError" in msg
-    assert "opdi" in msg and "not a package" in msg
+    assert df.withColumn("d", _dist_udf(F.col("h1"), F.col("h2"))).collect()[0]["d"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -209,21 +180,10 @@ def test_polyfill_geojson_udf_matches_h3_helpers_polyfill_geojson(spark):
     assert len(got) > 0
 
 
-#: NOTE: AirportDetectionZoneGenerator.generate() itself is NOT exercised
-#: end-to-end here. Its ``self._circle_udf = udf(generate_circle_polygon,
-#: StringType())`` wraps a *named* top-level function from this module by
-#: reference; cloudpickle needs to re-import ``opdi.reference.h3_airport_zones``
-#: to reconstruct it on the worker, which fails under local pytest because
-#: this worktree's top-level ``opdi.py`` shadows the ``src/opdi`` package on
-#: a Spark worker's sys.path (workers don't inherit the driver's pytest
-#: `pythonpath = ["src"]` prepend). This is PRE-EXISTING and unrelated to h3
-#: v3->v4 or h3_pyspark -- confirmed by reproducing the same
-#: ModuleNotFoundError with ``generate_circle_polygon`` wrapped exactly as
-#: the class already did, on the pre-port code path. It only ever worked on
-#: the cluster, where `opdi` is pip-installed in the image (no shadowing
-#: opdi.py). Out of scope for this task; the unit tests above cover every
-#: piece ``generate()`` calls (`_polyfill_geojson_udf`, and the plain-Python
-#: ring math in `generate_circle_polygon`, which has no h3 dependency at all).
+#: NOTE: AirportDetectionZoneGenerator.generate() itself is not run end to end
+#: here; the unit tests above cover every piece it calls
+#: (`_polyfill_geojson_udf`, and the plain-Python ring math in
+#: `generate_circle_polygon`).
 
 
 # ---------------------------------------------------------------------------

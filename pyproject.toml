@@ -136,7 +136,6 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-# `opdi.py` at the repo root shadows the `src/opdi/` package whenever the root
-# ends up on sys.path -- which `python -m pytest` does implicitly by adding the
-# working directory. Prepending src/ resolves the clash for every invocation.
+# src/ first, so that the tests import the code of this checkout rather than
+# another installed copy of the package.
 pythonpath = ["src", "tests"]

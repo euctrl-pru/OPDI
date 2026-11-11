@@ -84,8 +84,11 @@ The commands need a machine (or container) that has:
    therefore run inside the JupyterLab pod that hosts the driver, reached
    through the command prefix (see below).
 4. **S3 credentials** in the environment, `AWS_ACCESS_KEY_ID` and
-   `AWS_SECRET_ACCESS_KEY`, or in a `.env` file in the directory the command
-   runs from (see `.env.template` in the OPDI repository).
+   `AWS_SECRET_ACCESS_KEY`, or in a `.env` file (see `.env.template` in the
+   OPDI repository). The `.env` file is looked for first in the directory the
+   command runs from, then, when OPDI runs from a checkout of the repository,
+   at the root of that checkout; the first one found is read. A variable that
+   is already set in the environment is never replaced by the file.
 5. **At least 16 GB of memory** for the driver, and only one OPDI command at
    a time on that machine. The driver's memory is sized from what the machine
    has free when the command starts.

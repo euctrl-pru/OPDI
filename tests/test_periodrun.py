@@ -916,7 +916,7 @@ def _fake_run_period(monkeypatch, script):
 def test_the_wrapper_script_leaves_warehouse_unset_by_default(monkeypatch):
     """With no --warehouse, run_period() receives the sentinel and uses the
     configured warehouse (OPDI_WAREHOUSE or the default)."""
-    import run_period as script
+    from opdi import periodrun as script
 
     captured = _fake_run_period(monkeypatch, script)
     script.main(["--start", "2026-06-01"])
@@ -927,7 +927,7 @@ def test_the_wrapper_script_passes_worldwide_through(monkeypatch):
     """Worldwide is the default: no flag and --worldwide both reach
     run_period() as worldwide=True, --europe as worldwide=False -- mirrors the
     cli.py coverage for `opdi run`."""
-    import run_period as script
+    from opdi import periodrun as script
 
     captured = _fake_run_period(monkeypatch, script)
     script.main(["--start", "2026-06-01"])
@@ -946,7 +946,7 @@ def test_the_wrapper_script_still_lets_an_explicit_warehouse_win(monkeypatch):
     """An operator who names a prefix explicitly must get exactly that
     prefix, in either coverage -- the sentinel only changes what an *omitted*
     --warehouse resolves to."""
-    import run_period as script
+    from opdi import periodrun as script
 
     captured = _fake_run_period(monkeypatch, script)
     script.main(["--start", "2026-06-01", "--warehouse", "s3a://eurocontrol/scratch"])
@@ -1060,3 +1060,11 @@ def test_publishing_is_dispatched_per_day():
 
     src = inspect.getsource(periodrun.run_day_step)
     assert 'step == "09"' in src and "publish_day" in src
+
+
+def test_the_root_script_runs_the_module_command_line():
+    """``python run_period.py`` and ``python -m opdi.periodrun`` are one command."""
+    import run_period as script
+    from opdi import periodrun
+
+    assert script.main is periodrun.main
