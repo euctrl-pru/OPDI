@@ -85,6 +85,18 @@ SHARED = ("opdi_h3_airspace_ref",)
 DERIVED = ("opdi_flight_events", "opdi_measurements")
 
 ARMS = ("off", "on")
+
+#: The day's events are one partition (``repartition("dof")``) and so one
+#: large multipart upload; the bucket took over the SDK's 60 s default to
+#: complete it on 2026-11-11 and Spark aborted an 81-minute job at the
+#: write. Longer client timeouts and more retries for this study's sessions.
+S3_PATIENCE = {
+    "spark.hadoop.fs.s3a.connection.request.timeout": "600000",
+    "spark.hadoop.fs.s3a.connection.timeout": "600000",
+    "spark.hadoop.fs.s3a.attempts.maximum": "10",
+    "spark.hadoop.fs.s3a.retry.limit": "10",
+    "spark.hadoop.fs.s3a.retry.interval": "2s",
+}
 STEPS = ("00c", "03", "04")
 NAVIGATION_FLAGS = ("emit_holding", "emit_point_merge", "emit_fir_crossings")
 
@@ -168,7 +180,8 @@ def study_session(app_name: str, executors: int = 4):
     from opdi.utils.spark_helpers import SparkSessionManager
 
     return SparkSessionManager.create_session(
-        app_name=app_name, config=build_config("on", executors), distributed=True)
+        app_name=app_name, config=build_config("on", executors), distributed=True,
+        extra_configs=S3_PATIENCE)
 
 
 def run(arm: str, day: date, executors: int, steps, input_source: str, timings_csv=None) -> None:
@@ -186,7 +199,8 @@ def run(arm: str, day: date, executors: int, steps, input_source: str, timings_c
 
     redirect(arm, input_source)
     spark = SparkSessionManager.create_session(
-        app_name=f"airspace events {arm} {day}", config=cfg, distributed=True)
+        app_name=f"airspace events {arm} {day}", config=cfg, distributed=True,
+        extra_configs=S3_PATIENCE)
     try:
         kwargs = {"log_dir": str(REPO / "OPDI_live" / "logs" / f"airspace-events-{arm}")}
         for step in steps:
