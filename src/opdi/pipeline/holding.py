@@ -94,34 +94,52 @@ def _window_flag(df: DataFrame, config: EventConfig, placement: str, name: str) 
     one only near its start; at mid-orbit each holds under 300 degrees and
     the sample would go unflagged. The centred window holds the whole orbit
     there, and the union of the three flags every sample of any circuit of
-    at least 330 degrees that fits in the window."""
-    span = int(config.holding_window_seconds)
-    base = Window.partitionBy("track_id", PIECE).orderBy("_ts")
-    frames = {
-        "trailing": (-span, 0),
-        "leading": (0, span),
-        "centred": (-(span // 2), span - span // 2),
-    }
-    w = base.rangeBetween(*frames[placement])
-    net = F.sum("d_hdg").over(w)
-    gross = F.sum(F.abs(col("d_hdg"))).over(w)
-    # Displacement between the first and the last *turning* sample in the
-    # window: the pattern's own extent, not the straight run into it.
-    t_lat = F.when(col("turning"), col("lat"))
-    t_lon = F.when(col("turning"), col("lon"))
-    disp = _haversine_nm(
-        F.first(t_lat, ignorenulls=True).over(w), F.first(t_lon, ignorenulls=True).over(w),
-        F.last(t_lat, ignorenulls=True).over(w), F.last(t_lon, ignorenulls=True).over(w),
-    )
-    path = F.max("cumulative_distance_nm").over(w) - F.min("cumulative_distance_nm").over(w)
-    alt_range = (F.max("_alt_ft").over(w) - F.min("_alt_ft").over(w))
+    at least 330 degrees that fits in the window.
+
+    **Cost.** Spark re-aggregates a sliding frame from scratch for every row,
+    so a 6 min frame of 5 s samples costs about seventy times a running sum,
+    per aggregate, per placement; that made step 04 three times slower on a
+    worldwide day. Every window quantity here is therefore a difference of
+    running sums (or a lag/lead of a position) between the sample and the one
+    ``k`` rows away, where ``k`` is the window in samples at the pipeline's
+    cadence (``holding_sample_period_seconds``). The elapsed time between the
+    two rows must still be close to the window, or a gap is inside it and the
+    window is not judged.
+    """
+    k = max(1, int(round(config.holding_window_seconds / config.holding_sample_period_seconds)))
+    ka, kb = {"trailing": (k, 0), "leading": (0, k), "centred": (k // 2, k - k // 2)}[placement]
+    w = Window.partitionBy("track_id", PIECE).orderBy("_ts")
+    run = w.rowsBetween(Window.unboundedPreceding, 0)
+    if "_cum_turn" not in df.columns:
+        df = (
+            df.withColumn("_cum_turn", F.sum(F.coalesce(col("d_hdg"), lit(0.0))).over(run))
+            .withColumn("_cum_gross", F.sum(F.coalesce(F.abs(col("d_hdg")), lit(0.0))).over(run))
+            .withColumn("_cum_alt", F.sum(F.coalesce(F.abs(col("_alt_ft") - F.lag("_alt_ft").over(w)), lit(0.0))).over(run))
+            .withColumn("_cum_turning", F.sum(col("turning").cast("int")).over(run))
+            .withColumn("_row", F.row_number().over(w))
+        )
+
+    def at(c, offset):
+        if offset == 0:
+            return col(c)
+        return F.lag(c, offset).over(w) if offset > 0 else F.lead(c, -offset).over(w)
+
+    start, stop = (lambda c: at(c, ka)), (lambda c: at(c, -kb))
+    elapsed = stop("_ts") - start("_ts")
+    span = float(config.holding_window_seconds)
+    net = stop("_cum_turn") - start("_cum_turn")
+    gross = stop("_cum_gross") - start("_cum_gross")
+    disp = _haversine_nm(start("lat"), start("lon"), stop("lat"), stop("lon"))
+    path = stop("cumulative_distance_nm") - start("cumulative_distance_nm")
+    alt_change = stop("_cum_alt") - start("_cum_alt")
     flag = (
-        (F.abs(net) >= config.holding_net_turn_min_deg)
+        elapsed.between(0.8 * span, 1.25 * span)
+        & (F.abs(net) >= config.holding_net_turn_min_deg)
         & (gross > 0)
         & (F.abs(net) / gross >= config.holding_same_sense_min_pct / 100.0)
         & (disp <= config.holding_max_displacement_nm)
         & (path >= config.holding_min_path_nm)
-        & (alt_range <= config.holding_max_altitude_range_ft)
+        & (alt_change <= config.holding_max_altitude_range_ft)
     )
     return df.withColumn(name, F.coalesce(flag, lit(False)))
 
@@ -203,9 +221,14 @@ def calculate_holding_events(
     df = _window_flag(df, config, "trailing", "_hold_bwd")
     df = _window_flag(df, config, "leading", "_hold_fwd")
     df = _window_flag(df, config, "centred", "_hold_mid")
+    # Speed from the last sample that had one: cleaning blanks velocity
+    # together with heading on a repeated broadcast, and a NULL speed must
+    # not punch a hole in an episode.
+    known = Window.partitionBy("track_id", PIECE).orderBy("_ts").rowsBetween(Window.unboundedPreceding, 0)
+    speed_kt = F.last("velocity", ignorenulls=True).over(known) * KT_PER_MS
     gates = (
         ((col("_alt_ft") - col("_elev_ft")) >= config.holding_min_height_ft)
-        & ((col("velocity") * KT_PER_MS) >= config.holding_min_speed_kt)
+        & (speed_kt >= config.holding_min_speed_kt)
     )
     df = df.withColumn(
         "_in_hold",

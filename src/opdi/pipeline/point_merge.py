@@ -61,6 +61,13 @@ def _candidates(geo: DataFrame, pms_ref: DataFrame, config: EventConfig) -> Data
         .withColumn("d_nm", _haversine_nm(col("lat"), col("lon"), col("_mp_lat"), col("_mp_lon")))
         .withColumn("brg_deg", _bearing_deg(col("lat"), col("lon"), col("_mp_lat"), col("_mp_lon")))
     )
+    # Cleaning blanks heading, speed and vertical rate together when none of
+    # them changed between broadcasts: exactly what happens on a straight
+    # direct. Read the last heading the track had, within the piece.
+    if PIECE not in df.columns:
+        df = df.withColumn(PIECE, lit(0))
+    known = Window.partitionBy("track_id", PIECE).orderBy("_ts").rowsBetween(Window.unboundedPreceding, 0)
+    df = df.withColumn("heading", F.last("heading", ignorenulls=True).over(known))
     return df.filter(
         (col("d_nm") <= config.pms_candidate_radius_nm)
         & (col("_alt_ft") <= config.pms_candidate_max_altitude_ft)
@@ -125,10 +132,16 @@ def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
         F.max_by("_min_d_ahead", "_ts").alias("min_d_ahead"),
     )
     legs = legs.withColumn("duration_s", col("end_ts") - col("start_ts"))
+    # A leg counts when the track then went to the merge point: within the
+    # lookahead it came inside pms_merge_point_radius_nm, from a leg flown at
+    # least twice that far out. Whether it flew a straight, aligned direct is
+    # kept as information (``direct_aligned``): on the runway 10 system at
+    # Dublin the turn-in is a curve to the fix, not a straight line, and a
+    # strict alignment gate lost every one of those legs.
     legs = legs.filter(
         (col("duration_s") >= config.pms_leg_min_duration_seconds)
-        & col("direct_ok")
         & (col("min_d_ahead") <= config.pms_merge_point_radius_nm)
+        & (col("direct_to_distance_nm") >= 2 * config.pms_merge_point_radius_nm)
     )
     # Two merge points of one airport can sit within a mile of each other
     # (Dublin's 28L and 28R points): a leg that passes for both is kept once,
@@ -179,6 +192,7 @@ def calculate_point_merge_events(
         col("duration_s"),
         F.round(col("end_dist_nm") - col("start_dist_nm"), 2).alias("distance_nm"),
         F.round(col("direct_to_distance_nm"), 2).alias("direct_to_distance_nm"),
+        col("direct_ok").alias("direct_aligned"),
     ))
     legs = legs.withColumn("info", leg_info)
     out = _event(legs, "start", "pms-leg-entry").unionByName(_event(legs, "end", "pms-leg-exit"))

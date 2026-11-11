@@ -1336,6 +1336,15 @@ class EventConfig:
     turn rates of 1 to 2 deg/s), and the open label set this rule is scored
     against uses 6 min windows."""
 
+    holding_sample_period_seconds: float = 5.0
+    """The cadence the window is counted in: a window of
+    ``holding_window_seconds`` is the sample ``window / period`` rows away.
+    Spark re-aggregates a time-bounded sliding frame from scratch for every
+    row, which made step 04 three times slower worldwide; differences of
+    running sums between two rows cost a single pass. OSN state vectors are
+    thinned to one per 5 s before step 02. A window whose two rows are not
+    0.8 to 1.25 windows apart in time (a gap inside it) is not judged."""
+
     holding_max_sample_gap_seconds: float = 60.0
     """A heading difference across a longer silence is not a turn: it is
     nulled, so a gap does not read as a half circle."""
@@ -1368,9 +1377,10 @@ class EventConfig:
     """Distance flown in the window: 6 min at 150 kt; rejects slow traffic."""
 
     holding_max_altitude_range_ft: float = 2500.0
-    """Altitude spread allowed inside one window: two stack steps of 1,000 ft
-    (Melo's 1,000 ft was start-to-end of a whole hold and is too tight for a
-    descending stack)."""
+    """Total altitude change (sum of the absolute changes between samples)
+    allowed inside one window: two stack steps of 1,000 ft (Melo's 1,000 ft
+    was start-to-end of a whole hold and is too tight for a descending
+    stack). A climb-out or a descent through the window fails it."""
 
     holding_min_height_ft: float = 2500.0
     """Height above the flight's aerodrome below which nothing is a hold:
@@ -1444,20 +1454,22 @@ class EventConfig:
     """Shortest leg run kept (``traffic``'s 90 s)."""
 
     pms_direct_lookahead_seconds: float = 600.0
-    """A leg counts only if the direct to the merge point follows within this
+    """A leg counts only if the track reaches the merge point within this
     (``traffic`` looks 10 min back from the direct)."""
 
     pms_direct_align_deg: float = 5.0
     """Track within this of the bearing to the merge point is "aligned"
     (``traffic`` uses 1 degree at 1 Hz; OPDI samples every 5 s with integer
-    headings)."""
+    headings). Reported as ``info.direct_aligned``, not a gate: Dublin's
+    runway 10 turn-in is a curve to the fix and a strict gate lost it."""
 
     pms_direct_min_duration_seconds: float = 60.0
-    """Shortest aligned run that counts as the direct."""
+    """Shortest aligned run that sets ``direct_aligned``."""
 
     pms_merge_point_radius_nm: float = 3.0
-    """The track must come within this of the merge point for the direct to
-    count, and ``pms-merge-point`` is emitted at the closest approach."""
+    """The track must come within this of the merge point, from a leg at
+    least twice as far out, for the leg to count; ``pms-merge-point`` is
+    emitted at the closest approach."""
 
     # ----- FIR crossings ----------------------------------------------------
     emit_fir_crossings: bool = True

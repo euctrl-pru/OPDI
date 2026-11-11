@@ -355,6 +355,25 @@ def stub_storage(spark):
         "h3_id string, apt_icao string, strip_id string, "
         "le_ident string, he_ident string, zone string",
     )
+    # The FIR layer of step 00c: two volumes, cell A below 20,000 ft (the
+    # climb and the descent) and cell B at cruise, so the shipped run must
+    # emit a crossing each way. The families that did not exist before 2026-11
+    # are off under every reconstructed configuration, which the ladder's base
+    # pins, so the older runs are unaffected.
+    import h3
+    from opdi.reference.h3_airspaces import AIRSPACE_SCHEMA
+
+    cell_a = h3.latlng_to_cell(50.9, 4.48, 7)
+    cell_b = h3.latlng_to_cell(50.0, 8.5, 7)
+    fir = spark.createDataFrame(
+        [("FIR", code, code, "524", "2024-11-28", "2024-12-26", 0, 999, 1e4, cell, 7)
+         for code, cell in (("AAAA", cell_a), ("BBBB", cell_b))],
+        AIRSPACE_SCHEMA,
+    )
+    tracks = _flight(spark).withColumn(
+        "h3_res_7",
+        F.when(F.col("baro_altitude_c") * 3.28084 >= 20000.0, F.lit(cell_b)).otherwise(F.lit(cell_a)),
+    )
     return _StubStorage(
         {
             "opdi_flight_list": flight_list,
@@ -362,8 +381,9 @@ def stub_storage(spark):
             "h3_runway_zones": runway_grid,
             "oa_airports": airports,
             "oa_runways": runways,
+            "opdi_h3_airspace_ref": fir,
         },
-        tracks=_flight(spark),
+        tracks=tracks,
     )
 
 
@@ -787,137 +807,69 @@ def test_force_recomputes_every_family(spark, stub_storage, monkeypatch):
         assert f'_redo or _batch not in self._load_processed("{family}")' in src, family
 
 
-# --- per-family versions and info-backed measurements ---------------------------
 
 
-def _run_uncached(spark, stub_storage, events: EventConfig):
-    """``_run`` without the memo, collecting only the rows the family tests
-    read: a whole second pass through step 04 is at the local driver's heap
-    limit, so nothing more than the asserted rows is materialised."""
-    config = OPDIConfig()
-    config.events = events
-    with tempfile.TemporaryDirectory() as log_dir:
-        proc = FlightEventProcessor(spark, config, log_dir=log_dir)
-        proc.storage = stub_storage
-        proc._etl_flight_events_and_measures(
-            stub_storage.tracks, batch_id="b_", month=MONTH
-        )
-    events_out = stub_storage.written["opdi_flight_events"]
-    measures_out = stub_storage.written["opdi_measurements"]
-    out = (
-        events_out.filter(F.col("type").isin("first_seen", "level-start", "xing-fir")).collect(),
-        measures_out.filter(F.col("type").startswith("Test")).collect(),
-    )
-    spark.catalog.clearCache()
-    return out
+# --- per-family versions, info-backed measurements, the navigation group ------
 
 
-_FAMILY_RUN = {}
-
-
-class _WithAirspace:
-    """The session stub plus a two-volume FIR reference and tracks that carry
-    ``h3_res_7``: below 20,000 ft the flight is in cell A (volume AAAA), at
-    cruise in cell B (volume BBBB), so the step must emit two ``xing-fir``."""
-
-    def __init__(self, spark, stub):
-        import h3
-        from opdi.reference.h3_airspaces import AIRSPACE_SCHEMA
-
-        self._stub = stub
-        cell_a = h3.latlng_to_cell(50.9, 4.48, 7)
-        cell_b = h3.latlng_to_cell(50.0, 8.5, 7)
-        self.tracks = stub.tracks.withColumn(
-            "h3_res_7",
-            F.when(F.col("baro_altitude_c") * 3.28084 >= 20000.0, F.lit(cell_b)).otherwise(F.lit(cell_a)),
-        )
-        rows = [("FIR", code, code, "524", "2024-11-28", "2024-12-26", 0, 999, 1e4, cell, 7)
-                for code, cell in (("AAAA", cell_a), ("BBBB", cell_b))]
-        self._fir = spark.createDataFrame(rows, AIRSPACE_SCHEMA)
-        self.written = {}
-
-    def table_exists(self, name):
-        return name == "opdi_h3_airspace_ref" or self._stub.table_exists(name)
-
-    def read_table(self, name):
-        return self._fir if name == "opdi_h3_airspace_ref" else self._stub.read_table(name)
-
-    def write_table(self, df, name, mode="append", partition_by=None, partition_values=None):
-        self.written[name] = df
-
-
-_FAMILY_RUN = {}
-
-
-def _family_run(spark, stub_storage, monkeypatch):
-    """One full step with a stubbed family and the FIR reference, shared by
-    the tests below: a second full pass exhausts the local driver heap (see
-    ``_run``)."""
-    if "out" not in _FAMILY_RUN:
-        import opdi.pipeline.events as ev
-
-        real = ev.calculate_firstseen_lastseen_events
-
-        def fake(sdf_input):
-            # The real detector's rows, with the family's own version and an
-            # info field a measurement can be read from.
-            return (
-                real(sdf_input)
-                .withColumn("info", F.lit('{"duration_s": 42.0}'))
-                .withColumn("version", F.lit("fam_v9.9.9"))
-            )
-
-        monkeypatch.setattr(ev, "calculate_firstseen_lastseen_events", fake)
-        monkeypatch.setattr(
-            ev, "EXTRA_MEASURES",
-            [("first_seen", "duration_s", "Test duration (s)", "fam_v9.9.9"),
-             ("first_seen", "absent_field", "Test absent", "fam_v9.9.9")],
-        )
-        _FAMILY_RUN["out"] = _run_uncached(spark, _WithAirspace(spark, stub_storage), EventConfig())
-    return _FAMILY_RUN["out"]
-
-
-def test_a_detector_version_survives_stamping(spark, stub_storage, monkeypatch):
-    events, _ = _family_run(spark, stub_storage, monkeypatch)
-    versions = {r["type"]: r["version"] for r in events}
-    assert versions["first_seen"] == "fam_v9.9.9"
+def test_a_family_s_own_version_survives_stamping(spark, stub_storage):
+    """A detector that stamps its own ``version`` keeps it; the published
+    types keep ``events_version``."""
+    out = _run(spark, stub_storage, EventConfig())
+    versions = {r["type"]: r["version"] for r in out.collect()}
+    assert versions["xing-fir"] == "fir_v0.1.0"
     assert versions["level-start"] == EventConfig().events_version
 
 
-def test_an_info_field_listed_in_extra_measures_becomes_a_measurement(
-    spark, stub_storage, monkeypatch
-):
-    events, measures = _family_run(spark, stub_storage, monkeypatch)
-    event_id = next(r["id"] for r in events if r["type"] == "first_seen")
-    rows = [r for r in measures if r["type"] == "Test duration (s)"]
-    assert len(rows) == 2          # first_seen and last_seen both carry the field
-    row = next(r for r in rows if r["milestone_id"] == event_id)
-    assert row["value"] == 42.0
-    assert row["version"] == "fam_v9.9.9"
-    assert row["id"] == event_id + "_m0"
-    assert str(row["dof"]) == "2024-06-01"
+def test_a_full_run_emits_the_fir_family(spark, stub_storage):
+    out = _run(spark, stub_storage, EventConfig())
+    xings = out.filter(F.col("type") == "xing-fir").collect()
+    assert len(xings) == 2
+    pairs = sorted((json.loads(r["info"])["fir_from"], json.loads(r["info"])["fir_to"]) for r in xings)
+    assert pairs == [("AAAA", "BBBB"), ("BBBB", "AAAA")]
 
 
-def test_an_event_without_the_listed_field_gets_no_extra_row(
-    spark, stub_storage, monkeypatch
-):
-    _, measures = _family_run(spark, stub_storage, monkeypatch)
-    assert not [r for r in measures if r["type"] == "Test absent"]
+def test_families_off_emit_none_of_the_new_types(spark, stub_storage):
+    """The ladder's base turns the three families off; its run has none of
+    their types."""
+    types = _types(_run(spark, stub_storage, EventConfig(**event_bench.V4_BASE)))
+    assert not {t for t in types if t.startswith(("holding-", "pms-", "xing-fir"))}
+
+
+def test_an_info_field_listed_in_extra_measures_becomes_a_measurement(spark, monkeypatch):
+    import opdi.pipeline.events as ev
+
+    monkeypatch.setattr(
+        ev, "EXTRA_MEASURES",
+        [("holding-end", "duration_s", "Holding duration (s)", "holding_v9"),
+         ("holding-end", "absent_field", "Test absent", "holding_v9")],
+    )
+    events = spark.createDataFrame(
+        [("e1", "holding-end", '{"duration_s": 42.0}', dt.date(2024, 6, 1)),
+         ("e2", "holding-start", '{"duration_s": 42.0}', dt.date(2024, 6, 1)),
+         ("e3", "holding-end", '{"other": 1}', dt.date(2024, 6, 1))],
+        "id_tmp string, type string, info string, dof date",
+    )
+    rows = ev.extra_measurement_rows(events).collect()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["id"], row["milestone_id"], row["type"], row["value"], row["version"], str(row["dof"])) == (
+        "e1_m0", "e1", "Holding duration (s)", 42.0, "holding_v9", "2024-06-01")
+
+
+def test_no_extra_measures_means_no_frame(spark, monkeypatch):
+    import opdi.pipeline.events as ev
+
+    monkeypatch.setattr(ev, "EXTRA_MEASURES", [])
+    events = spark.createDataFrame([("e1", "x", "{}", dt.date(2024, 6, 1))],
+                                   "id_tmp string, type string, info string, dof date")
+    assert ev.extra_measurement_rows(events) is None
 
 
 def test_track_columns_include_h3_res_7():
     from opdi.pipeline.events import TRACK_COLUMNS
 
     assert "h3_res_7" in TRACK_COLUMNS
-
-
-def test_a_full_run_emits_the_fir_family(spark, stub_storage, monkeypatch):
-    events, _ = _family_run(spark, stub_storage, monkeypatch)
-    xings = [r for r in events if r["type"] == "xing-fir"]
-    assert len(xings) == 2
-    assert {r["version"] for r in xings} == {"fir_v0.1.0"}
-    pairs = [(json.loads(r["info"])["fir_from"], json.loads(r["info"])["fir_to"]) for r in xings]
-    assert sorted(pairs) == [("AAAA", "BBBB"), ("BBBB", "AAAA")]
 
 
 def test_the_navigation_group_is_tracked_in_the_progress_log(spark, tmp_path):
