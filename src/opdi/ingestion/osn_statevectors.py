@@ -396,7 +396,7 @@ class StateVectorIngestion:
 
         # The row count is deliberately not printed here.
         #
-        # `df_cleaned.count()` after the write is a second action on the same
+        # A count after the write is a second action on the same
         # plan, so the whole ingestion -- the S3 read and every transform --
         # ran twice, to produce a number for a log line. Nothing cached it in
         # between.
@@ -404,7 +404,7 @@ class StateVectorIngestion:
         # A diagnostic that costs as much as the step it describes has to be
         # asked for. `OPDI_REPORT_INGEST_ROWS=1` restores it.
         if os.environ.get("OPDI_REPORT_INGEST_ROWS"):
-            print(f"Written {df_cleaned.count()} records to osn_statevectors_v2")
+            print(f"Written {df_partitioned.count()} records to osn_statevectors_v2")
         else:
             print("Written statevectors to osn_statevectors_v2 "
                   "(set OPDI_REPORT_INGEST_ROWS=1 for a row count)")

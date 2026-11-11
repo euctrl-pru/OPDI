@@ -13,6 +13,7 @@ import re
 import traceback
 from typing import Dict, List, Optional, Set, Tuple
 
+import geopandas as gpd
 import h3
 import osmnx as ox
 import pandas as pd
