@@ -7,7 +7,9 @@ For each day, this step writes two files into the published folder:
 * ``flight_events/flight_events_YYYYMMDD.parquet``: one row per event of those
   flights. Each row carries the event's measurements as columns and the columns
   of its flight. A flight keeps all its events in the file of the day it
-  started, also the events that happen after midnight.
+  started, also the events that happen after midnight. An event whose flight is
+  not in any flight list is published in the file of the date stored on the
+  event, with empty (NULL) flight columns.
 
 It also keeps two small files up to date: a monthly flight index
 (``index/flight_index_YYYYMM.parquet``), which tells which file holds a flight,
@@ -23,8 +25,12 @@ How the files are written, so that readers can find rows quickly:
   can skip as a whole) holds about 100,000 rows, and its minimum and maximum
   values let a reader skip the blocks it does not need.
 * Bloom filters (a compact test that tells a reader a value is certainly not in
-  a block) are stored for the flight identifier, the aircraft address, the call
-  sign, the two airports and, in the events file, the event type.
+  a block) are stored for the three identifiers a reader looks up one value
+  of: the flight identifier, the aircraft address and the call sign. Columns
+  with few distinct values, such as the airports and the event type, are
+  stored with a dictionary (a list of the distinct values, which each row then
+  refers to), and the dictionary already tells a reader which values a block
+  holds.
 * A file is first written under a temporary name and then renamed, so a reader
   never sees a half-written file. Publishing a day again replaces its files,
   its catalogue row and its index rows.
@@ -63,8 +69,11 @@ _ROW_GROUP_MAX_BYTES = 1024 * 1024 * 1024
 
 FLIGHT_LIST_SORT = ("adep", "first_seen")
 FLIGHT_EVENTS_SORT = ("flight_id", "event_time")
-FLIGHT_LIST_BLOOM = ("flight_id", "icao24", "flt_id", "adep", "ades")
-FLIGHT_EVENTS_BLOOM = FLIGHT_LIST_BLOOM + ("type",)
+#: Columns that get a Bloom filter. Only identifiers with many distinct
+#: values: for them a dictionary does not help a reader, and a Bloom filter
+#: does.
+FLIGHT_LIST_BLOOM = ("flight_id", "icao24", "flt_id")
+FLIGHT_EVENTS_BLOOM = FLIGHT_LIST_BLOOM
 
 
 def _ddl(columns: Iterable[Column]) -> str:
@@ -162,8 +171,10 @@ def build_flight_events(
 
     Returns:
         The rows with the columns of :data:`~opdi.output.schema.FLIGHT_EVENTS`.
-        The ``dof`` column is the day of the event's flight as recorded on the
-        event, which is the day of the file it is published in.
+        The ``dof`` column is the date of the event's flight in the flight
+        list, which is the day of the file it is published in. For an event
+        whose flight is not in ``flight_list`` it is the date stored on the
+        event.
     """
     measured = measurements.groupBy(F.col("milestone_id").alias("_milestone_id")).agg(
         *[
@@ -176,7 +187,8 @@ def build_flight_events(
 
     flights = (
         build_flight_list(flight_list)
-        .drop("dof", "release")
+        .drop("release")
+        .withColumnRenamed("dof", "_flight_dof")
         .withColumnRenamed("version", "flight_version")
         .withColumnRenamed("flight_id", "_flight_id")
         .dropDuplicates(["_flight_id"])
@@ -189,12 +201,13 @@ def build_flight_events(
             for c in EVENT_COLUMNS
             if c.name != "h3_res_5"
         ],
-        F.col("dof").alias("dof"),
+        F.col("dof").alias("_event_dof"),
     ).withColumn("h3_res_5", _h3_res_5())
 
     joined = (
         event_part.join(measured, F.col("event_id") == F.col("_milestone_id"), "left")
         .join(flights, F.col("flight_id") == F.col("_flight_id"), "left")
+        .withColumn("dof", F.coalesce(F.col("_flight_dof"), F.col("_event_dof")))
         .withColumn("release", F.lit(RELEASE))
     )
     return joined.select(*[F.col(c.name).cast(c.dtype).alias(c.name) for c in FLIGHT_EVENTS])
@@ -236,7 +249,8 @@ def write_single_file(
         df: The rows to write.
         path: The final file path.
         sort_by: Columns to sort the rows by.
-        bloom_filters: Columns to store a Bloom filter for.
+        bloom_filters: Columns to store a Bloom filter for. These columns are
+            stored without a dictionary; every other column keeps one.
         row_group_rows: Number of rows per row group.
 
     Raises:
@@ -261,8 +275,11 @@ def write_single_file(
     for c in bloom_filters:
         # The Parquet writer leaves out the Bloom filter of a column that is
         # stored with a dictionary, so the dictionary is turned off for these
-        # columns to make sure every row group has its filter.
+        # columns to make sure every row group has its filter. The expected
+        # number of distinct values sizes the filter: a row group cannot hold
+        # more distinct values than rows.
         writer = writer.option(f"parquet.bloom.filter.enabled#{c}", "true")
+        writer = writer.option(f"parquet.bloom.filter.expected.ndv#{c}", str(int(row_group_rows)))
         writer = writer.option(f"parquet.enable.dictionary#{c}", "false")
     writer.parquet(tmp)
 
@@ -378,6 +395,44 @@ def _day_rows(storage, table: str, column: str, first: dt.date, last: dt.date) -
     return df.filter(F.col(column).between(F.lit(first), F.lit(last)))
 
 
+def _day_events(storage, day: dt.date):
+    """The working events and measurements published in ``day``'s file.
+
+    The working tables store each event under a date of their own, which can
+    be one day earlier or later than the date of its flight in the flight
+    list. The file of ``day`` therefore takes, from the three days around it,
+    every event whose flight is in ``day``'s flight list, plus the events
+    stored under ``day`` whose flight is in none of the three days' flight
+    lists.
+
+    Returns:
+        The events, their measurements and the flight-list rows of the three
+        days.
+    """
+    one_day = dt.timedelta(days=1)
+    first, last = day - one_day, day + one_day
+    nearby_flights = _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", first, last)
+    events = _day_rows(storage, EVENTS_TABLE, "dof", first, last)
+    measurements = _day_rows(storage, MEASUREMENTS_TABLE, "dof", first, last)
+
+    flight_days = nearby_flights.select(
+        F.col("ID").alias("_flight_id"), F.col("DOF").alias("_flight_dof")
+    ).dropDuplicates(["_flight_id"])
+    chosen = (
+        events.join(flight_days, F.col("flight_id") == F.col("_flight_id"), "left")
+        .filter(
+            (F.col("_flight_dof") == F.lit(day))
+            | (F.col("_flight_dof").isNull() & (F.col("dof") == F.lit(day)))
+        )
+        .drop("_flight_id", "_flight_dof")
+    )
+    chosen_ids = chosen.select(F.col("id").alias("_event_id")).distinct()
+    chosen_measurements = measurements.join(
+        chosen_ids, F.col("milestone_id") == F.col("_event_id"), "left_semi"
+    )
+    return chosen, chosen_measurements, nearby_flights
+
+
 def publish_day(
     spark: SparkSession,
     storage,
@@ -389,7 +444,8 @@ def publish_day(
     """Publish the flights that started on ``day``.
 
     Reads the day's rows of the working tables, writes the day's flight list
-    and flight events files, then rebuilds the month's flight index and
+    and flight events files (the events of exactly the flights in the flight
+    list file, see :func:`_day_events`), then rebuilds the month's flight index and
     replaces the day's catalogue row. Both files are written also when the day
     has no flights; they are then empty but have all their columns.
 
@@ -408,13 +464,8 @@ def publish_day(
         ``flight_list_version``, ``event_versions`` and ``index_flights`` (the
         number of flights in the month's index).
     """
-    one_day = dt.timedelta(days=1)
     flight_rows = _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", day, day)
-    event_rows = _day_rows(storage, EVENTS_TABLE, "dof", day, day)
-    measurement_rows = _day_rows(storage, MEASUREMENTS_TABLE, "dof", day, day)
-    # The flight of an event is looked up in a three-day window, because the
-    # date recorded on the flight and on its events can differ by a day.
-    nearby_flights = _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", day - one_day, day + one_day)
+    event_rows, measurement_rows, nearby_flights = _day_events(storage, day)
 
     write_single_file(
         build_flight_list(flight_rows), layout.flight_list(day),

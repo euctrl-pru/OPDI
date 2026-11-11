@@ -7,10 +7,12 @@ import pyarrow.parquet as pq
 import pytest
 
 from opdi.output.published import (
+    FLIGHT_EVENTS_BLOOM,
     PublishedLayout,
     build_flight_events,
     build_flight_list,
     publish_day,
+    write_single_file,
 )
 from opdi.output.schema import (
     CATALOGUE,
@@ -269,14 +271,125 @@ def test_events_file_is_sorted_with_row_groups_and_bloom_filters(spark, tables, 
         bounds.append((stats.min, stats.max))
     flat = [v for pair in bounds for v in pair]
     assert flat == sorted(flat)
-    for col in ("flight_id", "icao24", "flt_id", "adep", "ades", "type"):
+    for col in ("flight_id", "icao24", "flt_id"):
         chunk = meta.row_group(0).column(names.index(col))
         assert chunk.bloom_filter_offset is not None, col
+    for col in ("adep", "ades", "type"):
+        chunk = meta.row_group(0).column(names.index(col))
+        assert chunk.bloom_filter_offset is None, col
     assert meta.row_group(0).column(fid).compression == "ZSTD"
 
     fl_meta = pq.ParquetFile(layout.flight_list(DAY)).metadata
     fl_names = [fl_meta.schema.column(i).name for i in range(fl_meta.num_columns)]
-    for col in ("flight_id", "icao24", "flt_id", "adep", "ades"):
+    for col in ("flight_id", "icao24", "flt_id"):
         assert fl_meta.row_group(0).column(fl_names.index(col)).bloom_filter_offset is not None
+    for col in ("adep", "ades"):
+        assert fl_meta.row_group(0).column(fl_names.index(col)).bloom_filter_offset is None
     adeps = pq.read_table(layout.flight_list(DAY)).column("adep").to_pylist()
     assert adeps == sorted(adeps)
+
+
+# --- which day's file an event goes to --------------------------------------
+
+def _boundary_tables(spark):
+    """Working tables where the date stored on some events differs from the
+    date of their flight.
+
+    * trk_a starts on DAY at 23:50; the working events table stored its events
+      under NEXT. They belong to DAY's file.
+    * trk_b starts on NEXT; one of its events was stored under DAY. It belongs
+      to NEXT's file.
+    * orphan_1 and orphan_2 have no flight-list row at all. They stay in the
+      file of the date stored on them.
+    """
+    flight_cols = [c for c in FLIGHT_LIST if c.name != "release"]
+    ddl = ", ".join(f"`{c.source}` {c.dtype}" for c in flight_cols)
+    flights = [
+        _flight("trk_a", DAY, _ts(DAY, 23, 50), "LFPG"),
+        _flight("trk_b", NEXT, _ts(NEXT, 0, 5), "EDDF"),
+    ]
+    flight_list = spark.createDataFrame(
+        [tuple(r[c.source] for c in flight_cols) for r in flights], ddl
+    )
+    events = spark.createDataFrame(
+        [
+            ("a1", "trk_a", "ATOT", _ts(NEXT, 0, 2), 2.5, 49.0, 0.0, NEXT),
+            ("a2", "trk_a", "ALDT", _ts(NEXT, 1, 30), 4.7, 52.3, 0.0, NEXT),
+            ("b1", "trk_b", "first_seen", _ts(NEXT, 0, 5), 8.5, 50.0, 0.0, DAY),
+            ("b2", "trk_b", "ATOT", _ts(NEXT, 0, 15), 8.5, 50.0, 0.0, NEXT),
+            ("o1", "orphan_1", "level-start", _ts(DAY, 12, 0), 5.0, 50.0, 30000.0, DAY),
+            ("o2", "orphan_2", "level-start", _ts(NEXT, 12, 0), 5.0, 50.0, 30000.0, NEXT),
+        ],
+        "id string, flight_id string, type string, event_time timestamp, "
+        "longitude double, latitude double, altitude double, dof date",
+    ).selectExpr(
+        "id", "flight_id", "type", "event_time", "longitude", "latitude", "altitude",
+        "'OSN' as source", "'events_v0.3.0' as version", "'{}' as info", "dof",
+    )
+    measurements = spark.createDataFrame(
+        [
+            ("a1_d", "a1", "Distance flown (NM)", 3.0, "distance_v0.0.3", NEXT),
+            ("b1_d", "b1", "Distance flown (NM)", 0.0, "distance_v0.0.3", DAY),
+            ("o1_d", "o1", "Distance flown (NM)", 99.0, "distance_v0.0.3", DAY),
+        ],
+        "id string, milestone_id string, type string, value double, version string, "
+        "dof date",
+    )
+    return {
+        "opdi_flight_list": flight_list,
+        "opdi_flight_events": events,
+        "opdi_measurements": measurements,
+    }
+
+
+def test_events_follow_their_flight_into_its_day(spark, tmp_path):
+    layout = PublishedLayout(str(tmp_path / "published"))
+    storage = _Storage(_boundary_tables(spark))
+    publish_day(spark, storage, DAY, layout, commit="abc")
+    publish_day(spark, storage, NEXT, layout, commit="abc")
+
+    day = {r["event_id"]: r for r in pq.read_table(layout.flight_events(DAY)).to_pylist()}
+    nxt = {r["event_id"]: r for r in pq.read_table(layout.flight_events(NEXT)).to_pylist()}
+    assert sorted(day) == ["a1", "a2", "o1"]
+    assert sorted(nxt) == ["b1", "b2", "o2"]
+
+    # The flight's own columns, and its date, are on the events stored under
+    # the other day.
+    assert day["a1"]["dof"] == DAY and day["a1"]["adep"] == "LFPG"
+    assert day["a1"]["distance_flown_nm"] == 3.0
+    assert nxt["b1"]["dof"] == NEXT and nxt["b1"]["adep"] == "EDDF"
+    assert nxt["b1"]["distance_flown_nm"] == 0.0
+
+    # An event without a flight-list row keeps its own date and has NULL
+    # flight columns.
+    assert day["o1"]["dof"] == DAY and day["o1"]["adep"] is None
+    assert day["o1"]["distance_flown_nm"] == 99.0
+    assert nxt["o2"]["dof"] == NEXT and nxt["o2"]["flight_version"] is None
+
+    # A flight and its events are in the same day's files.
+    for d in (DAY, NEXT):
+        flights = set(pq.read_table(layout.flight_list(d)).column("flight_id").to_pylist())
+        events = pq.read_table(layout.flight_events(d)).to_pylist()
+        assert {e["flight_id"] for e in events if e["adep"] is not None} <= flights
+
+
+def test_identifiers_get_bloom_filters_and_other_columns_keep_a_dictionary(spark, tmp_path):
+    rows = [(f"trk_{i:04d}", f"{i:06x}", f"TST{i}", "EHAM" if i % 2 else "LFPG", "ATOT")
+            for i in range(2000)]
+    df = spark.createDataFrame(rows, "flight_id string, icao24 string, flt_id string, "
+                                     "adep string, type string")
+    path = str(tmp_path / "x.parquet")
+    write_single_file(df, path, sort_by=("flight_id",), bloom_filters=FLIGHT_EVENTS_BLOOM)
+    meta = pq.ParquetFile(path).metadata
+    names = [meta.schema.column(i).name for i in range(meta.num_columns)]
+    group = meta.row_group(0)
+    for col in ("flight_id", "icao24", "flt_id"):
+        chunk = group.column(names.index(col))
+        assert chunk.bloom_filter_offset is not None, col
+        assert not chunk.has_dictionary_page, col
+        # Sized for the rows of a row group, not the 1 MB maximum.
+        assert chunk.bloom_filter_length < 512 * 1024, col
+    for col in ("adep", "type"):
+        chunk = group.column(names.index(col))
+        assert chunk.bloom_filter_offset is None, col
+        assert chunk.has_dictionary_page, col
