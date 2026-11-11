@@ -1,8 +1,7 @@
 """
 Render the aerodrome detection zones to a kepler.gl page.
 
-Thin front end over ``opdi.reference.zone_viewer``; all behaviour lives in the
-package.
+Thin front end over ``tools/zone_viewer.py``, which holds the page builder.
 
     python benchmarks/view_zones.py --zones data/zones_110nm --out data/zones.html
 """
@@ -12,8 +11,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from opdi.reference.zone_viewer import DEFAULT_AERODROMES, DEFAULT_MAX_RADIUS_NM, build
+from tools.zone_viewer import DEFAULT_AERODROMES, DEFAULT_MAX_RADIUS_NM, build
 
 
 def main() -> None:
