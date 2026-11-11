@@ -27,7 +27,7 @@ NEW_MEASURES = ("Holding ", "Point merge ")
 def main(argv: Optional[List[str]] = None) -> int:
     from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
-    from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX
+    from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX, study_session
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--day", required=True)
@@ -37,7 +37,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     day = pd.Timestamp(args.day).date()
     inputs = A10_ARM if args.input == "a10" else INPUT_WAREHOUSE
-    spark = SparkSession.builder.appName("airspace counts").getOrCreate()
+    spark = study_session("airspace counts")
     dof = lambda df: df.filter(F.col("dof").cast("date") == F.lit(day).cast("date"))  # noqa: E731
     ev = dof(spark.read.parquet(f"{PREFIX}/on/opdi_flight_events"))
     ms = dof(spark.read.parquet(f"{PREFIX}/on/opdi_measurements"))

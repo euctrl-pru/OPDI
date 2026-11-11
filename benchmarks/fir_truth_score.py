@@ -79,7 +79,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     import provenance
     from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
-    from run_airspace_events_day import INPUT_WAREHOUSE, PREFIX
+    from run_airspace_events_day import INPUT_WAREHOUSE, PREFIX, study_session
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--day", required=True)
@@ -89,7 +89,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     argv = list(sys.argv[1:] if argv is None else argv)
     day = pd.Timestamp(args.day).date()
-    spark = SparkSession.builder.appName("fir truth").getOrCreate()
+    spark = study_session("fir truth")
     events = spark.read.parquet(f"{PREFIX}/on/opdi_flight_events").filter(
         (F.col("dof").cast("date") == F.lit(day).cast("date")) & (F.col("type") == "xing-fir"))
     ids = spark.read.parquet(f"{INPUT_WAREHOUSE}/osn_tracks_clean").filter(

@@ -113,7 +113,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     from opdi.pipeline.fir import attach_fir
     from opdi.pipeline.holes import add_piece
     from opdi.reference.h3_airspaces import DEFAULT_FIR_URLS, dissolve_volumes
-    from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX
+    from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX, study_session
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--day", required=True)
@@ -127,7 +127,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out = Path(args.results_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    spark = SparkSession.builder.appName("fir consistency").getOrCreate()
+    spark = study_session("fir consistency")
     events = spark.read.parquet(f"{PREFIX}/on/opdi_flight_events").filter(
         (F.col("dof").cast("date") == F.lit(day).cast("date")) & (F.col("type") == "xing-fir"))
     events.cache()

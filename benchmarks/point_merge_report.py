@@ -118,7 +118,7 @@ def plot_arrivals(spark, tracks_path: str, flight_list: pd.DataFrame, events: pd
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX
+    from run_airspace_events_day import A10_ARM, INPUT_WAREHOUSE, PREFIX, study_session
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--day", required=True)
@@ -133,7 +133,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     from opdi.reference.point_merge import point_merge_systems_for_day
 
-    spark = SparkSession.builder.appName("point merge report").getOrCreate()
+    spark = study_session("point merge report")
     day = pd.Timestamp(args.day).date()
     inputs = A10_ARM if args.input == "a10" else INPUT_WAREHOUSE
     events = _read(spark, f"{PREFIX}/on", "opdi_flight_events", day).filter("type like 'pms-%'").toPandas()

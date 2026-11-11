@@ -162,6 +162,15 @@ def restore() -> None:
         _ORIG.clear()
 
 
+def study_session(app_name: str, executors: int = 4):
+    """A cluster session for the scripts that read this study's tables: the
+    pod only hosts the driver (16 GB cap), the executors run on K8s."""
+    from opdi.utils.spark_helpers import SparkSessionManager
+
+    return SparkSessionManager.create_session(
+        app_name=app_name, config=build_config("on", executors), distributed=True)
+
+
 def run(arm: str, day: date, executors: int, steps, input_source: str, timings_csv=None) -> None:
     from opdi.utils.spark_helpers import SparkSessionManager
 
