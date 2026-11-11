@@ -146,8 +146,11 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "adep",
         "string",
         "",
-        "Departure airport, as its four-letter ICAO code. NULL when no departure "
-        "airport could be identified.",
+        "Departure airport, as its four-letter ICAO code. 'OOA' (out of area) when "
+        "the track began at the edge of the covered area, so the flight departed "
+        "from somewhere outside it. This occurs only in data built with European "
+        "coverage. NULL when no departure airport could be identified, which "
+        "includes every overflight.",
         "ADEP",
         "airports",
     ),
@@ -155,8 +158,11 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "ades",
         "string",
         "",
-        "Destination airport, as its four-letter ICAO code. NULL when no destination "
-        "airport could be identified.",
+        "Destination airport, as its four-letter ICAO code. 'OOA' (out of area) when "
+        "the track ended at the edge of the covered area, so the flight continued "
+        "to somewhere outside it. This occurs only in data built with European "
+        "coverage. NULL when no destination airport could be identified, which "
+        "includes every overflight.",
         "ADES",
         "airports",
     ),
@@ -182,10 +188,12 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "adep_source",
         "string",
         "",
-        "How the departure airport was decided: 'aerodrome' when an airport was "
-        "identified, 'out_of_area' when the track began outside the area covered, "
-        "'undetermined' when no airport could be identified. When adep is NULL, this "
-        "column tells the last two cases apart.",
+        "How the departure airport was decided. 'aerodrome': adep names the airport "
+        "near which the track began, found from the position and height of its first "
+        "reports. 'runway_event': adep was taken from a take-off detected on one of "
+        "that airport's runways, which takes precedence over the first method. "
+        "'out_of_area': adep is 'OOA'. 'undetermined': no airport could be "
+        "identified and adep is NULL, as for an overflight.",
         "ADEP_SOURCE",
         "airports",
     ),
@@ -193,7 +201,10 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "ades_source",
         "string",
         "",
-        "How the destination airport was decided, with the same values as " "adep_source.",
+        "How the destination airport was decided, with the same four values as "
+        "adep_source: 'aerodrome' (found from the last reports of the track), "
+        "'runway_event' (taken from a landing detected on one of the airport's "
+        "runways), 'out_of_area' (ades is 'OOA') and 'undetermined' (ades is NULL).",
         "ADES_SOURCE",
         "airports",
     ),

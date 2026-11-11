@@ -1986,8 +1986,8 @@ class FlightListProcessor:
             ICAO24 STRING COMMENT '24-bit ICAO transponder address',
             FLT_ID STRING COMMENT 'Flight callsign',
             DOF DATE COMMENT 'Date of flight',
-            ADEP STRING COMMENT 'Aerodrome of departure (ICAO code)',
-            ADES STRING COMMENT 'Aerodrome of destination (ICAO code)',
+            ADEP STRING COMMENT 'Aerodrome of departure (ICAO code), OOA when out of area, NULL when unknown',
+            ADES STRING COMMENT 'Aerodrome of destination (ICAO code), OOA when out of area, NULL when unknown',
             ADEP_P STRING COMMENT 'Alternative departure airports',
             ADES_P STRING COMMENT 'Alternative destination airports',
             REGISTRATION STRING COMMENT 'Aircraft registration',
@@ -1997,8 +1997,8 @@ class FlightListProcessor:
             ICAO_OPERATOR STRING COMMENT 'ICAO operator code',
             FIRST_SEEN TIMESTAMP COMMENT 'First ADS-B reception time',
             LAST_SEEN TIMESTAMP COMMENT 'Last ADS-B reception time',
-            ADEP_SOURCE STRING COMMENT 'How ADEP was decided: aerodrome (named it), out_of_area (the track began outside the observed area), undetermined (could not tell). A null ADEP means the last two, which are not the same thing.',
-            ADES_SOURCE STRING COMMENT 'The same for ADES.',
+            ADEP_SOURCE STRING COMMENT 'How ADEP was decided: aerodrome (found from the first reports of the track), runway_event (taken from a take-off detected on a runway, step 04b), out_of_area (ADEP is OOA), undetermined (ADEP is NULL).',
+            ADES_SOURCE STRING COMMENT 'How ADES was decided: aerodrome (found from the last reports of the track), runway_event (taken from a landing detected on a runway, step 04b), out_of_area (ADES is OOA), undetermined (ADES is NULL).',
             VERSION STRING COMMENT 'Processing version. v5.0.0 onward; v4.0.0 labelled a flight with the alphabetically smallest callsign in its track, and lists before that carried v2.0.0 or v3.0.0 depending on which algorithm named the departure.'
         )
         USING iceberg

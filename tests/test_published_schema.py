@@ -187,3 +187,24 @@ def test_csv_has_a_header_and_one_line_per_column():
 def test_module_does_not_import_spark():
     src = inspect.getsource(schema)
     assert "pyspark" not in src
+
+
+def test_the_airport_source_columns_list_every_value_the_pipeline_writes():
+    """Step 03 writes aerodrome, out_of_area and undetermined; step 04b writes
+    runway_event. A reader needs all four explained."""
+    from opdi.output.schema import FLIGHT_LIST
+
+    by_name = {c.name: c for c in FLIGHT_LIST}
+    for name in ("adep_source", "ades_source"):
+        text = by_name[name].description
+        for value in ("aerodrome", "out_of_area", "undetermined", "runway_event"):
+            assert f"'{value}'" in text, (name, value)
+
+
+def test_the_airport_columns_explain_the_out_of_area_code():
+    from opdi.output.schema import FLIGHT_LIST
+
+    by_name = {c.name: c for c in FLIGHT_LIST}
+    for name in ("adep", "ades"):
+        assert "'OOA'" in by_name[name].description
+        assert "NULL" in by_name[name].description
