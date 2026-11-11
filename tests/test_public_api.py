@@ -1,4 +1,4 @@
-"""Every name the repository imports from ``opdi`` stays importable from the same path.
+r"""Every name the repository imports from ``opdi`` stays importable from the same path.
 
 The lists below were generated from the repository by reading every Python
 file under ``src/``, ``tests/``, ``benchmarks/``, ``examples/``, ``tools/`` and
