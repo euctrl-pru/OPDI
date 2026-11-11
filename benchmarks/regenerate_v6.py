@@ -45,7 +45,12 @@ DAYS_2024 = ["2024-06-05", "2024-06-06", "2024-06-07"]
 #: Source files whose contents define each job's result. Named explicitly:
 #: a dependency worth re-running for is a dependency worth writing down.
 CORE = ["benchmarks/adep_ades.py", "benchmarks/osn_sample.py"]
-PIPE = CORE + ["src/opdi/pipeline/flights.py", "src/opdi/config.py", "benchmarks/flight_list_v6.py"]
+PIPE = CORE + [
+    "src/opdi/pipeline/flights.py",
+    "src/opdi/config.py",
+    "benchmarks/flight_list_v6.py",
+    "benchmarks/study_variants/detection.py",
+]
 
 
 class Stage:

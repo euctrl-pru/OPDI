@@ -353,6 +353,7 @@ _CODE_PATHS = [
     "src/opdi/pipeline/segmentation/__init__.py",
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/segmentation/methods.py",
+    "benchmarks/study_variants/segmentation.py",
 ]
 
 _NOTES = (

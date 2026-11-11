@@ -494,6 +494,7 @@ def main():
             "benchmarks/track_score.py",
             "src/opdi/pipeline/segmentation/base.py",
             "src/opdi/pipeline/segmentation/methods.py",
+            "benchmarks/study_variants/segmentation.py",
         ],
         inputs={"samples": sv.count(), "gt_flights": gt.count()},
         input_tables=[p["tracks"]],

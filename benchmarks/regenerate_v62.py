@@ -89,6 +89,7 @@ PIPE = CORE + [
     "src/opdi/pipeline/flights.py",
     "src/opdi/config.py",
     "benchmarks/flight_list_v62.py",
+    "benchmarks/study_variants/detection.py",
 ]
 #: Arm C reads the banding along with the counts, so a band edit must mark it
 #: stale. It is the study's discriminating measurement.

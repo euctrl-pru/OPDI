@@ -296,6 +296,7 @@ def main():
             "benchmarks/flight_list_v7.py",
             "src/opdi/pipeline/flights.py",
             "src/opdi/pipeline/segmentation/methods.py",
+            "benchmarks/study_variants/segmentation.py",
         ],
         inputs={"arms": len(arms)},
         notes=f"V7 run '{V7_RECOMMENDED_RUN}' held fixed; only track_id varies.",

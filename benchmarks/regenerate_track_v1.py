@@ -78,6 +78,7 @@ SEG = [
     "src/opdi/pipeline/segmentation/__init__.py",
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/segmentation/methods.py",
+    "benchmarks/study_variants/segmentation.py",
     "src/opdi/config.py",
 ]
 SCORE = ["benchmarks/track_truth.py", "benchmarks/track_score.py", "benchmarks/osn_sample.py"]
@@ -132,6 +133,7 @@ SWEEP_AS_RECORDED = [
     "benchmarks/track_truth.py",
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/segmentation/methods.py",
+    "benchmarks/study_variants/segmentation.py",
 ]
 
 #: The full stage-1 grid, as one command. Kept here rather than left to

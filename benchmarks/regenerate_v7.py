@@ -56,7 +56,12 @@ FL_CAPS = sorted({40, 60} | set(range(25, 301, 25)))
 #: Source files whose contents define each job's result. Named explicitly: a
 #: dependency worth re-running for is a dependency worth writing down.
 CORE = ["benchmarks/adep_ades.py", "benchmarks/osn_sample.py"]
-PIPE = CORE + ["src/opdi/pipeline/flights.py", "src/opdi/config.py", "benchmarks/flight_list_v7.py"]
+PIPE = CORE + [
+    "src/opdi/pipeline/flights.py",
+    "src/opdi/config.py",
+    "benchmarks/flight_list_v7.py",
+    "benchmarks/study_variants/detection.py",
+]
 
 #: S3 prefixes the analysis reads.
 T_TRACKS = "s3a://eurocontrol/opdi/osn_tracks"
