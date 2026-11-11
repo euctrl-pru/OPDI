@@ -54,10 +54,14 @@ def test_public_names_still_resolve():
     import opdi
     import opdi.output
     from opdi import H3Config, IngestionConfig, OPDIConfig, ProjectConfig, SparkConfig
-    from opdi.output import CSVExporter, ParquetExporter, clean_and_save_data
 
     assert OPDIConfig is opdi.config.OPDIConfig
     assert {ProjectConfig, SparkConfig, H3Config, IngestionConfig}
-    assert {CSVExporter, ParquetExporter, clean_and_save_data}
     assert set(opdi.__all__) >= {"OPDIConfig", "ProjectConfig", "__version__"}
-    assert set(opdi.output.__all__) == {"CSVExporter", "ParquetExporter", "clean_and_save_data"}
+
+
+def test_the_removed_exporters_say_what_replaced_them():
+    import pytest
+
+    with pytest.raises(ImportError, match="opdi.output.published"):
+        from opdi.output import ParquetExporter  # noqa: F401

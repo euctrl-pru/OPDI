@@ -110,13 +110,13 @@ def test_every_step_this_module_names_exists_in_the_runner(tmp_path):
 
 
 def test_the_undated_step_split_matches_the_runner(tmp_path):
-    """`runner.run_pipeline` special-cases exactly these three.
+    """`runner.run_pipeline` special-cases exactly this one.
 
     The split is duplicated rather than imported because runner keeps it inline
     in two branches. If runner ever changes it, this fails rather than the week
     run passing a date range to a step that takes none.
     """
-    assert UNDATED_STEPS == frozenset({"00", "07", "08"})
+    assert UNDATED_STEPS == frozenset({"00"})
 
 
 def test_completed_steps_are_skipped(tmp_path):
@@ -174,7 +174,7 @@ def test_a_state_file_for_another_window_is_not_reused(tmp_path):
     s.completed = {"01": {}}
     assert s.matches("opensky", date(2026, 6, 1), date(2026, 6, 7))
     assert not s.matches("opensky", date(2026, 7, 1), date(2026, 7, 7))
-    assert not s.matches("live", date(2026, 6, 1), date(2026, 6, 7))
+    assert not s.matches("local", date(2026, 6, 1), date(2026, 6, 7))
 
 
 def test_an_empty_state_matches_any_window(tmp_path):

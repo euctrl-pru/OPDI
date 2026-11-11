@@ -47,8 +47,6 @@ def test_the_old_worldwide_variable_has_no_effect(monkeypatch):
 @pytest.mark.parametrize(
     "env, declared",
     [
-        ("live", "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged"),
-        ("dev", "abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/opdi.db/unmanaged"),
         ("local", "./data/warehouse"),
     ],
 )

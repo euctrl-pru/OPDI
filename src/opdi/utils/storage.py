@@ -1,9 +1,10 @@
 """
 Storage abstraction layer for OPDI pipeline.
 
-Provides environment-aware table read/write operations. In Iceberg/Hive
-mode (dev, live) tables are managed via the catalog. In S3 mode (opensky)
-tables are stored as parquet directories on S3.
+Provides environment-aware table read/write operations. In Iceberg mode
+(the ``local`` environment by default) tables are managed via the catalog. In
+parquet mode (``opensky``, or ``spark.enable_iceberg = False``) tables are
+parquet folders under the release root.
 """
 
 import json

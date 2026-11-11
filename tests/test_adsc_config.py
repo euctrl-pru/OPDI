@@ -5,7 +5,7 @@ import pytest
 from opdi.config import AdscConfig, OPDIConfig
 
 
-@pytest.mark.parametrize("env", ["dev", "live", "local", "opensky"])
+@pytest.mark.parametrize("env", ["local", "opensky"])
 def test_adsc_is_off_in_every_environment(env):
     # The whole safety argument for this feature is that no existing caller
     # changes behaviour. An environment preset that quietly enabled it would

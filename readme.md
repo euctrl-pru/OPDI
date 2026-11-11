@@ -1,6 +1,6 @@
 # OPDI - Open Performance Data Initiative
 
-A pip-installable Python package for processing OpenSky Network aviation data through modular ETL pipelines. OPDI transforms raw ADS-B state vectors into enriched flight datasets with geospatial H3 indexing, event detection, and data quality monitoring.
+A pip-installable Python package for processing OpenSky Network aviation data through modular ETL pipelines. OPDI transforms raw ADS-B state vectors into enriched flight datasets with geospatial H3 indexing and event detection, and publishes them as daily files.
 
 ## Installation
 
@@ -42,8 +42,8 @@ from datetime import date
 from opdi.config import OPDIConfig
 from opdi.utils.spark_helpers import get_spark
 
-config = OPDIConfig.for_environment("dev")   # "dev", "live", "local", or "opensky"
-spark  = get_spark(env="dev", app_name="My OPDI Analysis")
+config = OPDIConfig.for_environment("opensky")   # "opensky" or "local"
+spark  = get_spark(env="opensky", app_name="My OPDI Analysis")
 
 # Run one pipeline step
 from opdi.pipeline import TrackProcessor
@@ -55,28 +55,28 @@ spark.stop()
 
 ## Running the full pipeline
 
-The package provides three equivalent ways to run the complete 00-08 pipeline:
+The package provides three equivalent ways to run the pipeline (steps 00 to 04b, and 09):
 
 ### 1. CLI (after `pip install`)
 
 ```bash
-opdi run --env live --start 2024-01-01 --end 2024-06-01
+opdi run --start 2024-01-01 --end 2024-06-01
 
 # Single step only
-opdi run --step 02 --env dev --start 2024-01-01 --end 2024-02-01
+opdi run --step 02 --start 2024-01-01 --end 2024-02-01
 ```
 
 ### 2. Standalone script
 
 ```bash
-python opdi.py --env live --start 2024-01-01 --end 2024-06-01
+python opdi.py --start 2024-01-01 --end 2024-06-01
 ```
 
 ### 3. Programmatic
 
 ```python
 from opdi.runner import run_pipeline
-run_pipeline(env="live", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
+run_pipeline(env="opensky", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
 ```
 
 **All three of these are local-driver-only, even under `--env opensky`.** They
@@ -105,10 +105,8 @@ which is why the script exists.
 | 02 | `02_osn_tracks_etl.py` | `pipeline.tracks` | Track creation (SHA256 IDs, H3, distance, alt cleaning) |
 | 03 | `03_opdi_flight_list_v2.py` | `pipeline.flights` | Flight list (DAI + overflights, aircraft enrichment) |
 | 04 | `04_opdi_flight_events_etl.py` | `pipeline.events` | Events & measurements (fuzzy phases, FL crossings, airport events) |
-| 05 | `05_extract_OPDI.py` | `output.parquet_exporter` | Export to parquet (monthly + 10-day intervals) |
-| 06 | `06_cleanup.py` | `output.csv_exporter` | Deduplication + CSV.gz export |
-| 07 | `07_get_stats.py` | `monitoring.basic_stats` | Table row counts |
-| 08 | `08_get_advanced_stats.py` | `monitoring.advanced_stats` | Data quality report + Plotly visualization |
+| 04b | — | `pipeline.flight_list_step` | Main events copied onto the flight list |
+| 09 | — | `output.published` | Daily published files (flight list, flight events) |
 
 ### Step 00b: airport ground layouts
 
@@ -274,8 +272,8 @@ config = OPDIConfig.for_environment("opensky", worldwide=False)  # European box
   progress records (`_state/`) and the published files (`published/`). Every
   run prints the warehouse, the release root and the coverage at start-up, and
   says so when `OPDI_WAREHOUSE` names another place than the one in use. In the
-  `dev`, `live` and `local` environments a worldwide run writes to the declared
-  path followed by `-world`.
+  `local` environment a worldwide run writes to the declared path followed by
+  `-world`.
 - **A `coverage_marker` table stamps each warehouse** with the coverage that
   built it (`europe` / `worldwide` / `custom`) and refuses to mix: pointing a
   worldwide run at a warehouse already marked European fails at step 00 with a
@@ -325,7 +323,8 @@ accuracy figures across.
 ## `cruise_linked` track segmentation (A10)
 
 **The default.** `standard` points to `cruise_linked` since the track-construction-v5
-study; before that it pointed to `debounced` (A9), which stays selectable by name.
+study; before that it pointed to `debounced` (A9), which now lives with the study
+scripts (`benchmarks/study_variants/segmentation.py`).
 `cruise_linked` is A9 with one change: a reception gap over 30 minutes does not end
 a track when the evidence at its two edges fits one continuous flight (both edges at
 cruise or the old edge still climbing, a plausible implied speed, an agreeing
@@ -348,12 +347,16 @@ old edge still climbing (0 false joins in 185 checkable holes in v4), and
 times at Seoul, minutes before ADS-B still showed the aircraft airborne, and the
 study's labelling no longer takes events outside Europe as evidence (0 in 117 since).
 
-To run the previous rule instead:
+To run the rule that reproduces the v0.0.2 release instead:
 
 ```python
 config = OPDIConfig.for_environment("opensky")
-config.segmentation.method = "debounced"   # A9; "recommended" is A8, "legacy" the pre-2026-08-27 rule
+config.segmentation.method = "legacy"
 ```
+
+A study script that needs one of the other rules of the studies registers them
+first (`from study_variants.segmentation import register_study_arms;
+register_study_arms()`); see `benchmarks/README.md`.
 
 What differs from the other rules when you run it:
 
@@ -491,8 +494,8 @@ opdi run --env opensky --start 2025-06-01 --end 2025-07-01
 
 ```
 src/opdi/
-├── config.py               # Centralised configuration (dev/live/local/opensky)
-├── runner.py               # Full pipeline orchestrator (steps 00-08)
+├── config.py               # Centralised configuration (opensky/local)
+├── runner.py               # Full pipeline orchestrator (steps 00-04b, 09)
 ├── cli.py                  # CLI entry point (`opdi run ...`)
 ├── ingestion/              # Data source connectors
 │   ├── osn_statevectors.py # OpenSky S3 state vectors
@@ -506,12 +509,9 @@ src/opdi/
 │   ├── tracks.py           # State vectors -> flight tracks
 │   ├── flights.py          # Tracks -> flight list (ADEP/ADES)
 │   └── events.py           # Flight events & measurements
-├── output/                 # Data export
-│   ├── parquet_exporter.py # Parquet export with intervals
-│   └── csv_exporter.py     # Deduplication + CSV.gz
-├── monitoring/             # Data quality
-│   ├── basic_stats.py      # Row counts
-│   └── advanced_stats.py   # Anomaly detection + Plotly
+├── output/                 # Published files
+│   ├── schema.py           # Declared columns of the published files
+│   └── published.py        # Step 09: daily flight list and flight events
 └── utils/                  # Shared utilities
     ├── storage.py           # Storage abstraction (Iceberg / S3 parquet)
     ├── datetime_helpers.py  # Date ranges, month boundaries
@@ -525,8 +525,6 @@ src/opdi/
 ```python
 from opdi.config import OPDIConfig
 
-config = OPDIConfig.for_environment("dev")      # Development (Azure/Iceberg)
-config = OPDIConfig.for_environment("live")     # Production (Azure/Iceberg)
 config = OPDIConfig.for_environment("local")    # Local testing
 config = OPDIConfig.for_environment("opensky")  # OpenSky Network S3
 

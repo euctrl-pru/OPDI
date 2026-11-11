@@ -12,10 +12,10 @@ def test_standard_is_the_default_segmentation():
 def test_every_environment_ships_the_same_segmentation():
     """A default that varies by environment is a default nobody can reason about.
 
-    dev and live would otherwise be able to publish track_ids that local runs
+    One environment would otherwise be able to publish track_ids that the other
     cannot reproduce, and nothing in the data would say why.
     """
-    for env in ("opensky", "local", "dev", "live"):
+    for env in ("opensky", "local"):
         assert OPDIConfig.for_environment(env).segmentation.method == "standard"
 
 

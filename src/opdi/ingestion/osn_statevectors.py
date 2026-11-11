@@ -444,8 +444,8 @@ class StateVectorIngestion:
             >>> from opdi.utils.spark_helpers import get_spark
             >>> from opdi.config import OPDIConfig
             >>>
-            >>> config = OPDIConfig.for_environment("live")
-            >>> spark = get_spark("live", "State Vector Ingestion")
+            >>> config = OPDIConfig.for_environment("opensky")
+            >>> spark = get_spark("opensky", "State Vector Ingestion")
             >>> ingestion = StateVectorIngestion(spark, config)
             >>> stats = ingestion.ingest(start_date=date(2024, 1, 1), end_date=date(2024, 2, 1))
         """

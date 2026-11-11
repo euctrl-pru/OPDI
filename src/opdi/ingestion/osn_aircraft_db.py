@@ -155,8 +155,8 @@ class AircraftDatabaseIngestion:
             >>> from opdi.utils.spark_helpers import get_spark
             >>> from opdi.config import OPDIConfig
             >>>
-            >>> config = OPDIConfig.for_environment("live")
-            >>> spark = get_spark("live", "Aircraft DB Ingestion")
+            >>> config = OPDIConfig.for_environment("opensky")
+            >>> spark = get_spark("opensky", "Aircraft DB Ingestion")
             >>> ingestion = AircraftDatabaseIngestion(spark, config)
             >>> count = ingestion.ingest(mode="overwrite")
             >>> print(f"Ingested {count} aircraft records")

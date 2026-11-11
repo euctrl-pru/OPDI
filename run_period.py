@@ -79,7 +79,7 @@ def main(argv=None) -> int:
     p.add_argument(
         "--env",
         default="opensky",
-        choices=["dev", "live", "local", "opensky"],
+        choices=["local", "opensky"],
         help="Environment (default: opensky).",
     )
     p.add_argument(
@@ -150,13 +150,6 @@ def main(argv=None) -> int:
         help="Apply the published European bounding box.",
     )
     p.add_argument(
-        "--allow-existing",
-        action="store_true",
-        help="Build even though the warehouse already holds "
-        "reference tables. Off by default so a rebuild cannot "
-        "silently merge with a previous attempt.",
-    )
-    p.add_argument(
         "--skip-preflight",
         action="store_true",
         help="Skip the pre-run checks (OSM extract present, "
@@ -179,7 +172,6 @@ def main(argv=None) -> int:
         skip_preflight=args.skip_preflight,
         dry_run=args.dry_run,
         warehouse=args.warehouse,
-        allow_existing=args.allow_existing,
         worldwide=args.worldwide,
         prune_tracks=args.prune_tracks,
         keep_tracks_on=args.keep_tracks_on,

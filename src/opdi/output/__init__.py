@@ -1,32 +1,25 @@
-"""Output modules for exporting OPDI data.
+"""What OPDI publishes, and how.
 
-The names below are imported only when first used, so that
+* :mod:`opdi.output.schema`: the declared columns of the published files.
+* :mod:`opdi.output.published`: step 09, which writes the daily flight list
+  and flight events files.
+
 ``import opdi.output.schema`` works without PySpark installed.
 """
 
-import importlib
-
-_LAZY = {
-    "CSVExporter": "opdi.output.csv_exporter",
-    "clean_and_save_data": "opdi.output.csv_exporter",
-    "ParquetExporter": "opdi.output.parquet_exporter",
-}
+#: Names of the monthly v0.0.2 exporters (steps 05 and 06), which are no
+#: longer part of the package.
+_REMOVED = ("CSVExporter", "ParquetExporter", "clean_and_save_data")
 
 
 def __getattr__(name):
-    if name in _LAZY:
-        value = getattr(importlib.import_module(_LAZY[name]), name)
-        globals()[name] = value
-        return value
+    if name in _REMOVED:
+        raise ImportError(
+            f"{name} was the monthly v0.0.2 export (steps 05 and 06), which OPDI no "
+            f"longer produces; the daily files are written by opdi.output.published "
+            f"(step 09)"
+        )
     raise AttributeError(f"module 'opdi.output' has no attribute {name!r}")
 
 
-def __dir__():
-    return sorted(set(globals()) | set(_LAZY))
-
-
-__all__ = [
-    "CSVExporter",
-    "ParquetExporter",
-    "clean_and_save_data",
-]
+__all__ = []

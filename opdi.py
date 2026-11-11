@@ -2,17 +2,15 @@
 """
 OPDI full pipeline script.
 
-Runs the complete OPDI data processing pipeline from start to finish,
-equivalent to executing all ``00_*`` through ``08_*`` scripts in
-``OPDI-live/python/v2.0.0/`` sequentially.
+Runs the OPDI data processing pipeline from start to finish.
 
 Usage::
 
-    # Run the full pipeline with default settings (dev environment)
+    # Run the full pipeline with default settings (opensky environment)
     python opdi.py
 
     # Run for a specific environment and date range
-    python opdi.py --env live --start 2024-01-01 --end 2024-06-01
+    python opdi.py --env local --start 2024-01-01 --end 2024-06-01
 
     # Run only a specific step
     python opdi.py --step 02 --start 2024-01-01 --end 2024-02-01
@@ -21,7 +19,7 @@ Usage::
     python opdi.py --env opensky --worldwide --start 2024-01-01 --end 2024-02-01
 
     # After pip install, also available as:
-    opdi run --env live --start 2024-01-01 --end 2024-06-01
+    opdi run --start 2024-01-01 --end 2024-06-01
 
 Pipeline steps
 --------------
@@ -30,10 +28,8 @@ Pipeline steps
 02  Track processing (state vectors -> continuous flight tracks)
 03  Flight list generation (departures, arrivals, overflights)
 04  Flight events & measurements (phases, FL crossings, airport events)
-05  Export to parquet files
-06  Cleanup: deduplication + CSV.gz export
-07  Basic statistics (row counts)
-08  Advanced statistics & data quality report
+04b Flight list milestones (the main events copied onto the flight list)
+09  Published daily files (flight list and flight events)
 """
 
 import argparse
@@ -49,9 +45,9 @@ def main(argv=None):
     )
     parser.add_argument(
         "--env",
-        choices=["dev", "live", "local", "opensky"],
-        default="dev",
-        help="Target environment (default: dev). NOTE: this script and "
+        choices=["local", "opensky"],
+        default="opensky",
+        help="Target environment (default: opensky). NOTE: this script and "
         "`opdi run` build a local-only Spark session -- they call "
         "create_session without distributed=True -- so --env opensky "
         "here does not attach to the Kubernetes cluster. A real "
@@ -70,23 +66,12 @@ def main(argv=None):
     parser.add_argument(
         "--step",
         default=None,
-        help="Run only this step (00-08). Omit to run all.",
+        help="Run only this step (00 to 04b, or 09). Omit to run all.",
     )
     parser.add_argument(
         "--airports-hex-path",
         default="data/airport_hex/zones_res7_processed.parquet",
         help="Path to airport hex zones (default: data/airport_hex/zones_res7_processed.parquet).",
-    )
-    parser.add_argument(
-        "--export-dir",
-        default="data/OPDI/v002",
-        help="Export output directory (default: data/OPDI/v002).",
-    )
-    parser.add_argument(
-        "--last-n-months",
-        type=int,
-        default=4,
-        help="Only export last N months (default: 4).",
     )
     coverage = parser.add_mutually_exclusive_group()
     coverage.add_argument(
@@ -104,8 +89,8 @@ def main(argv=None):
         "--europe",
         dest="worldwide",
         action="store_false",
-        help="Apply the published European bounding box. In the dev, live and "
-        "local environments this also selects the European warehouse.",
+        help="Apply the published European bounding box. In the local "
+        "environment this also selects the European warehouse.",
     )
 
     args = parser.parse_args(argv)
@@ -121,8 +106,6 @@ def main(argv=None):
         end_date=end_date,
         step=args.step,
         airports_hex_path=args.airports_hex_path,
-        export_dir=args.export_dir,
-        last_n_months=args.last_n_months,
         worldwide=args.worldwide,
     )
 

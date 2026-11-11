@@ -279,7 +279,7 @@ def test_defaults_differ_from_legacy_so_the_preset_is_load_bearing():
     assert DetectionConfig.legacy().endpoint_radius_nm == 40.0
 
 
-@pytest.mark.parametrize("env", ["opensky", "local", "dev", "live"])
+@pytest.mark.parametrize("env", ["opensky", "local"])
 def test_the_pipeline_gets_the_field_datum_in_every_environment(env):
     """The datum has to reach the *pipeline*, not just the benchmarks.
 

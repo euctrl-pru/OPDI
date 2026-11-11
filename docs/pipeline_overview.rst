@@ -107,44 +107,14 @@ Detailed events are extracted from each track:
 **Measurement records**
    Distance flown and time elapsed are computed between consecutive events.
 
-Stage 05 -- Data Extraction
-----------------------------
+Stage 09 -- Published Daily Files
+----------------------------------
 
-:mod:`opdi.output.parquet_exporter`
+:mod:`opdi.output.published`
 
-The flight list, events, and measurements tables are exported to Parquet files
-with configurable time intervals (typically 10-day windows). This stage
-produces the files that are published as the OPDI open dataset.
-
-Stage 06 -- Cleanup
---------------------
-
-:mod:`opdi.output.csv_exporter`
-
-Exported Parquet files are deduplicated and converted to compressed CSV for
-distribution. The :func:`~opdi.output.csv_exporter.clean_and_save_data`
-function removes duplicate rows and saves the result as gzip-compressed CSV.
-
-Stage 07 -- Basic Statistics
------------------------------
-
-:mod:`opdi.monitoring.basic_stats`
-
-Row counts and basic summary statistics are collected across all OPDI tables
-to monitor pipeline health and data completeness.
-
-Stage 08 -- Advanced Statistics
----------------------------------
-
-:mod:`opdi.monitoring.advanced_stats`
-
-In-depth data quality analysis:
-
-- Daily row-count trend analysis
-- Anomaly detection (suspiciously low counts)
-- Known outage tracking
-- MinIO bucket availability monitoring
-- Interactive Plotly visualisations for exploration
+Each day's flight list and flight events (with their measurements as columns)
+are written as one Parquet file each, under ``<release root>/published``,
+together with a monthly flight index and a catalogue of the published days.
 
 Data Flow Diagram
 -----------------
@@ -163,13 +133,10 @@ Data Flow Diagram
    [03] Flight List  <----  Aircraft Database
         |
         v
-   [04] Flight Events
+   [04] Flight Events  -->  [04b] Milestones on the flight list
         |
         v
-   [05] Parquet Export  -->  [06] CSV Export
-        |
-        v
-   [07] Basic Stats  -->  [08] Advanced Stats
+   [09] Published daily files
 
 See Also
 --------

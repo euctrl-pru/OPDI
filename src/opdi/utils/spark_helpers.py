@@ -24,7 +24,7 @@ class SparkSessionManager:
     def create_session(
         app_name: str = "OPDI Pipeline",
         config: Optional[OPDIConfig] = None,
-        env: str = "dev",
+        env: str = "opensky",
         extra_configs: Optional[Dict[str, str]] = None,
         distributed: bool = False,
         container_image: Optional[str] = None,
@@ -35,7 +35,7 @@ class SparkSessionManager:
         Args:
             app_name: Name for the Spark application
             config: OPDI configuration object. If None, creates config for specified env
-            env: Environment name ("dev", "live", "local", "opensky") - used if config is None
+            env: Environment name ("local" or "opensky") - used if config is None
             extra_configs: Additional Spark configurations to override defaults
             distributed: If True, enable Kubernetes distributed mode (opensky env)
             container_image: Override the Kubernetes executor container image
@@ -46,7 +46,7 @@ class SparkSessionManager:
 
         Example:
             >>> from opdi.utils.spark_helpers import SparkSessionManager
-            >>> spark = SparkSessionManager.create_session("Track Processing", env="live")
+            >>> spark = SparkSessionManager.create_session("Track Processing", env="opensky")
             >>> df = spark.table("project_opdi.osn_statevectors_v2")
         """
         if config is None:
@@ -82,7 +82,7 @@ class SparkSessionManager:
     def get_or_create(
         app_name: str = "OPDI Pipeline",
         config: Optional[OPDIConfig] = None,
-        env: str = "dev",
+        env: str = "opensky",
         distributed: bool = False,
     ) -> SparkSession:
         """
@@ -91,7 +91,7 @@ class SparkSessionManager:
         Args:
             app_name: Name for the Spark application
             config: OPDI configuration object. If None, creates config for specified env
-            env: Environment name ("dev", "live", "local", "opensky")
+            env: Environment name ("local" or "opensky")
             distributed: If True, enable Kubernetes distributed mode (opensky env)
 
         Returns:
@@ -172,7 +172,7 @@ class SparkSessionManager:
 
 
 def get_spark(
-    env: str = "dev",
+    env: str = "opensky",
     app_name: str = "OPDI Pipeline",
     distributed: bool = False,
     container_image: Optional[str] = None,
@@ -183,7 +183,7 @@ def get_spark(
     This is a shorthand for SparkSessionManager.create_session().
 
     Args:
-        env: Environment name ("dev", "live", "local", "opensky")
+        env: Environment name ("local" or "opensky")
         app_name: Name for the Spark application
         distributed: If True, enable Kubernetes distributed mode (opensky env)
         container_image: Override the Kubernetes executor container image

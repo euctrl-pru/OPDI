@@ -3,10 +3,7 @@ Basic usage example for the OPDI package.
 
 Demonstrates how to use the complete OPDI pipeline, from configuration
 through data ingestion, track processing, flight list generation,
-event detection, data export, and monitoring.
-
-Each pipeline step corresponds to scripts 00_* through 08_* in the
-original OPDI-live v2.0.0 pipeline.
+event detection and the published daily files.
 """
 
 from datetime import date
@@ -19,7 +16,7 @@ def main():
     """Walk through the full OPDI pipeline."""
 
     # ---- Configuration (shared across all steps) ----
-    config = OPDIConfig.for_environment("dev")  # "dev", "live", or "local"
+    config = OPDIConfig.for_environment("opensky")  # "opensky" or "local"
 
     print("OPDI Configuration:")
     print(f"  Project: {config.project.project_name}")
@@ -108,44 +105,11 @@ def main():
     # event_proc.process_date_range(date(2024, 1, 1), date(2024, 6, 1))
 
     # ================================================================
-    # STEP 05 - Export to parquet files
+    # STEP 09 - Published daily files
     # ================================================================
-    from opdi.output import ParquetExporter
+    from opdi.output.published import publish_range
 
-    exporter = ParquetExporter(spark, config, output_dir="data/OPDI/v002")
-    # exporter.export_all(
-    #     start_date=date(2024, 1, 1),
-    #     end_date=date(2024, 6, 1),
-    #     last_n_months=4,
-    # )
-
-    # ================================================================
-    # STEP 06 - Cleanup (deduplicate + export to CSV.gz)
-    # ================================================================
-    from opdi.output import CSVExporter
-
-    # csv_exporter = CSVExporter("data/OPDI/v002/measurements", "data/OPDI/v002/measurements_clean")
-    # csv_exporter.clean_and_export_all()
-
-    # ================================================================
-    # STEP 07 - Basic statistics
-    # ================================================================
-    from opdi.monitoring import BasicStatsCollector
-
-    stats = BasicStatsCollector(spark, config)
-    # stats.print_summary()
-
-    # ================================================================
-    # STEP 08 - Advanced statistics & data quality
-    # ================================================================
-    from opdi.monitoring import AdvancedStatsCollector
-
-    advanced = AdvancedStatsCollector(spark, config)
-    # advanced.generate_quality_report(
-    #     "osn_statevectors_v2",
-    #     "daily_counts.csv",
-    #     "daily_counts.html",
-    # )
+    # publish_range(spark, config, date(2024, 1, 1), date(2024, 1, 31))
 
     # ---- Date utility examples (always runnable) ----
     months = generate_months(date(2024, 1, 1), date(2024, 3, 1))

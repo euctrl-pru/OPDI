@@ -11,13 +11,13 @@ Quick start::
     from opdi.config import OPDIConfig
     from opdi.utils.spark_helpers import get_spark
 
-    config = OPDIConfig.for_environment("dev")
-    spark  = get_spark("dev")
+    config = OPDIConfig.for_environment("opensky")
+    spark  = get_spark("opensky")
 
 Full pipeline::
 
     from opdi.runner import run_pipeline
-    run_pipeline(env="live", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
+    run_pipeline(env="opensky", start_date=date(2024, 1, 1), end_date=date(2024, 6, 1))
 """
 
 __version__ = "2.0.0"

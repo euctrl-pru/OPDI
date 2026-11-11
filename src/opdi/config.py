@@ -2001,9 +2001,9 @@ WAREHOUSE_VARIABLE = "OPDI_WAREHOUSE"
 
 
 def _worldwide_warehouse(declared_warehouse_path: str) -> str:
-    """Where a worldwide run writes in the ``dev``, ``live`` and ``local`` environments.
+    """Where a worldwide run writes in the ``local`` environment.
 
-    These environments keep their European tables at the declared path, so a
+    That environment keeps its European tables at the declared path, so a
     worldwide run writes beside them, at the declared path followed by
     ``-world``. The ``opensky`` environment does not use this rule: there the
     coverage does not change the warehouse, and the coverage marker (a small
@@ -2031,7 +2031,7 @@ class OPDIConfig:
     @classmethod
     def for_environment(
         cls,
-        env: str = "dev",
+        env: str = "opensky",
         worldwide: bool = True,
         warehouse: Optional[str] = None,
     ) -> "OPDIConfig":
@@ -2045,53 +2045,19 @@ class OPDIConfig:
         :attr:`ProjectConfig.release_root`).
 
         Args:
-            env: Environment name: ``"dev"``, ``"live"``, ``"local"`` or
-                ``"opensky"``.
+            env: Environment name: ``"opensky"`` (the OpenSky cluster, the
+                default) or ``"local"`` (one machine).
             worldwide: Process the whole world (the default). Pass ``False``
                 to keep only positions inside the European box
-                (``EUROPE_BBOX``). In ``dev``, ``live`` and ``local`` a
-                worldwide run writes to the declared warehouse path followed
-                by ``-world``.
+                (``EUROPE_BBOX``). In ``local`` a worldwide run writes to the
+                declared warehouse path followed by ``-world``.
             warehouse: The warehouse to use. It replaces the environment's
                 declared path in every environment.
 
         Returns:
             The configuration.
         """
-        if env == "live":
-            # Production environment settings
-            config = cls(
-                project=ProjectConfig(
-                    project_name="project_opdi",
-                    warehouse_path="abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged",
-                    hadoop_filesystem="abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged",
-                ),
-                spark=SparkConfig(
-                    app_name="OPDI Pipeline - Live",
-                    driver_memory="14G",
-                    executor_memory="16G",
-                    executor_instances="3",
-                    dynamic_allocation_max_executors="20",
-                ),
-            )
-        elif env == "dev":
-            # Development environment settings
-            config = cls(
-                project=ProjectConfig(
-                    project_name="project_opdi",
-                    warehouse_path="abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/opdi.db/unmanaged",
-                    hadoop_filesystem="abfs://storage-fs@cdpdldev0.dfs.core.windows.net/data/project/opdi.db/unmanaged",
-                ),
-                spark=SparkConfig(
-                    app_name="OPDI Pipeline - Dev",
-                    driver_memory="14G",
-                    executor_memory="16G",
-                    executor_instances="3",
-                    dynamic_allocation_max_executors="20",
-                    hadoop_group="eur-app-opdi-dev",
-                ),
-            )
-        elif env == "local":
+        if env == "local":
             # Local testing environment
             config = cls(
                 project=ProjectConfig(
@@ -2166,7 +2132,7 @@ class OPDIConfig:
             )
         else:
             raise ValueError(
-                f"Unknown environment: {env}. Use 'dev', 'live', 'local', or 'opensky'."
+                f"Unknown environment: {env}. Use 'local' or 'opensky'."
             )
 
         if worldwide:
@@ -2203,5 +2169,5 @@ class OPDIConfig:
 
     @classmethod
     def default(cls) -> "OPDIConfig":
-        """Create default configuration (dev environment)."""
-        return cls.for_environment("dev")
+        """Create the default configuration (``opensky`` environment)."""
+        return cls.for_environment("opensky")

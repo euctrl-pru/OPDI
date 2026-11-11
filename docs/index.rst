@@ -33,9 +33,7 @@ Key Features
 - **Flight list generation** with departure/arrival detection using H3 zones
 - **Flight event detection** including phase classification, level crossings,
   and airport surface events
-- **Flexible export** to Parquet and CSV formats
-- **Data quality monitoring** with anomaly detection and interactive
-  visualizations
+- **Daily published files**: the flight list and the flight events, as Parquet
 
 Quick Links
 -----------

@@ -17,14 +17,14 @@ def test_the_european_box_is_the_published_one():
 
 
 def test_every_environment_defaults_to_worldwide():
-    """A coverage that varied by environment would let dev publish rows local
-    runs cannot reproduce, with nothing in the data saying why."""
-    for env in ("opensky", "local", "dev", "live"):
+    """A coverage that varied by environment would let one environment publish
+    rows another cannot reproduce, with nothing in the data saying why."""
+    for env in ("opensky", "local"):
         assert OPDIConfig.for_environment(env).coverage.bbox is None
 
 
 def test_every_environment_can_still_ask_for_europe():
-    for env in ("opensky", "local", "dev", "live"):
+    for env in ("opensky", "local"):
         c = OPDIConfig.for_environment(env, worldwide=False).coverage
         assert c.bbox == PUBLISHED
 

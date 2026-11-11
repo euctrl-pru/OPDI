@@ -147,10 +147,9 @@ def _resolve_warehouse(warehouse, configured: str) -> str:
     return configured
 
 
-#: Steps available but not run by default. Export and statistics are
-#: publication actions; a test period should be inspected before anything is
-#: published from it.
-OPTIONAL_STEPS: Tuple[str, ...] = ("05", "06", "07", "08", "09")
+#: Steps available but not run by default. Publishing is a release action; a
+#: test period should be inspected before anything is published from it.
+OPTIONAL_STEPS: Tuple[str, ...] = ("09",)
 
 #: Optional steps that run once per day, like :data:`DAY_STEPS`. Step 09
 #: publishes the day's flight list and flight events files; put it last.
@@ -165,7 +164,7 @@ def is_day_step(step: str) -> bool:
 #: Steps that take no date range. Mirrors the same split in ``runner.py``; if
 #: that list changes this one must change with it, which ``test_periodrun``
 #: pins.
-UNDATED_STEPS: frozenset = frozenset({"00", "07", "08"})
+UNDATED_STEPS: frozenset = frozenset({"00"})
 
 #: Reference tables the data steps read. A run that starts without these does
 #: not fail fast -- it produces empty joins and reports them as coverage
@@ -830,7 +829,6 @@ def run_period(
     warehouse: str = _UNSET,
     prune_tracks: bool = False,
     keep_tracks_on: Sequence[date] = (),
-    allow_existing: bool = False,
     worldwide: bool = True,
 ) -> int:
     """Run the pipeline over a window of ``days``, resuming where it stopped.
@@ -861,9 +859,6 @@ def run_period(
             :data:`DEFAULT_WAREHOUSE`. The tables go to the release root
             inside it (``<warehouse>/v2.0.0`` in the ``opensky``
             environment); see :func:`_resolve_warehouse`.
-        allow_existing: Proceed even though the warehouse prefix already holds
-            objects. Off by default: a rebuild that silently merged with a
-            previous attempt's output would produce a table nobody could date.
         worldwide: Process the whole world (the default). Pass ``False``
             for a run limited to the European box. The coverage does not
             change the warehouse; the coverage marker refuses a run whose
@@ -1018,8 +1013,6 @@ def run_period(
     kwargs = dict(
         airports_hex_path="data/airport_hex/zones_res7_processed.parquet",
         airports_hex_raw_path="data/airport_hex/zones_res7.parquet",
-        export_dir="data/OPDI/v002",
-        last_n_months=4,
         # Filled in below, once a session exists to inspect the warehouse
         # with. Substeps whose output is already built are skipped.
         run_reference={k: True for k in REFERENCE_OUTPUTS},

@@ -8,8 +8,8 @@ or runs the full pipeline end-to-end.
 Usage::
 
     opdi --help
-    opdi run --env live --start 2024-01-01 --end 2024-06-01
-    opdi run --step 02 --env dev --start 2024-01-01 --end 2024-02-01
+    opdi run --start 2024-01-01 --end 2024-06-01
+    opdi run --step 02 --env local --start 2024-01-01 --end 2024-02-01
 """
 
 import argparse
@@ -30,9 +30,9 @@ def main(argv=None):
     run_parser = subparsers.add_parser("run", help="Run pipeline stages.")
     run_parser.add_argument(
         "--env",
-        choices=["dev", "live", "local", "opensky"],
-        default="dev",
-        help="Environment (default: dev).",
+        choices=["local", "opensky"],
+        default="opensky",
+        help="Environment (default: opensky).",
     )
     run_parser.add_argument(
         "--start",
@@ -47,9 +47,9 @@ def main(argv=None):
     run_parser.add_argument(
         "--step",
         default=None,
-        help="Run only this step, 00-08 -- including the lettered ones, "
-        "01b (ADS-C ingestion) and 02a (trajectory cleaning). "
-        "Omit to run all steps.",
+        help="Run only this step: 00, 01, 01b (ADS-C ingestion), 02, "
+        "02a (trajectory cleaning), 03, 04, 04b (flight list milestones) "
+        "or 09 (published daily files). Omit to run all steps.",
     )
     run_parser.add_argument(
         "--no-airport-zones",
@@ -83,14 +83,14 @@ def main(argv=None):
     )
     run_parser.add_argument(
         "--adep-mode",
-        choices=["trend", "endpoint", "nearest"],
+        choices=["trend", "endpoint"],
         default=None,
         help="Detection algorithm for departures (step 03). Defaults to the "
         "value in DetectionConfig.",
     )
     run_parser.add_argument(
         "--ades-mode",
-        choices=["trend", "endpoint", "nearest"],
+        choices=["trend", "endpoint"],
         default=None,
         help="Detection algorithm for arrivals (step 03). The two roles take "
         "different rules because they are not equally hard.",
@@ -116,8 +116,8 @@ def main(argv=None):
         "--europe",
         dest="worldwide",
         action="store_false",
-        help="Apply the published European bounding box. In the dev, live and "
-        "local environments this also selects the European warehouse.",
+        help="Apply the published European bounding box. In the local "
+        "environment this also selects the European warehouse.",
     )
 
     args = parser.parse_args(argv)

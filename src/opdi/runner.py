@@ -1,9 +1,7 @@
 """
 OPDI full pipeline runner.
 
-Executes the complete OPDI data pipeline in order, mirroring the
-sequential execution of the ``00_*`` through ``08_*`` scripts in
-``OPDI-live/python/v2.0.0/``.
+Executes the OPDI pipeline steps in order, over a date range.
 
 Pipeline stages
 ---------------
@@ -21,10 +19,8 @@ No.  Description                                 Module
 02a  Trajectory cleaning                         ``cleaning.cleaner``
 03   Flight list generation                      ``pipeline.flights``
 04   Flight events & measurements                ``pipeline.events``
-05   Export to parquet                            ``output.parquet_exporter``
-06   Cleanup & CSV export                        ``output.csv_exporter``
-07   Basic statistics                            ``monitoring.basic_stats``
-08   Advanced statistics & quality report        ``monitoring.advanced_stats``
+04b  Flight list milestones                      ``pipeline.flight_list_step``
+09   Published daily files                       ``output.published``
 ===  ==========================================  ================================
 
 Usage
@@ -35,20 +31,20 @@ Run the full pipeline::
     from opdi.runner import run_pipeline
 
     run_pipeline(
-        env="live",
+        env="opensky",
         start_date=date(2024, 1, 1),
         end_date=date(2024, 6, 1),
     )
 
 Run a single step::
 
-    run_pipeline(env="dev", start_date=date(2024, 1, 1),
+    run_pipeline(env="opensky", start_date=date(2024, 1, 1),
                  end_date=date(2024, 2, 1), step="02")
 
 Or from the command line::
 
-    opdi run --env live --start 2024-01-01 --end 2024-06-01
-    opdi run --step 04 --env dev --start 2024-03-01 --end 2024-04-01
+    opdi run --start 2024-01-01 --end 2024-06-01
+    opdi run --step 04 --start 2024-03-01 --end 2024-04-01
 """
 
 import os
@@ -483,8 +479,7 @@ def _step_04_extract_events(spark, config, start_date, end_date, **kwargs):
 def _step_04b_enrich_flight_list(spark, config, start_date, end_date, **kwargs):
     """Step 04b: fold the milestones back into the flight list.
 
-    Numbered 04b rather than 05 because 05 is the published parquet export and
-    renumbering it would break every operator's muscle memory for no gain.
+    It works on the output of step 04, so it is numbered 04b.
     """
     print("\n" + "=" * 70)
     print(f"STEP 04b - Flight list milestones ({start_date} to {end_date})")
@@ -498,80 +493,6 @@ def _step_04b_enrich_flight_list(spark, config, start_date, end_date, **kwargs):
     if written is None:
         return
     print(f"Flight list enriched: {written:,} rows.")
-
-
-def _step_05_export_parquet(spark, config, start_date, end_date, **kwargs):
-    """Step 05: Export OPDI tables to parquet files."""
-    print("\n" + "=" * 70)
-    print(f"STEP 05 - Parquet export ({start_date} to {end_date})")
-    print("=" * 70)
-
-    output_dir = kwargs.get("export_dir", "data/OPDI/v002")
-
-    from opdi.output.parquet_exporter import ParquetExporter
-
-    exporter = ParquetExporter(spark, config, output_dir=output_dir)
-    exporter.export_all(
-        start_date=start_date,
-        end_date=end_date,
-        last_n_months=kwargs.get("last_n_months", 4),
-    )
-
-
-def _step_06_cleanup(spark, config, start_date, end_date, **kwargs):
-    """Step 06: Deduplicate and export to CSV.gz."""
-    print("\n" + "=" * 70)
-    print("STEP 06 - Data cleanup & CSV export")
-    print("=" * 70)
-
-    export_dir = kwargs.get("export_dir", "data/OPDI/v002")
-
-    from opdi.output.csv_exporter import CSVExporter
-
-    for subdir in ["flight_list", "flight_events", "measurements"]:
-        import os
-
-        input_dir = os.path.join(export_dir, subdir)
-        output_dir = os.path.join(export_dir, f"{subdir}_clean")
-
-        if os.path.isdir(input_dir):
-            print(f"\n  Cleaning {subdir}...")
-            exporter = CSVExporter(input_dir, output_dir)
-            exporter.clean_and_export_all()
-
-
-def _step_07_basic_stats(spark, config, **kwargs):
-    """Step 07: Print basic table statistics."""
-    print("\n" + "=" * 70)
-    print("STEP 07 - Basic statistics")
-    print("=" * 70)
-
-    from opdi.monitoring.basic_stats import BasicStatsCollector
-
-    collector = BasicStatsCollector(spark, config)
-    collector.print_summary()
-
-
-def _step_08_advanced_stats(spark, config, **kwargs):
-    """Step 08: Generate advanced data quality report."""
-    print("\n" + "=" * 70)
-    print("STEP 08 - Advanced statistics & data quality")
-    print("=" * 70)
-
-    from datetime import datetime
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    output_csv = kwargs.get("quality_csv", f"daily_rows_counts_{today}.csv")
-    output_html = kwargs.get("quality_html", f"daily_rows_visualization_{today}.html")
-
-    from opdi.monitoring.advanced_stats import AdvancedStatsCollector
-
-    collector = AdvancedStatsCollector(spark, config)
-    collector.generate_quality_report(
-        "osn_statevectors_v2",
-        output_csv,
-        output_html,
-    )
 
 
 def _step_09_publish(spark, config, start_date, end_date, **kwargs):
@@ -595,16 +516,12 @@ STEPS = {
     "03": _step_03_generate_flight_list,
     "04": _step_04_extract_events,
     "04b": _step_04b_enrich_flight_list,
-    "05": _step_05_export_parquet,
-    "06": _step_06_cleanup,
-    "07": _step_07_basic_stats,
-    "08": _step_08_advanced_stats,
     "09": _step_09_publish,
 }
 
 
 def run_pipeline(
-    env: str = "dev",
+    env: str = "opensky",
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     step: Optional[str] = None,
@@ -615,8 +532,6 @@ def run_pipeline(
     run_aircraft_db: bool = True,
     run_runway_grid: bool = True,
     airports_hex_path: str = "data/airport_hex/zones_res7_processed.parquet",
-    export_dir: str = "data/OPDI/v002",
-    last_n_months: int = 4,
     adep_mode: Optional[str] = None,
     ades_mode: Optional[str] = None,
     worldwide: bool = True,
@@ -624,11 +539,8 @@ def run_pipeline(
     """
     Run the OPDI pipeline end-to-end or a single step.
 
-    This function mirrors the sequential execution of the ``00_*`` through
-    ``08_*`` scripts in ``OPDI-live/python/v2.0.0/``.
-
     Args:
-        env: Environment name (``"dev"``, ``"live"``, or ``"local"``).
+        env: Environment name (``"opensky"`` or ``"local"``).
         start_date: Pipeline start date (first day of first month to process).
         end_date: Pipeline end date (first day of last month to process).
         step: Run only this step (``"00"`` through ``"09"``).
@@ -640,18 +552,16 @@ def run_pipeline(
         run_aircraft_db: Run step 00e — OpenSky aircraft database.
         run_runway_grid: Run step 00f — Runway + approach H3 grid (oa_runways).
         adep_mode: Detection algorithm for departures in step 03
-            (``"trend"``, ``"endpoint"`` or ``"nearest"``). ``None`` uses the
+            (``"trend"`` or ``"endpoint"``). ``None`` uses the
             configured default.
         ades_mode: Detection algorithm for arrivals in step 03. The two roles
             are separate because they are not equally hard and the rules that
             suit them differ.
         airports_hex_path: Path to pre-generated airport hex zones parquet
             (produced by step 00, consumed by step 03).
-        export_dir: Base directory for parquet/CSV exports (steps 05-06).
-        last_n_months: Only export the last N months of data (step 05).
         worldwide: Process the whole world (the default). Pass ``False``
-            for the European box. In the ``dev``, ``live`` and ``local``
-            environments this also selects the European warehouse.
+            for the European box. In the ``local`` environment this also
+            selects the European warehouse.
 
     Returns:
         Exit code: ``0`` on success, ``1`` on failure.
@@ -660,7 +570,7 @@ def run_pipeline(
         >>> from datetime import date
         >>> from opdi.runner import run_pipeline
         >>> run_pipeline(
-        ...     env="live",
+        ...     env="opensky",
         ...     start_date=date(2024, 1, 1),
         ...     end_date=date(2024, 6, 1),
         ...     run_airport_zones=False,
@@ -692,7 +602,7 @@ def run_pipeline(
     skip_all_ref = not any(run_reference.values())
 
     step_label = step or (
-        "ALL (01-08, incl. 01b/02a)" if skip_all_ref else "ALL (00-08, incl. 01b/02a)"
+        "ALL (01-09, incl. 01b/02a/04b)" if skip_all_ref else "ALL (00-09, incl. 01b/02a/04b)"
     )
     print(f"  Step        : {step_label}")
     if step is None:
@@ -714,8 +624,6 @@ def run_pipeline(
     kwargs = dict(
         airports_hex_path=airports_hex_path,
         airports_hex_raw_path=airports_hex_path.replace("_processed", ""),
-        export_dir=export_dir,
-        last_n_months=last_n_months,
         run_reference=run_reference,
         # None means "whatever DetectionConfig says", so a plain run is
         # unaffected by the existence of these.
@@ -731,8 +639,8 @@ def run_pipeline(
                 return 1
 
             fn = STEPS[step]
-            # Steps 00, 07, 08 don't need date range
-            if step in ("00", "07", "08"):
+            # Step 00 needs no date range
+            if step == "00":
                 fn(spark, config, **kwargs)
             else:
                 fn(spark, config, start_date, end_date, **kwargs)
@@ -740,7 +648,7 @@ def run_pipeline(
             # Run all steps in order
             for step_id in sorted(STEPS.keys()):
                 fn = STEPS[step_id]
-                if step_id in ("00", "07", "08"):
+                if step_id == "00":
                     fn(spark, config, **kwargs)
                 else:
                     fn(spark, config, start_date, end_date, **kwargs)
@@ -763,7 +671,7 @@ if __name__ == "__main__":
     import sys
 
     run_pipeline(
-        env=sys.argv[1] if len(sys.argv) > 1 else "dev",
+        env=sys.argv[1] if len(sys.argv) > 1 else "opensky",
         start_date=date.fromisoformat(sys.argv[2]) if len(sys.argv) > 2 else date(2022, 1, 1),
         end_date=date.fromisoformat(sys.argv[3]) if len(sys.argv) > 3 else date.today(),
     )

@@ -72,8 +72,8 @@ Quick Start
    from opdi.config import OPDIConfig
    from opdi.utils.spark_helpers import get_spark
 
-   config = OPDIConfig.for_environment("dev")  # "dev", "live", or "local"
-   spark = get_spark(env="dev", app_name="My OPDI App")
+   config = OPDIConfig.for_environment("opensky")  # "opensky" or "local"
+   spark = get_spark(env="opensky", app_name="My OPDI App")
 
 2. Ingest the aircraft database
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -111,25 +111,22 @@ Always stop the Spark session when you are finished:
 Environment Configuration
 -------------------------
 
-OPDI supports three environments:
+OPDI supports two environments:
 
-+-----------+--------------------------------------------------+
-| Name      | Description                                      |
-+===========+==================================================+
-| ``dev``   | Development -- moderate memory, suitable for      |
-|           | prototyping                                      |
-+-----------+--------------------------------------------------+
-| ``live``  | Production -- full resource allocation on the     |
-|           | Cloudera cluster                                 |
-+-----------+--------------------------------------------------+
-| ``local`` | Local testing -- lightweight Spark session        |
-+-----------+--------------------------------------------------+
++-------------+------------------------------------------------+
+| Name        | Description                                    |
++=============+================================================+
+| ``opensky`` | Production on the OpenSky cluster: parquet     |
+|             | tables on S3, Spark executors on Kubernetes    |
++-------------+------------------------------------------------+
+| ``local``   | Local testing -- lightweight Spark session      |
++-------------+------------------------------------------------+
 
 Override Spark settings when needed:
 
 .. code-block:: python
 
-   config = OPDIConfig.for_environment("dev")
+   config = OPDIConfig.for_environment("opensky")
    config.spark.driver_memory = "16G"
    config.spark.executor_memory = "20G"
 
