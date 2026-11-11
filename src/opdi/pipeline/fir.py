@@ -28,9 +28,9 @@ from opdi.config import EventConfig
 from opdi.pipeline.holding import FT_PER_M
 from opdi.pipeline.holes import PIECE
 
-#: Version stamped on the event. Its two standard measurements carry the
-#: measurement versions every event's do.
-FIR_VERSION = "fir_v0.1.0"
+# FIR_VERSION is stamped on the event; its two standard measurements carry the
+# measurement versions every event's do.
+from opdi.versions import FIR_VERSION
 
 AIRSPACE_TABLE = "opdi_h3_airspace_ref"
 

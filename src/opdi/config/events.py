@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from opdi.versions import EVENTS_VERSION, LEGACY_EVENTS_VERSION
+
 
 @dataclass
 class EventConfig:
@@ -573,7 +575,7 @@ class EventConfig:
     ids are row numbers counted over the day and change when the data
     change."""
 
-    events_version: str = "events_v0.3.0"
+    events_version: str = EVENTS_VERSION
     """Version string written on the events this configuration produces
     (column ``version``). A published version string is never reused for
     different results."""
@@ -653,5 +655,5 @@ class EventConfig:
             emit_holding=False,
             emit_point_merge=False,
             emit_fir_crossings=False,
-            events_version="events_v0.0.2",
+            events_version=LEGACY_EVENTS_VERSION,
         )

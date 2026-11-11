@@ -43,11 +43,11 @@ from opdi.pipeline.flights import resolve_flight_id
 from opdi.utils.datetime_helpers import get_start_end_of_month
 from opdi.utils.storage import StorageManager
 
-#: The events version of release v0.0.2. A run that writes it reproduces that
-#: release, so the call sign of the track is not resolved for it (see
-#: below). ``EventConfig.legacy()`` sets it; ``tests/test_events_labelling.py``
-#: checks that the two agree.
-LEGACY_EVENTS_VERSION = "events_v0.0.2"
+# The events version of release v0.0.2. A run that writes it reproduces that
+# release, so the call sign of the track is not resolved for it (see
+# below). ``EventConfig.legacy()`` sets it; ``tests/test_events_labelling.py``
+# checks that the two agree.
+from opdi.versions import LEGACY_EVENTS_VERSION
 
 
 def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:

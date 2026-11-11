@@ -24,9 +24,15 @@ import io
 from dataclasses import dataclass
 from typing import Dict, Iterable, Tuple
 
-#: Name of the data release. It is part of the published path and is written
-#: in the ``release`` column of every published row.
-RELEASE = "v2.0.0"
+# RELEASE, the name of the data release, is part of the published path and is
+# written in the ``release`` column of every published row.
+from opdi.versions import (
+    DISTANCE_VERSION,
+    HOLDING_VERSION,
+    PMS_VERSION,
+    RELEASE,
+    TIME_VERSION,
+)
 
 #: The groups a column can belong to. The data dictionary uses them as
 #: section headings.
@@ -768,14 +774,14 @@ MEASUREMENT_SUFFIX: Dict[str, str] = {
 
 #: Measurement type -> version of the method that computes it.
 MEASUREMENT_VERSION: Dict[str, str] = {
-    _DISTANCE: "distance_v0.0.3",
-    _TIME: "time_v0.0.1",
-    "Holding duration (s)": "holding_v0.1.0",
-    "Holding distance (NM)": "holding_v0.1.0",
-    "Holding circuits": "holding_v0.1.0",
-    "Point merge leg time (s)": "pms_v0.1.0",
-    "Point merge leg distance (NM)": "pms_v0.1.0",
-    "Point merge direct-to distance (NM)": "pms_v0.1.0",
+    _DISTANCE: DISTANCE_VERSION,
+    _TIME: TIME_VERSION,
+    "Holding duration (s)": HOLDING_VERSION,
+    "Holding distance (NM)": HOLDING_VERSION,
+    "Holding circuits": HOLDING_VERSION,
+    "Point merge leg time (s)": PMS_VERSION,
+    "Point merge leg distance (NM)": PMS_VERSION,
+    "Point merge direct-to distance (NM)": PMS_VERSION,
 }
 
 

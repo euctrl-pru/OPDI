@@ -101,6 +101,7 @@ from opdi.pipeline.vertical_pru import (
 from opdi.reference.point_merge import point_merge_systems_for_day
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.storage import StorageManager
+from opdi.versions import DISTANCE_VERSION, LEGACY_DISTANCE_VERSION, TIME_VERSION
 
 #: Columns step 04 reads from the track table.
 #:
@@ -1260,13 +1261,6 @@ def add_time_measure(sdf_input: DataFrame) -> DataFrame:
     return sdf_input.drop("min_event_time")
 
 
-#: The cumulative distance measured from the last known position.
-DISTANCE_VERSION = "distance_v0.0.3"
-#: The release v0.0.2 measurement, in which a missing position adds no
-#: distance on either side of it.
-LEGACY_DISTANCE_VERSION = "distance_v0.0.2"
-
-
 def distance_version(config: EventConfig) -> str:
     """The ``version`` of the distance measurement under ``config``."""
     if config.distance_from_last_known_position:
@@ -1784,7 +1778,7 @@ class FlightEventProcessor:
 
         df_time = (
             df_events.withColumn("type", lit("Time Passed (s)"))
-            .withColumn("version", lit("time_v0.0.1"))
+            .withColumn("version", lit(TIME_VERSION))
             .withColumn("id", self._measurement_id(batch_id, "_t_"))
             .select(
                 col("id"),

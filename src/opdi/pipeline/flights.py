@@ -52,6 +52,10 @@ from opdi.utils.datetime_helpers import (
 )
 from opdi.utils.storage import StorageManager
 
+# FLIGHT_LIST_VERSION is written on every flight-list row of release v2.0.0;
+# LEGACY_TREND_VERSION and LEGACY_ENDPOINT_VERSION by the v0.0.2 settings.
+from opdi.versions import FLIGHT_LIST_VERSION, LEGACY_ENDPOINT_VERSION, LEGACY_TREND_VERSION
+
 #: Default box for :func:`at_border`, the European coverage. The pipeline
 #: passes ``config.coverage.bbox`` explicitly (see
 #: :meth:`FlightListProcessor.build_endpoint_candidates`).
@@ -66,24 +70,6 @@ BORDER_MARGIN_NM = 30.0
 #: in the air (European coverage only): the airport lies outside the area and
 #: cannot be named from the data.
 OOA = "OOA"
-
-#: The ``version`` written on every flight-list row of release v2.0.0.
-#:
-#: A published version string is never reused for different results. Under
-#: this version: candidate airports are ranked by great-circle distance;
-#: departures come from the ``endpoint`` method and arrivals from ``trend``;
-#: the thresholds are those of :class:`~opdi.config.DetectionConfig`;
-#: ``trend`` measures its ceiling above the airport's elevation and can give
-#: the out-of-area code; the flight list is built from the cleaned tracks; and
-#: ``FLT_ID`` is the call sign the track broadcast most often (see
-#: :func:`resolve_flight_id`). A run with the v0.0.2 settings writes
-#: :data:`LEGACY_TREND_VERSION` instead.
-FLIGHT_LIST_VERSION = "v5.0.0"
-
-#: Versions written by the v0.0.2 settings (``trend``) and by the endpoint
-#: method when run with those settings.
-LEGACY_TREND_VERSION = "v2.0.0"
-LEGACY_ENDPOINT_VERSION = "v3.0.0"
 
 NM_PER_DEG = 60.0
 EARTH_R_NM = 3440.065

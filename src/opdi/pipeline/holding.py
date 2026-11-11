@@ -24,9 +24,7 @@ from pyspark.sql.functions import col, lit
 
 from opdi.config import EventConfig
 from opdi.pipeline.holes import PIECE
-
-#: Version stamped on the two events and on their measurements.
-HOLDING_VERSION = "holding_v0.1.0"
+from opdi.versions import HOLDING_VERSION  # stamped on the events and measurements
 
 #: The measurements read off ``holding-end``'s info (see ``events.EXTRA_MEASURES``).
 HOLDING_MEASURES = [
