@@ -96,6 +96,6 @@ def test_the_project_and_the_image_ask_for_the_same_h3_major():
 def test_the_executor_image_tag_is_not_a_pre_v4_build():
     """v4.1.1-5 and earlier carry h3 3.7.7. Pointing back at one of them
     reinstates a silently empty detection grid."""
-    cfg = (ROOT / "src" / "opdi" / "config.py").read_text()
+    cfg = (ROOT / "src" / "opdi" / "config" / "environments.py").read_text()
     assert "opdi-spark:v4.1.1-5" not in cfg
     assert "opdi-spark:v4.1.1-6" in cfg
