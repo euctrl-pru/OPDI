@@ -7,11 +7,11 @@ the OPDI package.
 Prerequisites
 -------------
 
-- **Python** >= 3.8
-- **Apache Spark** >= 3.3.0
-- Access to a Cloudera environment (production) or a local Spark cluster
-- For OpenSky data ingestion: ``OSN_USERNAME`` and ``OSN_KEY`` environment
-  variables
+- **Python** 3.10 or later and **Java** 17
+- **Apache Spark** 3.5 or later (PySpark is installed with the package)
+- A local Spark session, or the OpenSky Network cluster (``opensky``
+  environment) with S3 credentials (``AWS_ACCESS_KEY_ID``,
+  ``AWS_SECRET_ACCESS_KEY``)
 
 Installation
 ------------
@@ -21,7 +21,8 @@ Install from source (editable mode)
 
 .. code-block:: bash
 
-   cd OPDI-dev
+   git clone https://github.com/euctrl-pru/opdi.git
+   cd opdi
    pip install -e .
 
 Install with development tools
@@ -39,12 +40,11 @@ Dependencies
 All required dependencies are declared in ``pyproject.toml`` and installed
 automatically:
 
-- PySpark >= 3.3.0
-- H3 >= 3.7.0 and h3-pyspark >= 1.0.0
+- PySpark >= 3.5.1
+- h3 version 4 and h3-pyspark >= 1.0.0
 - Shapely >= 2.0.0
 - Pandas >= 1.5.0
 - NumPy >= 1.23.0
-- Plotly >= 5.0.0
 - And more -- see ``pyproject.toml`` for the full list.
 
 Building the documentation

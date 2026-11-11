@@ -14,8 +14,8 @@ a laptop with a local Spark session, are in `tests/benchmarks/`.
 
 ## Study variants
 
-The package keeps two behaviours: today's default configuration (release
-v2.0.0) and the configuration that reproduces the published v0.0.2 release.
+The package keeps two behaviours: the default configuration (release v2.0.0)
+and the configuration that reproduces the published v0.0.2 release.
 The other variants that the studies compared live in `study_variants/`:
 
 | Module | What it holds |
@@ -28,7 +28,7 @@ A script turns a variant on explicitly. For a segmentation rule:
 ```python
 from study_variants.segmentation import register_study_arms
 
-register_study_arms()                        # adds the rules to the pipeline's table
+register_study_arms()                        # adds the rules to the pipeline's rule registry
 config.segmentation.method = "debounced"     # now accepted by step 02
 ```
 
@@ -46,7 +46,13 @@ StudyFlightListProcessor(spark, config).process_dai(month, adep_mode="nearest",
 ## Where the scripts read and write
 
 `OPDIConfig.for_environment("opensky")` puts a release's tables in a folder
-named after the release (`<warehouse>/v2.0.0`). The study data was built before
-that folder existed and sits directly in the warehouse (for example
-`s3a://eurocontrol/opdi/research/...`). Every script that reads it therefore
-sets `config.project.release = ""`.
+named after the release (`<warehouse>/v2.0.0`). The study data sits directly in
+the warehouse (for example `s3a://eurocontrol/opdi/research/...`), so every
+script that reads it sets `config.project.release = ""`.
+
+## Other files
+
+The `*_RUN_LOG.md` and `*_RUN_NOTES.md` files are the working records of the
+studies (what was run, when, and with which result). `DATASETS.md` lists the
+data sets the studies read. `tools/` holds small viewers used while studying
+the data.
