@@ -104,7 +104,6 @@ class OPDIConfig:
                 project=ProjectConfig(
                     project_name="opdi_local",
                     warehouse_path="./data/warehouse",
-                    hadoop_filesystem="file:///",
                 ),
                 spark=SparkConfig(
                     app_name="OPDI Pipeline - Local",
@@ -112,7 +111,6 @@ class OPDIConfig:
                     executor_memory="4G",
                     executor_instances="1",
                     dynamic_allocation_max_executors="2",
-                    hadoop_group="",  # no Azure access on a local machine
                     iceberg_jar_path="",  # set by hand when Iceberg is used
                 ),
             )
@@ -125,7 +123,6 @@ class OPDIConfig:
                     # so OPDI_WAREHOUSE runs the whole pipeline elsewhere
                     # without touching the production tables.
                     warehouse_path=os.environ.get(WAREHOUSE_VARIABLE) or OPENSKY_DEFAULT_WAREHOUSE,
-                    hadoop_filesystem="",
                 ),
                 spark=SparkConfig(
                     app_name="OPDI - OpenSky",

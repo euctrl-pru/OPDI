@@ -71,11 +71,6 @@ class SparkConfig:
     handle_timestamp_without_timezone: str = "true"
     """Let Iceberg tables hold timestamps without a time zone."""
 
-    # Hadoop group settings
-    hadoop_group: str = "eur-app-opdi"
-    """Group required to access an Azure file system through Hadoop. Used
-    only with a Hive catalog."""
-
     # S3 settings (for OpenSky environment)
     s3_endpoint: str = ""
     """S3 address of the storage (``opensky`` environment). Empty: no S3 access is
@@ -163,8 +158,6 @@ class SparkConfig:
                     "spark.driver.maxResultSize": self.driver_max_result_size,
                     "spark.shuffle.compress": self.shuffle_compress,
                     "spark.shuffle.spill.compress": self.shuffle_spill_compress,
-                    "spark.hadoop.fs.azure.ext.cab.required.group": self.hadoop_group,
-                    "spark.kerberos.access.hadoopFileSystems": project_config.hadoop_filesystem,
                     "spark.jars": self.iceberg_jar_path,
                     "spark.executor.extraClassPath": self.iceberg_jar_path,
                     "spark.driver.extraClassPath": self.iceberg_jar_path,

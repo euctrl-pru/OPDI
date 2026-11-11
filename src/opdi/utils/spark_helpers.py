@@ -128,7 +128,7 @@ class SparkSessionManager:
     ) -> SparkSession:
         """Create a lightweight Spark session for local testing.
 
-        This creates a minimal Spark session without Iceberg, Hive, or Azure dependencies,
+        This creates a minimal Spark session without Iceberg or Hive,
         suitable for unit testing and local development.
 
         Args:

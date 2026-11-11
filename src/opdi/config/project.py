@@ -13,17 +13,9 @@ class ProjectConfig:
     """Name of the catalog database that holds the tables (``local``
     environment), or ``"opensky"`` for plain Parquet folders."""
 
-    warehouse_path: str = (
-        "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged"
-    )
+    warehouse_path: str = "./data/warehouse"
     """Folder (local path or ``s3a://`` address) under which the tables are
     written. :meth:`OPDIConfig.for_environment` sets it for each environment."""
-
-    hadoop_filesystem: str = (
-        "abfs://storage-fs@cdpdllive.dfs.core.windows.net/data/project/opdi.db/unmanaged"
-    )
-    """File system the Spark session may access with Kerberos. Used only with
-    a Hive catalog; the two environments of this package do not use it."""
 
     release: str = RELEASE
     """Name of the data release, for example ``v2.0.0``.
