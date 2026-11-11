@@ -343,3 +343,7 @@ def test_allow_empty_reaches_the_publishing_step(monkeypatch):
     monkeypatch.setattr(o, "run_day", lambda *a: seen.update(args=a) or 0)
     assert o.main(["day", "--day", "2026-06-14", "--allow-empty"]) == 0
     assert seen["args"][-1] is True
+
+
+def test_the_free_space_floor_leaves_room_for_a_worldwide_day():
+    assert o.DEFAULT_MIN_FREE_GB == 25.0

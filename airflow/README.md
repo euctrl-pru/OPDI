@@ -130,7 +130,7 @@ Set them under Admin > Variables. All are optional.
 |-----------------------|-----------|---------|
 | `opdi_command_prefix` | empty     | Text placed before `python -m opdi.orchestration` in every command. It says where OPDI runs. Examples: `kubectl exec -n eurocontrol <driver-pod> --` (run inside the pod that hosts the Spark driver), `source /opt/opdi/.venv/bin/activate &&` (a virtual environment on the worker). |
 | `opdi_warehouse`      | empty     | The warehouse. Empty means the `OPDI_WAREHOUSE` environment variable where the command runs, else `s3a://eurocontrol/opdi`. |
-| `opdi_min_free_gb`    | `5`       | Free space, in GB, a day needs before it starts. |
+| `opdi_min_free_gb`    | `25`      | Free space, in GB, a day needs before it starts. A worldwide day writes about 20 GB of internal tables (mostly tracks) before `prune` removes them. |
 | `opdi_lag_days`       | `2`       | How many days the daily run stays behind the run date. |
 | `opdi_keep_internal`  | `false`   | `true` keeps the internal tables of each day after publishing (needs much more space). |
 | `opdi_keep_working`   | `true`    | `false` also removes the working events and measurements of days that are already published, except the 7 days on each side of the day just run. See "How disk space is protected". |

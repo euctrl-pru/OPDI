@@ -112,7 +112,7 @@ def test_variables_have_defaults(tree):
     assert _constant(tree, "VARIABLE_DEFAULTS") == {
         "opdi_command_prefix": "",
         "opdi_warehouse": "",
-        "opdi_min_free_gb": "5",
+        "opdi_min_free_gb": "25",
         "opdi_lag_days": "2",
         "opdi_keep_internal": "false",
         "opdi_keep_working": "true",
