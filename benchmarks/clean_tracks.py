@@ -187,6 +187,8 @@ def main() -> None:
     from opdi.config import OPDIConfig
 
     cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     print(f"\ncleaning enabled={cfg.cleaning.enabled}")
     if not cfg.cleaning.enabled:
         raise SystemExit(

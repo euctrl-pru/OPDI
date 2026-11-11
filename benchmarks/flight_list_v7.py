@@ -762,6 +762,8 @@ def main() -> None:
     # the storage backend, and setting the field afterwards leaves the
     # StorageManager unwired, so every table looks absent.
     cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     month = datetime.strptime(period["months"][0], "%Y%m").date().replace(day=1)
 
     # A period with its own candidate cache must be recorded as already built,

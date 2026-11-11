@@ -47,6 +47,8 @@ def main() -> None:
 
     month = datetime.strptime(args.month, "%Y%m").date().replace(day=1)
     cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     proc = FlightListProcessor(spark, cfg)
     proc.build_endpoint_candidates(month, max_radius_nm=args.max_radius_nm, rebuild=args.rebuild)
     print(f"endpoint candidates built for {month:%Y-%m}")

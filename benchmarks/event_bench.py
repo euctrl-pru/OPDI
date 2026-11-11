@@ -930,6 +930,8 @@ def main() -> int:
         redirect_event_tables(target, flight_list=flight_list_table(args.period))
 
         config = OPDIConfig.for_environment("opensky")
+        # The study tables sit directly in the warehouse, not in a release folder.
+        config.project.release = ""
         config.events = cfg
         # Clear the per-family progress log first. `process_month` decides what
         # to compute from those logs *independently* of skip_if_processed, so a

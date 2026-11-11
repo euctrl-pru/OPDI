@@ -105,6 +105,8 @@ def main() -> None:
     from opdi.pipeline.flights import FlightListProcessor
 
     cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
 
     if not args.skip_ends:
         import h3_pyspark

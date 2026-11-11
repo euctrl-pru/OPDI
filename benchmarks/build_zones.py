@@ -79,7 +79,10 @@ def main() -> None:
     from opdi.config import OPDIConfig
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
 
-    gen = AirportDetectionZoneGenerator(spark, OPDIConfig.for_environment("opensky"))
+    cfg = OPDIConfig.for_environment("opensky")
+    # The reference tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
+    gen = AirportDetectionZoneGenerator(spark, cfg)
     print(f"resolution {gen.resolution}, rings {gen.radii_nm}")
 
     # The ingested OurAirports table, not the public CSV: reachable from the

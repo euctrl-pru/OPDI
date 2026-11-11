@@ -128,6 +128,8 @@ def _build_spark_k8s():
     from opdi.utils.spark_helpers import SparkSessionManager
 
     cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     cfg.spark.s3_access_key = _os.environ["AWS_ACCESS_KEY_ID"]
     cfg.spark.s3_secret_key = _os.environ["AWS_SECRET_ACCESS_KEY"]
     cfg.spark.executor_instances = str(RESEARCH_EXECUTORS)

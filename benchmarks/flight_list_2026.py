@@ -127,6 +127,8 @@ def main() -> None:
     # the storage backend, and setting it afterwards leaves StorageManager
     # unwired, so every table looks absent.
     cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
     proc = FlightListProcessor(spark, cfg, log_dir=str(args.log_dir), tracks_table=TRACKS_TABLE)

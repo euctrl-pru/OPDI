@@ -147,6 +147,8 @@ def main() -> None:
         from opdi.pipeline.tracks import TrackProcessor
 
         cfg = OPDIConfig.for_environment("opensky")
+        # The study tables sit directly in the warehouse, not in a release folder.
+        cfg.project.release = ""
         # Separate processed-month logs. Sharing production's would let this
         # experiment mark 2025-06 as done and make a later production run skip
         # a month it never actually built.

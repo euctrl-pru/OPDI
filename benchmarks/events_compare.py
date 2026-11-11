@@ -190,7 +190,10 @@ def main() -> int:
     from opdi.config import OPDIConfig
     from opdi.utils.storage import StorageManager
 
-    storage = StorageManager(spark, OPDIConfig.for_environment("opensky"))
+    storage_cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    storage_cfg.project.release = ""
+    storage = StorageManager(spark, storage_cfg)
     truth, rings, _ = events_gt.build(spark, args.period, airports=args.airports)
     truth.cache()
     rings.cache()

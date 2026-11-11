@@ -530,6 +530,8 @@ def main() -> None:
                 )
 
             cfg = OPDIConfig.for_environment("opensky")
+            # The study tables sit directly in the warehouse, not in a release folder.
+            cfg.project.release = ""
             cfg.segmentation.method = method
             redirect_tables(method)
 

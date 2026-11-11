@@ -63,7 +63,10 @@ def main() -> int:
     from opdi.reference.pbf_source import PbfLayoutSource
     from opdi.utils.storage import StorageManager
 
-    storage = StorageManager(spark, OPDIConfig.for_environment("opensky"))
+    cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
+    storage = StorageManager(spark, cfg)
     src = PbfLayoutSource(args.pbf, storage)
 
     lines = []

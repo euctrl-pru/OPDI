@@ -122,6 +122,8 @@ def main() -> None:
     from opdi.pipeline.tracks import TrackProcessor
 
     cfg = OPDIConfig.for_environment("opensky")
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     print(f"\ndecimation rule: {cfg.ingestion.decimation}")
     force_first_write_overwrite({"osn_statevectors_v2", "osn_tracks"})
 
