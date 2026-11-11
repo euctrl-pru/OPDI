@@ -30,6 +30,8 @@ docs/_build/
 # Data artifacts
 data/
 *.parquet
+# The reference outputs of the golden-output test are small and must be committed.
+!tests/golden/**/*.parquet
 *.csv
 *.csv.gz
 !requirements*.txt
