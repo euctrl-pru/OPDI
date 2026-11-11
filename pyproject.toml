@@ -60,6 +60,10 @@ dev = [
     "duckdb>=1.0.0",
     "sqlglot>=25.0.0",
 ]
+# Airflow, only on the machine that runs the scheduler (airflow/dags/).
+airflow = [
+    "apache-airflow==2.7.2",
+]
 # Reading the published files without Spark (opdi.published).
 reader = [
     "pyarrow>=10.0.0",
