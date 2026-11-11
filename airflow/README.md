@@ -227,3 +227,32 @@ To see what is used:
 ```bash
 python -m opdi.orchestration check-space --min-free-gb 0
 ```
+
+## What a day costs
+
+Measured by publishing one worldwide day (14 June 2026) from existing working
+tables on the OpenSky cluster with six executors:
+
+| Item | Value |
+|---|---|
+| Flights in the flight list | 175,615 |
+| Events in the merged file | 6,773,617 |
+| Flight-list file | 7.3 MB |
+| Merged flight-events file | 411 MB (68 row groups of 100,000 rows) |
+| Monthly flight index, one day in it | 4.4 MB |
+| Time for the publishing step alone | 228 s |
+| Reading all 27 events of one flight by `flight_id` | 1 of 68 row groups read, about 1 s |
+
+What this means for the bucket:
+
+- **Published files:** about 0.42 GB per day, so about 155 GB per year of
+  worldwide data.
+- **Working tables that are kept** (flight list, events, measurements): about
+  1.3 GB per day on top of that.
+- The first backfill (January 2025 to November 2026, about 680 days) therefore
+  needs roughly 290 GB for the published files alone. This is more than a
+  200 GB quota. Raise the quota, or publish to a larger warehouse (see
+  "Changing the warehouse"), before starting it.
+
+In that check 3,442 events (0.05%) belonged to tracks with no row in the
+flight list. They are published with empty flight columns.
