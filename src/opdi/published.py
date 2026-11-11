@@ -27,6 +27,7 @@ Files are found under a base address, which can be a web address
 ``s3a://``) or a local folder (``/data/opdi/`` or ``file:///data/opdi/``).
 """
 
+import glob
 import io
 import os
 import urllib.error
@@ -275,6 +276,32 @@ def _duckdb_files(table: str, base, start, end) -> str:
     return "[" + ", ".join("'" + f.replace("'", "''") + "'" for f in files) + "]"
 
 
+def _months(start: date, end: Optional[date]) -> List[date]:
+    """The first day of every month from ``start`` to ``end``."""
+    months = []
+    for d in _days(start, end):
+        first = d.replace(day=1)
+        if first not in months:
+            months.append(first)
+    return months
+
+
+def _duckdb_index_files(base, start, end) -> Optional[str]:
+    """The index files to read, or None when a local folder has no index."""
+    root = base_url(base)
+    local = _local_path(root)
+    if start is None:
+        if local is not None and not glob.glob(os.path.join(local, "index", "*.parquet")):
+            return None
+        return "'" + _duckdb_address(f"{root}index/*.parquet") + "'"
+    files = [f"{root}index/flight_index_{m:%Y%m}.parquet" for m in _months(start, end)]
+    if local is not None:
+        files = [f for f in files if os.path.isfile(_local_path(f))]
+        if not files:
+            return None
+    return "[" + ", ".join("'" + _duckdb_address(f).replace("'", "''") + "'" for f in files) + "]"
+
+
 def duckdb_views(
     base: Optional[str] = None,
     start: Optional[date] = None,
@@ -282,15 +309,20 @@ def duckdb_views(
 ) -> str:
     """DuckDB statements that define views over published files.
 
-    The views are ``opdi_flight_list``, ``opdi_flight_events_merged`` (the
-    files as published), ``opdi_flight_events`` and ``opdi_measurements``
-    (the classic shapes of release v0.0.2). Run the text in a DuckDB
-    connection::
+    The views have the same names as the Trino tables and views:
+
+    * ``flight_list`` and ``flight_events``: the files as published.
+    * ``flight_index``: the monthly flight index, which tells which daily
+      file holds a flight. Left out when a local folder has no index.
+    * ``events``, ``measurements`` and ``flight_list_v0``: the classic
+      shapes of release v0.0.2.
+
+    Run the text in a DuckDB connection::
 
         import duckdb
         con = duckdb.connect()
         con.execute(published.duckdb_views(start=date(2026, 6, 14)))
-        con.sql("select type, count(*) from opdi_flight_events group by type")
+        con.sql("select type, count(*) from events group by type")
 
     Reading over ``https://`` or ``s3://`` needs DuckDB's ``httpfs``
     extension, which DuckDB loads by itself when it is available.
@@ -313,11 +345,21 @@ def duckdb_views(
         raise ImportError(
             f"the DuckDB views need the duckdb package; install it with {_READER_EXTRA}"
         ) from exc
-    from opdi.sql.render import FLIGHT_EVENTS_FILES, FLIGHT_LIST_FILES
+    from opdi.sql.render import (
+        FLIGHT_EVENTS_FILES,
+        FLIGHT_INDEX_FILES,
+        FLIGHT_INDEX_VIEW_START,
+        FLIGHT_LIST_FILES,
+    )
 
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sql", "views.sql")
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
+    index = _duckdb_index_files(base, start, end)
+    if index is None:
+        text = text[: text.index(FLIGHT_INDEX_VIEW_START)]
+    else:
+        text = text.replace(FLIGHT_INDEX_FILES, index)
     return text.replace(FLIGHT_LIST_FILES, _duckdb_files("flight_list", base, start, end)).replace(
         FLIGHT_EVENTS_FILES, _duckdb_files("flight_events", base, start, end)
     )

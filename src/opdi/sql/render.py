@@ -52,6 +52,12 @@ DEFAULT_LOCATION = f"s3a://eurocontrol/opdi/{RELEASE}/published"
 #: Placeholders in :func:`duckdb_views_template` for the lists of files.
 FLIGHT_LIST_FILES = "__FLIGHT_LIST_FILES__"
 FLIGHT_EVENTS_FILES = "__FLIGHT_EVENTS_FILES__"
+FLIGHT_INDEX_FILES = "__FLIGHT_INDEX_FILES__"
+
+#: First line of the ``flight_index`` view in :func:`duckdb_views_template`.
+#: That view is the last statement of the text, so a reader whose folder
+#: has no index cuts the text at this line.
+FLIGHT_INDEX_VIEW_START = "-- The monthly flight index."
 
 _TRINO_TYPES = {
     "string": "varchar",
@@ -203,22 +209,31 @@ def trino_views(catalog: str = DEFAULT_CATALOG, schema: str = DEFAULT_SCHEMA) ->
 
 
 def duckdb_views_template() -> str:
-    """DuckDB statements that define four views over published files.
+    """DuckDB statements that define six views over published files.
 
-    * ``opdi_flight_list``: the flight list files.
-    * ``opdi_flight_events_merged``: the flight events files as published.
-    * ``opdi_flight_events``: the events alone, in the shape of release v0.0.2.
-    * ``opdi_measurements``: one row per measured value, in the shape of
+    The views have the names of the Trino tables and views:
+
+    * ``flight_list``: the flight list files.
+    * ``flight_events``: the flight events files as published.
+    * ``events``: the events alone, in the shape of release v0.0.2.
+    * ``measurements``: one row per measured value, in the shape of
       release v0.0.2.
+    * ``flight_list_v0``: the flight list with the columns and upper-case
+      names of release v0.0.2.
+    * ``flight_index``: the monthly flight index files. This is the last
+      statement and starts at the line :data:`FLIGHT_INDEX_VIEW_START`.
 
-    The text holds two placeholders, :data:`FLIGHT_LIST_FILES` and
-    :data:`FLIGHT_EVENTS_FILES`, for the files to read (a DuckDB list of
-    paths, or a path with a ``*`` wildcard). Use
+    The text holds three placeholders, :data:`FLIGHT_LIST_FILES`,
+    :data:`FLIGHT_EVENTS_FILES` and :data:`FLIGHT_INDEX_FILES`, for the files
+    to read (a DuckDB list of paths, or a path with a ``*`` wildcard). Use
     :func:`opdi.published.duckdb_views` to fill them in.
     """
     events = ",\n".join(
         f"    {name} AS {classic}" if name != classic else f"    {name}"
         for name, classic in CLASSIC_EVENT_COLUMNS.items()
+    )
+    flights = ",\n".join(
+        f"    {name} AS {classic}" for name, classic in CLASSIC_FLIGHT_LIST.items()
     )
     structs = ",\n".join(
         "        {"
@@ -235,15 +250,17 @@ def duckdb_views_template() -> str:
             "(opdi.output.schema). Do not edit.\n"
             "-- DuckDB views over the published OPDI files. opdi.published.duckdb_views()\n"
             f"-- replaces {FLIGHT_LIST_FILES} and {FLIGHT_EVENTS_FILES} with the files to read.\n",
-            "CREATE OR REPLACE VIEW opdi_flight_list AS\n"
+            "-- The flight list files.\n"
+            "CREATE OR REPLACE VIEW flight_list AS\n"
             f"SELECT * FROM read_parquet({FLIGHT_LIST_FILES}, union_by_name = true);\n",
-            "CREATE OR REPLACE VIEW opdi_flight_events_merged AS\n"
+            "-- The flight events files, as published.\n"
+            "CREATE OR REPLACE VIEW flight_events AS\n"
             f"SELECT * FROM read_parquet({FLIGHT_EVENTS_FILES}, union_by_name = true);\n",
             "-- Events in the shape of release v0.0.2.\n"
-            f"CREATE OR REPLACE VIEW opdi_flight_events AS\nSELECT\n{events}\n"
-            "FROM opdi_flight_events_merged;\n",
+            f"CREATE OR REPLACE VIEW events AS\nSELECT\n{events}\n"
+            "FROM flight_events;\n",
             "-- Measurements in the shape of release v0.0.2: one row per measured value.\n"
-            "CREATE OR REPLACE VIEW opdi_measurements AS\n"
+            "CREATE OR REPLACE VIEW measurements AS\n"
             "SELECT\n"
             "    event_id || m.suffix AS id,\n"
             "    event_id,\n"
@@ -254,9 +271,15 @@ def duckdb_views_template() -> str:
             "    SELECT event_id, UNNEST([\n"
             f"{structs}\n"
             "    ]) AS m\n"
-            "    FROM opdi_flight_events_merged\n"
+            "    FROM flight_events\n"
             ")\n"
             "WHERE m.value IS NOT NULL;\n",
+            "-- The flight list with the columns and names of release v0.0.2.\n"
+            f"CREATE OR REPLACE VIEW flight_list_v0 AS\nSELECT\n{flights}\n"
+            "FROM flight_list;\n",
+            f"{FLIGHT_INDEX_VIEW_START} Left out when the folder has no index.\n"
+            "CREATE OR REPLACE VIEW flight_index AS\n"
+            f"SELECT * FROM read_parquet({FLIGHT_INDEX_FILES}, union_by_name = true);\n",
         ]
     )
 

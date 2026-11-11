@@ -63,5 +63,6 @@ def test_the_duckdb_template_parses():
     text = render.duckdb_views_template()
     text = text.replace(render.FLIGHT_LIST_FILES, "['a.parquet']")
     text = text.replace(render.FLIGHT_EVENTS_FILES, "['b.parquet']")
+    text = text.replace(render.FLIGHT_INDEX_FILES, "['c.parquet']")
     statements = [s for s in sqlglot.parse(text, read="duckdb") if s is not None]
-    assert len(statements) == 4
+    assert len(statements) == 6

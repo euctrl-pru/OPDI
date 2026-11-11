@@ -112,14 +112,47 @@ def test_duckdb_views_match_the_pandas_shapes(base):
     con = duckdb.connect()
     con.execute(published.duckdb_views(base=base, start=DAY, end=NEXT))
     merged = published.read_flight_events(DAY, NEXT, base=base)
-    n = con.execute("select count(*) from opdi_measurements").fetchone()[0]
+    n = con.execute("select count(*) from measurements").fetchone()[0]
     assert n == len(published.as_measurements(merged))
-    assert con.execute("select count(*) from opdi_flight_list").fetchone()[0] == 3
-    assert con.execute("select count(*) from opdi_flight_events_merged").fetchone()[0] == 6
-    cols = [d[0] for d in con.execute("select * from opdi_flight_events").description]
+    assert con.execute("select count(*) from flight_list").fetchone()[0] == 3
+    assert con.execute("select count(*) from flight_events").fetchone()[0] == 6
+    cols = [d[0] for d in con.execute("select * from events").description]
     assert cols == list(CLASSIC_EVENT_COLUMNS.values())
-    ids = {r[0] for r in con.execute("select id from opdi_measurements").fetchall()}
+    ids = {r[0] for r in con.execute("select id from measurements").fetchall()}
     assert ids == set(published.as_measurements(merged)["id"])
+    v0 = [d[0] for d in con.execute("select * from flight_list_v0").description]
+    assert v0 == list(CLASSIC_FLIGHT_LIST.values())
+
+
+def test_the_duckdb_views_have_the_names_of_the_trino_views(base):
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect()
+    con.execute(published.duckdb_views(base=base, start=DAY, end=NEXT))
+    names = {r[0] for r in con.execute("select view_name from duckdb_views()").fetchall()}
+    expected = {"flight_list", "flight_events", "flight_index", "events", "measurements"}
+    assert expected | {"flight_list_v0"} <= names
+    assert not {n for n in names if n.startswith("opdi_")}
+
+
+def test_the_flight_index_view_reads_the_monthly_index(base):
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect()
+    con.execute(published.duckdb_views(base=base, start=DAY, end=NEXT))
+    n = con.execute("select count(*) from flight_index").fetchone()[0]
+    assert n == len(published.read_flight_list(DAY, NEXT, base=base))
+
+
+def test_without_an_index_folder_the_flight_index_view_is_left_out(tmp_path, base):
+    duckdb = pytest.importorskip("duckdb")
+    import shutil
+
+    folder = tmp_path / "copy"
+    shutil.copytree(base[len("file://") :], folder)
+    shutil.rmtree(folder / "index")
+    con = duckdb.connect()
+    con.execute(published.duckdb_views(base=f"file://{folder}/", start=DAY, end=NEXT))
+    names = {r[0] for r in con.execute("select view_name from duckdb_views()").fetchall()}
+    assert "flight_list" in names and "flight_index" not in names
 
 
 def test_duckdb_views_over_a_folder_use_a_wildcard(base):
@@ -128,7 +161,8 @@ def test_duckdb_views_over_a_folder_use_a_wildcard(base):
     assert "flight_list/*.parquet" in sql
     con = duckdb.connect()
     con.execute(sql)
-    assert con.execute("select count(*) from opdi_flight_list").fetchone()[0] == 3
+    assert con.execute("select count(*) from flight_list").fetchone()[0] == 3
+    assert con.execute("select count(*) from flight_index").fetchone()[0] == 3
 
 
 def test_without_duckdb_the_readers_work_and_the_views_say_what_to_install(base, monkeypatch):

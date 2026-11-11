@@ -2,14 +2,16 @@
 -- DuckDB views over the published OPDI files. opdi.published.duckdb_views()
 -- replaces __FLIGHT_LIST_FILES__ and __FLIGHT_EVENTS_FILES__ with the files to read.
 
-CREATE OR REPLACE VIEW opdi_flight_list AS
+-- The flight list files.
+CREATE OR REPLACE VIEW flight_list AS
 SELECT * FROM read_parquet(__FLIGHT_LIST_FILES__, union_by_name = true);
 
-CREATE OR REPLACE VIEW opdi_flight_events_merged AS
+-- The flight events files, as published.
+CREATE OR REPLACE VIEW flight_events AS
 SELECT * FROM read_parquet(__FLIGHT_EVENTS_FILES__, union_by_name = true);
 
 -- Events in the shape of release v0.0.2.
-CREATE OR REPLACE VIEW opdi_flight_events AS
+CREATE OR REPLACE VIEW events AS
 SELECT
     event_id AS id,
     flight_id,
@@ -21,10 +23,10 @@ SELECT
     source,
     version,
     info
-FROM opdi_flight_events_merged;
+FROM flight_events;
 
 -- Measurements in the shape of release v0.0.2: one row per measured value.
-CREATE OR REPLACE VIEW opdi_measurements AS
+CREATE OR REPLACE VIEW measurements AS
 SELECT
     event_id || m.suffix AS id,
     event_id,
@@ -42,6 +44,31 @@ FROM (
         {'type': 'Point merge leg distance (NM)', 'suffix': '_m602fff', 'value': pms_leg_distance_nm, 'version': 'pms_v0.1.0'},
         {'type': 'Point merge direct-to distance (NM)', 'suffix': '_mead295', 'value': pms_direct_to_distance_nm, 'version': 'pms_v0.1.0'}
     ]) AS m
-    FROM opdi_flight_events_merged
+    FROM flight_events
 )
 WHERE m.value IS NOT NULL;
+
+-- The flight list with the columns and names of release v0.0.2.
+CREATE OR REPLACE VIEW flight_list_v0 AS
+SELECT
+    flight_id AS ID,
+    icao24 AS ICAO24,
+    flt_id AS FLT_ID,
+    dof AS DOF,
+    adep AS ADEP,
+    ades AS ADES,
+    adep_p AS ADEP_P,
+    ades_p AS ADES_P,
+    registration AS REGISTRATION,
+    model AS MODEL,
+    typecode AS TYPECODE,
+    icao_aircraft_class AS ICAO_AIRCRAFT_CLASS,
+    icao_operator AS ICAO_OPERATOR,
+    first_seen AS FIRST_SEEN,
+    last_seen AS LAST_SEEN,
+    version AS VERSION
+FROM flight_list;
+
+-- The monthly flight index. Left out when the folder has no index.
+CREATE OR REPLACE VIEW flight_index AS
+SELECT * FROM read_parquet(__FLIGHT_INDEX_FILES__, union_by_name = true);
