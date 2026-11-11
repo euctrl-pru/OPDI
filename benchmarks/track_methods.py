@@ -70,6 +70,10 @@ import provenance  # noqa: E402
 import track_truth  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
+from study_variants.segmentation import (
+    StudySegmentationParams,  # noqa: E402
+    register_study_arms,  # noqa: E402
+)
 from track_score import (  # noqa: E402
     score_arm,
     score_arm_gated,
@@ -77,8 +81,11 @@ from track_score import (  # noqa: E402
 )
 
 from opdi.config import OPDIConfig  # noqa: E402
-from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
+from opdi.pipeline.segmentation import assign_track_id  # noqa: E402
 from opdi.pipeline.segmentation.methods import ARMS  # noqa: E402
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 
 BUCKET = "eurocontrol"
 S3_ENDPOINT = "https://s3.opensky-network.org"
@@ -411,14 +418,11 @@ def main():
     print(f"{sv.count():,} samples, {gt.count():,} ground-truth flights")
 
     cfg = OPDIConfig().segmentation
-    params = SegmentationParams(
+    # The four study thresholds keep their study values (StudySegmentationParams).
+    params = StudySegmentationParams(
         gap_minutes=cfg.gap_minutes,
         low_alt_gap_minutes=cfg.low_alt_gap_minutes,
         low_alt_ft=cfg.low_alt_ft,
-        ground_dwell_minutes=cfg.ground_dwell_minutes,
-        turnaround_max_height_ft=cfg.turnaround_max_height_ft,
-        turnaround_max_speed_kt=cfg.turnaround_max_speed_kt,
-        descent_floor_ft=cfg.descent_floor_ft,
     )
 
     args.results_dir.mkdir(parents=True, exist_ok=True)

@@ -8,19 +8,20 @@ arm gets it right.
 import datetime as dt
 
 from conftest import make_track
-
-from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
-from opdi.pipeline.segmentation.methods import (
-    ARMS,
+from study_variants.segmentation import (
+    STUDY_ARMS,
+    StudySegmentationParams,
     airframe_only,
     airport_anchored,
     ground_anchored,
-    legacy,
     no_month_suffix,
     recommended,
     traffic_style,
     vertical_profile,
 )
+
+from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
+from opdi.pipeline.segmentation.methods import ARMS, legacy
 
 P = SegmentationParams()
 _EPOCH = dt.datetime(2024, 6, 1, 12, 0, 0)
@@ -192,7 +193,7 @@ def test_legacy_merges_a_continuous_turnaround(spark):
 
 
 def test_ground_anchored_splits_a_continuous_turnaround(spark):
-    p = SegmentationParams(ground_dwell_minutes=5.0)
+    p = StudySegmentationParams(ground_dwell_minutes=5.0)
     assert n_tracks(assign_track_id(_continuous_turnaround(spark), ground_anchored(), p)) == 2
 
 
@@ -210,7 +211,7 @@ def test_ground_anchored_ignores_a_touch_and_go(spark):
         {"t": 180 + i * 30, "baro_altitude": i * 300, "on_ground": False, "velocity": 100.0}
         for i in range(4)
     ]
-    p = SegmentationParams(ground_dwell_minutes=5.0)
+    p = StudySegmentationParams(ground_dwell_minutes=5.0)
     assert n_tracks(assign_track_id(make_track(spark, rows), ground_anchored(), p)) == 1
 
 
@@ -422,7 +423,7 @@ def test_vertical_profile_splits_on_a_descent_climb_cycle_with_no_gap_and_no_gro
         {"t": (len(_DESCENT_M) + i) * 60, "baro_altitude": float(a), "on_ground": False}
         for i, a in enumerate(_CLIMB_M)
     ]
-    p = SegmentationParams(descent_floor_ft=1500.0)
+    p = StudySegmentationParams(descent_floor_ft=1500.0)
     out = assign_track_id(make_track(spark, rows), vertical_profile(), p)
     assert n_tracks(out) == 2
     # And it split in the right *place*: the break is the climb row that crosses
@@ -439,7 +440,7 @@ def test_vertical_profile_does_not_split_a_step_descent_in_the_cruise(spark):
     """FL350 -> FL310 is a level change, not a landing."""
     rows = [{"t": i * 60, "baro_altitude": 10600.0, "on_ground": False} for i in range(5)]
     rows += [{"t": 300 + i * 60, "baro_altitude": 9400.0, "on_ground": False} for i in range(5)]
-    p = SegmentationParams(descent_floor_ft=1500.0)
+    p = StudySegmentationParams(descent_floor_ft=1500.0)
     assert n_tracks(assign_track_id(make_track(spark, rows), vertical_profile(), p)) == 1
 
 
@@ -462,7 +463,7 @@ def test_vertical_profile_does_not_split_a_departure_climb_with_no_prior_descent
         {"t": i * 60, "baro_altitude": float(a), "on_ground": False, "field_elev_ft": 0.0}
         for i, a in enumerate([0, 100, 200, 500, 1000, 2000, 3000, 4000])
     ]
-    p = SegmentationParams(descent_floor_ft=1500.0)
+    p = StudySegmentationParams(descent_floor_ft=1500.0)
     df = make_track(spark, rows)
     assert n_tracks(assign_track_id(df, vertical_profile(), p)) == 1
 
@@ -487,7 +488,7 @@ def test_vertical_profile_uses_height_above_field_not_barometric_altitude(spark)
         {"t": i * 60, "baro_altitude": float(a), "on_ground": False, "field_elev_ft": 6200.0}
         for i, a in enumerate(profile_m)
     ]
-    p = SegmentationParams(descent_floor_ft=1500.0)
+    p = StudySegmentationParams(descent_floor_ft=1500.0)
     df = make_track(spark, rows)
     assert n_tracks(assign_track_id(df, legacy(), p)) == 1
     assert n_tracks(assign_track_id(df, vertical_profile(), p)) == 2
@@ -524,7 +525,7 @@ def test_every_registered_arm_runs(spark):
         for i in range(5)
     ]
     df = make_track(spark, rows)
-    for name, factory in ARMS.items():
+    for name, factory in {**ARMS, **STUDY_ARMS}.items():
         out = assign_track_id(df, factory(), P)
         assert out.count() == df.count(), name
         assert out.filter(out.track_id.isNull()).count() == 0, name

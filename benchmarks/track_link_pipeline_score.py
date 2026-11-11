@@ -104,6 +104,10 @@ from run_track_link_day import (  # noqa: E402
     arm_path,
     build_config,
 )
+from study_variants.segmentation import (
+    debounced,  # noqa: E402
+    register_study_arms,  # noqa: E402
+)
 from track_link_controls import real_hole_candidates  # noqa: E402
 from track_link_grid import holes_inside_flights  # noqa: E402
 
@@ -114,13 +118,15 @@ from opdi.pipeline.segmentation.base import BreakRule  # noqa: E402
 from opdi.pipeline.segmentation.methods import (  # noqa: E402
     callsign_memory_minutes,
     cruise_linked,
-    debounced,
     debounced_callsign_change,
     legacy,
     link_feature_columns,
     linkable,
 )
 from opdi.pipeline.tracks import TrackProcessor, required_lookback_hours  # noqa: E402
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 
 OUTPUTS = (
     "link_flight_list.csv",

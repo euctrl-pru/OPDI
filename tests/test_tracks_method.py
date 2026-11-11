@@ -96,7 +96,7 @@ def test_cruise_linked_is_selectable_through_the_pipeline(spark, tmp_path):
         assign_track_id(df, cruise_linked(), SegmentationParams())
     )
     assert len(_partition(processor._add_track_id(df))) == 1
-    assert len(_partition(_proc(spark, tmp_path, "debounced")._add_track_id(df))) == 2
+    assert len(_partition(_proc(spark, tmp_path, "legacy")._add_track_id(df))) == 2
 
 
 def test_a_transatlantic_hole_is_one_track_by_default(spark, tmp_path):
@@ -148,22 +148,6 @@ def test_standard_is_the_arm_the_study_benchmarked(spark, tmp_path):
         assert _partition(through_pipeline) == _partition(through_study)
 
 
-def test_standard_now_debounces_where_recommended_would_split(spark, tmp_path):
-    """The flip is real, not cosmetic: ``standard`` no longer equals A8.
-
-    On a sub-30 s callsign flicker A8 (``recommended``) splits one flight into
-    three tracks; the shipped ``standard`` (A10, which keeps A9's guard) keeps it
-    whole. If ``standard`` ever silently reverted to A8 this partition would
-    jump from one group to three.
-    """
-    df = make_track(spark, FLICKER)
-    standard = _partition(_proc(spark, tmp_path, "standard")._add_track_id(df))
-    a8 = _partition(_proc(spark, tmp_path, "recommended")._add_track_id(df))
-    assert len(standard) == 1
-    assert len(a8) == 3
-    assert standard != a8
-
-
 def test_an_unknown_method_raises_rather_than_falling_back(spark, tmp_path):
     """A typo must not silently produce legacy ids under a new name."""
     df = make_track(spark, BLANKING)
@@ -171,14 +155,8 @@ def test_an_unknown_method_raises_rather_than_falling_back(spark, tmp_path):
         _proc(spark, tmp_path, "recomended")._add_track_id(df)
 
 
-def test_any_study_arm_can_be_selected(spark, tmp_path):
-    """The benchmark drives the real pipeline by naming an arm here.
-
-    Without this the v2 study would have to re-implement each arm outside the
-    pipeline, which is the arrangement v1 had and the reason its numbers
-    described a harness rather than production.
-    """
+def test_a_study_rule_is_refused_until_registered(spark, tmp_path):
+    """A study rule's name says where the rule lives instead of running."""
     df = make_track(spark, BLANKING)
-    out = _proc(spark, tmp_path, "airframe_only")._add_track_id(df)
-    assert out.count() == df.count()
-    assert out.filter(out.track_id.isNull()).count() == 0
+    with pytest.raises(ValueError, match="benchmarks/study_variants"):
+        _proc(spark, tmp_path, "airframe_only")._add_track_id(df)

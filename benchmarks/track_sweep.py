@@ -52,11 +52,15 @@ import provenance  # noqa: E402
 import track_truth  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
+from study_variants.segmentation import register_study_arms  # noqa: E402
 from track_methods import PERIODS, attach_airport_context  # noqa: E402
 from track_score import score_arm, track_extents  # noqa: E402
 
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
 from opdi.pipeline.segmentation.methods import ARMS  # noqa: E402
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 
 #: Production is 30. Swept from well below to well above so the optimum is
 #: interior to the grid rather than at its edge.

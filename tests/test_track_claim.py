@@ -185,7 +185,7 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
 
     p = SegmentationParams()
     assert required_lookback_hours("cruise_linked", p) == 11
-    assert required_lookback_hours("debounced", p) == 3
+    assert required_lookback_hours("legacy", p) == 3
     assert required_lookback_hours("standard", p) == 11  # standard is cruise_linked
     assert required_lookback_hours("legacy", p) == 3
 
@@ -212,7 +212,7 @@ def test_cruise_linked_reads_back_past_its_longest_gap():
     # The callsign guard's memory is the longest hole plus the 30 s hold, so even
     # with nothing else read behind the edge a part-hour is added for it.
     assert required_lookback_hours("cruise_linked", neither) == 7
-    assert required_lookback_hours("debounced", far_position) == 3
+    assert required_lookback_hours("legacy", far_position) == 3
 
 
 def test_process_day_reads_the_lookback_its_arm_requires(spark):
@@ -231,8 +231,8 @@ def test_process_day_reads_the_lookback_its_arm_requires(spark):
     default.process_day(day)
     assert default.windows[0][0] == "2024-06-01 13:00:00"
 
-    # `debounced` by name keeps A9's three hours.
-    previous = _processor_capturing_windows("debounced")
+    # A rule that does not link holes, such as `legacy`, reads three hours.
+    previous = _processor_capturing_windows("legacy")
     previous.process_day(day)
     assert previous.windows[0][0] == "2024-06-01 21:00:00"
 
@@ -246,7 +246,7 @@ def test_too_short_an_explicit_lookback_raises(spark):
 
 def test_other_arms_keep_their_explicit_lookback(spark):
     """The guard is about linking. Other arms' breaks are local, so one hour is fine."""
-    processor = _processor_capturing_windows("debounced")
+    processor = _processor_capturing_windows("legacy")
     processor.process_day(dt.date(2024, 6, 2), lookback_hours=1)
     assert processor.windows[0][0] == "2024-06-01 23:00:00"
 
@@ -634,7 +634,7 @@ def test_the_margin_adds_what_the_decision_reads_past_the_new_edge(
 
 
 def test_other_arms_keep_the_60_second_margin(spark, capsys):
-    out = _warning_from_process_day(capsys, _straddling_read_end(spark), "debounced")
+    out = _warning_from_process_day(capsys, _straddling_read_end(spark), "legacy")
     assert "WARNING" not in out
     assert "covered every track" in out
 
@@ -652,7 +652,7 @@ def test_other_arms_still_say_the_tail_may_be_missing(spark, capsys):
         spark,
         [{"t": _t(D_MINUS_1 + dt.timedelta(hours=47, minutes=59, seconds=30)), "track_id": "a"}],
     ).withColumn("dof", lit(D_MINUS_1.date()))
-    out = _warning_from_process_day(capsys, written, "debounced")
+    out = _warning_from_process_day(capsys, written, "legacy")
     assert "WARNING: 1 track(s)" in out
     assert "Their tails may be missing and no other day will claim them" in out
     assert "simply long" not in out
@@ -760,32 +760,3 @@ def test_the_callsign_memory_is_inside_every_days_read(overrides):
     p = replace(_shipped(), **overrides)
     reach = callsign_memory_minutes(p) + p.callsign_min_persistence_seconds / 60.0
     assert reach <= required_lookback_hours("cruise_linked", p) * 60
-
-
-def test_debounced_by_name_keeps_its_published_memory(spark):
-    """A9 is a published rule and stays as it was: it remembers a callsign without limit.
-
-    Eleven hours of samples with no callsign, then a garble and the old callsign again.
-    A9 still calls the garble a flicker; A10 has forgotten the old callsign and splits.
-    """
-    from opdi.pipeline.segmentation import assign_track_id
-    from opdi.pipeline.segmentation.methods import cruise_linked, debounced
-
-    h = lambda hours, minutes=0: dt.timedelta(hours=hours, minutes=minutes)  # noqa: E731
-    samples = _every(D_MINUS_1 + h(1), D_MINUS_1 + h(1, 30), 10, lon=0.0, callsign="DLH1")
-    samples += _every(D_MINUS_1 + h(1, 40), D_MINUS_1 + h(12, 30), 10, lon=0.0, callsign="")
-    samples += _every(D_MINUS_1 + h(12, 31), D_MINUS_1 + h(12, 31), 1, lon=0.0, callsign="DLH7X")
-    samples += _every(
-        D_MINUS_1 + h(12, 31) + dt.timedelta(seconds=5),
-        D_MINUS_1 + h(12, 40),
-        1,
-        lon=0.0,
-        callsign="DLH1",
-    )
-    sv = make_track(spark, samples)
-
-    def tracks(rule):
-        return assign_track_id(sv, rule(), _shipped()).select("track_id").distinct().count()
-
-    assert tracks(debounced) == 1
-    assert tracks(cruise_linked) == 2

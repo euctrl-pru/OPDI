@@ -43,9 +43,9 @@ def test_the_config_value_reaches_the_params():
 
 
 from conftest import make_track
+from study_variants.segmentation import debounced, recommended
 
 from opdi.pipeline.segmentation import assign_track_id
-from opdi.pipeline.segmentation.methods import debounced, recommended
 
 P0 = SegmentationParams(callsign_min_persistence_seconds=0.0)  # debounce off (A8)
 P30 = SegmentationParams(callsign_min_persistence_seconds=30.0)  # debounce on (shipped default)

@@ -41,13 +41,13 @@ def test_standard_resolves_to_cruise_linked():
     assert rule.month_suffix is False
 
 
-def test_debounced_by_name_is_still_a9_with_a_3h_lookback():
-    """A9 stays reachable for reproducing the data it built, with the read it had."""
+def test_legacy_by_name_reads_3h_back():
+    """The v0.0.2 rule does not link holes, so it reads the short lookback."""
     from opdi.pipeline.segmentation import SegmentationParams
     from opdi.pipeline.tracks import _resolve_segmentation_method, required_lookback_hours
 
-    assert _resolve_segmentation_method("debounced") == "debounced"
-    assert required_lookback_hours("debounced", SegmentationParams()) == 3
+    assert _resolve_segmentation_method("legacy") == "legacy"
+    assert required_lookback_hours("legacy", SegmentationParams()) == 3
 
 
 def test_the_default_run_reads_11_hours_back():
@@ -58,17 +58,9 @@ def test_the_default_run_reads_11_hours_back():
     assert required_lookback_hours("standard", p) == 11
 
 
-def test_a8_stays_reachable_under_its_own_name():
-    """`recommended` (A8) must remain selectable so data published between
-    2026-08-27 and this release stays reproducible."""
-    rule = ARMS["recommended"]()
-    assert rule.group_cols == ["icao24"]
-    assert rule.month_suffix is False
-
-
 def test_the_shipped_persistence_guard_is_active_by_default():
-    """`standard` == `debounced` only debounces if the hold is non-zero; zero
-    collapses it to A8. The shipped default must therefore be the validated 30 s."""
+    """`standard` only debounces a callsign change if the hold is non-zero. The
+    shipped default must therefore be the validated 30 s."""
     assert (
         OPDIConfig.for_environment("opensky").segmentation.callsign_min_persistence_seconds == 30.0
     )

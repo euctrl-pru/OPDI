@@ -65,10 +65,10 @@ import track_truth  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import DataFrame, SparkSession, Window  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
+from study_variants.segmentation import StudySegmentationParams  # noqa: E402
 from track_score import boundary_offsets  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
-from opdi.pipeline.segmentation import SegmentationParams  # noqa: E402
 from opdi.pipeline.segmentation.base import FT_PER_M  # noqa: E402
 
 __all__ = [
@@ -817,14 +817,11 @@ def run_boundary_hist(spark, s3, args, period_cfg, days, out_path) -> dict:
     print(f"{n_sv:,} samples, {n_gt:,} ground-truth flights")
 
     cfg = OPDIConfig().segmentation
-    params = SegmentationParams(
+    # The four study thresholds keep their study values (StudySegmentationParams).
+    params = StudySegmentationParams(
         gap_minutes=cfg.gap_minutes,
         low_alt_gap_minutes=cfg.low_alt_gap_minutes,
         low_alt_ft=cfg.low_alt_ft,
-        ground_dwell_minutes=cfg.ground_dwell_minutes,
-        turnaround_max_height_ft=cfg.turnaround_max_height_ft,
-        turnaround_max_speed_kt=cfg.turnaround_max_speed_kt,
-        descent_floor_ft=cfg.descent_floor_ft,
     )
 
     fh = out_path.open("w", newline="")

@@ -166,6 +166,7 @@ import provenance
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.storagelevel import StorageLevel
+from study_variants.segmentation import debounced
 from track_fragmentation import measure
 from track_link_controls import (
     LOW_EDGE_FAMILIES,
@@ -182,7 +183,6 @@ from track_truth import REFERENCE_BASE, load_flight_intervals
 from opdi.coverage import EUROPE_BBOX
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.methods import (
-    debounced,
     link_checks,
     link_feature_columns,
     linkable,

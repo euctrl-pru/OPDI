@@ -46,6 +46,7 @@ import osn_sample  # noqa: E402
 import provenance  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
+from study_variants.segmentation import register_study_arms  # noqa: E402
 from track_methods import (  # noqa: E402
     ASSIGN_BASE,
     BUCKET,
@@ -58,6 +59,9 @@ from track_methods import (  # noqa: E402
 from opdi.config import OPDIConfig  # noqa: E402
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
 from opdi.pipeline.segmentation.methods import ARMS  # noqa: E402
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 
 #: The run name in flight_list_v7.py whose parameters V7 recommends: the
 #: *shipped* configuration, ``(S(), S().adep_mode, S().ades_mode, clean)``

@@ -198,10 +198,10 @@ def test_params_from_config_reads_the_config_values():
     assert SegmentationParams.from_config(cfg) == SegmentationParams()
 
     cfg.segmentation.low_alt_ft = 7000.0
-    cfg.segmentation.ground_dwell_minutes = 11.0
+    cfg.segmentation.callsign_min_persistence_seconds = 11.0
     p = SegmentationParams.from_config(cfg)
     assert p.low_alt_ft == 7000.0
-    assert p.ground_dwell_minutes == 11.0
+    assert p.callsign_min_persistence_seconds == 11.0
     # A SegmentationConfig may also be handed over directly.
     assert SegmentationParams.from_config(cfg.segmentation) == p
 

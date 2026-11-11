@@ -21,10 +21,14 @@ import argparse
 
 from pyspark.sql import Window
 from pyspark.sql import functions as F
+from study_variants.segmentation import register_study_arms  # noqa: E402
 
 from opdi.config import OPDIConfig, SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.methods import ARMS
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 from opdi.utils.spark_helpers import SparkSessionManager
 from opdi.utils.storage import StorageManager
 

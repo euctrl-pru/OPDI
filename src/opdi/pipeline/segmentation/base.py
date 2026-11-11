@@ -152,11 +152,6 @@ class SegmentationParams:
     #: the v5 study: the false joins version 4 counted against it were estimated truth
     #: times outside Europe. Decided apart from the old edge's setting.
     link_new_edge_descent: bool = True
-    # A5-A7 knobs; unused by the gap family.
-    ground_dwell_minutes: float = 5.0
-    turnaround_max_height_ft: float = 1000.0
-    turnaround_max_speed_kt: float = 40.0
-    descent_floor_ft: float = 1500.0
 
     @classmethod
     def from_config(cls, config) -> "SegmentationParams":

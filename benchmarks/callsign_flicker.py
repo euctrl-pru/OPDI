@@ -18,11 +18,11 @@ from pathlib import Path
 
 from pyspark.sql import Window
 from pyspark.sql import functions as F
+from study_variants.segmentation import recommended
 
 from opdi.config import OPDIConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.base import FT_PER_M
-from opdi.pipeline.segmentation.methods import recommended
 from opdi.utils.spark_helpers import SparkSessionManager
 from opdi.utils.storage import StorageManager
 

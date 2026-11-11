@@ -6,6 +6,7 @@ Spark configurations, H3 parameters, and ingestion settings.
 """
 
 import os
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -1748,6 +1749,20 @@ class EventConfig:
         )
 
 
+#: Segmentation rules of the track construction studies that are not part of the
+#: package. They live in ``benchmarks/study_variants/segmentation.py``.
+STUDY_SEGMENTATION_METHODS = (
+    "no_month_suffix",
+    "traffic_style",
+    "airframe_only",
+    "ground_anchored",
+    "airport_anchored",
+    "vertical_profile",
+    "recommended",
+    "debounced",
+)
+
+
 @dataclass
 class SegmentationConfig:
     """Track segmentation thresholds. Aviation units, unit in every field name.
@@ -1790,13 +1805,11 @@ class SegmentationConfig:
     not heard for longer than ``link_max_gap_minutes``, so two days' reads judge
     a flicker after a hole alike (``methods.callsign_memory_minutes``).
 
-    The earlier arms stay reachable under their own names, for reproducing the
-    data each built: ``"debounced"`` (A9) is A10 without the link -- every gap
-    over ``gap_minutes`` splits -- and was ``"standard"`` from the A9 release
-    until the track-construction-v5 study; ``"recommended"`` (A8) is A9 without
-    the persistence guard and was ``"standard"`` from 2026-08-27 until the A9
-    release. A8 measured 23.1% of its track boundaries as flicker artefacts; the
-    guard removes them for ~19% fewer tracks, merge-neutral.
+    Only these two rules are part of the package. The other rules the track
+    construction studies compared live with the study scripts, in
+    ``benchmarks/study_variants/segmentation.py``; a script that registers them
+    (``register_study_arms()``) can select them here by name. Without that, a
+    study rule's name is refused with a message saying where it lives.
 
     Under A10 ``process_day`` reads further back (11 h at the defaults, not 3)
     and refuses a shorter explicit lookback; see ``tracks.required_lookback_hours``.
@@ -1834,15 +1847,12 @@ class SegmentationConfig:
     """Bound on A8's callsign lookback, in minutes. ``None`` follows ``gap_minutes``."""
 
     callsign_min_persistence_seconds: float = 30.0
-    """How long a new callsign must hold before the ``debounced`` arm (A9)
-    treats it as a real change.
+    """How long a new callsign must hold before the default rule treats it as a
+    real change (seconds).
 
     30 s is the shipped value, and the one every debounce measurement was taken
-    at: 23.1% of A8's track boundaries are flicker artefacts a 30 s guard
-    removes, for ~19% fewer tracks, merge-neutral. Zero reproduces A8
-    `recommended` exactly -- what every dataset published between 2026-08-27 and
-    this release uses -- so set ``method="recommended"`` (which ignores this
-    field) rather than zeroing it if you need the A8 ``track_id``."""
+    at: 23.1% of the track boundaries of a rule without it are flicker
+    artefacts a 30 s hold removes, for ~19% fewer tracks."""
 
     link_max_gap_minutes: float = 600.0
     """Longest reception hole the ``cruise_linked`` arm (A10) can link (minutes).
@@ -1938,17 +1948,16 @@ class SegmentationConfig:
     ``link_old_edge_climb`` because the study decides them apart; ``False``
     reproduces the version-4 rule."""
 
-    ground_dwell_minutes: float = 5.0
-    """On-ground dwell above which a ground contact is a turnaround (minutes)."""
-
-    turnaround_max_height_ft: float = 1000.0
-    """Height above field elevation below which a turnaround can occur (feet)."""
-
-    turnaround_max_speed_kt: float = 40.0
-    """Ground speed below which an aircraft counts as stationary (knots)."""
-
-    descent_floor_ft: float = 1500.0
-    """Altitude a descent must reach before a following climb is a new sortie (feet)."""
+    def __post_init__(self) -> None:
+        """Refuse a study rule that no study script has registered."""
+        methods = sys.modules.get("opdi.pipeline.segmentation.methods")
+        registered = methods is not None and self.method in methods.ARMS
+        if self.method in STUDY_SEGMENTATION_METHODS and not registered:
+            raise ValueError(
+                f"segmentation method {self.method!r} is a study rule and not part of "
+                f"opdi; it lives in benchmarks/study_variants/segmentation.py, and a "
+                f"study script calls register_study_arms() to select it"
+            )
 
 
 #: The warehouse of the ``opensky`` environment when nothing else is named:
@@ -2091,9 +2100,7 @@ class OPDIConfig:
                 ),
             )
         else:
-            raise ValueError(
-                f"Unknown environment: {env}. Use 'local' or 'opensky'."
-            )
+            raise ValueError(f"Unknown environment: {env}. Use 'local' or 'opensky'.")
 
         if worldwide:
             config.coverage = CoverageConfig(bbox=None)

@@ -137,10 +137,8 @@ def tracks_touching_window_end(df, read_end, margin_seconds=60):
 def _resolve_segmentation_method(method: str) -> str:
     """The arm a configured method names: ``standard`` is a pointer, not an arm.
 
-    It resolves to ``cruise_linked`` (A10) since the track-construction-v5 study,
-    to ``debounced`` (A9) before that, and to ``recommended`` (A8) from
-    2026-08-27 until A9; see ``SegmentationConfig.method``. Each earlier arm
-    stays reachable under its own name.
+    It resolves to ``cruise_linked``, the default rule; see
+    ``SegmentationConfig.method``.
     """
     return "cruise_linked" if method == "standard" else method
 
@@ -423,19 +421,17 @@ class TrackProcessor:
         units in their names.
         """
         from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
-        from opdi.pipeline.segmentation.methods import ARMS
+        from opdi.pipeline.segmentation.methods import ARMS, STUDY_ARMS, STUDY_HOME
 
-        # "standard" is the production pointer to whatever arm this release
-        # recommends -- not an arm itself. Two names because they answer
-        # different questions: inside the study an arm is one candidate among
-        # several, while a deployment wants to name the segmentation it runs
-        # without implying a comparison it is not making. "standard" resolves
-        # to "cruise_linked" (A10); before the v5 study it resolved to
-        # "debounced" (A9), and before 2026-08-27 to "recommended" (A8). Each
-        # stays reachable under its own name for reproducing the data it built.
-        # Every other arm name is accepted too, which is what lets the benchmark
-        # drive the real pipeline instead of a harness that only resembles it.
+        # "standard" names the default rule, "cruise_linked". Any rule in ARMS
+        # is accepted, including the study rules a study script registered, so
+        # a study drives the real pipeline rather than a copy of it.
         resolved = _resolve_segmentation_method(method)
+        if resolved in STUDY_ARMS and resolved not in ARMS:
+            raise ValueError(
+                f"segmentation method {method!r} is a study rule and not part of opdi; "
+                f"it lives in {STUDY_HOME}"
+            )
         if resolved not in ARMS:
             known = sorted(set(ARMS) | {"standard"})
             raise ValueError(f"unknown segmentation method {method!r}; known: {', '.join(known)}")

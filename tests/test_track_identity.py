@@ -42,7 +42,7 @@ def _ids(df):
     return {v: k for k, v in first.items()}
 
 
-def _segment(spark, samples, arm="recommended"):
+def _segment(spark, samples, arm="cruise_linked"):
     sv = make_track(spark, samples)
     return assign_track_id(sv, ARMS[arm](), _params())
 

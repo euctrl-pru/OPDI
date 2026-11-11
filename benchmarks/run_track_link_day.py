@@ -52,10 +52,15 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+from study_variants.segmentation import register_study_arms  # noqa: E402
+
 from opdi.config import OPDIConfig  # noqa: E402
 from opdi.periodrun import run_day_step  # noqa: E402
 from opdi.utils.spark_helpers import SparkSessionManager  # noqa: E402
 from opdi.utils.storage import StorageManager  # noqa: E402
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 
 ARM_PREFIX = "s3a://eurocontrol/opdi-world/research/a10"
 REFERENCE_WAREHOUSE = "s3a://eurocontrol/opdi-world"

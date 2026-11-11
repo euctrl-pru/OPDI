@@ -57,9 +57,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
+from study_variants.segmentation import register_study_arms  # noqa: E402
+
 from opdi.config import OPDIConfig  # noqa: E402
 from opdi.periodrun import run_day_step  # noqa: E402
 from opdi.utils.spark_helpers import SparkSessionManager  # noqa: E402
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 
 RESEARCH_WAREHOUSE = "s3a://eurocontrol/opdi/research/a9"
 
