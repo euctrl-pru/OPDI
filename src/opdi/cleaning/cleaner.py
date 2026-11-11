@@ -127,11 +127,6 @@ class TrackCleaner:
 
         cleaned = clean_tracks(df, self.cleaning)
 
-        if self.cleaning.enable_pandas_stage:
-            from opdi.cleaning.pandas_udf import apply_pandas_stages
-
-            cleaned = apply_pandas_stages(cleaned, self.cleaning)
-
         cleaned = cleaned.repartition("track_id")
         if day is not None:
             # The layout change EVENTS_RUN_LOG decision 15 said was needed

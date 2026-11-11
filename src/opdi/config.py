@@ -525,12 +525,6 @@ class CleaningConfig:
     """Coverage holes at or beyond this become a new ``segment_id``, so
     downstream detectors never interpolate across them. 5 minutes."""
 
-    # -- Optional pandas stage -------------------------------------------
-    enable_pandas_stage: bool = False
-    """Opt-in ``applyInPandas`` escape hatch (csaps smoothing, 1 s resampling,
-    ILS alignment). Off by default: it needs the fat executor image, so the
-    default path stays dependency-free. See ``cleaning/pandas_udf.py``."""
-
     # -- Does anything downstream actually read the cleaned table? -------
     feeds_flight_list: bool = True
     """Whether step 03 reads ``osn_tracks_clean`` or the uncleaned
@@ -1714,17 +1708,6 @@ class EventConfig:
     because ``StorageManager.write_table`` defaults to append, re-processing a
     month duplicates its events instead of replacing them."""
 
-    enable_pandas_stage: bool = False
-    """Enable the ``applyInPandas`` escape hatch for algorithms with no Spark
-    equivalent (holding-pattern detection, and anything else needing the
-    ``traffic`` library at runtime).
-
-    **Off by default and expected to stay off.** It requires the fatter
-    ``docker/Dockerfile.traffic`` executor image; nothing in the current event
-    vocabulary needs it, because the algorithms worth porting -- ILS alignment,
-    track-based runway detection, start-of-movement -- are all closed-form and
-    express natively as column and window expressions."""
-
     events_version: str = "events_v0.3.0"
     """Version stamped on events this configuration produces.
 
@@ -1786,7 +1769,6 @@ class EventConfig:
             airport_events_ordered=False,
             feeds_from_clean_tracks=False,
             deterministic_event_ids=False,
-            enable_pandas_stage=False,
             # Rings did not exist at all.
             ring_radii_nm=(),
             emit_runway_milestones=False,

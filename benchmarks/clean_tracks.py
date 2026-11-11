@@ -187,10 +187,7 @@ def main() -> None:
     from opdi.config import OPDIConfig
 
     cfg = OPDIConfig.for_environment("opensky")
-    print(
-        f"\ncleaning enabled={cfg.cleaning.enabled} "
-        f"pandas_stage={cfg.cleaning.enable_pandas_stage}"
-    )
+    print(f"\ncleaning enabled={cfg.cleaning.enabled}")
     if not cfg.cleaning.enabled:
         raise SystemExit(
             "cleaning is disabled in the config, so this stage would write "

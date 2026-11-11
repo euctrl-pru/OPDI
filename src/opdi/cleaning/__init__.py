@@ -3,10 +3,6 @@
 Native Spark cleaning ported from the 2024 PRC Data Challenge winning
 solution. See :mod:`opdi.cleaning.native` for the algorithm and for the list
 of techniques deliberately not ported.
-
-The optional ``applyInPandas`` escape hatch lives in
-:mod:`opdi.cleaning.pandas_udf` and is off by default -- it needs a fat
-executor image, so the default path stays dependency-free.
 """
 
 from opdi.cleaning.native import (
