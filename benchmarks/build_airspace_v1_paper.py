@@ -45,6 +45,8 @@ ALLOWED_LITERALS = {
     "42", "13",                  # merge point to airport distances cited
     "100",                       # per cent
     "50",                        # half a window
+    "00", "04",                  # pipeline steps 00c and 04
+    "2023",                      # Melo (2023)
 }
 
 PIPELINE_DAY = "2026-06-14"
