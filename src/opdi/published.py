@@ -14,8 +14,10 @@ list, events and measurements tables in the layout of release v0.0.2
 those tables the identifiers are text and do not match the identifiers of
 release v0.0.2, which were 64-bit integers, and the ``version`` column holds
 the version of the method that produced each row. It
-needs pyarrow and pandas, and DuckDB only for :func:`duckdb_views`. It does
-not need Spark. Install everything with ``pip install "opdi[reader]"``.
+reads with pyarrow and pandas, and DuckDB only for :func:`duckdb_views`; it
+never starts Spark or Java. Install these with ``pip install "opdi[reader]"``.
+PySpark is a dependency of the package itself and is installed as well,
+but it is not used here.
 
 Example::
 

@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "opdi"
 version = "2.0.0"
 description = "Open Performance Data Initiative - Aviation data processing pipeline"
-readme = "README.md"
-requires-python = ">=3.8"
+readme = "readme.md"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "EUROCONTROL", email = "pru-support@eurocontrol.int"}
@@ -21,8 +21,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -38,8 +36,13 @@ dependencies = [
     # v3. Left open at >=3.7.0, the driver resolved 4.5.0 while the executor
     # image pinned <4, and the two ran different APIs for weeks.
     "h3>=4,<5",
+    # Not used by the pipeline itself (it has its own H3 functions), but
+    # imported by study scripts under benchmarks/ and tests/, and installed in
+    # the executor image.
     "h3-pyspark>=1.0.0",
     "shapely>=2.0.0",
+    # Imported by the reference step 00b (airport layouts); osmnx needs it too.
+    "geopandas>=0.12.0",
     "pyproj>=3.4.0",
     "osmnx>=1.2.0",
     "pandas>=1.5.0",
@@ -63,7 +66,14 @@ dev = [
 airflow = [
     "apache-airflow==2.7.2",
 ]
-# Reading the published files without Spark (opdi.published).
+# Building the airport layouts (reference step 00b) from a local
+# OpenStreetMap extract (opdi.reference.pbf_source, pbf_filter).
+reference = [
+    "osmium>=3.6.0",
+]
+# Reading the published files (opdi.published). The reader never starts
+# Spark or Java, but PySpark is a dependency of the package itself, so it is
+# installed as well.
 reader = [
     "pyarrow>=10.0.0",
     "duckdb>=1.0.0",
@@ -94,11 +104,11 @@ opdi = ["py.typed"]
 
 [tool.black]
 line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+target-version = ['py310', 'py311', 'py312']
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "D", "B", "UP"]
@@ -111,6 +121,15 @@ ignore = [
     # The class docstring documents the constructor's arguments (Google
     # style), so __init__ needs no docstring of its own.
     "D107",
+    # The code writes Optional[...], List[...] and typing imports, which
+    # Python 3.10 still accepts; rewriting every annotation is a separate
+    # change.
+    "UP006",
+    "UP007",
+    "UP035",
+    "UP045",
+    # zip() without strict=: the code zips sequences of equal length.
+    "B905",
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -126,7 +145,7 @@ convention = "google"
 "tools/**" = ["D"]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

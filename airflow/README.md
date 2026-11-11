@@ -93,8 +93,9 @@ The commands need a machine (or container) that has:
    a time on that machine. The driver's memory is sized from what the machine
    has free when the command starts.
 6. **For the first reference build only:** an OpenStreetMap extract of the
-   world's aerodromes, named by the environment variable `OPDI_OSM_PBF`. The
-   reference task refuses to start without it.
+   world's aerodromes, named by the environment variable `OPDI_OSM_PBF`, and
+   the `osmium` package that reads it (`pip install "/path/to/opdi[reference]"`).
+   The reference task refuses to start without the extract.
 
 Airflow itself needs nothing beyond its core: the DAG file uses only
 `BashOperator`, `PythonOperator` and `EmptyOperator`.

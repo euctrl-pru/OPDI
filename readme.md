@@ -61,10 +61,10 @@ The files are Parquet files, one per table and day:
 
 A day's files hold the flights that were first seen on that day (UTC). Any
 Parquet reader works (pandas, R `arrow`, DuckDB, Spark). The package includes
-a small reader that needs no Spark:
+a small reader that never starts Spark or Java:
 
 ```bash
-pip install "opdi[reader]"      # pyarrow, pandas and DuckDB
+pip install "opdi[reader]"      # adds DuckDB; PySpark, pyarrow and pandas come with the package
 ```
 
 ```python
@@ -124,6 +124,7 @@ later (PySpark is installed with the package).
 git clone https://github.com/euctrl-pru/opdi.git
 cd opdi
 pip install -e .              # the pipeline
+pip install -e ".[reference]" # plus osmium, to build the airport layouts (step 00b)
 pip install -e ".[dev]"       # plus the tools for tests and linting
 pip install -e ".[airflow]"   # on the machine that runs the Airflow scheduler
 ```
