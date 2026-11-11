@@ -66,6 +66,14 @@ RING_TYPES = {"xing-40nm": "xing-40nm", "xing-100nm": "xing-100nm"}
 # `event_bench.runway_identity_types`.
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def _identity(spark, storage, period, tracks_table):
     """(track_id -> icao24, callsign, day), from whichever source the period has.
 
@@ -190,7 +198,7 @@ def main() -> int:
     from opdi.config import OPDIConfig
     from opdi.utils.storage import StorageManager
 
-    storage_cfg = OPDIConfig.for_environment("opensky")
+    storage_cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     storage_cfg.project.release = ""
     storage = StorageManager(spark, storage_cfg)

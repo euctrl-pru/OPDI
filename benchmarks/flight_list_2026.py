@@ -64,6 +64,14 @@ CAND_TABLE = "research/cand_2026"
 MONTH = date(2026, 6, 1)
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def redirect_candidates(table: str) -> None:
     """Point the endpoint-candidate cache's *physical path* at `table`.
 
@@ -126,7 +134,7 @@ def main() -> None:
     # The factory, not OPDIConfig() plus an attribute: the environment decides
     # the storage backend, and setting it afterwards leaves StorageManager
     # unwired, so every table looks absent.
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     args.log_dir.mkdir(parents=True, exist_ok=True)

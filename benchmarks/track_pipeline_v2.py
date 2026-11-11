@@ -117,6 +117,14 @@ PERIODS = {
 }
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def table_for(method: str, name: str) -> str:
     """Storage-relative table this run uses in place of *name*."""
     return f"{RESEARCH_ROOT}/{method}/{name}"
@@ -529,7 +537,7 @@ def main() -> None:
                     f"exceeds quota fails after the work is done"
                 )
 
-            cfg = OPDIConfig.for_environment("opensky")
+            cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
             # The study tables sit directly in the warehouse, not in a release folder.
             cfg.project.release = ""
             cfg.segmentation.method = method

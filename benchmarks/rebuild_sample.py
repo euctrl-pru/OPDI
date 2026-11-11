@@ -44,6 +44,14 @@ LOGS = [
 ]
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def force_first_write_overwrite(tables):
     """Make the first write to each named table replace it.
 
@@ -121,7 +129,7 @@ def main() -> None:
     from opdi.ingestion.osn_statevectors import StateVectorIngestion
     from opdi.pipeline.tracks import TrackProcessor
 
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     print(f"\ndecimation rule: {cfg.ingestion.decimation}")

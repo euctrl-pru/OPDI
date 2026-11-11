@@ -85,6 +85,14 @@ OUT_TMPL = "research/flight_list_v62_{run}"
 RUNS = ("legacy", "trend", "endpoint", "nearest", "combined", "recommended")
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def main_checkout(repo: Path = REPO) -> Path:
     """The real repository root, even when running from a git worktree.
 
@@ -569,7 +577,7 @@ def main() -> None:
     # the storage backend (plain parquet over S3A, no Hive, no Iceberg), and
     # setting the field afterwards leaves the StorageManager unwired, so every
     # table looks absent.
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     month = datetime.strptime(args.months[0], "%Y%m").date().replace(day=1)

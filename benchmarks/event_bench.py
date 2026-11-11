@@ -94,6 +94,14 @@ PERIOD_TRACKS = {
 DEFAULT_FLIGHT_LIST = "opdi_flight_list"
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def flight_list_table(period: str) -> str:
     """Which flight list this period's aerodrome joins must read."""
     return PERIOD_TRACKS[period].get("flight_list", DEFAULT_FLIGHT_LIST)
@@ -929,7 +937,7 @@ def main() -> int:
         target = f"research/events_{args.period}_{name}"
         redirect_event_tables(target, flight_list=flight_list_table(args.period))
 
-        config = OPDIConfig.for_environment("opensky")
+        config = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
         # The study tables sit directly in the warehouse, not in a release folder.
         config.project.release = ""
         config.events = cfg

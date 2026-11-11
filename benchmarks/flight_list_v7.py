@@ -97,6 +97,14 @@ PERIODS = {
 }
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def redirect_candidates(table: str) -> None:
     """Point the endpoint candidate cache at a period's own copy.
 
@@ -761,7 +769,7 @@ def main() -> None:
     # The factory, not OPDIConfig() plus an attribute: the environment decides
     # the storage backend, and setting the field afterwards leaves the
     # StorageManager unwired, so every table looks absent.
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     month = datetime.strptime(period["months"][0], "%Y%m").date().replace(day=1)

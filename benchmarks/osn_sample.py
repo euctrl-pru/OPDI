@@ -70,6 +70,14 @@ DRIVER_PORT = 7078
 DRIVER_BLOCK_MANAGER_PORT = 7079
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def load_dotenv() -> None:
     env = REPO / ".env"
     if not env.is_file():
@@ -127,7 +135,7 @@ def _build_spark_k8s():
     from opdi.config import OPDIConfig
     from opdi.utils.spark_helpers import SparkSessionManager
 
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     cfg.spark.s3_access_key = _os.environ["AWS_ACCESS_KEY_ID"]

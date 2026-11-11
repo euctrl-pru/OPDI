@@ -22,6 +22,13 @@ sys.path.insert(0, str(REPO / "src"))
 import osn_sample
 from osn_sample import build_spark, load_dotenv
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -46,7 +53,7 @@ def main() -> None:
     from opdi.pipeline.flights import FlightListProcessor
 
     month = datetime.strptime(args.month, "%Y%m").date().replace(day=1)
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     proc = FlightListProcessor(spark, cfg)

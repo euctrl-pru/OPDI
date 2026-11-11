@@ -68,6 +68,14 @@ PERIODS = {
 }
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def add_h3_index(df, resolution: int = 7):
     """Attach ``h3_res_7``, for tracks built before step 02 computed it."""
     import h3_pyspark
@@ -186,7 +194,7 @@ def main() -> None:
     from opdi.cleaning.cleaner import TrackCleaner
     from opdi.config import OPDIConfig
 
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     print(f"\ncleaning enabled={cfg.cleaning.enabled}")

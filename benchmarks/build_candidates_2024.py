@@ -43,6 +43,14 @@ ENDS_2024 = "research/tracks_2024_ends"
 CAND_2024 = "research/cand_2024"
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def redirect(cand_table: str):
     """Send the candidate *write* to the 2024 copy, and nowhere else.
 
@@ -104,7 +112,7 @@ def main() -> None:
     from opdi.config import OPDIConfig
     from opdi.pipeline.flights import FlightListProcessor
 
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
 

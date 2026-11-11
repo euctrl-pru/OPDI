@@ -42,6 +42,14 @@ AIRPORTS_TABLE = "s3a://eurocontrol/opdi/oa_airports"
 AIRPORT_TYPES = list(CoverageConfig().airport_types)
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -79,7 +87,7 @@ def main() -> None:
     from opdi.config import OPDIConfig
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
 
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The reference tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     gen = AirportDetectionZoneGenerator(spark, cfg)

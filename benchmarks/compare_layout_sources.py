@@ -30,6 +30,14 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pbf", required=True)
@@ -63,7 +71,7 @@ def main() -> int:
     from opdi.reference.pbf_source import PbfLayoutSource
     from opdi.utils.storage import StorageManager
 
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
     # The study tables sit directly in the warehouse, not in a release folder.
     cfg.project.release = ""
     storage = StorageManager(spark, cfg)
