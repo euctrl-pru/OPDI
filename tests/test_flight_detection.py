@@ -291,11 +291,11 @@ def test_at_border_uses_the_box_it_is_given(spark):
 # Wiring: the configured box reaches both `at_border` call sites
 # ---------------------------------------------------------------------------
 #
-# `FlightListProcessor._endpoint_candidates_frame` does not exist -- the two
-# real places `at_border` and `OOA` meet are `_track_border_flags` (feeds
-# `trend`'s out-of-area label) and `build_endpoint_candidates` (feeds
-# `classify_endpoints`'s, by way of the `at_border` column it caches). Both
-# are exercised for real here; only `_get_data_within_timeframe` (needs S3)
+# In the package, `at_border` and `OOA` meet in `build_endpoint_candidates`
+# (feeds `classify_endpoints`'s label, by way of the `at_border` column it
+# caches). The study variant of `trend`'s out-of-area label is a second call
+# site, tested in tests/benchmarks/test_study_variants.py. The call is
+# exercised for real here; only `_get_data_within_timeframe` (needs S3)
 # and `_load_airports_hex` (needs the H3 reference tables) are stubbed, since
 # those are the only two dependencies this task did not touch and cannot
 # supply locally. Everything else -- the window functions, the join, the
@@ -305,8 +305,8 @@ def test_at_border_uses_the_box_it_is_given(spark):
 
 
 def _tracks_for_border_wiring(spark):
-    """Two samples of one track: enough columns for `_track_border_flags` and
-    `build_endpoint_candidates` to run their real logic end to end.
+    """Two samples of one track: enough columns for `build_endpoint_candidates`
+    (and the study variant's `_track_border_flags`) to run their real logic.
 
     The geometry is irrelevant -- `at_border` itself is replaced by a
     recorder in the test below, so nothing here depends on where these points
@@ -375,11 +375,11 @@ def _wiring_processor(spark, tmp_path, bbox):
     return proc
 
 
-def test_border_wiring_threads_the_configured_box_through_both_call_sites(
+def test_border_wiring_threads_the_configured_box_through_the_call_site(
     spark, tmp_path, monkeypatch
 ):
-    """The wiring this task adds: both call sites must pass the box the run
-    was configured with, not the module default and not a hardcoded value.
+    """The call site must pass the box the run was configured with, not the
+    module default and not a hardcoded value.
 
     The sentinel box is neither `EUROPE_BBOX` nor `None` on purpose. A test
     built on the European default could pass with the config ignored and the
@@ -402,10 +402,9 @@ def test_border_wiring_threads_the_configured_box_through_both_call_sites(
 
     proc = _wiring_processor(spark, tmp_path, sentinel_bbox)
 
-    proc._track_border_flags(_EPOCH.date()).collect()
     proc.build_endpoint_candidates(_EPOCH.date(), rebuild=True)
 
-    assert recorded == [sentinel_bbox, sentinel_bbox]
+    assert recorded == [sentinel_bbox]
 
 
 def test_version_is_new_unless_the_run_is_a_legacy_one():

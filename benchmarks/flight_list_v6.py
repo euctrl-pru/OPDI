@@ -118,7 +118,9 @@ def guard_writes(allowed_prefix: str = "research/") -> None:
 
 def build(spark, cfg, month, run, detection, adep_mode, ades_mode, log_dir):
     """Run step 03 for one configuration and return the table name."""
-    from opdi.pipeline.flights import FlightListProcessor
+    # The study processor: the package's step 03 plus the `nearest` mode and
+    # the `trend_ooa` option these runs compare.
+    from study_variants.detection import StudyFlightListProcessor as FlightListProcessor
 
     cfg.detection = detection
     # Grid cells are scored and discarded, so they share one table rather than

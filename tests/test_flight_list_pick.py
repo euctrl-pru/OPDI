@@ -110,11 +110,9 @@ def _candidates(spark, order):
     )
 
 
-def test_classify_endpoints_settles_equal_distance_by_the_identifier(spark):
+def test_the_endpoint_ranking_settles_equal_distance_by_the_identifier(spark):
     got = {
-        FlightListProcessor.classify_endpoints(_candidates(spark, order), mode="nearest").first()[
-            "apt"
-        ]
+        FlightListProcessor._best_candidates(_candidates(spark, order), 0.0).first()["apt_ident"]
         for order in (("CYEG", "CA-1291"), ("CA-1291", "CYEG"))
     }
     assert got == {"CA-1291"}

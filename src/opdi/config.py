@@ -845,44 +845,6 @@ class DetectionConfig:
     +0.58 pp of arrival accuracy at **zero** coverage cost -- the same flights
     answered, 380 more of them correctly."""
 
-    trend_ooa: bool = False
-    """Whether ``trend`` may emit the out-of-area marker.
-
-    Implemented in V7, measured, and **left off**. The capability is real and
-    the mechanism is sound; the geometry does not support it for the role that
-    matters.
-
-    ``trend`` named an aerodrome or said nothing, and those are not the only two
-    possibilities: a flight that entered the observed area already airborne has
-    an origin no feed here can name. Roughly one flight in twelve is in that
-    position, so the gap was worth closing.
-
-    **Why it is off.** The shipped configuration takes departures from
-    ``endpoint``, so this switch only ever reaches *arrivals* in practice -- and
-    an arrival label is right barely half the time: 50.35% precision, against
-    89.20% for the same test applied to departures by ``endpoint``. Every label
-    replaces a *silence*, so at the study's exchange rate of two, converting
-    nulls into coin flips loses about 205 points per three-day sample. It costs
-    arrivals on both periods measured, -827 and -245.
-
-    The asymmetry is geometric rather than a tuning accident. A track that
-    *begins* at the edge of the observed area almost certainly entered from
-    outside. A track that *ends* near the edge is ambiguous: it may be leaving,
-    or it may be a flight still bound somewhere inside whose reception was lost.
-    The border test ports cleanly to departures because the geometry supports
-    it, and does not port to arrivals.
-
-    **What would make it shippable.** A direction requirement -- the track must
-    be heading *out* of the area, not merely near its edge. The course is
-    already computed for ``trend_bearing_tiebreak_nm``, so the machinery exists;
-    it has not been built or measured. Until then arrivals get their out-of-area
-    labels from ``endpoint``, where precision is 89%.
-
-    The test and its precedence, when enabled, are ``endpoint``'s deliberately:
-    a fix within the border margin of the ingestion bbox, and aerodrome first,
-    border second. Reversing that order labels departures from aerodromes near
-    the edge as out-of-area with the aircraft still on the runway."""
-
     # -- endpoint --------------------------------------------------------
     endpoint_radius_nm: float = 30.0
     """**Changed from 40.** An interior optimum of the radius x height sweep,
@@ -903,8 +865,7 @@ class DetectionConfig:
 
     # -- which algorithm serves which role -------------------------------
     adep_mode: str = "endpoint"
-    """Algorithm naming the departure aerodrome: ``trend``, ``endpoint`` or
-    ``nearest``.
+    """Algorithm naming the departure aerodrome: ``trend`` or ``endpoint``.
 
     **Changed from ``trend``.** The two roles are not equally hard and the
     rules that suit them differ, which is the study's second result after the
@@ -963,7 +924,6 @@ class DetectionConfig:
             trend_smooth_before_cut=False,
             trend_radius_exact=False,
             trend_bearing_tiebreak_nm=0.0,
-            trend_ooa=False,
             endpoint_radius_nm=40.0,
             endpoint_height_ft=15000.0,
             endpoint_sched_penalty_nm=10.0,

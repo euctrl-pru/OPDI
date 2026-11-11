@@ -317,6 +317,8 @@ def build_plan(args, period) -> dict:
     ``tracks`` is the track table the run reads: ``None`` to resolve it from the
     configuration, or an explicit name.
     """
+    from study_variants.detection import StudyDetectionConfig
+
     from opdi.config import DetectionConfig
 
     L = DetectionConfig.legacy
@@ -402,7 +404,12 @@ def build_plan(args, period) -> dict:
     # The delta against `shipped` is what says whether it should be on.
     rejected = {
         "reject_radius20": (frm(S, trend_radius_nm=20.0), S().adep_mode, S().ades_mode, clean),
-        "reject_trend_ooa": (frm(S, trend_ooa=True), S().adep_mode, S().ades_mode, clean),
+        "reject_trend_ooa": (
+            frm(StudyDetectionConfig, trend_ooa=True),
+            S().adep_mode,
+            S().ades_mode,
+            clean,
+        ),
         # `reject_margin2` rather than `margin0`: zero is now what ships, and
         # this measures the value it replaced. Kept because V6 shipped 2 and a
         # reader deserves the number that moved it.
@@ -529,7 +536,9 @@ def verify_plan(plan: dict) -> None:
 
 def build(spark, cfg, month, run, detection, adep_mode, ades_mode, log_dir, tracks_table):
     """Run step 03 for one configuration and return the table it wrote."""
-    from opdi.pipeline.flights import FlightListProcessor
+    # The study processor: the package's step 03 plus the `nearest` mode and
+    # the `trend_ooa` option these runs compare.
+    from study_variants.detection import StudyFlightListProcessor as FlightListProcessor
 
     cfg.detection = detection
     # Grid cells are scored and discarded, so they share one table rather than
@@ -682,7 +691,7 @@ def main() -> None:
                 f"m{d.trend_vote_margin} pen{d.trend_sched_penalty_nm:g} "
                 f"rank={d.trend_rank_by} exact_r={d.trend_radius_exact} "
                 f"smooth1st={d.trend_smooth_before_cut} "
-                f"tie={d.trend_bearing_tiebreak_nm:g} ooa={d.trend_ooa} "
+                f"tie={d.trend_bearing_tiebreak_nm:g} ooa={getattr(d, 'trend_ooa', False)} "
                 f"e_r={d.endpoint_radius_nm:g}"
             )
         return

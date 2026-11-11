@@ -83,8 +83,9 @@ def test_unknown_mode_is_rejected():
     """`process_dai` used to branch on `mode == "trend"` versus *everything
     else*, so a typo silently ran the endpoint path. The mode set is now
     closed."""
-    modes = {"trend", "endpoint", "nearest"}
-    for bad in ("Trend", "endpoints", "", "traffic"):
+    modes = set(FlightListProcessor.DETECTION_MODES)
+    assert modes == {"trend", "endpoint"}
+    for bad in ("Trend", "endpoints", "", "traffic", "nearest"):
         assert bad not in modes
 
 
@@ -151,7 +152,7 @@ def test_the_recommended_configuration_is_what_a_caller_gets_by_default():
     d = DetectionConfig()
     assert d.adep_mode == "endpoint"
     assert d.ades_mode == "trend"
-    assert {d.adep_mode, d.ades_mode} <= {"trend", "endpoint", "nearest"}
+    assert {d.adep_mode, d.ades_mode} <= {"trend", "endpoint"}
 
     # Published lists were built from `trend` alone; `endpoint` served nothing.
     legacy = DetectionConfig.legacy()
@@ -180,7 +181,6 @@ def test_every_new_behaviour_is_off_under_legacy():
     prevent -- and it would do so without failing anything.
     """
     legacy = DetectionConfig.legacy()
-    assert legacy.trend_ooa is False
     assert legacy.trend_bearing_tiebreak_nm == 0.0
     assert legacy.trend_smooth_before_cut is False
     assert legacy.trend_radius_exact is False
@@ -195,21 +195,6 @@ def test_the_shipped_new_behaviours_are_on():
     assert d.trend_bearing_tiebreak_nm == 2.0
     assert d.trend_smooth_before_cut is True
     assert d.trend_radius_exact is True
-
-
-def test_trend_out_of_area_is_implemented_but_not_enabled():
-    """Built, measured, and deliberately off -- which is not the same as absent.
-
-    The switch exists and works; the geometry does not support it for the role
-    that matters. Departures ship from `endpoint`, so this only reaches
-    arrivals, where the label is right 50.35% of the time against `endpoint`'s
-    89.20%. Every label replaces a silence, so at k = 2 that is a losing trade.
-
-    Pinned so that "the feature is implemented, why is it off?" has to be
-    answered against the measurement rather than switched on by assumption.
-    """
-    assert DetectionConfig().trend_ooa is False
-    assert DetectionConfig.legacy().trend_ooa is False
 
 
 def test_version_string_is_new_and_the_published_ones_are_untouched():
