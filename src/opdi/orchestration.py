@@ -48,6 +48,10 @@ from typing import Dict, List, Optional, Sequence
 #: * 09: publish the day's flight list and flight events files.
 DAY_STEPS = ("01", "02", "02a", "03", "04", "04b", "09")
 
+#: Day steps that read the reference tables. Publishing (09) reads only the
+#: working tables, so it can run where no reference table exists.
+STEPS_NEEDING_REFERENCE = ("01", "02", "02a", "03", "04", "04b")
+
 #: The step that builds the reference tables (airports, runways, aircraft). It
 #: runs once, not per day, and skips the tables that already exist.
 REFERENCE_STEP = "00"
@@ -229,7 +233,7 @@ def run_unit(
                 kwargs["run_reference"] = todo
                 STEPS[REFERENCE_STEP](spark, config, **kwargs)
         else:
-            missing = periodrun.preflight(storage)
+            missing = periodrun.preflight(storage) if step in STEPS_NEEDING_REFERENCE else []
             if missing:
                 print("Missing or unreadable reference tables: " + ", ".join(missing)
                       + ". Run 'python -m opdi.orchestration reference' first.")

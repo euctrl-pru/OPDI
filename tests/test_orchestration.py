@@ -14,6 +14,11 @@ def test_day_steps_end_with_publishing():
     assert o.DAY_STEPS == ("01", "02", "02a", "03", "04", "04b", "09")
 
 
+def test_publishing_needs_no_reference_table():
+    assert "09" not in o.STEPS_NEEDING_REFERENCE
+    assert set(o.STEPS_NEEDING_REFERENCE) == set(o.DAY_STEPS) - {"09"}
+
+
 def test_days_are_inclusive_and_newest_first_by_default():
     assert o.days(date(2026, 6, 1), date(2026, 6, 3)) == [
         date(2026, 6, 3), date(2026, 6, 2), date(2026, 6, 1)]
