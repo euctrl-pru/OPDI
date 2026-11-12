@@ -161,9 +161,10 @@ class EventConfig:
     the track that belongs to its own leg.
 
     An off-block time is then the start of the first sustained movement on
-    the ground before the take-off, and needs a stand exit before that
-    take-off; an in-block time is the end of the last sustained movement on
-    the ground after the landing, and needs a stand entry after that landing.
+    the ground before the take-off, and an in-block time the end of the last
+    sustained movement on the ground after the landing; each needs a stand
+    passage in the track, and names the stand when that passage lies in the
+    same part of the track.
     A track that lands and departs again gets the in-block time of its
     arrival and the off-block time of its departure. Movement is read only
     from reports that may be on the ground: flagged on the ground, without

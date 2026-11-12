@@ -68,12 +68,10 @@ def _movement_runs(
     *,
     partition_cols: Sequence[str] = ("track_id",),
     time_col: str = "event_time",
-    counts: Optional[Column] = None,
     break_after_seconds: Optional[float] = None,
 ) -> DataFrame:
     """Each run of sustained movement: ``_from`` and ``_to`` per run.
 
-    ``counts`` says which reports may count as moving (all when None).
     ``break_after_seconds`` starts a new run after a silence longer than that,
     so two movements with nothing received between them are not one run.
     """
@@ -89,8 +87,6 @@ def _movement_runs(
         # unresolved-column analysis error.
         gs_kt = F.coalesce(gs_kt, _derived_groundspeed_kt(ordered, time_col))
     moving = gs_kt > F.lit(config.ground_speed_threshold_kt)
-    if counts is not None:
-        moving = moving & counts
     work = sdf.withColumn("_moving", moving)
 
     # Sessionise runs of movement, then keep runs long enough to be a push
@@ -178,8 +174,9 @@ _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 def on_or_near_ground(sdf: DataFrame, config: "EventConfig") -> Column:
     """Whether a report may be on the ground: the test of the airport layout events.
 
-    True when the report is flagged on the ground, when its altitude is
-    unknown (a surface report carries none), or when it is at most
+    True when the report is flagged on the ground, when its altitude or its
+    position is unknown (a surface report carries no altitude), or when it is
+    at most
     ``airport_max_height_agl_ft`` (2,000 ft) above the lower of the flight's
     two airports. Elevations that are not on the frame count as 0 ft.
     """
@@ -195,7 +192,11 @@ def on_or_near_ground(sdf: DataFrame, config: "EventConfig") -> Column:
     ]
     height_ft = F.least(*[alt_ft - e for e in elevations])
     low = height_ft <= F.lit(float(config.airport_max_height_agl_ft))
-    return flagged | F.col("baro_altitude_c").isNull() | low
+    # A report without a position says nothing about where the aircraft is;
+    # some receivers repeat a stale altitude in such reports long after the
+    # aircraft has parked.
+    no_position = F.col("lat").isNull() if "lat" in sdf.columns else F.lit(False)
+    return flagged | F.col("baro_altitude_c").isNull() | low | no_position
 
 
 def block_events(
@@ -220,15 +221,22 @@ def block_events(
       stand stop; the in-block time is the end of the movement before it, the
       off-block time the start of the movement after it.
 
-    A track with no take-off time gets its off-block time from the ground
-    part at its start (up to its first report in flight); one with no
-    landing time gets its in-block time from the ground part at its end.
+    Where the track starts with a landing, or has no take-off time, the
+    off-block time comes from the ground part at its start (up to its first
+    report in flight); where it ends with a take-off, or has no landing time,
+    the in-block time comes from the ground part at its end (after its last
+    report in flight). A take-off or landing that was not found then does not
+    lose the block time next to it.
 
     Movement is measured on reports that may be on the ground
     (:func:`on_or_near_ground`), so flight is never movement on the ground,
     and a silence longer than ``airport_trace_gap_seconds`` ends a movement.
+    The track counts as in flight only where reports in flight last at least
+    ``ground_move_min_seconds``, so a garbled altitude does not end a ground
+    part.
     Each time also needs a stand exit (off-block) or a stand entry (in-block)
-    in the same part; the event names that stand and its airport.
+    in the track, as before. When that stand passage lies in the same part,
+    the event names the stand and its airport; otherwise it names none.
 
     Returns:
         ``track_id``, ``block`` (``"off"`` or ``"on"``), ``event_time``,
@@ -242,20 +250,48 @@ def block_events(
     # exhaust the memory of the Spark driver before the job starts.
     ground = on_or_near_ground(sdf, config)
     reports = sdf.withColumn("_ground", ground)
+    # Reports in flight are left out of the movement rather than counted as
+    # standing still, so a garbled altitude on the ground (a report or two at
+    # 16,000 ft between two surface reports) does not cut a push-back in two.
+    # A real flight leaves a silence longer than airport_trace_gap_seconds,
+    # which ends the movement.
     runs = _movement_runs(
-        reports,
+        reports.filter(F.col("_ground")),
         config,
-        counts=F.col("_ground"),
         break_after_seconds=float(config.airport_trace_gap_seconds),
     ).select("track_id", "_from", "_to")
     runs = runs.localCheckpoint()
 
+    # The track is in flight where reports in flight follow each other for at
+    # least ground_move_min_seconds (30 s); a shorter run of them is a
+    # garbled altitude, not a flight.
+    ordered = Window.partitionBy("track_id").orderBy("event_time")
+    air = reports.withColumn("_air", ~F.col("_ground"))
+    air = air.withColumn(
+        "_change",
+        F.when(
+            F.col("_air") != F.coalesce(F.lag("_air").over(ordered), ~F.col("_air")), 1
+        ).otherwise(0),
+    ).withColumn(
+        "_stretch",
+        F.sum("_change").over(ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)),
+    )
+    stretches = (
+        air.filter(F.col("_air"))
+        .groupBy("track_id", "_stretch")
+        .agg(F.min("event_time").alias("_a_from"), F.max("event_time").alias("_a_to"))
+        .filter(
+            F.col("_a_to").cast("double") - F.col("_a_from").cast("double")
+            >= F.lit(float(config.ground_move_min_seconds))
+        )
+        .groupBy(F.col("track_id").alias("_a_track"))
+        .agg(F.min("_a_from").alias("_first_air"), F.max("_a_to").alias("_last_air"))
+    )
     span = reports.groupBy("track_id").agg(
         F.min("event_time").alias("_first"),
         F.max("event_time").alias("_last"),
-        F.min(F.when(~F.col("_ground"), F.col("event_time"))).alias("_first_air"),
-        F.max(F.when(~F.col("_ground"), F.col("event_time"))).alias("_last_air"),
     )
+    span = span.join(stretches, span["track_id"] == stretches["_a_track"], "left").drop("_a_track")
     span = span.localCheckpoint()
 
     # Take-off ("dep") and landing ("arr") times, then the parts between them.
@@ -331,8 +367,16 @@ def block_events(
     single_on = parts.filter((F.col("_lo_kind") == "arr") & (F.col("_hi_kind") == "end"))
     split = parts.filter((F.col("_lo_kind") == "arr") & (F.col("_hi_kind") == "dep"))
 
-    # Without a take-off (landing) time: the ground part at the start (end).
-    no_dep = span.filter(~F.coalesce(F.col("_has_dep"), F.lit(False))).select(
+    # Before the first take-off when a landing (or nothing) comes first, and
+    # after the last landing when a take-off (or nothing) comes last: the
+    # ground part at the start (end) of the track, up to its first (from its
+    # last) report in flight. This is where a take-off or landing time that
+    # was not found would have been.
+    starts_without_take_off = F.col("_first_dep").isNull() | (
+        F.col("_first_arr") < F.col("_first_dep")
+    )
+    ends_without_landing = F.col("_last_arr").isNull() | (F.col("_last_dep") > F.col("_last_arr"))
+    no_dep = span.filter(F.coalesce(starts_without_take_off, F.lit(True))).select(
         "track_id",
         F.col("_first").alias("_lo"),
         F.least(
@@ -340,7 +384,7 @@ def block_events(
             F.coalesce(F.col("_first_arr"), F.col("_last")),
         ).alias("_hi"),
     )
-    no_arr = span.filter(~F.coalesce(F.col("_has_arr"), F.lit(False))).select(
+    no_arr = span.filter(F.coalesce(ends_without_landing, F.lit(True))).select(
         "track_id",
         F.greatest(
             F.coalesce(F.col("_last_air"), F.col("_first")),
@@ -426,14 +470,25 @@ def block_events(
         & (F.col("block") == F.col("_s_block"))
         & (F.col("stand_time") >= F.col("_s_lo"))
         & (F.col("stand_time") <= F.col("_s_hi")),
-        "inner",
+        "left",
     )
+    # A part with no stand passage of its own still gives its time when the
+    # track passed a stand elsewhere (the stand at the start of a departure
+    # is often not received); the time then names no stand.
+    anywhere = stands.select(
+        F.col("_s_track").alias("_a_track"), F.col("_s_block").alias("_a_block")
+    ).distinct()
+    matched = matched.join(
+        anywhere,
+        (F.col("track_id") == F.col("_a_track")) & (F.col("block") == F.col("_a_block")),
+        "inner",
+    ).drop("_a_track", "_a_block")
     st = F.col("stand_time").cast("double")
     ev = F.col("event_time").cast("double")
     off_side = F.col("block") == "off"
     preferred = F.when(off_side, st >= ev).otherwise(st <= ev)
     pick = Window.partitionBy("track_id", "block", "event_time").orderBy(
-        preferred.desc(), F.abs(st - ev).asc(), "stand_time"
+        preferred.desc_nulls_last(), F.abs(st - ev).asc_nulls_last(), "stand_time"
     )
     return (
         matched.withColumn("_rank", F.row_number().over(pick))

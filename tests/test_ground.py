@@ -371,3 +371,108 @@ def test_a_report_without_altitude_counts_as_possibly_on_the_ground(spark):
 def test_the_v002_settings_keep_the_earlier_block_times(spark):
     assert EventConfig.legacy().block_times_on_ground_only is False
     assert EventConfig().block_times_on_ground_only is True
+
+
+def test_a_departure_whose_stand_was_not_seen_keeps_its_off_block(spark):
+    """Stand to stand, but the departure stand was not received: the only
+    stand passage is at the arrival. The off-block time of the departure is
+    still the start of its first movement before the take-off, as before;
+    it names no stand, since none was seen in that part of the track."""
+    got = _blocks(
+        spark,
+        _reports(spark, DEPARTURE + ARRIVAL),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ATOT", 600), ("ALDT", 1000)]),
+    )
+
+    assert got == [("off", 60.0, None, None), ("on", 1290.0, "B2", "EDDF")]
+
+
+def test_a_landing_that_was_not_found_after_the_last_take_off_still_gives_the_in_block(
+    spark,
+):
+    """Arrival at EDDF (landing found), departure (take-off found), then an
+    arrival at a second airport whose landing time was not found: the ground
+    part after the last report in flight gives the in-block time of that
+    last arrival."""
+    legs = ARRIVAL + [
+        _leg(1420, 3700, 0, step_s=60),
+        _leg(3700, 4100, 15),
+        _leg(4100, 6000, 250, alt_ft=9000, on_ground=False),
+        _leg(6000, 6300, 15),
+        _leg(6300, 6400, 0),
+    ]
+    stands = ARRIVAL_STANDS + [("entry-parking_position", 6250, "C3", "LFPG")]
+    got = _blocks(
+        spark,
+        _reports(spark, legs),
+        _stands(spark, stands),
+        _runway(spark, [("ALDT", 1000), ("ATOT", 4100)]),
+    )
+
+    assert ("on", 6290.0, "C3", "LFPG") in got
+
+
+def _with_glitch(legs, at_s):
+    """The report at ``at_s`` replaced by one at 16,000 ft, not on the ground:
+    a garbled altitude in an airborne-format message."""
+    out = []
+    for leg in legs:
+        out.append(
+            [
+                (s, kt, 16000 / FT_PER_M, False) if s == at_s else (s, kt, a, g)
+                for s, kt, a, g in leg
+            ]
+        )
+    return out
+
+
+def test_a_garbled_altitude_on_the_ground_does_not_split_the_movement(spark):
+    """Two reports at 16,000 ft in the middle of the push-back: the off-block
+    time stays at the start of the push-back."""
+    legs = _with_glitch(_with_glitch(DEPARTURE, 80), 90)
+    got = _blocks(
+        spark,
+        _reports(spark, legs),
+        _stands(spark, DEPARTURE_STANDS),
+        _runway(spark, [("ATOT", 600)]),
+    )
+
+    assert got == [("off", 60.0, "A1", "EBBR")]
+
+
+def test_a_garbled_altitude_on_the_ground_does_not_end_the_ground_part(spark):
+    """A ground track without take-off or landing time, with a garbled report
+    near its end: it still gets both times."""
+    legs = _with_glitch([_leg(0, 60, 0), _leg(60, 300, 12), _leg(300, 360, 0)], 330)
+    stands = [
+        ("entry-parking_position", 0, "C3", "LFPG"),
+        ("exit-parking_position", 80, "C3", "LFPG"),
+    ]
+    got = _blocks(spark, _reports(spark, legs), _stands(spark, stands), _runway(spark, []))
+
+    assert got == [("off", 60.0, "C3", "LFPG"), ("on", 290.0, "C3", "LFPG")]
+
+
+def test_reports_without_position_do_not_count_as_flight(spark):
+    """A parked aircraft whose last reports carry no position and a stale
+    altitude of 15,000 ft: they do not end the ground part, so the in-block
+    time of the arrival is kept."""
+    legs = ARRIVAL + [[(s, None, 15000 / FT_PER_M, False) for s in range(1420, 1600, 5)]]
+    rows = [
+        (
+            "trk-1",
+            _at(s),
+            None if s >= 1420 else 50.0,
+            None if s >= 1420 else 4.0,
+            None if kt is None else _kt(kt),
+            a,
+            g,
+        )
+        for leg in legs
+        for (s, kt, a, g) in leg
+    ]
+    reports = spark.createDataFrame(rows, _REPORT_DDL)
+    got = _blocks(spark, reports, _stands(spark, ARRIVAL_STANDS), _runway(spark, []))
+
+    assert got == [("on", 1290.0, "B2", "EDDF")]
