@@ -155,7 +155,26 @@ def test_an_unknown_method_raises_rather_than_falling_back(spark, tmp_path):
         _proc(spark, tmp_path, "recomended")._add_track_id(df)
 
 
-def test_a_study_rule_is_refused_until_registered(spark, tmp_path):
+@pytest.fixture
+def registry_without_study_rules():
+    """The rule registry as the package ships it, restored after the test.
+
+    Another test file (``test_segmentation_lookback.py``, through
+    ``benchmarks/track_sweep.py``) registers the study rules and leaves them
+    in the registry; without this, the test below would depend on the order
+    the files run in.
+    """
+    from opdi.pipeline.segmentation import methods
+
+    saved = dict(methods.ARMS)
+    for name in methods.STUDY_ARMS:
+        methods.ARMS.pop(name, None)
+    yield
+    methods.ARMS.clear()
+    methods.ARMS.update(saved)
+
+
+def test_a_study_rule_is_refused_until_registered(spark, tmp_path, registry_without_study_rules):
     """A study rule's name says where the rule lives instead of running."""
     df = make_track(spark, BLANKING)
     with pytest.raises(ValueError, match="benchmarks/study_variants"):
