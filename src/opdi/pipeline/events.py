@@ -553,7 +553,9 @@ def merge_milestone_duplicates(
         ATOT = runway milestone airborne if found, else runway window time
         ALDT = runway milestone touchdown if found, else runway window time
 
-    A flight keeps a time whenever either detector found one. Every other
+    A flight keeps a time whenever either detector found one, and a row
+    without a time is kept only when no row of that flight and type has one.
+    Every other
     event type, and rows without ``info.method``, pass through unchanged.
     """
     config = config or EventConfig()
@@ -569,9 +571,12 @@ def merge_milestone_duplicates(
         # replaces a known one.
         lit(len(_METHOD_RANK)),
     )
-    # ``event_time`` breaks a tie between two rows of one method, so the
-    # choice does not depend on how Spark split the data.
-    best = Window.partitionBy("track_id", "type").orderBy(rank.asc(), col("event_time").asc())
+    # A row without a time is never kept where a row with one exists, whatever
+    # its method. ``event_time`` then breaks a tie between two rows of one
+    # method, so the choice does not depend on how Spark split the data.
+    best = Window.partitionBy("track_id", "type").orderBy(
+        col("event_time").isNull().asc(), rank.asc(), col("event_time").asc()
+    )
     kept = (
         df_events.filter(merged)
         .withColumn("_rank", F.row_number().over(best))

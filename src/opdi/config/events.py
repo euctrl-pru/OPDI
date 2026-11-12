@@ -94,6 +94,19 @@ class EventConfig:
     level, interpolated between the two reports around it, instead of the
     last report before it (up to 5 seconds early). Off in release v0.0.2."""
 
+    interpolate_crossings_over_missing_values: bool = True
+    """Place a crossing between the last report that has a value (altitude,
+    distance or height) and the report after the crossing, skipping the
+    reports in between that have no value.
+
+    Cleaning blanks implausible altitudes, so a track can hold reports with
+    no altitude in the middle of a climb. Without this setting, a crossing
+    that happens over such reports is read from a report without a value: it
+    gets no time at all, or the time of an earlier crossing of the same
+    level. With it, a crossing whose two known values are more than
+    :attr:`track_hole_seconds` apart is not given, because its time and
+    position cannot be placed. Off in release v0.0.2."""
+
     ring_radii_nm: tuple = (40.0, 50.0, 60.0, 100.0, 110.0, 120.0)
     """Radii, in NM, of the circles around the departure and destination
     airports whose crossings are detected. 40 NM is the area used by the
@@ -637,6 +650,7 @@ class EventConfig:
             phase_require_complete_rules=False,
             crossing_all_occurrences=False,
             crossing_interpolate=False,
+            interpolate_crossings_over_missing_values=False,
             airport_events_ordered=False,
             feeds_from_clean_tracks=False,
             deterministic_event_ids=False,

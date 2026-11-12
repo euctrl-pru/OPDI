@@ -223,3 +223,77 @@ def test_no_thresholds_yields_an_empty_frame_not_an_error(spark):
 
     assert out.count() == 0
     assert "crossing_seq" in out.columns
+
+
+# ---------------------------------------------------------------------------
+# Missing values between two reports
+# ---------------------------------------------------------------------------
+
+
+def _with_gaps(spark, altitudes_ft, step_s=5):
+    """A climb in which ``None`` stands for a report without an altitude."""
+    return make_track(
+        spark,
+        [
+            {"t": i * step_s, "baro_altitude": None if a is None else _m(a)}
+            for i, a in enumerate(altitudes_ft)
+        ],
+    )
+
+
+def test_a_crossing_over_missing_values_is_placed_between_the_known_values(spark):
+    """Reports without an altitude sit between 9,500 ft (t=5) and 10,500 ft
+    (t=20). The crossing is interpolated between those two known values: at
+    t=12.5, 15 s apart. Before, it was taken from the report without a value
+    and had no time at all."""
+    sdf = _with_gaps(spark, [9000, 9500, None, None, 10500, 11000])
+
+    fl100 = [r for r in _crossings(sdf) if r.threshold == 100.0]
+
+    assert len(fl100) == 1
+    assert _offset_s(fl100[0].event_time) == pytest.approx(12.5, abs=0.05)
+    assert fl100[0].bracket_seconds == pytest.approx(15.0)
+    assert fl100[0].lat is not None
+
+
+def test_a_crossing_over_missing_values_does_not_take_the_time_of_an_earlier_one(spark):
+    """Climb through FL100 at t=7.5, then descend through it with a report
+    without an altitude in between. The descent must get its own time (t=65,
+    between 10,500 ft at t=60 and 9,500 ft at t=70), not the time of the climb,
+    which the earlier code carried forward."""
+    profile = [9000, 9500, 10500, 11000, 11500, 12000, 12000, 12000, 11500, 11000]
+    profile += [11000, 11000, 10500, None, 9500, 9000]
+    sdf = _with_gaps(spark, profile)
+
+    fl100 = [r for r in _crossings(sdf) if r.threshold == 100.0]
+
+    assert [r.direction for r in fl100] == ["up", "down"]
+    assert _offset_s(fl100[0].event_time) == pytest.approx(7.5, abs=0.05)
+    assert _offset_s(fl100[1].event_time) == pytest.approx(65.0, abs=0.05)
+
+
+def test_a_crossing_over_a_long_run_of_missing_values_is_not_emitted(spark):
+    """The last known altitude is 31 minutes before the next one: longer than
+    ``track_hole_seconds`` (30 minutes). The aircraft did cross, but neither its
+    time nor its position can be placed honestly, so no event is given -- and
+    no time of another crossing is borrowed."""
+    samples = [{"t": 0, "baro_altitude": _m(9000)}, {"t": 5, "baro_altitude": _m(9500)}]
+    samples += [{"t": 5 + 60 * k, "baro_altitude": None} for k in range(1, 32)]
+    samples += [{"t": 1870, "baro_altitude": _m(10500)}, {"t": 1875, "baro_altitude": _m(11000)}]
+    sdf = make_track(spark, samples)
+
+    assert [r for r in _crossings(sdf) if r.threshold == 100.0] == []
+
+
+def test_the_v002_settings_keep_the_earlier_handling_of_missing_values(spark):
+    """With ``interpolate_crossings_over_missing_values`` off, the crossing is
+    still read from the report without a value, which gives no time."""
+    config = EventConfig(interpolate_crossings_over_missing_values=False)
+    sdf = _with_gaps(spark, [9000, 9500, None, None, 10500, 11000])
+
+    fl100 = [r for r in _crossings(sdf, config=config) if r.threshold == 100.0]
+
+    assert len(fl100) == 1
+    assert fl100[0].event_time is None
+    assert EventConfig.legacy().interpolate_crossings_over_missing_values is False
+    assert EventConfig().interpolate_crossings_over_missing_values is True

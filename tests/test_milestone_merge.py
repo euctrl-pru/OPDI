@@ -176,3 +176,23 @@ def test_the_unmerged_configuration_keeps_both_rows(spark):
     out = merge_milestone_duplicates(df, EventConfig(merge_duplicate_milestones=False))
 
     assert out.count() == 2
+
+
+def test_an_event_without_a_time_never_replaces_one_with_a_time(spark):
+    """The runway milestone is preferred, but not when it has no time: a
+    take-off time without a time says nothing, and the runway window time of
+    the same flight is kept instead."""
+    df = spark.createDataFrame(
+        [
+            ("trk-1", "ATOT", None, json.dumps({"method": "acdm"})),
+            ("trk-1", "ATOT", T0, json.dumps({"method": "legacy"})),
+            ("trk-2", "ALDT", None, json.dumps({"method": "legacy"})),
+            ("trk-2", "ALDT", T0, json.dumps({"method": "legacy"})),
+        ],
+        "track_id string, type string, event_time timestamp, info string",
+    )
+
+    out = _by_type(merge_milestone_duplicates(df, EventConfig()))
+
+    assert out[("trk-1", "ATOT")]["event_time"] == T0
+    assert out[("trk-2", "ALDT")]["event_time"] == T0

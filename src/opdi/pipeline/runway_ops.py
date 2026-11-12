@@ -81,7 +81,7 @@ from pyspark.sql.window import Window
 if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
-from opdi.pipeline.crossings import threshold_crossings
+from opdi.pipeline.crossings import missing_value_options, threshold_crossings
 from opdi.pipeline.elevation import (
     height_above_aerodrome_ft,
     height_above_elevation_ft,
@@ -863,6 +863,7 @@ def _height_crossing(sdf: DataFrame, config: "EventConfig", direction: str) -> D
         down_label="down",
         interpolate=True,
         all_occurrences=True,
+        **missing_value_options(config),
     ).filter(F.col("direction") == direction)
 
 
@@ -908,6 +909,7 @@ def _threshold_plane(sdf: DataFrame, config: "EventConfig") -> DataFrame:
         down_label="outbound",
         interpolate=True,
         all_occurrences=True,
+        **missing_value_options(config),
     )
     return crossings.filter(
         (F.col("direction") == "inbound")
@@ -1043,6 +1045,7 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
         down_label="down",
         interpolate=True,
         all_occurrences=True,
+        **missing_value_options(config),
     )
 
     trigger_down = (F.col("threshold") == F.lit(float(config.goaround_trigger_height_ft))) & (

@@ -497,6 +497,30 @@ def test_airborne_is_interpolated_to_the_height_threshold(spark):
     assert airborne[0]["event_time"].second == 5
 
 
+def test_airborne_over_a_report_without_altitude_is_placed_between_the_known_heights(spark):
+    """5 ft at t=0, no altitude at t=5, 25 ft at t=10: the lift-off is placed
+    between the two known heights, at t=5. Before, it was read from the report
+    without an altitude and had no time."""
+    sv = make_track(
+        spark,
+        [
+            {"t": 0, "baro_altitude": _m(5.0), "velocity": _mps(150), "vert_rate": 10.0},
+            {"t": 5, "baro_altitude": None, "velocity": _mps(155), "vert_rate": 10.0},
+            {"t": 10, "baro_altitude": _m(25.0), "velocity": _mps(160), "vert_rate": 10.0},
+        ],
+    )
+    out = runway_milestones(_prepared(sv), _departure_traversal(spark), EventConfig())
+    airborne = out.filter(F.col("type") == "ATOT").collect()
+    assert len(airborne) == 1
+    assert airborne[0]["event_time"] is not None
+    assert airborne[0]["event_time"].second == 5
+
+    # The setting reaches the runway milestones too: off, the earlier reading.
+    earlier = EventConfig(interpolate_crossings_over_missing_values=False)
+    out = runway_milestones(_prepared(sv), _departure_traversal(spark), earlier)
+    assert [r["event_time"] for r in out.filter(F.col("type") == "ATOT").collect()] == [None]
+
+
 def test_a_departure_emits_line_up_then_roll_then_airborne_in_order(spark):
     out = runway_milestones(_departure_track(spark), _departure_traversal(spark), EventConfig())
     seq = [
