@@ -220,6 +220,13 @@ LADDER = [
             "emit_fir_crossings": True,
         },
     ),
+    # The plausibility study (2026-11): crossings placed between known values,
+    # block times from the ground part of their own leg, and the checks that
+    # remove events the track contradicts. One rung each, as each moves
+    # different event types.
+    ("L17_crossings_over_missing_values", {"interpolate_crossings_over_missing_values": True}),
+    ("L18_block_times_on_ground", {"block_times_on_ground_only": True}),
+    ("L19_plausibility_checks", {"plausibility_checks": True}),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
@@ -259,6 +266,10 @@ V4_BASE = dict(
     emit_holding=False,
     emit_point_merge=False,
     emit_fir_crossings=False,
+    # Nor did the corrections and checks of the plausibility study.
+    interpolate_crossings_over_missing_values=False,
+    block_times_on_ground_only=False,
+    plausibility_checks=False,
     events_version="events_v0.1.0",
 )
 
@@ -303,6 +314,13 @@ LADDER_V4 = [
     ("V10_holding", {"emit_holding": True}),
     ("V11_point_merge", {"emit_point_merge": True}),
     ("V12_fir", {"emit_fir_crossings": True}),
+    # The plausibility study (2026-11): crossings placed between known values,
+    # block times from the ground part of their own leg, and the checks that
+    # remove events the track contradicts. One rung each, as each moves
+    # different event types.
+    ("V13_crossings_over_missing_values", {"interpolate_crossings_over_missing_values": True}),
+    ("V14_block_times_on_ground", {"block_times_on_ground_only": True}),
+    ("V15_plausibility_checks", {"plausibility_checks": True}),
 ]
 
 #: Rungs that are allowed to be config-identical to the rung before them,
