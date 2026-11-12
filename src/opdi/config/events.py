@@ -156,6 +156,28 @@ class EventConfig:
     starts to move sends. The reported speed is used wherever it exists.
     Off in release v0.0.2."""
 
+    block_times_on_ground_only: bool = True
+    """Find each off-block and in-block time on the ground, in the part of
+    the track that belongs to its own leg.
+
+    An off-block time is then the start of the first sustained movement on
+    the ground before the take-off, and needs a stand exit before that
+    take-off; an in-block time is the end of the last sustained movement on
+    the ground after the landing, and needs a stand entry after that landing.
+    A track that lands and departs again gets the in-block time of its
+    arrival and the off-block time of its departure. Movement is read only
+    from reports that may be on the ground: flagged on the ground, without
+    altitude, or at most :attr:`airport_max_height_agl_ft` above the
+    airport. The event names the stand and its airport (``info.stand``,
+    ``info.apt_icao``).
+
+    Without this setting, the off-block time is the first sustained movement
+    anywhere in the track and the in-block time the last one, flight
+    included, whenever the track passed any stand: an arrival then gets an
+    off-block time at its first report in flight. Off in release v0.0.2,
+    which publishes no block times. See
+    https://www.opdi.aero/content/methods/block-times.html."""
+
     # -- runway identification for take-off and landing times ------------
     runway_max_dist_nm: float = 5.0
     """Only reports within this distance of the airport, in NM, are used to
@@ -647,6 +669,7 @@ class EventConfig:
             emit_block_events=False,
             emit_level_offs=False,
             ground_speed_derive_from_position=False,
+            block_times_on_ground_only=False,
             phase_require_complete_rules=False,
             crossing_all_occurrences=False,
             crossing_interpolate=False,

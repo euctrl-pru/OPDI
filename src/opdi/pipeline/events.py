@@ -76,7 +76,7 @@ from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
 from opdi.pipeline.flights import resolve_flight_id
-from opdi.pipeline.ground import block_times, movement_window
+from opdi.pipeline.ground import block_events, block_times, movement_window
 from opdi.pipeline.holding import calculate_holding_events
 from opdi.pipeline.holes import PIECE, add_piece
 
@@ -395,6 +395,7 @@ def calculate_block_events(
     sdf_input: DataFrame,
     airport_events: DataFrame,
     config: Optional[EventConfig] = None,
+    runway_events: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
     """Off-block and in-block times (A-CDM milestones T04 and T21).
 
@@ -402,19 +403,19 @@ def calculate_block_events(
     runway milestones are on without :attr:`merge_duplicate_milestones`. One
     detector, two names.
 
-    Found from the first movement after the aircraft leaves its stand
-    (``exit-parking_position``) and the last movement before it reaches one
-    (``entry-parking_position``), events that step 04 already finds from the
-    airport layouts. Coverage is the main limit: an aircraft on a stand is
-    often not received at all.
+    Found from the movement on the ground next to the stand events
+    (``exit-parking_position``, ``entry-parking_position``) that step 04
+    already finds from the airport layouts. With
+    :attr:`~opdi.config.EventConfig.block_times_on_ground_only` (the default)
+    each time comes from the ground part of its own leg, bounded by the
+    take-off and landing times in ``runway_events``
+    (:func:`opdi.pipeline.ground.block_events`), and ``info`` names the stand
+    (``stand``) and its airport (``apt_icao``). Without it, the first and last
+    sustained movement of the whole track are used. Coverage is the main
+    limit: an aircraft on a stand is often not received at all.
     See https://www.opdi.aero/content/methods/block-times.html.
     """
     config = config or EventConfig()
-    movements = movement_window(sdf_input, config)
-    blocks = block_times(movements, airport_events)
-    if blocks is None:
-        return None
-
     common = [
         lit(None).cast("double").alias("lon"),
         lit(None).cast("double").alias("lat"),
@@ -427,6 +428,30 @@ def calculate_block_events(
     _acdm_names = config.emit_runway_milestones and not config.merge_duplicate_milestones
     off_type = "off-block" if _acdm_names else "AOBT"
     on_type = "on-block" if _acdm_names else "AIBT"
+
+    if config.block_times_on_ground_only:
+        found = block_events(sdf_input, airport_events, runway_events, config)
+        stand = [col("stand").alias("stand"), col("stand_airport").alias("apt_icao")]
+        aobt = found.filter(col("block") == "off").select(
+            col("track_id"),
+            lit(off_type).alias("type"),
+            col("event_time"),
+            *common,
+            to_json(struct(col("stand_time").alias("stand_exit"), *stand)).alias("info"),
+        )
+        aibt = found.filter(col("block") == "on").select(
+            col("track_id"),
+            lit(on_type).alias("type"),
+            col("event_time"),
+            *common,
+            to_json(struct(col("stand_time").alias("stand_entry"), *stand)).alias("info"),
+        )
+        return aobt.unionByName(aibt)
+
+    movements = movement_window(sdf_input, config)
+    blocks = block_times(movements, airport_events)
+    if blocks is None:
+        return None
     aobt = blocks.filter(col("aobt").isNotNull()).select(
         col("track_id"),
         lit(off_type).alias("type"),
@@ -1590,6 +1615,18 @@ class FlightEventProcessor:
         #: The go-around rows, if the runway family computed them: the holding
         #: family drops an episode next to one.
         df_go_arounds = None
+        #: The take-off and landing times found so far, which bound the ground
+        #: parts the block times are read from.
+        runway_frames: List[DataFrame] = []
+
+        def keep_runway(frame: Optional[DataFrame]) -> Optional[DataFrame]:
+            # Cached because the block family reads these rows and the write
+            # reads them again; both read the same rows.
+            if frame is None or not self.events.block_times_on_ground_only:
+                return frame
+            frame = frame.cache()
+            runway_frames.append(frame)
+            return frame
 
         def add(frame: Optional[DataFrame]) -> None:
             nonlocal df_events
@@ -1635,7 +1672,11 @@ class FlightEventProcessor:
             # runway milestone where there is one. Off with the v0.0.2
             # settings (emit_runway_events).
             if self.events.emit_runway_events:
-                add(calculate_runway_events(sdf_input, month, self.storage, self.events))
+                add(
+                    keep_runway(
+                        calculate_runway_events(sdf_input, month, self.storage, self.events)
+                    )
+                )
 
             add(calculate_ring_crossing_events(sdf_input, month, self.storage, self.events))
 
@@ -1647,7 +1688,7 @@ class FlightEventProcessor:
             if self.events.emit_runway_milestones:
                 print(f"Calculating runway milestones for batch: {batch_id}")
                 rwy_sv = self._with_flight_id(geo)
-                add(self._runway_traversal_family(rwy_sv, month))
+                add(keep_runway(self._runway_traversal_family(rwy_sv, month)))
                 # Independent of the runway passages and of the layout table: a
                 # go-around may never touch a runway, so it needs only the
                 # destination airport.
@@ -1656,7 +1697,15 @@ class FlightEventProcessor:
                     add(df_go_arounds)
 
             if self.events.emit_block_events:
-                add(calculate_block_events(sdf_input, df_hexaero, self.events))
+                if self.events.block_times_on_ground_only:
+                    # ``geo`` carries the airport elevations of the ground test.
+                    runway = None
+                    for frame in runway_frames:
+                        part = frame.select("track_id", "type", "event_time")
+                        runway = part if runway is None else runway.unionByName(part)
+                    add(calculate_block_events(geo, df_hexaero, self.events, runway))
+                else:
+                    add(calculate_block_events(sdf_input, df_hexaero, self.events))
 
         if (
             calc_navigation

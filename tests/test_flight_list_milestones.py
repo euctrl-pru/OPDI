@@ -826,3 +826,48 @@ def test_a_stand_with_no_aerodrome_match_yields_null_not_a_guess(spark):
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
 
     assert row["STND_ARR"] is None
+
+
+def test_the_stand_columns_name_the_stand_of_the_block_times(spark):
+    """The off-block and in-block times name the stand they were read from.
+    STND_DEP and STND_ARR are those stands, so the time and the stand of one
+    flight-list row come from the same stand passage. A stand exit seen
+    earlier at the same airport (a stand the aircraft was towed from) does not
+    replace it."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "exit-parking_position", -900, osm_airport="EBBR", osm_ref="Z9"),
+            _event("trk-1", "exit-parking_position", 30, osm_airport="EBBR", osm_ref="A1"),
+            _event("trk-1", "AOBT", 0, stand_exit=str(_t(30)), stand="A1", apt_icao="EBBR"),
+            _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+            _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
+            _event("trk-1", "AIBT", 4000, stand_entry=str(_t(3950)), stand="D8", apt_icao="EHAM"),
+            _event("trk-1", "entry-parking_position", 3950, osm_airport="EHAM", osm_ref="D8"),
+            _event("trk-1", "entry-parking_position", 4500, osm_airport="EHAM", osm_ref="F2"),
+        ],
+    )
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert (row["STND_DEP"], row["STND_ARR"]) == ("A1", "D8")
+
+
+def test_a_block_time_at_another_airport_does_not_name_the_stand(spark):
+    """An off-block time whose stand is at another airport than ADEP leaves
+    STND_DEP to the stand exits at ADEP, as before."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "AOBT", 0, stand_exit=str(_t(30)), stand="K7", apt_icao="LFPG"),
+            _event("trk-1", "exit-parking_position", 40, osm_airport="EBBR", osm_ref="A1"),
+        ],
+    )
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["STND_DEP"] == "A1"

@@ -507,11 +507,31 @@ def enrich_flight_list(
         _first(is_dep(_ATOT), _runway_bearing()).alias("RWY_DEP_BEARING_DEG"),
         _last(is_arr(_ALDT), _runway()).alias("RWY_ARR"),
         _last(is_arr(_ALDT), _runway_bearing()).alias("RWY_ARR_BEARING_DEG"),
-        _first(is_dep(_STAND_EXIT), _info("osm_ref")).alias("STND_DEP"),
-        _last(is_arr(_STAND_ENTRY), _info("osm_ref")).alias("STND_ARR"),
+        _first(is_dep(_STAND_EXIT), _info("osm_ref")).alias("_stnd_dep_layout"),
+        _last(is_arr(_STAND_ENTRY), _info("osm_ref")).alias("_stnd_arr_layout"),
+        # The stand the block time itself was read from (``info.stand``), and
+        # its airport. Block times written without it give NULL here.
+        _first(is_(_AOBT), _info("stand")).alias("_aobt_stand"),
+        _first(is_(_AOBT), _info("apt_icao")).alias("_aobt_apt"),
+        _last(is_(_AIBT), _info("stand")).alias("_aibt_stand"),
+        _last(is_(_AIBT), _info("apt_icao")).alias("_aibt_apt"),
+        F.first("_adep").alias("_k_adep"),
+        F.first("_ades").alias("_k_ades"),
         *[ring(nm, arrival=True).alias(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM],
         *[ring(nm, arrival=False).alias(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM],
     )
+
+    # STND_DEP and STND_ARR are the stands of the AOBT and AIBT columns when
+    # those events name a stand at the flight's own airport, so the time and
+    # the stand of a row come from the same stand passage. Otherwise they are
+    # the first stand exit at ADEP and the last stand entry at ADES.
+    def _own_stand(stand: str, airport: str, leg: str, layout: str) -> Column:
+        at_leg = F.col(airport).isNull() | (F.col(airport) == F.col(leg))
+        return F.when(F.col(stand).isNotNull() & at_leg, F.col(stand)).otherwise(F.col(layout))
+
+    agg = agg.withColumn(
+        "STND_DEP", _own_stand("_aobt_stand", "_aobt_apt", "_k_adep", "_stnd_dep_layout")
+    ).withColumn("STND_ARR", _own_stand("_aibt_stand", "_aibt_apt", "_k_ades", "_stnd_arr_layout"))
 
     # LEFT, flight list on the left: a flight with no events at all must
     # survive with nulls rather than vanish, and the row count is part of the

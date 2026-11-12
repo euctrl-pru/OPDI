@@ -698,7 +698,7 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
     stand = spark.createDataFrame(
         [
             ("trk-1", "exit-parking_position", _T0),
-            ("trk-1", "entry-parking_position", _T0 + dt.timedelta(seconds=200)),
+            ("trk-1", "entry-parking_position", _T0 + dt.timedelta(seconds=100)),
         ],
         "track_id string, type string, event_time timestamp",
     )
@@ -718,6 +718,47 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
     assert shipped == {"AOBT", "AIBT"}
     assert v020 == {"off-block", "on-block"}
     assert legacy == {"AOBT", "AIBT"}
+
+
+def test_a_block_time_names_its_stand_and_follows_the_landing(spark):
+    """An arrival: in flight until the landing at 300 s, taxi, stand B2 at
+    EDDF. Only the in-block time is given, and it names the stand."""
+    import json as _json
+
+    from opdi.pipeline.events import calculate_block_events
+
+    rows = [
+        ("trk-1", _T0 + dt.timedelta(seconds=s), 50.0, 4.0, 120.0, 900.0, False)
+        for s in range(0, 300, 10)
+    ] + [
+        ("trk-1", _T0 + dt.timedelta(seconds=s), 50.0, 4.0, 7.0, None, True)
+        for s in range(300, 500, 10)
+    ]
+    sv = spark.createDataFrame(
+        rows,
+        "track_id string, event_time timestamp, lat double, lon double, velocity double, "
+        "baro_altitude_c double, on_ground boolean",
+    )
+    info = _json.dumps({"osm_ref": "B2", "osm_airport": "EDDF"})
+    stand = spark.createDataFrame(
+        [
+            ("trk-1", "entry-parking_position", _T0 + dt.timedelta(seconds=450), info),
+            ("trk-1", "exit-parking_position", _T0 + dt.timedelta(seconds=490), info),
+        ],
+        "track_id string, type string, event_time timestamp, info string",
+    )
+    runway = spark.createDataFrame(
+        [("trk-1", "ALDT", _T0 + dt.timedelta(seconds=300))],
+        "track_id string, type string, event_time timestamp",
+    )
+
+    got = calculate_block_events(sv, stand, EventConfig(), runway_events=runway).collect()
+
+    assert [r["type"] for r in got] == ["AIBT"]
+    assert got[0]["event_time"] == _T0 + dt.timedelta(seconds=490)
+    detail = _json.loads(got[0]["info"])
+    assert detail["stand"] == "B2" and detail["apt_icao"] == "EDDF"
+    assert "stand_entry" in detail
 
 
 def test_the_track_projection_carries_every_column_a_detector_feature_gates_on():
