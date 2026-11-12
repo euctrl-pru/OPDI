@@ -1221,6 +1221,26 @@ def run_before_after(args, argv) -> int:
     }
     removed = pd.concat([removed, pd.DataFrame([total])], ignore_index=True)
 
+    # Every removed event that a record confirms, to be read one by one.
+    confirmed_removed = [
+        f"removed confirmed: {r['reject_rule']} {r['flight_id']} {r['type']} "
+        f"{r['event_time']} record {r['gt_time']} at {r['gt_airport']} "
+        f"error {r['error_s']:.0f} s detail {r['reject_detail']}"
+        for r in r_sc.filter(a <= CONFIRMED_S)
+        .select(
+            "reject_rule",
+            "flight_id",
+            "type",
+            "event_time",
+            "gt_time",
+            "gt_airport",
+            "error_s",
+            "reject_detail",
+        )
+        .orderBy("reject_rule", "type", "flight_id")
+        .limit(500)
+        .collect()
+    ]
     known = []
     for name, df in (("before", before), ("after", after), ("rejected", rejected)):
         for r in (
@@ -1235,7 +1255,7 @@ def run_before_after(args, argv) -> int:
 
     out = Path(args.results_dir)
     out.mkdir(parents=True, exist_ok=True)
-    inputs = {"day": args.day, "known_cases": known}
+    inputs = {"day": args.day, "known_cases": known, "confirmed_removed": confirmed_removed}
     for name, frame in (("before_after.csv", table), ("removed_by_rule.csv", removed)):
         frame.to_csv(out / name, index=False)
         provenance.record(
@@ -1255,6 +1275,7 @@ def run_before_after(args, argv) -> int:
     print(table.to_string())
     print(removed.to_string())
     print("\n".join(known))
+    print("\n".join(confirmed_removed))
     return 0
 
 
