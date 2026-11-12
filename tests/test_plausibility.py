@@ -499,3 +499,88 @@ def test_a_runway_time_at_an_airport_at_5000_ft_is_kept(spark):
     tracks = _reports(0, 5040, 150, lat=51.0) + _reports(1000, 5020, 130, lat=51.0)
     kept, rejected = _check(spark, events, tracks)
     assert rejected == {}
+
+
+# --- every event is kept or removed, exactly once ---------------------------
+
+
+def test_an_event_without_a_type_is_kept(spark):
+    kept, rejected = _check(spark, [(("t1", None, _t(0), "{}")), _event("AOBT", 10)], [])
+    assert kept == {(None, _t(0)), ("AOBT", _t(10))}
+    assert rejected == {}
+
+
+def test_every_event_is_kept_or_removed_exactly_once_whatever_is_unknown(spark):
+    """NULL in every column of the events, the reports, the flight list
+    (which also names one flight twice) and the airport table (which names
+    one airport twice): each event appears once, in the kept or the removed
+    frame."""
+    events = spark.createDataFrame(
+        [
+            (1, None, None, None, None, None),
+            (2, "t1", None, _t(0), None, None),
+            (3, None, "AOBT", _t(0), "{}", None),
+            (4, "t1", "AOBT", _t(0), None, None),
+            (5, "t1", "AIBT", _t(0), '{"landing": null}', None),
+            (6, "t1", "ATOT", _t(0), '{"apt_icao": "LOW"}', None),
+            (7, "t1", "ALDT", _t(0), '{"apt_icao": "LOW"}', 30000.0),
+            (8, "t1", "AOBT", _t(0), json.dumps({"take_off": _t(0).isoformat()}), None),
+            (9, "t2", "entry-taxiway", None, None, None),
+            (10, "t1", "AOBT", _t(0), "not json", None),
+            (11, "t1", "ATOT", _t(5), None, 1700.0),
+        ],
+        "eid int, track_id string, type string, event_time timestamp, info string, "
+        "altitude_ft double",
+    )
+    reports = _reports(0, 30000, 450) + [
+        ("t1", None, None, None, None, None, None, None),
+        (None, _t(0), 50.0, 4.0, 100.0, 1.0, 0.0, True),
+        ("t1", _t(1), None, 4.0, None, None, None, None),
+        ("t1", _t(2), 50.0, None, 3000.0, None, None, True),
+    ]
+    flights = [("t1", "LOW", "HIGH"), ("t1", "LOW", None), (None, None, None), ("t2", None, "LOW")]
+    airports = AIRPORTS + [
+        ("LOW", 50.0, 4.0, 200),
+        (None, None, None, None),
+        ("X", None, None, None),
+    ]
+    kept, rejected = check_events(
+        events,
+        spark.createDataFrame(reports, TRACK_DDL),
+        spark.createDataFrame(airports, AIRPORT_DDL),
+        EventConfig(),
+        flights=spark.createDataFrame(flights, FLIGHT_DDL),
+    )
+    got = sorted([r.eid for r in kept.collect()] + [r.eid for r in rejected.collect()])
+    assert got == list(range(1, 12))
+    assert set(kept.columns) == set(events.columns)
+
+
+def test_a_flight_named_twice_in_the_flight_list_does_not_double_its_events(spark):
+    kept, rejected = check_events(
+        spark.createDataFrame([_event("AOBT", 10), _event("xing-fl100", 50)], EVENT_DDL),
+        spark.createDataFrame([], TRACK_DDL),
+        spark.createDataFrame(AIRPORTS, AIRPORT_DDL),
+        EventConfig(),
+        flights=spark.createDataFrame([("t1", "LOW", "HIGH"), ("t1", "LOW", "HIGH")], FLIGHT_DDL),
+    )
+    assert kept.count() == 2 and rejected.count() == 0
+
+
+def test_the_step_reads_each_flight_of_the_flight_list_once(spark, tmp_path):
+    from opdi.config import OPDIConfig
+    from opdi.pipeline.events import FlightEventProcessor
+
+    class _Storage:
+        def table_exists(self, name):
+            return name == "opdi_flight_list"
+
+        def read_table(self, name):
+            return spark.createDataFrame(
+                [("t1", T0, "LOW", "HIGH"), ("t1", T0, "LOW", "HIGH")],
+                "id string, dof timestamp, adep string, ades string",
+            )
+
+    proc = FlightEventProcessor(spark, OPDIConfig(), log_dir=str(tmp_path))
+    proc.storage = _Storage()
+    assert proc._flight_airports(dt.date(2026, 6, 1)).count() == 1

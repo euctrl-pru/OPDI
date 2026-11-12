@@ -1540,7 +1540,11 @@ class FlightEventProcessor:
         return self.storage.read_table("oa_airports")
 
     def _flight_airports(self, month: date) -> Optional[DataFrame]:
-        """``id``, ``adep``, ``ades`` of the flight list of the batch, or None."""
+        """``id``, ``adep``, ``ades`` of the flight list of the batch, or None.
+
+        One row per flight id, so that a flight named twice does not repeat
+        its events in the plausibility checks.
+        """
         if not self.storage.table_exists("opdi_flight_list"):
             return None
         start_ts, end_ts = get_start_end_of_month(month)
@@ -1551,6 +1555,7 @@ class FlightEventProcessor:
                 & (col("dof") < to_timestamp(lit(end_ts)))
             )
             .select("id", "adep", "ades")
+            .dropDuplicates(["id"])
         )
 
     def _with_flight_id(self, sv: DataFrame) -> DataFrame:

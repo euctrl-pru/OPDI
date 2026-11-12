@@ -340,11 +340,16 @@ def event_context(
             [], "ident string, _alat double, _alon double, _aelev double"
         )
     else:
-        apt = airports.select(
-            F.col("ident"),
-            F.col("latitude_deg").cast("double").alias("_alat"),
-            F.col("longitude_deg").cast("double").alias("_alon"),
-            F.col("elevation_ft").cast("double").alias("_aelev"),
+        # One row per airport: a repeated ident would repeat the events.
+        apt = (
+            airports.filter(F.col("ident").isNotNull())
+            .dropDuplicates(["ident"])
+            .select(
+                F.col("ident"),
+                F.col("latitude_deg").cast("double").alias("_alat"),
+                F.col("longitude_deg").cast("double").alias("_alon"),
+                F.col("elevation_ft").cast("double").alias("_aelev"),
+            )
         )
 
     def airport(prefix):
@@ -530,7 +535,10 @@ def label_events(
         F.lit("{}").alias("reject_detail"),
     )
 
-    ground_row = is_ground_event(F.col("type")) | F.col("type").isin(*RUNWAY_TIME_TYPES)
+    # Never NULL: an event without a type is not checked, and is kept.
+    ground_row = F.coalesce(
+        is_ground_event(F.col("type")) | F.col("type").isin(*RUNWAY_TIME_TYPES), F.lit(False)
+    )
     others = timed.filter(~ground_row).select(
         *columns,
         F.lit(None).cast("string").alias("reject_rule"),
@@ -542,7 +550,9 @@ def label_events(
     probe = timed.filter(ground_row)
     probe = probe.withColumn("apt_icao", F.coalesce(_info("apt_icao"), _info("osm_airport")))
     if flights is not None:
-        fl = flights.select(
+        # One row per flight: a flight list naming a flight twice would
+        # otherwise repeat its events.
+        fl = flights.dropDuplicates(["id"]).select(
             F.col("id").alias("_fl_id"), F.col("adep").alias("adep"), F.col("ades").alias("ades")
         )
         probe = probe.join(fl, probe["track_id"] == fl["_fl_id"], "left").drop("_fl_id")
