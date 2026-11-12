@@ -648,10 +648,46 @@ class EventConfig:
     Taxiing aircraft move at 10 to 30 kt."""
 
     plausibility_max_runway_time_height_ft: float = 1500.0
-    """Height above the airport, in feet, above which a take-off or landing
+    """Height above the ground, in feet, above which a take-off or landing
     time (``ATOT``, ``ALDT``) is removed. A time close to the ground is kept:
     in the study of these checks, the airport records confirm most times
-    found between 1,000 and 1,500 ft, and none above."""
+    found between 1,000 and 1,500 ft, and none above.
+
+    The height is the event's barometric altitude minus the same track's
+    barometric altitude on the ground at that airport (see
+    :attr:`plausibility_ground_reference_window_s`), which cancels the
+    error of barometric altitude on a day of low or high pressure. When the
+    track has no such report, the height is measured above the airport's
+    elevation and :attr:`plausibility_pressure_allowance_ft` is added to the
+    limit."""
+
+    plausibility_runway_time_window_s: float = 10.0
+    """Seconds around a take-off or landing time within which the reports
+    that give its altitude are read, when the event has no altitude of its
+    own. The altitude is interpolated between the nearest report before and
+    the nearest report after the time that have both an altitude and a
+    position; without one on each side within this window the height is
+    unknown and the event is kept. A jet climbs 2,000 to 4,000 ft in a
+    minute, so a report further away says little about the height at the
+    time."""
+
+    plausibility_pressure_allowance_ft: float = 1000.0
+    """Feet added to :attr:`plausibility_max_runway_time_height_ft` when the
+    height of a take-off or landing time is measured above the airport's
+    elevation rather than above the track's own altitude on the ground.
+    Barometric altitude is measured from standard pressure (1013.25 hPa) and
+    reads about 27 ft high per hPa below it: at 975 hPa, a true 500 ft above
+    the airport reads about 1,530 ft. 1,000 ft covers pressures down to
+    about 976 hPa."""
+
+    plausibility_ground_reference_window_s: float = 1800.0
+    """Seconds around a take-off or landing time within which the track's
+    reports flagged on the ground, with an altitude, give its altitude on
+    the ground (the median of those reports)."""
+
+    plausibility_ground_reference_radius_nm: float = 5.0
+    """Distance from the airport, in NM, within which those reports on the
+    ground are read."""
 
     plausibility_context_window_s: int = 60
     """Seconds around the event in which the position reports are read. A
