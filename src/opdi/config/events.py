@@ -275,6 +275,14 @@ class EventConfig:
     It is small rather than zero because barometric altitude near the
     ground is noisy by a few feet."""
 
+    runway_airborne_max_bracket_seconds: float = 60.0
+    """Longest time, in seconds, between the two reports with an altitude
+    that ``airborne`` or ``touchdown`` is interpolated between, when the
+    reports in between have no altitude. A crossing over a longer gap is not
+    given: the aircraft climbs or descends several hundred feet in a minute
+    near the runway, so its time could not be placed. The time between the
+    two reports is written in ``info.bracket_s``."""
+
     runway_roll_speed_kt: float = 50.0
     """Ground speed, in knots, above which a departing aircraft is rolling
     for take-off rather than taxiing (taxi speed is about 20 kt, rotation

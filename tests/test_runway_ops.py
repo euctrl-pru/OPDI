@@ -499,8 +499,9 @@ def test_airborne_is_interpolated_to_the_height_threshold(spark):
 
 def test_airborne_over_a_report_without_altitude_is_placed_between_the_known_heights(spark):
     """5 ft at t=0, no altitude at t=5, 25 ft at t=10: the lift-off is placed
-    between the two known heights, at t=5. Before, it was read from the report
-    without an altitude and had no time."""
+    between the two known heights, at t=5, and ``info.bracket_s`` says the
+    two were 10 s apart. Without the setting, it is read from the report
+    without an altitude and has no time."""
     sv = make_track(
         spark,
         [
@@ -514,11 +515,29 @@ def test_airborne_over_a_report_without_altitude_is_placed_between_the_known_hei
     assert len(airborne) == 1
     assert airborne[0]["event_time"] is not None
     assert airborne[0]["event_time"].second == 5
+    assert json.loads(airborne[0]["info"])["bracket_s"] == 10.0
 
-    # The setting reaches the runway milestones too: off, the earlier reading.
+    # The setting reaches the runway milestones too: off, the other reading.
     earlier = EventConfig(interpolate_crossings_over_missing_values=False)
     out = runway_milestones(_prepared(sv), _departure_traversal(spark), earlier)
     assert [r["event_time"] for r in out.filter(F.col("type") == "ATOT").collect()] == [None]
+
+
+def test_a_lift_off_over_a_long_gap_without_altitude_is_not_placed(spark):
+    """5 ft at t=0, then 80 s without altitude, then 600 ft: the lift-off lies
+    somewhere in those 80 s, more than ``runway_airborne_max_bracket_seconds``
+    (60 s), so no time is invented for it."""
+    rows = [{"t": 0, "baro_altitude": _m(5.0), "velocity": _mps(150), "vert_rate": 10.0}]
+    rows += [
+        {"t": t, "baro_altitude": None, "velocity": _mps(155), "vert_rate": 10.0}
+        for t in range(10, 80, 10)
+    ]
+    rows.append({"t": 80, "baro_altitude": _m(600.0), "velocity": _mps(160), "vert_rate": 10.0})
+    out = runway_milestones(
+        _prepared(make_track(spark, rows)), _departure_traversal(spark), EventConfig()
+    )
+    assert EventConfig().runway_airborne_max_bracket_seconds == 60.0
+    assert out.filter(F.col("type") == "ATOT").collect() == []
 
 
 def test_a_departure_emits_line_up_then_roll_then_airborne_in_order(spark):

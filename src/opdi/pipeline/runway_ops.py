@@ -612,7 +612,7 @@ def _empty_milestones(sdf: DataFrame) -> DataFrame:
     return _session(sdf).createDataFrame([], MILESTONE_SCHEMA)
 
 
-def _info(milestone: Optional[str], method: Optional[str] = None):
+def _info(milestone: Optional[str], method: Optional[str] = None, bracket: bool = False):
     """The ``info`` JSON every runway milestone carries.
 
     ``milestone`` is the ICAO number, and it is what lets a consumer tell the
@@ -626,6 +626,10 @@ def _info(milestone: Optional[str], method: Optional[str] = None):
     window detector (``"legacy"``), and the two have different biases. It is
     NULL on every type with only one source, where there is nothing to
     disambiguate.
+
+    With ``bracket``, ``bracket_s`` gives the seconds between the two reports
+    the time was interpolated between (``bracket_seconds`` of
+    :func:`opdi.pipeline.crossings.threshold_crossings`).
     """
     return F.to_json(
         F.struct(
@@ -651,12 +655,21 @@ def _info(milestone: Optional[str], method: Optional[str] = None):
             F.col("osn_flight_id").alias("osn_flight_id"),
             F.lit(milestone).cast("string").alias("milestone"),
             F.lit(method).cast("string").alias("method"),
+            (
+                F.col("bracket_seconds").cast("double") if bracket else F.lit(None).cast("double")
+            ).alias("bracket_s"),
         )
     )
 
 
-def _event(sdf: DataFrame, type_: str, time_col: str, method: Optional[str] = None) -> DataFrame:
-    """Project onto the standard event frame."""
+def _event(
+    sdf: DataFrame,
+    type_: str,
+    time_col: str,
+    method: Optional[str] = None,
+    bracket: bool = False,
+) -> DataFrame:
+    """Project onto the standard event frame (``bracket``: see :func:`_info`)."""
     return sdf.select(
         F.col("track_id"),
         F.lit(type_).alias("type"),
@@ -666,7 +679,7 @@ def _event(sdf: DataFrame, type_: str, time_col: str, method: Optional[str] = No
         F.col("altitude_ft").cast("double").alias("altitude_ft"),
         F.col("cumulative_distance_nm").cast("double").alias("cumulative_distance_nm"),
         F.col("cumulative_time_s").cast("double").alias("cumulative_time_s"),
-        _info(MILESTONE_NUMBERS.get(type_), method).alias("info"),
+        _info(MILESTONE_NUMBERS.get(type_), method, bracket).alias("info"),
     )
 
 
@@ -845,7 +858,16 @@ def _height_crossing(sdf: DataFrame, config: "EventConfig", direction: str) -> D
     threshold, opposite sense -- which is the point: the two milestones are one
     geometric fact read in two directions, and giving them separate detectors
     would let them drift apart.
+
+    Over reports without altitude, the crossing is placed between the two
+    known heights only when they are at most
+    ``runway_airborne_max_bracket_seconds`` apart, shorter than the limit of
+    the other crossings (``track_hole_seconds``): near the runway the height
+    changes fast.
     """
+    options = missing_value_options(config)
+    if options["over_missing_values"]:
+        options["max_bracket_seconds"] = float(config.runway_airborne_max_bracket_seconds)
     return threshold_crossings(
         sdf,
         value_col="height_ft",
@@ -863,7 +885,7 @@ def _height_crossing(sdf: DataFrame, config: "EventConfig", direction: str) -> D
         down_label="down",
         interpolate=True,
         all_occurrences=True,
-        **missing_value_options(config),
+        **options,
     ).filter(F.col("direction") == direction)
 
 
@@ -957,10 +979,12 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
         # A departure: lined up, rolling, then off the deck.
         _event(_at_extreme(dep, True), "line-up", "entry_time"),
         _event(_roll_start(dep, config), "take-off-roll", "event_time"),
-        _event(_height_crossing(dep, config, "up"), lift_off, "event_time", method),
+        _event(_height_crossing(dep, config, "up"), lift_off, "event_time", method, bracket=True),
         # An arrival: over the threshold, wheels down, off the strip.
         _event(_threshold_plane(arr_approach, config), "landing", "event_time"),
-        _event(_height_crossing(arr, config, "down"), touch_down, "event_time", method),
+        _event(
+            _height_crossing(arr, config, "down"), touch_down, "event_time", method, bracket=True
+        ),
         _event(_at_extreme(arr, False), "runway-vacated", "exit_time"),
         # A crossing is not a movement: it gets its two instants and nothing
         # else, so it can never be counted as one.

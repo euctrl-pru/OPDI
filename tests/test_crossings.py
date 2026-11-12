@@ -297,3 +297,27 @@ def test_the_v002_settings_keep_the_earlier_handling_of_missing_values(spark):
     assert fl100[0].event_time is None
     assert EventConfig.legacy().interpolate_crossings_over_missing_values is False
     assert EventConfig().interpolate_crossings_over_missing_values is True
+
+
+def test_without_interpolation_the_setting_over_missing_values_changes_nothing(spark):
+    """With ``interpolate=False`` the confirming report is reported as it is;
+    skipping reports without a value would only change where an interpolated
+    crossing is placed, so both settings give the same rows."""
+    sdf = make_track(
+        spark,
+        [
+            {"t": 0, "baro_altitude": _m(9000)},
+            {"t": 5, "baro_altitude": _m(9600)},
+            {"t": 10, "baro_altitude": None},
+            {"t": 15, "baro_altitude": _m(10600)},
+            {"t": 20, "baro_altitude": _m(11000)},
+        ],
+    ).withColumn("fl", F.col("baro_altitude") * FT_PER_M / 100.0)
+
+    def run(over):
+        out = threshold_crossings(
+            sdf, "fl", [100.0], 3.0, ["track_id"], interpolate=False, over_missing_values=over
+        )
+        return sorted((r.event_time, r.direction, r.crossing_seq) for r in out.collect())
+
+    assert run(True) == run(False)

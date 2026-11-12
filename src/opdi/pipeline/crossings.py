@@ -116,6 +116,8 @@ def threshold_crossings(
     interpolate
         When False, report the confirming sample as-is. This is the published
         behaviour and exists so a legacy run stays reproducible.
+        ``over_missing_values`` and ``max_bracket_seconds`` then have no
+        effect.
     all_occurrences
         When False, keep only the first and last crossing of each threshold,
         as the published detector did.
@@ -129,20 +131,27 @@ def threshold_crossings(
     max_bracket_seconds
         With ``over_missing_values``, a crossing whose two known values are
         more than this many seconds apart is not returned: its time and
-        position would be invented. ``crossing_seq`` still counts it. None
-        keeps every crossing.
+        position would be invented. ``crossing_seq`` still counts it, so the
+        crossings returned can skip a number (1, 3, 4 when the second could
+        not be placed): the number says which crossing of the threshold it
+        is along the track. None keeps every crossing.
 
     Returns:
     -------
     One row per crossing, carrying ``partition_cols`` plus ``threshold``,
-    ``direction``, ``crossing_seq``, the (possibly interpolated) ``time_col``
+    ``direction``, ``crossing_seq`` (1 for the first crossing of a threshold
+    in the partition, 2 for the second, ...; see ``max_bracket_seconds`` for
+    the numbers that can be missing), the (possibly interpolated) ``time_col``
     and ``interpolate_cols``, and ``bracket_seconds`` -- the spacing of the two
     samples the crossing was interpolated between, so a consumer can tell an
     instant measured across a 5 s gap from one inferred across a 4 minute hole.
     """
     if not thresholds:
         return _empty_result(sdf, partition_cols, time_col, interpolate_cols)
-    if over_missing_values:
+    # Skipping reports without a value only changes where a crossing is
+    # interpolated; without interpolation the confirming report is reported
+    # as it is, and the comparison with the report just before it is kept.
+    if over_missing_values and interpolate:
         return _crossings_over_missing_values(
             sdf,
             value_col,
@@ -296,7 +305,10 @@ def _crossings_over_missing_values(
     straddle whose known values are too far apart keeps its record with no
     time, so the confirmation that follows it finds that record, and not the
     straddle of an earlier crossing of the same threshold.
+
+    Only called with ``interpolate`` (see :func:`threshold_crossings`).
     """
+    assert interpolate, "the crossings over missing values are always interpolated"
     ordered = _ordered(partition_cols, time_col)
     running = _running(partition_cols, time_col)
     before = ordered.rowsBetween(Window.unboundedPreceding, -1)
