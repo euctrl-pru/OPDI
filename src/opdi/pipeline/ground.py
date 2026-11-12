@@ -241,7 +241,13 @@ def block_events(
     Returns:
         ``track_id``, ``block`` (``"off"`` or ``"on"``), ``event_time``,
         ``stand_time`` (time of the stand exit or entry), ``stand`` (its
-        reference in the airport layout) and ``stand_airport``.
+        reference in the airport layout), ``stand_airport``, and
+        ``bound_time`` and ``bound_method``: the take-off after an off-block
+        time, or the landing before an in-block time, of the same leg, with
+        the detector that found it (``info.method`` of the runway event).
+        Both are NULL where the part has no such time (the ground part at
+        the start or end of the track). The plausibility checks compare the
+        block time with this time.
     """
     # The four inputs below are small (a few rows per track) and each is read
     # several times. They are computed once and kept (``localCheckpoint``), so
@@ -301,8 +307,17 @@ def block_events(
             "track_id",
             F.lit(None).cast("timestamp").alias("_t"),
             F.lit(None).cast("string").alias("_kind"),
+            F.lit(None).cast("string").alias("_method"),
         )
     else:
+        # The detector of each time (``info.method``: ``acdm`` for the runway
+        # milestones, ``legacy`` for the runway window). Where both found the
+        # same instant, the alphabetically first is kept.
+        method = (
+            F.get_json_object(F.col("info"), "$.method")
+            if "info" in runway_events.columns
+            else F.lit(None).cast("string")
+        )
         bounds = (
             runway_events.filter(
                 F.col("type").isin(*TAKE_OFF_TYPES, *LANDING_TYPES)
@@ -314,8 +329,10 @@ def block_events(
                 F.when(F.col("type").isin(*TAKE_OFF_TYPES), F.lit("dep"))
                 .otherwise(F.lit("arr"))
                 .alias("_kind"),
+                method.alias("_method"),
             )
-            .distinct()
+            .groupBy("track_id", "_t", "_kind")
+            .agg(F.min("_method").alias("_method"))
         )
     bounds = bounds.localCheckpoint()
     kinds = bounds.groupBy("track_id").agg(
@@ -329,7 +346,9 @@ def block_events(
     span = span.join(kinds, "track_id", "left")
 
     # The parts between consecutive boundaries, the start and end of the track
-    # included. At equal times the start sorts first and the end last.
+    # included. At equal times the start sorts first and the end last, and a
+    # landing before a take-off (``arr`` before ``dep``), so the order does not
+    # depend on how Spark split the data.
     marks = (
         bounds.join(span.select("track_id"), "track_id", "inner")
         .withColumn("_order", F.lit(1))
@@ -338,6 +357,7 @@ def block_events(
                 "track_id",
                 F.col("_first").alias("_t"),
                 F.lit("start").alias("_kind"),
+                F.lit(None).cast("string").alias("_method"),
                 F.lit(0).alias("_order"),
             )
         )
@@ -346,20 +366,24 @@ def block_events(
                 "track_id",
                 F.col("_last").alias("_t"),
                 F.lit("end").alias("_kind"),
+                F.lit(None).cast("string").alias("_method"),
                 F.lit(2).alias("_order"),
             )
         )
     )
-    w = Window.partitionBy("track_id").orderBy("_t", "_order")
+    w = Window.partitionBy("track_id").orderBy("_t", "_order", "_kind")
     parts = (
         marks.withColumn("_hi", F.lead("_t").over(w))
         .withColumn("_hi_kind", F.lead("_kind").over(w))
+        .withColumn("_hi_method", F.lead("_method").over(w))
         .select(
             "track_id",
             F.col("_t").alias("_lo"),
             F.col("_kind").alias("_lo_kind"),
+            F.col("_method").alias("_lo_method"),
             "_hi",
             "_hi_kind",
+            "_hi_method",
         )
         .filter(F.col("_hi").isNotNull())
     )
@@ -376,6 +400,10 @@ def block_events(
         F.col("_first_arr") < F.col("_first_dep")
     )
     ends_without_landing = F.col("_last_arr").isNull() | (F.col("_last_dep") > F.col("_last_arr"))
+    no_bound = [
+        F.lit(None).cast("timestamp").alias("_bound"),
+        F.lit(None).cast("string").alias("_bound_method"),
+    ]
     no_dep = span.filter(F.coalesce(starts_without_take_off, F.lit(True))).select(
         "track_id",
         F.col("_first").alias("_lo"),
@@ -383,6 +411,7 @@ def block_events(
             F.coalesce(F.col("_first_air"), F.col("_last")),
             F.coalesce(F.col("_first_arr"), F.col("_last")),
         ).alias("_hi"),
+        *no_bound,
     )
     no_arr = span.filter(F.coalesce(ends_without_landing, F.lit(True))).select(
         "track_id",
@@ -391,14 +420,30 @@ def block_events(
             F.coalesce(F.col("_last_dep"), F.col("_first")),
         ).alias("_lo"),
         F.col("_last").alias("_hi"),
+        *no_bound,
     )
-    off_parts = single_off.select("track_id", "_lo", "_hi").unionByName(no_dep)
-    on_parts = single_on.select("track_id", "_lo", "_hi").unionByName(no_arr)
+    # The take-off that ends a part, or the landing that starts it, bounds
+    # the block time found in it: the off-block time lies before that
+    # take-off, the in-block time after that landing.
+    off_parts = single_off.select(
+        "track_id",
+        "_lo",
+        "_hi",
+        F.col("_hi").alias("_bound"),
+        F.col("_hi_method").alias("_bound_method"),
+    ).unionByName(no_dep)
+    on_parts = single_on.select(
+        "track_id",
+        "_lo",
+        "_hi",
+        F.col("_lo").alias("_bound"),
+        F.col("_lo_method").alias("_bound_method"),
+    ).unionByName(no_arr)
 
     off = (
         off_parts.join(runs, "track_id", "inner")
         .filter((F.col("_from") >= F.col("_lo")) & (F.col("_from") <= F.col("_hi")))
-        .groupBy("track_id", "_lo", "_hi")
+        .groupBy("track_id", "_lo", "_hi", "_bound", "_bound_method")
         .agg(F.min("_from").alias("event_time"))
         .select(
             "track_id",
@@ -406,12 +451,14 @@ def block_events(
             "event_time",
             F.col("_lo").alias("_s_lo"),
             F.col("_hi").alias("_s_hi"),
+            "_bound",
+            "_bound_method",
         )
     )
     on = (
         on_parts.join(runs, "track_id", "inner")
         .filter((F.col("_to") >= F.col("_lo")) & (F.col("_to") <= F.col("_hi")))
-        .groupBy("track_id", "_lo", "_hi")
+        .groupBy("track_id", "_lo", "_hi", "_bound", "_bound_method")
         .agg(F.max("_to").alias("event_time"))
         .select(
             "track_id",
@@ -419,6 +466,8 @@ def block_events(
             "event_time",
             F.col("_lo").alias("_s_lo"),
             F.col("_hi").alias("_s_hi"),
+            "_bound",
+            "_bound_method",
         )
     )
 
@@ -441,6 +490,8 @@ def block_events(
         F.col("_to").alias("event_time"),
         F.col("_lo").alias("_s_lo"),
         F.col("_next_from").alias("_s_hi"),
+        F.col("_lo").alias("_bound"),
+        F.col("_lo_method").alias("_bound_method"),
     )
     split_off = stop.select(
         "track_id",
@@ -448,6 +499,8 @@ def block_events(
         F.col("_next_from").alias("event_time"),
         F.col("_to").alias("_s_lo"),
         F.col("_hi").alias("_s_hi"),
+        F.col("_hi").alias("_bound"),
+        F.col("_hi_method").alias("_bound_method"),
     )
     candidates = off.unionByName(on).unionByName(split_on).unionByName(split_off)
 
@@ -493,5 +546,14 @@ def block_events(
     return (
         matched.withColumn("_rank", F.row_number().over(pick))
         .filter(F.col("_rank") == 1)
-        .select("track_id", "block", "event_time", "stand_time", "stand", "stand_airport")
+        .select(
+            "track_id",
+            "block",
+            "event_time",
+            "stand_time",
+            "stand",
+            "stand_airport",
+            F.col("_bound").alias("bound_time"),
+            F.col("_bound_method").alias("bound_method"),
+        )
     )

@@ -476,3 +476,79 @@ def test_reports_without_position_do_not_count_as_flight(spark):
     got = _blocks(spark, reports, _stands(spark, ARRIVAL_STANDS), _runway(spark, []))
 
     assert got == [("on", 1290.0, "B2", "EDDF")]
+
+
+def _runway_with_method(spark, rows, track="trk-1"):
+    """``(type, seconds, method)`` as take-off and landing events with ``info``."""
+    import json
+
+    return spark.createDataFrame(
+        [(track, t, _at(s), json.dumps({"method": m})) for t, s, m in rows],
+        "track_id string, type string, event_time timestamp, info string",
+    )
+
+
+def test_each_block_time_names_the_runway_time_of_its_own_leg(spark):
+    """The off-block time carries the take-off after it, the in-block time the
+    landing before it, each with the detector that found it; the
+    plausibility checks compare the block time with these, not with the one
+    take-off and one landing step 04 keeps per track."""
+    import json
+
+    from opdi.pipeline.events import calculate_block_events
+
+    rows = calculate_block_events(
+        _reports(spark, DEPARTURE + ARRIVAL),
+        _stands(spark, DEPARTURE_STANDS + ARRIVAL_STANDS),
+        EventConfig(),
+        _runway_with_method(spark, [("ATOT", 600, "legacy"), ("ALDT", 1000, "acdm")]),
+    ).collect()
+    info = {r.type: json.loads(r.info) for r in rows}
+
+    assert info["AOBT"]["take_off"] == "2024-06-01T12:10:00.000000Z"
+    assert info["AOBT"]["take_off_method"] == "legacy"
+    assert info["AIBT"]["landing"] == "2024-06-01T12:16:40.000000Z"
+    assert info["AIBT"]["landing_method"] == "acdm"
+
+
+def test_a_block_time_at_the_start_of_a_track_names_no_runway_time(spark):
+    """A track seen only on the ground: its block times have no take-off or
+    landing beside them."""
+    import json
+
+    from opdi.pipeline.events import calculate_block_events
+
+    reports = _reports(spark, [_leg(0, 60, 0), _leg(60, 300, 12), _leg(300, 360, 0)])
+    stands = [
+        ("entry-parking_position", 0, "C3", "LFPG"),
+        ("exit-parking_position", 80, "C3", "LFPG"),
+    ]
+    rows = calculate_block_events(
+        reports, _stands(spark, stands), EventConfig(), _runway_with_method(spark, [])
+    ).collect()
+
+    assert len(rows) == 2
+    for r in rows:
+        assert not {"take_off", "landing"} & set(json.loads(r.info))
+
+
+def test_a_landing_and_a_take_off_at_the_same_instant_are_ordered_landing_first(spark):
+    """Two runway times at one instant sort the same way on every run, the
+    landing first, as in a touch-and-go: the track then has no ground part
+    that starts at a landing and ends at the track's end, and no ground part
+    that starts at the track's start and ends at a take-off, so it gives no
+    block time, whatever order the rows come in."""
+    got = []
+    for order in (
+        [("ATOT", 1000, "legacy"), ("ALDT", 1000, "acdm")],
+        [("ALDT", 1000, "acdm"), ("ATOT", 1000, "legacy")],
+    ):
+        rows = block_events(
+            _reports(spark, ARRIVAL),
+            _stands(spark, ARRIVAL_STANDS),
+            _runway_with_method(spark, order),
+            EventConfig(),
+        ).collect()
+        got.append(sorted((r.block, r.event_time) for r in rows))
+
+    assert got == [[], []]

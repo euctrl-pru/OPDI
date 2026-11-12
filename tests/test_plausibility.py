@@ -215,16 +215,85 @@ def test_a_40_kt_helicopter_keeps_its_ground_events(spark):
 # --- block_after_takeoff / block_before_landing ----------------------------
 
 
-def test_block_times_on_the_wrong_side_of_the_runway_times_are_removed(spark):
+def _iso(s):
+    """A time as the block time detector writes it in ``info``."""
+    return _t(s).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _block(type_, at, bound_s=None, method="acdm", track="t1"):
+    """A block time with the take-off or landing that bounds it, as the
+    detector writes them (``info.take_off`` or ``info.landing``)."""
+    if bound_s is None:
+        return _event(type_, at, track=track)
+    key = "take_off" if type_ in ("AOBT", "off-block") else "landing"
+    return _event(type_, at, track=track, **{key: _iso(bound_s), f"{key}_method": method})
+
+
+def _merged_then_checked(spark, events, flights=(("t1", "LOW", "LOW"),)):
+    """Step 04's order: one ATOT and one ALDT per track, then the checks."""
+    from opdi.pipeline.events import merge_milestone_duplicates
+
+    merged = merge_milestone_duplicates(spark.createDataFrame(events, EVENT_DDL), EventConfig())
+    kept, rejected = check_events(
+        merged,
+        spark.createDataFrame([], TRACK_DDL),
+        spark.createDataFrame(AIRPORTS, AIRPORT_DDL),
+        EventConfig(),
+        flights=spark.createDataFrame(list(flights), FLIGHT_DDL),
+    )
+    return (
+        {(r.type, r.event_time) for r in kept.collect()},
+        {(r.type, r.event_time): r.reject_rule for r in rejected.collect()},
+    )
+
+
+def test_a_second_departure_keeps_its_off_block_after_the_merge(spark):
+    """Departs at 0 s, lands at 3,600 s, in-block at 3,900 s, off-block at
+    6,000 s, take-off at 6,600 s, lands at 9,000 s. The merge keeps one ATOT
+    (0 s) and one ALDT (3,600 s); each block time is compared with the
+    take-off or landing of its own leg, which the detector wrote beside it."""
     events = [
-        _event("AOBT", 600),  # at the take-off: removed
-        _event("ATOT", 600),
-        _event("AOBT", 599, track="t2"),  # one second before: kept
-        _event("ATOT", 600, track="t2"),
-        _event("ALDT", 3600),
-        _event("AIBT", 3600),  # at the landing: removed
-        _event("ALDT", 3600, track="t2"),
-        _event("AIBT", 3601, track="t2"),  # one second after: kept
+        _event("ATOT", 0, method="acdm"),
+        _event("ALDT", 3600, method="acdm"),
+        _block("AIBT", 3900, bound_s=3600),
+        _block("AOBT", 6000, bound_s=6600),
+        _event("ATOT", 6600, method="acdm"),
+        _event("ALDT", 9000, method="acdm"),
+        _block("AIBT", 9300, bound_s=9000),
+    ]
+    kept, rejected = _merged_then_checked(spark, events)
+
+    assert rejected == {}
+    assert {("AOBT", _t(6000)), ("AIBT", _t(3900)), ("AIBT", _t(9300))} <= kept
+
+
+def test_a_first_arrival_keeps_its_in_block_when_the_merge_keeps_the_other_landing(spark):
+    """As above, but the first landing comes from the runway window method and
+    the second from the runway milestones: the merge keeps the second
+    (9,000 s), which lies after the in-block time of the first arrival."""
+    events = [
+        _event("ATOT", 0, method="acdm"),
+        _event("ALDT", 3600, method="legacy"),
+        _block("AIBT", 3900, bound_s=3600, method="legacy"),
+        _block("AOBT", 6000, bound_s=6600, method="legacy"),
+        _event("ATOT", 6600, method="legacy"),
+        _event("ALDT", 9000, method="acdm"),
+        _block("AIBT", 9300, bound_s=9000),
+    ]
+    kept, rejected = _merged_then_checked(spark, events)
+
+    assert rejected == {}
+    assert {("AOBT", _t(6000)), ("AIBT", _t(3900)), ("AIBT", _t(9300))} <= kept
+
+
+def test_block_times_on_the_wrong_side_of_their_own_runway_time_are_removed(spark):
+    """An off-block time at its take-off and an in-block time at its landing
+    are removed; one second inside, each is kept."""
+    events = [
+        _block("AOBT", 600, bound_s=600),
+        _block("AOBT", 599, bound_s=600, track="t2"),
+        _block("AIBT", 3600, bound_s=3600),
+        _block("AIBT", 3601, bound_s=3600, track="t2"),
     ]
     flights = [("t1", "LOW", "HIGH"), ("t2", "LOW", "HIGH")]
     kept, rejected = _check(spark, events, [], flights=flights)
@@ -233,13 +302,16 @@ def test_block_times_on_the_wrong_side_of_the_runway_times_are_removed(spark):
         ("AOBT", _t(600)): "block_after_takeoff",
         ("AIBT", _t(3600)): "block_before_landing",
     }
+    detail = json.loads(rejected[("AOBT", _t(600))].reject_detail)
+    assert detail["take_off_method"] == "acdm"
     assert ("AOBT", _t(599)) in kept and ("AIBT", _t(3601)) in kept
 
 
-def test_an_off_block_before_a_later_take_off_is_kept(spark):
-    """A track that departs, lands and departs again: the off-block time of
-    the second departure lies after the first take-off and before the last."""
-    events = [_event("ATOT", 0), _event("ALDT", 3600), _event("AOBT", 6000), _event("ATOT", 6600)]
+def test_a_block_time_without_its_runway_time_is_not_judged_by_the_order(spark):
+    """No take-off or landing beside it (none found in its leg, or the runway
+    family was not computed in that call): the order checks keep it, even
+    when another take-off of the track lies before it."""
+    events = [_event("ATOT", 0), _event("ALDT", 3600), _block("AOBT", 6000), _block("AIBT", 10)]
     kept, rejected = _check(spark, events, [])
     assert rejected == {}
 

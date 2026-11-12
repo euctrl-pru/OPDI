@@ -29,9 +29,19 @@ removed by the first one that fires:
   the airport's elevation. A time close to the ground, though not on it, is
   kept; an unknown height or airport keeps the event.
 * ``block_after_takeoff``: an off-block time that is not earlier than the
-  last take-off time of its track.
+  take-off of its own leg.
 * ``block_before_landing``: an in-block time that is not later than the
-  first landing time of its track.
+  landing of its own leg.
+
+  The block time detector (:func:`opdi.pipeline.ground.block_events`)
+  writes that take-off or landing into the block time's ``info``
+  (``take_off`` or ``landing``, with the detector that found it in
+  ``take_off_method`` or ``landing_method``). It reads every take-off and
+  landing of the track, before step 04 keeps one ``ATOT`` and one ``ALDT``
+  per track, so a track with two legs is compared leg by leg. A block time
+  without such a time (no take-off or landing found in its leg, or the
+  runway events not computed in the same call) is not judged by these two
+  checks.
 
 The other runway milestones (line-up, take-off roll, runway vacated, runway
 crossings, ``landing``) are not checked against the track height: their
@@ -146,12 +156,12 @@ RULES: Tuple[Rule, ...] = (
     Rule(
         "block_after_takeoff",
         OFF_BLOCK_TYPES,
-        "An off-block time not earlier than the last take-off time of its track.",
+        "An off-block time not earlier than the take-off of its own leg.",
     ),
     Rule(
         "block_before_landing",
         ON_BLOCK_TYPES,
-        "An in-block time not later than the first landing time of its track.",
+        "An in-block time not later than the landing of its own leg.",
     ),
 )
 
@@ -398,17 +408,11 @@ def label_events(
         probe = probe.join(fl, probe["track_id"] == fl["_fl_id"], "left").drop("_fl_id")
     probe = event_context(probe, tracks, airports, config.plausibility_context_window_s)
 
-    # Take-off and landing times of each track, for the order of the block times.
-    runway = timed.filter(F.col("type").isin(*TAKE_OFF_TYPES, *LANDING_TYPES))
-    runway = runway.groupBy(F.col("track_id").alias("_r_track")).agg(
-        F.max(F.when(F.col("type").isin(*TAKE_OFF_TYPES), F.col("event_time"))).alias(
-            "_last_take_off"
-        ),
-        F.min(F.when(F.col("type").isin(*LANDING_TYPES), F.col("event_time"))).alias(
-            "_first_landing"
-        ),
-    )
-    probe = probe.join(runway, probe["track_id"] == runway["_r_track"], "left").drop("_r_track")
+    # The take-off or landing that bounds each block time, written by the block
+    # time detector into ``info`` from the runway times of the same leg, found
+    # before step 04 keeps one take-off and one landing per track.
+    bound_take_off = F.to_timestamp(_info("take_off"))
+    bound_landing = F.to_timestamp(_info("landing"))
 
     height = F.col("ctx_height_ft")
     high = (height > F.lit(float(config.plausibility_max_ground_event_height_ft))) | (
@@ -432,12 +436,13 @@ def label_events(
         & (runway_height > F.lit(float(config.plausibility_max_runway_time_height_ft))),
         F.lit(False),
     )
+    # A block time without such a bound is not judged by these two checks.
     after_take_off = F.coalesce(
-        F.col("type").isin(*OFF_BLOCK_TYPES) & (F.col("event_time") >= F.col("_last_take_off")),
+        F.col("type").isin(*OFF_BLOCK_TYPES) & (F.col("event_time") >= bound_take_off),
         F.lit(False),
     )
     before_landing = F.coalesce(
-        F.col("type").isin(*ON_BLOCK_TYPES) & (F.col("event_time") <= F.col("_first_landing")),
+        F.col("type").isin(*ON_BLOCK_TYPES) & (F.col("event_time") <= bound_landing),
         F.lit(False),
     )
 
@@ -476,11 +481,21 @@ def label_events(
         )
         .when(
             after_take_off,
-            F.to_json(F.struct(F.col("_last_take_off").alias("last_take_off"))),
+            F.to_json(
+                F.struct(
+                    _info("take_off").alias("take_off"),
+                    _info("take_off_method").alias("take_off_method"),
+                )
+            ),
         )
         .when(
             before_landing,
-            F.to_json(F.struct(F.col("_first_landing").alias("first_landing"))),
+            F.to_json(
+                F.struct(
+                    _info("landing").alias("landing"),
+                    _info("landing_method").alias("landing_method"),
+                )
+            ),
         )
         .alias("reject_detail"),
     )

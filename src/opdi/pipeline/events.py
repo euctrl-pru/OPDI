@@ -398,6 +398,11 @@ def calculate_level_off_events(
     return starts.unionByName(ends)
 
 
+#: How the take-off or landing beside a block time is written in its ``info``
+#: (ISO 8601 with microseconds and the UTC offset).
+BOUND_TIME_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX"
+
+
 def calculate_block_events(
     sdf_input: DataFrame,
     airport_events: DataFrame,
@@ -417,8 +422,11 @@ def calculate_block_events(
     each time comes from the ground part of its own leg, bounded by the
     take-off and landing times in ``runway_events``
     (:func:`opdi.pipeline.ground.block_events`), and ``info`` names the stand
-    (``stand``) and its airport (``apt_icao``). Without it, the first and last
-    sustained movement of the whole track are used. Coverage is the main
+    (``stand``) and its airport (``apt_icao``), and the take-off after the
+    off-block time (``take_off``, ``take_off_method``) or the landing before
+    the in-block time (``landing``, ``landing_method``) in the same leg.
+    Without it, the first and last sustained movement of the whole track are
+    used. Coverage is the main
     limit: an aircraft on a stand is often not received at all.
     See https://www.opdi.aero/content/methods/block-times.html.
     """
@@ -439,19 +447,36 @@ def calculate_block_events(
     if config.block_times_on_ground_only:
         found = block_events(sdf_input, airport_events, runway_events, config)
         stand = [col("stand").alias("stand"), col("stand_airport").alias("apt_icao")]
+        # The take-off or landing of the same leg, to the microsecond: the
+        # plausibility checks compare the block time with it.
+        bound = F.date_format(col("bound_time"), BOUND_TIME_FORMAT)
         aobt = found.filter(col("block") == "off").select(
             col("track_id"),
             lit(off_type).alias("type"),
             col("event_time"),
             *common,
-            to_json(struct(col("stand_time").alias("stand_exit"), *stand)).alias("info"),
+            to_json(
+                struct(
+                    col("stand_time").alias("stand_exit"),
+                    *stand,
+                    bound.alias("take_off"),
+                    col("bound_method").alias("take_off_method"),
+                )
+            ).alias("info"),
         )
         aibt = found.filter(col("block") == "on").select(
             col("track_id"),
             lit(on_type).alias("type"),
             col("event_time"),
             *common,
-            to_json(struct(col("stand_time").alias("stand_entry"), *stand)).alias("info"),
+            to_json(
+                struct(
+                    col("stand_time").alias("stand_entry"),
+                    *stand,
+                    bound.alias("landing"),
+                    col("bound_method").alias("landing_method"),
+                )
+            ).alias("info"),
         )
         return aobt.unionByName(aibt)
 
@@ -1728,7 +1753,7 @@ class FlightEventProcessor:
                     # ``geo`` carries the airport elevations of the ground test.
                     runway = None
                     for frame in runway_frames:
-                        part = frame.select("track_id", "type", "event_time")
+                        part = frame.select("track_id", "type", "event_time", "info")
                         runway = part if runway is None else runway.unionByName(part)
                     add(calculate_block_events(geo, df_hexaero, self.events, runway))
                 else:
