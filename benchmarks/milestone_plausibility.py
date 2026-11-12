@@ -93,7 +93,7 @@ def scratch_path(day: str) -> str:
     return f"{SCRATCH}/context_{day}"
 
 
-def _guard(path: str) -> None:
+def check_write_path(path: str) -> None:
     if not path.startswith(SCRATCH + "/"):
         raise AssertionError(f"refusing to write {path!r}: this study writes under {SCRATCH}")
 
@@ -255,7 +255,7 @@ def run_context(args) -> int:
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     spark.conf.set("spark.sql.shuffle.partitions", "400")
     out = scratch_path(args.day)
-    _guard(out)
+    check_write_path(out)
     ctx, truth = build_context(spark, args.day, args.window_s)
     ctx.repartition(24).write.mode("overwrite").parquet(out)
     n_truth = (
@@ -265,7 +265,7 @@ def run_context(args) -> int:
     )
     stats = {r["_g_type"]: r["count"] for r in n_truth.collect()}
     meta = {"day": args.day, "window_s": args.window_s, "records_on_day": stats}
-    _guard(out + "_meta")
+    check_write_path(out + "_meta")
     spark.createDataFrame([(json.dumps(meta),)], ["meta"]).coalesce(1).write.mode("overwrite").text(
         out + "_meta"
     )
@@ -1122,6 +1122,72 @@ def _kept_in_place(before_scored, after):
     return {r["type"]: r.asDict() for r in rows.collect()}
 
 
+#: A block time counts as placed in flight when the aircraft is more than
+#: this high above the airport and faster than :data:`IN_FLIGHT_SPEED_KT` at
+#: the event (the measure of the context study, ``context_by_type.csv``).
+IN_FLIGHT_HEIGHT_FT = 500.0
+IN_FLIGHT_SPEED_KT = 80.0
+
+
+def _in_flight(spark, day, sides):
+    """Per side and block type: events, events with known context, events in flight.
+
+    ``sides`` maps a name to a frame of events (``flight_id``, ``type``,
+    ``event_time``). The context is that of :func:`event_context` within
+    60 s, measured above the departure airport (``AOBT``) or the destination
+    (``AIBT``) of the flight list, as in the context study: the stand airport
+    a block time names is not used, so that both sides are measured alike.
+    """
+    from pyspark.sql import functions as F
+
+    d = F.lit(day).cast("date")
+    frames = None
+    for name, df in sides.items():
+        part = df.filter(F.col("type").isin("AOBT", "AIBT")).select(
+            F.lit(name).alias("side"),
+            F.col("flight_id").alias("track_id"),
+            "type",
+            "event_time",
+        )
+        frames = part if frames is None else frames.unionByName(part)
+    fl = (
+        spark.read.parquet(FLIGHT_LIST)
+        .filter(F.col("DOF") == d)
+        .select(
+            F.col("ID").alias("_fl_id"), F.col("ADEP").alias("adep"), F.col("ADES").alias("ades")
+        )
+        .dropDuplicates(["_fl_id"])
+    )
+    ev = frames.join(fl, F.col("track_id") == F.col("_fl_id"), "left").drop("_fl_id")
+    tracks = (
+        spark.read.parquet(TRACKS)
+        .filter(F.col("dof") == d)
+        .select(
+            "track_id",
+            "event_time",
+            "lat",
+            "lon",
+            "baro_altitude_c",
+            "velocity",
+            "vert_rate",
+            "on_ground",
+        )
+    )
+    ctx = event_context(ev, tracks, spark.read.parquet(AIRPORTS), 60.0)
+    known = F.col("ctx_height_ft").isNotNull() & F.col("ctx_speed_kt").isNotNull()
+    flying = (
+        known
+        & (F.col("ctx_height_ft") > F.lit(IN_FLIGHT_HEIGHT_FT))
+        & (F.col("ctx_speed_kt") > F.lit(IN_FLIGHT_SPEED_KT))
+    )
+    rows = ctx.groupBy("side", "type").agg(
+        F.count(F.lit(1)).alias("events"),
+        F.sum(known.cast("int")).alias("known_context"),
+        F.sum(flying.cast("int")).alias("in_flight"),
+    )
+    return {(r["side"], r["type"]): r.asDict() for r in rows.collect()}
+
+
 def run_before_after(args, argv) -> int:
     """Score the events before and after the checks against the airport records."""
     import pandas as pd
@@ -1198,6 +1264,45 @@ def run_before_after(args, argv) -> int:
         rows.append(row)
     table = pd.DataFrame(rows)
 
+    # Block times placed in flight: before (the code before the checks and
+    # the detector corrections), as the detector gives them now (kept and
+    # removed together), and as published (kept).
+    detector = after.select("flight_id", "type", "event_time").unionByName(
+        rejected.select("flight_id", "type", "event_time")
+    )
+    flying = _in_flight(spark, args.day, {"before": before, "detector": detector, "after": after})
+    in_flight_rows = []
+    for t in ("AOBT", "AIBT"):
+        row = {"type": t}
+        for side in ("before", "detector", "after"):
+            f = flying.get((side, t), {})
+            n, k, a = f.get("events", 0), f.get("known_context", 0), f.get("in_flight", 0)
+            row[f"events_{side}"] = n
+            row[f"known_context_{side}"] = k
+            row[f"in_flight_{side}"] = a
+            row[f"in_flight_{side}_pct"] = round(100.0 * a / k, 2) if k else None
+        in_flight_rows.append(row)
+    in_flight_table = pd.DataFrame(in_flight_rows)
+
+    # Every event that a record confirms before and that is not at the same
+    # time after, to be read one by one.
+    lost = (
+        b_sc.filter(F.abs(F.col("error_s")) <= CONFIRMED_S)
+        .select("flight_id", "type", "event_time", "error_s", "gt_airport")
+        .join(
+            after.select("flight_id", "type", "event_time").distinct().withColumn("_x", F.lit(1)),
+            ["flight_id", "type", "event_time"],
+            "left",
+        )
+        .filter(F.col("_x").isNull())
+        .drop("_x")
+    )
+    lost_confirmed = [
+        f"lost confirmed: {r['flight_id']} {r['type']} {r['event_time']} record at "
+        f"{r['gt_airport']} error {r['error_s']:.0f} s"
+        for r in lost.orderBy("type", "flight_id").limit(1000).collect()
+    ]
+
     r_sc = _scored(rejected, flights, truth)
     a = F.abs(F.col("error_s"))
     rec_part = r_sc.groupBy("reject_rule", "type").agg(
@@ -1255,8 +1360,19 @@ def run_before_after(args, argv) -> int:
 
     out = Path(args.results_dir)
     out.mkdir(parents=True, exist_ok=True)
-    inputs = {"day": args.day, "known_cases": known, "confirmed_removed": confirmed_removed}
-    for name, frame in (("before_after.csv", table), ("removed_by_rule.csv", removed)):
+    inputs = {
+        "day": args.day,
+        "known_cases": known,
+        "confirmed_removed": confirmed_removed,
+        "lost_confirmed": lost_confirmed,
+        "in_flight_height_ft": IN_FLIGHT_HEIGHT_FT,
+        "in_flight_speed_kt": IN_FLIGHT_SPEED_KT,
+    }
+    for name, frame in (
+        ("before_after.csv", table),
+        ("removed_by_rule.csv", removed),
+        ("in_flight_before_after.csv", in_flight_table),
+    ):
         frame.to_csv(out / name, index=False)
         provenance.record(
             out,
@@ -1265,7 +1381,7 @@ def run_before_after(args, argv) -> int:
             argv,
             [REPO / p for p in _CODE_PATHS + _AFTER_CODE_PATHS],
             inputs={**inputs, "rows": int(len(frame))},
-            input_tables=[EVENTS, AFTER_EVENTS, AFTER_REJECTED, FLIGHT_LIST],
+            input_tables=[EVENTS, AFTER_EVENTS, AFTER_REJECTED, FLIGHT_LIST, TRACKS],
             notes=(
                 "Before: the events of research/airspace_events/on. After: step 04 run by "
                 "benchmarks/run_plausibility_day.py under " + AFTER_ROOT + "."
@@ -1274,8 +1390,10 @@ def run_before_after(args, argv) -> int:
         print(f"wrote {out / name} ({len(frame)} rows)")
     print(table.to_string())
     print(removed.to_string())
+    print(in_flight_table.to_string())
     print("\n".join(known))
     print("\n".join(confirmed_removed))
+    print("\n".join(lost_confirmed))
     return 0
 
 
@@ -1302,7 +1420,7 @@ def run_clean_after(args) -> int:
         aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
     )
-    _guard(AFTER_ROOT + "/x")
+    check_write_path(AFTER_ROOT + "/x")
     bucket, _, key = AFTER_ROOT.replace("s3a://", "").partition("/")
     n = 0
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=key + "/"):
@@ -1360,7 +1478,7 @@ def run_clean(args) -> int:
         aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
     )
     for p in (scratch_path(args.day), scratch_path(args.day) + "_meta"):
-        _guard(p)
+        check_write_path(p)
         bucket, _, key = p.replace("s3a://", "").partition("/")
         n = 0
         for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=key + "/"):
