@@ -22,15 +22,21 @@ removed by the first one that fires:
   15,000 ft barometric altitude when the airport or its elevation is
   unknown), faster than 80 kt, and no position report within 60 s flagged
   on the ground. All three must hold.
+* ``runway_time_too_high``: a take-off or landing time (``ATOT``, ``ALDT``,
+  and ``airborne``, ``touchdown`` under the other naming) more than 1,500 ft
+  above its airport. The height is the event's own altitude when it has
+  one, else the altitude of the nearest position report within 60 s, minus
+  the airport's elevation. A time close to the ground, though not on it, is
+  kept; an unknown height or airport keeps the event.
 * ``block_after_takeoff``: an off-block time that is not earlier than the
   last take-off time of its track.
 * ``block_before_landing``: an in-block time that is not later than the
   first landing time of its track.
 
-The runway milestones (line-up, take-off roll, runway vacated, runway
-crossings, ``ATOT``, ``ALDT``, ``landing``) are not checked against the track
-height: their detector already tests the height on the runway, so a report
-that contradicts them points at an altitude error rather than a wrong event.
+The other runway milestones (line-up, take-off roll, runway vacated, runway
+crossings, ``landing``) are not checked against the track height: their
+detector already tests the height on the runway, so a report that
+contradicts them points at an altitude error rather than a wrong event.
 
 The thresholds come from a study of one worldwide day (2026-06-14) against
 the times airport operators report for about ninety European airports: the
@@ -94,6 +100,9 @@ ARRIVAL_SIDE = (
 OFF_BLOCK_TYPES = ("AOBT", "off-block")
 ON_BLOCK_TYPES = ("AIBT", "on-block")
 
+#: Take-off and landing times, checked against :attr:`plausibility_max_runway_time_height_ft`.
+RUNWAY_TIME_TYPES = TAKE_OFF_TYPES + LANDING_TYPES
+
 #: Event types checked against the track height, besides every
 #: ``entry-<part>`` and ``exit-<part>`` of the airport layout.
 GROUND_EVENT_TYPES = OFF_BLOCK_TYPES + ON_BLOCK_TYPES
@@ -128,6 +137,11 @@ RULES: Tuple[Rule, ...] = (
         GROUND_EVENT_TYPES + ("entry-*", "exit-*"),
         "A ground event while the aircraft flies: high above the airport, fast, "
         "and no report near it flagged on the ground.",
+    ),
+    Rule(
+        "runway_time_too_high",
+        RUNWAY_TIME_TYPES,
+        "A take-off or landing time high above its airport.",
     ),
     Rule(
         "block_after_takeoff",
@@ -366,7 +380,7 @@ def label_events(
         F.lit("{}").alias("reject_detail"),
     )
 
-    ground_row = is_ground_event(F.col("type"))
+    ground_row = is_ground_event(F.col("type")) | F.col("type").isin(*RUNWAY_TIME_TYPES)
     others = timed.filter(~ground_row).select(
         *columns,
         F.lit(None).cast("string").alias("reject_rule"),
@@ -407,7 +421,17 @@ def label_events(
     fast = F.col("ctx_speed_kt") > F.lit(float(config.plausibility_max_ground_event_speed_kt))
     never_on_ground = F.col("ctx_on_ground") <= F.lit(0.0)
     # Every comparison with an unknown value is NULL, which keeps the event.
-    airborne = F.coalesce(high & fast & never_on_ground, F.lit(False))
+    airborne = F.coalesce(
+        is_ground_event(F.col("type")) & high & fast & never_on_ground, F.lit(False)
+    )
+    # A take-off or landing time: its own altitude first, else the track's.
+    own_ft = F.col("altitude_ft") if "altitude_ft" in columns else F.lit(None).cast("double")
+    runway_height = F.coalesce(own_ft - F.col("ctx_airport_elevation_ft"), height)
+    too_high = F.coalesce(
+        F.col("type").isin(*RUNWAY_TIME_TYPES)
+        & (runway_height > F.lit(float(config.plausibility_max_runway_time_height_ft))),
+        F.lit(False),
+    )
     after_take_off = F.coalesce(
         F.col("type").isin(*OFF_BLOCK_TYPES) & (F.col("event_time") >= F.col("_last_take_off")),
         F.lit(False),
@@ -432,10 +456,24 @@ def label_events(
     checked = probe.select(
         *columns,
         F.when(airborne, F.lit("airborne_ground_event"))
+        .when(too_high, F.lit("runway_time_too_high"))
         .when(after_take_off, F.lit("block_after_takeoff"))
         .when(before_landing, F.lit("block_before_landing"))
         .alias("reject_rule"),
         F.when(airborne, airborne_detail)
+        .when(
+            too_high,
+            F.to_json(
+                F.struct(
+                    F.col("ctx_airport").alias("airport"),
+                    F.col("ctx_airport_elevation_ft").alias("airport_elevation_ft"),
+                    own_ft.alias("event_altitude_ft"),
+                    F.round(F.col("ctx_altitude_ft"), 1).alias("altitude_ft"),
+                    F.round(runway_height, 1).alias("height_ft"),
+                    F.col("ctx_gap_s").alias("nearest_report_s"),
+                )
+            ),
+        )
         .when(
             after_take_off,
             F.to_json(F.struct(F.col("_last_take_off").alias("last_take_off"))),

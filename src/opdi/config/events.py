@@ -609,7 +609,9 @@ class EventConfig:
     off-block, in-block or airport layout event while the aircraft flies, an
     off-block time not before the track's last take-off time, an in-block
     time not after its first landing time. Only clear evidence removes an
-    event; an unknown fact keeps it. Off in release v0.0.2."""
+    event; an unknown fact keeps it. A take-off or landing time more than
+    :attr:`plausibility_max_runway_time_height_ft` above its airport is
+    removed too. Off in release v0.0.2."""
 
     plausibility_max_ground_event_height_ft: float = 1500.0
     """Height above the airport, in feet, above which an off-block, in-block
@@ -624,6 +626,12 @@ class EventConfig:
     plausibility_max_ground_event_speed_kt: float = 80.0
     """Ground speed, in knots, above which such an event counts as in flight.
     Taxiing aircraft move at 10 to 30 kt."""
+
+    plausibility_max_runway_time_height_ft: float = 1500.0
+    """Height above the airport, in feet, above which a take-off or landing
+    time (``ATOT``, ``ALDT``) is removed. A time close to the ground is kept:
+    in the study of these checks, the airport records confirm most times
+    found between 1,000 and 1,500 ft, and none above."""
 
     plausibility_context_window_s: int = 60
     """Seconds around the event in which the position reports are read. A

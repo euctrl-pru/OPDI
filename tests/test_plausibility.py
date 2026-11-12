@@ -60,6 +60,7 @@ def test_the_rules_are_applied_in_the_published_order():
     assert [r.name for r in RULES] == [
         "missing_time",
         "airborne_ground_event",
+        "runway_time_too_high",
         "block_after_takeoff",
         "block_before_landing",
     ]
@@ -72,6 +73,7 @@ def test_the_settings():
     assert c.plausibility_max_ground_event_altitude_ft == 15000.0
     assert c.plausibility_max_ground_event_speed_kt == 80.0
     assert c.plausibility_context_window_s == 60
+    assert c.plausibility_max_runway_time_height_ft == 1500.0
     assert EventConfig.legacy().plausibility_checks is False
 
 
@@ -129,7 +131,10 @@ def test_a_layout_event_over_the_airport_is_removed(spark):
 
 
 def test_the_runway_family_is_not_checked_against_the_track_height(spark):
-    events = [_event(t, 0) for t in ("line-up", "take-off-roll", "runway-vacated", "ATOT", "ALDT")]
+    """Line-up, take-off roll, runway vacated and the threshold crossing are
+    found on the runway's own heights; only the take-off and landing times
+    have a height limit (``runway_time_too_high``)."""
+    events = [_event(t, 0) for t in ("line-up", "take-off-roll", "runway-vacated")]
     events.append(_event("landing", 0))
     kept, rejected = _check(spark, events, _reports(0, 30000, 450))
     assert rejected == {}
@@ -246,3 +251,61 @@ def test_the_checks_off_return_the_events_unchanged(spark):
     )
     assert rejected == {}
     assert len(kept) == 2
+
+
+# --- runway_time_too_high --------------------------------------------------
+
+
+def test_a_take_off_time_too_high_above_the_airport_is_removed(spark):
+    """1,601 ft above LOW (100 ft): removed. 1,599 ft: kept. A take-off or
+    landing time close to the ground, but not on it, is kept."""
+    events = [_event("ATOT", 0, apt_icao="LOW"), _event("ALDT", 1000, apt_icao="LOW")]
+    tracks = _reports(0, 1601, 160) + _reports(1000, 1599, 140)
+    kept, rejected = _check(spark, events, tracks)
+
+    assert {k: r.reject_rule for k, r in rejected.items()} == {
+        ("ATOT", _t(0)): "runway_time_too_high"
+    }
+    assert ("ALDT", _t(1000)) in kept
+    detail = json.loads(rejected[("ATOT", _t(0))].reject_detail)
+    assert detail["airport"] == "LOW" and round(detail["height_ft"]) == 1501
+
+
+def test_the_event_s_own_altitude_comes_before_the_track(spark):
+    """The runway milestones carry the altitude at the instant they were
+    interpolated to (15 ft above the field); that one decides, not a report
+    50 s away."""
+    events = spark.createDataFrame(
+        [("t1", "ATOT", _t(0), json.dumps({"apt_icao": "LOW"}), 115.0)],
+        EVENT_DDL + ", altitude_ft double",
+    )
+    kept, rejected = check_events(
+        events,
+        spark.createDataFrame(_reports(0, 3000, 200), TRACK_DDL),
+        spark.createDataFrame(AIRPORTS, AIRPORT_DDL),
+        EventConfig(),
+    )
+    assert rejected.count() == 0 and kept.count() == 1
+
+
+def test_an_unknown_height_keeps_a_runway_time(spark):
+    """No report near it, or no altitude in the reports, or an airport that is
+    not in the airport table: kept."""
+    events = [
+        _event("ATOT", 0, apt_icao="LOW"),
+        _event("ALDT", 1000, apt_icao="LOW"),
+        _event("ATOT", 2000, apt_icao="NOWHERE"),
+    ]
+    tracks = _reports(1000, None, 140) + _reports(2000, 30000, 300)
+    kept, rejected = _check(spark, events, tracks, flights=[("t1", None, None)])
+    assert rejected == {}
+    assert len(kept) == 3
+
+
+def test_a_runway_time_at_an_airport_at_5000_ft_is_kept(spark):
+    """At HIGH (5,000 ft) a lift-off at 5,040 ft barometric altitude is 40 ft
+    above the airport."""
+    events = [_event("ATOT", 0, apt_icao="HIGH"), _event("touchdown", 1000, apt_icao="HIGH")]
+    tracks = _reports(0, 5040, 150, lat=51.0) + _reports(1000, 5020, 130, lat=51.0)
+    kept, rejected = _check(spark, events, tracks)
+    assert rejected == {}

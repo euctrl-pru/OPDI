@@ -168,6 +168,7 @@ facts it is checked against are all known and clearly contradict it:
 |-------|---------|
 | `missing_time` | an event without a time |
 | `airborne_ground_event` | an off-block or in-block time, or an entry or exit of a part of the airport layout, while the aircraft flies: more than 1,500 ft above the airport (more than 15,000 ft altitude when the airport is unknown), faster than 80 kt, and no position report within 60 s flagged on the ground |
+| `runway_time_too_high` | a take-off or landing time (`ATOT`, `ALDT`) more than 1,500 ft above its airport (the event's own altitude, else the nearest position report within 60 s); a time close to the ground is kept |
 | `block_after_takeoff` | an off-block time not earlier than the last take-off time of its track |
 | `block_before_landing` | an in-block time not later than the first landing time of its track |
 
