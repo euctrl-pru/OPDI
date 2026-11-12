@@ -21,7 +21,7 @@ milestones will be missing for a large share of flights. That number is a
 finding to report, not something to tune away.
 """
 
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, List, Optional, Sequence
 
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
@@ -259,11 +259,20 @@ def on_or_near_ground(sdf: DataFrame, config: "EventConfig") -> Column:
     return F.coalesce(_report_on_ground(sdf, config), F.lit(False))
 
 
+def _kept(df: DataFrame, checkpoints: Optional[List[DataFrame]]) -> DataFrame:
+    """``df.localCheckpoint()``, recorded in ``checkpoints`` when given."""
+    kept = df.localCheckpoint()
+    if checkpoints is not None:
+        checkpoints.append(kept)
+    return kept
+
+
 def block_events(
     sdf: DataFrame,
     airport_events: DataFrame,
     runway_events: Optional[DataFrame],
     config: "EventConfig",
+    checkpoints: Optional[List[DataFrame]] = None,
 ) -> DataFrame:
     """Off-block and in-block times, each from the ground part of its own leg.
 
@@ -324,6 +333,18 @@ def block_events(
     the same part, the event names the stand and its airport; otherwise it
     names none.
 
+    Args:
+        sdf: the position reports, with the airport elevations and distances
+            of :func:`_report_on_ground` when known.
+        airport_events: the airport layout events (stand entries and exits).
+        runway_events: the take-off and landing times (``track_id``,
+            ``type``, ``event_time``, optionally ``info``), or None.
+        config: :class:`~opdi.config.EventConfig`.
+        checkpoints: when given, the frames this function keeps with
+            ``localCheckpoint`` are added to it, so that the caller can free
+            them (:func:`opdi.utils.spark_helpers.release_local_checkpoint`)
+            once the result has been written.
+
     Returns:
         ``track_id``, ``block`` (``"off"`` or ``"on"``), ``event_time``,
         ``stand_time`` (time of the stand exit or entry), ``stand`` (its
@@ -339,7 +360,9 @@ def block_events(
     # several times. They are computed once and kept (``localCheckpoint``), so
     # that the plan of the reports and of the other event families is not
     # repeated in every part of this one; repeated, it is large enough to
-    # exhaust the memory of the Spark driver before the job starts.
+    # exhaust the memory of the Spark driver before the job starts. The kept
+    # data live on the executors that computed them: if one is lost, the step
+    # fails and is run again (it never gives wrong data).
     reports = sdf.withColumn("_ground", _report_on_ground(sdf, config))
     # Reports in flight are left out of the movement rather than counted as
     # standing still, so a garbled altitude on the ground (a report or two at
@@ -351,7 +374,7 @@ def block_events(
         config,
         break_after_seconds=float(config.airport_trace_gap_seconds),
     ).select("track_id", "_from", "_to", "_from_kt", "_to_kt", "_from_flagged", "_to_flagged")
-    runs = runs.localCheckpoint()
+    runs = _kept(runs, checkpoints)
 
     # The track is in flight where reports in flight follow each other for at
     # least ground_move_min_seconds (30 s); a shorter run of them is a
@@ -385,7 +408,7 @@ def block_events(
         F.max("event_time").alias("_last"),
     )
     span = span.join(stretches, span["track_id"] == stretches["_a_track"], "left").drop("_a_track")
-    span = span.localCheckpoint()
+    span = _kept(span, checkpoints)
 
     # Take-off ("dep") and landing ("arr") times, then the parts between them.
     if runway_events is None:
@@ -421,7 +444,7 @@ def block_events(
             .groupBy("track_id", "_t", "_kind")
             .agg(F.min("_method").alias("_method"))
         )
-    bounds = bounds.localCheckpoint()
+    bounds = _kept(bounds, checkpoints)
     kinds = bounds.groupBy("track_id").agg(
         F.max(F.col("_kind") == "dep").alias("_has_dep"),
         F.max(F.col("_kind") == "arr").alias("_has_arr"),
@@ -658,7 +681,7 @@ def block_events(
         F.get_json_object(info, "$.osm_ref").alias("stand"),
         F.get_json_object(info, "$.osm_airport").alias("stand_airport"),
     )
-    stands = stands.localCheckpoint()
+    stands = _kept(stands, checkpoints)
     matched = candidates.join(
         stands,
         (F.col("track_id") == F.col("_s_track"))

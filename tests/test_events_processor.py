@@ -316,6 +316,8 @@ class _StubStorage:
         #: reference tables have to describe the same flight.
         self.tracks = tracks
         self.written = {}
+        #: ``(table, mode, partition_values)`` of every write, in order.
+        self.calls = []
 
     def table_exists(self, name):
         return name in self._tables
@@ -324,7 +326,11 @@ class _StubStorage:
         return self._tables[name]
 
     def write_table(self, df, name, mode="append", partition_by=None, partition_values=None):
-        self.written[name] = df
+        # Computed here, as a real write computes the frame: the step frees
+        # what it kept once its tables are written, so a frame kept unread
+        # would no longer be readable.
+        self.written[name] = df.sparkSession.createDataFrame(df.collect(), df.schema)
+        self.calls.append((name, mode, partition_values))
 
 
 @pytest.fixture(scope="session")
@@ -691,8 +697,9 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
     so the V4 ladder's baseline rung keeps the names it published."""
     from opdi.pipeline.events import calculate_block_events
 
+    # A taxi at 5 m/s (about 10 kt) from the first report to the last.
     sv = spark.createDataFrame(
-        [("trk-1", _T0 + dt.timedelta(seconds=i), 20.0) for i in range(0, 120, 10)],
+        [("trk-1", _T0 + dt.timedelta(seconds=i), 5.0) for i in range(0, 120, 10)],
         "track_id string, event_time timestamp, velocity double",
     )
     stand = spark.createDataFrame(
@@ -1047,7 +1054,7 @@ def test_a_removed_event_leaves_no_measurement_and_no_flight_list_column(
 
     cruise = _T0 + dt.timedelta(seconds=300)
 
-    def in_flight_block(sdf, airport_events, config=None, runway_events=None):
+    def in_flight_block(sdf, airport_events, config=None, runway_events=None, checkpoints=None):
         return sdf.limit(1).select(
             F.lit("trk-1").alias("track_id"),
             F.lit("AOBT").alias("type"),
@@ -1095,3 +1102,67 @@ def test_a_removed_event_leaves_no_measurement_and_no_flight_list_column(
     )
     row = enrich_flight_list(flight_list, events, EventConfig()).collect()[0]
     assert row["AOBT"] is None
+
+
+# ---------------------------------------------------------------------------
+# The table of removed events
+# ---------------------------------------------------------------------------
+
+
+def _rejected_rows(spark, ids, day):
+    from opdi.pipeline.events import REJECTED_SCHEMA
+
+    return spark.createDataFrame(
+        [
+            (i, "trk-1", "AOBT", _T0, None, None, None, "OSN", "v", "{}", "rule", "{}", day)
+            for i in ids
+        ],
+        REJECTED_SCHEMA,
+    )
+
+
+def _rejected_processor(spark, tables, tmp_path):
+    from opdi.pipeline.events import FlightEventProcessor
+
+    storage = _StubStorage(tables, None)
+    proc = FlightEventProcessor(spark, OPDIConfig(), log_dir=str(tmp_path))
+    proc.storage = storage
+    return proc, storage
+
+
+def test_a_full_rebuild_with_nothing_removed_empties_the_day(spark, tmp_path):
+    """The checks off (or nothing removed) in a full rebuild of a day whose
+    removed events exist from an earlier run: the day is replaced with
+    nothing, for a day-scoped and for a month-scoped run."""
+    from opdi.pipeline.plausibility import REJECTED_TABLE
+
+    day = dt.date(2024, 6, 1)
+    tables = {REJECTED_TABLE: _rejected_rows(spark, ["old"], day)}
+    track_day = spark.createDataFrame([("trk-1", day)], "track_id string, dof date")
+    for day_arg in (day, None):
+        proc, storage = _rejected_processor(spark, tables, tmp_path)
+        proc._write_rejected(None, track_day, full_rebuild=True, day=day_arg)
+        assert storage.calls == [(REJECTED_TABLE, "overwrite", [{"dof": day}])]
+        assert storage.written[REJECTED_TABLE].count() == 0
+
+
+def test_without_the_checks_and_without_the_table_nothing_is_written(spark, tmp_path):
+    proc, storage = _rejected_processor(spark, {}, tmp_path)
+    track_day = spark.createDataFrame([("trk-1", dt.date(2024, 6, 1))], "track_id string, dof date")
+    proc._write_rejected(None, track_day, full_rebuild=True, day=None)
+    assert storage.calls == []
+
+
+def test_a_call_that_adds_families_does_not_add_a_removed_event_twice(spark, tmp_path):
+    from opdi.pipeline.plausibility import REJECTED_TABLE
+
+    day = dt.date(2024, 6, 1)
+    proc, storage = _rejected_processor(
+        spark, {REJECTED_TABLE: _rejected_rows(spark, ["a"], day)}, tmp_path
+    )
+    track_day = spark.createDataFrame([("trk-1", day)], "track_id string, dof date")
+    proc._write_rejected(
+        _rejected_rows(spark, ["a", "b"], day), track_day, full_rebuild=False, day=day
+    )
+    assert storage.calls == [(REJECTED_TABLE, "append", None)]
+    assert [r["id"] for r in storage.written[REJECTED_TABLE].collect()] == ["b"]

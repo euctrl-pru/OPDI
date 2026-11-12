@@ -108,6 +108,7 @@ from opdi.pipeline.vertical_pru import (
 from opdi.reference.point_merge import point_merge_systems_for_day
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.geometry import bearing_deg, haversine_nm
+from opdi.utils.spark_helpers import release_local_checkpoint
 from opdi.utils.storage import StorageManager
 from opdi.versions import DISTANCE_VERSION, LEGACY_DISTANCE_VERSION, TIME_VERSION
 
@@ -398,6 +399,14 @@ def calculate_level_off_events(
     return starts.unionByName(ends)
 
 
+#: The columns of :data:`REJECTED_TABLE`: those of ``opdi_flight_events``,
+#: the check that removed the event and the facts it used, and the day.
+REJECTED_SCHEMA = (
+    "id string, flight_id string, type string, event_time timestamp, longitude double, "
+    "latitude double, altitude double, source string, version string, info string, "
+    "reject_rule string, reject_detail string, dof date"
+)
+
 #: How the take-off or landing beside a block time is written in its ``info``
 #: (ISO 8601 with microseconds and the UTC offset).
 BOUND_TIME_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX"
@@ -408,6 +417,7 @@ def calculate_block_events(
     airport_events: DataFrame,
     config: Optional[EventConfig] = None,
     runway_events: Optional[DataFrame] = None,
+    checkpoints: Optional[List[DataFrame]] = None,
 ) -> Optional[DataFrame]:
     """Off-block and in-block times (``AOBT`` and ``AIBT``).
 
@@ -429,6 +439,8 @@ def calculate_block_events(
     used. Coverage is the main
     limit: an aircraft on a stand is often not received at all.
     See https://www.opdi.aero/content/methods/block-times.html.
+
+    ``checkpoints``: see :func:`opdi.pipeline.ground.block_events`.
     """
     config = config or EventConfig()
     common = [
@@ -445,7 +457,9 @@ def calculate_block_events(
     on_type = "on-block" if _acdm_names else "AIBT"
 
     if config.block_times_on_ground_only:
-        found = block_events(sdf_input, airport_events, runway_events, config)
+        found = block_events(
+            sdf_input, airport_events, runway_events, config, checkpoints=checkpoints
+        )
         stand = [col("stand").alias("stand"), col("stand_airport").alias("apt_icao")]
         # The take-off or landing of the same leg, to the microsecond: the
         # plausibility checks compare the block time with it.
@@ -1632,6 +1646,15 @@ class FlightEventProcessor:
             calc_navigation: Detect holding, point merge and FIR crossings
                 (each also subject to its ``emit_*`` setting).
             day: The day, when a single day is processed.
+
+        **A call that computes only some families** (``process_month`` adds
+        the families its progress log lists as missing) appends their events
+        to the day. The plausibility checks and the block times then see
+        only the events of this call: the block times are bounded by the
+        take-off and landing times found in the same call (none when the
+        runway families are not part of it, and the order checks then keep
+        every block time), and the removed events of the call are added to
+        the day's removed events.
         """
         sdf_input = add_distance_measure(sdf_input, self.events.distance_from_last_known_position)
         sdf_input = add_time_measure(sdf_input)
@@ -1675,6 +1698,12 @@ class FlightEventProcessor:
         #: The take-off and landing times found so far, which bound the ground
         #: parts the block times are read from.
         runway_frames: List[DataFrame] = []
+        #: Frames kept for the step (``cache``, ``localCheckpoint``), freed
+        #: once its tables are written. Kept data live on the executors: if
+        #: one is lost, the step fails and is run again; it never gives wrong
+        #: data.
+        cached: List[DataFrame] = []
+        checkpoints: List[DataFrame] = []
 
         def keep_runway(frame: Optional[DataFrame]) -> Optional[DataFrame]:
             # Cached because the block family reads these rows and the write
@@ -1683,6 +1712,7 @@ class FlightEventProcessor:
                 return frame
             frame = frame.cache()
             runway_frames.append(frame)
+            cached.append(frame)
             return frame
 
         def add(frame: Optional[DataFrame]) -> None:
@@ -1760,7 +1790,11 @@ class FlightEventProcessor:
                     for frame in runway_frames:
                         part = frame.select("track_id", "type", "event_time", "info")
                         runway = part if runway is None else runway.unionByName(part)
-                    add(calculate_block_events(geo, df_hexaero, self.events, runway))
+                    add(
+                        calculate_block_events(
+                            geo, df_hexaero, self.events, runway, checkpoints=checkpoints
+                        )
+                    )
                 else:
                     add(calculate_block_events(sdf_input, df_hexaero, self.events))
 
@@ -1799,6 +1833,7 @@ class FlightEventProcessor:
             return
 
         df_events.cache()
+        cached.append(df_events)
 
         # One event per milestone (merge_duplicate_milestones), before the ids
         # are made: the id includes the type. Done on the cached frame, which
@@ -1824,6 +1859,7 @@ class FlightEventProcessor:
             # them, so the events are computed once here and the checks start
             # from the result.
             df_events = df_events.localCheckpoint()
+            checkpoints.append(df_events)
             labelled = label_events(
                 df_events,
                 sdf_input,
@@ -1831,6 +1867,7 @@ class FlightEventProcessor:
                 self.events,
                 flights=self._flight_airports(month),
             ).cache()
+            cached.append(labelled)
             counts = {
                 r["reject_rule"]: r["count"]
                 for r in labelled.groupBy("reject_rule").count().collect()
@@ -1929,13 +1966,7 @@ class FlightEventProcessor:
                     col("dof"),
                 )
             )
-            self.storage.write_table(
-                df_rejected.repartition("dof"),
-                REJECTED_TABLE,
-                mode=write_mode,
-                partition_by=["dof"],
-                partition_values=_partition_values,
-            )
+        self._write_rejected(df_rejected, track_day, full_rebuild, day)
 
         # Write measurements (distance + time)
         df_dist = (
@@ -1981,6 +2012,76 @@ class FlightEventProcessor:
             # Known when a single day is being processed; None falls back to
             # probing, which a month-scoped run still needs.
             partition_values=_partition_values,
+        )
+
+        # Everything is written: free what the step kept.
+        for frame in cached:
+            frame.unpersist()
+        for frame in checkpoints:
+            release_local_checkpoint(frame)
+
+    def _write_rejected(
+        self,
+        rejected: Optional[DataFrame],
+        track_day: DataFrame,
+        full_rebuild: bool,
+        day: Optional[date],
+    ) -> None:
+        """Write the removed events of the batch to :data:`REJECTED_TABLE`.
+
+        Args:
+            rejected: the removed events in the columns of the table, or None
+                when the plausibility checks are off.
+            track_day: ``track_id`` and ``dof`` of every track of the batch.
+            full_rebuild: whether this call builds the whole day.
+            day: the day, when one day is processed.
+
+        A full rebuild replaces the removed events of each day of the batch,
+        also with nothing: a day with nothing removed, or processed with the
+        checks off, has no removed events left from an earlier run. With the
+        checks off and no table yet, nothing is written. A call that adds
+        families appends, leaving out the events whose id the table already
+        holds, so a family processed twice is not counted twice.
+        """
+        exists = self.storage.table_exists(REJECTED_TABLE)
+        if rejected is None:
+            if not (full_rebuild and exists):
+                return
+            rejected = self.spark.createDataFrame([], REJECTED_SCHEMA)
+        if not full_rebuild:
+            if exists:
+                known = self.storage.read_table(REJECTED_TABLE).select(col("id").alias("_known"))
+                rejected = rejected.join(known, rejected["id"] == known["_known"], "left_anti")
+            self.storage.write_table(
+                rejected.repartition("dof"), REJECTED_TABLE, mode="append", partition_by=["dof"]
+            )
+            return
+        if day is not None:
+            days = [day]
+        else:
+            days = [
+                r["dof"]
+                for r in track_day.select("dof").distinct().collect()
+                if r["dof"] is not None
+            ]
+        if not getattr(self.storage, "use_s3", True):
+            # Iceberg replaces only the partitions the frame holds rows for,
+            # so the days are emptied first.
+            if exists and days:
+                listed = ", ".join(f"DATE '{d.isoformat()}'" for d in days)
+                self.spark.sql(
+                    f"DELETE FROM `{self.project}`.`{REJECTED_TABLE}` WHERE dof IN ({listed})"
+                )
+            self.storage.write_table(
+                rejected.repartition("dof"), REJECTED_TABLE, mode="append", partition_by=["dof"]
+            )
+            return
+        self.storage.write_table(
+            rejected.repartition("dof"),
+            REJECTED_TABLE,
+            mode="overwrite",
+            partition_by=["dof"],
+            partition_values=[{"dof": d} for d in days],
         )
 
     def process_day(self, day: date, skip_if_processed: bool = True) -> None:
@@ -2089,7 +2190,7 @@ class FlightEventProcessor:
         print(f"Flight event processing complete for {start_month} to {end_month}.")
 
     def create_tables_if_not_exist(self) -> None:
-        """Create the Iceberg tables of the events and measurements if missing."""
+        """Create the Iceberg tables of events, removed events and measurements."""
         today = datetime.today().strftime("%d %B %Y")
 
         events_sql = f"""
@@ -2123,8 +2224,32 @@ class FlightEventProcessor:
         COMMENT 'OPDI measurements linked to flight events. Last updated: {today}.'
         """
 
+        rejected_sql = f"""
+        CREATE TABLE IF NOT EXISTS `{self.project}`.`{REJECTED_TABLE}` (
+            id STRING COMMENT 'Event identifier, as it would have been published',
+            flight_id STRING COMMENT 'Track/flight identifier',
+            type STRING COMMENT 'Event type',
+            event_time TIMESTAMP COMMENT 'Event timestamp',
+            longitude DOUBLE COMMENT 'Event longitude',
+            latitude DOUBLE COMMENT 'Event latitude',
+            altitude DOUBLE COMMENT 'Event altitude in feet',
+            source STRING COMMENT 'Data source (OSN)',
+            version STRING COMMENT 'Processing version',
+            info STRING COMMENT 'Additional info (JSON)',
+            reject_rule STRING COMMENT 'The plausibility check that removed the event',
+            reject_detail STRING COMMENT 'The facts that check used (JSON)',
+            dof DATE COMMENT 'Day of the track'
+        )
+        USING iceberg
+        PARTITIONED BY (dof)
+        COMMENT 'Events removed by the plausibility checks, never published. Last updated: {today}.'
+        """
+
         self.storage.create_table(events_sql)
         print(f"Table {self.project}.opdi_flight_events created/verified.")
+
+        self.storage.create_table(rejected_sql)
+        print(f"Table {self.project}.{REJECTED_TABLE} created/verified.")
 
         self.storage.create_table(measurements_sql)
         print(f"Table {self.project}.opdi_measurements created/verified.")

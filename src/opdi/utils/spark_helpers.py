@@ -198,3 +198,14 @@ def get_spark(
         distributed=distributed,
         container_image=container_image,
     )
+
+
+def release_local_checkpoint(df) -> None:
+    """Free the data a ``df.localCheckpoint()`` holds on the executors.
+
+    ``unpersist`` does not reach it: the checkpointed data belong to the RDD
+    under the frame, which is released here. Call it only when nothing will
+    read ``df`` again; a later read fails (the data are gone), it never
+    gives other data.
+    """
+    df._jdf.queryExecution().analyzed().rdd().unpersist(False)

@@ -742,3 +742,13 @@ def test_a_report_without_position_counts_as_ground_only_when_flagged_or_without
     )
     got = [r.g for r in df.select(on_or_near_ground(df, EventConfig()).alias("g")).collect()]
     assert got == [False, True, True]
+
+
+def test_without_runway_times_no_block_time_names_one(spark):
+    """The runway families not computed in the call (``runway_events`` None):
+    the block times have no take-off or landing beside them, and the order
+    checks then keep them."""
+    rows = block_events(
+        _reports(spark, DEPARTURE), _stands(spark, DEPARTURE_STANDS), None, EventConfig()
+    ).collect()
+    assert rows and all(r.bound_time is None and r.bound_method is None for r in rows)
