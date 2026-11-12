@@ -409,7 +409,7 @@ def calculate_block_events(
     config: Optional[EventConfig] = None,
     runway_events: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
-    """Off-block and in-block times (A-CDM milestones T04 and T21).
+    """Off-block and in-block times (``AOBT`` and ``AIBT``).
 
     Published as ``AOBT``/``AIBT``, or as ``off-block``/``on-block`` when the
     runway milestones are on without :attr:`merge_duplicate_milestones`. One

@@ -1,4 +1,4 @@
-"""Ground movement milestones: off-block (T04) and on-block (T21).
+"""Ground movement milestones: the off-block time (``AOBT``) and the in-block time (``AIBT``).
 
 A native port of the signal in ``traffic``'s ``StartMoving``
 (``traffic/src/traffic/algorithms/ground/movement.py:13-63``): the aircraft is
@@ -72,22 +72,41 @@ def _movement_runs(
 ) -> DataFrame:
     """Each run of sustained movement: ``_from`` and ``_to`` per run.
 
+    Also, for the report where the run starts and the one where it ends:
+    the lower of its reported and position-derived speed in knots
+    (``_from_kt``, ``_to_kt``) and whether it is flagged on the ground
+    (``_from_flagged``, ``_to_flagged``).
+
     ``break_after_seconds`` starts a new run after a silence longer than that,
     so two movements with nothing received between them are not one run.
     """
     ordered = Window.partitionBy(*partition_cols).orderBy(time_col)
 
-    gs_kt = F.col("velocity") * KT_PER_MPS
-    if config.ground_speed_derive_from_position and "lat" in sdf.columns and "lon" in sdf.columns:
+    reported_kt = F.col("velocity") * KT_PER_MPS
+    gs_kt = reported_kt
+    has_position = "lat" in sdf.columns and "lon" in sdf.columns
+    derived_kt = _derived_groundspeed_kt(ordered, time_col) if has_position else None
+    if config.ground_speed_derive_from_position and has_position:
         # Fill the gaps, do not replace: the reported speed is used wherever
         # `velocity` exists, the derived one only where it is missing (see
         # EventConfig.ground_speed_derive_from_position). Applied only when the
         # lat/lon columns are present: a caller without them (some tests, any
         # minimal projection) gets the reported speed alone rather than an
         # unresolved-column analysis error.
-        gs_kt = F.coalesce(gs_kt, _derived_groundspeed_kt(ordered, time_col))
+        gs_kt = F.coalesce(gs_kt, derived_kt)
     moving = gs_kt > F.lit(config.ground_speed_threshold_kt)
     work = sdf.withColumn("_moving", moving)
+    # The speed that says whether the aircraft stood or rolled slowly where a
+    # movement starts or ends: the lower of the reported and the derived
+    # speed (``least`` skips an unknown one), because the reported value is
+    # sometimes stale on the ground.
+    work = work.withColumn(
+        "_slow_kt", F.least(reported_kt, derived_kt) if derived_kt is not None else reported_kt
+    )
+    flagged = (
+        F.coalesce(F.col("on_ground"), F.lit(False)) if "on_ground" in sdf.columns else F.lit(False)
+    )
+    work = work.withColumn("_flagged", flagged)
 
     # Sessionise runs of movement, then keep runs long enough to be a push
     # rather than a wobble in the speed field.
@@ -103,10 +122,19 @@ def _movement_runs(
         F.sum("_new_run").over(ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)),
     )
 
+    t_run = F.col(time_col)
     runs = (
         work.filter(F.col("_moving"))
         .groupBy(*partition_cols, "_run")
-        .agg(F.min(time_col).alias("_from"), F.max(time_col).alias("_to"))
+        .agg(
+            F.min(time_col).alias("_from"),
+            F.max(time_col).alias("_to"),
+            # The report where the run starts and the one where it ends.
+            F.min_by(F.col("_slow_kt"), t_run).alias("_from_kt"),
+            F.max_by(F.col("_slow_kt"), t_run).alias("_to_kt"),
+            F.min_by(F.col("_flagged"), t_run).alias("_from_flagged"),
+            F.max_by(F.col("_flagged"), t_run).alias("_to_flagged"),
+        )
     )
     return runs.withColumn(
         "_seconds", F.col("_to").cast("double") - F.col("_from").cast("double")
@@ -171,14 +199,25 @@ LANDING_TYPES = ("ALDT", "touchdown")
 _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 
 
-def on_or_near_ground(sdf: DataFrame, config: "EventConfig") -> Column:
-    """Whether a report may be on the ground: the test of the airport layout events.
+def _report_on_ground(sdf: DataFrame, config: "EventConfig") -> Column:
+    """True, False or NULL: whether a report may be on the ground.
 
-    True when the report is flagged on the ground, when its altitude or its
-    position is unknown (a surface report carries no altitude), or when it is
-    at most
-    ``airport_max_height_agl_ft`` (2,000 ft) above the lower of the flight's
-    two airports. Elevations that are not on the frame count as 0 ft.
+    True when the report is flagged on the ground, has no altitude (a
+    surface report carries none), or is at most
+    ``airport_max_height_agl_ft`` (2,000 ft) above the airport of its leg;
+    False when it has a position and an altitude higher than that; NULL
+    (unknown) for a report without a position that has an altitude and is
+    not flagged on the ground. Some receivers repeat a stale altitude in
+    such reports, at cruise level after the aircraft parked, or near the
+    ground after it took off, so these reports count neither as ground nor
+    as flight.
+
+    The airport of the leg is the one of the flight's two airports nearer to
+    the report (``dist_adep_nm``, ``dist_ades_nm``): for a report on or near
+    the ground, the departure airport on the departure side and the
+    destination on the arrival side. When neither distance is known, the
+    lower of the two airports is used. Elevations that are not on the frame
+    count as 0 ft.
     """
     flagged = (
         F.coalesce(F.col("on_ground"), F.lit(False)) if "on_ground" in sdf.columns else F.lit(False)
@@ -186,17 +225,38 @@ def on_or_near_ground(sdf: DataFrame, config: "EventConfig") -> Column:
     if "baro_altitude_c" not in sdf.columns:
         return F.lit(True)
     alt_ft = F.col("baro_altitude_c") * F.lit(3.28084)
-    elevations = [
-        F.coalesce(F.col(c), F.lit(0.0)) if c in sdf.columns else F.lit(0.0)
-        for c in ("elev_adep_ft", "elev_ades_ft")
-    ]
-    height_ft = F.least(*[alt_ft - e for e in elevations])
-    low = height_ft <= F.lit(float(config.airport_max_height_agl_ft))
-    # A report without a position says nothing about where the aircraft is;
-    # some receivers repeat a stale altitude in such reports long after the
-    # aircraft has parked.
-    no_position = F.col("lat").isNull() if "lat" in sdf.columns else F.lit(False)
-    return flagged | F.col("baro_altitude_c").isNull() | low | no_position
+
+    def column_or_null(c):
+        return F.col(c) if c in sdf.columns else F.lit(None).cast("double")
+
+    elev_dep = F.coalesce(column_or_null("elev_adep_ft"), F.lit(0.0))
+    elev_arr = F.coalesce(column_or_null("elev_ades_ft"), F.lit(0.0))
+    d_dep, d_arr = column_or_null("dist_adep_nm"), column_or_null("dist_ades_nm")
+    elevation = (
+        F.when(
+            d_dep.isNotNull() & d_arr.isNotNull(),
+            F.when(d_dep <= d_arr, elev_dep).otherwise(elev_arr),
+        )
+        .when(d_dep.isNotNull(), elev_dep)
+        .when(d_arr.isNotNull(), elev_arr)
+        .otherwise(F.least(elev_dep, elev_arr))
+    )
+    low = (alt_ft - elevation) <= F.lit(float(config.airport_max_height_agl_ft))
+    has_position = F.col("lat").isNotNull() if "lat" in sdf.columns else F.lit(True)
+    return (
+        F.when(flagged | F.col("baro_altitude_c").isNull(), F.lit(True))
+        .when(has_position, low)
+        .otherwise(F.lit(None).cast("boolean"))
+    )
+
+
+def on_or_near_ground(sdf: DataFrame, config: "EventConfig") -> Column:
+    """Whether a report may be on the ground; never NULL.
+
+    The True of :func:`_report_on_ground`; an unknown report (no position, an
+    altitude, not flagged) gives False.
+    """
+    return F.coalesce(_report_on_ground(sdf, config), F.lit(False))
 
 
 def block_events(
@@ -217,9 +277,13 @@ def block_events(
     * from a landing to the end of the track: an in-block time is the end of
       the last sustained movement in that part;
     * from a landing to a take-off (the aircraft landed, stood, and left
-      again): the longest stop between two movements in that part is the
-      stand stop; the in-block time is the end of the movement before it, the
-      off-block time the start of the movement after it.
+      again): when a stand passage (stand entry or exit) lies in that part,
+      the longest stop between two movements in it is the stand stop; the
+      in-block time is the end of the movement before it, the off-block time
+      the start of the movement after it. Without a stand passage in the
+      part, the stop is a wait (at a holding point, between two circuits)
+      and gives no time; a part with a single movement has no stop and gives
+      no time either.
 
     Where the track starts with a landing, or has no take-off time, the
     off-block time comes from the ground part at its start (up to its first
@@ -228,15 +292,37 @@ def block_events(
     report in flight). A take-off or landing that was not found then does not
     lose the block time next to it.
 
+    **A movement from or to a standstill.** An off-block time is the start
+    of a movement from a standstill: the report where the movement starts is
+    at most ``block_time_max_start_speed_kt`` (30 kt) fast, or is flagged on
+    the ground. In the same way the report where the last movement ends is
+    slow or flagged on the ground for an in-block time. The speed is the
+    lower of the reported and the position-derived ground speed. A movement
+    that starts at the track's first report while faster than that (or ends
+    at its last report) gives no time, flagged or not: the aircraft was
+    already moving when first received (on the take-off roll, in the climb,
+    on final) or still moving when last received, so the moment it left or
+    reached the stand was not seen. Only the first movement of a part is
+    read for an off-block time and the last for an in-block time; when that
+    movement does not start (end) at a standstill, the part gives no time.
+
     Movement is measured on reports that may be on the ground
-    (:func:`on_or_near_ground`), so flight is never movement on the ground,
-    and a silence longer than ``airport_trace_gap_seconds`` ends a movement.
-    The track counts as in flight only where reports in flight last at least
+    (:func:`_report_on_ground`: flagged on the ground, without altitude, or
+    at most 2,000 ft above the airport of the leg), so flight is never
+    movement on the ground, and a silence longer than
+    ``airport_trace_gap_seconds`` ends a movement. Reports in flight are
+    left out of the movement rather than counted as standing still, and the
+    track counts as in flight only where reports in flight last at least
     ``ground_move_min_seconds``, so a garbled altitude does not end a ground
-    part.
-    Each time also needs a stand exit (off-block) or a stand entry (in-block)
-    in the track, as before. When that stand passage lies in the same part,
-    the event names the stand and its airport; otherwise it names none.
+    part. A report without a position that carries an altitude and is not
+    flagged on the ground counts neither as ground nor as flight.
+
+    Each time from the start or the end of a track needs a stand passage
+    somewhere in the track: an exit (off-block) or an entry (in-block). It
+    need not lie in the same part, because the stand at the airport of a
+    single-leg track is often not received. When the stand passage lies in
+    the same part, the event names the stand and its airport; otherwise it
+    names none.
 
     Returns:
         ``track_id``, ``block`` (``"off"`` or ``"on"``), ``event_time``,
@@ -254,25 +340,26 @@ def block_events(
     # that the plan of the reports and of the other event families is not
     # repeated in every part of this one; repeated, it is large enough to
     # exhaust the memory of the Spark driver before the job starts.
-    ground = on_or_near_ground(sdf, config)
-    reports = sdf.withColumn("_ground", ground)
+    reports = sdf.withColumn("_ground", _report_on_ground(sdf, config))
     # Reports in flight are left out of the movement rather than counted as
     # standing still, so a garbled altitude on the ground (a report or two at
     # 16,000 ft between two surface reports) does not cut a push-back in two.
     # A real flight leaves a silence longer than airport_trace_gap_seconds,
     # which ends the movement.
     runs = _movement_runs(
-        reports.filter(F.col("_ground")),
+        reports.filter(F.coalesce(F.col("_ground"), F.lit(False))),
         config,
         break_after_seconds=float(config.airport_trace_gap_seconds),
-    ).select("track_id", "_from", "_to")
+    ).select("track_id", "_from", "_to", "_from_kt", "_to_kt", "_from_flagged", "_to_flagged")
     runs = runs.localCheckpoint()
 
     # The track is in flight where reports in flight follow each other for at
     # least ground_move_min_seconds (30 s); a shorter run of them is a
     # garbled altitude, not a flight.
+    # A report whose state is unknown takes no part: it neither starts nor
+    # ends a stretch in flight.
     ordered = Window.partitionBy("track_id").orderBy("event_time")
-    air = reports.withColumn("_air", ~F.col("_ground"))
+    air = reports.filter(F.col("_ground").isNotNull()).withColumn("_air", ~F.col("_ground"))
     air = air.withColumn(
         "_change",
         F.when(
@@ -440,11 +527,48 @@ def block_events(
         F.col("_lo_method").alias("_bound_method"),
     ).unionByName(no_arr)
 
+    # A movement starts from a standstill when the report where it starts is
+    # slow, or is flagged on the ground and is not the track's first report;
+    # it ends in one when the report where it ends is slow, or is flagged on
+    # the ground and is not the track's last report. A movement that starts
+    # at the first report while fast (ends at the last while fast) was
+    # already under way when the track was first received (still under way
+    # when it was last received).
+    slow = F.lit(float(config.block_time_max_start_speed_kt))
+    first_last = span.select(
+        F.col("track_id").alias("_fl_track"),
+        F.col("_first").alias("_t_first"),
+        F.col("_last").alias("_t_last"),
+    )
+    runs = runs.join(first_last, runs["track_id"] == first_last["_fl_track"], "inner").drop(
+        "_fl_track"
+    )
+    runs = runs.withColumn(
+        "_starts_still",
+        F.coalesce(
+            (F.col("_from_kt") <= slow)
+            | (F.col("_from_flagged") & (F.col("_from") > F.col("_t_first"))),
+            F.lit(False),
+        ),
+    ).withColumn(
+        "_ends_still",
+        F.coalesce(
+            (F.col("_to_kt") <= slow) | (F.col("_to_flagged") & (F.col("_to") < F.col("_t_last"))),
+            F.lit(False),
+        ),
+    )
+
+    # The first movement of each part gives its off-block time and the last
+    # its in-block time, each only when it starts (ends) at a standstill; a
+    # later (earlier) movement is not taken instead, as it would time a wait
+    # on the way rather than the departure from the stand.
     off = (
         off_parts.join(runs, "track_id", "inner")
         .filter((F.col("_from") >= F.col("_lo")) & (F.col("_from") <= F.col("_hi")))
         .groupBy("track_id", "_lo", "_hi", "_bound", "_bound_method")
-        .agg(F.min("_from").alias("event_time"))
+        .agg(F.min_by(F.struct("_from", "_starts_still"), F.col("_from")).alias("_first_run"))
+        .filter(F.col("_first_run._starts_still"))
+        .withColumn("event_time", F.col("_first_run._from"))
         .select(
             "track_id",
             F.lit("off").alias("block"),
@@ -459,7 +583,9 @@ def block_events(
         on_parts.join(runs, "track_id", "inner")
         .filter((F.col("_to") >= F.col("_lo")) & (F.col("_to") <= F.col("_hi")))
         .groupBy("track_id", "_lo", "_hi", "_bound", "_bound_method")
-        .agg(F.max("_to").alias("event_time"))
+        .agg(F.max_by(F.struct("_to", "_ends_still"), F.col("_to")).alias("_last_run"))
+        .filter(F.col("_last_run._ends_still"))
+        .withColumn("event_time", F.col("_last_run._to"))
         .select(
             "track_id",
             F.lit("on").alias("block"),
@@ -471,20 +597,36 @@ def block_events(
         )
     )
 
-    # A landing followed by a take-off: split at the longest stop.
+    # A landing followed by a take-off: split at the longest stop, but only
+    # when a stand passage lies between the landing and the take-off;
+    # otherwise the stop is a wait (at a holding point, between two
+    # circuits), not a stand stop. A part with a single movement has no stop
+    # and gives no time.
+    passages = airport_events.filter(F.col("type").isin(_STAND_EXIT, _STAND_ENTRY)).select(
+        F.col("track_id").alias("_p_track"), F.col("event_time").alias("_p_time")
+    )
+    split = split.join(
+        passages,
+        (F.col("track_id") == F.col("_p_track"))
+        & (F.col("_p_time") >= F.col("_lo"))
+        & (F.col("_p_time") <= F.col("_hi")),
+        "left_semi",
+    )
     in_split = split.join(runs, "track_id", "inner").filter(
         (F.col("_to") >= F.col("_lo")) & (F.col("_from") <= F.col("_hi"))
     )
     by_start = Window.partitionBy("track_id", "_lo").orderBy("_from")
-    in_split = in_split.withColumn("_next_from", F.lead("_from").over(by_start)).filter(
-        F.col("_next_from").isNotNull()
+    in_split = (
+        in_split.withColumn("_next_from", F.lead("_from").over(by_start))
+        .withColumn("_next_starts_still", F.lead("_starts_still").over(by_start))
+        .filter(F.col("_next_from").isNotNull())
     )
     in_split = in_split.withColumn(
         "_stop_s", F.col("_next_from").cast("double") - F.col("_to").cast("double")
     )
     longest = Window.partitionBy("track_id", "_lo").orderBy(F.col("_stop_s").desc(), "_from")
     stop = in_split.withColumn("_rank", F.row_number().over(longest)).filter(F.col("_rank") == 1)
-    split_on = stop.select(
+    split_on = stop.filter(F.col("_ends_still")).select(
         "track_id",
         F.lit("on").alias("block"),
         F.col("_to").alias("event_time"),
@@ -493,7 +635,7 @@ def block_events(
         F.col("_lo").alias("_bound"),
         F.col("_lo_method").alias("_bound_method"),
     )
-    split_off = stop.select(
+    split_off = stop.filter(F.coalesce(F.col("_next_starts_still"), F.lit(False))).select(
         "track_id",
         F.lit("off").alias("block"),
         F.col("_next_from").alias("event_time"),

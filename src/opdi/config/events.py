@@ -169,7 +169,9 @@ class EventConfig:
     arrival and the off-block time of its departure. Movement is read only
     from reports that may be on the ground: flagged on the ground, without
     altitude, or at most :attr:`airport_max_height_agl_ft` above the
-    airport. The event names the stand and its airport (``info.stand``,
+    airport of the leg, and a block time is the start (end) of a movement
+    from (to) a standstill (:attr:`block_time_max_start_speed_kt`). The
+    event names the stand and its airport (``info.stand``,
     ``info.apt_icao``).
 
     Without this setting, the off-block time is the first sustained movement
@@ -178,6 +180,23 @@ class EventConfig:
     off-block time at its first report in flight. Off in release v0.0.2,
     which publishes no block times. See
     https://www.opdi.aero/content/methods/block-times.html."""
+
+    block_time_max_start_speed_kt: float = 30.0
+    """Highest ground speed, in knots, at which a movement counts as starting
+    from a standstill (off-block) or ending in one (in-block), with
+    :attr:`block_times_on_ground_only`.
+
+    An off-block time is the start of a movement from a standstill. The
+    report where the movement starts must be at most this fast, or be
+    flagged on the ground; the same holds for the report where the last
+    movement ends, for an in-block time. A movement that starts at the
+    track's first report while faster than this (or ends at its last report)
+    gives no block time: the aircraft was already moving when it was first
+    received (or still moving when last received), so the moment it left or
+    reached the stand was not seen. The speed is the lower of the reported
+    ground speed and the speed derived from successive positions, because
+    the reported value is sometimes stale on the ground. 30 kt is the top of
+    normal taxi speeds; a push-back moves at 2 to 5 kt."""
 
     # -- runway identification for take-off and landing times ------------
     runway_max_dist_nm: float = 5.0

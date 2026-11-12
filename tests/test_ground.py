@@ -1,4 +1,4 @@
-"""Tests for the ground movement milestones (T04 off-block, T21 on-block)."""
+"""Tests for the ground movement milestones: off-block (``AOBT``) and in-block (``AIBT``) times."""
 
 from conftest import _EPOCH, make_track
 from pyspark.sql import functions as F
@@ -170,12 +170,16 @@ def _leg(start_s, end_s, kt, alt_ft=None, on_ground=True, step_s=10):
     return [(s, kt, alt_m, on_ground) for s in range(start_s, end_s, step_s)]
 
 
-def _reports(spark, legs, track="trk-1"):
-    rows = [
-        (track, _at(s), 50.0, 4.0, _kt(kt), alt_m, gnd)
-        for leg in legs
-        for (s, kt, alt_m, gnd) in leg
-    ]
+def _reports(spark, legs, track="trk-1", moving=False):
+    """The reports of ``legs``, all at one position, or with ``moving`` at
+    positions that advance north at each report's speed."""
+    rows, lat, last = [], 50.0, None
+    for leg in legs:
+        for s, kt, alt_m, gnd in leg:
+            if moving and last is not None:
+                lat += kt * (s - last) / 3600.0 / NM_PER_DEG
+            last = s
+            rows.append((track, _at(s), lat, 4.0, _kt(kt), alt_m, gnd))
     return spark.createDataFrame(rows, _REPORT_DDL)
 
 
@@ -238,8 +242,9 @@ ARRIVAL_STANDS = [
 
 
 def test_a_departure_gets_its_off_block_and_no_in_block(spark):
-    """The stand passage gives an entry as well as an exit. Before, that entry
-    made the last movement of the track, high in the climb, an in-block time."""
+    """The stand passage gives an entry as well as an exit. That entry must
+    not make the last movement of the track, high in the climb, an in-block
+    time."""
     got = _blocks(
         spark,
         _reports(spark, DEPARTURE),
@@ -261,7 +266,7 @@ def test_the_off_block_time_of_a_departure_does_not_move(spark):
 
 
 def test_an_arrival_gets_its_in_block_and_no_off_block(spark):
-    """Before, the first movement of the track, in flight, was its off-block time."""
+    """The first movement of the track, in flight, is not an off-block time."""
     got = _blocks(
         spark,
         _reports(spark, ARRIVAL),
@@ -274,8 +279,8 @@ def test_an_arrival_gets_its_in_block_and_no_off_block(spark):
 
 def test_a_flight_gets_the_stand_of_each_of_its_two_airports(spark):
     """Stand to stand: the off-block time names the stand it left at EBBR, the
-    in-block time the stand it reached at EDDF. The two times are those of
-    the earlier rule."""
+    in-block time the stand it reached at EDDF. The two times are the first
+    and last sustained movement of the whole track (``movement_window``)."""
     reports = _reports(spark, DEPARTURE + ARRIVAL)
     before = movement_window(reports, EventConfig()).collect()[0]
     got = _blocks(
@@ -334,7 +339,7 @@ def test_a_touch_and_go_gives_no_block_time(spark):
 
 def test_without_take_off_or_landing_the_ground_part_at_each_end_is_used(spark):
     """A track seen only on the ground, with no take-off or landing time:
-    both times, as before (it cannot be told which of the two it is)."""
+    both times (it cannot be told which of the two it is)."""
     reports = _reports(spark, [_leg(0, 60, 0), _leg(60, 300, 12), _leg(300, 360, 0)])
     stands = [
         ("entry-parking_position", 0, "C3", "LFPG"),
@@ -368,7 +373,7 @@ def test_a_report_without_altitude_counts_as_possibly_on_the_ground(spark):
     assert ("off", 60.0, "C3", "LFPG") in got
 
 
-def test_the_v002_settings_keep_the_earlier_block_times(spark):
+def test_the_v002_settings_use_the_movement_of_the_whole_track(spark):
     assert EventConfig.legacy().block_times_on_ground_only is False
     assert EventConfig().block_times_on_ground_only is True
 
@@ -376,7 +381,7 @@ def test_the_v002_settings_keep_the_earlier_block_times(spark):
 def test_a_departure_whose_stand_was_not_seen_keeps_its_off_block(spark):
     """Stand to stand, but the departure stand was not received: the only
     stand passage is at the arrival. The off-block time of the departure is
-    still the start of its first movement before the take-off, as before;
+    still the start of its first movement before the take-off;
     it names no stand, since none was seen in that part of the track."""
     got = _blocks(
         spark,
@@ -552,3 +557,188 @@ def test_a_landing_and_a_take_off_at_the_same_instant_are_ordered_landing_first(
         got.append(sorted((r.block, r.event_time) for r in rows))
 
     assert got == [[], []]
+
+
+# ---------------------------------------------------------------------------
+# A block time is the start (end) of a movement from (to) a standstill
+# ---------------------------------------------------------------------------
+
+#: The arrival of a flight whose stand at the destination is the only one seen.
+_ARRIVAL_AT_B2 = [_leg(900, 1000, 140, alt_ft=6000, on_ground=False)] + ARRIVAL[1:]
+
+
+def test_the_settings_of_the_standstill_condition():
+    assert EventConfig().block_time_max_start_speed_kt == 30.0
+
+
+def test_a_flight_first_received_after_lift_off_gives_no_off_block(spark):
+    """First report at 300 ft and 150 kt, just after lift-off; the runway
+    window gives the take-off at that report. The climb below 2,000 ft is a
+    movement from the first report, but the aircraft was already moving fast
+    when first received: its off-block time was not observed."""
+    legs = [
+        _leg(0, 60, 150, alt_ft=300, on_ground=False),
+        _leg(60, 900, 250, alt_ft=20000, on_ground=False),
+    ] + _ARRIVAL_AT_B2
+    got = _blocks(
+        spark,
+        _reports(spark, legs, moving=True),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ATOT", 0), ("ALDT", 1000)]),
+    )
+
+    assert got == [("on", 1290.0, "B2", "EDDF")]
+
+
+def test_a_flight_first_received_on_the_take_off_roll_gives_no_off_block(spark):
+    """First reports on the runway at 90 kt, flagged on the ground and
+    without altitude; lift-off 20 s later."""
+    legs = [
+        _leg(0, 20, 90, step_s=5),
+        _leg(20, 60, 150, alt_ft=300, on_ground=False),
+        _leg(60, 900, 250, alt_ft=20000, on_ground=False),
+    ] + _ARRIVAL_AT_B2
+    got = _blocks(
+        spark,
+        _reports(spark, legs, moving=True),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ATOT", 20), ("ALDT", 1000)]),
+    )
+
+    assert got == [("on", 1290.0, "B2", "EDDF")]
+
+
+def test_an_arrival_first_received_on_final_gives_no_off_block(spark):
+    """First report on final approach at 1,200 ft and 140 kt, landing at
+    1,000 s: no off-block time in the air."""
+    legs = [_leg(900, 1000, 140, alt_ft=1200, on_ground=False)] + ARRIVAL[1:]
+    got = _blocks(
+        spark,
+        _reports(spark, legs, moving=True),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ALDT", 1000)]),
+    )
+
+    assert got == [("on", 1290.0, "B2", "EDDF")]
+
+
+def test_a_departure_ending_in_the_climb_below_2000_ft_gives_no_in_block(spark):
+    """The track ends at 1,200 ft and 160 kt, still climbing: the last
+    movement ends at the last report while fast, so no in-block time."""
+    legs = DEPARTURE[:-1] + [_leg(600, 700, 160, alt_ft=1200, on_ground=False)]
+    got = _blocks(
+        spark,
+        _reports(spark, legs, moving=True),
+        _stands(spark, DEPARTURE_STANDS),
+        _runway(spark, [("ATOT", 600)]),
+    )
+
+    assert got == [("off", 60.0, "A1", "EBBR")]
+
+
+def test_a_departure_ending_in_cruise_with_reports_without_position_gives_no_in_block(spark):
+    """The track ends in cruise at 35,000 ft and 450 kt with 60 s of reports
+    that carry an altitude but no position: they say nothing about the
+    ground, so they give no movement on it."""
+    legs = DEPARTURE[:-1] + [_leg(600, 1500, 450, alt_ft=35000, on_ground=False)]
+    rows = [
+        ("trk-1", _at(s), 50.0, 4.0, _kt(kt), a, g) for leg in legs for (s, kt, a, g) in leg
+    ] + [
+        ("trk-1", _at(s), None, None, _kt(450), 35000 / FT_PER_M, False)
+        for s in range(1500, 1570, 10)
+    ]
+    got = _blocks(
+        spark,
+        spark.createDataFrame(rows, _REPORT_DDL),
+        _stands(spark, DEPARTURE_STANDS),
+        _runway(spark, [("ATOT", 600)]),
+    )
+
+    assert got == [("off", 60.0, "A1", "EBBR")]
+
+
+def test_a_wait_at_the_holding_point_between_two_circuits_is_not_a_stand_stop(spark):
+    """A training flight: leaves stand A1, take-off at 600 s, full-stop
+    landing at 1,200 s, taxi back, a 200 s wait at the holding point, take-off
+    at 1,700 s, landing at 2,300 s, parks at A1. No stand lies between the
+    two flights, so the wait gives no in-block and no off-block time."""
+    legs = [
+        _leg(0, 60, 0),
+        _leg(60, 600, 15),
+        _leg(600, 1200, 100, alt_ft=3000, on_ground=False),
+        _leg(1200, 1400, 15),
+        _leg(1400, 1600, 0),
+        _leg(1600, 1700, 15),
+        _leg(1700, 2300, 100, alt_ft=3000, on_ground=False),
+        _leg(2300, 2500, 15),
+        _leg(2500, 2600, 0),
+    ]
+    stands = [
+        ("entry-parking_position", 0, "A1", "EBBR"),
+        ("exit-parking_position", 70, "A1", "EBBR"),
+        ("entry-parking_position", 2490, "A1", "EBBR"),
+    ]
+    got = _blocks(
+        spark,
+        _reports(spark, legs),
+        _stands(spark, stands),
+        _runway(spark, [("ATOT", 600), ("ALDT", 1200), ("ATOT", 1700), ("ALDT", 2300)]),
+    )
+
+    assert got == [("off", 60.0, "A1", "EBBR"), ("on", 2490.0, "A1", "EBBR")]
+
+
+def test_a_stale_reported_speed_on_the_stand_does_not_hide_the_in_block(spark):
+    """The reported speed of the last reports repeats 100 kt while the
+    positions stand still at the stand: the position-derived speed says the
+    aircraft stopped, and the in-block time is kept."""
+    legs = ARRIVAL[:-1]
+    rows = [
+        ("trk-1", _at(s), 50.0 + s * 1e-5, 4.0, _kt(kt), a, g)
+        for leg in legs
+        for (s, kt, a, g) in leg
+    ]
+    # At the stand: the positions do not move, the reported speed is stale.
+    rows += [
+        ("trk-1", _at(s), 50.0 + 1300 * 1e-5, 4.0, _kt(100), None, True)
+        for s in range(1300, 1330, 10)
+    ]
+    got = _blocks(
+        spark,
+        spark.createDataFrame(rows, _REPORT_DDL),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ALDT", 1000)]),
+    )
+
+    assert [g[0] for g in got] == ["on"]
+
+
+def _ground_flag(spark, alt_ft, d_dep_nm, d_arr_nm, lat=50.0):
+    from opdi.pipeline.ground import on_or_near_ground
+
+    df = spark.createDataFrame(
+        [(lat, alt_ft / FT_PER_M, False, 100.0, 5000.0, d_dep_nm, d_arr_nm)],
+        "lat double, baro_altitude_c double, on_ground boolean, elev_adep_ft double, "
+        "elev_ades_ft double, dist_adep_nm double, dist_ades_nm double",
+    )
+    return df.select(on_or_near_ground(df, EventConfig()).alias("g")).first().g
+
+
+def test_the_height_is_measured_above_the_airport_of_the_leg(spark):
+    """Departure from a 100 ft airport to one at 5,000 ft. At 6,500 ft next to
+    the departure airport the aircraft is 6,400 ft above it: in flight. The
+    same altitude next to the 5,000 ft airport is 1,500 ft above it: possibly
+    on the ground there."""
+    assert _ground_flag(spark, 6500, 1.0, 60.0) is False
+    assert _ground_flag(spark, 6500, 60.0, 1.0) is True
+
+
+def test_a_report_without_position_counts_as_ground_only_when_flagged_or_without_altitude(spark):
+    from opdi.pipeline.ground import on_or_near_ground
+
+    df = spark.createDataFrame(
+        [(None, 35000 / FT_PER_M, False), (None, 35000 / FT_PER_M, True), (None, None, False)],
+        "lat double, baro_altitude_c double, on_ground boolean",
+    )
+    got = [r.g for r in df.select(on_or_near_ground(df, EventConfig()).alias("g")).collect()]
+    assert got == [False, True, True]
