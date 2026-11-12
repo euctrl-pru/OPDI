@@ -52,23 +52,15 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import provenance  # noqa: E402
 
-#: Storage is SI; these are the conversions ``events.py`` uses.
-FT_PER_M = 3.28084
-KT_PER_MPS = 1.94384
-FTMIN_PER_MPS = 196.850394
-
-#: Events that happen at the departure airport. Their height is measured above
-#: the flight's departure airport unless the event names an airport itself.
-DEPARTURE_SIDE = ("AOBT", "off-block", "line-up", "take-off-roll", "ATOT", "airborne", "take-off")
-#: Events that happen at the destination airport.
-ARRIVAL_SIDE = (
-    "AIBT",
-    "on-block",
-    "ALDT",
-    "touchdown",
-    "landing",
-    "runway-vacated",
-    "go-around",
+# The context of an event, and the airport sides it uses, live in the package:
+# step 04 uses the same function for its plausibility checks.
+from opdi.pipeline.plausibility import (  # noqa: E402
+    ARRIVAL_SIDE,  # noqa: F401  (part of this script's interface)
+    DEPARTURE_SIDE,  # noqa: F401
+    FT_PER_M,
+    FTMIN_PER_MPS,  # noqa: F401
+    KT_PER_MPS,  # noqa: F401
+    event_context,
 )
 
 #: The working tables of this study, and the only place it writes.
@@ -91,6 +83,7 @@ RECORD_SEARCH_S = 6 * 3600.0
 _CODE_PATHS = [
     "benchmarks/milestone_plausibility.py",
     "benchmarks/events_gt.py",
+    "src/opdi/pipeline/plausibility.py",
     "src/opdi/utils/geometry.py",
 ]
 
@@ -103,176 +96,6 @@ def scratch_path(day: str) -> str:
 def _guard(path: str) -> None:
     if not path.startswith(SCRATCH + "/"):
         raise AssertionError(f"refusing to write {path!r}: this study writes under {SCRATCH}")
-
-
-# ---------------------------------------------------------------------------
-# Context of an event
-# ---------------------------------------------------------------------------
-
-
-def event_context(events, tracks, airports, window_s: float = 60.0):
-    """Add to each event the state of the aircraft at the event's time.
-
-    Args:
-        events: one row per event with ``event_id`` (unique), ``track_id``,
-            ``type`` and ``event_time``, and optionally ``apt_icao`` (the
-            airport the event names), ``adep`` and ``ades`` (the flight's
-            departure and destination airports).
-        tracks: position reports with ``track_id``, ``event_time``, ``lat``,
-            ``lon``, ``baro_altitude_c`` (m), ``velocity`` (m/s), ``vert_rate``
-            (m/s) and optionally ``on_ground``.
-        airports: ``ident``, ``latitude_deg``, ``longitude_deg``,
-            ``elevation_ft`` (the OurAirports table).
-        window_s: only reports within this many seconds of the event are read.
-
-    Returns:
-        ``events`` with these columns added, each NULL when unknown:
-
-        * ``ctx_gap_s`` -- seconds to the nearest report of the track;
-        * ``ctx_altitude_ft`` -- barometric altitude of the nearest report that
-          has one;
-        * ``ctx_height_ft`` -- that altitude minus the elevation of the event's
-          airport (``ctx_airport``);
-        * ``ctx_speed_kt``, ``ctx_vertical_rate_ft_min`` -- ground speed and
-          vertical rate of the nearest report that has them;
-        * ``ctx_on_ground`` -- share of the reports in the window flagged on the
-          ground (0 to 1);
-        * ``ctx_lat``, ``ctx_lon`` -- position of the nearest report with one;
-        * ``ctx_airport`` -- the airport the event belongs to: the one it names,
-          else the departure airport for a departure-side type
-          (:data:`DEPARTURE_SIDE`), the destination for an arrival-side type
-          (:data:`ARRIVAL_SIDE`), and for every other type the nearer of the
-          two to the aircraft;
-        * ``ctx_airport_elevation_ft``, ``ctx_airport_distance_nm``.
-
-    When two reports are equally near, the earlier one is used.
-    """
-    from pyspark.sql import functions as F
-
-    from opdi.utils.geometry import haversine_nm
-
-    w = float(window_s)
-    ev = events
-    for c in ("apt_icao", "adep", "ades"):
-        if c not in ev.columns:
-            ev = ev.withColumn(c, F.lit(None).cast("string"))
-
-    # Reports are joined through time buckets one window wide: an event meets
-    # the reports of its own bucket and of the two next to it, which holds
-    # every report within the window and few others.
-    probe = ev.select(
-        F.col("event_id").alias("_eid"),
-        F.col("track_id").alias("_etrack"),
-        F.col("event_time").cast("double").alias("_et"),
-    ).withColumn("_eb0", F.floor(F.col("_et") / F.lit(w)))
-    probe = probe.withColumn(
-        "_eb", F.explode(F.array(F.col("_eb0") - 1, F.col("_eb0"), F.col("_eb0") + 1))
-    ).drop("_eb0")
-
-    on_ground = (
-        F.col("on_ground").cast("double")
-        if "on_ground" in tracks.columns
-        else F.lit(None).cast("double")
-    )
-    rep = tracks.select(
-        F.col("track_id").alias("_rtrack"),
-        F.col("event_time").cast("double").alias("_rt"),
-        F.col("lat").alias("_lat"),
-        F.col("lon").alias("_lon"),
-        F.col("baro_altitude_c").alias("_alt_m"),
-        F.col("velocity").alias("_gs_ms"),
-        F.col("vert_rate").alias("_vr_ms"),
-        on_ground.alias("_gnd"),
-    ).withColumn("_rb", F.floor(F.col("_rt") / F.lit(w)))
-
-    pairs = probe.join(
-        rep, (probe["_etrack"] == rep["_rtrack"]) & (probe["_eb"] == rep["_rb"]), "inner"
-    )
-    pairs = pairs.withColumn("_dt", F.col("_rt") - F.col("_et")).filter(
-        F.abs(F.col("_dt")) <= F.lit(w)
-    )
-    # Nearest first; a report after the event loses a tie to one before it.
-    pairs = pairs.withColumn(
-        "_key", F.abs(F.col("_dt")) + F.when(F.col("_dt") > 0, F.lit(1e-3)).otherwise(F.lit(0.0))
-    )
-
-    def nearest(value, *needed):
-        known = F.lit(True)
-        for c in needed:
-            known = known & F.col(c).isNotNull()
-        return F.min_by(value, F.when(known, F.col("_key")))
-
-    agg = pairs.groupBy("_eid").agg(
-        F.min(F.abs(F.col("_dt"))).alias("ctx_gap_s"),
-        nearest(F.col("_alt_m"), "_alt_m").alias("_alt_m"),
-        nearest(F.col("_gs_ms"), "_gs_ms").alias("_gs_ms"),
-        nearest(F.col("_vr_ms"), "_vr_ms").alias("_vr_ms"),
-        nearest(F.struct(F.col("_lat"), F.col("_lon")), "_lat", "_lon").alias("_pos"),
-        F.avg(F.col("_gnd")).alias("ctx_on_ground"),
-    )
-
-    out = ev.join(agg, ev["event_id"] == agg["_eid"], "left").drop("_eid")
-    out = (
-        out.withColumn("ctx_altitude_ft", F.col("_alt_m") * F.lit(FT_PER_M))
-        .withColumn("ctx_speed_kt", F.col("_gs_ms") * F.lit(KT_PER_MPS))
-        .withColumn("ctx_vertical_rate_ft_min", F.col("_vr_ms") * F.lit(FTMIN_PER_MPS))
-        .withColumn("ctx_lat", F.col("_pos._lat"))
-        .withColumn("ctx_lon", F.col("_pos._lon"))
-        .drop("_alt_m", "_gs_ms", "_vr_ms", "_pos")
-    )
-
-    apt = airports.select(
-        F.col("ident"),
-        F.col("latitude_deg").cast("double").alias("_alat"),
-        F.col("longitude_deg").cast("double").alias("_alon"),
-        F.col("elevation_ft").cast("double").alias("_aelev"),
-    )
-
-    def airport(prefix):
-        return F.broadcast(
-            apt.select(
-                F.col("ident").alias(f"{prefix}_ident"),
-                F.col("_alat").alias(f"{prefix}_lat"),
-                F.col("_alon").alias(f"{prefix}_lon"),
-            )
-        )
-
-    out = out.join(airport("_dep"), F.col("adep") == F.col("_dep_ident"), "left")
-    out = out.join(airport("_arr"), F.col("ades") == F.col("_arr_ident"), "left")
-    d_dep = haversine_nm(F.col("ctx_lat"), F.col("ctx_lon"), F.col("_dep_lat"), F.col("_dep_lon"))
-    d_arr = haversine_nm(F.col("ctx_lat"), F.col("ctx_lon"), F.col("_arr_lat"), F.col("_arr_lon"))
-    nearer = (
-        F.when(d_dep.isNull(), F.when(d_arr.isNotNull(), F.col("ades")))
-        .when(d_arr.isNull(), F.col("adep"))
-        .when(d_dep <= d_arr, F.col("adep"))
-        .otherwise(F.col("ades"))
-    )
-    out = out.withColumn(
-        "ctx_airport",
-        F.coalesce(
-            F.col("apt_icao"),
-            F.when(F.col("type").isin(*DEPARTURE_SIDE), F.col("adep"))
-            .when(F.col("type").isin(*ARRIVAL_SIDE), F.col("ades"))
-            .otherwise(nearer),
-        ),
-    ).drop("_dep_ident", "_dep_lat", "_dep_lon", "_arr_ident", "_arr_lat", "_arr_lon")
-
-    own = F.broadcast(
-        apt.select(
-            F.col("ident").alias("_own_ident"),
-            F.col("_alat").alias("_own_lat"),
-            F.col("_alon").alias("_own_lon"),
-            F.col("_aelev").alias("ctx_airport_elevation_ft"),
-        )
-    )
-    out = out.join(own, F.col("ctx_airport") == F.col("_own_ident"), "left")
-    out = out.withColumn(
-        "ctx_height_ft", F.col("ctx_altitude_ft") - F.col("ctx_airport_elevation_ft")
-    ).withColumn(
-        "ctx_airport_distance_nm",
-        haversine_nm(F.col("ctx_lat"), F.col("ctx_lon"), F.col("_own_lat"), F.col("_own_lon")),
-    )
-    return out.drop("_own_ident", "_own_lat", "_own_lon")
 
 
 # ---------------------------------------------------------------------------
@@ -1105,6 +928,370 @@ def run_analyse(args, argv) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Before and after the checks (Spark, on the cluster)
+# ---------------------------------------------------------------------------
+
+#: The events of step 04 run with the checks and the two detector corrections
+#: (``benchmarks/run_plausibility_day.py``).
+AFTER_ROOT = f"{SCRATCH}/after"
+AFTER_EVENTS = f"{AFTER_ROOT}/opdi_flight_events"
+AFTER_REJECTED = f"{AFTER_ROOT}/opdi_flight_events_rejected"
+#: The two off-block times confirmed by the records that the checks of Task 1
+#: would remove (ENGM, LDZA).
+KNOWN_CASES = ("72093ba15069144d_1781424689", "b639fcfdfe5eef4d_1781472634")
+#: Types whose rows carry a ``direction`` in ``info``: the crossings.
+CROSSING_PREFIX = "xing-"
+
+
+def _records(spark, day: str):
+    """The airport records of the four milestones, for the day and the days either side."""
+    import events_gt
+    from pyspark.sql import functions as F
+
+    events_gt.assert_utc_session(spark)
+    spec = events_gt.PERIODS["2026"]
+    apdf = events_gt.load_apdf(spark, spec["month"], full=False)
+    flights = events_gt.load_flights(spark, spec["month"])
+    d = F.lit(day).cast("date")
+    days = [str(x) for x in spark.range(1).select(F.date_sub(d, 1), d, F.date_add(d, 1)).first()]
+    return events_gt.milestones(events_gt.bridge(apdf, flights), days, "all").select(
+        F.col("icao24").alias("_g_icao24"),
+        F.col("callsign").alias("_g_callsign"),
+        F.col("milestone").alias("_g_type"),
+        F.col("gt_time"),
+        F.col("gt_airport"),
+    )
+
+
+def _scored(events, flights, truth):
+    """Events of the four recorded types with the nearest record of their flight.
+
+    Adds ``error_s`` (event minus record, NULL without a record) and the
+    record's key (``_g_*``, ``gt_time``).
+    """
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+
+    ev = events.filter(F.col("type").isin(*RECORDED)).withColumn(
+        "_eid", F.monotonically_increasing_id()
+    )
+    ev = ev.join(flights, F.col("flight_id") == F.col("_fl_id"), "left").drop("_fl_id")
+    ev = ev.cache()
+    rec = ev.join(
+        truth,
+        (F.col("icao24") == F.col("_g_icao24"))
+        & (F.col("callsign") == F.col("_g_callsign"))
+        & (F.col("type") == F.col("_g_type")),
+        "inner",
+    ).withColumn("error_s", F.col("event_time").cast("double") - F.col("gt_time").cast("double"))
+    rec = rec.filter(F.abs(F.col("error_s")) <= F.lit(RECORD_SEARCH_S))
+    best = Window.partitionBy("_eid").orderBy(F.abs(F.col("error_s")).asc())
+    rec = (
+        rec.withColumn("_r", F.row_number().over(best))
+        .filter(F.col("_r") == 1)
+        .select("_eid", "_g_icao24", "_g_callsign", "gt_time", "gt_airport", "error_s")
+    )
+    return ev.join(rec, "_eid", "left")
+
+
+def _record_summary(scored, truth_day):
+    """Per type: events, with a record, confirmed, shares, 90th percentile, coverage."""
+    from pyspark.sql import functions as F
+
+    a = F.abs(F.col("error_s"))
+    per_event = scored.groupBy("type").agg(
+        F.count(F.lit(1)).alias("events"),
+        F.count("error_s").alias("events_with_record"),
+        F.sum(F.when(a <= CONFIRMED_S, 1).otherwise(0)).alias("confirmed_60s"),
+        F.sum(F.when(a <= FAR_S, 1).otherwise(0)).alias("within_300s"),
+        F.percentile_approx(a, 0.9, 100000).alias("p90_abs_error_s"),
+        F.percentile_approx(F.when(a <= CONFIRMED_S, F.col("error_s")), 0.5, 100000).alias(
+            "median_error_confirmed_s"
+        ),
+    )
+    found = (
+        scored.filter(F.col("error_s").isNotNull())
+        .select("type", "_g_icao24", "_g_callsign", "gt_time", (a <= CONFIRMED_S).alias("_c"))
+        .groupBy("type", "_g_icao24", "_g_callsign", "gt_time")
+        .agg(F.max("_c").alias("_c"))
+        .join(
+            truth_day.select(
+                F.col("_g_type").alias("type"), "_g_icao24", "_g_callsign", "gt_time"
+            ).distinct(),
+            ["type", "_g_icao24", "_g_callsign", "gt_time"],
+            "inner",
+        )
+        .groupBy("type")
+        .agg(
+            F.count(F.lit(1)).alias("records_found"),
+            F.sum(F.col("_c").cast("int")).alias("records_confirmed"),
+        )
+    )
+    on_day = truth_day.groupBy(F.col("_g_type").alias("type")).agg(
+        F.countDistinct("_g_icao24", "_g_callsign", "gt_time").alias("records_on_day")
+    )
+    return {
+        r["type"]: r.asDict()
+        for r in per_event.join(found, "type", "left").join(on_day, "type", "left").collect()
+    }
+
+
+def _type_counts(events):
+    """Per type: events, events without a time, and crossings sharing their time."""
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+
+    ev = events.withColumn("_dir", F.get_json_object(F.col("info"), "$.direction"))
+    same = Window.partitionBy("flight_id", "type", "event_time")
+    ev = ev.withColumn(
+        "_n_same",
+        F.when(F.col("event_time").isNotNull(), F.count(F.lit(1)).over(same)),
+    ).withColumn(
+        "_dirs_same",
+        F.when(F.col("event_time").isNotNull(), F.size(F.collect_set("_dir").over(same))),
+    )
+    xing = F.col("type").startswith(CROSSING_PREFIX)
+    rows = ev.groupBy("type").agg(
+        F.count(F.lit(1)).alias("events"),
+        F.sum(F.col("event_time").isNull().cast("int")).alias("without_time"),
+        F.sum(F.when(xing & (F.col("_n_same") > 1), 1).otherwise(0)).alias(
+            "crossings_sharing_time"
+        ),
+        F.sum(F.when(xing & (F.col("_dirs_same") > 1), 1).otherwise(0)).alias(
+            "crossings_sharing_time_other_direction"
+        ),
+    )
+    return {r["type"]: r.asDict() for r in rows.collect()}
+
+
+def _null_fate(before, after):
+    """Of the events without a time before: how many have a time after, how many are gone.
+
+    Counted per (track, type, direction, airport): the crossings that happen are
+    the same before and after, so a group that has fewer events after than
+    before (with and without time) lost the ones that could not be placed.
+    """
+    from pyspark.sql import functions as F
+
+    def keyed(df):
+        return df.select(
+            "flight_id",
+            "type",
+            F.coalesce(F.get_json_object("info", "$.direction"), F.lit("")).alias("_dir"),
+            F.coalesce(F.get_json_object("info", "$.apt_icao"), F.lit("")).alias("_apt"),
+            F.col("event_time").isNull().alias("_null"),
+        )
+
+    key = ["flight_id", "type", "_dir", "_apt"]
+    b = (
+        keyed(before)
+        .groupBy(*key)
+        .agg(F.sum(F.col("_null").cast("int")).alias("_b_null"), F.count(F.lit(1)).alias("_b_all"))
+    )
+    b = b.filter(F.col("_b_null") > 0)
+    a = keyed(after).filter(~F.col("_null")).groupBy(*key).agg(F.count(F.lit(1)).alias("_a"))
+    j = b.join(a, key, "left").withColumn("_a", F.coalesce("_a", F.lit(0)))
+    j = j.withColumn(
+        "_gone", F.least(F.col("_b_null"), F.greatest(F.col("_b_all") - F.col("_a"), F.lit(0)))
+    )
+    rows = j.groupBy("type").agg(
+        F.sum("_b_null").alias("null_before"),
+        F.sum(F.col("_b_null") - F.col("_gone")).alias("null_now_timed"),
+        F.sum("_gone").alias("null_not_emitted"),
+    )
+    return {r["type"]: r.asDict() for r in rows.collect()}
+
+
+def _kept_in_place(before_scored, after):
+    """Per type: confirmed events before, and how many have the same time after."""
+    from pyspark.sql import functions as F
+
+    conf = before_scored.filter(F.abs(F.col("error_s")) <= CONFIRMED_S).select(
+        "flight_id", "type", "event_time"
+    )
+    there = after.select("flight_id", "type", "event_time").distinct().withColumn("_x", F.lit(1))
+    rows = (
+        conf.join(there, ["flight_id", "type", "event_time"], "left")
+        .groupBy("type")
+        .agg(
+            F.count(F.lit(1)).alias("confirmed_before"),
+            F.sum(F.coalesce("_x", F.lit(0))).alias("confirmed_before_same_time_after"),
+        )
+    )
+    return {r["type"]: r.asDict() for r in rows.collect()}
+
+
+def run_before_after(args, argv) -> int:
+    """Score the events before and after the checks against the airport records."""
+    import pandas as pd
+    from pyspark.sql import functions as F
+    from run_airspace_events_day import study_session
+
+    spark = study_session("milestone plausibility before/after", executors=args.executors)
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    spark.conf.set("spark.sql.shuffle.partitions", "400")
+    d = F.lit(args.day).cast("date")
+    before = spark.read.parquet(EVENTS).filter(F.col("dof") == d)
+    after = spark.read.parquet(AFTER_EVENTS).filter(F.col("dof") == d)
+    rejected = spark.read.parquet(AFTER_REJECTED).filter(F.col("dof") == d)
+    flights = (
+        spark.read.parquet(FLIGHT_LIST)
+        .filter(F.col("DOF") == d)
+        .select(
+            F.col("ID").alias("_fl_id"),
+            F.lower(F.col("ICAO24")).alias("icao24"),
+            F.trim(F.col("FLT_ID")).alias("callsign"),
+        )
+    )
+    truth = _records(spark, args.day).cache()
+    truth_day = truth.filter(F.to_date("gt_time") == d).filter(F.col("gt_airport").isNotNull())
+
+    b_sc, a_sc = _scored(before, flights, truth), _scored(after, flights, truth)
+    stats = {
+        "before": _record_summary(b_sc, truth_day),
+        "after": _record_summary(a_sc, truth_day),
+    }
+    counts = {"before": _type_counts(before), "after": _type_counts(after)}
+    fate = _null_fate(before, after)
+    in_place = _kept_in_place(b_sc, after)
+
+    types = sorted(set(counts["before"]) | set(counts["after"]))
+    rows = []
+    for t in types:
+        row = {"type": t}
+        for side in ("before", "after"):
+            c = counts[side].get(t, {})
+            row[f"events_{side}"] = c.get("events", 0)
+            row[f"without_time_{side}"] = c.get("without_time", 0)
+            row[f"crossings_sharing_time_{side}"] = c.get("crossings_sharing_time", 0)
+            row[f"crossings_sharing_time_other_direction_{side}"] = c.get(
+                "crossings_sharing_time_other_direction", 0
+            )
+        f = fate.get(t, {})
+        row["null_before"] = f.get("null_before", 0)
+        row["null_now_timed"] = f.get("null_now_timed", 0)
+        row["null_not_emitted"] = f.get("null_not_emitted", 0)
+        if t in RECORDED:
+            for side in ("before", "after"):
+                s = stats[side].get(t, {})
+                n_rec = s.get("events_with_record") or 0
+                row[f"with_record_{side}"] = n_rec
+                row[f"confirmed_60s_{side}"] = s.get("confirmed_60s") or 0
+                row[f"share_60s_{side}_pct"] = (
+                    round(100.0 * (s.get("confirmed_60s") or 0) / n_rec, 2) if n_rec else None
+                )
+                row[f"share_300s_{side}_pct"] = (
+                    round(100.0 * (s.get("within_300s") or 0) / n_rec, 2) if n_rec else None
+                )
+                row[f"p90_abs_error_s_{side}"] = s.get("p90_abs_error_s")
+                row[f"median_error_confirmed_s_{side}"] = s.get("median_error_confirmed_s")
+                row[f"records_on_day_{side}"] = s.get("records_on_day")
+                row[f"records_found_{side}"] = s.get("records_found")
+                row[f"records_confirmed_{side}"] = s.get("records_confirmed")
+                on_day = s.get("records_on_day") or 0
+                row[f"coverage_{side}_pct"] = (
+                    round(100.0 * (s.get("records_found") or 0) / on_day, 2) if on_day else None
+                )
+            k = in_place.get(t, {})
+            row["confirmed_before_same_time_after"] = k.get("confirmed_before_same_time_after")
+        rows.append(row)
+    table = pd.DataFrame(rows)
+
+    r_sc = _scored(rejected, flights, truth)
+    a = F.abs(F.col("error_s"))
+    rec_part = r_sc.groupBy("reject_rule", "type").agg(
+        F.count("error_s").alias("removed_with_record"),
+        F.sum(F.when(a <= CONFIRMED_S, 1).otherwise(0)).alias("removed_confirmed_60s"),
+        F.sum(F.when(a > FAR_S, 1).otherwise(0)).alias("removed_far_300s"),
+    )
+    removed = (
+        rejected.groupBy("reject_rule", "type")
+        .agg(F.count(F.lit(1)).alias("removed"))
+        .join(rec_part, ["reject_rule", "type"], "left")
+        .toPandas()
+        .sort_values(["reject_rule", "type"])
+    )
+    for c in ("removed_with_record", "removed_confirmed_60s", "removed_far_300s"):
+        removed[c] = removed[c].fillna(0).astype(int)
+    total = {
+        "reject_rule": "ALL",
+        "type": "ALL",
+        **{c: int(removed[c].sum()) for c in removed.columns if c.startswith("removed")},
+    }
+    removed = pd.concat([removed, pd.DataFrame([total])], ignore_index=True)
+
+    known = []
+    for name, df in (("before", before), ("after", after), ("rejected", rejected)):
+        for r in (
+            df.filter(F.col("flight_id").isin(*KNOWN_CASES))
+            .filter(F.col("type").isin("AOBT", "AIBT", "ATOT", "ALDT"))
+            .select("flight_id", "type", "event_time", "info")
+            .orderBy("flight_id", "event_time")
+            .collect()
+        ):
+            known.append(f"{name}: {r['flight_id']} {r['type']} {r['event_time']} {r['info']}")
+    spark.stop()
+
+    out = Path(args.results_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    inputs = {"day": args.day, "known_cases": known}
+    for name, frame in (("before_after.csv", table), ("removed_by_rule.csv", removed)):
+        frame.to_csv(out / name, index=False)
+        provenance.record(
+            out,
+            name,
+            "benchmarks/milestone_plausibility.py",
+            argv,
+            [REPO / p for p in _CODE_PATHS + _AFTER_CODE_PATHS],
+            inputs={**inputs, "rows": int(len(frame))},
+            input_tables=[EVENTS, AFTER_EVENTS, AFTER_REJECTED, FLIGHT_LIST],
+            notes=(
+                "Before: the events of research/airspace_events/on. After: step 04 run by "
+                "benchmarks/run_plausibility_day.py under " + AFTER_ROOT + "."
+            ),
+        )
+        print(f"wrote {out / name} ({len(frame)} rows)")
+    print(table.to_string())
+    print(removed.to_string())
+    print("\n".join(known))
+    return 0
+
+
+#: The code the "after" events depend on, besides :data:`_CODE_PATHS`.
+_AFTER_CODE_PATHS = [
+    "benchmarks/run_plausibility_day.py",
+    "src/opdi/pipeline/events.py",
+    "src/opdi/pipeline/ground.py",
+    "src/opdi/pipeline/crossings.py",
+    "src/opdi/pipeline/runway_ops.py",
+    "src/opdi/config/events.py",
+]
+
+
+def run_clean_after(args) -> int:
+    """Delete the events of the "after" run, object by object."""
+    import boto3
+
+    import opdi.config.dotenv  # noqa: F401  (reads .env into the environment)
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=os.environ.get("OPDI_S3_ENDPOINT", "https://s3.opensky-network.org"),
+        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    )
+    _guard(AFTER_ROOT + "/x")
+    bucket, _, key = AFTER_ROOT.replace("s3a://", "").partition("/")
+    n = 0
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=key + "/"):
+        for o in page.get("Contents", []):
+            s3.delete_object(Bucket=bucket, Key=o["Key"])
+            n += 1
+    print(f"deleted {AFTER_ROOT} ({n} objects)")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1120,6 +1307,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     a.add_argument("--cache-dir", default=None)
     k = sub.add_parser("clean")
     k.add_argument("--day", required=True)
+    b = sub.add_parser("before-after")
+    b.add_argument("--day", required=True)
+    b.add_argument("--results-dir", required=True)
+    b.add_argument("--executors", type=int, default=8)
+    sub.add_parser("clean-after")
     args = ap.parse_args(argv)
     if args.cmd == "context":
         return run_context(args)
@@ -1127,6 +1319,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run_analyse(args, list(sys.argv[1:] if argv is None else argv))
     if args.cmd == "clean":
         return run_clean(args)
+    if args.cmd == "before-after":
+        return run_before_after(args, list(sys.argv[1:] if argv is None else argv))
+    if args.cmd == "clean-after":
+        return run_clean_after(args)
     return 1
 
 
