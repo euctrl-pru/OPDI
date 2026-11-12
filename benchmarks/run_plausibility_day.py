@@ -18,7 +18,7 @@ the airspace events study, and the reference tables of ``opdi-world``.
 
 **Where it writes.** Only under
 ``s3a://eurocontrol/opdi-world/research/plausibility/after/``: the events,
-the measurements and the removed events. :func:`guard_write_path` raises on
+the measurements and the removed events. :func:`check_write_path` raises on
 anything else. Delete the folder once the study tables are staged
 (``milestone_plausibility.py clean-after``).
 """
@@ -71,7 +71,7 @@ def table_path(table: str) -> str:
     raise RuntimeError(f"unclassified table {table!r} in benchmarks/run_plausibility_day.py")
 
 
-def guard_write_path(path: str) -> None:
+def check_write_path(path: str) -> None:
     """Refuse a write outside the study prefix. Raises."""
     if not ALLOWED_WRITE_ROOT.match(path):
         raise AssertionError(f"refusing to write {path!r}: this run writes under {PREFIX!r} only")
@@ -89,11 +89,11 @@ def redirect() -> None:
         return table_path(table_name)
 
     def write_table(self, df, table_name, mode="append", partition_by=None, partition_values=None):
-        guard_write_path(_s3_path(self, table_name))
+        check_write_path(_s3_path(self, table_name))
         return orig_write(self, df, table_name, mode, partition_by, partition_values)
 
     def drop_partitions(self, table_name, column, values):
-        guard_write_path(_s3_path(self, table_name))
+        check_write_path(_s3_path(self, table_name))
         return orig_drop(self, table_name, column, values)
 
     StorageManager._s3_path = _s3_path

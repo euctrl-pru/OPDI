@@ -55,8 +55,9 @@ detector already tests the height on the runway, so a report that
 contradicts them points at an altitude error rather than a wrong event.
 
 The thresholds come from a study of one worldwide day (2026-06-14) against
-the times airport operators report for about ninety European airports: the
-checks remove 0.006% of the events those records confirm within 60 s.
+the times airport operators report for about ninety European airports; each
+is set where it removes none of the events those records confirm within
+60 s, and the website gives the measured numbers.
 See ``https://www.opdi.aero/content/methods/plausibility-checks.html``.
 
 Removed events are kept, with the check that removed them and the facts it
