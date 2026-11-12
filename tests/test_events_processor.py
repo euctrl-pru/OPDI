@@ -1032,3 +1032,66 @@ def test_the_navigation_group_is_tracked_in_the_progress_log(spark, tmp_path):
     assert dt.date(2026, 6, 14) in [
         d.date() if hasattr(d, "date") else d for d in proc._load_processed("navigation")
     ]
+
+
+def test_a_removed_event_leaves_no_measurement_and_no_flight_list_column(
+    spark, stub_storage, monkeypatch
+):
+    """An off-block time placed at cruise (35,000 ft, 600 kt) is removed by the
+    plausibility checks. It is written to the working table of removed events,
+    not to the events; it has no measurement; and step 04b, which reads the
+    events, leaves the flight list's AOBT column empty."""
+    from opdi.pipeline import events as events_module
+    from opdi.pipeline.flight_list_milestones import enrich_flight_list
+    from opdi.pipeline.plausibility import REJECTED_TABLE
+
+    cruise = _T0 + dt.timedelta(seconds=300)
+
+    def in_flight_block(sdf, airport_events, config=None, runway_events=None):
+        return sdf.limit(1).select(
+            F.lit("trk-1").alias("track_id"),
+            F.lit("AOBT").alias("type"),
+            F.lit(cruise).alias("event_time"),
+            F.lit(None).cast("double").alias("lon"),
+            F.lit(None).cast("double").alias("lat"),
+            F.lit(None).cast("double").alias("altitude_ft"),
+            F.lit(None).cast("double").alias("cumulative_distance_nm"),
+            F.lit(None).cast("long").alias("cumulative_time_s"),
+            F.lit("{}").alias("info"),
+        )
+
+    monkeypatch.setattr(events_module, "calculate_block_events", in_flight_block)
+    storage = _StubStorage(
+        stub_storage._tables,
+        stub_storage.tracks.withColumn(
+            "on_ground", F.col("baro_altitude_c") * 3.28084 < F.lit(1.0)
+        ),
+    )
+    config = OPDIConfig()
+    config.events = EventConfig()
+    with tempfile.TemporaryDirectory() as log_dir:
+        proc = FlightEventProcessor(spark, config, log_dir=log_dir)
+        proc.storage = storage
+        proc._etl_flight_events_and_measures(storage.tracks, batch_id="b_", month=MONTH)
+
+    events = spark.createDataFrame(
+        storage.written["opdi_flight_events"].collect(),
+        storage.written["opdi_flight_events"].schema,
+    )
+    rejected = storage.written[REJECTED_TABLE].collect()
+    measurements = storage.written["opdi_measurements"].collect()
+    spark.catalog.clearCache()
+
+    assert [(r["type"], r["event_time"], r["reject_rule"]) for r in rejected] == [
+        ("AOBT", cruise, "airborne_ground_event")
+    ]
+    assert events.filter(F.col("type") == "AOBT").count() == 0
+    assert rejected[0]["id"] not in {m["milestone_id"] for m in measurements}
+
+    flight_list = spark.createDataFrame(
+        [("trk-1", "abc123", "TEST123", _T0, "EBBR", "EDDF", "v", _T0, _T0)],
+        "id string, ICAO24 string, FLT_ID string, DOF timestamp, ADEP string, ADES string, "
+        "VERSION string, FIRST_SEEN timestamp, LAST_SEEN timestamp",
+    )
+    row = enrich_flight_list(flight_list, events, EventConfig()).collect()[0]
+    assert row["AOBT"] is None

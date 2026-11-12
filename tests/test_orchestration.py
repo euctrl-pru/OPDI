@@ -306,6 +306,8 @@ def test_prune_drops_working_days_only_when_published(monkeypatch):
     working = {(p.rsplit("/", 1)[1], tuple(v)) for p, _, v in storage.dropped}
     assert ("opdi_flight_events", ("2026-05-01",)) in working
     assert ("opdi_measurements", ("2026-05-01",)) in working
+    # The events removed by the plausibility checks go with the events.
+    assert ("opdi_flight_events_rejected", ("2026-05-01",)) in working
     assert not [v for p, _, v in storage.dropped if "2026-05-02" in v and "opdi_" in p]
 
 

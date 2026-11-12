@@ -83,10 +83,12 @@ INTERNAL_TABLES: dict[str, str] = {
 #: folders of days that are already published, and lie outside a window of
 #: :data:`DEFAULT_WORKING_KEEP_DAYS` days, are removed. The working flight
 #: list (``opdi_flight_list``) is never removed: building a later day reads
-#: it.
+#: it. ``opdi_flight_events_rejected`` holds the events step 04 removed with
+#: its plausibility checks; it is kept and removed with the events.
 WORKING_TABLES: dict[str, str] = {
     "opdi_flight_events": "dof",
     "opdi_measurements": "dof",
+    "opdi_flight_events_rejected": "dof",
 }
 
 #: Days of working events and measurements kept on each side of the day just

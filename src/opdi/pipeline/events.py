@@ -33,6 +33,11 @@ start of the track, and the holding and point merge values
 modules (``layout``, ``runway_ops``, ``ground``, ``level_segments``,
 ``vertical_pru``, ``holding``, ``point_merge``, ``fir``) and this module
 combines them in :class:`FlightEventProcessor`.
+
+Before the events are written, the plausibility checks
+(:mod:`opdi.pipeline.plausibility`) remove those the track clearly
+contradicts; they go to the working table ``opdi_flight_events_rejected``
+with the reason, and get no measurements.
 """
 
 import os
@@ -89,6 +94,8 @@ from opdi.pipeline.layout import (  # noqa: E402
     height_above_field_ft,  # noqa: F401  (imported from here by callers)
 )
 from opdi.pipeline.level_segments import LEVEL_ARMS, classify_level_offs
+from opdi.pipeline.plausibility import REJECTED_TABLE, label_events, split_labelled
+from opdi.pipeline.plausibility import RULES as PLAUSIBILITY_RULES
 from opdi.pipeline.point_merge import calculate_point_merge_events
 from opdi.pipeline.runway_ops import go_arounds, runway_milestones, runway_traversals
 from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
@@ -1501,6 +1508,26 @@ class FlightEventProcessor:
         geo = attach_aerodrome_geometry(sdf, month, self.storage)
         return aerodrome_distances(geo)
 
+    def _airports(self) -> Optional[DataFrame]:
+        """The OurAirports table, or None when it is missing."""
+        if not self.storage.table_exists("oa_airports"):
+            return None
+        return self.storage.read_table("oa_airports")
+
+    def _flight_airports(self, month: date) -> Optional[DataFrame]:
+        """``id``, ``adep``, ``ades`` of the flight list of the batch, or None."""
+        if not self.storage.table_exists("opdi_flight_list"):
+            return None
+        start_ts, end_ts = get_start_end_of_month(month)
+        return (
+            self.storage.read_table("opdi_flight_list")
+            .filter(
+                (col("dof") >= to_timestamp(lit(start_ts)))
+                & (col("dof") < to_timestamp(lit(end_ts)))
+            )
+            .select("id", "adep", "ades")
+        )
+
     def _with_flight_id(self, sv: DataFrame) -> DataFrame:
         """Add the track's call sign, published by the runway milestones.
 
@@ -1756,7 +1783,38 @@ class FlightEventProcessor:
             "version", F.coalesce(col("version"), lit(self.events.events_version))
         )
 
-        df_events = df_events.withColumn("id_tmp", self._event_id(batch_id)).select(
+        # The plausibility checks: events the track contradicts are removed
+        # here, before the ids, the measurements and the flight list. They
+        # are written to REJECTED_TABLE below, with the reason.
+        df_rejected = None
+        if self.events.plausibility_checks:
+            # The checks join the events with themselves and with the tracks.
+            # The plan of ``df_events`` holds every event family, and Spark
+            # needs more memory to analyse those joins over it than to run
+            # them, so the events are computed once here and the checks start
+            # from the result.
+            df_events = df_events.localCheckpoint()
+            labelled = label_events(
+                df_events,
+                sdf_input,
+                self._airports(),
+                self.events,
+                flights=self._flight_airports(month),
+            ).cache()
+            counts = {
+                r["reject_rule"]: r["count"]
+                for r in labelled.groupBy("reject_rule").count().collect()
+            }
+            removed = ", ".join(
+                f"{rule.name} {counts.get(rule.name, 0)}" for rule in PLAUSIBILITY_RULES
+            )
+            print(
+                f"Plausibility checks for batch {batch_id}: {counts.get(None, 0)} events kept; "
+                f"removed: {removed}"
+            )
+            df_events, df_rejected = split_labelled(labelled)
+
+        event_columns = [
             col("id_tmp"),
             col("track_id"),
             col("type"),
@@ -1769,7 +1827,8 @@ class FlightEventProcessor:
             col("info"),
             col("cumulative_distance_nm"),
             col("cumulative_time_s"),
-        )
+        ]
+        df_events = df_events.withColumn("id_tmp", self._event_id(batch_id)).select(*event_columns)
 
         # The day each track starts, from the tracks themselves.
         #
@@ -1815,6 +1874,38 @@ class FlightEventProcessor:
             # probing, which a month-scoped run still needs.
             partition_values=_partition_values,
         )
+
+        # The removed events, with the same columns and ids, plus the check
+        # that removed them and the facts it used. A working table: never
+        # published, and replaced with the day like the events.
+        if df_rejected is not None:
+            df_rejected = (
+                df_rejected.withColumn("id_tmp", self._event_id(batch_id))
+                .select(*event_columns, col("reject_rule"), col("reject_detail"))
+                .join(track_day, on="track_id", how="left")
+                .select(
+                    col("id_tmp").alias("id"),
+                    col("track_id").alias("flight_id"),
+                    col("type"),
+                    col("event_time"),
+                    col("lon").alias("longitude"),
+                    col("lat").alias("latitude"),
+                    col("altitude_ft").alias("altitude"),
+                    col("source"),
+                    col("version"),
+                    col("info"),
+                    col("reject_rule"),
+                    col("reject_detail"),
+                    col("dof"),
+                )
+            )
+            self.storage.write_table(
+                df_rejected.repartition("dof"),
+                REJECTED_TABLE,
+                mode=write_mode,
+                partition_by=["dof"],
+                partition_values=_partition_values,
+            )
 
         # Write measurements (distance + time)
         df_dist = (

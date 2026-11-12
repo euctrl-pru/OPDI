@@ -20,7 +20,7 @@ class EventConfig:
 
     Units are in the field names: ``_ft`` feet, ``_fl`` flight level,
     ``_nm`` nautical miles, ``_kt`` knots, ``_ftmin`` feet per minute,
-    ``_deg`` degrees, ``_seconds`` seconds, ``_pct`` percent.
+    ``_deg`` degrees, ``_seconds`` or ``_s`` seconds, ``_pct`` percent.
 
     The defaults are those of release v2.0.0. :meth:`legacy` gives the
     behaviour of release v0.0.2 (event version ``events_v0.0.2``).
@@ -598,6 +598,37 @@ class EventConfig:
     they come from whichever report Spark reads first, which need not be the
     one at that time."""
 
+    # -- plausibility checks ----------------------------------------------
+    #
+    # Events that the aircraft's own track clearly contradicts are removed
+    # before they are written (``opdi.pipeline.plausibility``), and kept with
+    # the reason in the working table ``opdi_flight_events_rejected``. See
+    # https://www.opdi.aero/content/methods/plausibility-checks.html.
+    plausibility_checks: bool = True
+    """Remove the events the track contradicts: an event without a time, an
+    off-block, in-block or airport layout event while the aircraft flies, an
+    off-block time not before the track's last take-off time, an in-block
+    time not after its first landing time. Only clear evidence removes an
+    event; an unknown fact keeps it. Off in release v0.0.2."""
+
+    plausibility_max_ground_event_height_ft: float = 1500.0
+    """Height above the airport, in feet, above which an off-block, in-block
+    or airport layout event counts as in flight (together with the speed and
+    the on-ground flag below)."""
+
+    plausibility_max_ground_event_altitude_ft: float = 15000.0
+    """Barometric altitude, in feet, used instead of the height when the
+    event's airport or its elevation is unknown: above the highest airports
+    in the world (about 14,500 ft)."""
+
+    plausibility_max_ground_event_speed_kt: float = 80.0
+    """Ground speed, in knots, above which such an event counts as in flight.
+    Taxiing aircraft move at 10 to 30 kt."""
+
+    plausibility_context_window_s: int = 60
+    """Seconds around the event in which the position reports are read. A
+    report flagged on the ground in this window keeps the event."""
+
     # -- inputs and identifiers -------------------------------------------
     feeds_from_clean_tracks: bool = True
     """Detect events on the cleaned tracks ``osn_tracks_clean`` (default),
@@ -692,5 +723,6 @@ class EventConfig:
             emit_holding=False,
             emit_point_merge=False,
             emit_fir_crossings=False,
+            plausibility_checks=False,
             events_version=LEGACY_EVENTS_VERSION,
         )

@@ -153,12 +153,31 @@ before it and writes its own:
 | 02 | Split the reports into tracks, one per flight (`track_id`) | `osn_tracks` | `opdi.pipeline.tracks` |
 | 02a | Clean the tracks: set values that cannot be trusted to NULL | `osn_tracks_clean` | `opdi.cleaning` |
 | 03 | Flight list: departure and destination airports, aircraft data | `opdi_flight_list` | `opdi.pipeline.flights` |
-| 04 | Flight events and their measurements | `opdi_flight_events`, `opdi_measurements` | `opdi.pipeline.events` |
+| 04 | Flight events and their measurements; events the track contradicts are removed and kept apart | `opdi_flight_events`, `opdi_measurements`, `opdi_flight_events_rejected` | `opdi.pipeline.events`, `opdi.pipeline.plausibility` |
 | 04b | Copy the main milestones onto the flight list | `opdi_flight_list` | `opdi.pipeline.flight_list_step` |
 | 09 | Publish the day's flight list and flight events files, the monthly index and the catalogue | `published/` | `opdi.output.published` |
 
 Step 01b, off by default, adds ADS-C reports (satellite position reports,
 mostly over oceans) to step 02; see `AdscConfig` in `src/opdi/config/adsc.py`.
+
+Before step 04 writes the events, it checks them against the track they
+come from (`opdi.pipeline.plausibility`). An event is removed only when the
+facts it is checked against are all known and clearly contradict it:
+
+| Check | Removes |
+|-------|---------|
+| `missing_time` | an event without a time |
+| `airborne_ground_event` | an off-block or in-block time, or an entry or exit of a part of the airport layout, while the aircraft flies: more than 1,500 ft above the airport (more than 15,000 ft altitude when the airport is unknown), faster than 80 kt, and no position report within 60 s flagged on the ground |
+| `block_after_takeoff` | an off-block time not earlier than the last take-off time of its track |
+| `block_before_landing` | an in-block time not later than the first landing time of its track |
+
+Removed events are not written to `opdi_flight_events`, have no
+measurements, and do not reach the flight list or the published files. They
+are kept in the working table `opdi_flight_events_rejected`, with the check
+that removed them (`reject_rule`) and the facts it used (`reject_detail`,
+JSON). Step 04 prints, per day, the number of events kept and removed by each
+check. The settings are the `plausibility_*` fields of `EventConfig`; the
+v0.0.2 settings turn the checks off.
 
 A day's steps process the flights that started on that day, whole, even when
 they end on the next day. A day can therefore be processed only once the

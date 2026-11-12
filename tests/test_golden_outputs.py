@@ -27,6 +27,9 @@ FRAMES = golden_pipeline.OUTPUT_TABLES + tuple(
     f"published_{name}" for name in golden_pipeline.PUBLISHED_FILES
 )
 WRITE = os.environ.get("OPDI_WRITE_GOLDEN") == "1"
+#: The local warehouse of each golden run, for the tests that read a table
+#: the comparison does not cover.
+WAREHOUSES = {}
 
 
 @pytest.fixture(scope="module")
@@ -36,6 +39,7 @@ def outputs(spark, tmp_path_factory):
     for name in CONFIGURATIONS:
         warehouse = str(tmp_path_factory.mktemp(f"golden_{name}"))
         result[name] = golden_pipeline.run(spark, name, warehouse)
+        WAREHOUSES[name] = warehouse
     if WRITE:
         for name, frames in result.items():
             folder = GOLDEN_DIR / name
@@ -112,3 +116,18 @@ def test_output_equals_the_reference(outputs, name, key, tmp_path):
         f"{name}/{key}: {len(differing)} of {len(got)} rows differ; first at row "
         f"{differing[0]}:\n  got  {got[differing[0]]}\n  want {want[differing[0]]}"
     )
+
+
+def test_the_plausibility_checks_remove_nothing_from_the_golden_day(outputs, spark):
+    """The six simulated flights are physically consistent, so no check may
+    fire: the working table of removed events holds no row."""
+    rows = 0
+    for path in Path(WAREHOUSES["default"]).rglob("opdi_flight_events_rejected"):
+        files = [f for f in path.rglob("*.parquet")]
+        if files:
+            rows += spark.read.parquet(str(path)).count()
+    assert rows == 0
+    # The table is written, so a run with the checks on can be told from one
+    # without them.
+    assert list(Path(WAREHOUSES["default"]).rglob("opdi_flight_events_rejected"))
+    assert not list(Path(WAREHOUSES["v002"]).rglob("opdi_flight_events_rejected"))
