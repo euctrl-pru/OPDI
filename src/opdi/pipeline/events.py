@@ -1931,7 +1931,11 @@ class FlightEventProcessor:
             col("info"),
             col("dof"),
         )
-        df_milestones = df_milestones.repartition("dof").orderBy("type", "version")
+        # Spread over many tasks by flight, so the day is written as many
+        # files at once; ``repartition("dof")`` put the whole day into one
+        # task. The order of rows inside the files carries no meaning: step 09
+        # sorts the published file itself.
+        df_milestones = df_milestones.repartition("dof", "flight_id")
         self.storage.write_table(
             df_milestones,
             "opdi_flight_events",
@@ -2001,7 +2005,7 @@ class FlightEventProcessor:
         extra = extra_measurement_rows(df_events)
         if extra is not None:
             df_measurements = df_measurements.unionByName(extra)
-        df_measurements = df_measurements.repartition("dof").orderBy("type", "version")
+        df_measurements = df_measurements.repartition("dof", "milestone_id")
         # Measurements have no time of their own, so their day folder is the
         # ``dof`` of their event's track.
         self.storage.write_table(
