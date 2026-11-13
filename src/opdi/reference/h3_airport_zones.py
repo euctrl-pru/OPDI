@@ -211,6 +211,10 @@ def generate_circle_polygon(
     return json.dumps({"type": "Polygon", "coordinates": [points]})
 
 
+#: Number of files of ``h3_airport_detection_zones`` (about 1 GB worldwide).
+ZONE_FILES = 8
+
+
 class AirportDetectionZoneGenerator:
     """Generates H3 hexagonal detection zones around airports.
 
@@ -893,5 +897,8 @@ class AirportDetectionZoneGenerator:
             table_name: Target table name.
         """
         sdf = self.prepare_for_flight_list_spark(max_radius_nm, airport_types)
-        self.storage.write_table(sdf, table_name, mode="overwrite")
+        # A few large files rather than one per task: step 03 reads the whole
+        # table, and on S3 the time to read it grows with the number of files
+        # (thousands of 100 KB files took two minutes per read).
+        self.storage.write_table(sdf.repartition(ZONE_FILES), table_name, mode="overwrite")
         print(f"Saved prepared hex rows to table {table_name}.")
