@@ -155,11 +155,23 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
     """One row per episode, trimmed to its first and last turning sample."""
     w = Window.partitionBy("track_id", PIECE).orderBy("_ts")
     before = w.rowsBetween(Window.unboundedPreceding, -1)
-    after = w.rowsBetween(1, Window.unboundedFollowing)
+    # The rows after this one, as the rows before it in the reversed order.
+    # Spark answers a frame that ends at the last row (``rowsBetween(1,
+    # unboundedFollowing)``) by scanning to the end of the track for every
+    # row, which is quadratic in the track's length; a frame that starts at
+    # the first row grows and is kept up to date row by row. The times are
+    # unique within a track (cleaning removes repeated times), so both
+    # frames hold the same rows.
+    after = (
+        Window.partitionBy("track_id", PIECE)
+        .orderBy(col("_ts").desc())
+        .rowsBetween(Window.unboundedPreceding, -1)
+    )
     hold_ts = F.when(col("_in_hold"), col("_ts"))
     # Bridge a short unflagged stretch between two flagged ones.
     prev_hold = F.last(hold_ts, ignorenulls=True).over(before)
-    next_hold = F.first(hold_ts, ignorenulls=True).over(after)
+    # The next flagged time is the smallest flagged time after this row.
+    next_hold = F.min(hold_ts).over(after)
     bridged = col("_in_hold") | (
         ((col("_ts") - prev_hold) <= config.holding_bridge_gap_seconds)
         & ((next_hold - col("_ts")) <= config.holding_bridge_gap_seconds)
@@ -286,9 +298,8 @@ def calculate_holding_events(
     )
     episodes = episodes.withColumn("info", info)
 
-    def _row(kind: str) -> DataFrame:
-        return episodes.select(
-            col("track_id"),
+    def _row(kind: str):
+        return F.struct(
             lit(f"holding-{kind}").alias("type"),
             col(f"{kind}_time").alias("event_time"),
             col(f"{kind}_lon").alias("lon"),
@@ -296,8 +307,23 @@ def calculate_holding_events(
             col(f"{kind}_alt_ft").alias("altitude_ft"),
             col(f"{kind}_dist_nm").alias("cumulative_distance_nm"),
             col(f"{kind}_cum_s").cast("long").alias("cumulative_time_s"),
-            col("info"),
-            lit(HOLDING_VERSION).alias("version"),
         )
 
-    return _row("start").unionByName(_row("end"))
+    # Both events of an episode come from one row, so the episodes are
+    # computed once. (A union of a start frame and an end frame computed the
+    # whole family twice, as Spark does not share the work of two branches.)
+    pair = episodes.select(
+        col("track_id"), col("info"), F.explode(F.array(_row("start"), _row("end"))).alias("_e")
+    )
+    return pair.select(
+        col("track_id"),
+        col("_e.type").alias("type"),
+        col("_e.event_time").alias("event_time"),
+        col("_e.lon").alias("lon"),
+        col("_e.lat").alias("lat"),
+        col("_e.altitude_ft").alias("altitude_ft"),
+        col("_e.cumulative_distance_nm").alias("cumulative_distance_nm"),
+        col("_e.cumulative_time_s").alias("cumulative_time_s"),
+        col("info"),
+        lit(HOLDING_VERSION).alias("version"),
+    )
