@@ -760,3 +760,40 @@ def test_the_callsign_memory_is_inside_every_days_read(overrides):
     p = replace(_shipped(), **overrides)
     reach = callsign_memory_minutes(p) + p.callsign_min_persistence_seconds / 60.0
     assert reach <= required_lookback_hours("cruise_linked", p) * 60
+
+
+def test_only_the_aircraft_seen_on_the_day_are_kept_with_all_their_reports(spark):
+    from opdi.pipeline.tracks import keep_aircraft_seen_in
+
+    day = dt.datetime(2026, 6, 14)
+    rows = [
+        ("a", dt.datetime(2026, 6, 13, 22)),  # seen on the day as well: kept whole
+        ("a", dt.datetime(2026, 6, 14, 1)),
+        ("a", dt.datetime(2026, 6, 15, 9)),
+        ("b", dt.datetime(2026, 6, 13, 23)),  # never on the day: left out
+        ("b", dt.datetime(2026, 6, 15, 0)),  # midnight belongs to the next day
+        ("c", dt.datetime(2026, 6, 14, 0)),  # midnight belongs to the day
+    ]
+    df = spark.createDataFrame(rows, "icao24 string, event_time timestamp")
+    kept = keep_aircraft_seen_in(df, day, day + dt.timedelta(days=1))
+    assert sorted((r.icao24, r.event_time) for r in kept.collect()) == sorted(
+        r for r in rows if r[0] in ("a", "c")
+    )
+
+
+def test_leaving_out_the_aircraft_not_seen_on_the_day_keeps_the_tracks(spark):
+    """The tracks claimed by a day are the same with and without the aircraft filter."""
+    from opdi.pipeline.tracks import keep_aircraft_seen_in
+
+    day = dt.datetime(2026, 6, 14)
+    end = day + dt.timedelta(days=1)
+    rows = []
+    for icao, starts in (("a", [-5, 2, 23.5]), ("b", [-10, 26]), ("c", [0, 30])):
+        for k, h in enumerate(starts):
+            for m in range(0, 60, 5):
+                rows.append((icao, f"{icao}_{k}", day + dt.timedelta(hours=h, minutes=m)))
+    df = spark.createDataFrame(rows, "icao24 string, track_id string, event_time timestamp")
+    plain = keep_tracks_starting_in(df, day, end)
+    filtered = keep_tracks_starting_in(keep_aircraft_seen_in(df, day, end), day, end)
+    assert sorted(plain.collect()) == sorted(filtered.collect())
+    assert filtered.count() > 0

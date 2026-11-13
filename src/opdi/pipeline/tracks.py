@@ -76,6 +76,30 @@ def _geo_to_h3_cell(lat, lon, resolution):
     return h3.latlng_to_cell(float(lat), float(lon), int(resolution))
 
 
+def keep_aircraft_seen_in(df, claim_start, claim_end):
+    """Keep every report of the aircraft seen in ``[claim_start, claim_end)``.
+
+    A track starting on the day has its first report on the day, so an
+    aircraft with no report on the day has no track to keep, and its reports
+    of the hours read before and after the day need not be split into tracks.
+    The aircraft kept keep all their reports, so their tracks, and the
+    numbering of the tracks inside each aircraft, do not change.
+
+    Args:
+        df: State vectors with ``icao24`` and ``event_time``.
+        claim_start: First instant of the day, inclusive.
+        claim_end: First instant of the next day, exclusive.
+    """
+    seen = (
+        df.filter((col("event_time") >= lit(claim_start)) & (col("event_time") < lit(claim_end)))
+        .select(col("icao24").alias("_seen_icao24"))
+        .distinct()
+    )
+    # A join condition rather than ``on="icao24"``, which would move the
+    # column to the front.
+    return df.join(seen, df["icao24"] == seen["_seen_icao24"], "left_semi")
+
+
 def keep_tracks_starting_in(df, claim_start, claim_end):
     """Keep whole tracks whose first sample falls in ``[claim_start, claim_end)``.
 
@@ -581,6 +605,11 @@ class TrackProcessor:
         # Before `original_columns`, so `source` survives the select below,
         # and before `_add_track_id`, so segmentation sees both feeds.
         df_month = self._merge_adsc(df_month, start_time_str, end_time_str)
+
+        # Only the aircraft seen on the claimed day can have a track starting
+        # on it: the others are left out before the tracks are built.
+        if claim is not None:
+            df_month = keep_aircraft_seen_in(df_month, claim[0], claim[1])
 
         # Store original column names + new columns we'll add
         original_columns = df_month.columns + ["track_id"] + h3_columns
