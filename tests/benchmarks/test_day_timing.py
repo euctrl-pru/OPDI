@@ -243,3 +243,9 @@ def test_a_real_event_log_gives_the_step_and_the_python_line(tmp_path):
     assert all(r["call_site"].startswith("job.py:") for r in rows)
     assert any("Window" in r["operators"] for r in rows)
     assert sum(r["output_bytes"] for r in rows) > 0
+
+
+def test_call_site_paths_are_cut_to_the_file_name():
+    assert t._short_site("first at /home/x/src/opdi/pipeline/flights.py:513") == (
+        "first at flights.py:513"
+    )

@@ -296,6 +296,11 @@ def _operators(stage_info: dict) -> str:
     return " ".join(op for op in OPERATORS if op in names)
 
 
+def _short_site(site: str) -> str:
+    """A call site with its file paths cut to the file name."""
+    return re.sub(r"(?:/[^\s/:]+)+/([^\s/:]+\.py)", r"\1", site)
+
+
 def stage_rows(lines, label: str) -> list[dict]:
     """One row per completed stage attempt of the event log ``lines`` (JSON text lines).
 
@@ -349,7 +354,7 @@ def stage_rows(lines, label: str) -> list[dict]:
                 "step": group[len("step-") :],
                 "stage_id": sid,
                 "attempt": attempt,
-                "call_site": sites.get(sid) or info.get("Stage Name", ""),
+                "call_site": _short_site(sites.get(sid) or info.get("Stage Name", "")),
                 "operators": _operators(info),
                 "seconds": (
                     round((_num(completed) - _num(submitted)) / 1000.0, 1)
