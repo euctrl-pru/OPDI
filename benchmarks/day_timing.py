@@ -136,6 +136,12 @@ COUNT_GROUP = "count"
 # --------------------------------------------------------------------------
 
 
+#: The zone table as step 00a now writes it (8 files), copied from the warehouse.
+COMPACT_ZONES = f"{PREFIX}/ref/h3_airport_detection_zones"
+#: Set by ``--compact-zones``: read the zones from :data:`COMPACT_ZONES`.
+USE_COMPACT_ZONES = False
+
+
 def table_path(label: str, table: str, builds_tracks: bool) -> str:
     """Absolute path of ``table`` in the run ``label``.
 
@@ -165,6 +171,8 @@ def redirect(label: str, builds_tracks: bool) -> None:
     orig_drop = StorageManager.drop_partitions
 
     def _s3_path(self, table_name):
+        if table_name == "h3_airport_detection_zones" and USE_COMPACT_ZONES:
+            return COMPACT_ZONES
         if table_name in PASSTHROUGH:
             return orig_path(self, table_name)
         return table_path(label, table_name, builds_tracks)
@@ -587,6 +595,8 @@ def run(args) -> int:
             "spark.eventLog.compress": "false",
         }
     )
+    global USE_COMPACT_ZONES
+    USE_COMPACT_ZONES = bool(args.compact_zones)
     redirect(label, builds_tracks)
     spark = SparkSessionManager.create_session(
         app_name=f"day timing {label} {day}",
@@ -597,6 +607,8 @@ def run(args) -> int:
     install_call_sites(spark)
     sc = spark.sparkContext
     settings = " ".join(f"{k}={v}" for k, v in sorted(extra.items()) if "eventLog" not in k)
+    if args.compact_zones:
+        settings += " zones=8 files"
     cores = int(cfg.spark.executor_cores)
     step_rows = []
     status = 0
@@ -843,6 +855,9 @@ def main(argv=None) -> int:
     )
     r.add_argument("--needed-gb", type=float, default=3.0)
     r.add_argument("--conf", action="append", help="extra Spark setting key=value")
+    r.add_argument(
+        "--compact-zones", action="store_true", help="read the zones from the 8-file copy"
+    )
     r.add_argument("--out", type=Path, default=DEFAULT_OUT)
     s = sub.add_parser("summarise")
     s.add_argument("--label", required=True)
