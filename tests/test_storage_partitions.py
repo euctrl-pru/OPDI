@@ -242,3 +242,48 @@ def test_a_null_partition_value_maps_to_the_hive_default_directory():
 
     assert _partition_dir_value(None) == HIVE_DEFAULT_PARTITION
     assert _partition_dir_value("2026-06-01") == "2026-06-01"
+
+
+def test_a_day_written_in_many_files_is_replaced_whole_by_a_smaller_rerun(spark, tmp_path):
+    """A re-run of a day leaves none of the earlier run's files, whatever their number."""
+    import glob
+    from datetime import date
+
+    from pyspark.sql import functions as F
+
+    from opdi.config import OPDIConfig
+    from opdi.utils.storage import StorageManager
+
+    config = OPDIConfig.for_environment("local", worldwide=True, warehouse=str(tmp_path))
+    config.spark.enable_iceberg = False
+    config.spark.enable_hive = False
+    storage = StorageManager(spark, config)
+    day, other = date(2026, 6, 14), date(2026, 6, 13)
+
+    def frame(n, d):
+        return spark.range(n).select(
+            F.col("id").cast("string").alias("flight_id"), F.lit(d).alias("dof")
+        )
+
+    storage.write_table(
+        frame(3, other),
+        "t",
+        mode="overwrite",
+        partition_by=["dof"],
+        partition_values=[{"dof": other}],
+    )
+    first = frame(500, day).repartition(8, "dof", "flight_id")
+    storage.write_table(
+        first, "t", mode="overwrite", partition_by=["dof"], partition_values=[{"dof": day}]
+    )
+    folder = f"{storage._s3_path('t')}/dof={day}".replace("file://", "")
+    assert len(glob.glob(f"{folder}/*.parquet")) == 8
+
+    second = frame(7, day).repartition(2, "dof", "flight_id")
+    storage.write_table(
+        second, "t", mode="overwrite", partition_by=["dof"], partition_values=[{"dof": day}]
+    )
+    assert len(glob.glob(f"{folder}/*.parquet")) == 2
+    table = storage.read_table("t")
+    assert table.filter(F.col("dof") == F.lit(day)).count() == 7
+    assert table.filter(F.col("dof") == F.lit(other)).count() == 3
