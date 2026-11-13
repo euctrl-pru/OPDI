@@ -235,8 +235,17 @@ def install_call_sites(spark) -> None:
         inner._timed = True
         setattr(cls, name, inner)
 
-    for name in ("count", "collect", "first", "take", "head", "toPandas", "localCheckpoint"):
-        wrap(DataFrame, name)
+    classes = [DataFrame]
+    try:  # Spark 4: the DataFrame of a classic session is a subclass with its own methods.
+        from pyspark.sql.classic.dataframe import DataFrame as ClassicDataFrame
+
+        classes.append(ClassicDataFrame)
+    except ImportError:
+        pass
+    for cls in classes:
+        for name in ("count", "collect", "first", "take", "head", "toPandas", "localCheckpoint"):
+            if name in vars(cls):
+                wrap(cls, name)
     for name in ("parquet", "save"):
         wrap(DataFrameWriter, name)
 
@@ -508,6 +517,23 @@ def hour_rows(spark, start: datetime, hours: int) -> int:
     return spark.read.parquet(*hour_paths(start, start + timedelta(hours=hours))).count()
 
 
+def sample_aircraft(mod: int) -> None:
+    """Make step 01 keep only the aircraft with ``abs(hash(icao24)) % mod == 0``."""
+    from pyspark.sql import functions as F
+
+    from opdi.ingestion.osn_statevectors import StateVectorIngestion
+
+    orig = StateVectorIngestion._apply_filters
+    if getattr(orig, "_sampled", False):
+        return
+
+    def _apply_filters(self, df):
+        return orig(self, df.filter(F.abs(F.hash("icao24")) % mod == 0))
+
+    _apply_filters._sampled = True
+    StateVectorIngestion._apply_filters = _apply_filters
+
+
 def read_window_hours(cfg) -> int:
     """Hours of reports step 02 reads for one day: the lookback, the day and the lookahead."""
     from opdi.pipeline.segmentation import SegmentationParams
@@ -530,10 +556,15 @@ def run(args) -> int:
     label = args.label
     check_write_path(f"{PREFIX}/{label}/")
     builds_tracks = any(s in ("02", "02a") for s in args.steps)
-    if args.slice_hours and any(s not in SLICE_STEPS for s in args.steps):
-        raise SystemExit("--slice-hours runs steps 01, 02 and 02a only")
-    if any(s in SLICE_STEPS for s in args.steps) and not args.slice_hours:
-        raise SystemExit("steps 01, 02 and 02a need --slice-hours: a full day does not fit")
+    part = args.slice_hours or args.sample_mod
+    if args.slice_hours and args.sample_mod:
+        raise SystemExit("--slice-hours and --sample-mod exclude each other")
+    if part and any(s not in SLICE_STEPS for s in args.steps):
+        raise SystemExit("--slice-hours and --sample-mod run steps 01, 02 and 02a only")
+    if any(s in SLICE_STEPS for s in args.steps) and not part:
+        raise SystemExit(
+            "steps 01, 02 and 02a need --slice-hours or --sample-mod: a full day does not fit"
+        )
 
     used = bucket_used_gb()
     print(f"bucket: {used:.1f} of {QUOTA_GB:.0f} GB used", flush=True)
@@ -579,20 +610,38 @@ def run(args) -> int:
                 from opdi.ingestion.osn_statevectors import StateVectorIngestion
 
                 start = datetime(day.year, day.month, day.day)
-                StateVectorIngestion(spark, cfg).ingest_from_s3(
-                    start_date=start, end_date=start + timedelta(hours=args.slice_hours)
-                )
+                if args.sample_mod:
+                    # Every hour step 02 reads, for one aircraft in ``sample_mod``.
+                    window = read_window_hours(cfg)
+                    first = start - timedelta(hours=window - 48)
+                    sample_aircraft(args.sample_mod)
+                    StateVectorIngestion(spark, cfg).ingest_from_s3(
+                        start_date=first, end_date=first + timedelta(hours=window)
+                    )
+                else:
+                    StateVectorIngestion(spark, cfg).ingest_from_s3(
+                        start_date=start, end_date=start + timedelta(hours=args.slice_hours)
+                    )
             else:
                 run_day_step(spark, cfg, step, day, {"log_dir": log_dir})
             seconds = time.monotonic() - started
             sc.setJobGroup(COUNT_GROUP, "row counts")
             rows_out = count_day_rows(spark, label, step, day, builds_tracks)
             # What the step read: the archive's hours (01), or what the step before wrote.
-            if step == "01":
+            if step == "01" and args.sample_mod:
+                rows_in = ""
+            elif step == "01":
                 rows_in = hour_rows(spark, datetime(day.year, day.month, day.day), args.slice_hours)
             else:
                 rows_in = step_rows[-1]["rows_out"] if step_rows else ""
-            scope = f"first {args.slice_hours} h of the day" if args.slice_hours else "full"
+            if args.sample_mod:
+                scope = f"aircraft with hash(icao24) % {args.sample_mod} == 0, full read window"
+                if step == "01":
+                    scope += " (step 01 reads the whole window here: not a daily step 01)"
+            elif args.slice_hours:
+                scope = f"first {args.slice_hours} h of the day"
+            else:
+                scope = "full"
             row = {
                 "label": label,
                 "step": step,
@@ -603,7 +652,7 @@ def run(args) -> int:
                 "rows_out": rows_out,
                 "scope": scope,
                 "scale_factor": "",
-                "full_day_seconds": round(seconds) if not args.slice_hours else "",
+                "full_day_seconds": round(seconds) if not part else "",
                 "settings": settings,
             }
             step_rows.append(row)
@@ -760,15 +809,18 @@ def clean(args) -> int:
     s3 = s3_client()
     key = scratch_key(args.label)
     n = size = 0
+    keys = []
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket="eurocontrol", Prefix=key):
-        objs = page.get("Contents", [])
-        if not objs:
-            continue
-        n += len(objs)
-        size += sum(o["Size"] for o in objs)
-        s3.delete_objects(
-            Bucket="eurocontrol", Delete={"Objects": [{"Key": o["Key"]} for o in objs]}
-        )
+        for o in page.get("Contents", []):
+            keys.append(o["Key"])
+            size += o["Size"]
+    # One key per request: the store refuses the batch call without a
+    # Content-MD5 header, which the current client no longer sends.
+    for k in keys:
+        if not k.startswith(key):
+            raise RuntimeError(f"refusing to delete {k!r}: outside {key!r}")
+        s3.delete_object(Bucket="eurocontrol", Key=k)
+        n += 1
     print(f"deleted {n} objects, {size / 1e9:.2f} GB under {key}")
     return 0
 
@@ -786,6 +838,9 @@ def main(argv=None) -> int:
     r.add_argument("--memory", default=None)
     r.add_argument("--label", required=True)
     r.add_argument("--slice-hours", type=int, default=None)
+    r.add_argument(
+        "--sample-mod", type=int, default=None, help="keep one aircraft in M (steps 01 to 02a)"
+    )
     r.add_argument("--needed-gb", type=float, default=3.0)
     r.add_argument("--conf", action="append", help="extra Spark setting key=value")
     r.add_argument("--out", type=Path, default=DEFAULT_OUT)
