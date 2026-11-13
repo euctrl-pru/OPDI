@@ -11,6 +11,7 @@ import json
 
 from opdi.config import EventConfig
 from opdi.pipeline.plausibility import RULES, check_events
+from opdi.pipeline.runway_ops import RUNWAY_THRESHOLD_CROSSING
 
 T0 = dt.datetime(2026, 6, 14, 10, 0, 0)
 FT_PER_M = 3.28084
@@ -139,7 +140,7 @@ def test_the_runway_family_is_not_checked_against_the_track_height(spark):
     found on the runway's own heights; only the take-off and landing times
     have a height limit (``runway_time_too_high``)."""
     events = [_event(t, 0) for t in ("line-up", "take-off-roll", "runway-vacated")]
-    events.append(_event("landing", 0))
+    events.append(_event(RUNWAY_THRESHOLD_CROSSING, 0))
     kept, rejected = _check(spark, events, _reports(0, 30000, 450))
     assert rejected == {}
 

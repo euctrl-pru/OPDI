@@ -1,8 +1,8 @@
 """Runway milestones of Airport Collaborative Decision Making (A-CDM).
 
 Part of step 04. Finds, for every flight, the runway it used and the times
-of ``line-up``, ``take-off-roll``, ``airborne``, ``landing`` (crossing of the
-threshold), ``touchdown`` and ``runway-vacated``, the runway crossings of a
+of ``line-up``, ``take-off-roll``, ``airborne``, ``xing-runway-threshold``
+(crossing of the threshold), ``touchdown`` and ``runway-vacated``, the runway crossings of a
 taxiing aircraft, and ``go-around``. All are read from passages over a
 runway, built from the H3 cells of the runway zones (``h3_runway_zones``).
 See https://www.opdi.aero/content/methods/runway-milestones.html.
@@ -45,16 +45,16 @@ The band is deliberate, not an oversight.
 
 **Timing is interpolated, not sampled.** ``airborne`` and ``touchdown`` are the
 instants the height above field elevation crosses ``runway_airborne_height_ft``,
-and ``landing`` the instant the along-track distance from the threshold changes
-sign. All three go through :func:`opdi.pipeline.crossings.threshold_crossings`
+and ``xing-runway-threshold`` the instant the along-track distance from the
+threshold changes sign. All three go through :func:`opdi.pipeline.crossings.threshold_crossings`
 -- the same crossing detector (a dead band plus interpolation) that produces
 the flight-level and ring crossings. The take-off and landing times of the
 runway window method (``ATOT``/``ALDT``) are instead the first or last
 report of a window, which places them systematically late or early.
 
-``landing`` needs one sample the traversal does not contain: the threshold is
-the near edge of the runway polygon, so the point short of it is outside the
-traversal by definition. The arrival sample window therefore reaches back
+``xing-runway-threshold`` needs one sample the traversal does not contain: the
+threshold is the near edge of the runway polygon, so the point short of it is
+outside the traversal by definition. The arrival sample window therefore reaches back
 :data:`ARRIVAL_LEAD_SECONDS` before entry, and only for that one crossing --
 entry, exit and every reported position stay bounded by the polygon.
 
@@ -103,9 +103,10 @@ AIRBORNE_HYSTERESIS_FT = 5.0
 
 #: Half-width of the dead band around the threshold plane, in nautical miles.
 #: 0.05 NM is 304 ft, which at 140 kt (236 ft/s) is about 1.3 s. The band
-#: only confirms a crossing; it does not move the reported instant. ``landing`` is
-#: interpolated to the sample pair that straddles the bare plane, which is
-#: earlier than the confirming sample and unaffected by how wide the band is.
+#: only confirms a crossing; it does not move the reported instant.
+#: ``xing-runway-threshold`` is interpolated to the sample pair that straddles
+#: the bare plane, which is earlier than the confirming sample and unaffected
+#: by how wide the band is.
 #: What the width buys is that a sample sitting on the plane cannot toggle the
 #: trigger.
 THRESHOLD_PLANE_HYSTERESIS_NM = 0.05
@@ -124,13 +125,14 @@ ROLL_MAX_GAP_SECONDS = 30.0
 #: How far back before a traversal's entry the *arrival* sample window reaches,
 #: in seconds.
 #:
-#: ``landing`` (T16) is the crossing of the threshold plane, and the threshold
-#: is the near edge of the runway polygon: the sample short of it is by
+#: ``xing-runway-threshold`` (T16) is the crossing of the threshold plane, and
+#: the threshold is the near edge of the runway polygon: the sample short of it is by
 #: definition **outside** the polygon and so outside the traversal. Confirming
 #: the crossing needs one, so the arrival window is extended backwards by this
 #: much -- the pre-threshold final-approach samples the T16 crossing needs, and
 #: nothing else. Without it the Schmitt trigger never sees a negative
-#: along-track distance and ``landing`` cannot fire at all in production.
+#: along-track distance and ``xing-runway-threshold`` cannot fire at all in
+#: production.
 #:
 #: Sixty seconds is about 2.3 NM at 140 kt: comfortably more than any runway's
 #: displaced threshold or the gap between the polygon edge and the last
@@ -206,6 +208,12 @@ MILESTONE_SCHEMA = StructType(
     ]
 )
 
+#: Event type of the moment an arriving aircraft crosses the runway threshold
+#: (ICAO milestone T16), a few seconds before the wheels touch the runway.
+#: The ``landing`` of release v0.0.2 is a different event: the report at which
+#: the flight phase changes from descent to ground.
+RUNWAY_THRESHOLD_CROSSING = "xing-runway-threshold"
+
 #: ICAO milestone numbers. ``go-around`` and the two runway crossings have
 #: none, and are absent rather than invented.
 MILESTONE_NUMBERS = {
@@ -213,7 +221,7 @@ MILESTONE_NUMBERS = {
     "take-off-roll": "T07",
     "airborne": "T08",
     "ATOT": "T08",
-    "landing": "T16",
+    RUNWAY_THRESHOLD_CROSSING: "T16",
     "touchdown": "T17",
     "ALDT": "T17",
     "runway-vacated": "T19",
@@ -284,10 +292,11 @@ def along_track_nm(lat, lon, thr_lat, thr_lon, rwy_bearing):
     Positive towards the far end of the runway, negative on the approach short
     of the threshold. Two things read the sign: the geometric occupancy test,
     which admits a sample only when its along-track distance lies between the
-    two thresholds; and ``landing`` (T16), which is the instant this distance
-    changes sign and so interpolates linearly across the threshold plane. It is
-    the companion of :func:`~opdi.pipeline.runways.cross_track_nm` -- one gives
-    distance *along* the centreline, the other distance *across* it.
+    two thresholds; and ``xing-runway-threshold`` (T16), which is the instant
+    this distance changes sign and so interpolates linearly across the
+    threshold plane. It is the companion of
+    :func:`~opdi.pipeline.runways.cross_track_nm` -- one gives distance
+    *along* the centreline, the other distance *across* it.
     """
     d = haversine_nm(thr_lat, thr_lon, lat, lon)
     brg = bearing_deg(thr_lat, thr_lon, lat, lon)
@@ -615,11 +624,9 @@ def _empty_milestones(sdf: DataFrame) -> DataFrame:
 def _info(milestone: Optional[str], method: Optional[str] = None, bracket: bool = False):
     """The ``info`` JSON every runway milestone carries.
 
-    ``milestone`` is the ICAO number, and it is what lets a consumer tell the
-    threshold-crossing ``landing`` (T16) from the ``landing`` of the phase
-    method without parsing version strings. The classification, the runway and the
-    alignment travel with it so the decision that produced the row is auditable
-    from the row.
+    ``milestone`` is the ICAO number (``T16`` for ``xing-runway-threshold``).
+    The classification, the runway and the alignment travel with it so the
+    decision that produced the row is auditable from the row.
 
     ``method`` names the detector on the two types the merge makes ambiguous:
     ``ATOT`` and ``ALDT`` may come from here (``"acdm"``) or from the legacy
@@ -900,8 +907,8 @@ def _threshold_plane(sdf: DataFrame, config: "EventConfig") -> DataFrame:
 
     Only crossings above ``runway_airborne_height_ft`` are kept. An aircraft
     rolling past the threshold on the ground -- backtracking, or vacating via a
-    turn-off beyond it -- has already landed, and stamping a second ``landing``
-    there would double the arrival count.
+    turn-off beyond it -- has already landed, and stamping a second
+    ``xing-runway-threshold`` there would double the arrival count.
     """
     work = sdf.withColumn(
         "along_track_nm",
@@ -981,7 +988,7 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
         _event(_roll_start(dep, config), "take-off-roll", "event_time"),
         _event(_height_crossing(dep, config, "up"), lift_off, "event_time", method, bracket=True),
         # An arrival: over the threshold, wheels down, off the strip.
-        _event(_threshold_plane(arr_approach, config), "landing", "event_time"),
+        _event(_threshold_plane(arr_approach, config), RUNWAY_THRESHOLD_CROSSING, "event_time"),
         _event(
             _height_crossing(arr, config, "down"), touch_down, "event_time", method, bracket=True
         ),

@@ -131,3 +131,14 @@ def test_the_plausibility_checks_remove_nothing_from_the_golden_day(outputs, spa
     # without them.
     assert list(Path(WAREHOUSES["default"]).rglob("opdi_flight_events_rejected"))
     assert not list(Path(WAREHOUSES["v002"]).rglob("opdi_flight_events_rejected"))
+
+
+def test_the_threshold_crossing_is_named_xing_runway_threshold(outputs):
+    """Under the default settings, the moment an arriving aircraft crosses the
+    runway threshold is the event ``xing-runway-threshold``. No event of the
+    default settings is called ``landing``: that name belongs to the end of the
+    descent of release v0.0.2."""
+    for key in ("opdi_flight_events", "published_flight_events"):
+        types = set(outputs["default"][key]["type"])
+        assert "xing-runway-threshold" in types, key
+        assert "landing" not in types, key

@@ -25,6 +25,7 @@ from test_runway_ops import _dest
 
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.events import FlightEventProcessor
+from opdi.pipeline.runway_ops import RUNWAY_THRESHOLD_CROSSING
 
 
 @pytest.fixture
@@ -211,7 +212,7 @@ _DEPARTURE = [
 
 #: The same arrival profile ``test_runway_ops`` uses, at EDDF: it straddles the
 #: threshold plane between -0.2 and +0.1 NM and the 15 ft height between 30 and
-#: 5 ft, so ``landing`` (T16) and ``touchdown`` (T17) are both well defined.
+#: 5 ft, so ``xing-runway-threshold`` (T16) and ``touchdown`` (T17) are both well defined.
 _ARRIVAL = [
     (-1.5, 500.0, 140.0),
     (-1.0, 340.0, 138.0),
@@ -290,7 +291,7 @@ def _flight(spark):
         # crossing interpolates from is outside the traversal by construction
         # and reaches the detector only through ``ARRIVAL_LEAD_SECONDS``. An
         # earlier version of this fixture painted the whole final approach as
-        # runway cells, and ``landing`` passed here on a traversal shape
+        # runway cells, and ``xing-runway-threshold`` passed here on a traversal shape
         # ``runway_traversals`` cannot produce.
         if i >= len(_ARRIVAL) - 2:
             cell = "cell-eddf-stand"
@@ -512,13 +513,31 @@ def test_v4_emits_the_a_cdm_runway_family(spark, stub_storage):
     arrived. Without this the previous test passes on a step that emits
     nothing at all."""
     got = _types(_run(spark, stub_storage, EventConfig()))
-    assert {"line-up", "take-off-roll", "ATOT", "landing", "ALDT", "runway-vacated"} <= got
+    assert {
+        "line-up",
+        "take-off-roll",
+        "ATOT",
+        RUNWAY_THRESHOLD_CROSSING,
+        "ALDT",
+        "runway-vacated",
+    } <= got
 
 
 def test_legacy_still_emits_exactly_what_it_always_did(spark, stub_storage):
     out = _run(spark, stub_storage, EventConfig.legacy())
     assert "take-off" in _types(out)
     assert out.select("version").distinct().collect()[0][0] == "events_v0.0.2"
+
+
+def test_the_v002_settings_still_emit_landing(spark, stub_storage):
+    """The v0.0.2 settings keep their ``landing``: the report at which the
+    flight phase changes from descent to ground, with an empty ``info``. The
+    default settings call the runway threshold crossing
+    ``xing-runway-threshold`` and emit no ``landing``."""
+    legacy = _run(spark, stub_storage, EventConfig.legacy()).filter(F.col("type") == "landing")
+    assert legacy.count() > 0
+    assert {r["info"] for r in legacy.collect()} == {""}
+    assert "landing" not in _types(_run(spark, stub_storage, EventConfig()))
 
 
 def test_legacy_keeps_the_undifferentiated_runway_pair(spark, stub_storage):
@@ -564,20 +583,17 @@ def test_legacy_tops_carry_the_empty_info_of_their_release(spark, stub_storage):
     assert {r["info"] for r in out.collect()} == {""}
 
 
-def test_landing_carries_the_new_meaning_only_under_the_new_version(spark, stub_storage):
-    """Same string, two definitions, distinguished by ``version`` -- which is
-    what the version column is for, and which the breaking-changes chapter
-    leads with. Under v0.2.0 ``landing`` is ICAO T16, the threshold plane;
-    under v0.0.2 it is the phase change at ground contact and carries no
-    milestone number at all."""
-    v4 = _run(spark, stub_storage, EventConfig()).filter(F.col("type") == "landing")
-    assert v4.count() > 0
-    info = json.loads(v4.collect()[0]["info"])
+def test_the_threshold_crossing_carries_its_milestone_number(spark, stub_storage):
+    """Under the default settings ``xing-runway-threshold`` is ICAO milestone
+    T16, the crossing of the threshold plane. The ``landing`` of the v0.0.2
+    settings is a different event (the phase change at ground contact) and
+    carries no milestone number at all."""
+    xing = _run(spark, stub_storage, EventConfig()).filter(
+        F.col("type") == RUNWAY_THRESHOLD_CROSSING
+    )
+    assert xing.count() > 0
+    info = json.loads(xing.collect()[0]["info"])
     assert info["milestone"] == "T16"
-
-    legacy = _run(spark, stub_storage, EventConfig.legacy()).filter(F.col("type") == "landing")
-    assert legacy.count() > 0
-    assert legacy.collect()[0]["info"] == ""
 
 
 def test_every_top_of_climb_records_which_algorithm_produced_it(spark, stub_storage):

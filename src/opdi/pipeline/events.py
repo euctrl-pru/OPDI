@@ -1025,9 +1025,9 @@ def calculate_horizontal_segment_events(
 
     # ``take-off`` and ``landing`` here are the reports at which the phase
     # changed to or from ground. The runway milestones give the same moments
-    # as ``airborne``/``touchdown``, interpolated at a set height, and their
-    # ``landing`` is the threshold crossing (A-CDM T16). So this pair is
-    # published only when the runway milestones are off.
+    # as ``airborne``/``touchdown``, interpolated at a set height, and add
+    # the threshold crossing ``xing-runway-threshold`` (A-CDM T16). So this
+    # pair is published only when the runway milestones are off.
     if not config.emit_runway_milestones:
         # Only with the runway milestones off, which also means no merge.
         milestone_types = milestone_types.when(

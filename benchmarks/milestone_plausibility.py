@@ -62,6 +62,7 @@ from opdi.pipeline.plausibility import (  # noqa: E402
     KT_PER_MPS,  # noqa: F401
     event_context,
 )
+from opdi.pipeline.runway_ops import RUNWAY_THRESHOLD_CROSSING  # noqa: E402
 
 #: The working tables of this study, and the only place it writes.
 SCRATCH = "s3a://eurocontrol/opdi-world/research/plausibility"
@@ -361,7 +362,7 @@ GROUND_TYPES = (
     "runway-crossing-vacated",
 ) + SURFACE_TYPES
 #: Runway times: the aircraft is on the runway or a few feet above it.
-RUNWAY_TIMES = ("ATOT", "ALDT", "airborne", "touchdown", "landing")
+RUNWAY_TIMES = ("ATOT", "ALDT", "airborne", "touchdown", RUNWAY_THRESHOLD_CROSSING)
 BLOCK_TYPES = ("AOBT", "AIBT")
 TOP_TYPES = ("top-of-climb", "top-of-descent")
 LEVEL_TYPES = (
@@ -407,6 +408,11 @@ def _ring_radius(types):
 def prepare(df):
     """Add the record columns and the per-track milestone times."""
     df = df.copy()
+    # The event tables this study reads were written with the default settings
+    # before the threshold crossing was named ``xing-runway-threshold``; in
+    # them it is called ``landing``. The default settings emit no other event
+    # of that name, so both names are read as the threshold crossing.
+    df["type"] = df["type"].replace({"landing": RUNWAY_THRESHOLD_CROSSING})
     df["has_record"] = df["error_s"].notna()
     df["abs_error_s"] = df["error_s"].abs()
     df["confirmed"] = df["abs_error_s"] <= CONFIRMED_S
@@ -421,7 +427,7 @@ def prepare(df):
         ("AIBT", "max"),
         ("take-off-roll", "min"),
         ("line-up", "min"),
-        ("landing", "max"),
+        (RUNWAY_THRESHOLD_CROSSING, "max"),
         ("runway-vacated", "max"),
         ("top-of-climb", "min"),
         ("top-of-descent", "max"),
@@ -666,7 +672,7 @@ SEQUENCES = (
     ("line_up_to_roll", "line-up", "take-off-roll"),
     ("roll_to_take_off", "take-off-roll", "ATOT"),
     ("flight", "ATOT", "ALDT"),
-    ("threshold_to_landing", "landing", "ALDT"),
+    ("threshold_to_landing", RUNWAY_THRESHOLD_CROSSING, "ALDT"),
     ("landing_to_vacated", "ALDT", "runway-vacated"),
     ("vacated_to_in_block", "runway-vacated", "AIBT"),
     ("taxi_in", "ALDT", "AIBT"),

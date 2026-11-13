@@ -193,8 +193,9 @@ def test_the_no_op_exemption_is_by_name_not_by_position():
 # The milestone map
 #
 # `landing` is the subtle one: ground contact under v0.1.0, the ICAO T16
-# threshold-plane crossing under v0.2.0. APDF records the first and has no
-# column at all for the second.
+# threshold-plane crossing under v0.2.0 in the ladder's stored tables (today's
+# default settings name that crossing `xing-runway-threshold`). APDF records
+# the first and has no column at all for the second.
 
 
 def test_v0_1_0_landing_is_scored_against_aldt():
@@ -209,6 +210,7 @@ def test_v0_2_0_landing_is_not_scored_at_all():
     mapping = milestone_map(build_plan(ladder="v4")["V07_v020"])
 
     assert "landing" not in mapping
+    assert "xing-runway-threshold" not in mapping
     assert mapping["touchdown"] == "ALDT"
     assert mapping["airborne"] == "ATOT"
 

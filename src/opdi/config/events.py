@@ -263,8 +263,8 @@ class EventConfig:
     emit_runway_milestones: bool = True
     """Publish the runway milestones of Airport Collaborative Decision
     Making (A-CDM): ``line-up``, ``take-off-roll``, ``airborne``,
-    ``landing``, ``touchdown``, ``runway-vacated``, ``go-around`` and the
-    two runway-crossing events. Off in release v0.0.2, which published
+    ``xing-runway-threshold``, ``touchdown``, ``runway-vacated``,
+    ``go-around`` and the two runway-crossing events. Off in release v0.0.2, which published
     ``take-off``, ``landing``, ``entry-runway`` and ``exit-runway`` instead.
     See https://www.opdi.aero/content/methods/runway-milestones.html."""
 

@@ -161,7 +161,9 @@ def test_departure_side_types_use_the_departure_airport(spark):
 
 
 def test_arrival_side_types_use_the_destination_airport(spark):
-    for type_ in ("AIBT", "ALDT", "landing", "runway-vacated"):
+    # ``landing`` is the threshold crossing in event tables written before it
+    # was named ``xing-runway-threshold``; both names are on the arrival side.
+    for type_ in ("AIBT", "ALDT", "xing-runway-threshold", "landing", "runway-vacated"):
         row = _context(spark, _event(spark, type_=type_), [_report(0, 1000.0, lat=50.0)])
         assert row.ctx_airport == "HIGH", type_
 
@@ -231,6 +233,21 @@ def _frame(rows):
 
 
 AIRBORNE = mp.CHOSEN["airborne_ground_event"]
+
+
+def test_a_stored_landing_is_read_as_the_threshold_crossing():
+    """Tables written before the rename call the threshold crossing ``landing``;
+    the study reads it under its current name, so the sequence checks find it."""
+    import pandas as pd
+
+    df = _frame(
+        [
+            {"type": "landing", "event_time": pd.Timestamp("2026-06-14 11:00:00")},
+            {"type": "ALDT", "event_time": pd.Timestamp("2026-06-14 11:00:07")},
+        ]
+    )
+    assert set(df["type"]) == {"xing-runway-threshold", "ALDT"}
+    assert df["trk_xing-runway-threshold_s"].notna().all()
 
 
 def test_an_off_block_time_in_flight_is_removed_and_its_neighbour_kept():

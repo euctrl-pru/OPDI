@@ -577,10 +577,10 @@ def verify_plan_v4(plan: dict) -> None:
     for name, cfg in plan.items():
         if cfg.emit_runway_milestones:
             assert "landing" not in milestone_map(cfg), (
-                f"{name} emits the A-CDM runway family, where `landing` is the "
-                f"ICAO T16 threshold-plane crossing -- an event APDF does not "
-                f"record. Scoring it against ALDT would report a touchdown "
-                f"error for a thing that is not a touchdown."
+                f"{name} emits the A-CDM runway family, whose stored tables "
+                f"name the ICAO T16 threshold-plane crossing `landing` -- an "
+                f"event APDF does not record. Scoring it against ALDT would "
+                f"report a touchdown error for a thing that is not a touchdown."
             )
 
 
@@ -619,8 +619,9 @@ RUNWAY_IDENTITY_TYPES = {"ATOT": "ATOT", "ALDT": "ALDT", "airborne": "ATOT", "to
 def milestone_map(config) -> dict:
     """The type -> milestone map that is correct for *this* configuration.
 
-    One map cannot serve both vocabularies, because ``landing`` means two
-    different physical things depending on ``emit_runway_milestones``:
+    One map cannot serve both vocabularies, because in the tables this ladder
+    wrote ``landing`` means two different physical things depending on
+    ``emit_runway_milestones``:
 
     * **off** (v0.1.0 and earlier) -- the fuzzy phase transition into GND, i.e.
       ground contact. That is what ALDT is, so it is scored.
@@ -631,6 +632,11 @@ def milestone_map(config) -> dict:
       report a large systematic "error" that is really a comparison between two
       different events -- and it would land in the same table as the honest
       figures, indistinguishable from them.
+
+    The ladder's tables were written before the pipeline named the threshold
+    crossing ``xing-runway-threshold``; today's default settings emit no
+    ``landing`` at all. The new name is not in the map either, so neither name
+    of the threshold crossing is scored against ALDT.
 
     So the map is narrowed per rung rather than per period or per version
     string: the ladder's own configuration is the only thing that knows which

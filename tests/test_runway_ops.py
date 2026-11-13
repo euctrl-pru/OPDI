@@ -25,6 +25,7 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig
 from opdi.pipeline.runway_ops import (
     MILESTONE_SCHEMA,
+    RUNWAY_THRESHOLD_CROSSING,
     along_track_nm,
     classify_traversal,
     go_arounds,
@@ -257,7 +258,7 @@ def _dest(lat, lon, bearing, dist_nm):
     """Point ``dist_nm`` along ``bearing`` from (lat, lon).
 
     The arrival tests need positions whose along-track distance from the
-    threshold is a *stated* number, because `landing` is asserted to be the
+    threshold is a *stated* number, because `xing-runway-threshold` is asserted to be the
     interpolated instant that distance changes sign.
     """
     radius = 3440.065
@@ -339,7 +340,7 @@ def _arrival_traversal(spark):
 
     Bounded by the runway polygon, so it starts at the first sample *at* the
     threshold -- not 1.5 NM out on final. An earlier version of this fixture
-    declared the wider window, and `landing` passed on a traversal shape the
+    declared the wider window, and `xing-runway-threshold` passed on a traversal shape the
     detector could never produce.
     """
     return _traversal(
@@ -690,34 +691,35 @@ def test_no_runway_milestone_is_emitted_under_the_legacy_configuration(spark):
     assert out.count() == 0
 
 
-def test_an_arrival_emits_landing_then_touchdown_then_vacated(spark):
-    """`landing` is the threshold plane, `touchdown` the 15 ft crossing.
+def test_an_arrival_emits_threshold_then_touchdown_then_vacated(spark):
+    """`xing-runway-threshold` is the threshold plane, `touchdown` the 15 ft
+    crossing.
 
     They are different instants and the arrival profile puts them 6.7 s apart,
-    so a detector that collapsed the two -- as the retired ground-contact
-    `landing` effectively did -- fails on the order as well as the count.
+    so a detector that collapsed the two -- as the ground-contact `landing` of
+    release v0.0.2 effectively did -- fails on the order as well as the count.
     """
     out = runway_milestones(_arrival_track(spark), _arrival_traversal(spark), EventConfig())
     seq = [r["type"] for r in out.orderBy("event_time").collect()]
-    assert seq == ["landing", "ALDT", "runway-vacated"]
+    assert seq == [RUNWAY_THRESHOLD_CROSSING, "ALDT", "runway-vacated"]
 
 
-def test_landing_is_interpolated_to_the_threshold_plane(spark):
+def test_the_threshold_crossing_is_interpolated_to_the_threshold_plane(spark):
     """-0.2 NM at t=30 and +0.1 NM at t=40 put the plane two thirds through,
     i.e. at t=36.67 s -- not at either sample."""
     out = runway_milestones(_arrival_track(spark), _arrival_traversal(spark), EventConfig())
-    landing = out.filter(F.col("type") == "landing").collect()
-    assert len(landing) == 1
-    offset = (landing[0]["event_time"] - _EPOCH).total_seconds()
+    xing = out.filter(F.col("type") == RUNWAY_THRESHOLD_CROSSING).collect()
+    assert len(xing) == 1
+    offset = (xing[0]["event_time"] - _EPOCH).total_seconds()
     assert offset == pytest.approx(36.667, abs=0.1)
 
 
 def test_every_milestone_carries_its_icao_number(spark):
-    """The number is what lets a consumer tell the new threshold-crossing
-    `landing` from the retired ground-contact one without parsing versions."""
+    """Every runway milestone carries its ICAO milestone number in `info`, so
+    a consumer can match it to the A-CDM definitions."""
     out = runway_milestones(_arrival_track(spark), _arrival_traversal(spark), EventConfig())
     numbers = {r["type"]: json.loads(r["info"]).get("milestone") for r in out.collect()}
-    assert numbers["landing"] == "T16"
+    assert numbers[RUNWAY_THRESHOLD_CROSSING] == "T16"
     assert numbers["ALDT"] == "T17"
     assert numbers["runway-vacated"] == "T19"
 
@@ -898,22 +900,22 @@ def test_runway_traversals_spans_the_approach_corridor_for_an_arrival(spark):
     assert out[0]["exit_height_ft"] < 15.0
 
 
-def test_landing_fires_on_a_traversal_the_detector_actually_produces(spark):
+def test_the_threshold_crossing_fires_on_a_traversal_the_detector_produces(spark):
     """End to end: the polygon-bounded traversal, then T16 through the lead.
 
     The straddling pair is (-0.2 NM at t=30, +0.1 NM at t=40) and the first of
     those is *outside* the polygon. Without `ARRIVAL_LEAD_SECONDS` the sample
     is not in the traversal's frame, the Schmitt trigger never sees a negative
-    along-track distance, and `landing` cannot fire at all -- which is what
+    along-track distance, and `xing-runway-threshold` cannot fire at all -- which is what
     production did while a hand-built traversal made the unit test pass.
     """
     sv = _arrival_on_07(spark)
     traversals = runway_traversals(sv, _grid(spark), _thresholds(spark), EventConfig())
     out = runway_milestones(sv, traversals, EventConfig())
 
-    landing = out.filter(F.col("type") == "landing").collect()
-    assert len(landing) == 1
-    assert (landing[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(36.667, abs=0.1)
+    xing = out.filter(F.col("type") == RUNWAY_THRESHOLD_CROSSING).collect()
+    assert len(xing) == 1
+    assert (xing[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(36.667, abs=0.1)
 
 
 def test_runway_traversals_classifies_a_taxiing_crossing(spark):
@@ -995,7 +997,7 @@ def test_an_arrival_at_the_lower_of_two_aerodromes_still_touches_down(spark):
     """The symmetric case: a 1,416 ft origin and a 24 ft destination.
 
     The permissive height is again about -1,400 ft throughout, so no sample
-    enters above 15 ft and the arrival is never classified -- no `landing`, no
+    enters above 15 ft and the arrival is never classified -- no `xing-runway-threshold`, no
     `touchdown`, no `runway-vacated`. Against the arrival's own field the
     profile is the ordinary one, and 15 ft is crossed three fifths of the way
     between the 30 ft and 5 ft samples: t = 46 s.
@@ -1075,7 +1077,7 @@ def test_along_track_nm_sign_and_magnitude(spark):
 
     A point 1 NM beyond the threshold on the runway bearing reads +1.0; 1 NM
     short of it on the reciprocal reads -1.0; a point 1 NM abeam reads ~0. The
-    sign is what makes ``landing`` a zero crossing and the magnitude what the
+    sign is what makes ``xing-runway-threshold`` a zero crossing and the magnitude what the
     on-runway test bounds against the runway length.
     """
     past = _dest(50.0, 4.0, 70.0, 1.0)
@@ -1149,14 +1151,14 @@ def test_arrival_from_final_approach_emits_touchdown(spark):
     All three arrival milestones fire, in order, and
     ``touchdown`` -- which emitted for essentially no arrival under hexaero --
     is among them. Remove the approach corridor (the arrival lead) and
-    ``landing`` disappears, breaking the sequence.
+    ``xing-runway-threshold`` disappears, breaking the sequence.
     """
     sv = _arrival_on_07(spark)
     traversals = runway_traversals(sv, _grid(spark), _thresholds(spark), EventConfig())
     out = runway_milestones(sv, traversals, EventConfig())
 
     seq = [r["type"] for r in out.orderBy("event_time").collect()]
-    assert seq == ["landing", "ALDT", "runway-vacated"]
+    assert seq == [RUNWAY_THRESHOLD_CROSSING, "ALDT", "runway-vacated"]
     assert out.filter(F.col("type") == "ALDT").count() == 1
 
 
@@ -1201,7 +1203,7 @@ def _sparse_arrival_track(spark):
 
 def test_a_sparse_arrival_still_emits_touchdown_from_the_approach_corridor(spark):
     """The scale-risk guard: an arrival with no on-runway flare sample above
-    15 ft must STILL emit landing -> touchdown -> runway-vacated, off the
+    15 ft must STILL emit xing-runway-threshold -> touchdown -> runway-vacated, off the
     descending approach corridor.
 
     Against a detector that requires an on-runway sample above the airborne
@@ -1221,7 +1223,7 @@ def test_a_sparse_arrival_still_emits_touchdown_from_the_approach_corridor(spark
 
     out = runway_milestones(sv, traversals, EventConfig())
     seq = [r["type"] for r in out.orderBy("event_time").collect()]
-    assert seq == ["landing", "ALDT", "runway-vacated"]
+    assert seq == [RUNWAY_THRESHOLD_CROSSING, "ALDT", "runway-vacated"]
     assert out.filter(F.col("type") == "ALDT").count() == 1
 
 

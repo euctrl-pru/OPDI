@@ -50,7 +50,7 @@ removed by the first one that fires:
   checks.
 
 The other runway milestones (line-up, take-off roll, runway vacated, runway
-crossings, ``landing``) are not checked against the track height: their
+crossings, ``xing-runway-threshold``) are not checked against the track height: their
 detector already tests the height on the runway, so a report that
 contradicts them points at an altitude error rather than a wrong event.
 
@@ -71,6 +71,7 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
 from opdi.pipeline.ground import LANDING_TYPES, TAKE_OFF_TYPES
+from opdi.pipeline.runway_ops import RUNWAY_THRESHOLD_CROSSING
 from opdi.utils.geometry import haversine_nm
 
 if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
@@ -102,12 +103,17 @@ FTMIN_PER_MPS = 196.850394
 #: Events that happen at the departure airport. Their height is measured above
 #: the flight's departure airport unless the event names an airport itself.
 DEPARTURE_SIDE = ("AOBT", "off-block", "line-up", "take-off-roll", "ATOT", "airborne", "take-off")
-#: Events that happen at the destination airport.
+#: Events that happen at the destination airport. ``landing`` and, above,
+#: ``take-off`` are the names of release v0.0.2 (the end of the descent and
+#: the start of the climb); they also let the study scripts read event tables
+#: written before the threshold crossing was named ``xing-runway-threshold``,
+#: in which ``landing`` is that crossing.
 ARRIVAL_SIDE = (
     "AIBT",
     "on-block",
     "ALDT",
     "touchdown",
+    RUNWAY_THRESHOLD_CROSSING,
     "landing",
     "runway-vacated",
     "go-around",
