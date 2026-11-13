@@ -153,7 +153,16 @@ def _debounced_runs(df: DataFrame, config: EventConfig) -> DataFrame:
     """``fir_run`` = the volume code after short runs are absorbed into the run before."""
     w = Window.partitionBy("track_id", PIECE).orderBy("_ts")
     upto = w.rowsBetween(Window.unboundedPreceding, 0)
-    after = w.rowsBetween(1, Window.unboundedFollowing)
+    # The rows after this one, as the rows before it in the reversed order:
+    # a frame ending at the last row is rescanned for every row (quadratic in
+    # the track's length), a frame starting at the first row is not. Times
+    # are unique within a track, so both frames hold the same rows, and a
+    # minimum does not depend on their order.
+    after = (
+        Window.partitionBy("track_id", PIECE)
+        .orderBy(col("_ts").desc())
+        .rowsBetween(Window.unboundedPreceding, -1)
+    )
     whole = w.rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
     start = (
         ~(col("fir_code").eqNullSafe(F.lag("fir_code").over(w)))
