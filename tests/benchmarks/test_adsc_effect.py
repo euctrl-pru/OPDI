@@ -243,6 +243,7 @@ def _tracks(rows):
                 "first_seen": T0 + minutes(s),
                 "last_seen": T0 + minutes(e),
                 "adsc_reports": (rest or [0])[0],
+                "callsigns": 1,
             }
             for t, i, s, e, *rest in rows
         ]
@@ -279,6 +280,7 @@ def test_a_track_over_two_flights_is_a_false_join():
     assert fj["flights"].iloc[0] == 2
     t = ae.false_join_table(truth, {"merged": tracks}).iloc[0]
     assert t["false_joins"] == 1 and t["false_joins_with_adsc"] == 1
+    assert t["tracks_with_two_callsigns"] == 0
 
 
 def test_a_track_touching_only_the_ground_part_of_a_flight_is_not_a_false_join():

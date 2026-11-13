@@ -19,7 +19,7 @@ def at(minutes):
 
 TRACK_SCHEMA = (
     "icao24 string, track_id string, event_time timestamp, "
-    "cumulative_distance_nm double, source string"
+    "cumulative_distance_nm double, source string, callsign string"
 )
 
 
@@ -27,14 +27,14 @@ TRACK_SCHEMA = (
 def merged_tracks(spark):
     rows = [
         # ADS-B, a hole of 120 min, two ADS-C reports in it, then ADS-B again.
-        ("a", "t1", at(0), 0.0, "ADS-B"),
-        ("a", "t1", at(1), 8.0, "ADS-B"),
-        ("a", "t1", at(41), 330.0, "ADS-C"),
-        ("a", "t1", at(81), 660.0, "ADS-C"),
-        ("a", "t1", at(121), 990.0, "ADS-B"),
+        ("a", "t1", at(0), 0.0, "ADS-B", "DLH400"),
+        ("a", "t1", at(1), 8.0, "ADS-B", "DLH400 "),
+        ("a", "t1", at(41), 330.0, "ADS-C", None),
+        ("a", "t1", at(81), 660.0, "ADS-C", None),
+        ("a", "t1", at(121), 990.0, "ADS-B", "DLH401"),
         # An ADS-C report after the last ADS-B report of its aircraft.
-        ("b", "t2", at(0), 0.0, "ADS-B"),
-        ("b", "t2", at(30), 250.0, "ADS-C"),
+        ("b", "t2", at(0), 0.0, "ADS-B", ""),
+        ("b", "t2", at(30), 250.0, "ADS-C", None),
     ]
     return spark.createDataFrame(rows, TRACK_SCHEMA)
 
@@ -47,6 +47,7 @@ def test_track_summaries(merged_tracks):
     # but each remaining gap is still over 30 min.
     assert s.loc["t1", "holes"] == 3
     assert s.loc["t1", "distance_nm"] == 990.0
+    assert s.loc["t1", "callsigns"] == 2 and s.loc["t2", "callsigns"] == 0
 
 
 def test_track_summaries_without_a_source_column(merged_tracks):

@@ -785,6 +785,7 @@ def false_join_table(truth: pd.DataFrame, tracks_by_run: Dict[str, pd.DataFrame]
                 "run": run,
                 "tracks": len(tracks),
                 "tracks_with_adsc": int(len(with_adsc)),
+                "tracks_with_two_callsigns": int((tracks["callsigns"] >= 2).sum()),
                 "false_joins": len(fj),
                 "false_joins_with_adsc": int(fj["track_id"].isin(set(with_adsc)).sum()),
                 "flights_in_false_joins": int(fj["flights"].sum()) if len(fj) else 0,
@@ -1020,7 +1021,8 @@ def _is_adsc(df):
 
 def track_summaries(tracks):
     """One row per track: aircraft, first and last report, reports, ADS-C
-    reports, distance flown, longest gap and number of holes."""
+    reports, distance flown, longest gap, number of holes and number of
+    different call signs (two or more point to two flights in one track)."""
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
@@ -1039,6 +1041,9 @@ def track_summaries(tracks):
             F.max("cumulative_distance_nm").alias("distance_nm"),
             F.coalesce(F.max("_gap"), F.lit(0.0)).alias("max_gap_s"),
             F.sum(F.when(F.col("_gap") > HOLE_SECONDS, 1).otherwise(0)).alias("holes"),
+            F.countDistinct(F.when(F.trim("callsign") != "", F.trim("callsign"))).alias(
+                "callsigns"
+            ),
         )
     )
 
@@ -1275,7 +1280,7 @@ def cmd_compare(args) -> int:
             tracks = spark.read.parquet(table_path(run, "osn_tracks_clean")).where(
                 F.col("dof") == F.lit(d).cast("date")
             )
-            keep = ["icao24", "track_id", "event_time", "cumulative_distance_nm"]
+            keep = ["icao24", "track_id", "event_time", "cumulative_distance_nm", "callsign"]
             keep += ["source"] if "source" in tracks.columns else []
             tables[run] = {
                 "tracks": tracks.select(*keep).cache(),
