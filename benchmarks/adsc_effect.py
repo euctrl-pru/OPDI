@@ -130,9 +130,11 @@ RUN_STEPS = ("02", "02a", "03", "04", "04b")
 
 QUOTA_GB = 200.0
 
-#: Free space needed before a run starts, in GB (10^9 bytes). The largest
-#: moment of the whole sequence is estimated at about 2.5 GB (see the report of
-#: the study plan); 3 GB leaves a margin.
+#: Free space needed before a run starts, in GB (10^9 bytes). For about 2,000
+#: aircraft, the study folder is largest when the run ``merged`` has built its
+#: tracks: the ADS-B input of three days (about 1 GB), the tables of the run
+#: ``base`` (about 0.6 GB) and the uncleaned tracks of ``merged`` (about 0.5 GB),
+#: estimated from the earlier ADS-C study of 2026-06-05. 3 GB leaves a margin.
 NEED_GB = 3.0
 
 #: Spark settings for S3 reads that wait instead of failing on a slow answer.
@@ -363,17 +365,29 @@ def check_before_run(adsb_days: Iterable[str], adsc_days: Iterable[str], day: da
         )
 
 
-def record_timing(path: Path, run: str, step: str, seconds: float, study_gb: float) -> None:
+def record_timing(
+    path: Path, run: str, step: str, seconds: float, study_gb: float, commit: str = ""
+) -> None:
     """Write the duration of ``step`` in ``run`` to the CSV file at ``path``.
 
-    One row per run and step: a re-run replaces its own row.
+    One row per run and step: a re-run replaces its own row. ``commit`` is the
+    code the step ran with, so that the comparison can show that both runs
+    used the same code.
     """
     path = Path(path)
     rows = pd.read_csv(path, dtype={"step": str}) if path.is_file() else pd.DataFrame()
     if len(rows):
         rows = rows[~((rows["run"] == run) & (rows["step"] == step))]
     new = pd.DataFrame(
-        [{"run": run, "step": step, "seconds": round(seconds, 1), "study_gb": round(study_gb, 3)}]
+        [
+            {
+                "run": run,
+                "step": step,
+                "seconds": round(seconds, 1),
+                "study_gb": round(study_gb, 3),
+                "commit": commit,
+            }
+        ]
     )
     rows = pd.concat([rows, new], ignore_index=True) if len(rows) else new
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -420,11 +434,14 @@ def _partitions(spark, path: str, column: str) -> List[str]:
 
 def run_part(spark, part: str, day: date, executors: int, steps, sample_mod: int, args) -> None:
     """Run the steps of one part (``inputs``, ``base`` or ``merged``)."""
+    import provenance
+
     from opdi.periodrun import run_day_step
     from opdi.utils.storage import StorageManager
 
     run = "merged" if part == "inputs" else part
     cfg = build_config(run, executors)
+    commit = provenance.git_sha() + ("-dirty" if provenance.git_dirty() else "")
     timings = Path(args.results_dir or RESULTS_ROOT / day.isoformat()) / "timings.csv"
     adsb_path = table_path(run, "osn_statevectors_v2")
     adsc_path = table_path(run, "osn_adsc_statevectors")
@@ -474,7 +491,7 @@ def run_part(spark, part: str, day: date, executors: int, steps, sample_mod: int
                     delete_folder(spark, adsb_path)
                     print("    deleted the ADS-B input (both runs have built their tracks)")
             study_gb = folder_gb(spark, PREFIX)
-            record_timing(timings, part, step, seconds, study_gb)
+            record_timing(timings, part, step, seconds, study_gb, commit)
             print(
                 f"<<< {part} step {step} day {day} done in {seconds:.0f} s; "
                 f"study folder {study_gb:.2f} GB",
@@ -903,6 +920,22 @@ def fir_table(fir: pd.DataFrame) -> pd.DataFrame:
     wide["oceanic"] = wide["fir_to"].isin(OCEANIC_FIRS)
     wide["added"] = wide["crossings_merged"] - wide["crossings_base"]
     return wide.sort_values(["oceanic", "added"], ascending=[False, False]).reset_index(drop=True)
+
+
+def bracket_table(brackets: pd.DataFrame) -> pd.DataFrame:
+    """Events placed between two reports far apart in time, per run and type.
+
+    A crossing (flight level, FIR) is placed between the two reports on
+    either side of it; ``info.bracket_s`` is the time between them. Sparse
+    ADS-C reports make that time long, and the event's time is then
+    uncertain by up to that much. ``brackets``: ``run``, ``type``,
+    ``events``, ``over_limit`` (bracket over
+    :data:`FIR_BRACKET_LIMIT_SECONDS`), ``median_bracket_s``,
+    ``p90_bracket_s``.
+    """
+    out = brackets.copy()
+    out["over_limit_share"] = out["over_limit"] / out["events"].where(out["events"] > 0)
+    return out.sort_values(["type", "run"]).reset_index(drop=True)
 
 
 def rejected_table(rejected: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
@@ -1459,6 +1492,35 @@ def cmd_compare(args) -> int:
             fir_rows.append(x)
         _write(out, "fir_crossings.csv", fir_table(pd.concat(fir_rows)), argv, inputs, input_tables)
 
+        # Events placed between two distant reports.
+        brackets = []
+        for r in RUNS:
+            b = F.get_json_object("info", "$.bracket_s").cast("double")
+            brackets.append(
+                tables[r]["events"]
+                .select("type", b.alias("b"))
+                .where(F.col("b").isNotNull())
+                .groupBy("type")
+                .agg(
+                    F.count(F.lit(1)).alias("events"),
+                    F.sum(F.when(F.col("b") > FIR_BRACKET_LIMIT_SECONDS, 1).otherwise(0)).alias(
+                        "over_limit"
+                    ),
+                    F.percentile_approx("b", 0.5).alias("median_bracket_s"),
+                    F.percentile_approx("b", 0.9).alias("p90_bracket_s"),
+                )
+                .toPandas()
+                .assign(run=r)
+            )
+        _write(
+            out,
+            "event_brackets.csv",
+            bracket_table(pd.concat(brackets, ignore_index=True)),
+            argv,
+            inputs,
+            input_tables,
+        )
+
         # Plausibility checks.
         rej = pd.concat(
             [
@@ -1491,6 +1553,10 @@ def cmd_compare(args) -> int:
         # Processing time.
         timings_file = out / "timings.csv"
         if timings_file.is_file():
+            commits = sorted(set(pd.read_csv(timings_file)["commit"].dropna().astype(str)))
+            inputs["run_commits"] = commits
+            if len(commits) != 1 or commits[0].endswith("-dirty"):
+                print(f"WARNING: the steps ran with code {commits}, not one clean commit")
             _write(
                 out,
                 "processing_time.csv",

@@ -148,10 +148,11 @@ def test_timings_keep_one_row_per_run_and_step(tmp_path):
     p = tmp_path / "t.csv"
     ae.record_timing(p, "base", "02", 100.0, 1.0)
     ae.record_timing(p, "merged", "02", 120.0, 1.5)
-    ae.record_timing(p, "base", "02", 90.0, 1.2)
+    ae.record_timing(p, "base", "02", 90.0, 1.2, "abc1234")
     t = pd.read_csv(p, dtype={"step": str})
     assert len(t) == 2
     assert t.set_index("run").loc["base", "seconds"] == 90.0
+    assert t.set_index("run").loc["base", "commit"] == "abc1234"
 
 
 # --- gaps ----------------------------------------------------------------------
@@ -434,3 +435,19 @@ def test_flight_gap_table_counts_only_flights_seen():
     assert t.loc["base", "flights_with_hole"] == 1 and t.loc["merged", "flights_with_hole"] == 0
     assert t.loc["base", "median_longest_gap_min"] == pytest.approx(65.0)
     assert t.loc["merged", "flights_with_adsc"] == 3
+
+
+def test_bracket_share():
+    b = pd.DataFrame(
+        {
+            "run": ["merged", "base"],
+            "type": ["xing-fir", "xing-fir"],
+            "events": [10, 0],
+            "over_limit": [4, 0],
+            "median_bracket_s": [200.0, np.nan],
+            "p90_bracket_s": [900.0, np.nan],
+        }
+    )
+    t = ae.bracket_table(b).set_index("run")
+    assert t.loc["merged", "over_limit_share"] == pytest.approx(0.4)
+    assert pd.isna(t.loc["base", "over_limit_share"])
