@@ -12,8 +12,9 @@ partitioned by day.
 import os
 import subprocess
 import time
-from datetime import date
-from typing import Dict, List, Optional, Set, Tuple
+from calendar import timegm
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -21,6 +22,34 @@ from pyspark.sql.functions import col, from_unixtime, to_date
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
+
+#: The hourly state vector folders of the OpenSky archive, one ``hour=<unix>`` folder per hour.
+OSN_STATE_VECTORS = "s3a://opensky-hdfs-backup/tables_v4/state_vectors"
+
+
+def hour_paths(
+    start: Union[date, datetime],
+    end: Union[date, datetime],
+    base: str = OSN_STATE_VECTORS,
+) -> List[str]:
+    """The hourly folders of the archive from ``start`` to ``end`` (end excluded), in UTC.
+
+    ``start`` and ``end`` are days (from midnight) or times (from that hour).
+    Each folder is named after the Unix time of its first second.
+    """
+
+    def _as_time(value):
+        if isinstance(value, datetime):
+            return value.replace(minute=0, second=0, microsecond=0)
+        return datetime(value.year, value.month, value.day)
+
+    current, stop = _as_time(start), _as_time(end)
+    paths = []
+    while current < stop:
+        paths.append(f"{base}/hour={timegm(current.timetuple())}")
+        current += timedelta(hours=1)
+    return paths
+
 
 #: Thinning rules for :meth:`StateVectorIngestion._apply_filters`. ``bucket``
 #: is the default of release v2.0.0; ``modulo`` the rule of release v0.0.2.
@@ -484,9 +513,9 @@ class StateVectorIngestion:
 
     def ingest_from_s3(
         self,
-        start_date: date,
-        end_date: date,
-        s3_base_path: str = "s3a://opensky-hdfs-backup/tables_v4/state_vectors",
+        start_date: Union[date, datetime],
+        end_date: Union[date, datetime],
+        s3_base_path: str = OSN_STATE_VECTORS,
     ) -> int:
         """Ingest state vectors by reading directly from the OpenSky S3 bucket.
 
@@ -495,8 +524,10 @@ class StateVectorIngestion:
         the ``opensky`` environment.
 
         Args:
-            start_date: First day to ingest (inclusive).
-            end_date: Last day to ingest (exclusive).
+            start_date: First day to ingest (inclusive), or a time to start
+                at that hour.
+            end_date: Last day to ingest (exclusive), or a time to stop
+                before that hour.
             s3_base_path: S3 prefix for hourly state-vector partitions.
 
         Returns:
@@ -506,16 +537,7 @@ class StateVectorIngestion:
             >>> ingestion = StateVectorIngestion(spark, config)
             >>> rows = ingestion.ingest_from_s3(date(2025, 8, 1), date(2025, 8, 2))
         """
-        from datetime import datetime, timedelta
-
-        # Build list of hourly partition paths
-        current = datetime(start_date.year, start_date.month, start_date.day)
-        end_dt = datetime(end_date.year, end_date.month, end_date.day)
-        paths = []
-        while current < end_dt:
-            hour_ts = int(current.timestamp())
-            paths.append(f"{s3_base_path}/hour={hour_ts}")
-            current += timedelta(hours=1)
+        paths = hour_paths(start_date, end_date, s3_base_path)
 
         print(f"Reading {len(paths)} hourly partitions from S3 ({start_date} to {end_date})...")
         df = self.spark.read.option("mergeSchema", "true").parquet(*paths)
