@@ -51,6 +51,12 @@ def hour_paths(
     return paths
 
 
+def _days_of_hours(start: Union[date, datetime], end: Union[date, datetime]) -> List[date]:
+    """The days of the hourly folders from ``start`` to ``end`` (see :func:`hour_paths`)."""
+    stamps = [int(p.rsplit("=", 1)[1]) for p in hour_paths(start, end, base="")]
+    return sorted({datetime.utcfromtimestamp(t).date() for t in stamps})
+
+
 #: Thinning rules for :meth:`StateVectorIngestion._apply_filters`. ``bucket``
 #: is the default of release v2.0.0; ``modulo`` the rule of release v0.0.2.
 DECIMATION_MODULO = "modulo"
@@ -557,19 +563,28 @@ class StateVectorIngestion:
         # Convert Unix timestamp to Spark timestamp
         df = df.withColumn("event_time", from_unixtime(col("event_time")).cast("timestamp"))
 
-        row_count = df.count()
-        print(f"Read {row_count:,} state vectors.")
-
-        # Partitioned by day, replacing only the days present in this frame, so
-        # ingesting one day keeps the others of the window.
+        # Partitioned by day, replacing only the days of the hours read, so
+        # ingesting one day keeps the others of the window. Each hourly folder
+        # holds the reports of its hour, so the days are known from the folders
+        # and the frame is computed once, by the write. (Counting the rows and
+        # listing the days first computed it three times, each time reading
+        # the archive again.)
         df = df.withColumn("event_time_day", to_date(col("event_time")))
-        days = [r[0] for r in df.select("event_time_day").distinct().collect()]
+        days = _days_of_hours(start_date, end_date)
         self.storage.write_table(
             df,
             "osn_statevectors_v2",
             mode="overwrite",
             partition_by=["event_time_day"],
             partition_values=[{"event_time_day": d} for d in days],
+        )
+        # Counted from the files just written (their footers), not from the archive.
+        row_count = (
+            self.storage.read_table("osn_statevectors_v2")
+            .filter(col("event_time_day").isin(days))
+            .count()
+            if days
+            else 0
         )
         print(f"Written to osn_statevectors_v2 ({row_count:,} rows).")
 
