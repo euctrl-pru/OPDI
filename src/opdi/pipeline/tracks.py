@@ -620,7 +620,10 @@ class TrackProcessor:
             "dof",
             to_date(f_min("event_time").over(Window.partitionBy("track_id"))),
         )
-        df_month = df_month.repartition("dof").orderBy("dof")
+        # Spread over many tasks by track, so that the day is written as many
+        # files in parallel; every report of a track stays in one file. (Grouping
+        # by ``dof`` alone put the whole day into one task and one file.)
+        df_month = df_month.repartition("dof", "track_id")
 
         # Overwrite, not append, and safe because it is partitioned: only the
         # days present are replaced, so re-running a day stops duplicating it
