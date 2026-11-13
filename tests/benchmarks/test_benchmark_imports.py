@@ -15,6 +15,7 @@ MODULES = [
     "adsc_bridging_diagnosis",
     "adsc_census",
     "adsc_coverage_gain",
+    "adsc_effect",
     "adsc_events_compare",
     "adsc_flight_list_truth",
     "adsc_subset_breakdown",
