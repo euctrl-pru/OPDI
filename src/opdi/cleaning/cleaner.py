@@ -12,6 +12,7 @@ from datetime import date, datetime
 from typing import List
 
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 
 from opdi.cleaning.native import clean_tracks, null_rate_report
 from opdi.config import OPDIConfig
@@ -144,7 +145,16 @@ class TrackCleaner:
             self.storage.write_table(cleaned, TARGET_TABLE, mode="append")
 
         if report:
-            rates = null_rate_report(self.storage.read_table(TARGET_TABLE))
+            # The rows just written: the day (or the month), not the whole table.
+            written = self.storage.read_table(TARGET_TABLE)
+            if day is not None:
+                written = filter_batch(written, day=day)
+            else:
+                written = written.filter(
+                    (F.col("event_time") >= F.lit(start_str).cast("timestamp"))
+                    & (F.col("event_time") < F.lit(end_str).cast("timestamp"))
+                )
+            rates = null_rate_report(written)
             print("  NULL rate after cleaning:")
             for name, rate in sorted(rates.items()):
                 print(f"    {name:<16} {rate:6.2%}")
