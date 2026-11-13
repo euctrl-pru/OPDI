@@ -405,7 +405,14 @@ class FlightListProcessor:
             The zones: H3 cells around each airport with their distance band.
         """
         if self.storage.table_exists("h3_airport_detection_zones"):
-            return self.storage.read_table("h3_airport_detection_zones")
+            # Read once per processor and kept on the executors: step 03
+            # reads the zones three times (highest airport, endpoint
+            # candidates, trend), and each read of the table opens all of its
+            # files again. Kept data that an executor loses are read again
+            # from the table, so a lost executor never changes the result.
+            if getattr(self, "_zones", None) is None:
+                self._zones = self.storage.read_table("h3_airport_detection_zones").cache()
+            return self._zones
         if airports_hex_path:
             df_apt = pd.read_parquet(airports_hex_path)
             return self.spark.createDataFrame(df_apt.to_dict(orient="records"))
@@ -443,7 +450,11 @@ class FlightListProcessor:
         if radius_col:
             sdf_apt = sdf_apt.filter(col(radius_col) <= float(max_radius_nm))
 
-        j = sv.join(sdf_apt, sv.h3_res_7 == sdf_apt.apt_hex_id, "inner")
+        # The end reports (two per track) are few beside the zones, so they
+        # are sent to every executor and the zones are not moved. Moving both
+        # sides by cell put the cells of busy airports, where many tracks end
+        # and many zones overlap, into a few long tasks.
+        j = sdf_apt.join(F.broadcast(sv), sv.h3_res_7 == sdf_apt.apt_hex_id, "inner")
         j = j.withColumn(
             "dist_nm",
             haversine_nm(col("lat"), col("lon"), col("apt_latitude_deg"), col("apt_longitude_deg")),
@@ -1501,6 +1512,10 @@ class FlightListProcessor:
             self.process_overflights(day, skip_if_processed)
         finally:
             self._batch_day = None
+            zones = getattr(self, "_zones", None)
+            if zones is not None:
+                zones.unpersist()
+                self._zones = None
 
     def process_dai(
         self,
