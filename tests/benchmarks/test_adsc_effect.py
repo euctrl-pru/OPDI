@@ -295,6 +295,33 @@ def test_great_circle_of_a_known_pair():
     assert ae.great_circle_nm(0.0, 0.0, 1.0, 0.0) == pytest.approx(60.04, rel=1e-3)
 
 
+def test_coverage_counts_the_unseen_ends():
+    pf = pd.DataFrame(
+        {
+            "t_off": [T0, T0, T0],
+            "t_on": [T0 + minutes(600)] * 3,
+            "first_report": [T0 + minutes(10), T0 + minutes(60), pd.NaT],
+            "last_report": [T0 + minutes(200), T0 + minutes(590), pd.NaT],
+            "hole_s": [0.0, 3600.0, np.nan],
+        }
+    )
+    c = ae.add_coverage(pf)
+    # 1: the end after 200 min is unseen (400 min); the 10 min start is not a hole.
+    # 2: 60 min start + 60 min hole; the 10 min end is not.
+    # 3: no report: all 600 min.
+    assert list(c["uncovered_s"]) == [400 * 60.0, 120 * 60.0, 600 * 60.0]
+    assert c["coverage_share"].iloc[0] == pytest.approx(1 - 400 / 600)
+
+
+def test_flight_distance_sums_the_tracks_of_the_flight():
+    truth = _truth()
+    tracks = _tracks([("t1", "a", 10, 100), ("t2", "a", 150, 230), ("t9", "a", 600, 700)])
+    tracks["distance_nm"] = [400.0, 300.0, 50.0]
+    d = ae.flight_distances(truth, tracks)
+    assert d.loc[0] == 700.0
+    assert pd.isna(d.loc[2])
+
+
 def test_distance_table_uses_only_flights_with_a_base_hole_in_both_runs():
     pf = pd.DataFrame(
         {
@@ -304,8 +331,10 @@ def test_distance_table_uses_only_flights_with_a_base_hole_in_both_runs():
             "gc_nm": [1000.0, 1000.0, 500.0, 500.0, 600.0],
             "ref_nm": [1050.0, 1050.0, np.nan, np.nan, 800.0],
             "base_hole": [True, True, False, False, True],
+            "one_track_both": [False, False, True, True, True],
         }
     )
+    assert ae.distance_table(pf, one_track=True).empty
     t = ae.distance_table(pf).set_index("run")
     # Flight 1 has no hole; flight 2 lacks the merged run.
     assert t.loc["base", "flights"] == 1 and t.loc["merged", "flights"] == 1
@@ -430,11 +459,16 @@ def test_flight_gap_table_counts_only_flights_seen():
             "adsc_reports": [0, 0, np.nan, 10, 10, 3],
             "max_gap_s": [7200.0, 600.0, np.nan, 1200.0, 600.0, 900.0],
             "holes": [1, 0, np.nan, 0, 0, 0],
+            "uncovered_s": [7200.0, 0.0, 9000.0, 0.0, 0.0, 1800.5],
+            "coverage_share": [0.8, 1.0, 0.0, 1.0, 1.0, 0.9],
         }
     )
     t = ae.flight_gap_table(pf).set_index("run")
     assert t.loc["base", "flights"] == 3 and t.loc["base", "flights_seen"] == 2
-    assert t.loc["base", "flights_with_hole"] == 1 and t.loc["merged", "flights_with_hole"] == 0
+    assert t.loc["base", "flights_with_uncovered_time"] == 2
+    assert t.loc["merged", "flights_with_uncovered_time"] == 1
+    assert t.loc["base", "uncovered_hours"] == pytest.approx(4.5)
+    assert t.loc["base", "holes_between_reports"] == 1
     assert t.loc["base", "median_longest_gap_min"] == pytest.approx(65.0)
     assert t.loc["merged", "flights_with_adsc"] == 3
 
@@ -476,7 +510,7 @@ def test_agreement_table_finds_aircraft_that_changed():
             "first_seen": [T0, T0],
             "last_seen": [T0 + minutes(60), T0 + minutes(90)],
             "reports": [10, 20],
-            "distance_nm": [100.0, 200.0],
+            "cumulative_nm": [100.0, 200.0],
         }
     )
     tm = tr.copy()

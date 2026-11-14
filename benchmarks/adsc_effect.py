@@ -173,6 +173,9 @@ INNER_MARGIN = pd.Timedelta(minutes=10)
 #: are not paired.
 MATCH_TOLERANCE_SECONDS = 3600
 
+#: The published measurement of the distance flown (``opdi_measurements.type``).
+DISTANCE_MEASUREMENT = "Distance flown (NM)"
+
 #: Upper edges of the classes of a moved event's time change, in seconds.
 SHIFT_EDGES_SECONDS = (10.0, 60.0, 300.0, 1800.0, 3600.0)
 
@@ -751,6 +754,7 @@ def changed_flights_table(per_flight: pd.DataFrame) -> pd.DataFrame:
                 "flights": len(g),
                 "became_one_track": int(((g["b"] != 1) & (g["m"] == 1)).sum()),
                 "stopped_being_one_track": int(((g["b"] == 1) & (g["m"] != 1)).sum()),
+                "no_track_left_on_the_day": int(((g["b"] >= 1) & (g["m"] == 0)).sum()),
                 "fewer_tracks": int((g["m"] < g["b"]).sum()),
                 "more_tracks": int((g["m"] > g["b"]).sum()),
             }
@@ -803,18 +807,22 @@ def great_circle_nm(lat1, lon1, lat2, lon2):
     return 2 * 6371.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0))) / 1.852
 
 
-def distance_table(per_flight: pd.DataFrame) -> pd.DataFrame:
+def distance_table(per_flight: pd.DataFrame, one_track: bool = False) -> pd.DataFrame:
     """Distance flown against the airports' great circle and the reference.
 
     ``per_flight``: one row per (reference flight, run) with ``run``,
     ``flight_key``, ``distance_nm`` (the pipeline's distance flown, summed
     over the flight's tracks), ``gc_nm`` (great circle between the reference
     airports), ``ref_nm`` (the reference route length, may be NaN) and
-    ``base_hole`` (the flight has a gap over :data:`HOLE_SECONDS` in the run
-    ``base``). Only flights with ``base_hole`` are summarised, and only those
-    with a distance in both runs, so both runs describe the same flights.
+    ``base_hole`` (the flight has uncovered time in the run ``base``, see
+    :func:`add_coverage`). Only flights with ``base_hole`` are summarised, and
+    only those with a distance in both runs, so both runs describe the same
+    flights. With ``one_track`` set, only the flights that are exactly one track
+    in both runs (column ``one_track_both``).
     """
     f = per_flight[per_flight["base_hole"] & per_flight["distance_nm"].notna()]
+    if one_track:
+        f = f[f["one_track_both"]]
     both = f.groupby("flight_key")["run"].nunique()
     f = f[f["flight_key"].isin(both[both == len(RUNS)].index)]
     rows = []
@@ -824,6 +832,7 @@ def distance_table(per_flight: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "run": run,
+                "population": "one_track_in_both_runs" if one_track else "all",
                 "flights": len(g),
                 "median_distance_nm": float(g["distance_nm"].median()),
                 "median_ratio_to_great_circle": float(to_gc.median()),
@@ -838,14 +847,50 @@ def distance_table(per_flight: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def add_coverage(per_flight: pd.DataFrame) -> pd.DataFrame:
+    """Add ``uncovered_s`` and ``coverage_share`` to each (flight, run) row.
+
+    The uncovered time is the time between off-block and on-block that lies
+    in a silence of more than :data:`HOLE_SECONDS`: the holes between reports,
+    and the stretch before the first report and after the last one when they
+    are that long. A flight with no report is uncovered for its whole block
+    time. Counting the two ends matters: a report added far beyond the last
+    ADS-B report turns an unseen end into a hole between reports, which is
+    more coverage, not less.
+
+    Needs ``t_off``, ``t_on``, ``first_report``, ``last_report``, ``hole_s``.
+    """
+    f = per_flight.copy()
+    block = (f["t_on"] - f["t_off"]).dt.total_seconds()
+    start = (pd.to_datetime(f["first_report"]) - f["t_off"]).dt.total_seconds()
+    end = (f["t_on"] - pd.to_datetime(f["last_report"])).dt.total_seconds()
+    edges = start.where(start > HOLE_SECONDS, 0.0) + end.where(end > HOLE_SECONDS, 0.0)
+    unc = f["hole_s"].fillna(0.0) + edges.fillna(0.0)
+    unc = unc.where(f["first_report"].notna(), block)
+    f["uncovered_s"] = unc.clip(lower=0.0)
+    f["coverage_share"] = 1.0 - f["uncovered_s"] / block.where(block > 0)
+    return f
+
+
+def flight_distances(truth: pd.DataFrame, tracks: pd.DataFrame, slack=OVERLAP_SLACK) -> pd.Series:
+    """Published distance flown of each reference flight: the sum over the
+    tracks that overlap its block window. NaN when no track with a distance
+    overlaps it. ``tracks``: ``icao24``, ``track_id``, ``first_seen``,
+    ``last_seen``, ``distance_nm``."""
+    j = truth[["flight_key", "icao24", "t_off", "t_on"]].merge(
+        tracks[["icao24", "track_id", "first_seen", "last_seen", "distance_nm"]], on="icao24"
+    )
+    hit = (j["first_seen"] <= j["t_on"] + slack) & (j["last_seen"] >= j["t_off"] - slack)
+    d = j[hit].groupby("flight_key")["distance_nm"].sum(min_count=1)
+    return d.reindex(truth["flight_key"])
+
+
 def flight_gap_table(per_flight: pd.DataFrame) -> pd.DataFrame:
     """Reception gaps of the reference flights, per run and flow.
 
-    ``per_flight``: one row per (flight, run) with ``run``, ``flow``,
-    ``reports``, ``adsc_reports``, ``max_gap_s`` and ``holes`` (NaN when the
-    run has no report of the flight). Returns the flights seen, those with a
-    hole, the holes, the median longest gap in minutes and the flights with at
-    least one ADS-C report.
+    ``per_flight``: one row per (flight, run) after :func:`add_coverage`, with
+    ``run``, ``flow``, ``reports``, ``adsc_reports``, ``holes``, ``max_gap_s``,
+    ``uncovered_s`` and ``coverage_share``.
     """
     rows = []
     for (run, flow), g in per_flight.groupby(["run", "flow"]):
@@ -856,8 +901,10 @@ def flight_gap_table(per_flight: pd.DataFrame) -> pd.DataFrame:
                 "flow": flow,
                 "flights": len(g),
                 "flights_seen": len(seen),
-                "flights_with_hole": int((seen["holes"] > 0).sum()),
-                "holes": int(seen["holes"].sum()),
+                "flights_with_uncovered_time": int((g["uncovered_s"] > 0).sum()),
+                "uncovered_hours": float(g["uncovered_s"].sum() / 3600.0),
+                "median_coverage_share": float(g["coverage_share"].median()),
+                "holes_between_reports": int(seen["holes"].sum()),
                 "median_longest_gap_min": float(seen["max_gap_s"].median() / 60.0),
                 "flights_with_adsc": int((seen["adsc_reports"] > 0).sum()),
             }
@@ -892,7 +939,7 @@ def agreement_table(
     """Per aircraft group: aircraft whose tracks and events are the same in both runs.
 
     ``tracks[run]``: ``icao24``, ``track_id``, ``first_seen``, ``last_seen``,
-    ``reports``, ``distance_nm``. ``events[run]``: ``icao24``, ``type``,
+    ``reports``, ``cumulative_nm``. ``events[run]``: ``icao24``, ``type``,
     ``event_time``. Tracks are the same when the two runs hold the same set of
     (track id, first and last report, reports, distance to 0.001 NM); events
     are the same when they hold the same events (type and time, with repeats).
@@ -901,7 +948,7 @@ def agreement_table(
     """
 
     def track_keys(t):
-        k = t.assign(d=t["distance_nm"].round(3).fillna(-1.0))
+        k = t.assign(d=t["cumulative_nm"].round(3).fillna(-1.0))
         cols = ["track_id", "first_seen", "last_seen", "reports", "d"]
         return k.groupby("icao24")[cols].apply(lambda g: sorted(map(tuple, g.astype(str).values)))
 
@@ -1089,7 +1136,7 @@ def _is_adsc(df):
 
 def track_summaries(tracks):
     """One row per track: aircraft, first and last report, reports, ADS-C
-    reports, distance flown, longest gap, number of holes and number of
+    reports, the largest ``cumulative_distance_nm``, longest gap, number of holes and number of
     different call signs (two or more point to two flights in one track)."""
     from pyspark.sql import Window
     from pyspark.sql import functions as F
@@ -1106,7 +1153,7 @@ def track_summaries(tracks):
             F.max("event_time").alias("last_seen"),
             F.count(F.lit(1)).alias("reports"),
             F.sum("_adsc").alias("adsc_reports"),
-            F.max("cumulative_distance_nm").alias("distance_nm"),
+            F.max("cumulative_distance_nm").alias("cumulative_nm"),
             F.coalesce(F.max("_gap"), F.lit(0.0)).alias("max_gap_s"),
             F.sum(F.when(F.col("_gap") > HOLE_SECONDS, 1).otherwise(0)).alias("holes"),
             F.countDistinct(F.when(F.trim("callsign") != "", F.trim("callsign"))).alias(
@@ -1133,9 +1180,8 @@ def track_gaps(tracks):
 
 def flight_measures(spark, tracks, truth: pd.DataFrame):
     """Per reference flight, from the reports of its aircraft between its
-    block times: reports, ADS-C reports, longest gap, holes, number of tracks
-    and the distance flown (per track, the change of ``cumulative_distance_nm``
-    over the flight's time, summed over its tracks)."""
+    block times: reports, ADS-C reports, first and last report, longest gap,
+    holes and their total length, and the number of tracks."""
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
@@ -1146,18 +1192,34 @@ def flight_measures(spark, tracks, truth: pd.DataFrame):
     w = Window.partitionBy("flight_key").orderBy("event_time")
     gap = _seconds("event_time") - F.lag(_seconds("event_time")).over(w)
     j = j.withColumn("_gap", gap).withColumn("_adsc", _is_adsc(tracks).cast("int"))
-    per_flight = j.groupBy("flight_key").agg(
+    return j.groupBy("flight_key").agg(
         F.count(F.lit(1)).alias("reports"),
         F.sum("_adsc").alias("adsc_reports"),
+        F.min("event_time").alias("first_report"),
+        F.max("event_time").alias("last_report"),
         F.coalesce(F.max("_gap"), F.lit(0.0)).alias("max_gap_s"),
         F.sum(F.when(F.col("_gap") > HOLE_SECONDS, 1).otherwise(0)).alias("holes"),
+        F.sum(F.when(F.col("_gap") > HOLE_SECONDS, F.col("_gap")).otherwise(0.0)).alias("hole_s"),
         F.countDistinct("track_id").alias("tracks_in_window"),
     )
-    per_piece = j.groupBy("flight_key", "track_id").agg(
-        (F.max("cumulative_distance_nm") - F.min("cumulative_distance_nm")).alias("d")
+
+
+def track_distances(events, measurements):
+    """The published distance flown of each track: the measurement
+    ``Distance flown (NM)`` of its ``last_seen`` event."""
+    from pyspark.sql import functions as F
+
+    last = events.where(F.col("type") == "last_seen").select(
+        F.col("id").alias("milestone_id"), F.col("flight_id").alias("track_id")
     )
-    distance = per_piece.groupBy("flight_key").agg(F.sum("d").alias("distance_nm"))
-    return per_flight.join(distance, "flight_key", "left")
+    dist = measurements.where(F.col("type") == DISTANCE_MEASUREMENT).select(
+        "milestone_id", F.col("value").alias("distance_nm")
+    )
+    return (
+        last.join(dist, "milestone_id")
+        .groupBy("track_id")
+        .agg(F.max("distance_nm").alias("distance_nm"))
+    )
 
 
 def adsc_positions(merged_tracks):
@@ -1516,19 +1578,43 @@ def cmd_compare(args) -> int:
             truth["gt_ades"].map(coords["longitude_deg"]),
         )
         measures = {r: flight_measures(spark, tables[r]["tracks"], truth).toPandas() for r in RUNS}
-        base_hole = measures["base"].set_index("flight_key")["holes"] > 0
+        dist = {}
+        for r in RUNS:
+            meas = spark.read.parquet(table_path(r, "opdi_measurements")).where(
+                F.col("dof") == F.lit(d).cast("date")
+            )
+            td = track_distances(tables[r]["events"], meas).toPandas()
+            dist[r] = flight_distances(truth, tracks_pd[r].merge(td, on="track_id", how="left"))
         rows = []
         for r in RUNS:
             m = (
-                truth[["flight_key", "flow", "ref_nm"]]
+                truth[["flight_key", "flow", "ref_nm", "t_off", "t_on"]]
                 .assign(gc_nm=gc.values)
                 .merge(measures[r], on="flight_key", how="left")
             )
             m["run"] = r
-            m["base_hole"] = m["flight_key"].map(base_hole).fillna(False).astype(bool)
-            rows.append(m)
+            m["distance_nm"] = m["flight_key"].map(dist[r])
+            rows.append(add_coverage(m))
         per_flight_d = pd.concat(rows, ignore_index=True)
-        _write(out, "distance.csv", distance_table(per_flight_d), argv, inputs, input_tables)
+        base_unc = per_flight_d[per_flight_d["run"] == "base"].set_index("flight_key")
+        per_flight_d["base_hole"] = (
+            per_flight_d["flight_key"].map(base_unc["uncovered_s"] > 0).fillna(False).astype(bool)
+        )
+        one = per_flight.set_index("flight_key")
+        per_flight_d["one_track_both"] = (
+            per_flight_d["flight_key"]
+            .map((one["tracks_base"] == 1) & (one["tracks_merged"] == 1))
+            .fillna(False)
+            .astype(bool)
+        )
+        _write(
+            out,
+            "distance.csv",
+            pd.concat([distance_table(per_flight_d), distance_table(per_flight_d, one_track=True)]),
+            argv,
+            inputs,
+            input_tables,
+        )
         _write(out, "flight_gaps.csv", flight_gap_table(per_flight_d), argv, inputs, input_tables)
         _write(out, "flights.csv", per_flight_d, argv, inputs, input_tables)
 

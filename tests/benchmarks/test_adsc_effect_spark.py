@@ -46,7 +46,7 @@ def test_track_summaries(merged_tracks):
     # Three gaps of 40 min: the two ADS-C reports shorten the hole of 120 min
     # but each remaining gap is still over 30 min.
     assert s.loc["t1", "holes"] == 3
-    assert s.loc["t1", "distance_nm"] == 990.0
+    assert s.loc["t1", "cumulative_nm"] == 990.0
     assert s.loc["t1", "callsigns"] == 2 and s.loc["t2", "callsigns"] == 0
 
 
@@ -79,8 +79,8 @@ def test_flight_measures_sum_the_pieces(spark, merged_tracks):
     )
     m = ae.flight_measures(spark, merged_tracks, truth).toPandas().iloc[0]
     assert m["reports"] == 5 and m["adsc_reports"] == 2
-    assert m["distance_nm"] == 990.0
-    assert m["holes"] == 3
+    assert m["holes"] == 3 and m["hole_s"] == 3 * 40 * 60
+    assert m["first_report"] == pd.Timestamp(at(0))
 
 
 def test_events_are_paired_by_aircraft_type_and_nearest_time(spark, merged_tracks):
@@ -125,3 +125,21 @@ def test_flag_holes_is_strictly_inside(spark):
     )
     f = ae.flag_holes(df, holes, "t", "h").toPandas().sort_values(["icao24", "t"])
     assert list(f["h"]) == [False, True, False]
+
+
+def test_track_distance_is_the_measure_at_last_seen(spark):
+    ev = spark.createDataFrame(
+        [("e1", "t1", "first_seen"), ("e2", "t1", "last_seen"), ("e3", "t2", "last_seen")],
+        "id string, flight_id string, type string",
+    )
+    me = spark.createDataFrame(
+        [
+            ("e1", "Distance flown (NM)", 0.0),
+            ("e2", "Distance flown (NM)", 3283.75),
+            ("e2", "Time Passed (s)", 28560.0),
+            ("e3", "Distance flown (NM)", 12.0),
+        ],
+        "milestone_id string, type string, value double",
+    )
+    d = ae.track_distances(ev, me).toPandas().set_index("track_id")["distance_nm"]
+    assert d.to_dict() == {"t1": 3283.75, "t2": 12.0}
