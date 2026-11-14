@@ -130,11 +130,13 @@ class OPDIConfig:
                     executor_memory="12g",
                     executor_memory_overhead="2g",
                     executor_cores="2",
-                    # 13 executors of 2 cores use 26 of the namespace's 30 CPUs;
-                    # memory is the limit (13 x 14 GiB of a 192 GiB quota, with
-                    # room left for the driver). The number of executors does
-                    # not change the results.
-                    executor_instances="13",
+                    # The namespace allows 30 CPUs and 192 GiB in all, and the
+                    # pod that runs the driver takes 4 CPUs and 16 GiB of them.
+                    # An executor takes 2 CPUs and 14 GiB (its memory limit,
+                    # below), so 12 executors fit (24 CPUs, 168 GiB); a 13th
+                    # would wait for memory that never comes free. The number
+                    # of executors does not change the results.
+                    executor_instances="12",
                     enable_hive=False,
                     enable_iceberg=False,
                     s3_endpoint="https://s3.opensky-network.org",
