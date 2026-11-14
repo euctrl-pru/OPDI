@@ -265,3 +265,57 @@ def test_the_reports_can_be_read_from_another_run(monkeypatch):
     storage = StorageManager.__new__(StorageManager)
     assert storage._s3_path("osn_statevectors_v2") == f"{t.PREFIX}/first/osn_statevectors_v2"
     assert storage._s3_path("osn_tracks") == f"{t.PREFIX}/second/osn_tracks"
+
+
+def test_executor_summary_counts_the_executors_killed_for_memory():
+    lines = [
+        json.dumps({"Event": "SparkListenerExecutorAdded", "Executor ID": "1"}),
+        json.dumps({"Event": "SparkListenerExecutorAdded", "Executor ID": "2"}),
+        json.dumps(
+            {
+                "Event": "SparkListenerExecutorRemoved",
+                "Executor ID": "1",
+                "Removed Reason": "The executor with id 1 exited with exit code 137(SIGKILL).",
+            }
+        ),
+        json.dumps({"Event": "SparkListenerExecutorAdded", "Executor ID": "3"}),
+        json.dumps({"Event": "SparkListenerTaskEnd", "Stage ID": 137}),
+    ]
+    ex = t.executor_summary(lines)
+    assert (ex["added"], ex["removed"], ex["killed_137"], ex["max_alive"]) == (3, 1, 1, 2)
+
+
+def test_full_day_run_deletes_only_tables_no_later_step_reads():
+    # The reports feed step 02 only, the raw tracks step 02a only, and the
+    # cleaned tracks steps 03 and 04; the flight list and events stay.
+    assert t.DROP_AFTER == {
+        "02": ("osn_statevectors_v2",),
+        "02a": ("osn_tracks",),
+        "04": ("osn_tracks_clean",),
+    }
+    order = list(t.STEPS)
+    readers = {"osn_statevectors_v2": "02", "osn_tracks": "02a", "osn_tracks_clean": "04"}
+    for step, tables in t.DROP_AFTER.items():
+        for table in tables:
+            assert order.index(step) >= order.index(readers[table])
+
+
+def test_read_tables_are_read_from_the_other_run_and_never_written(monkeypatch):
+    from opdi.output import published
+    from opdi.utils.storage import StorageManager
+
+    for name in ("_s3_path", "write_table", "drop_partitions"):
+        monkeypatch.setattr(StorageManager, name, getattr(StorageManager, name))
+    monkeypatch.setattr(
+        published.PublishedLayout, "for_storage", published.PublishedLayout.for_storage
+    )
+    monkeypatch.setattr(t, "READ_FROM", "ref")
+    monkeypatch.setattr(t, "READ_TABLES", frozenset({"opdi_flight_list"}))
+    t.redirect("cand", False)
+    storage = StorageManager.__new__(StorageManager)
+    assert storage._s3_path("opdi_flight_list") == f"{t.PREFIX}/ref/opdi_flight_list"
+    assert storage._s3_path("opdi_flight_events") == f"{t.PREFIX}/cand/opdi_flight_events"
+    with pytest.raises(AssertionError, match="read from run ref"):
+        storage.write_table(None, "opdi_flight_list")
+    with pytest.raises(AssertionError, match="read from run ref"):
+        storage.drop_partitions("opdi_flight_list", "DOF", [])
