@@ -49,6 +49,10 @@ OPENSKY_CLUSTER_SETTINGS = {
     "spark.hadoop.fs.s3a.retry.throttle.limit": "20",
     "spark.hadoop.fs.s3a.retry.throttle.interval": "1s",
     "spark.hadoop.fs.s3a.connection.request.timeout": "120s",
+    # Record the memory of each executor's processes (Java and Python) with
+    # each stage, so that the event log shows how close a step comes to the
+    # container's limit. Read from /proc; no measurable cost.
+    "spark.executor.processTreeMetrics.enabled": "true",
 }
 
 #: Environment variable that names the warehouse of the ``opensky``
@@ -162,18 +166,21 @@ class OPDIConfig:
                     # Each executor is a container of heap + overhead = 13.5 GiB
                     # (13,824 MiB) and 2 CPUs. The namespace allows 30 CPUs and
                     # 192 GiB, of which the pod that runs the driver takes 4 CPUs
-                    # and 16 GiB: 13 executors fit (26 CPUs, 175.5 GiB). The
-                    # overhead holds everything outside the Java heap: the
-                    # Python workers, network buffers, compression. With Spark's
+                    # and 16 GiB: 13 executors fit (26 CPUs, 175.5 GiB). 13
+                    # executors instead of 12: step 04 took 1,662 and 1,692 s
+                    # instead of 1,760 and 1,763 s (-5%).
+                    # The overhead holds everything outside the Java heap: the
+                    # Python workers, threads, network buffers. With Spark's
                     # default (10% of the heap, 1.2 GiB) every executor was
-                    # killed for memory (exit 137) in step 09, and in one run
-                    # four times over in step 04b, which then failed. No stage
-                    # spills to disk at 11g of heap. 13 executors instead of 12:
-                    # step 04 took 1,662 and 1,692 s instead of 1,760 and
-                    # 1,763 s (-5%). The number and size of the executors do
-                    # not change the results.
-                    executor_memory="11g",
-                    executor_memory_overhead="2560m",
+                    # killed for memory (exit 137) in step 09 of every full-day
+                    # run, and one run failed in step 04b. Measured with 11g of
+                    # heap and 2.5 GiB of overhead: no executor killed, but at
+                    # the peak (step 09: the Java process 12,475 MiB, the Python
+                    # workers 951 MiB) 0.4 GiB short of the limit; so 10g of heap
+                    # and 3.5 GiB of overhead. The number and size of the
+                    # executors do not change the results.
+                    executor_memory="10g",
+                    executor_memory_overhead="3584m",
                     executor_cores="2",
                     executor_instances="13",
                     enable_hive=False,
