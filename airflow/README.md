@@ -132,7 +132,7 @@ Set them under Admin > Variables. All are optional.
 |-----------------------|-----------|---------|
 | `opdi_command_prefix` | empty     | Text placed before `python -m opdi.orchestration` in every command. It says where OPDI runs. Examples: `kubectl exec -n eurocontrol <driver-pod> --` (run inside the pod that hosts the Spark driver), `source /opt/opdi/.venv/bin/activate &&` (a virtual environment on the worker). |
 | `opdi_warehouse`      | empty     | The warehouse. Empty means the `OPDI_WAREHOUSE` environment variable where the command runs, else `s3a://eurocontrol/opdi`. |
-| `opdi_min_free_gb`    | `25`      | Free space, in GB, a day needs before it starts. A worldwide day writes about 20 GB of internal tables (mostly tracks) before `prune` removes them. |
+| `opdi_min_free_gb`    | `32`      | Free space, in GB, a day needs before it starts. A worldwide day adds about 29 GB (the next day's reports, the tracks, the cleaned tracks, events) before `prune` removes them. |
 | `opdi_lag_days`       | `2`       | How many days the daily run stays behind the run date. At least 2: day D is built from the position reports of D-1 to D+1, and at 06:00 UTC on day R the reports of R-1 are not complete yet. A smaller value stops the run at its first task with a message. |
 | `opdi_keep_internal`  | `false`   | `true` keeps the internal tables of each day after publishing (needs much more space). |
 | `opdi_keep_working`   | `true`    | `false` also removes the working events and measurements of days that are already published, except the 7 days on each side of the day just run. See "How disk space is protected". |
@@ -243,6 +243,21 @@ the position reports of the day before, the day and the day after; steps
 list and events. A day that has started but is not yet published keeps these
 folders: neither `prune` nor the step 01 of another day removes them.
 
+**Inside each command** a step that fails for a passing reason is run
+again by itself, up to two more times, two minutes apart, each time in a new
+Spark session (`--retries`, `--retry-pause`). Passing reasons are those seen
+on the OpenSky cluster: the storage refusing requests for a while ("503:
+please reduce your request rate"), an upload it lost ("NoSuchUpload"), a
+request that timed out, executors lost (killed for memory, deleted, moved),
+and the quota refusing an executor for a moment. The log then shows `failed
+after ... (attempt 1 of 3, transient)` and `running it again in 120 s`.
+Running a step again is safe: each step replaces the day's folders as a
+whole, the published files are written aside and moved into place, and a
+step is recorded as finished only at its end. Causes that a new attempt does
+not cure stop at once, with `not retried; the cause has to be removed
+first`: a full bucket, a table that an earlier step left empty, columns that
+do not match, an error in the code or the settings.
+
 **In the daily DAG** a failed task is retried twice, ten minutes apart. While
 it waits for a retry the run is still running, and the next morning's run
 waits (`max_active_runs=1`). When the task has failed for good, the next run
@@ -297,6 +312,42 @@ reader can see the new flight list beside the old events file; a reader never
 sees a partly written file. If publishing stops part way, publishing the day
 again ends in the correct state.
 
+## What can still stop a day
+
+Each of these stops the command with a message that names the cause, and
+leaves the warehouse in a state the next run continues from (the steps
+finished so far stay recorded; the step that failed is run again from its
+start):
+
+- **The bucket is full.** The day does not start when less than 32 GB are
+  free (`check-space`). A worldwide day adds about 29 GB before `prune`
+  removes its working tables (the next day's reports 9 GB, the tracks and the
+  cleaned tracks 9 GB each, events and measurements 1.3 GB); a first day,
+  which fetches all three days of reports, adds about 47 GB. If the quota is
+  reached during a step, the write fails, is not retried, and the message
+  names the quota. Free space, then run the day again.
+- **The archive lacks an hour.** Step 01 reads the 24 hourly folders of
+  each day it fetches; when one is missing, it stops with `PATH_NOT_FOUND`
+  and the folder (`.../hour=<unix time>`), and is not retried. Nothing of
+  that day is recorded as fetched, so once the hour is in the archive (or the
+  day is to be built without it, which needs a change of code), running the
+  day again fetches it.
+- **The cluster refuses executors for longer than the retries last.** Spark
+  waits for executors; a session that gets none does not progress and the
+  task ends at its timeout (24 hours in the backfill DAG). Check the namespace
+  quota (`kubectl describe resourcequota`): a pod left from an earlier run
+  holds CPUs and memory.
+- **The pod that runs the driver is killed** (its 16 GB limit, a restart of
+  the notebook server). The command stops without a message of its own;
+  Airflow sees the task fail. Clear the task: the day continues from the step
+  that was running.
+- **A publish lock left behind** by a publish whose process was killed:
+  step 09 stops with the lock's holder and age; see the table above.
+- **The same error three times** in a row for a passing reason (the storage
+  refusing requests for more than about six minutes, executors lost again
+  and again): the step stops after its third attempt; run the day again
+  later.
+
 ## How disk space is protected
 
 The bucket has a quota (200 GB by default; set `OPDI_BUCKET_QUOTA_GB` where
@@ -349,51 +400,50 @@ python -m opdi.orchestration check-space --min-free-gb 0
 
 ### Time
 
-Measured on one worldwide day, 14 June 2026, on the OpenSky cluster. An
-executor is one Spark worker process with 2 CPU cores and 14 GiB of memory;
-the pipeline uses 12 of them (`executor_instances` in
-`src/opdi/config/environments.py`), the most the namespace quota holds: 30
-CPUs and 192 GiB in all, of which the pod that runs the driver takes 4 CPUs
+Measured on one worldwide day, 14 June 2026, on the OpenSky cluster, every
+step run on the whole day from the raw archive through `python -m
+opdi.orchestration day`. An executor is one Spark worker process with 2 CPU
+cores, 11 GiB of Java heap and 2.5 GiB outside it; the pipeline uses 13 of
+them (`src/opdi/config/environments.py`), the most the namespace quota holds:
+30 CPUs and 192 GiB in all, of which the pod that runs the driver takes 4 CPUs
 and 16 GiB.
 
-| Step | What it does | Time | How the figure was obtained |
+| Step | What it does | Time | Second run |
 |---|---|---|---|
-| 01 | fetch and thin the reports | 396 s | scaled from a 4-hour slice of the day |
-| 02 | build the tracks | 2,133 s | scaled from one aircraft in 12 |
-| 02a | clean the tracks | 1,225 s | scaled from one aircraft in 12 |
-| 03 | flight list | 387 s | measured on the full day |
-| 04 | events and measurements | 1,741 s | measured on the full day |
-| 04b | milestones in the flight list | 55 s | measured on the full day |
-| 09 | published files | 246 s | measured on the full day |
-| **all** | | **6,183 s (1.7 h)** | 2,429 s measured, 3,754 s scaled |
+| 01 | fetch and thin one day of reports | 384 s | 396 s |
+| 02 | build the tracks | 1,677 s | 1,738 s |
+| 02a | clean the tracks | 744 s | 751 s |
+| 03 | flight list | 356 s | 359 s |
+| 04 | events and measurements | 1,550 s | 1,542 s |
+| 04b | milestones in the flight list | 79 s | 97 s |
+| 09 | published files | 209 s | 234 s |
+| **all** | | **4,999 s (1.4 h)** | 5,117 s |
 
-Steps 01, 02 and 02a write about 20 GB for a full day, more than the bucket
-had free, so they were run on a part of the day: step 01 on the first 2 and
-4 hours, steps 02 and 02a on all 59 hours that step 02 reads, but for one
-aircraft in 12 and one in 24. A scaled figure is the work of that part (its
-executor-seconds: the sum of the time of all its tasks) times the share of
-the day it covers, divided by the cores at work (85% of them on average, as
-measured on the full-day steps), plus the stages that run as a single task,
-times the share. A part of a day runs in one or two rounds of tasks, so its
-own run time says little about a full day. Steps 01 to 02a were measured
-with 8 executors; their figures assume that 12 executors do the same work
-1.5 times as fast.
+Step 01 of a daily run fetches one new day (the day after the one
+processed); the day before and the day itself are already there from the
+runs of the days before. When a day is the first one processed, step 01
+fetches two or three days and takes two or three times as long. Between the
+steps, starting each step's Spark session and waiting for the executors of
+the step before to leave the quota adds about 15 s each.
 
-The number of executors does not change the results. Neither does the order
-in which Spark happens to process the rows, with one exception: when one H3
-cell lies on several parts of an airport layout (two taxiways, a taxiway and
-a stand), the layout event names one of them in its `info` text, and which
-one can change from one run to the next.
+The settings that brought a day from about 6,200 s (12 executors, Spark's
+defaults) to this are, each measured on the same day: 13 executors instead of
+12 (step 04 -5%), 104 shuffle parts instead of 200 (step 04 -10% more), and
+2.5 GiB outside the heap instead of Spark's default 1.2 GiB, without which
+every executor was killed for memory in step 09 and the lost work was done
+again. The comparison of every setting tried is in the processing speed note
+of the portal (`papers/processing-speed-v1/data/settings_tests.csv`).
 
-**Where the time goes.** A day costs about 120,000 executor-seconds: about
-43,500 in step 02, 35,000 in step 04, 25,000 in step 02a and 8,000 in step
-01. With 24 cores busy 85% of the time that is about 5,800 s, so this
-cluster does not process a worldwide day in one hour. Step 02 reads 59 hours
-of reports for each day (the hours before the day, the day, and the 24 hours
-after it), so each report is split into tracks on two to three days; building
-the tracks once per hour of reports, and carrying the tracks still open from
-one day to the next, would remove most of that work. Otherwise about twice
-the cores would be needed.
+The number and size of the executors and the shuffle parts do not change the
+results; neither does losing executors during a step (tested by deleting one
+in the middle of step 02 and one in the middle of step 04: same flights, same
+events). Neither does the order in which Spark happens to process the rows.
+
+**Where the time goes.** Steps 02 and 04 are two thirds of the day. Step 02
+reads 59 hours of reports for each day (the hours before the day, the day,
+and the 24 hours after it), so each report is split into tracks on two to
+three days; building the tracks once per hour of reports, and carrying the
+tracks still open from one day to the next, would remove most of that work.
 
 `benchmarks/day_timing.py` measures a day step by step and stage by stage;
 `benchmarks/day_compare.py` compares the outputs of two runs of a day.
