@@ -200,6 +200,11 @@ continues where it stopped, on any machine. `python -m opdi.orchestration
 --help` lists every command, including `check-space` and `prune` (removing the
 working tables that are no longer needed).
 
+A worldwide day takes about 1.7 hours on the OpenSky cluster with its 12
+executors; step 02 (the tracks) and step 04 (the events) take most of it.
+The time of each step, and how it was measured, is in "What a day costs" in
+`airflow/README.md`.
+
 Step 00b needs a local OpenStreetMap extract of the airports (set
 `OPDI_OSM_PBF`); see `opdi.reference.pbf_filter` to reduce a regional or
 planet extract to the aeroway features it needs.

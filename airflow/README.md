@@ -347,6 +347,59 @@ python -m opdi.orchestration check-space --min-free-gb 0
 
 ## What a day costs
 
+### Time
+
+Measured on one worldwide day, 14 June 2026, on the OpenSky cluster. An
+executor is one Spark worker process with 2 CPU cores and 14 GiB of memory;
+the pipeline uses 12 of them (`executor_instances` in
+`src/opdi/config/environments.py`), the most the namespace quota holds: 30
+CPUs and 192 GiB in all, of which the pod that runs the driver takes 4 CPUs
+and 16 GiB.
+
+| Step | What it does | Time | How the figure was obtained |
+|---|---|---|---|
+| 01 | fetch and thin the reports | 396 s | scaled from a 4-hour slice of the day |
+| 02 | build the tracks | 2,133 s | scaled from one aircraft in 12 |
+| 02a | clean the tracks | 1,225 s | scaled from one aircraft in 12 |
+| 03 | flight list | 387 s | measured on the full day |
+| 04 | events and measurements | 1,741 s | measured on the full day |
+| 04b | milestones in the flight list | 55 s | measured on the full day |
+| 09 | published files | 246 s | measured on the full day |
+| **all** | | **6,183 s (1.7 h)** | 2,429 s measured, 3,754 s scaled |
+
+Steps 01, 02 and 02a write about 20 GB for a full day, more than the bucket
+had free, so they were run on a part of the day: step 01 on the first 2 and
+4 hours, steps 02 and 02a on all 59 hours that step 02 reads, but for one
+aircraft in 12 and one in 24. A scaled figure is the work of that part (its
+executor-seconds: the sum of the time of all its tasks) times the share of
+the day it covers, divided by the cores at work (85% of them on average, as
+measured on the full-day steps), plus the stages that run as a single task,
+times the share. A part of a day runs in one or two rounds of tasks, so its
+own run time says little about a full day. Steps 01 to 02a were measured
+with 8 executors; their figures assume that 12 executors do the same work
+1.5 times as fast.
+
+The number of executors does not change the results. Neither does the order
+in which Spark happens to process the rows, with one exception: when one H3
+cell lies on several parts of an airport layout (two taxiways, a taxiway and
+a stand), the layout event names one of them in its `info` text, and which
+one can change from one run to the next.
+
+**Where the time goes.** A day costs about 120,000 executor-seconds: about
+43,500 in step 02, 35,000 in step 04, 25,000 in step 02a and 8,000 in step
+01. With 24 cores busy 85% of the time that is about 5,800 s, so this
+cluster does not process a worldwide day in one hour. Step 02 reads 59 hours
+of reports for each day (the hours before the day, the day, and the 24 hours
+after it), so each report is split into tracks on two to three days; building
+the tracks once per hour of reports, and carrying the tracks still open from
+one day to the next, would remove most of that work. Otherwise about twice
+the cores would be needed.
+
+`benchmarks/day_timing.py` measures a day step by step and stage by stage;
+`benchmarks/day_compare.py` compares the outputs of two runs of a day.
+
+### Space
+
 Measured by publishing one worldwide day (14 June 2026) from existing working
 tables on the OpenSky cluster with six executors:
 
