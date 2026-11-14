@@ -865,6 +865,74 @@ def flight_gap_table(per_flight: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def aircraft_groups(airframes: Iterable[str], positions: pd.DataFrame) -> pd.Series:
+    """Group of each study aircraft by what its ADS-C reports can change.
+
+    * ``no_adsc_kept``: no ADS-C report of the aircraft is left in the merged
+      tracks (all lie within the shadow window of ADS-B, or none fell in the
+      days read). Merging changes nothing for it.
+    * ``adsc_near_adsb_only``: every kept ADS-C report is within
+      :data:`GAP_FLOOR_MINUTES` of an ADS-B report on at least one side.
+    * ``adsc_in_gap``: at least one kept ADS-C report lies in a reception gap
+      or beyond the ADS-B reports of the day.
+    """
+    out = pd.Series("no_adsc_kept", index=pd.Index(sorted(set(airframes)), name="icao24"))
+    if len(positions):
+        far = positions.assign(far=positions["position"] != "near_adsb").groupby("icao24")["far"]
+        any_far = far.any()
+        out[any_far.index] = np.where(any_far, "adsc_in_gap", "adsc_near_adsb_only")
+    return out
+
+
+def agreement_table(
+    groups: pd.Series,
+    tracks: Dict[str, pd.DataFrame],
+    events: Dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Per aircraft group: aircraft whose tracks and events are the same in both runs.
+
+    ``tracks[run]``: ``icao24``, ``track_id``, ``first_seen``, ``last_seen``,
+    ``reports``, ``distance_nm``. ``events[run]``: ``icao24``, ``type``,
+    ``event_time``. Tracks are the same when the two runs hold the same set of
+    (track id, first and last report, reports, distance to 0.001 NM); events
+    are the same when they hold the same events (type and time, with repeats).
+    An aircraft for which the merge adds nothing must be the same: any
+    difference there comes from something other than the ADS-C reports.
+    """
+
+    def track_keys(t):
+        k = t.assign(d=t["distance_nm"].round(3).fillna(-1.0))
+        cols = ["track_id", "first_seen", "last_seen", "reports", "d"]
+        return k.groupby("icao24")[cols].apply(lambda g: sorted(map(tuple, g.astype(str).values)))
+
+    def event_keys(e):
+        return e.groupby("icao24")[["type", "event_time"]].apply(
+            lambda g: sorted(map(tuple, g.astype(str).values))
+        )
+
+    tk = {r: track_keys(tracks[r]) for r in RUNS}
+    ek = {r: event_keys(events[r]) for r in RUNS}
+
+    def same(keys, icao):
+        return keys["base"].get(icao, []) == keys["merged"].get(icao, [])
+
+    rows = []
+    for group, members in groups.groupby(groups):
+        icaos = list(members.index)
+        st = [same(tk, i) for i in icaos]
+        se = [same(ek, i) for i in icaos]
+        rows.append(
+            {
+                "group": group,
+                "aircraft": len(icaos),
+                "same_tracks": int(sum(st)),
+                "same_events": int(sum(se)),
+                "same_both": int(sum(a and b for a, b in zip(st, se))),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def shift_class(seconds: pd.Series) -> pd.Series:
     """Class of the size of a time change: ``0 s``, ``<=10 s``, ..., ``<=3600 s``."""
     s = seconds.abs()
@@ -1327,6 +1395,26 @@ def cmd_compare(args) -> int:
         pos = adsc_positions(tables["merged"]["tracks"]).toPandas()
         pos["position"] = adsc_position(pos["gap_before_s"], pos["gap_after_s"])
         _write(out, "adsc_reports.csv", adsc_report_table(pos, counts), argv, inputs, input_tables)
+
+        # Review: aircraft for which the merge adds nothing must be the same.
+        groups = aircraft_groups(airframes, pos)
+        ev_pd = {}
+        for r in RUNS:
+            ids = tables[r]["tracks"].select("track_id", "icao24").distinct()
+            ev_pd[r] = (
+                tables[r]["events"]
+                .join(ids, tables[r]["events"]["flight_id"] == ids["track_id"])
+                .select("icao24", "type", "event_time")
+                .toPandas()
+            )
+        _write(
+            out,
+            "agreement.csv",
+            agreement_table(groups, summaries, ev_pd),
+            argv,
+            inputs,
+            input_tables,
+        )
 
         # Reference flights.
         month = day.strftime("%Y%m")

@@ -453,3 +453,36 @@ def test_bracket_share():
     t = ae.bracket_table(b).set_index("run")
     assert t.loc["merged", "over_limit_share"] == pytest.approx(0.4)
     assert pd.isna(t.loc["base", "over_limit_share"])
+
+
+def test_aircraft_groups():
+    pos = pd.DataFrame(
+        {"icao24": ["b", "b", "c"], "position": ["near_adsb", "near_adsb", "in_hole"]}
+    )
+    g = ae.aircraft_groups(["a", "b", "c"], pos)
+    assert g.to_dict() == {
+        "a": "no_adsc_kept",
+        "b": "adsc_near_adsb_only",
+        "c": "adsc_in_gap",
+    }
+
+
+def test_agreement_table_finds_aircraft_that_changed():
+    groups = pd.Series({"a": "no_adsc_kept", "c": "adsc_in_gap"})
+    tr = pd.DataFrame(
+        {
+            "icao24": ["a", "c"],
+            "track_id": ["t1", "t3"],
+            "first_seen": [T0, T0],
+            "last_seen": [T0 + minutes(60), T0 + minutes(90)],
+            "reports": [10, 20],
+            "distance_nm": [100.0, 200.0],
+        }
+    )
+    tm = tr.copy()
+    tm.loc[1, "reports"] = 22
+    ev = pd.DataFrame({"icao24": ["a", "c"], "type": ["first_seen"] * 2, "event_time": [T0, T0]})
+    t = ae.agreement_table(groups, {"base": tr, "merged": tm}, {"base": ev, "merged": ev})
+    t = t.set_index("group")
+    assert t.loc["no_adsc_kept", "same_both"] == 1
+    assert t.loc["adsc_in_gap", "same_tracks"] == 0 and t.loc["adsc_in_gap", "same_events"] == 1
