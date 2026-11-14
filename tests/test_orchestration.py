@@ -361,7 +361,7 @@ def test_allow_empty_reaches_the_publishing_step(monkeypatch):
 
 
 def test_the_free_space_floor_leaves_room_for_a_worldwide_day():
-    assert o.DEFAULT_MIN_FREE_GB == 25.0
+    assert o.DEFAULT_MIN_FREE_GB == 32.0
 
 
 def test_working_events_stay_while_a_neighbouring_day_is_not_published():

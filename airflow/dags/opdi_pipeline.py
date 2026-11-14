@@ -40,7 +40,7 @@ VARIABLE_DEFAULTS = {
     "opdi_warehouse": "",
     # Free space a day needs before it starts, in GB. A worldwide day writes
     # about 20 GB of internal tables before they are removed.
-    "opdi_min_free_gb": "25",
+    "opdi_min_free_gb": "32",
     # How many days the daily run stays behind the run date.
     "opdi_lag_days": "2",
     # "true" keeps the internal tables of each day after publishing.

@@ -81,7 +81,7 @@ def test_a_backfill_of_more_than_1000_days_is_refused_with_advice(module):
 VARIABLES = {
     "opdi_command_prefix": "kubectl exec -n eurocontrol driver --",
     "opdi_warehouse": "s3a://eurocontrol/opdi-test",
-    "opdi_min_free_gb": "25",
+    "opdi_min_free_gb": "32",
     "opdi_lag_days": "2",
     "opdi_keep_internal": "false",
     "opdi_keep_working": "true",
@@ -104,7 +104,7 @@ def test_every_daily_command_rendered(dags):
     wh = "--warehouse s3a://eurocontrol/opdi-test"
     expected = {
         "reference": f"{prefix} reference {wh}",
-        "check_space": f"{prefix} check-space --min-free-gb 25 {wh}",
+        "check_space": f"{prefix} check-space --min-free-gb 32 {wh}",
         "ingest": f"{prefix} step --step 01 --day 2026-11-09 {wh}",
         "tracks": f"{prefix} step --step 02 --day 2026-11-09 {wh}",
         "clean": f"{prefix} step --step 02a --day 2026-11-09 {wh}",
@@ -130,7 +130,7 @@ def test_the_daily_commands_without_variables(dags):
         "--day",
         "2026-11-09",
     ]
-    assert "--min-free-gb 25" in _render(daily, "check_space", variables={})
+    assert "--min-free-gb 32" in _render(daily, "check_space", variables={})
 
 
 def test_prune_follows_the_two_variables(dags):
@@ -190,7 +190,7 @@ def test_the_backfill_commands(dags, module, monkeypatch):
             "--day",
             day,
             "--min-free-gb",
-            "25",
+            "32",
             "--warehouse",
             "s3a://b/x; echo INJECTED",
             "--keep-internal",

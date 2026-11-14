@@ -7,7 +7,7 @@ such unit and is meant to be called as a command::
     python -m opdi.orchestration reference                       # step 00, once
     python -m opdi.orchestration step --step 02 --day 2026-06-14  # one step, one day
     python -m opdi.orchestration day --day 2026-06-14             # every step of a day
-    python -m opdi.orchestration check-space --min-free-gb 25
+    python -m opdi.orchestration check-space --min-free-gb 32
     python -m opdi.orchestration prune --day 2026-06-14
     python -m opdi.orchestration prune --day 2026-06-14 --drop-published-working
     python -m opdi.orchestration clear-lock                       # after a stopped publish
@@ -108,10 +108,12 @@ DEFAULT_KEEP_DAYS = 2
 DEFAULT_QUOTA_GB = 200.0
 QUOTA_VARIABLE = "OPDI_BUCKET_QUOTA_GB"
 
-#: Free space below which a day does not start, in GB. A worldwide day
-#: writes about 20 GB of internal tables (mostly tracks) before they are
-#: removed, so the floor leaves room for one day and some margin.
-DEFAULT_MIN_FREE_GB = 25.0
+#: Free space below which a day does not start, in GB. A worldwide day adds
+#: about 29 GB before ``prune`` removes its working tables (measured on
+#: 2026-06-14: the reports of the next day 9.0, the tracks 9.3, the cleaned
+#: tracks 9.2, events and measurements 1.3, published files 0.5), so the
+#: floor leaves room for one day and a small margin.
+DEFAULT_MIN_FREE_GB = 32.0
 
 ORDERS = ("newest_first", "oldest_first")
 
