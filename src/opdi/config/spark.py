@@ -1,6 +1,6 @@
 """Settings of the Spark session: :class:`SparkConfig`."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict
 
 from opdi.config.project import ProjectConfig
@@ -102,6 +102,9 @@ class SparkConfig:
     """Kubernetes memory limit of each executor."""
     k8s_executor_cores_limit: str = ""
     """Kubernetes CPU limit of each executor."""
+    cluster_settings: Dict[str, str] = field(default_factory=dict)
+    """Further Spark settings for a run with executors on Kubernetes only, added by
+    :meth:`to_distributed_config`. A session on one machine (the tests) never gets them."""
 
     # Feature flags
     enable_hive: bool = True
@@ -190,9 +193,11 @@ class SparkConfig:
             "spark.driver.blockManager.port": self.k8s_driver_block_manager_port,
             "spark.executor.instances": self.executor_instances,
             "spark.executor.memory": self.executor_memory,
+            "spark.executor.memoryOverhead": self.executor_memory_overhead,
             "spark.executor.cores": self.executor_cores,
             "spark.kubernetes.executor.limit.memory": self.k8s_executor_memory_limit,
             "spark.kubernetes.executor.limit.cores": self.k8s_executor_cores_limit,
             "spark.kubernetes.container.image": self.k8s_container_image,
             "spark.kubernetes.namespace": self.k8s_namespace,
+            **self.cluster_settings,
         }

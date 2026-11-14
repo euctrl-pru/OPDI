@@ -19,6 +19,38 @@ from opdi.coverage import CoverageConfig
 #: the storage prefix under which each release has its own folder.
 OPENSKY_DEFAULT_WAREHOUSE = "s3a://eurocontrol/opdi"
 
+#: Spark settings of the ``opensky`` cluster beyond memory and cores, each
+#: measured on the worldwide day 2026-06-14 (the processing speed note of the portal,
+#: settings_tests.csv). None changes the results.
+OPENSKY_CLUSTER_SETTINGS = {
+    # Parts of a shuffle: 104 (4 per core of the 13 executors) instead of
+    # Spark's 200. Step 04 keeps every event family in 200 parts each, most
+    # of them tiny (the median one ran 0.4 s); with 104 it took 1,507 and 1,506 s
+    # instead of 1,662 and 1,692 s on 13 executors (-10%, 33,600 instead of
+    # 35,750 to 36,250 executor-seconds). Steps 03, 04b and 09 unchanged.
+    "spark.sql.shuffle.partitions": "104",
+    # Copies lost with an executor are made again on another one, so the
+    # kept frames of step 04 (kept twice, see
+    # opdi.utils.spark_helpers.keep_frame) survive more than one loss.
+    "spark.storage.replication.proactive": "true",
+    # Executors lost to the container's memory limit count as failures of
+    # the tasks and stages they ran; Spark's default of 4 attempts let one run
+    # of step 04b fail. 8 gives room for losses that do not repeat.
+    "spark.task.maxFailures": "8",
+    "spark.stage.maxConsecutiveAttempts": "8",
+    # Storage. Hadoop's defaults retry a request 5 times and give up on one
+    # after 60 s; the study settings used earlier (10 retries, 600 s) left a
+    # stalled request hanging for ten minutes. Here: 10 retries, a request
+    # given up after 120 s, and throttling ("503: please reduce your request
+    # rate") retried 20 times with a pause that starts at 1 s and doubles.
+    "spark.hadoop.fs.s3a.attempts.maximum": "10",
+    "spark.hadoop.fs.s3a.retry.limit": "10",
+    "spark.hadoop.fs.s3a.retry.interval": "2s",
+    "spark.hadoop.fs.s3a.retry.throttle.limit": "20",
+    "spark.hadoop.fs.s3a.retry.throttle.interval": "1s",
+    "spark.hadoop.fs.s3a.connection.request.timeout": "120s",
+}
+
 #: Environment variable that names the warehouse of the ``opensky``
 #: environment.
 WAREHOUSE_VARIABLE = "OPDI_WAREHOUSE"
@@ -127,16 +159,23 @@ class OPDIConfig:
                 spark=SparkConfig(
                     app_name="OPDI - OpenSky",
                     driver_memory="10G",
-                    executor_memory="12g",
-                    executor_memory_overhead="2g",
+                    # Each executor is a container of heap + overhead = 13.5 GiB
+                    # (13,824 MiB) and 2 CPUs. The namespace allows 30 CPUs and
+                    # 192 GiB, of which the pod that runs the driver takes 4 CPUs
+                    # and 16 GiB: 13 executors fit (26 CPUs, 175.5 GiB). The
+                    # overhead holds everything outside the Java heap: the
+                    # Python workers, network buffers, compression. With Spark's
+                    # default (10% of the heap, 1.2 GiB) every executor was
+                    # killed for memory (exit 137) in step 09, and in one run
+                    # four times over in step 04b, which then failed. No stage
+                    # spills to disk at 11g of heap. 13 executors instead of 12:
+                    # step 04 took 1,662 and 1,692 s instead of 1,760 and
+                    # 1,763 s (-5%). The number and size of the executors do
+                    # not change the results.
+                    executor_memory="11g",
+                    executor_memory_overhead="2560m",
                     executor_cores="2",
-                    # The namespace allows 30 CPUs and 192 GiB in all, and the
-                    # pod that runs the driver takes 4 CPUs and 16 GiB of them.
-                    # An executor takes 2 CPUs and 14 GiB (its memory limit,
-                    # below), so 12 executors fit (24 CPUs, 168 GiB); a 13th
-                    # would wait for memory that never comes free. The number
-                    # of executors does not change the results.
-                    executor_instances="12",
+                    executor_instances="13",
                     enable_hive=False,
                     enable_iceberg=False,
                     s3_endpoint="https://s3.opensky-network.org",
@@ -146,11 +185,14 @@ class OPDIConfig:
                     # The executor image must carry h3 version 4, which this
                     # package's H3 calls need; tags before -6 carry version 3.
                     k8s_container_image="docker.io/quintengs/opdi-spark:v4.1.1-6",
-                    k8s_executor_memory_limit="14g",
+                    # Not a Spark setting (Spark sets the container memory to
+                    # heap + overhead); kept for the record of the pod size.
+                    k8s_executor_memory_limit="13824m",
                     # Equal to executor_cores: the namespace quota counts CPU
                     # limits, so a higher limit would reserve CPUs no executor
                     # uses and allow fewer executors.
                     k8s_executor_cores_limit="2",
+                    cluster_settings=dict(OPENSKY_CLUSTER_SETTINGS),
                 ),
             )
         else:
