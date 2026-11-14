@@ -63,7 +63,7 @@ def test_track_gaps_keep_gaps_from_five_minutes(merged_tracks):
 
 
 def test_adsc_positions(merged_tracks):
-    p = ae.adsc_positions(merged_tracks).toPandas().sort_values("event_time")
+    p = ae.adsc_positions(merged_tracks).toPandas().sort_values(["icao24", "event_time"])
     p["position"] = ae.adsc_position(p["gap_before_s"], p["gap_after_s"])
     assert list(p["position"]) == ["in_hole", "in_hole", "after_last_adsb"]
 
