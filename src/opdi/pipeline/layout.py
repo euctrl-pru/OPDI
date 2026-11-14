@@ -290,6 +290,7 @@ def calculate_airport_events(
         col("entry_cumulative_time_s").alias("cumulative_time_s"),
         col("entry_type").alias("type"),
         col("info"),
+        col("osm_id").alias("_osm_id"),
     )
     exit_events = result.select(
         col("track_id"),
@@ -301,6 +302,7 @@ def calculate_airport_events(
         col("exit_cumulative_time_s").alias("cumulative_time_s"),
         col("exit_type").alias("type"),
         col("info"),
+        col("osm_id").alias("_osm_id"),
     )
 
     apt_events = entry_events.unionByName(exit_events)
@@ -314,18 +316,46 @@ def calculate_airport_events(
         "cumulative_distance_nm",
         "cumulative_time_s",
         "info",
+        "_osm_id",
     )
-    apt_events = apt_events.dropDuplicates(
-        [
-            "track_id",
-            "type",
-            "event_time",
-            "lon",
-            "lat",
-            "altitude_ft",
-            "cumulative_distance_nm",
-            "cumulative_time_s",
-        ]
-    )
+    return one_element_per_passage(apt_events, config)
 
-    return apt_events
+
+#: The columns that make two layout events the same passage; ``info`` names
+#: the element.
+_PASSAGE_KEY = [
+    "track_id",
+    "type",
+    "event_time",
+    "lon",
+    "lat",
+    "altitude_ft",
+    "cumulative_distance_nm",
+    "cumulative_time_s",
+]
+
+
+def one_element_per_passage(events: DataFrame, config: EventConfig) -> DataFrame:
+    """One event per passage when overlapping layout elements give several.
+
+    Elements of one kind can share an H3 cell (a taxiway crossing an apron's
+    edge, stands drawn over an apron), and a passage through the cell then
+    gives the same event once per element, differing only in ``info``. With
+    :attr:`~opdi.config.EventConfig.layout_deterministic_element` the event
+    kept names the element with the smallest identifier (``_osm_id``), then
+    the first in the order of ``info``; otherwise any one is kept.
+
+    Args:
+        events: Layout events with an ``_osm_id`` column, dropped here.
+        config: Event settings.
+    """
+    if not config.layout_deterministic_element:
+        return events.dropDuplicates(_PASSAGE_KEY).drop("_osm_id")
+    w = Window.partitionBy(*_PASSAGE_KEY).orderBy(
+        col("_osm_id").asc_nulls_last(), col("info").asc_nulls_last()
+    )
+    return (
+        events.withColumn("_rank", F.row_number().over(w))
+        .filter(col("_rank") == 1)
+        .drop("_rank", "_osm_id")
+    )

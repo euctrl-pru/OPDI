@@ -626,6 +626,14 @@ class EventConfig:
     they come from whichever report Spark reads first, which need not be the
     one at that time."""
 
+    layout_deterministic_element: bool = True
+    """When several layout elements of one kind (taxiways, aprons, stands)
+    share an H3 cell, a passage gives one event, naming the element with the
+    smallest identifier (``osm_id``); between elements with the same
+    identifier, the first in the order of ``info``. Without it (release
+    v0.0.2) the event names whichever of them Spark keeps, which can differ
+    between two runs of the same day."""
+
     # -- plausibility checks ----------------------------------------------
     #
     # Events that the aircraft's own track clearly contradicts are removed
@@ -778,6 +786,7 @@ class EventConfig:
             crossing_interpolate=False,
             interpolate_crossings_over_missing_values=False,
             airport_events_ordered=False,
+            layout_deterministic_element=False,
             feeds_from_clean_tracks=False,
             deterministic_event_ids=False,
             # No distance circles in release v0.0.2.

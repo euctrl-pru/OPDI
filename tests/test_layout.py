@@ -320,3 +320,96 @@ def test_legacy_keeps_the_altitude_only_gate(spark):
     must stay dropped now."""
     sv = _surface_samples(spark)
     assert _passes_gate(sv, EventConfig.legacy()) is False
+
+
+def _overlapping_layouts(spark, order):
+    """Three taxiway elements sharing one cell, listed in ``order``."""
+    rows = {
+        "b": (H3_CELL_TAXIWAY, ADEP, "osm-twy-b", "taxiway", "TWY-B"),
+        "a": (H3_CELL_TAXIWAY, ADEP, "osm-twy-a", "taxiway", "TWY-A"),
+        "c": (H3_CELL_TAXIWAY, ADEP, "osm-twy-c", "taxiway", "TWY-C"),
+    }
+    return spark.createDataFrame(
+        [rows[k] for k in order],
+        "hexaero_h3_id string, hexaero_apt_icao string, hexaero_osm_id string, "
+        "hexaero_aeroway string, hexaero_ref string",
+    )
+
+
+def _events_with_layouts(spark, layouts, config):
+    import json
+
+    out = calculate_airport_events(
+        _track_over_a_taxiway(spark), MONTH, StubStorage(spark, layouts=layouts), config
+    )
+    rows = sorted(
+        (r.type, r.event_time, r.lon, r.lat, r.altitude_ft, r.info) for r in out.collect()
+    )
+    return rows, {json.loads(r[-1])["osm_id"] for r in rows}
+
+
+def test_of_overlapping_elements_the_event_names_the_smallest_identifier(spark):
+    """Several taxiway, apron or stand elements can share one cell. The event
+    names one of them, the same on every run: the smallest element identifier."""
+    for order in ("bac", "cba", "abc"):
+        rows, named = _events_with_layouts(
+            spark, _overlapping_layouts(spark, order).repartition(3), EventConfig()
+        )
+        assert named == {"osm-twy-a"}, order
+        assert [r[0] for r in rows] == ["entry-taxiway", "exit-taxiway"]
+
+
+def test_two_runs_over_shuffled_layouts_give_the_same_events(spark):
+    first, _ = _events_with_layouts(spark, _overlapping_layouts(spark, "cab"), EventConfig())
+    again, _ = _events_with_layouts(
+        spark, _overlapping_layouts(spark, "bca").orderBy(F.rand(3)).repartition(2), EventConfig()
+    )
+    assert first == again
+
+
+def test_the_v002_settings_keep_one_event_per_passage_without_the_rule(spark):
+    """``EventConfig.legacy()`` keeps the release v0.0.2 choice (any one of the
+    overlapping elements), so its output is unchanged."""
+    assert EventConfig.legacy().layout_deterministic_element is False
+    assert EventConfig().layout_deterministic_element is True
+    rows, named = _events_with_layouts(
+        spark, _overlapping_layouts(spark, "bac"), EventConfig(layout_deterministic_element=False)
+    )
+    assert len(rows) == 2 and len(named) == 1
+
+
+def test_the_element_kept_does_not_depend_on_the_row_order(spark):
+    """The choice itself, on events that differ only in the element they name."""
+    import json
+
+    from opdi.pipeline.layout import one_element_per_passage
+
+    t = dt.datetime(2024, 6, 1, 12, 0)
+
+    def events(order):
+        rows = [
+            (
+                "trk-1",
+                "entry-apron",
+                t,
+                12.6,
+                55.6,
+                10.0,
+                0.1,
+                5,
+                json.dumps({"osm_id": k, "osm_ref": f"A{k}"}),
+                k,
+            )
+            for k in order
+        ]
+        return spark.createDataFrame(
+            rows,
+            "track_id string, type string, event_time timestamp, lon double, lat double, "
+            "altitude_ft double, cumulative_distance_nm double, cumulative_time_s long, "
+            "info string, _osm_id long",
+        )
+
+    for order in ([30, 20, 10], [10, 30, 20], [20, 10, 30]):
+        kept = one_element_per_passage(events(order).coalesce(1), EventConfig()).collect()
+        assert [json.loads(r.info)["osm_id"] for r in kept] == [10], order
+        assert "_osm_id" not in kept[0].asDict()
