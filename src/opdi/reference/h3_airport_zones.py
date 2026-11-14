@@ -899,6 +899,11 @@ class AirportDetectionZoneGenerator:
         sdf = self.prepare_for_flight_list_spark(max_radius_nm, airport_types)
         # A few large files rather than one per task: step 03 reads the whole
         # table, and on S3 the time to read it grows with the number of files
-        # (thousands of 100 KB files took two minutes per read).
-        self.storage.write_table(sdf.repartition(ZONE_FILES), table_name, mode="overwrite")
+        # (thousands of 100 KB files took two minutes per read). Each airport's
+        # rows are kept together and in order, which keeps the files small
+        # (spread at random, the same rows took twice the space).
+        sdf = sdf.repartition(ZONE_FILES, "apt_ident").sortWithinPartitions(
+            "apt_ident", "apt_hex_id"
+        )
+        self.storage.write_table(sdf, table_name, mode="overwrite")
         print(f"Saved prepared hex rows to table {table_name}.")
