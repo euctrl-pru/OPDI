@@ -69,6 +69,11 @@ def test_passing_failures_are_transient(error):
         ),
         RuntimeError("[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column named `dof` cannot be found"),
         ValueError("unknown step '05'"),
+        RuntimeError(
+            "Job aborted due to stage failure: Task 0 in stage 35.0 failed 8 times ... "
+            "org.apache.spark.memory.SparkOutOfMemoryError: [UNABLE_TO_ACQUIRE_MEMORY] Unable "
+            "to acquire 65536 bytes of memory"
+        ),
         KeyError("h3_res_7"),
     ],
 )

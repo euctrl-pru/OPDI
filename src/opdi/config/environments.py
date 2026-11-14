@@ -173,14 +173,16 @@ class OPDIConfig:
                     # Python workers, threads, network buffers. With Spark's
                     # default (10% of the heap, 1.2 GiB) every executor was
                     # killed for memory (exit 137) in step 09 of every full-day
-                    # run, and one run failed in step 04b. Measured with 11g of
-                    # heap and 2.5 GiB of overhead: no executor killed, but at
-                    # the peak (step 09: the Java process 12,475 MiB, the Python
-                    # workers 951 MiB) 0.4 GiB short of the limit; so 10g of heap
-                    # and 3.5 GiB of overhead. The number and size of the
-                    # executors do not change the results.
-                    executor_memory="10g",
-                    executor_memory_overhead="3584m",
+                    # run, and one run failed in step 04b. With 11g of heap and
+                    # 2.5 GiB of overhead no executor was killed in two full
+                    # runs; the highest use, in step 09, was 13,426 MiB (the
+                    # Java process 12,475, the Python workers 951) of 13,824.
+                    # 10g of heap and 3.5 GiB of overhead is too little heap: the
+                    # one task that writes the day's events file in step 09 then
+                    # fails (UNABLE_TO_ACQUIRE_MEMORY). The number and size of
+                    # the executors do not change the results.
+                    executor_memory="11g",
+                    executor_memory_overhead="2560m",
                     executor_cores="2",
                     executor_instances="13",
                     enable_hive=False,

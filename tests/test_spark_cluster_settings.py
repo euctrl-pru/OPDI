@@ -36,7 +36,7 @@ def test_the_executors_fit_the_namespace_quota():
         distributed["spark.executor.memoryOverhead"]
     )
     assert (n, cores, pod) == (13, 2, 13824)
-    assert distributed["spark.executor.memory"] == "10g"
+    assert distributed["spark.executor.memory"] == "11g"
     assert n * cores <= 30 - 4
     assert n * pod <= (192 - 16) * 1024
 

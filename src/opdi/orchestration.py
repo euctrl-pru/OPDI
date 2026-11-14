@@ -136,6 +136,10 @@ PERMANENT_FAILURES = (
     "CANNOT_MERGE_SCHEMAS",
     "PATH_NOT_FOUND",
     "Status Code: 403",
+    # Memory too small for a task: the same task fails the same way again.
+    "UNABLE_TO_ACQUIRE_MEMORY",
+    "SparkOutOfMemoryError",
+    "java.lang.OutOfMemoryError: Java heap space",
 )
 #: Failures that pass: the storage throttling or timing out, an upload it
 #: lost, executors lost (killed for memory, deleted, evicted) with the data
