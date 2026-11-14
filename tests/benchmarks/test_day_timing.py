@@ -249,3 +249,19 @@ def test_call_site_paths_are_cut_to_the_file_name():
     assert t._short_site("first at /home/x/src/opdi/pipeline/flights.py:513") == (
         "first at flights.py:513"
     )
+
+
+def test_the_reports_can_be_read_from_another_run(monkeypatch):
+    from opdi.output import published
+    from opdi.utils.storage import StorageManager
+
+    for name in ("_s3_path", "write_table", "drop_partitions"):
+        monkeypatch.setattr(StorageManager, name, getattr(StorageManager, name))
+    monkeypatch.setattr(
+        published.PublishedLayout, "for_storage", published.PublishedLayout.for_storage
+    )
+    monkeypatch.setattr(t, "STATEVECTORS_FROM", "first")
+    t.redirect("second", True)
+    storage = StorageManager.__new__(StorageManager)
+    assert storage._s3_path("osn_statevectors_v2") == f"{t.PREFIX}/first/osn_statevectors_v2"
+    assert storage._s3_path("osn_tracks") == f"{t.PREFIX}/second/osn_tracks"

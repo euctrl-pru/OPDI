@@ -140,6 +140,8 @@ COUNT_GROUP = "count"
 COMPACT_ZONES = f"{PREFIX}/ref/h3_airport_detection_zones"
 #: Set by ``--compact-zones``: read the zones from :data:`COMPACT_ZONES`.
 USE_COMPACT_ZONES = False
+#: Set by ``--statevectors-from``: read ``osn_statevectors_v2`` from that run.
+STATEVECTORS_FROM = None
 
 
 def table_path(label: str, table: str, builds_tracks: bool) -> str:
@@ -175,6 +177,8 @@ def redirect(label: str, builds_tracks: bool) -> None:
             return COMPACT_ZONES
         if table_name in PASSTHROUGH:
             return orig_path(self, table_name)
+        if table_name == "osn_statevectors_v2" and STATEVECTORS_FROM:
+            return table_path(STATEVECTORS_FROM, table_name, builds_tracks)
         return table_path(label, table_name, builds_tracks)
 
     def write_table(self, df, table_name, mode="append", partition_by=None, partition_values=None):
@@ -595,8 +599,11 @@ def run(args) -> int:
             "spark.eventLog.compress": "false",
         }
     )
-    global USE_COMPACT_ZONES
+    global USE_COMPACT_ZONES, STATEVECTORS_FROM
     USE_COMPACT_ZONES = bool(args.compact_zones)
+    STATEVECTORS_FROM = args.statevectors_from
+    if STATEVECTORS_FROM and "01" in args.steps:
+        raise SystemExit("--statevectors-from reads the reports of another run: no step 01")
     redirect(label, builds_tracks)
     spark = SparkSessionManager.create_session(
         app_name=f"day timing {label} {day}",
@@ -857,6 +864,11 @@ def main(argv=None) -> int:
     r.add_argument("--conf", action="append", help="extra Spark setting key=value")
     r.add_argument(
         "--compact-zones", action="store_true", help="read the zones from the 8-file copy"
+    )
+    r.add_argument(
+        "--statevectors-from",
+        default=None,
+        help="label of the run whose osn_statevectors_v2 steps 02 and later read",
     )
     r.add_argument("--out", type=Path, default=DEFAULT_OUT)
     s = sub.add_parser("summarise")
