@@ -151,8 +151,33 @@ def _window_flag(df: DataFrame, config: EventConfig, placement: str, name: str) 
     return df.withColumn(name, F.coalesce(flag, lit(False)))
 
 
+def _one_row_per_time(df: DataFrame) -> DataFrame:
+    """One row per ``(track_id, piece, _ts)``.
+
+    The windows of this family look a number of rows ahead or behind, and
+    two reports at one time would make "the next row" depend on the order
+    Spark reads them in. Cleaning (step 02a) removes repeated times, but
+    step 04 can also read tracks that kept them. At a repeated time the row
+    kept is the first in the order of every other column (by name, NULLs
+    last), so the choice is the same on every run.
+    """
+    keys = {"track_id", PIECE, "_ts"}
+    rest = [
+        col(f.name).asc_nulls_last()
+        for f in sorted(df.schema.fields, key=lambda f: f.name)
+        if f.name not in keys and f.dataType.typeName() not in ("array", "map", "struct")
+    ]
+    w = Window.partitionBy("track_id", PIECE).orderBy(col("_ts").asc(), *rest)
+    repeated = F.coalesce(F.lag("_ts").over(w) == col("_ts"), lit(False))
+    return df.withColumn("_repeated", repeated).filter(~col("_repeated")).drop("_repeated")
+
+
 def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
-    """One row per episode, trimmed to its first and last turning sample."""
+    """One row per episode, trimmed to its first and last turning sample.
+
+    The times must be unique within a track and piece (see
+    :func:`_one_row_per_time`).
+    """
     w = Window.partitionBy("track_id", PIECE).orderBy("_ts")
     before = w.rowsBetween(Window.unboundedPreceding, -1)
     # The rows after this one, as the rows before it in the reversed order.
@@ -160,7 +185,7 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
     # unboundedFollowing)``) by scanning to the end of the track for every
     # row, which is quadratic in the track's length; a frame that starts at
     # the first row grows and is kept up to date row by row. The times are
-    # unique within a track (cleaning removes repeated times), so both
+    # unique within a track and piece (``_one_row_per_time``), so both
     # frames hold the same rows.
     after = (
         Window.partitionBy("track_id", PIECE)
@@ -233,6 +258,13 @@ def calculate_holding_events(
     """
     if not config.emit_holding:
         return None
+    return _pair_rows(_holding_episodes(geo, config, go_arounds))
+
+
+def _holding_episodes(
+    geo: DataFrame, config: EventConfig, go_arounds: Optional[DataFrame] = None
+) -> DataFrame:
+    """One row per kept episode, with its ``info``; see :func:`calculate_holding_events`."""
     elev_cols = [c for c in ("elev_ades_ft", "elev_adep_ft") if c in geo.columns]
     elev = F.coalesce(*[col(c) for c in elev_cols], lit(0.0)) if elev_cols else lit(0.0)
     df = (
@@ -243,6 +275,7 @@ def calculate_holding_events(
     )
     if PIECE not in df.columns:
         df = df.withColumn(PIECE, lit(0))
+    df = _one_row_per_time(df)
     df = _turn_series(df, config)
     df = _window_flag(df, config, "trailing", "_hold_bwd")
     df = _window_flag(df, config, "leading", "_hold_fwd")
@@ -296,7 +329,11 @@ def calculate_holding_events(
             straight_pct.alias("straight_pct"),
         )
     )
-    episodes = episodes.withColumn("info", info)
+    return episodes.withColumn("info", info)
+
+
+def _pair_rows(episodes: DataFrame) -> DataFrame:
+    """The ``holding-start`` and ``holding-end`` events of each episode."""
 
     def _row(kind: str):
         return F.struct(
