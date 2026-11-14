@@ -127,6 +127,20 @@ STAGE_COLUMNS = (
     "failure",
 )
 
+#: Free space a full-day run needs before each step, in GB: what the step
+#: writes on top of what is already there (measured sizes of 2026-06-14,
+#: rounded up). The peak is at the end of step 02: the reports of the 59 hours
+#: (about 22 GB) and the tracks of the day (about 9.5 GB).
+FULL_DAY_NEED_GB = {
+    "01": 33.0,
+    "02": 11.0,
+    "02a": 11.0,
+    "03": 2.0,
+    "04": 3.0,
+    "04b": 1.0,
+    "09": 1.0,
+}
+
 #: Job group of the jobs that count rows after a step; left out of the stage table.
 COUNT_GROUP = "count"
 
@@ -142,6 +156,9 @@ COMPACT_ZONES = f"{PREFIX}/ref/h3_airport_detection_zones"
 USE_COMPACT_ZONES = False
 #: Set by ``--statevectors-from``: read ``osn_statevectors_v2`` from that run.
 STATEVECTORS_FROM = None
+#: Set by ``--read-from`` and ``--read-tables``: read these tables from that run, never write them.
+READ_FROM = None
+READ_TABLES: frozenset = frozenset()
 
 
 def table_path(label: str, table: str, builds_tracks: bool) -> str:
@@ -179,13 +196,19 @@ def redirect(label: str, builds_tracks: bool) -> None:
             return orig_path(self, table_name)
         if table_name == "osn_statevectors_v2" and STATEVECTORS_FROM:
             return table_path(STATEVECTORS_FROM, table_name, builds_tracks)
+        if table_name in READ_TABLES:
+            return table_path(READ_FROM, table_name, builds_tracks)
         return table_path(label, table_name, builds_tracks)
 
     def write_table(self, df, table_name, mode="append", partition_by=None, partition_values=None):
+        if table_name in READ_TABLES:
+            raise AssertionError(f"refusing to write {table_name}: it is read from run {READ_FROM}")
         check_write_path(_s3_path(self, table_name))
         return orig_write(self, df, table_name, mode, partition_by, partition_values)
 
     def drop_partitions(self, table_name, column, values):
+        if table_name in READ_TABLES:
+            raise AssertionError(f"refusing to drop {table_name}: it is read from run {READ_FROM}")
         check_write_path(_s3_path(self, table_name))
         return orig_drop(self, table_name, column, values)
 
@@ -556,6 +579,76 @@ def read_window_hours(cfg) -> int:
     return lookback + 24 + TrackProcessor.DEFAULT_LOOKAHEAD_HOURS
 
 
+def use_arrow_for_h3() -> None:
+    """Run the H3 function of steps 02 and 09 as an Arrow-batched Python function.
+
+    The plain function sends the rows to Python one at a time (pickled); the
+    Arrow form sends columns in batches. ``spark.sql.execution.pythonUDF.arrow.enabled``
+    does the same only for functions defined after the session started, and
+    this one is defined when its module is imported, so it is rebuilt here.
+    """
+    from pyspark.sql.functions import udf
+
+    from opdi.pipeline import tracks
+
+    plain = tracks._geo_to_h3_cell
+    if getattr(plain, "evalType", None) != 100:  # already Arrow (eval type 101)
+        return
+    tracks._geo_to_h3_cell = udf(plain.func, plain.returnType, useArrow=True)
+
+
+#: Tables a full-day run deletes once the step after which nothing reads them is done.
+DROP_AFTER = {
+    "02": ("osn_statevectors_v2",),
+    "02a": ("osn_tracks",),
+    "04": ("osn_tracks_clean",),
+}
+
+
+def drop_table(label: str, table: str) -> float:
+    """Delete ``research/speed/<label>/<table>/``; returns the GB deleted."""
+    s3 = s3_client()
+    key = scratch_key(label) + table + "/"
+    size = 0
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket="eurocontrol", Prefix=key):
+        for o in page.get("Contents", []):
+            if not o["Key"].startswith(key):
+                raise RuntimeError(f"refusing to delete {o['Key']!r}: outside {key!r}")
+            s3.delete_object(Bucket="eurocontrol", Key=o["Key"])
+            size += o["Size"]
+    print(f"  deleted {table}: {size / 1e9:.2f} GB", flush=True)
+    return size / 1e9
+
+
+def executor_summary(lines) -> dict:
+    """Executors added and removed during a run, from its event log.
+
+    ``killed_137`` counts the executors whose container ended with exit code
+    137 (killed for memory); ``max_alive`` the most executors alive at once.
+    """
+    added = removed = killed = alive = most = 0
+    reasons = []
+    for line in lines:
+        if '"SparkListenerExecutorAdded"' in line:
+            added += 1
+            alive += 1
+            most = max(most, alive)
+        elif '"SparkListenerExecutorRemoved"' in line:
+            removed += 1
+            alive -= 1
+            reason = json.loads(line).get("Removed Reason", "")
+            if "137" in reason:
+                killed += 1
+            reasons.append(reason[:160])
+    return {
+        "added": added,
+        "removed": removed,
+        "killed_137": killed,
+        "max_alive": most,
+        "reasons": reasons,
+    }
+
+
 def run(args) -> int:
     from opdi.periodrun import run_day_step
     from opdi.utils.spark_helpers import SparkSessionManager
@@ -564,16 +657,21 @@ def run(args) -> int:
     from run_airspace_events_day import S3_PATIENCE
     from run_track_link_day import QUOTA_GB, bucket_used_gb, check_free_space
 
+    if args.full:
+        args.needed_gb = max(args.needed_gb, FULL_DAY_NEED_GB["01"])
+
     day = date.fromisoformat(args.day)
     label = args.label
     check_write_path(f"{PREFIX}/{label}/")
     builds_tracks = any(s in ("02", "02a") for s in args.steps)
     part = args.slice_hours or args.sample_mod
+    if args.full and part:
+        raise SystemExit("--full runs the whole day: no --slice-hours or --sample-mod")
     if args.slice_hours and args.sample_mod:
         raise SystemExit("--slice-hours and --sample-mod exclude each other")
     if part and any(s not in SLICE_STEPS for s in args.steps):
         raise SystemExit("--slice-hours and --sample-mod run steps 01, 02 and 02a only")
-    if any(s in SLICE_STEPS for s in args.steps) and not part:
+    if any(s in SLICE_STEPS for s in args.steps) and not part and not args.full:
         raise SystemExit(
             "steps 01, 02 and 02a need --slice-hours or --sample-mod: a full day does not fit"
         )
@@ -583,7 +681,10 @@ def run(args) -> int:
     check_free_space(used, QUOTA_GB, args.needed_gb)
 
     cfg = build_config(args.executors, args.cores, args.memory)
-    extra = dict(S3_PATIENCE)
+    # ``patience``: the study settings (10-minute request timeout, 10 retries),
+    # with which the earlier rounds were measured; ``production``: none, so
+    # Hadoop's defaults, as the daily run has them.
+    extra = dict(S3_PATIENCE) if args.s3 == "patience" else {}
     for item in args.conf or []:
         key, _, value = item.partition("=")
         extra[key] = value
@@ -599,7 +700,13 @@ def run(args) -> int:
             "spark.eventLog.compress": "false",
         }
     )
-    global USE_COMPACT_ZONES, STATEVECTORS_FROM
+    global USE_COMPACT_ZONES, STATEVECTORS_FROM, READ_FROM, READ_TABLES
+    if bool(args.read_from) != bool(args.read_tables):
+        raise SystemExit("--read-from and --read-tables go together")
+    READ_FROM = args.read_from
+    READ_TABLES = frozenset(args.read_tables or ())
+    if READ_FROM:
+        check_write_path(f"{PREFIX}/{READ_FROM}/")
     USE_COMPACT_ZONES = bool(args.compact_zones)
     STATEVECTORS_FROM = args.statevectors_from
     if STATEVECTORS_FROM and "01" in args.steps:
@@ -612,8 +719,16 @@ def run(args) -> int:
         extra_configs=extra,
     )
     install_call_sites(spark)
+    if args.arrow_udf:
+        use_arrow_for_h3()
     sc = spark.sparkContext
     settings = " ".join(f"{k}={v}" for k, v in sorted(extra.items()) if "eventLog" not in k)
+    if args.s3 == "production":
+        settings = ("s3=Hadoop defaults " + settings).strip()
+    if args.arrow_udf:
+        settings += " h3 function=Arrow"
+    if args.memory:
+        settings += f" executor heap={args.memory}"
     if args.compact_zones:
         settings += " zones=8 files"
     cores = int(cfg.spark.executor_cores)
@@ -623,9 +738,52 @@ def run(args) -> int:
         log_dir = str(REPO / "OPDI_live" / "logs" / f"speed-{label}")
         for step in args.steps:
             print(f"\n{'-' * 72}\n>>> {label}  step {step}  day {day}\n{'-' * 72}", flush=True)
+            if args.full:
+                used = bucket_used_gb()
+                print(
+                    f"  bucket before step {step}: {used:.1f} of {QUOTA_GB:.0f} GB used", flush=True
+                )
+                check_free_space(used, QUOTA_GB, FULL_DAY_NEED_GB.get(step, 3.0))
             sc.setJobGroup(f"step-{step}", f"step {step}")
             started = time.monotonic()
-            if step == "01":
+            if step == "01" and args.full:
+                from opdi.ingestion.osn_statevectors import StateVectorIngestion
+
+                # The hours step 02 reads around the day (the hours before it
+                # and the 24 after it) are what the daily runs of the days
+                # before and after would have written. They are fetched first
+                # and timed apart (row "01w"); step 01 itself is the day only.
+                start = datetime(day.year, day.month, day.day)
+                window = read_window_hours(cfg)
+                first = start - timedelta(hours=window - 48)
+                sc.setJobGroup("step-01w", "step 01, hours around the day")
+                t0 = time.monotonic()
+                ingest = StateVectorIngestion(spark, cfg)
+                ingest.ingest_from_s3(start_date=first, end_date=start)
+                ingest.ingest_from_s3(
+                    start_date=start + timedelta(hours=24), end_date=first + timedelta(hours=window)
+                )
+                around = time.monotonic() - t0
+                step_rows.append(
+                    {
+                        "label": label,
+                        "step": "01w",
+                        "seconds": round(around),
+                        "executors": args.executors,
+                        "cores": cores,
+                        "rows_in": "",
+                        "rows_out": "",
+                        "scope": f"the {window - 24} h around the day that step 02 reads",
+                        "scale_factor": "",
+                        "full_day_seconds": "",
+                        "settings": settings,
+                    }
+                )
+                print(f"  hours around the day: {around:.0f} s", flush=True)
+                sc.setJobGroup(f"step-{step}", f"step {step}")
+                started = time.monotonic()
+                ingest.ingest_from_s3(start_date=start, end_date=start + timedelta(hours=24))
+            elif step == "01":
                 from opdi.ingestion.osn_statevectors import StateVectorIngestion
 
                 start = datetime(day.year, day.month, day.day)
@@ -650,7 +808,8 @@ def run(args) -> int:
             if step == "01" and args.sample_mod:
                 rows_in = ""
             elif step == "01":
-                rows_in = hour_rows(spark, datetime(day.year, day.month, day.day), args.slice_hours)
+                hours = 24 if args.full else args.slice_hours
+                rows_in = hour_rows(spark, datetime(day.year, day.month, day.day), hours)
             else:
                 rows_in = step_rows[-1]["rows_out"] if step_rows else ""
             if args.sample_mod:
@@ -677,6 +836,9 @@ def run(args) -> int:
             step_rows.append(row)
             print(f"  step {step}: {seconds:.0f} s, {rows_out} rows written", flush=True)
             replace_rows(args.out / "step_timings.csv", STEP_COLUMNS, step_rows, label)
+            if args.drop_intermediates:
+                for table in DROP_AFTER.get(step, ()):
+                    drop_table(label, table)
     except Exception:
         traceback.print_exc()
         status = 1
@@ -686,6 +848,24 @@ def run(args) -> int:
     replace_rows(args.out / "stage_timings.csv", STAGE_COLUMNS, stages, label)
     print(f"\n{len(stages)} stages recorded for {label}")
     print_summary(stages)
+    ex = executor_summary(event_log_lines(eventlog))
+    print(
+        f"executors: {ex['added']} added, {ex['removed']} removed, {ex['killed_137']} killed for "
+        f"memory (exit 137), at most {ex['max_alive']} alive at once"
+    )
+    for reason in ex["reasons"]:
+        print(f"  removed: {reason}")
+    append_rows(
+        args.out / "executor_events.csv",
+        ("label", "requested", "added", "removed", "killed_137", "max_alive"),
+        [
+            {
+                "label": label,
+                "requested": args.executors,
+                **{k: ex[k] for k in ("added", "removed", "killed_137", "max_alive")},
+            }
+        ],
+    )
     return status
 
 
@@ -869,6 +1049,25 @@ def main(argv=None) -> int:
         "--statevectors-from",
         default=None,
         help="label of the run whose osn_statevectors_v2 steps 02 and later read",
+    )
+    r.add_argument(
+        "--read-from", default=None, help="label of the run whose --read-tables this run reads"
+    )
+    r.add_argument("--read-tables", nargs="+", default=None, help="tables read from --read-from")
+    r.add_argument(
+        "--s3",
+        choices=("patience", "production"),
+        default="patience",
+        help="storage settings: the study's long timeouts (default) or Hadoop's defaults",
+    )
+    r.add_argument("--arrow-udf", action="store_true", help="H3 function batched through Arrow")
+    r.add_argument(
+        "--full", action="store_true", help="steps 01 to 02a on the whole day (needs ~33 GB free)"
+    )
+    r.add_argument(
+        "--drop-intermediates",
+        action="store_true",
+        help="delete each working table once no later step reads it (see DROP_AFTER)",
     )
     r.add_argument("--out", type=Path, default=DEFAULT_OUT)
     s = sub.add_parser("summarise")
