@@ -227,6 +227,10 @@ LADDER = [
     ("L17_crossings_over_missing_values", {"interpolate_crossings_over_missing_values": True}),
     ("L18_block_times_on_ground", {"block_times_on_ground_only": True}),
     ("L19_plausibility_checks", {"plausibility_checks": True}),
+    # Of overlapping layout elements of one kind, the event names the one with
+    # the smallest identifier (2026-11); changes only the info of layout events
+    # and block times.
+    ("L20_deterministic_layout_element", {"layout_deterministic_element": True}),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
