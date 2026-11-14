@@ -246,6 +246,8 @@ def test_step_01_keeps_the_reports_an_unfinished_day_still_needs(spark, tmp_path
     config = o.make_config(wh)
     for k in (-1, 0, 1):
         _folder(wh, "osn_statevectors_v2", "event_time_day", (D + k * ONE).isoformat())
+        # Fetched in full by the step 01 of D.
+        _storage(spark, wh).mark_done(periodrun.fetched_key(D + k * ONE))
     _mark(spark, wh, "01", day=D)
 
     fetched = []

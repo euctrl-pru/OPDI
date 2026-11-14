@@ -535,7 +535,18 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         unfinished = days_in_progress(storage) - {day}
         kept = needed_folders(unfinished)["osn_statevectors_v2"]
 
-        missing = [d for d in needed if d.isoformat() not in present]
+        # A day's folder counts as fetched only when its fetch is recorded as
+        # finished: a fetch that failed while writing can leave part of the
+        # day's files, which a folder listing cannot tell from a whole day.
+        partial = [
+            d for d in needed if d.isoformat() in present and not storage.is_done(fetched_key(d))
+        ]
+        if partial:
+            print(
+                "  fetched again (no record that their fetch finished): "
+                + ", ".join(d.isoformat() for d in partial)
+            )
+        missing = [d for d in needed if d.isoformat() not in present or d in partial]
         stale = sorted(present - {d.isoformat() for d in needed} - kept)
         if unfinished:
             print(
@@ -552,15 +563,20 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         sv = StateVectorIngestion(spark, config)
         for d in missing:
             print(f"    fetching {d}")
+            storage.clear_done(fetched_key(d))
+            began = time.time()
             if config.project.project_name == "opensky":
                 sv.ingest_from_s3(start_date=d, end_date=d + timedelta(days=1))
             else:
                 sv.ingest(start_date=d, end_date=d + timedelta(days=1))
+            storage.mark_done(fetched_key(d), time.time() - began)
 
         if stale:
             # After fetching, never before: after a failure in between, a
             # short window could not be told from a day the archive lacks.
             n = storage.drop_partitions("osn_statevectors_v2", "event_time_day", stale)
+            for d in stale:
+                storage.clear_done(fetched_key(date.fromisoformat(d)))
             print(f"    dropped {n} day(s) the window has passed: {', '.join(stale)}")
     elif step == "01b":
         if not config.adsc.enabled:
@@ -643,6 +659,15 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         raise ValueError(
             f"{step!r} is not a per-day step; expected one of " f"{DAY_STEPS + OPTIONAL_DAY_STEPS}."
         )
+
+
+def fetched_key(day: date) -> str:
+    """The record that step 01 fetched the reports of ``day`` in full.
+
+    Without ``@``, so that it is not read as a step of a day (see
+    :func:`opdi.orchestration.days_in_progress`).
+    """
+    return f"01-fetched-{day.isoformat()}"
 
 
 def day_state_key(step: str, day: date) -> str:
