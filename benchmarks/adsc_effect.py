@@ -598,9 +598,10 @@ def cmd_clean(args) -> int:
     if not args.yes:
         print("nothing deleted (add --yes to delete)")
         return 0
-    for i in range(0, len(keys), 1000):
-        chunk = keys[i : i + 1000]
-        s3.delete_objects(Bucket="eurocontrol", Delete={"Objects": [{"Key": k} for k in chunk]})
+    # One request per object: the OpenSky S3 server refuses the batch request
+    # that recent versions of boto3 send (it asks for a Content-MD5 header).
+    for k in keys:
+        s3.delete_object(Bucket="eurocontrol", Key=k)
     print(f"deleted {len(keys)} objects ({total:.2f} GB)")
     return 0
 
