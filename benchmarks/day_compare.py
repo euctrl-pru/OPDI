@@ -265,7 +265,8 @@ def content_rows(part: str, counts: dict, diffs: dict, ids: dict | None = None) 
 
     Args:
         part: Name of the table compared.
-        counts: ``before``, ``after`` and ``matched`` rows.
+        counts: ``before``, ``after`` and ``matched`` rows, and optionally
+            ``differing``: matched rows with at least one column differing.
         diffs: For each compared column, the matched rows where it differs.
         ids: ``before``, ``after`` and ``both``: distinct track ids, or None.
     """
@@ -289,6 +290,16 @@ def content_rows(part: str, counts: dict, diffs: dict, ids: dict | None = None) 
             ),
         }
     ]
+    if "differing" in counts:
+        rows.append(
+            {
+                "part": part,
+                "item": "matched rows with a column differing",
+                "matched": m,
+                "matched_share": round(1 - counts["differing"] / m, 6) if m else 1.0,
+                "note": f"{counts['differing']} matched rows differ in at least one column",
+            }
+        )
     if ids is not None:
         rows.append(
             {
@@ -347,15 +358,20 @@ def compare_content(
         F.count("_a").alias("after"),
         F.sum(F.when(both, 1).otherwise(0)).alias("matched"),
     ]
+    any_diff = F.lit(False)
     for i, c in enumerate(rest):
         x, y = F.col(f"b_{c}"), F.col(f"a_{c}")
         if isinstance(kinds[c], (DoubleType, FloatType)):
-            diff = (x.isNull() != y.isNull()) | (F.abs(x - y) > CONTENT_TOLERANCE)
+            diff = (x.isNull() != y.isNull()) | F.coalesce(
+                F.abs(x - y) > CONTENT_TOLERANCE, F.lit(False)
+            )
         else:
             diff = ~x.eqNullSafe(y)
+        any_diff = any_diff | diff
         aggs.append(F.sum(F.when(both & diff, 1).otherwise(0)).alias(f"_d{i}"))
+    aggs.append(F.sum(F.when(both & any_diff, 1).otherwise(0)).alias("differing"))
     r = j.agg(*aggs).first()
-    counts = {n: int(r[n] or 0) for n in ("before", "after", "matched")}
+    counts = {n: int(r[n] or 0) for n in ("before", "after", "matched", "differing")}
     diffs = {c: int(r[f"_d{i}"] or 0) for i, c in enumerate(rest)}
     ids = None
     if id_col:
@@ -416,7 +432,7 @@ def stamp(out: Path, argv: list, inputs: list[str], notes: str = "") -> None:
         out.name,
         script="benchmarks/day_compare.py",
         argv=list(argv),
-        code_paths=[REPO / "benchmarks" / "day_compare.py", REPO / "src" / "opdi"],
+        code_paths=["benchmarks/day_compare.py", "src/opdi"],
         notes=notes,
         input_tables=inputs,
     )

@@ -144,6 +144,7 @@ def test_content_counts_rows_matched_and_the_columns_that_differ(spark):
     assert by["column lat"]["note"] == "1 matched rows differ"
     assert by["column callsign"]["note"] == "1 matched rows differ"
     assert by["column n"]["note"] == "0 matched rows differ"
+    assert by["matched rows with a column differing"]["note"].startswith("1 matched rows")
     ids = by["track ids"]
     assert (ids["before"], ids["after"], ids["matched"], ids["only_after"]) == (2, 3, 2, 1)
 
@@ -194,3 +195,12 @@ def test_the_manifest_records_the_command_line_and_the_inputs(tmp_path, monkeypa
     assert sorted(entry["input_tables"]) == sorted(inputs)
     assert f"{c.PREFIX}/a/osn_tracks_clean" in entry["input_tables"]
     assert entry["notes"] == "a = before, b = after"
+
+
+def test_the_rows_with_any_column_differing_are_counted_once():
+    rows = c.content_rows(
+        "x", {"before": 4, "after": 4, "matched": 4, "differing": 1}, {"a": 1, "b": 1}
+    )
+    (row,) = [r for r in rows if r["item"] == "matched rows with a column differing"]
+    assert row["note"] == "1 matched rows differ in at least one column"
+    assert row["matched_share"] == 0.75
