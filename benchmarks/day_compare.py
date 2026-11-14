@@ -31,6 +31,23 @@ or ``info`` text differ, so that a moved event is not counted as unchanged.
 
 **Files.** Rows and the sum of each numeric column of the published files.
 
+**Content** (``events`` also writes it for the published events and flight
+list; ``tracks`` and ``statevectors`` write only it). Rows are matched on a
+key, with an occurrence number inside equal keys: rows in each run, matched,
+only before, only after; for every other column, the number of matched rows
+whose values differ (exactly for text, integers, times and flags, by more
+than 1e-9 for decimal numbers, and as JSON text for lists); and, for tables
+of tracks, the track ids in each run and in both.
+
+    day_compare.py tracks --day 2026-06-14 --before m12before --after m12after --out ...
+    day_compare.py statevectors --before s2before --after s2after --out ...
+
+``tracks`` compares ``osn_tracks`` and ``osn_tracks_clean`` of the day on
+``(track_id, event_time)``; ``statevectors`` compares the whole
+``osn_statevectors_v2`` of both runs on ``(icao24, event_time)``. The output
+and the input tables are recorded in the ``_manifest.json`` beside the CSV
+(``benchmarks/provenance.py``).
+
 The table has the columns ``part``, ``item``, ``before``, ``after``,
 ``matched``, ``only_before``, ``only_after``, ``matched_share`` and ``note``.
 """
@@ -73,6 +90,8 @@ MEASURES = (
 #: Columns of a matched event compared exactly (numbers within 1e-6).
 EVENT_FIELDS = ("longitude", "latitude", "altitude_ft", "info")
 TOLERANCE = 1e-6
+#: Tolerance of decimal numbers in the content comparison.
+CONTENT_TOLERANCE = 1e-9
 
 
 def share(matched: int, before: int, after: int) -> float:
@@ -241,6 +260,122 @@ def compare_sums(before, after, name: str) -> list[dict]:
     return rows
 
 
+def content_rows(part: str, counts: dict, diffs: dict, ids: dict | None = None) -> list[dict]:
+    """The CSV rows of a content comparison.
+
+    Args:
+        part: Name of the table compared.
+        counts: ``before``, ``after`` and ``matched`` rows.
+        diffs: For each compared column, the matched rows where it differs.
+        ids: ``before``, ``after`` and ``both``: distinct track ids, or None.
+    """
+    b, a, m = counts["before"], counts["after"], counts["matched"]
+    differing = {c: n for c, n in diffs.items() if n}
+    rows = [
+        {
+            "part": part,
+            "item": "rows",
+            "before": b,
+            "after": a,
+            "matched": m,
+            "only_before": b - m,
+            "only_after": a - m,
+            "matched_share": round(share(m, b, a), 6),
+            "note": (
+                "columns differing: "
+                + "; ".join(f"{c} on {n}" for c, n in sorted(differing.items()))
+                if differing
+                else f"every other column equal on all matched rows ({len(diffs)} columns)"
+            ),
+        }
+    ]
+    if ids is not None:
+        rows.append(
+            {
+                "part": part,
+                "item": "track ids",
+                "before": ids["before"],
+                "after": ids["after"],
+                "matched": ids["both"],
+                "only_before": ids["before"] - ids["both"],
+                "only_after": ids["after"] - ids["both"],
+                "matched_share": round(share(ids["both"], ids["before"], ids["after"]), 6),
+                "note": "",
+            }
+        )
+    for c in sorted(diffs):
+        rows.append(
+            {
+                "part": part,
+                "item": f"column {c}",
+                "matched": m,
+                "matched_share": round(1 - diffs[c] / m, 6) if m else 1.0,
+                "note": f"{diffs[c]} matched rows differ",
+            }
+        )
+    return rows
+
+
+def compare_content(
+    before, after, key: list, part: str, id_col: str | None = None, skip=()
+) -> list[dict]:
+    """Rows matched on ``key`` and every other column compared (see the module text)."""
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import DoubleType, FloatType
+
+    common = [c for c in before.columns if c in after.columns and c not in skip]
+    rest = [c for c in common if c not in key]
+    kinds = {f.name: f.dataType for f in before.schema.fields}
+
+    def plain(df):
+        cols = []
+        for c in common:
+            t = kinds[c].typeName()
+            cols.append(F.to_json(F.col(c)).alias(c) if t in ("array", "map", "struct") else c)
+        df = df.select(*cols)
+        w = Window.partitionBy(*key).orderBy(*[F.col(c).asc_nulls_first() for c in rest])
+        return df.withColumn("_n", F.row_number().over(w))
+
+    k = key + ["_n"]
+    bb = plain(before).select(*k, *[F.col(c).alias(f"b_{c}") for c in rest], F.lit(1).alias("_b"))
+    aa = plain(after).select(*k, *[F.col(c).alias(f"a_{c}") for c in rest], F.lit(1).alias("_a"))
+    j = bb.join(aa, on=k, how="full_outer")
+    both = F.col("_a").isNotNull() & F.col("_b").isNotNull()
+    aggs = [
+        F.count("_b").alias("before"),
+        F.count("_a").alias("after"),
+        F.sum(F.when(both, 1).otherwise(0)).alias("matched"),
+    ]
+    for i, c in enumerate(rest):
+        x, y = F.col(f"b_{c}"), F.col(f"a_{c}")
+        if isinstance(kinds[c], (DoubleType, FloatType)):
+            diff = (x.isNull() != y.isNull()) | (F.abs(x - y) > CONTENT_TOLERANCE)
+        else:
+            diff = ~x.eqNullSafe(y)
+        aggs.append(F.sum(F.when(both & diff, 1).otherwise(0)).alias(f"_d{i}"))
+    r = j.agg(*aggs).first()
+    counts = {n: int(r[n] or 0) for n in ("before", "after", "matched")}
+    diffs = {c: int(r[f"_d{i}"] or 0) for i, c in enumerate(rest)}
+    ids = None
+    if id_col:
+        ib = before.select(F.col(id_col).alias("_id")).distinct().withColumn("_b", F.lit(1))
+        ia = after.select(F.col(id_col).alias("_id")).distinct().withColumn("_a", F.lit(1))
+        r = (
+            ib.join(ia, "_id", "full_outer")
+            .agg(
+                F.count("_b").alias("before"),
+                F.count("_a").alias("after"),
+                F.sum(
+                    F.when(F.col("_a").isNotNull() & F.col("_b").isNotNull(), 1).otherwise(0)
+                ).alias("both"),
+            )
+            .first()
+        )
+        ids = {n: int(r[n] or 0) for n in ("before", "after", "both")}
+    return content_rows(part, counts, diffs, ids)
+
+
 def write_rows(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as fh:
@@ -250,17 +385,66 @@ def write_rows(path: Path, rows: list[dict]) -> None:
             writer.writerow({k: r.get(k, "") for k in COLUMNS})
 
 
-def main(argv=None) -> int:
+SUBCOMMANDS = ("events", "tracks", "statevectors")
+
+
+def table(label: str, name: str) -> str:
+    """A working table of the run ``label`` (as ``day_timing.py`` writes it)."""
+    return f"{PREFIX}/{label}/{name}"
+
+
+def inputs_of(command: str, before: str, after: str, day: date | None) -> list[str]:
+    """The folders a comparison reads, for the manifest."""
+    if command == "tracks":
+        names = ["osn_tracks", "osn_tracks_clean"]
+        return [table(label, n) for label in (before, after) for n in names]
+    if command == "statevectors":
+        return [table(label, "osn_statevectors_v2") for label in (before, after)]
+    return [
+        published(label, kind, day)
+        for label in (before, after)
+        for kind in ("flight_events", "flight_list")
+    ]
+
+
+def stamp(out: Path, argv: list, inputs: list[str], notes: str = "") -> None:
+    """Record ``out`` in the manifest beside it, with the command line and the inputs."""
+    import provenance
+
+    provenance.record(
+        out.parent,
+        out.name,
+        script="benchmarks/day_compare.py",
+        argv=list(argv),
+        code_paths=[REPO / "benchmarks" / "day_compare.py", REPO / "src" / "opdi"],
+        notes=notes,
+        input_tables=inputs,
+    )
+
+
+def parse(argv: list):
+    """Parse the command line; without a subcommand, ``events`` is meant."""
+    if not argv or argv[0] not in SUBCOMMANDS + ("-h", "--help"):
+        argv = ["events"] + list(argv)
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--day", required=True)
-    ap.add_argument("--before", required=True, help="label of the run before")
-    ap.add_argument("--after", required=True, help="label of the run after")
-    ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--executors", type=int, default=6)
-    args = ap.parse_args(argv)
-    day = date.fromisoformat(args.day)
+    sub = ap.add_subparsers(dest="command", required=True)
+    for name in SUBCOMMANDS:
+        p = sub.add_parser(name)
+        p.add_argument("--day", required=(name != "statevectors"))
+        p.add_argument("--before", required=True, help="label of the run before")
+        p.add_argument("--after", required=True, help="label of the run after")
+        p.add_argument("--out", type=Path, required=True)
+        p.add_argument("--executors", type=int, default=6)
+        p.add_argument("--notes", default="", help="what the two runs are, for the manifest")
+    return ap.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    args = parse(argv)
+    day = date.fromisoformat(args.day) if args.day else None
 
     from day_timing import build_config
     from run_airspace_events_day import S3_PATIENCE
@@ -268,26 +452,48 @@ def main(argv=None) -> int:
     from opdi.utils.spark_helpers import SparkSessionManager
 
     spark = SparkSessionManager.create_session(
-        app_name=f"day compare {args.before} {args.after}",
+        app_name=f"day compare {args.command} {args.before} {args.after}",
         config=build_config(args.executors),
         distributed=True,
         extra_configs=S3_PATIENCE,
     )
     try:
-        ev_b = spark.read.parquet(published(args.before, "flight_events", day))
-        ev_a = spark.read.parquet(published(args.after, "flight_events", day))
-        fl_b = spark.read.parquet(published(args.before, "flight_list", day))
-        fl_a = spark.read.parquet(published(args.after, "flight_list", day))
-        rows = compare_flights(fl_b, fl_a)
-        rows += compare_events(ev_b, ev_a)
-        rows += compare_sums(fl_b, fl_a, "flight_list")
-        rows += compare_sums(ev_b, ev_a, "flight_events")
+        from pyspark.sql import functions as F
+
+        if args.command == "tracks":
+            rows = []
+            for name in ("osn_tracks", "osn_tracks_clean"):
+                tb, ta = (
+                    spark.read.parquet(table(label, name)).filter(F.col("dof") == F.lit(day))
+                    for label in (args.before, args.after)
+                )
+                rows += compare_content(tb, ta, ["track_id", "event_time"], name, id_col="track_id")
+        elif args.command == "statevectors":
+            sb, sa = (
+                spark.read.parquet(table(label, "osn_statevectors_v2"))
+                for label in (args.before, args.after)
+            )
+            rows = compare_content(sb, sa, ["icao24", "event_time"], "osn_statevectors_v2")
+        else:
+            ev_b = spark.read.parquet(published(args.before, "flight_events", day))
+            ev_a = spark.read.parquet(published(args.after, "flight_events", day))
+            fl_b = spark.read.parquet(published(args.before, "flight_list", day))
+            fl_a = spark.read.parquet(published(args.after, "flight_list", day))
+            rows = compare_flights(fl_b, fl_a)
+            rows += compare_events(ev_b, ev_a)
+            rows += compare_sums(fl_b, fl_a, "flight_list")
+            rows += compare_sums(ev_b, ev_a, "flight_events")
+            rows += compare_content(
+                ev_b, ev_a, ["flight_id", "type", "event_time"], "flight_events content"
+            )
+            rows += compare_content(fl_b, fl_a, ["flight_id"], "flight_list content")
     finally:
         spark.stop()
     write_rows(args.out, rows)
+    stamp(args.out, argv, inputs_of(args.command, args.before, args.after, day), args.notes)
     for r in rows:
         print(
-            f"{r['part']:<14} {str(r['item']):<34} {str(r.get('before', '')):>14} "
+            f"{r['part']:<22} {str(r['item']):<34} {str(r.get('before', '')):>14} "
             f"{str(r.get('after', '')):>14} {str(r.get('matched', '')):>10} "
             f"{str(r.get('matched_share', '')):>9}  {r.get('note', '')}"
         )
