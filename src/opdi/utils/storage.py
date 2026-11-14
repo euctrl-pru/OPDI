@@ -37,6 +37,16 @@ def _partition_dir_value(value):
     return HIVE_DEFAULT_PARTITION if value is None else value
 
 
+class EmptyTableError(RuntimeError):
+    """A table folder exists but holds no data file to read.
+
+    Raised instead of Spark's ``UNABLE_TO_INFER_SCHEMA``, which says nothing
+    of the cause: a write that failed part-way removed the day it was
+    replacing, or the table was never written. The step that writes the
+    table is to be run again; a read never guesses the columns from nothing.
+    """
+
+
 class StorageManager:
     """Table operations for the pipeline steps, on Iceberg or on Parquet folders.
 
@@ -82,7 +92,17 @@ class StorageManager:
         reader = self.spark.read
         if table_name in self.MERGE_SCHEMA_TABLES:
             reader = reader.option("mergeSchema", "true")
-        return reader.parquet(self._s3_path(table_name))
+        path = self._s3_path(table_name)
+        try:
+            return reader.parquet(path)
+        except Exception as exc:
+            if "UNABLE_TO_INFER_SCHEMA" not in str(exc):
+                raise
+            raise EmptyTableError(
+                f"the table {table_name} ({path}) holds no data file: a write that "
+                "failed part-way left it empty, or it was never written. Run the step "
+                "that writes it again."
+            ) from exc
 
     def read_table(self, table_name: str) -> DataFrame:
         """Read a full table as a DataFrame."""
