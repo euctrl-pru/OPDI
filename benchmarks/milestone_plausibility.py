@@ -63,6 +63,7 @@ from opdi.pipeline.plausibility import (  # noqa: E402
     event_context,
 )
 from opdi.pipeline.runway_ops import RUNWAY_THRESHOLD_CROSSING  # noqa: E402
+from opdi.versions import LEGACY_EVENTS_VERSION  # noqa: E402
 
 #: The working tables of this study, and the only place it writes.
 SCRATCH = "s3a://eurocontrol/opdi-world/research/plausibility"
@@ -136,6 +137,7 @@ def build_context(spark, day: str, window_s: float):
         F.col("id").alias("event_id"),
         F.col("flight_id").alias("track_id"),
         "type",
+        "version",
         "event_time",
         F.col("latitude").alias("ev_lat"),
         F.col("longitude").alias("ev_lon"),
@@ -405,14 +407,27 @@ def _ring_radius(types):
     return pd.to_numeric(r, errors="coerce")
 
 
+def stored_threshold_crossing(df):
+    """The rows whose stored type ``landing`` is the runway threshold crossing.
+
+    The event tables this study reads (:data:`EVENTS`) were written with the
+    default settings before the threshold crossing was named
+    ``xing-runway-threshold``; in them it is called ``landing``. With the
+    v0.0.2 settings ``landing`` is the end of the descent, stamped with the
+    events version :data:`~opdi.versions.LEGACY_EVENTS_VERSION`, and keeps its
+    name. A context written without the ``version`` column was read from the
+    default-settings tables, so its ``landing`` is the threshold crossing.
+    """
+    landing = df["type"] == "landing"
+    if "version" not in df.columns:
+        return landing
+    return landing & (df["version"] != LEGACY_EVENTS_VERSION)
+
+
 def prepare(df):
     """Add the record columns and the per-track milestone times."""
     df = df.copy()
-    # The event tables this study reads were written with the default settings
-    # before the threshold crossing was named ``xing-runway-threshold``; in
-    # them it is called ``landing``. The default settings emit no other event
-    # of that name, so both names are read as the threshold crossing.
-    df["type"] = df["type"].replace({"landing": RUNWAY_THRESHOLD_CROSSING})
+    df.loc[stored_threshold_crossing(df), "type"] = RUNWAY_THRESHOLD_CROSSING
     df["has_record"] = df["error_s"].notna()
     df["abs_error_s"] = df["error_s"].abs()
     df["confirmed"] = df["abs_error_s"] <= CONFIRMED_S

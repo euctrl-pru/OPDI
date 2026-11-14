@@ -250,6 +250,26 @@ def test_a_stored_landing_is_read_as_the_threshold_crossing():
     assert df["trk_xing-runway-threshold_s"].notna().all()
 
 
+def test_a_stored_landing_of_the_v002_settings_keeps_its_name():
+    """With the v0.0.2 settings ``landing`` is the end of the descent, stamped
+    with the v0.0.2 events version; only the default settings' ``landing`` (and
+    a context written without the version, read from the default-settings
+    study tables) is the threshold crossing."""
+    import pandas as pd
+
+    from opdi.versions import EVENTS_VERSION, LEGACY_EVENTS_VERSION
+
+    t = pd.Timestamp("2026-06-14 11:00:00")
+    df = _frame(
+        [
+            {"type": "landing", "event_time": t, "version": LEGACY_EVENTS_VERSION},
+            {"type": "landing", "event_time": t, "version": EVENTS_VERSION},
+            {"type": "ALDT", "event_time": t, "version": EVENTS_VERSION},
+        ]
+    )
+    assert list(df["type"]) == ["landing", "xing-runway-threshold", "ALDT"]
+
+
 def test_an_off_block_time_in_flight_is_removed_and_its_neighbour_kept():
     df = _frame(
         [
