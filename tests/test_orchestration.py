@@ -62,7 +62,7 @@ def test_the_plan_command_prints_the_days(capsys):
 
 def test_the_step_command_passes_its_arguments(monkeypatch):
     calls = []
-    monkeypatch.setattr(o, "run_unit", lambda *a: calls.append(a) or 0)
+    monkeypatch.setattr(o, "run_unit", lambda *a, **k: calls.append(a) or 0)
     assert (
         o.main(
             ["step", "--step", "02a", "--day", "2026-06-14", "--warehouse", "s3a://x/y", "--europe"]
@@ -73,7 +73,7 @@ def test_the_step_command_passes_its_arguments(monkeypatch):
 
 
 def test_a_step_that_raises_gives_exit_code_1(monkeypatch):
-    def boom(*args):
+    def boom(*args, **kwargs):
         raise RuntimeError("storage unreachable")
 
     monkeypatch.setattr(o, "run_unit", boom)
@@ -82,7 +82,7 @@ def test_a_step_that_raises_gives_exit_code_1(monkeypatch):
 
 
 def test_a_failing_step_gives_exit_code_1(monkeypatch):
-    monkeypatch.setattr(o, "run_unit", lambda *a: 1)
+    monkeypatch.setattr(o, "run_unit", lambda *a, **k: 1)
     assert o.main(["step", "--step", "04", "--day", "2026-06-14"]) == 1
 
 
@@ -349,9 +349,13 @@ def test_allow_empty_reaches_the_publishing_step(monkeypatch):
     calls = []
     monkeypatch.setattr(o, "run_unit", lambda *a, **k: calls.append((a, k)) or 0)
     assert o.main(["step", "--step", "09", "--day", "2026-06-14", "--allow-empty"]) == 0
-    assert calls[-1][1] == {"allow_empty": True}
+    assert calls[-1][1] == {
+        "allow_empty": True,
+        "retries": o.DEFAULT_RETRIES,
+        "retry_pause": o.DEFAULT_RETRY_PAUSE_S,
+    }
     seen = {}
-    monkeypatch.setattr(o, "run_day", lambda *a: seen.update(args=a) or 0)
+    monkeypatch.setattr(o, "run_day", lambda *a, **k: seen.update(args=a) or 0)
     assert o.main(["day", "--day", "2026-06-14", "--allow-empty"]) == 0
     assert seen["args"][-1] is True
 

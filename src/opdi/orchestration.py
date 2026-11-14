@@ -115,6 +115,92 @@ DEFAULT_MIN_FREE_GB = 25.0
 
 ORDERS = ("newest_first", "oldest_first")
 
+#: Attempts of a step after the first, when it fails for a passing reason.
+DEFAULT_RETRIES = 2
+#: Seconds between two attempts: time for the storage to stop throttling and
+#: for the executors of the stopped session to leave the namespace quota.
+DEFAULT_RETRY_PAUSE_S = 120.0
+
+#: Failures that running the step again does not cure, checked first: the
+#: bucket full, a table to be written by an earlier step, the publish lock of
+#: another run, columns that do not match.
+PERMANENT_FAILURES = (
+    "QuotaExceeded",
+    "Bucket quota",
+    "quota has been exceeded",
+    "EmptyTableError",
+    "holds no data file",
+    "PublishLockedError",
+    "UNRESOLVED_COLUMN",
+    "DATATYPE_MISMATCH",
+    "CANNOT_MERGE_SCHEMAS",
+    "PATH_NOT_FOUND",
+    "Status Code: 403",
+)
+#: Failures that pass: the storage throttling or timing out, an upload it
+#: lost, executors lost (killed for memory, deleted, evicted) with the data
+#: they held, a session that stopped under the step.
+TRANSIENT_FAILURES = (
+    "503",
+    "SlowDown",
+    "reduce your request rate",
+    "NoSuchUpload",
+    "Throttl",
+    "timed out",
+    "Timeout",
+    "Connection reset",
+    "Connection refused",
+    "Unable to execute HTTP request",
+    "ExecutorLostFailure",
+    "exit code 137",
+    "Lost executor",
+    "FetchFailed",
+    "Missing an output location",
+    "has failed the maximum allowable number of times",
+    "Checkpoint block",
+    "SparkContext was shut down",
+    "SparkContext has been shutdown",
+    "Py4JNetworkError",
+    "exceeded quota: ",  # Kubernetes refusing an executor pod for a while
+)
+#: Python errors of the code or the configuration: the same input gives them again.
+PERMANENT_TYPES = (
+    ValueError,
+    TypeError,
+    KeyError,
+    AttributeError,
+    NameError,
+    ImportError,
+    AssertionError,
+    NotImplementedError,
+)
+
+
+def classify_failure(exc: BaseException) -> str:
+    """``"transient"`` when running the step again may succeed, else ``"permanent"``.
+
+    Decided from the text of the error and of its causes (a Spark error
+    carries the Java error in its text). Known permanent causes are checked
+    first, then known passing ones; a Python error of the code itself
+    (:data:`PERMANENT_TYPES`) is permanent; any other error of Spark or of
+    the storage is taken as passing, since running a step again is safe and
+    the attempts are few.
+    """
+    texts = []
+    seen = exc
+    while seen is not None and len(texts) < 10:
+        texts.append(f"{type(seen).__name__}: {seen}")
+        seen = seen.__cause__ or seen.__context__
+    text = "\n".join(texts)
+    if any(p.lower() in text.lower() for p in PERMANENT_FAILURES):
+        return "permanent"
+    if any(p in text for p in TRANSIENT_FAILURES):
+        return "transient"
+    if isinstance(exc, PERMANENT_TYPES):
+        return "permanent"
+    return "transient"
+
+
 #: The step that writes the day folders of each working table. When a step
 #: of a day finds a folder it reads missing, the day is built again from the
 #: step that writes it.
@@ -368,11 +454,20 @@ def run_unit(
     worldwide: bool = True,
     force: bool = False,
     allow_empty: bool = False,
+    retries: int = DEFAULT_RETRIES,
+    retry_pause: float = DEFAULT_RETRY_PAUSE_S,
 ) -> int:
     """Run one step for one day, or step 00 when ``day`` is None.
 
     The unit is skipped when the warehouse records it as finished, unless
     ``force`` is set. It is recorded as finished only when it succeeds.
+
+    A step that fails for a passing reason (:func:`classify_failure`: the
+    storage throttling, executors lost) is run again, up to ``retries``
+    times, each time in a new Spark session after ``retry_pause`` seconds.
+    Running a step again is safe: each step replaces the day's folders as a
+    whole, and its mark is written only at the end. A permanent failure
+    stops at once.
 
     Args:
         step: ``"00"`` or one of :data:`DAY_STEPS`.
@@ -382,6 +477,8 @@ def run_unit(
         force: Run the unit even when it is recorded as finished.
         allow_empty: For step 09, replace published files that have rows
             with empty ones (see :func:`opdi.output.published.publish_day`).
+        retries: Attempts after the first, for a passing failure.
+        retry_pause: Seconds between two attempts.
 
     Returns:
         0 when the unit succeeded or was already finished, 1 when it failed.
@@ -391,6 +488,39 @@ def run_unit(
             expected.
     """
     _check_unit(step, day)
+    label = f"step {step}" + (f" day {day}" if day is not None else "")
+    attempts = max(0, int(retries)) + 1
+    for attempt in range(1, attempts + 1):
+        started = time.time()
+        try:
+            return _attempt_unit(step, day, warehouse, worldwide, force, allow_empty)
+        except Exception as exc:  # noqa: BLE001 - reported as an exit code
+            kind = classify_failure(exc)
+            print(
+                f"  {label} failed after {time.time() - started:.0f} s "
+                f"(attempt {attempt} of {attempts}, {kind}): {exc}"
+            )
+            traceback.print_exc()
+            if kind == "permanent":
+                print(f"  {label}: not retried; the cause has to be removed first.")
+                return 1
+            if attempt == attempts:
+                print(f"  {label}: still failing after {attempts} attempts; stopped.")
+                return 1
+            print(f"  {label}: running it again in {retry_pause:.0f} s")
+            time.sleep(retry_pause)
+    return 1
+
+
+def _attempt_unit(
+    step: str,
+    day: date | None,
+    warehouse: str | None,
+    worldwide: bool,
+    force: bool,
+    allow_empty: bool,
+) -> int:
+    """One attempt of :func:`run_unit`, in its own Spark session. Raises on failure."""
     from opdi import periodrun
     from opdi.utils.storage import StorageManager
 
@@ -459,12 +589,11 @@ def run_unit(
         storage.mark_done(key, elapsed)
         print(f"  {label} finished in {elapsed:.0f} s")
         return 0
-    except Exception as exc:  # noqa: BLE001 - reported as an exit code
-        print(f"  {label} failed after {time.time() - started:.0f} s: {exc}")
-        traceback.print_exc()
-        return 1
     finally:
-        spark.stop()
+        try:
+            spark.stop()
+        except Exception as exc:  # noqa: BLE001 - a session that is already gone
+            print(f"  stopping the Spark session: {exc}")
 
 
 def unfinished_steps(day: date, warehouse: str | None = None, worldwide: bool = True) -> list[str]:
@@ -525,8 +654,13 @@ def run_day(
     drop_published_working: bool = False,
     working_keep_days: int = DEFAULT_WORKING_KEEP_DAYS,
     allow_empty: bool = False,
+    retries: int = DEFAULT_RETRIES,
+    retry_pause: float = DEFAULT_RETRY_PAUSE_S,
 ) -> int:
     """Run every step of ``day`` in order, publishing last.
+
+    Each step is retried after a passing failure (``retries``,
+    ``retry_pause``; see :func:`run_unit`).
 
     Checks the free space first, then runs :data:`DAY_STEPS`. Finished steps
     are skipped, so running a failed day again continues where it stopped.
@@ -561,6 +695,8 @@ def run_day(
             worldwide=worldwide,
             force=force,
             allow_empty=allow_empty,
+            retries=retries,
+            retry_pause=retry_pause,
         )
         if rc != 0:
             return rc
@@ -922,6 +1058,19 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run units again even when they are recorded as finished.",
     )
+    common.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help=f"Attempts of a step after the first, after a passing failure (default "
+        f"{DEFAULT_RETRIES}).",
+    )
+    common.add_argument(
+        "--retry-pause",
+        type=float,
+        default=DEFAULT_RETRY_PAUSE_S,
+        help=f"Seconds between two attempts (default {DEFAULT_RETRY_PAUSE_S:.0f}).",
+    )
 
     parser = argparse.ArgumentParser(
         prog="python -m opdi.orchestration",
@@ -987,19 +1136,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "plan":
             print(json.dumps([d.isoformat() for d in days(args.start, args.end, args.order)]))
             return 0
+        retry = {
+            "retries": getattr(args, "retries", DEFAULT_RETRIES),
+            "retry_pause": getattr(args, "retry_pause", DEFAULT_RETRY_PAUSE_S),
+        }
         if args.command == "reference":
-            return run_unit(REFERENCE_STEP, None, args.warehouse, args.worldwide, args.force)
+            return run_unit(
+                REFERENCE_STEP, None, args.warehouse, args.worldwide, args.force, **retry
+            )
         if args.command == "step":
             if args.allow_empty:
-                return run_unit(
-                    args.step,
-                    args.day,
-                    args.warehouse,
-                    args.worldwide,
-                    args.force,
-                    allow_empty=True,
-                )
-            return run_unit(args.step, args.day, args.warehouse, args.worldwide, args.force)
+                retry["allow_empty"] = True
+            return run_unit(
+                args.step, args.day, args.warehouse, args.worldwide, args.force, **retry
+            )
         if args.command == "day":
             return run_day(
                 args.day,
@@ -1012,6 +1162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.drop_published_working,
                 args.working_keep_days,
                 args.allow_empty,
+                **retry,
             )
         if args.command == "check-space":
             check_space(args.min_free_gb, args.warehouse, args.quota_gb, args.worldwide)
