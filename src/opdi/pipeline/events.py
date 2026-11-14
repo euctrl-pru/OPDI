@@ -108,7 +108,7 @@ from opdi.pipeline.vertical_pru import (
 from opdi.reference.point_merge import point_merge_systems_for_day
 from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.geometry import bearing_deg, haversine_nm
-from opdi.utils.spark_helpers import release_local_checkpoint
+from opdi.utils.spark_helpers import keep_frame, release_local_checkpoint
 from opdi.utils.storage import StorageManager
 from opdi.versions import DISTANCE_VERSION, LEGACY_DISTANCE_VERSION, TIME_VERSION
 
@@ -1858,7 +1858,7 @@ class FlightEventProcessor:
             # needs more memory to analyse those joins over it than to run
             # them, so the events are computed once here and the checks start
             # from the result.
-            df_events = df_events.localCheckpoint()
+            df_events = keep_frame(df_events)
             checkpoints.append(df_events)
             labelled = label_events(
                 df_events,

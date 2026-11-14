@@ -200,6 +200,21 @@ def get_spark(
     )
 
 
+def keep_frame(df):
+    """``df`` computed once and kept on the executors, with its plan cut.
+
+    A ``localCheckpoint`` whose blocks are kept twice, on two executors
+    (memory, then disk). The plan of the result starts from the kept blocks,
+    so later joins over it are cheap for the driver to analyse; and when an
+    executor is lost, the other copy is read instead (Spark's plain
+    ``localCheckpoint`` keeps one copy, and its loss fails the step). Free it
+    with :func:`release_local_checkpoint`.
+    """
+    from pyspark import StorageLevel
+
+    return df.localCheckpoint(eager=True, storageLevel=StorageLevel.MEMORY_AND_DISK_2)
+
+
 def release_local_checkpoint(df) -> None:
     """Free the data a ``df.localCheckpoint()`` holds on the executors.
 

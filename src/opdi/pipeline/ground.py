@@ -260,8 +260,10 @@ def on_or_near_ground(sdf: DataFrame, config: "EventConfig") -> Column:
 
 
 def _kept(df: DataFrame, checkpoints: Optional[List[DataFrame]]) -> DataFrame:
-    """``df.localCheckpoint()``, recorded in ``checkpoints`` when given."""
-    kept = df.localCheckpoint()
+    """``df`` kept (:func:`opdi.utils.spark_helpers.keep_frame`), recorded in ``checkpoints``."""
+    from opdi.utils.spark_helpers import keep_frame
+
+    kept = keep_frame(df)
     if checkpoints is not None:
         checkpoints.append(kept)
     return kept
@@ -361,8 +363,8 @@ def block_events(
     # that the plan of the reports and of the other event families is not
     # repeated in every part of this one; repeated, it is large enough to
     # exhaust the memory of the Spark driver before the job starts. The kept
-    # data live on the executors that computed them: if one is lost, the step
-    # fails and is run again (it never gives wrong data).
+    # data live on the executors, twice: when one executor is lost, the other
+    # copy is read.
     reports = sdf.withColumn("_ground", _report_on_ground(sdf, config))
     # Reports in flight are left out of the movement rather than counted as
     # standing still, so a garbled altitude on the ground (a report or two at
