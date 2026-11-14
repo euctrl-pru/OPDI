@@ -24,12 +24,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F
-
 import osn_sample
 from adep_ades import OOA, airport_locations, label_ground_truth, load_ground_truth
 from elevation_bands import BANDS, airport_elevations, elevation_band
 from osn_sample import build_spark, load_dotenv
+from pyspark.sql import functions as F
 
 DAYS_2025 = ["2025-06-05", "2025-06-06", "2025-06-07"]
 DAYS_2024 = ["2024-06-05", "2024-06-06", "2024-06-07"]
@@ -37,9 +36,7 @@ DAYS_2024 = ["2024-06-05", "2024-06-06", "2024-06-07"]
 
 def census(spark, months, days, period):
     """Ground-truthed movements per (band, role) for one period."""
-    gt = label_ground_truth(
-        load_ground_truth(spark, months, days), airport_locations(spark)
-    )
+    gt = label_ground_truth(load_ground_truth(spark, months, days), airport_locations(spark))
     elev = airport_elevations(spark)
 
     # One row per (flight, role). A departure from a high field and an arrival
@@ -47,9 +44,7 @@ def census(spark, months, days, period):
     # flights instead would hide whichever role is the scarcer of the two.
     moves = (
         gt.select(F.col("gt_adep").alias("apt"), F.lit("departure").alias("role"))
-        .unionByName(
-            gt.select(F.col("gt_ades").alias("apt"), F.lit("arrival").alias("role"))
-        )
+        .unionByName(gt.select(F.col("gt_ades").alias("apt"), F.lit("arrival").alias("role")))
         .filter(F.col("apt").isNotNull() & (F.col("apt") != F.lit(OOA)))
     )
 
@@ -72,9 +67,7 @@ def top_aerodromes(spark, months, days, period, min_elev_ft=1500.0, n=15):
     make Arm C a measurement of that field rather than of elevation. This is
     how that shows up before the expensive part rather than after it.
     """
-    gt = label_ground_truth(
-        load_ground_truth(spark, months, days), airport_locations(spark)
-    )
+    gt = label_ground_truth(load_ground_truth(spark, months, days), airport_locations(spark))
     elev = airport_elevations(spark)
     moves = (
         gt.select(F.col("gt_adep").alias("apt"))
@@ -119,16 +112,26 @@ def main() -> None:
     print("\n=== ground-truthed in-area movements per field-elevation band ===")
     print(
         pdf.pivot_table(
-            index="band", columns=["period", "role"],
-            values="movements", aggfunc="sum", fill_value=0,
-        ).reindex(order).to_string()
+            index="band",
+            columns=["period", "role"],
+            values="movements",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .reindex(order)
+        .to_string()
     )
     print("\n=== distinct aerodromes per band ===")
     print(
         pdf.pivot_table(
-            index="band", columns=["period", "role"],
-            values="aerodromes", aggfunc="sum", fill_value=0,
-        ).reindex(order).to_string()
+            index="band",
+            columns=["period", "role"],
+            values="aerodromes",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .reindex(order)
+        .to_string()
     )
 
     tops = top_aerodromes(spark, ["202506"], DAYS_2025, "2025-06").toPandas()

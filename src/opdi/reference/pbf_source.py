@@ -1,17 +1,17 @@
 """Aeroway geometry from a local ``.osm.pbf`` extract.
 
-Step 00b used to reach the public Overpass API once per airport, through
-``osmnx.features_from_place``, which first resolves the airport *name* through
-Nominatim and then sends Overpass a polygon predicate. That is two rate-limited
-services per aerodrome, and it fails silently: a name that does not resolve
-returns no data rather than an error, which is why five of twenty airports came
-back empty during the flight-events-v4 campaign -- one of them an airport that
-demonstrably has stands. At 1,353 aerodromes the public endpoint simply refuses.
+Without a local extract, step 00b asks the public Overpass service for each
+airport through ``osmnx.features_from_place``, which first looks the airport
+up by name (Nominatim). That is two rate-limited services per airport, a name
+that cannot be resolved returns no data without an error, and the service
+refuses requests for many airports.
 
-Reading a Geofabrik extract removes both services. The file is read once, all
+Reading a Geofabrik extract needs neither service. The file is read once, all
 ``aeroway`` features are kept, and each is assigned to an aerodrome from
-reference data we already hold. See ``docs/industrialization-plan.md`` §3.
+reference data we already hold.
 """
+
+import math
 import re
 import warnings
 from collections import Counter
@@ -20,6 +20,7 @@ from typing import List, Optional
 import geopandas as gpd
 import osmium
 import pandas as pd
+from pyspark.sql import functions as F
 from shapely import wkb as shapely_wkb
 
 from opdi.reference.h3_airport_layouts import AEROWAY_TAGS
@@ -36,16 +37,18 @@ def _tags_of(obj) -> dict:
 
 
 def _split_icao_codes(raw: Optional[str]) -> List[str]:
-    """OSM's semicolon convention for an ``icao`` field shared by more than
-    one use -- Sion is tagged ``icao='LSGS;LSMS'``, civil and military
-    sharing one field. A comma is accepted too, for the same convention seen
-    written that way elsewhere. Splitting (rather than upper-casing the whole
-    string as a single key) matters twice over: neither code would otherwise
-    ever match a lookup for ``LSGS`` or ``LSMS`` alone, and the polygon would
-    still silently claim every feature inside it regardless -- containment
-    does not care what the icao string says -- so both real airports would
-    end up with nothing, and because the aerodrome is not *unassigned*, the
-    box fallback would never even be tried for either of them.
+    """The ICAO codes of an OSM ``icao`` tag that may hold several.
+
+    OSM separates codes sharing one field with a semicolon: Sion is tagged
+    ``icao='LSGS;LSMS'``, civil and military sharing one field. A comma is
+    accepted too, for the same convention seen written that way elsewhere.
+    Splitting (rather than upper-casing the whole string as a single key)
+    matters twice over: neither code would otherwise ever match a lookup for
+    ``LSGS`` or ``LSMS`` alone, and the polygon would still silently claim
+    every feature inside it regardless -- containment does not care what the
+    icao string says -- so both real airports would end up with nothing, and
+    because the aerodrome is not *unassigned*, the box fallback would never
+    even be tried for either of them.
     """
     if not raw:
         return []
@@ -99,11 +102,7 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
     # `with_areas()` makes osmium assemble multipolygon relations and closed
     # ways into areas, which is how OSM encodes an apron. Without it those
     # features arrive as bare ways and an apron becomes a thin buffered line.
-    fp = (
-        osmium.FileProcessor(pbf_path)
-        .with_areas()
-        .with_filter(osmium.filter.KeyFilter("aeroway"))
-    )
+    fp = osmium.FileProcessor(pbf_path).with_areas().with_filter(osmium.filter.KeyFilter("aeroway"))
     for obj in fp:
         tag = obj.tags.get("aeroway")
         if tag not in AEROWAY_TAGS:
@@ -131,14 +130,11 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
             continue
         if geom is None or geom.is_empty:
             continue
-        rows.append({"element": element, "id": int(oid), "geometry": geom,
-                     **_tags_of(obj)})
+        rows.append({"element": element, "id": int(oid), "geometry": geom, **_tags_of(obj)})
 
     if build_failures:
         total = sum(build_failures.values())
-        breakdown = ", ".join(
-            f"{t}: {c}" for t, c in sorted(build_failures.items())
-        )
+        breakdown = ", ".join(f"{t}: {c}" for t, c in sorted(build_failures.items()))
         print(
             f"read_aeroway_features: skipped {total} feature(s) in {pbf_path} "
             f"whose geometry could not be built ({breakdown})"
@@ -153,9 +149,7 @@ def read_aeroway_features(pbf_path: str) -> gpd.GeoDataFrame:
     # the docstring. Only ways whose id collides with a *way-derived* area's
     # orig_id are affected; open ways (taxiway/runway centrelines) and ways
     # that merely share a numeric id with an unrelated relation survive.
-    is_duplicate_way = (df["element"] == "way") & df["id"].isin(
-        way_derived_area_ids
-    )
+    is_duplicate_way = (df["element"] == "way") & df["id"].isin(way_derived_area_ids)
     df = df[~is_duplicate_way]
 
     return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
@@ -165,11 +159,9 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     """OSM's own aerodrome boundary polygons, keyed by ICAO code.
 
     ``aeroway=aerodrome`` is OSM's tag for the airport boundary itself -- the
-    same polygon Overpass used to fetch by first geocoding the airport's
-    *name* through Nominatim. Reading it here from the extract keys it on the
-    ``icao`` tag instead, which is exact where the geocode step was a name
-    lookup that failed silently for five of twenty airports during the
-    flight-events-v4 campaign.
+    same polygon Overpass returns after looking the airport up by name. Read
+    from the extract, it is matched on the ``icao`` tag instead, which is
+    exact.
 
     Returns ``icao``, ``name``, ``element``, ``id``, ``geometry`` -- one row
     per aerodrome feature whose geometry could be assembled as a polygon.
@@ -188,11 +180,7 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     candidate_way_ids: dict = {}  # way id -> [icao, ...], for failed-assembly detection
     build_failures: Counter = Counter()
 
-    fp = (
-        osmium.FileProcessor(pbf_path)
-        .with_areas()
-        .with_filter(osmium.filter.KeyFilter("aeroway"))
-    )
+    fp = osmium.FileProcessor(pbf_path).with_areas().with_filter(osmium.filter.KeyFilter("aeroway"))
     for obj in fp:
         if obj.tags.get("aeroway") != "aerodrome":
             continue
@@ -215,8 +203,15 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
             # code, all sharing this same geometry -- see
             # `_split_icao_codes`. Almost always a single-element list.
             for code in codes:
-                rows.append({"icao": code, "name": obj.tags.get("name"),
-                             "element": "area", "id": int(oid), "geometry": geom})
+                rows.append(
+                    {
+                        "icao": code,
+                        "name": obj.tags.get("name"),
+                        "element": "area",
+                        "id": int(oid),
+                        "geometry": geom,
+                    }
+                )
         elif isinstance(obj, osmium.osm.Way):
             # The raw closed way behind an assembled Area, or -- if
             # assembly failed -- the only trace of this aerodrome's
@@ -247,7 +242,8 @@ def read_aerodromes(pbf_path: str) -> gpd.GeoDataFrame:
     if not rows:
         return gpd.GeoDataFrame(
             columns=["icao", "name", "element", "id", "geometry"],
-            geometry="geometry", crs="EPSG:4326",
+            geometry="geometry",
+            crs="EPSG:4326",
         )
 
     df = pd.DataFrame(rows)
@@ -303,10 +299,6 @@ def pbf_has_aerodrome_outside_bbox(pbf_path: str, bbox) -> bool:
     return False
 
 
-import math
-
-from pyspark.sql import functions as F
-
 #: Margin around the runway extent, in kilometres. Aprons, stands and hangars
 #: sit off the runway axis; 1.5 km covers them at the largest aerodromes without
 #: reaching a neighbouring field at typical separations.
@@ -341,8 +333,13 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
     )
     rwy = (
         storage.read_table("oa_runways")
-        .select("airport_ident", "le_latitude_deg", "le_longitude_deg",
-                "he_latitude_deg", "he_longitude_deg")
+        .select(
+            "airport_ident",
+            "le_latitude_deg",
+            "le_longitude_deg",
+            "he_latitude_deg",
+            "he_longitude_deg",
+        )
         .toPandas()
     )
     lat = pd.concat([rwy["le_latitude_deg"], rwy["he_latitude_deg"]])
@@ -352,8 +349,12 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
         pd.DataFrame({"ident": ident, "lat": lat, "lon": lon})
         .dropna()
         .groupby("ident")
-        .agg(lat_min=("lat", "min"), lat_max=("lat", "max"),
-             lon_min=("lon", "min"), lon_max=("lon", "max"))
+        .agg(
+            lat_min=("lat", "min"),
+            lat_max=("lat", "max"),
+            lon_min=("lon", "min"),
+            lon_max=("lon", "max"),
+        )
         .reset_index()
     )
     out = apt.merge(ext, on="ident", how="left")
@@ -362,12 +363,8 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
     m_lat = BOX_MARGIN_KM / _KM_PER_DEG_LAT
     out.loc[have, "lat_min"] -= m_lat
     out.loc[have, "lat_max"] += m_lat
-    out.loc[have, "lon_min"] -= [
-        _deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]
-    ]
-    out.loc[have, "lon_max"] += [
-        _deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]
-    ]
+    out.loc[have, "lon_min"] -= [_deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]]
+    out.loc[have, "lon_max"] += [_deg_lon(BOX_MARGIN_KM, v) for v in out.loc[have, "apt_lat"]]
 
     # No runway coordinates: a square around the aerodrome point, so it is
     # still built rather than silently absent from the table.
@@ -392,8 +389,10 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
     # handful of extra candidate features and cannot lose any.
     wrapped = (out["lon_max"] > 180.0) | (out["lon_min"] < -180.0)
     if wrapped.any():
-        print(f"  {int(wrapped.sum())} aerodrome box(es) cross the antimeridian; "
-              "widening their longitude range to the full circle.")
+        print(
+            f"  {int(wrapped.sum())} aerodrome box(es) cross the antimeridian; "
+            "widening their longitude range to the full circle."
+        )
         out.loc[wrapped, "lon_min"] = -180.0
         out.loc[wrapped, "lon_max"] = 180.0
     return out
@@ -404,8 +403,7 @@ def airport_boxes(storage, airport_types=None) -> pd.DataFrame:
 #: tolerates the join artefacts `geopandas.sjoin` or the helper columns below
 #: add, so every return path -- including the empty ones -- is restricted to
 #: exactly this list before it leaves the class.
-_OUTPUT_COLUMNS = ["element", "id", "geometry", "aeroway", "width", "ref",
-                    "surface", "length"]
+_OUTPUT_COLUMNS = ["element", "id", "geometry", "aeroway", "width", "ref", "surface", "length"]
 
 
 class PbfLayoutSource:
@@ -420,7 +418,7 @@ class PbfLayoutSource:
     (``read_aerodromes``), computed once for every feature in a single spatial
     join. An aerodrome with no polygon in the extract -- most commonly because
     it is mapped as a bare node, which encloses nothing -- falls back to the
-    runway-extent box with the nearest-aerodrome guard, applied only to
+    runway-extent box with the nearest-airport check, applied only to
     features the polygon pass left unassigned so the box's looser boundary
     never overrides a real one.
     """
@@ -454,7 +452,8 @@ class PbfLayoutSource:
         if aerodromes is not None and len(aerodromes):
             rep_points = gpd.GeoDataFrame(
                 geometry=feats.geometry.representative_point(),
-                index=feats.index, crs=feats.crs,
+                index=feats.index,
+                crs=feats.crs,
             )
             ad = aerodromes[["icao", "geometry"]].copy()
             # Area in degrees^2 is not a physical area, but it is a valid
@@ -495,27 +494,23 @@ class PbfLayoutSource:
             reps = sub.geometry.representative_point()
             lat = reps.y
             lon = reps.x
-            b = self._boxes  # nearest-guard compares against every box, not
-                              # just the box-only ones, so a polygon aerodrome
-                              # whose own boundary missed the point still
-                              # keeps a closer neighbour's box from claiming it
+            # The nearest-airport check compares with every box, not only the
+            # box-only ones, so a polygon airport whose own boundary missed a
+            # point still keeps a closer neighbour's box from claiming it.
+            b = self._boxes
             for _, r in box_only.iterrows():
                 # `r.lon_min`/`r.lon_max` may be -180/180 here -- `airport_boxes`
                 # widens a box that straddles the antimeridian to the full
                 # circle rather than leaving an inverted interval `between`
                 # would match nothing on. That widening is only safe because
-                # of the nearest-guard immediately below: it does not accept
+                # of the nearest-airport check below: it does not accept
                 # every point this (now unbounded) box contains, it claims a
                 # point only if THIS aerodrome is nearer than every other one
                 # in `_boxes`, so a full-circle box cannot steal features near
-                # a different, closer aerodrome anywhere on the globe. If that
-                # guard is ever relaxed or removed, this must become a
-                # wrap-aware interval test instead (`lon >= lon_min OR
-                # lon <= lon_max`), not stay a widened box with no guard
-                # behind it.
-                inside = lat.between(r.lat_min, r.lat_max) & lon.between(
-                    r.lon_min, r.lon_max
-                )
+                # a different, closer airport anywhere on the globe. Without
+                # that check, this would have to become a wrap-aware interval
+                # test (`lon >= lon_min OR lon <= lon_max`).
+                inside = lat.between(r.lat_min, r.lat_max) & lon.between(r.lon_min, r.lon_max)
                 if not inside.any():
                     continue
                 idx = lat.index[inside]
@@ -525,8 +520,7 @@ class PbfLayoutSource:
                 nearest = pd.Series(True, index=idx)
                 for _, o in b[b["ident"] != r.ident].iterrows():
                     d_other = (lat.loc[idx] - o.apt_lat) ** 2 + (
-                        (lon.loc[idx] - o.apt_lon)
-                        * math.cos(math.radians(o.apt_lat))
+                        (lon.loc[idx] - o.apt_lon) * math.cos(math.radians(o.apt_lat))
                     ) ** 2
                     nearest &= d_this <= d_other
                 claim = idx[nearest.to_numpy()]
@@ -537,16 +531,19 @@ class PbfLayoutSource:
         return assigned
 
     def features_for(self, apt_icao: str) -> gpd.GeoDataFrame:
-        """Features assigned to *apt_icao*, by polygon containment or --
-        where the aerodrome has no polygon -- the runway-extent box."""
+        """The features assigned to ``apt_icao``.
+
+        By containment in its boundary polygon or, where the airport has no
+        polygon, in the box around its runways.
+        """
         self._load()
         out = self._features.loc[self._assigned_icao == apt_icao, _OUTPUT_COLUMNS]
         return gpd.GeoDataFrame(out, geometry="geometry", crs=self._features.crs)
 
     def assignment_report(self) -> pd.DataFrame:
-        """Per aerodrome in scope: which method actually produced its
-        features, and how many it received. Not a seam contract -- this is
-        what Task 6 reads before committing to a full build.
+        """Per airport: which method assigned its features, and how many.
+
+        Useful to check a small build before a full one.
 
         "polygon" means the aerodrome's own boundary covered >=1 feature.
         An aerodrome whose polygon exists but is empty (EFIT) is reported as
@@ -564,8 +561,11 @@ class PbfLayoutSource:
                 method = "bbox"
             else:
                 method = "none"
-            rows.append({
-                "icao": ident, "method": method,
-                "n_features": int(counts.get(ident, 0)),
-            })
+            rows.append(
+                {
+                    "icao": ident,
+                    "method": method,
+                    "n_features": int(counts.get(ident, 0)),
+                }
+            )
         return pd.DataFrame(rows)

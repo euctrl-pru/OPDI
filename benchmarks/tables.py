@@ -36,5 +36,4 @@ def fixed(name: str) -> str:
 
 
 def describe() -> str:
-    return ("warehouse=" + WAREHOUSE
-            + ("" if WAREHOUSE == PRODUCTION_ROOT else "  (ISOLATED)"))
+    return "warehouse=" + WAREHOUSE + ("" if WAREHOUSE == PRODUCTION_ROOT else "  (ISOLATED)")

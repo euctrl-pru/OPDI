@@ -18,11 +18,9 @@ always intended; these tests pin that it is the one reported.
 import datetime as dt
 import random
 
-from pyspark.sql import functions as F
+from test_flight_detection import _EPOCH, CLASSIFIED
 
 from opdi.pipeline.flights import FlightListProcessor
-
-from test_flight_detection import CLASSIFIED, _EPOCH
 
 
 def _landings(spark, aerodromes, tracks=1, n=2, seed=None):
@@ -35,11 +33,26 @@ def _landings(spark, aerodromes, tracks=1, n=2, seed=None):
             t = _EPOCH + dt.timedelta(seconds=i * 30)
             lon = 4.5 - 0.5 * i / max(n - 1, 1)
             for apt, (alat, alon) in aerodromes.items():
-                rows.append((
-                    f"ac{k:04d}", "TEST01  ", f"trk-{k:04d}", apt, alat, alon,
-                    t, 50.0, lon, "landing", 1,
-                    _EPOCH, last_seen, _EPOCH.date(), 0, 1,
-                ))
+                rows.append(
+                    (
+                        f"ac{k:04d}",
+                        "TEST01  ",
+                        f"trk-{k:04d}",
+                        apt,
+                        alat,
+                        alon,
+                        t,
+                        50.0,
+                        lon,
+                        "landing",
+                        1,
+                        _EPOCH,
+                        last_seen,
+                        _EPOCH.date(),
+                        0,
+                        1,
+                    )
+                )
     if seed is not None:
         random.Random(seed).shuffle(rows)
     return spark.createDataFrame(rows, schema=CLASSIFIED)
@@ -57,7 +70,8 @@ def test_the_named_airport_is_the_one_ranked_first(spark):
     """Enough flights in one task that the aggregation falls back to sorting,
     which is where ``first()`` stopped meaning "ranked first"."""
     out = FlightListProcessor._compute_flight_table(
-        _landings(spark, THREE, tracks=400, seed=7), rank_by="haversine").collect()
+        _landings(spark, THREE, tracks=400, seed=7), rank_by="haversine"
+    ).collect()
     assert len(out) == 400
     wrong = [r["id"] for r in out if r["ADES"] != "NEAR"]
     assert wrong == []
@@ -65,7 +79,8 @@ def test_the_named_airport_is_the_one_ranked_first(spark):
 
 def test_the_named_airport_is_not_among_its_own_alternatives(spark):
     out = FlightListProcessor._compute_flight_table(
-        _landings(spark, THREE, tracks=400, seed=7), rank_by="haversine").collect()
+        _landings(spark, THREE, tracks=400, seed=7), rank_by="haversine"
+    ).collect()
     listed_twice = [r["id"] for r in out if r["ADES"] in r["ADES_P"].split(", ")]
     assert listed_twice == []
     assert {tuple(sorted(r["ADES_P"].split(", "))) for r in out} == {("FAR1", "MID1")}
@@ -81,20 +96,23 @@ def test_equal_distance_is_settled_by_the_identifier(spark):
     for seed in (1, 2, 3):
         out = FlightListProcessor._compute_flight_table(
             _landings(spark, TWINS, tracks=50, n=8, seed=seed),
-            rank_by="haversine", bearing_tiebreak_nm=2.0)
+            rank_by="haversine",
+            bearing_tiebreak_nm=2.0,
+        )
         named |= {r["ADES"] for r in out.collect()}
     assert named == {"CA-1291"}
 
 
 def _candidates(spark, order):
     rows = [("trk-1", "ades", ident, 3.0) for ident in order]
-    return spark.createDataFrame(rows, "track_id string, role string, apt_ident string, dist_nm double")
+    return spark.createDataFrame(
+        rows, "track_id string, role string, apt_ident string, dist_nm double"
+    )
 
 
-def test_classify_endpoints_settles_equal_distance_by_the_identifier(spark):
+def test_the_endpoint_ranking_settles_equal_distance_by_the_identifier(spark):
     got = {
-        FlightListProcessor.classify_endpoints(
-            _candidates(spark, order), mode="nearest").first()["apt"]
+        FlightListProcessor._best_candidates(_candidates(spark, order), 0.0).first()["apt_ident"]
         for order in (("CYEG", "CA-1291"), ("CA-1291", "CYEG"))
     }
     assert got == {"CA-1291"}
@@ -103,6 +121,7 @@ def test_classify_endpoints_settles_equal_distance_by_the_identifier(spark):
 # ---------------------------------------------------------------------------
 # A day run builds its candidates from the tracks it was given
 # ---------------------------------------------------------------------------
+
 
 class _Stop(Exception):
     pass
@@ -125,8 +144,12 @@ def test_a_day_run_rebuilds_its_endpoint_candidates():
 
     proc.build_endpoint_candidates = build
     try:
-        proc.process_day(dt.date(2026, 6, 14), skip_if_processed=False,
-                         adep_mode="endpoint", ades_mode="endpoint")
+        proc.process_day(
+            dt.date(2026, 6, 14),
+            skip_if_processed=False,
+            adep_mode="endpoint",
+            ades_mode="endpoint",
+        )
     except _Stop:
         pass
     assert seen == {"rebuild": True}
@@ -148,8 +171,9 @@ def test_a_month_run_keeps_its_candidate_cache():
 
     proc.build_endpoint_candidates = build
     try:
-        proc.process_dai(dt.date(2026, 6, 1), skip_if_processed=False,
-                         adep_mode="endpoint", ades_mode="endpoint")
+        proc.process_dai(
+            dt.date(2026, 6, 1), skip_if_processed=False, adep_mode="endpoint", ades_mode="endpoint"
+        )
     except _Stop:
         pass
     assert seen == {"rebuild": False}

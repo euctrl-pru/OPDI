@@ -1,11 +1,12 @@
-"""
-H3 airport ground layout generator.
+"""Step 00b: the airport layouts.
 
-Retrieves airport infrastructure data (runways, taxiways, aprons, hangars)
-from OpenStreetMap via osmnx, converts geometries to H3 hexagons at
-resolution 12, and stores the results for use in airport event detection.
-
-Ported from: OPDI-live/python/v2.0.0/00_create_h3_airport_layouts.py
+Reads the parts of each airport (runways, taxiways, aprons, stands, hangars
+and others) from OpenStreetMap, from a local extract
+(:mod:`opdi.reference.pbf_source`) or, without one, from the Overpass
+service, converts their shapes to H3 cells at resolution 12 (about 20 m
+across), and writes ``hexaero_airport_layouts``. Step 04 matches the reports
+to these cells for the airport layout events.
+See https://www.opdi.aero/content/methods/surface-events.html.
 """
 
 import os
@@ -13,13 +14,11 @@ import re
 import traceback
 from typing import Dict, List, Optional, Set, Tuple
 
+import geopandas as gpd
 import h3
 import osmnx as ox
 import pandas as pd
 from pyproj import Transformer
-from shapely.geometry import LineString, MultiPolygon, Point, Polygon
-from shapely.ops import transform
-
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -30,10 +29,11 @@ from pyspark.sql.types import (
     StructField,
     StructType,
 )
+from shapely.geometry import LineString, Polygon
+from shapely.ops import transform
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
-
 
 # Default buffer widths (meters) by aeroway type
 DEFAULT_AEROWAY_WIDTHS: Dict[str, float] = {
@@ -56,20 +56,22 @@ AEROWAY_TAGS = [
     "deicing_pad",
 ]
 
-HEXAERO_SCHEMA = StructType([
-    StructField("hexaero_apt_icao", StringType(), True),
-    StructField("hexaero_h3_id", StringType(), True),
-    StructField("hexaero_latitude", DoubleType(), True),
-    StructField("hexaero_longitude", DoubleType(), True),
-    StructField("hexaero_res", IntegerType(), True),
-    StructField("hexaero_aeroway", StringType(), True),
-    StructField("hexaero_length", DoubleType(), True),
-    StructField("hexaero_ref", StringType(), True),
-    StructField("hexaero_surface", StringType(), True),
-    StructField("hexaero_width", DoubleType(), True),
-    StructField("hexaero_osm_id", LongType(), True),
-    StructField("hexaero_type", StringType(), True),
-])
+HEXAERO_SCHEMA = StructType(
+    [
+        StructField("hexaero_apt_icao", StringType(), True),
+        StructField("hexaero_h3_id", StringType(), True),
+        StructField("hexaero_latitude", DoubleType(), True),
+        StructField("hexaero_longitude", DoubleType(), True),
+        StructField("hexaero_res", IntegerType(), True),
+        StructField("hexaero_aeroway", StringType(), True),
+        StructField("hexaero_length", DoubleType(), True),
+        StructField("hexaero_ref", StringType(), True),
+        StructField("hexaero_surface", StringType(), True),
+        StructField("hexaero_width", DoubleType(), True),
+        StructField("hexaero_osm_id", LongType(), True),
+        StructField("hexaero_type", StringType(), True),
+    ]
+)
 
 COLUMN_TYPES: Dict[str, type] = {
     "hexaero_apt_icao": str,
@@ -88,8 +90,7 @@ COLUMN_TYPES: Dict[str, type] = {
 
 
 def retrieve_osm_data(icao_code: str) -> "gpd.GeoDataFrame":
-    """
-    Retrieve aeroway features from OpenStreetMap for an airport.
+    """Retrieve aeroway features from OpenStreetMap for an airport.
 
     Args:
         icao_code: ICAO airport code (e.g., 'EBBR').
@@ -109,11 +110,8 @@ def retrieve_osm_data(icao_code: str) -> "gpd.GeoDataFrame":
     return gdf
 
 
-def buffer_geometry(
-    line: LineString, width_m: float, always_xy: bool = True
-) -> Polygon:
-    """
-    Buffer a LineString geometry to create a Polygon with a specified width.
+def buffer_geometry(line: LineString, width_m: float, always_xy: bool = True) -> Polygon:
+    """Buffer a LineString geometry to create a Polygon with a specified width.
 
     Projects to EPSG:3395 (meters), applies the buffer, then projects back
     to EPSG:4326 (degrees).
@@ -126,12 +124,8 @@ def buffer_geometry(
     Returns:
         Buffered geometry as a Polygon.
     """
-    transformer_to_meters = Transformer.from_crs(
-        "EPSG:4326", "EPSG:3395", always_xy=always_xy
-    )
-    transformer_to_degrees = Transformer.from_crs(
-        "EPSG:3395", "EPSG:4326", always_xy=always_xy
-    )
+    transformer_to_meters = Transformer.from_crs("EPSG:4326", "EPSG:3395", always_xy=always_xy)
+    transformer_to_degrees = Transformer.from_crs("EPSG:3395", "EPSG:4326", always_xy=always_xy)
     line_in_meters = transform(transformer_to_meters.transform, line)
     buffered_line = line_in_meters.buffer(width_m)
     return transform(transformer_to_degrees.transform, buffered_line)
@@ -149,8 +143,7 @@ def is_number(s) -> bool:
 
 
 def safe_convert_to_float(s) -> Optional[float]:
-    """
-    Safely convert a string to float, stripping non-numeric characters.
+    """Safely convert a string to float, stripping non-numeric characters.
 
     Args:
         s: Value to convert.
@@ -170,8 +163,7 @@ def safe_convert_to_float(s) -> Optional[float]:
 
 
 def fill_missing_width(aeroway: str, width_m) -> Optional[float]:
-    """
-    Fill missing width values based on aeroway type defaults.
+    """Fill missing width values based on aeroway type defaults.
 
     Args:
         aeroway: Type of aeroway (runway, taxiway, etc.).
@@ -186,8 +178,7 @@ def fill_missing_width(aeroway: str, width_m) -> Optional[float]:
 
 
 def convert_to_polygon(geometry, geom_type: str, width_m: float) -> List[Polygon]:
-    """
-    Convert a geometry to a list of Polygons, buffering if necessary.
+    """Convert a geometry to a list of Polygons, buffering if necessary.
 
     Args:
         geometry: Input geometry (Polygon, MultiPolygon, LineString, or Point).
@@ -208,8 +199,7 @@ def convert_to_polygon(geometry, geom_type: str, width_m: float) -> List[Polygon
 
 
 def _polyfill_latlng(ring: List[Tuple[float, float]], resolution: int) -> Set[str]:
-    """
-    Fill a single [lat, lng] ring with H3 hexagons at the given resolution.
+    """Fill a single [lat, lng] ring with H3 hexagons at the given resolution.
 
     THE FOOTGUN: h3 v3's ``polyfill(geojson, res)`` consumed GeoJSON-ordered
     ``[lng, lat]`` rings. v4's ``h3.LatLngPoly`` always takes ``[lat, lng]``
@@ -229,8 +219,7 @@ def _polyfill_latlng(ring: List[Tuple[float, float]], resolution: int) -> Set[st
 
 
 def polygon_to_h3(poly: Polygon, resolution: int) -> Set[str]:
-    """
-    Convert a Polygon to a set of H3 hexagon indices.
+    """Convert a Polygon to a set of H3 hexagon indices.
 
     Args:
         poly: Shapely Polygon.
@@ -246,8 +235,7 @@ def polygon_to_h3(poly: Polygon, resolution: int) -> Set[str]:
 
 
 def clean_str(s) -> str:
-    """
-    Clean a string value, converting feet/miles to meters.
+    """Clean a string value, converting feet/miles to meters.
 
     Args:
         s: Input string potentially containing unit suffixes.
@@ -279,8 +267,7 @@ def clean_str(s) -> str:
 
 
 def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.DataFrame:
-    """
-    Process a single airport: fetch OSM data, create polygons, convert to H3.
+    """Process a single airport: fetch OSM data, create polygons, convert to H3.
 
     Args:
         apt_icao: ICAO airport code.
@@ -314,9 +301,7 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.D
     if "width" not in df.columns:
         df["width"] = None
 
-    df["width"] = df.apply(
-        lambda row: fill_missing_width(row["aeroway"], row["width"]), axis=1
-    )
+    df["width"] = df.apply(lambda row: fill_missing_width(row["aeroway"], row["width"]), axis=1)
 
     # Handle multiple polygons per feature
     df["polygon_geometries"] = df.apply(
@@ -333,10 +318,8 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.D
     df = df[~df.hex_id.isna()]
 
     # Add H3 coordinates (cell_to_latlng returns (lat, lng), same order as
-    # the v3 h3_to_geo it replaces).
-    df["hex_latitude"], df["hex_longitude"] = zip(
-        *df["hex_id"].apply(h3.cell_to_latlng)
-    )
+    # the h3 v3 h3_to_geo it replaces).
+    df["hex_latitude"], df["hex_longitude"] = zip(*df["hex_id"].apply(h3.cell_to_latlng))
     df["hex_res"] = resolution
 
     # Reorganize columns
@@ -360,8 +343,7 @@ def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.D
 
 
 class AirportLayoutGenerator:
-    """
-    Generates H3 hexagonal representations of airport ground infrastructure.
+    """Generates H3 hexagonal representations of airport ground infrastructure.
 
     Retrieves aeroway features (runways, taxiways, aprons, hangars) from
     OpenStreetMap for each airport, converts them to H3 hexagons at
@@ -401,7 +383,7 @@ class AirportLayoutGenerator:
         self.log_dir = log_dir
 
         # When set, step 00b reads this local extract instead of the public
-        # Overpass API. See docs/industrialization-plan.md §3.
+        # Overpass API.
         self.pbf_path = pbf_path
         self._pbf_source = None
 
@@ -451,8 +433,7 @@ class AirportLayoutGenerator:
           from the boxes silently produced no geometry, which is indis-
           tinguishable from an airport OSM does not map.
 
-        ``airports_url`` is retained and honoured so an explicit override still
-        works, but it is no longer the default path.
+        ``airports_url``, when given, is read instead.
 
         Returns:
             DataFrame with columns: ident, latitude_deg, longitude_deg,
@@ -467,9 +448,7 @@ class AirportLayoutGenerator:
         if airports_url is not None:
             airports_df = pd.read_csv(airports_url)
             airports_df = airports_df[airports_df["type"].isin(airport_types)][cols]
-            mask = cov.pandas_mask(
-                airports_df.latitude_deg, airports_df.longitude_deg, offset=True
-            )
+            mask = cov.pandas_mask(airports_df.latitude_deg, airports_df.longitude_deg, offset=True)
             airports_df = airports_df[mask]
         else:
             if not self.storage.table_exists("oa_airports"):
@@ -491,20 +470,13 @@ class AirportLayoutGenerator:
             )
             airports_df = apt.toPandas()
 
-        print(f"There are {len(airports_df)} airports to process "
-              f"(coverage: {cov.label})...")
+        print(f"There are {len(airports_df)} airports to process " f"(coverage: {cov.label})...")
         return airports_df
 
     def process_airport(self, apt_icao: str) -> Optional[pd.DataFrame]:
-        """
-        Build the H3 layout rows for one airport. **Writes nothing.**
+        """Build the H3 layout rows for one airport; nothing is written.
 
-        This used to write ``hexaero_airport_layouts`` itself, with
-        ``mode="overwrite"`` -- so calling it in a loop left the table holding
-        only the last airport, and calling it once destroyed the table. The
-        write belongs to :meth:`process_all`, which knows how many airports it
-        is about to produce; a per-airport function cannot know that and must
-        not decide it.
+        :meth:`process_all` writes the table once for all airports.
 
         Args:
             apt_icao: ICAO airport code.
@@ -517,9 +489,7 @@ class AirportLayoutGenerator:
                 from opdi.reference.pbf_source import PbfLayoutSource
 
                 self._pbf_source = PbfLayoutSource(self.pbf_path, self.storage)
-            df = hexagonify_airport(
-                apt_icao, resolution=self.resolution, source=self._pbf_source
-            )
+            df = hexagonify_airport(apt_icao, resolution=self.resolution, source=self._pbf_source)
             # `hexagonify_airport` can return duplicate column labels. pandas
             # raises InvalidIndexError when such frames are concatenated, and
             # `createDataFrame` warns "columns are not unique, some columns will
@@ -537,8 +507,7 @@ class AirportLayoutGenerator:
         airport_types: Optional[List[str]] = None,
         troublesome_airports: Optional[List[str]] = None,
     ) -> Tuple[List[str], List[str]]:
-        """
-        Process all airports, skipping already-processed ones.
+        """Process all airports, skipping already-processed ones.
 
         Args:
             airports_url: URL to OurAirports airports CSV.
@@ -577,9 +546,7 @@ class AirportLayoutGenerator:
                 frames.append(result)
                 self._mark_success(apt_icao, processed_success)
             else:
-                self._mark_failed(
-                    apt_icao, "See logs", processed_failed, processed_errors
-                )
+                self._mark_failed(apt_icao, "See logs", processed_failed, processed_errors)
 
         # One write for the whole run, not one per airport. The per-airport
         # write this replaced was ``mode="overwrite"`` on the shared table, so
@@ -596,7 +563,8 @@ class AirportLayoutGenerator:
             sdf = self.spark.createDataFrame(big, HEXAERO_SCHEMA)
             sdf = sdf.repartition("hexaero_apt_icao").orderBy("hexaero_apt_icao")
             self.storage.write_table(
-                sdf, "hexaero_airport_layouts",
+                sdf,
+                "hexaero_airport_layouts",
                 mode="overwrite" if first_write else "append",
             )
 

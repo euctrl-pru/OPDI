@@ -1,12 +1,10 @@
-"""Where OPDI looks. One bounding box, asked for by everything that filters.
+"""The geographic coverage of a run: worldwide, or a bounding box.
 
-The box used to be written out six times in five files -- four of them
-textually identical ``LAT_MIN``/``LAT_MAX``/``LON_MIN``/``LON_MAX`` class
-constants with no link between them. Widening coverage therefore meant finding
-all six, and missing one produced no error: the ingest would keep worldwide
-rows while the detection zones covered Europe, so every flight outside Europe
-got a track and no aerodrome. That is a silent wrong answer, which is the
-failure mode this module exists to make impossible.
+Every part of the pipeline that filters by position (ingestion, airport
+detection, the three reference generators) reads :class:`CoverageConfig`, so
+they always cover the same area. If they did not, the ingestion could keep
+reports for which no airport zones exist, and those flights would get no
+airport, without any error.
 
 ``bbox = None`` means worldwide. It is not a box of +/-180/90 because those are
 not the same thing: a full-globe box still compares four columns on every row,
@@ -25,13 +23,11 @@ __all__ = ["EUROPE_BBOX", "CoverageConfig"]
 
 #: The published OPDI coverage box, ``(min_lon, min_lat, max_lon, max_lat)``.
 #:
-#: **Do not edit.** It reaches published data through ``track_id`` -- a track
-#: is the run of samples that survived this filter -- and every detection study
-#: OPDI has published was tuned inside it. Changing coverage is done by
-#: choosing a different ``CoverageConfig``, never by editing this tuple.
-EUROPE_BBOX: Tuple[float, float, float, float] = (
-    -25.86653, 26.74617, 49.65699, 70.25976
-)
+#: Do not edit: the European data published by OPDI were built inside this box
+#: (it decides which reports form each track), and the detection thresholds
+#: were tuned inside it. Another coverage is chosen with another
+#: ``CoverageConfig``.
+EUROPE_BBOX: Tuple[float, float, float, float] = (-25.86653, 26.74617, 49.65699, 70.25976)
 
 
 @dataclass
@@ -48,33 +44,25 @@ class CoverageConfig:
     bbox_offset_deg: float = 3.0
     """How far outside the box reference data is still built, in degrees.
 
-    An aerodrome sitting just beyond the edge still receives traffic that is
-    inside it, so its zones and layout must exist or those flights get a track
-    and no ADEP. 3 degrees is the value all four reference generators used
-    independently before this module existed. Ignored worldwide, where there
-    is no edge to be just beyond.
+    An airport just beyond the edge still has traffic inside it, so its zones
+    and layout must exist, or those flights get no ADEP. Default 3 degrees.
+    Ignored worldwide.
     """
 
     airport_types: Tuple[str, ...] = ("large_airport", "medium_airport")
-    """Which aerodromes get reference data.
+    """OurAirports airport types that get reference data (default: large and
+    medium airports).
 
-    Measured against the released ``h3_airport_detection_zones``: it holds
-    large and medium aerodromes and nothing else. The filter used to be a
-    bounding box alone, and inside that box OurAirports lists 13,973
-    aerodromes -- 6,782 small, 3,820 heliports, 1,952 *closed* -- against
-    1,357 large or medium.
-
-    Rebuilding without this therefore did two things at once. It changed the
-    ADEP/ADES candidate set by a factor of ten, silently, against the set
-    every detection study tuned on; and at H3 resolution 7 with rings out to
-    110 NM it generated enough cells to OOM every executor in the namespace.
-
-    All three reference tables -- detection zones, ground layouts, runway grid
-    -- must use one set, or they join to each other with gaps nothing reports.
+    Small airports, heliports and closed airports outnumber large and medium
+    ones by about ten to one, and would change the candidate airports of the
+    flight list and multiply the size of the reference tables. All three
+    reference tables (detection zones, layouts, runway grid) use this one set,
+    so they always join to each other.
     """
 
     @property
     def is_worldwide(self) -> bool:
+        """Whether the coverage is the whole world (no box)."""
         return self.bbox is None
 
     @property
@@ -104,19 +92,17 @@ class CoverageConfig:
             return F.lit(True)
         min_lon, min_lat, max_lon, max_lat = self._bounds(offset)
         return (
-            (lat_col >= F.lit(min_lat)) & (lat_col <= F.lit(max_lat))
-            & (lon_col >= F.lit(min_lon)) & (lon_col <= F.lit(max_lon))
+            (lat_col >= F.lit(min_lat))
+            & (lat_col <= F.lit(max_lat))
+            & (lon_col >= F.lit(min_lon))
+            & (lon_col <= F.lit(max_lon))
         )
 
     def pandas_mask(self, lat, lon, *, offset: bool):
-        """The same rule for a pandas frame. ``h3_airport_layouts`` filters its
-        airport loop list in pandas, and the two must not be able to disagree.
-        """
+        """The same filter for a pandas frame (used by ``h3_airport_layouts``)."""
         import numpy as np
 
         if self.bbox is None:
             return np.ones(len(lat), dtype=bool)
         min_lon, min_lat, max_lon, max_lat = self._bounds(offset)
-        return (
-            lat.between(min_lat, max_lat) & lon.between(min_lon, max_lon)
-        ).to_numpy()
+        return (lat.between(min_lat, max_lat) & lon.between(min_lon, max_lon)).to_numpy()

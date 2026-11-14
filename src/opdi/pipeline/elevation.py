@@ -16,9 +16,7 @@ from opdi.utils.storage import StorageManager
 FT_PER_M = 3.28084
 
 
-def attach_field_elevation(
-    sdf: DataFrame, month: date, storage: "StorageManager"
-) -> DataFrame:
+def attach_field_elevation(sdf: DataFrame, month: date, storage: "StorageManager") -> DataFrame:
     """Attach the field elevation of each track's ADEP and ADES.
 
     Ground membership has to be measured against the field, not the ellipsoid:
@@ -42,7 +40,9 @@ def attach_field_elevation(
     start_ts, end_ts = get_start_end_of_month(month)
     fl = (
         storage.read_table("opdi_flight_list")
-        .filter((col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts))))
+        .filter(
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
+        )
         .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
     )
 
@@ -67,9 +67,7 @@ def attach_field_elevation(
         )
 
     fl = fl.select("_fl_id", "elev_adep_ft", "elev_ades_ft")
-    return sdf.join(
-        F.broadcast(fl), sdf.track_id == col("_fl_id"), "left"
-    ).drop("_fl_id")
+    return sdf.join(F.broadcast(fl), sdf.track_id == col("_fl_id"), "left").drop("_fl_id")
 
 
 def height_above_field_ft(sdf):
@@ -102,8 +100,8 @@ def height_above_field_ft(sdf):
        :func:`height_above_aerodrome_ft` (or, where the aerodrome is fixed by
        the detector's own definition, :func:`height_above_elevation_ft`).
 
-    NULL elevations coalesce to zero, which reproduces the behaviour of every
-    caller that used a bare pressure altitude before this existed.
+    A NULL elevation counts as 0 ft, so the height is then the pressure
+    altitude.
     """
     alt_ft = F.col("baro_altitude_c") * F.lit(FT_PER_M)
     return F.least(
@@ -120,9 +118,7 @@ def height_above_elevation_ft(elevation):
     back to a bare pressure altitude, rather than nulling the height and
     removing the flight from the detector.
     """
-    return F.col("baro_altitude_c") * F.lit(FT_PER_M) - F.coalesce(
-        elevation, F.lit(0.0)
-    )
+    return F.col("baro_altitude_c") * F.lit(FT_PER_M) - F.coalesce(elevation, F.lit(0.0))
 
 
 def field_elevation_ft(sdf, apt_ident):
@@ -142,10 +138,14 @@ def field_elevation_ft(sdf, apt_ident):
     Returns the permissive fallback for the whole frame when ``adep``/``ades``
     are absent, so a caller that never joined the flight list keeps working.
     """
-    fallback = F.greatest(
-        F.coalesce(F.col("elev_adep_ft"), F.lit(0.0)),
-        F.coalesce(F.col("elev_ades_ft"), F.lit(0.0)),
-    ) if "elev_adep_ft" in sdf.columns and "elev_ades_ft" in sdf.columns else F.lit(0.0)
+    fallback = (
+        F.greatest(
+            F.coalesce(F.col("elev_adep_ft"), F.lit(0.0)),
+            F.coalesce(F.col("elev_ades_ft"), F.lit(0.0)),
+        )
+        if "elev_adep_ft" in sdf.columns and "elev_ades_ft" in sdf.columns
+        else F.lit(0.0)
+    )
 
     if "adep" not in sdf.columns or "ades" not in sdf.columns:
         return fallback

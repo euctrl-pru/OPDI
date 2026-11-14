@@ -1,8 +1,8 @@
-"""PRU's vertical profile: the tops of climb and descent, and where they move to.
+"""Top of climb and top of descent, as the vertical flight efficiency method defines them.
 
-EUROCONTROL's Performance Review Unit defines the vertical-efficiency tops
-differently from OPDI's published fuzzy phase classifier, and the difference is
-not a tuning choice:
+Part of step 04. The Performance Review Unit (PRU) of EUROCONTROL defines the
+tops of climb and descent for its vertical flight efficiency indicators
+differently from the phase method of :mod:`opdi.pipeline.events`:
 
 * The analysis is **bounded by a 200 NM radius** around the flight's own
   aerodromes. ``D200`` is the first crossing of that radius outbound, ``A200``
@@ -18,12 +18,12 @@ not a tuning choice:
   start of the first such segment, **ToD-CDO** to the end of the last. With no
   such segment the CCO top is the D200 top.
 
-Both definitions are published. No reference data records a top of climb --
-APDF has none and neither does anything else OPDI can reach -- so neither can
-be shown better than the other, and the honest publication is both, each saying
-which algorithm produced it. That is what the ``method`` key in ``info`` is
-for: the PRU pair stamps ``"pru"`` here, the fuzzy pair stamps ``"phase"``
-where it is built.
+No reference data records a top of climb, so neither definition can be shown
+to be better. By default these tops are published as ``top-of-climb`` and
+``top-of-descent``; with the merge off, they are ``top-of-climb-cco`` and
+``top-of-descent-cdo`` beside the tops of the phase method, and the ``method``
+key in ``info`` says which method gave each (``"pru"`` or ``"phase"``).
+See https://www.opdi.aero/content/methods/vertical-events.html.
 
 Only :func:`attach_aerodrome_geometry` reads storage. :func:`pru_tops` and
 :func:`pru_top_events` take DataFrames, so the algorithm is testable on a
@@ -38,11 +38,11 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import col, lit, to_timestamp
 from pyspark.sql.window import Window
 
-from opdi.pipeline.flights import haversine_nm
 from opdi.pipeline.runway_ops import MILESTONE_SCHEMA
 from opdi.utils.datetime_helpers import get_start_end_of_month
+from opdi.utils.geometry import haversine_nm
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
     from opdi.utils.storage import StorageManager
 
@@ -64,9 +64,7 @@ ATTACHED_GEOMETRY_COLS = (
 )
 
 
-def attach_aerodrome_geometry(
-    sdf: DataFrame, month: date, storage: "StorageManager"
-) -> DataFrame:
+def attach_aerodrome_geometry(sdf: DataFrame, month: date, storage: "StorageManager") -> DataFrame:
     """Attach each track's ADEP and ADES with their position and elevation.
 
     The same join as :func:`opdi.pipeline.elevation.attach_field_elevation`,
@@ -101,8 +99,7 @@ def attach_aerodrome_geometry(
     fl = (
         storage.read_table("opdi_flight_list")
         .filter(
-            (col("dof") >= to_timestamp(lit(start_ts)))
-            & (col("dof") < to_timestamp(lit(end_ts)))
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
         )
         .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
     )
@@ -141,18 +138,16 @@ def _assert_unique_flight_ids(fl: DataFrame, month: date) -> None:
     list id does not error: it multiplies every state vector of that track by
     the number of rows carrying the id. Nothing downstream would say so. The
     level segments would be detected over a trajectory sampled twice, the
-    runway traversals would emit two of every milestone, and the event counts
-    the ladder reports would be inflated for exactly the flights whose flight
-    list entry was ambiguous.
+    runway passages would give two of every milestone, and the event counts
+    would be too high for exactly the flights whose flight list entry was
+    ambiguous.
 
     Cheap, and paid once per step: one aggregation over the month's flight
     list, which is a few hundred thousand rows and is about to be broadcast
     anyway. The alternative is a silent fan-out that only shows up as a
     benchmark that will not reconcile.
     """
-    n, distinct = fl.select(
-        F.count(col("_fl_id")), F.countDistinct(col("_fl_id"))
-    ).first()
+    n, distinct = fl.select(F.count(col("_fl_id")), F.countDistinct(col("_fl_id"))).first()
     if n != distinct:
         raise ValueError(
             f"the flight list for {month:%Y-%m} has {n} rows but only "
@@ -168,7 +163,7 @@ def aerodrome_distances(sdf: DataFrame) -> DataFrame:
     """Per-sample haversine distances to the flight's own ADEP and ADES.
 
     Idempotent, and a no-op when the caller has already attached them: the
-    level arms and :func:`pru_tops` both need these columns, and computing them
+    level segment methods and :func:`pru_tops` both need these columns, and computing them
     once at the top of the family is cheaper than twice and cannot produce two
     answers.
     """
@@ -180,9 +175,7 @@ def aerodrome_distances(sdf: DataFrame) -> DataFrame:
             continue
         sdf = sdf.withColumn(
             out,
-            haversine_nm(
-                col("lat"), col("lon"), col(f"{prefix}_lat"), col(f"{prefix}_lon")
-            ),
+            haversine_nm(col("lat"), col("lon"), col(f"{prefix}_lat"), col(f"{prefix}_lon")),
         )
     return sdf
 
@@ -199,7 +192,7 @@ def pru_tops(
 
     ``sdf`` is the state-vector frame carrying either ``dist_adep_nm`` /
     ``dist_ades_nm`` or the aerodrome coordinates to compute them from;
-    ``segments`` is the output of either level arm, and is consulted only for
+    ``segments`` is the output of either level segment method, and is used only for
     the relocation. Returns ``toc_d200_time``, ``toc_d200_alt_ft``,
     ``toc_cco_time``, ``toc_cco_alt_ft``, ``toc_relocated`` and the four
     ``tod_`` equivalents.
@@ -242,21 +235,19 @@ def pru_tops(
     in_descent = F.col("_t") >= F.col("_t_a200")
     work = work.withColumn(
         "_toc_alt", F.max(F.when(in_climb, F.col("_alt_ft"))).over(whole)
-    ).withColumn(
-        "_tod_alt", F.max(F.when(in_descent, F.col("_alt_ft"))).over(whole)
-    )
+    ).withColumn("_tod_alt", F.max(F.when(in_descent, F.col("_alt_ft"))).over(whole))
 
     # First and last: a plateau at the top of the climb is entered once and
     # left once, and PRU names the entry in climb and the exit in descent.
     tops = work.groupBy("track_id").agg(
         F.first("_toc_alt").alias("toc_d200_alt_ft"),
         F.first("_tod_alt").alias("tod_a200_alt_ft"),
-        F.min(
-            F.when(in_climb & (F.col("_alt_ft") == F.col("_toc_alt")), F.col("_t"))
-        ).alias("toc_d200_time"),
-        F.max(
-            F.when(in_descent & (F.col("_alt_ft") == F.col("_tod_alt")), F.col("_t"))
-        ).alias("tod_a200_time"),
+        F.min(F.when(in_climb & (F.col("_alt_ft") == F.col("_toc_alt")), F.col("_t"))).alias(
+            "toc_d200_time"
+        ),
+        F.max(F.when(in_descent & (F.col("_alt_ft") == F.col("_tod_alt")), F.col("_t"))).alias(
+            "tod_a200_time"
+        ),
     )
 
     return _relocate(tops, segments, config)
@@ -353,14 +344,12 @@ def pru_top_events(
         return session.createDataFrame([], MILESTONE_SCHEMA)
 
     if tops is None:
-        tops = pru_tops(
-            sdf, segments, config, altitude_col=altitude_col, time_col=time_col
-        )
+        tops = pru_tops(sdf, segments, config, altitude_col=altitude_col, time_col=time_col)
 
-    # Under the merge the PRU arm is the only top published, so it takes the
-    # plain names; the fuzzy arm is dropped in
-    # ``calculate_horizontal_segment_events``. Without the merge both arms run
-    # and this one wears the suffix that tells them apart.
+    # With the merge these are the only tops published, under the plain
+    # names; the tops of the phase method are dropped in
+    # ``calculate_horizontal_segment_events``. Without the merge both are
+    # published and these carry the suffix that tells them apart.
     _merged = config.merge_duplicate_milestones
     toc_type = "top-of-climb" if _merged else "top-of-climb-cco"
     tod_type = "top-of-descent" if _merged else "top-of-descent-cdo"
@@ -411,7 +400,7 @@ def _attach_position(events: DataFrame, sdf: DataFrame, time_col: str) -> DataFr
     """Place each top at the last sample at or before its time.
 
     Not an equality join: a relocated top sits at a level segment's boundary,
-    which the PRU arm reports on an interpolated grid and so need not be an
+    which the ``pru`` level method reports on an interpolated grid and so need not be an
     instant the track was sampled at. An equality join would silently null the
     position of exactly the events the relocation moved.
     """

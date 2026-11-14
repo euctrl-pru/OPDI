@@ -1,11 +1,11 @@
-"""
-H3 airport detection zone generator.
+"""Step 00a: the airport detection zones.
 
-Creates concentric hexagonal rings around airports for flight detection.
-Each airport gets rings at configurable radii (default: 0-40 NM) encoded
-as H3 hexagons at resolution 7.
-
-Ported from: OPDI-live/python/v2.0.0/00_create_h3_airport_detection_areas.py
+Around every airport of the coverage, rings of H3 cells at resolution 7
+(about 5 km across) every 5 NM out to 110 NM, written to
+``h3_airport_detection_zones`` with the inner and outer radius of each ring.
+Step 03 matches the reports to these zones to find departure and
+destination airports, and applies its own detection radius.
+See https://www.opdi.aero/content/methods/airports.html.
 """
 
 import json
@@ -13,20 +13,23 @@ import math
 import os
 from typing import List, Optional
 
+import h3
 import numpy as np
 import pandas as pd
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.functions import udf, col, lit, array_except, explode
+from pyspark.sql.functions import array_except, col, explode, lit, udf
 from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType,
-    IntegerType,
-    FloatType,
     ArrayType,
+    FloatType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
 )
-import h3
+
+from opdi.config import OPDIConfig
+from opdi.utils.storage import StorageManager
 
 
 @udf(returnType=FloatType())
@@ -61,10 +64,11 @@ def _geo_to_h3_udf(lat, lon, res):
             # module-level function forces the worker to import ``opdi``,
             # which it cannot do -- the same constraint that keeps ``h3``
             # imported inline here.
-            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "h3 call {} failed on this worker: {}: {}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
-            "point config.spark.k8s_container_image at the new tag."
-            .format("latlng_to_cell", type(exc).__name__, exc)
+            "point config.spark.k8s_container_image at the new tag.".format(
+                "latlng_to_cell", type(exc).__name__, exc
+            )
         ) from exc
 
 
@@ -80,10 +84,11 @@ def _h3_distance_udf(h1, h2):
             # module-level function forces the worker to import ``opdi``,
             # which it cannot do -- the same constraint that keeps ``h3``
             # imported inline here.
-            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "h3 call {} failed on this worker: {}: {}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
-            "point config.spark.k8s_container_image at the new tag."
-            .format("grid_distance", type(exc).__name__, exc)
+            "point config.spark.k8s_container_image at the new tag.".format(
+                "grid_distance", type(exc).__name__, exc
+            )
         ) from exc
     except Exception:
         # Genuinely unreachable pairs: h3 refuses a grid distance across
@@ -95,48 +100,19 @@ def _h3_distance_udf(h1, h2):
 
 @udf(returnType=ArrayType(StringType()))
 def _polyfill_geojson_udf(geojson_str, resolution):
-    """H3 v4 replacement for ``h3_pyspark.polyfill(col, res, geo_json_conformant=True)``.
+    """The H3 cells inside a GeoJSON polygon, as a Spark UDF.
 
-    h3_pyspark's ``polyfill`` wraps h3 v3's ``h3.polyfill``, which no longer
-    exists on the installed h3 4.5.0 (AttributeError at task execution time --
-    see tests/test_h3_zones_v4.py::test_h3_pyspark_geo_to_h3_is_broken_on_h3_v4,
-    which pins the same failure mode for ``geo_to_h3``). The circle polygons
-    this generator builds (:func:`generate_circle_polygon`) are GeoJSON
-    strings in ``[lon, lat]`` order.
+    Replaces ``h3_pyspark.polyfill(col, res, geo_json_conformant=True)``, which
+    calls the h3 version 3 function ``h3.polyfill`` that does not exist in h3
+    version 4. The circle polygons of :func:`generate_circle_polygon` are
+    GeoJSON strings in ``[lon, lat]`` order; ``h3.LatLngPoly`` takes
+    ``[lat, lon]``, so every ring coordinate is swapped first. Getting the
+    order wrong gives an empty or wrong set of cells.
 
-    THE FOOTGUN: v3's ``polyfill(geojson, res, geo_json_conformant=True)``
-    consumed those ``[lng, lat]`` rings directly. v4's ``h3.LatLngPoly``
-    always takes ``[lat, lng]`` tuples, so every ring coordinate is swapped
-    below before calling h3 -- getting this backwards yields an empty or
-    silently wrong cell set.
-
-    This is the same swap-then-polyfill primitive as
-    ``opdi.utils.h3_helpers.polyfill_geojson(..., geo_json_conformant=True)``
-    (used by ``h3_airspaces``) -- but reimplemented inline here rather than
-    imported, so this module ends up with a *third* independent copy of the
-    footgun swap (the second being ``h3_airport_layouts._polyfill_latlng``/
-    ``polygon_to_h3``, which is also standalone and does not call
-    ``h3_helpers`` either). This one cannot be consolidated: this function
-    only ever runs inside a Spark UDF, and this worktree has a top-level
-    ``opdi.py`` script that shadows the ``src/opdi`` package on a Spark
-    worker's ``sys.path`` (workers don't inherit the driver's pytest
-    ``pythonpath = ["src"]`` prepend, confirmed locally under the test
-    suite's ``local[1]`` fixture -- not merely a cluster-only concern).
-    cloudpickle needs to pickle a UDF's referenced globals *by reference*
-    when they resolve to another named function or an imported symbol,
-    which forces the worker to re-import that function's home module --
-    confirmed empirically: closing over ``opdi.utils.h3_helpers.polyfill_geojson``,
-    or even over a second top-level function in *this* module, both fail on
-    the worker with ``ModuleNotFoundError: No module named 'opdi...'; 'opdi'
-    is not a package``. This is pinned by
-    tests/test_h3_zones_v4.py::test_udf_closing_over_opdi_symbol_fails_on_worker_local_spark,
-    a regression test that reproduces the failure directly rather than
-    leaving it as an unverified claim. Every other UDF in this module has
-    the same constraint and only ever touches the third-party ``h3``
-    package inline for that reason -- this keeps the pattern rather than
-    reintroducing the failure. tests/test_h3_zones_v4.py separately checks
-    this UDF's output against ``h3_helpers.polyfill_geojson`` (called
-    driver-side, where the import works) to prove the two stay identical.
+    The same operation as ``opdi.utils.h3_helpers.polyfill_geojson``, written
+    out here rather than imported, so that the UDF needs only the ``h3``
+    package on a Spark worker. ``tests/test_h3_zones_v4.py`` checks that its
+    result equals ``h3_helpers.polyfill_geojson``.
     """
     if geojson_str is None or resolution is None:
         return None
@@ -153,16 +129,11 @@ def _polyfill_geojson_udf(geojson_str, resolution):
             # A ring of one distinct point is not a polygon.
             #
             # `radii_nm` starts at 0, and `generate_circle_polygon` at radius 0
-            # returns the same coordinate `num_points` times. h3 v3 answered
-            # that with an empty set, which is why it never surfaced and why
-            # the published table was built without trouble. v4 raises
-            # H3FailedError instead, so the innermost ring of the first airport
-            # killed the stage.
-            #
-            # Empty is the right answer, not an error: a zero-radius circle
-            # encloses no area, so it contains no cells. The annulus it bounds
-            # is emitted by the next radius up, which is why the published
-            # table's smallest `max_c_radius_nm` is 5 and nothing is lost here.
+            # returns the same coordinate `num_points` times, which h3
+            # version 4 refuses (H3FailedError). A circle of radius 0 holds no
+            # cells; the band it bounds is produced by the next radius up, so
+            # the smallest `max_c_radius_nm` of the table is 5 and nothing is
+            # lost.
             if len({(round(x, 12), round(y, 12)) for x, y in outer}) < 3:
                 continue
             outer_latlng = [(lat, lng) for lng, lat in outer]
@@ -176,21 +147,18 @@ def _polyfill_geojson_udf(geojson_str, resolution):
             # module-level function forces the worker to import ``opdi``,
             # which it cannot do -- the same constraint that keeps ``h3``
             # imported inline here.
-            "h3 call {0} failed on this worker: {1}: {2}. This code requires "
+            "h3 call {} failed on this worker: {}: {}. This code requires "
             "the h3 v4 API. Rebuild docker/Dockerfile (it asks for h3 v4) and "
-            "point config.spark.k8s_container_image at the new tag."
-            .format("polygon_to_cells/LatLngPoly", type(exc).__name__, exc)
+            "point config.spark.k8s_container_image at the new tag.".format(
+                "polygon_to_cells/LatLngPoly", type(exc).__name__, exc
+            )
         ) from exc
-
-from opdi.config import OPDIConfig
-from opdi.utils.storage import StorageManager
 
 
 def generate_circle_polygon(
     lon: float, lat: float, radius_nautical_miles: float, num_points: int = 360
 ) -> str:
-    """
-    Generate a GeoJSON polygon approximating a circle around a point.
+    """Generate a GeoJSON polygon approximating a circle around a point.
 
     Uses the destination-point formula to compute points along a circle
     at a given radius from a center coordinate.
@@ -236,17 +204,19 @@ def generate_circle_polygon(
         return [lon_new, math.degrees(lat_new_rad)]
 
     points = [
-        calculate_point(lon, lat, radius_km, (360 / num_points) * i)
-        for i in range(num_points)
+        calculate_point(lon, lat, radius_km, (360 / num_points) * i) for i in range(num_points)
     ]
     points.append(points[0])  # Close the polygon
 
     return json.dumps({"type": "Polygon", "coordinates": [points]})
 
 
+#: Number of files of ``h3_airport_detection_zones`` (about 1 GB worldwide).
+ZONE_FILES = 8
+
+
 class AirportDetectionZoneGenerator:
-    """
-    Generates H3 hexagonal detection zones around airports.
+    """Generates H3 hexagonal detection zones around airports.
 
     Creates concentric rings around each airport at configurable radii,
     encoded as H3 hexagons. These zones are used by the flight list
@@ -270,7 +240,7 @@ class AirportDetectionZoneGenerator:
 
     #: Rows per partition the 2,000-partition figure implies: 21,712 / 2,000.
     #: Kept as the derived quantity so the two numbers cannot disagree.
-    ZONE_ROWS_PER_TASK = 21712 / 2000    # ~10.9
+    ZONE_ROWS_PER_TASK = 21712 / 2000  # ~10.9
 
     #: Partitions to spread the ring polyfill across, and the floor
     #: :meth:`zone_build_partitions` never goes below.
@@ -318,26 +288,28 @@ class AirportDetectionZoneGenerator:
     not, and no join would report it.
     """
 
-    AIRPORT_SCHEMA = StructType([
-        StructField("id", StringType(), True),
-        StructField("ident", StringType(), True),
-        StructField("type", StringType(), True),
-        StructField("name", StringType(), True),
-        StructField("latitude_deg", FloatType(), True),
-        StructField("longitude_deg", FloatType(), True),
-        StructField("elevation_ft", FloatType(), True),
-        StructField("continent", StringType(), True),
-        StructField("iso_country", StringType(), True),
-        StructField("iso_region", StringType(), True),
-        StructField("municipality", StringType(), True),
-        StructField("scheduled_service", StringType(), True),
-        StructField("gps_code", StringType(), True),
-        StructField("iata_code", StringType(), True),
-        StructField("local_code", StringType(), True),
-        StructField("home_link", StringType(), True),
-        StructField("wikipedia_link", StringType(), True),
-        StructField("keywords", StringType(), True),
-    ])
+    AIRPORT_SCHEMA = StructType(
+        [
+            StructField("id", StringType(), True),
+            StructField("ident", StringType(), True),
+            StructField("type", StringType(), True),
+            StructField("name", StringType(), True),
+            StructField("latitude_deg", FloatType(), True),
+            StructField("longitude_deg", FloatType(), True),
+            StructField("elevation_ft", FloatType(), True),
+            StructField("continent", StringType(), True),
+            StructField("iso_country", StringType(), True),
+            StructField("iso_region", StringType(), True),
+            StructField("municipality", StringType(), True),
+            StructField("scheduled_service", StringType(), True),
+            StructField("gps_code", StringType(), True),
+            StructField("iata_code", StringType(), True),
+            StructField("local_code", StringType(), True),
+            StructField("home_link", StringType(), True),
+            StructField("wikipedia_link", StringType(), True),
+            StructField("keywords", StringType(), True),
+        ]
+    )
 
     def __init__(
         self,
@@ -370,8 +342,8 @@ class AirportDetectionZoneGenerator:
         # endpoint be described as "150 NM from any aerodrome", which is the
         # evidence an out-of-area test needs.
         self.radii_nm = radii_nm or (
-            list(range(0, 45, 5))          # 0-40 NM, 5 NM steps
-            + list(range(50, 120, 10))     # 50-110 NM, 10 NM steps
+            list(range(0, 45, 5))  # 0-40 NM, 5 NM steps
+            + list(range(50, 120, 10))  # 50-110 NM, 10 NM steps
         )
         self._result_df: Optional[pd.DataFrame] = None
         self._result_sdf: Optional[DataFrame] = None
@@ -380,13 +352,12 @@ class AirportDetectionZoneGenerator:
         self._circle_udf = udf(generate_circle_polygon, StringType())
 
     def filter_airports(self, sdf: DataFrame) -> DataFrame:
-        """Aerodromes this coverage builds zones for.
+        """The airports this coverage builds zones for.
 
-        Type first, then geography, then latitude. All three must be here: the
-        type filter alone once widened the candidate set tenfold and OOM'd
-        every executor, the geography filter is what follows configuration,
-        and the latitude filter is what keeps a pole out of a polygon fill
-        that cannot express one.
+        By type (``config.coverage.airport_types``; all airport types would
+        multiply the size of the table), then by the coverage box, then by
+        latitude, which keeps the poles out of a polygon fill that cannot
+        represent them.
         """
         cov = self.config.coverage
         kept = sdf.filter(
@@ -403,8 +374,10 @@ class AirportDetectionZoneGenerator:
         # never mapped, and the two need completely different responses.
         excluded = [r.ident for r in kept.filter(polar).select("ident").collect()]
         if excluded:
-            print(f"  Excluded {len(excluded)} aerodrome(s) beyond "
-                  f"{self.POLAR_LIMIT_DEG:g} deg latitude: {', '.join(excluded)}")
+            print(
+                f"  Excluded {len(excluded)} aerodrome(s) beyond "
+                f"{self.POLAR_LIMIT_DEG:g} deg latitude: {', '.join(excluded)}"
+            )
         return kept.filter(~polar)
 
     def cell_filter(self, lat_col, lon_col):
@@ -430,11 +403,12 @@ class AirportDetectionZoneGenerator:
         airports_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
         airports_df: Optional[DataFrame] = None,
     ) -> DataFrame:
-        """
-        Load airport data from OurAirports and filter to this run's coverage.
+        """Load airport data from OurAirports and filter to this run's coverage.
 
         Args:
-            airports_url: URL to OurAirports airports CSV.
+            airports_url: Address of the OurAirports airports CSV file.
+            airports_df: The airports, when already read (the ``oa_airports``
+                table); ``airports_url`` is then not read.
 
         Returns:
             Spark DataFrame with airport data filtered to this coverage.
@@ -450,11 +424,13 @@ class AirportDetectionZoneGenerator:
 
         # Ensure column types
         df_apt.columns = df_apt.columns.astype(str)
-        df_apt = df_apt.astype({
-            "latitude_deg": "float64",
-            "longitude_deg": "float64",
-            "elevation_ft": "float64",
-        })
+        df_apt = df_apt.astype(
+            {
+                "latitude_deg": "float64",
+                "longitude_deg": "float64",
+                "elevation_ft": "float64",
+            }
+        )
 
         # Type and coverage filter. Both paths must agree, or which source the
         # zones came from changes what is in them.
@@ -475,44 +451,50 @@ class AirportDetectionZoneGenerator:
         # does not carry -- OurAirports adds and drops fields over time and a
         # missing optional column should not fail zone generation.
         present = set(df.columns)
-        return df.select(*[
-            col(f.name).cast(f.dataType).alias(f.name) if f.name in present
-            else lit(None).cast(f.dataType).alias(f.name)
-            for f in self.AIRPORT_SCHEMA.fields
-        ])
+        return df.select(
+            *[
+                (
+                    col(f.name).cast(f.dataType).alias(f.name)
+                    if f.name in present
+                    else lit(None).cast(f.dataType).alias(f.name)
+                )
+                for f in self.AIRPORT_SCHEMA.fields
+            ]
+        )
 
     def _build_ring_config(self) -> DataFrame:
-        """
-        Build Spark DataFrame defining concentric ring boundaries.
+        """Build Spark DataFrame defining concentric ring boundaries.
 
         Returns:
             Spark DataFrame with ring configuration (area_type, min/max radii).
         """
         area_type = [f"C{x + 10}" for x in self.radii_nm]
 
-        df = pd.DataFrame({
-            "max_resolution": self.resolution,
-            "number_of_points_c": self.num_points,
-            "area_type": area_type,
-            "min_c_radius_nm": self.radii_nm,
-        })
-
-        df["max_c_radius_nm"] = (
-            df["min_c_radius_nm"].shift(-1).fillna(np.max(self.radii_nm) + 10)
+        df = pd.DataFrame(
+            {
+                "max_resolution": self.resolution,
+                "number_of_points_c": self.num_points,
+                "area_type": area_type,
+                "min_c_radius_nm": self.radii_nm,
+            }
         )
+
+        df["max_c_radius_nm"] = df["min_c_radius_nm"].shift(-1).fillna(np.max(self.radii_nm) + 10)
         df[["min_c_radius_nm", "max_c_radius_nm"]] = df[
             ["min_c_radius_nm", "max_c_radius_nm"]
         ].astype(float)
         df["m_col"] = 1
 
-        schema = StructType([
-            StructField("max_resolution", IntegerType(), True),
-            StructField("number_of_points_c", IntegerType(), True),
-            StructField("area_type", StringType(), True),
-            StructField("min_c_radius_nm", FloatType(), True),
-            StructField("max_c_radius_nm", FloatType(), True),
-            StructField("m_col", IntegerType(), True),
-        ])
+        schema = StructType(
+            [
+                StructField("max_resolution", IntegerType(), True),
+                StructField("number_of_points_c", IntegerType(), True),
+                StructField("area_type", StringType(), True),
+                StructField("min_c_radius_nm", FloatType(), True),
+                StructField("max_c_radius_nm", FloatType(), True),
+                StructField("m_col", IntegerType(), True),
+            ]
+        )
 
         return self.spark.createDataFrame(df, schema=schema)
 
@@ -521,15 +503,16 @@ class AirportDetectionZoneGenerator:
         airports_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv",
         airports_df: Optional[DataFrame] = None,
     ) -> pd.DataFrame:
-        """
-        Generate H3 detection zones for all airports in the European bounding box.
+        """Generate the H3 detection zones of every airport of the coverage.
 
         Each airport-ring combination produces a set of H3 hex IDs formed by
         subtracting the inner circle hexagons from the outer circle hexagons,
         creating a ring-shaped detection zone.
 
         Args:
-            airports_url: URL to OurAirports airports CSV.
+            airports_url: Address of the OurAirports airports CSV file.
+            airports_df: The airports, when already read (the ``oa_airports``
+                table); ``airports_url`` is then not read.
 
         Returns:
             Pandas DataFrame with airport detection zone hex IDs.
@@ -552,8 +535,10 @@ class AirportDetectionZoneGenerator:
         # zone_build_partitions. Repartitioning here is what keeps a task's
         # share of the 584 million cells inside the executor's memory.
         n_partitions = self.zone_build_partitions(n_airports, len(self.radii_nm))
-        print(f"  {n_airports:,} aerodromes x {len(self.radii_nm)} rings -> "
-              f"{n_partitions:,} partitions for the ring polyfill")
+        print(
+            f"  {n_airports:,} aerodromes x {len(self.radii_nm)} rings -> "
+            f"{n_partitions:,} partitions for the ring polyfill"
+        )
         airports_m = airports_m.repartition(n_partitions)
 
         print(f"Generating H3 zones at resolution {self.resolution}...")
@@ -578,21 +563,15 @@ class AirportDetectionZoneGenerator:
             )
             .withColumn(
                 "inner_circle_hex_ids",
-                _polyfill_geojson_udf(
-                    col("inner_circle_polygon"), col("max_resolution")
-                ),
+                _polyfill_geojson_udf(col("inner_circle_polygon"), col("max_resolution")),
             )
             .withColumn(
                 "outer_circle_hex_ids",
-                _polyfill_geojson_udf(
-                    col("outer_circle_polygon"), col("max_resolution")
-                ),
+                _polyfill_geojson_udf(col("outer_circle_polygon"), col("max_resolution")),
             )
             .withColumn(
                 "hex_id",
-                array_except(
-                    col("outer_circle_hex_ids"), col("inner_circle_hex_ids")
-                ),
+                array_except(col("outer_circle_hex_ids"), col("inner_circle_hex_ids")),
             )
             .drop(
                 "inner_circle_polygon",
@@ -604,21 +583,9 @@ class AirportDetectionZoneGenerator:
         sdf.cache()
         self._result_sdf = sdf
 
-        # Deliberately NOT collected.
-        #
-        # This used to end `self._result_df = sdf.toPandas()`, which pulls
-        # every row to the driver -- and a row here holds an *array* of cells,
-        # up to 98,250 of them for the outermost ring. Across 1,357 aerodromes
-        # that is 584 million cell strings in driver pandas, and the driver was
-        # SIGKILLed by the container (exit 137) every time.
-        #
-        # It went unnoticed because the collect was free while it was broken:
-        # under the old h3 v3 executors the polyfill returned NULL, so
-        # toPandas() brought back 21,712 empty arrays. The moment the cells
-        # were real, so was the memory.
-        #
-        # Anything that genuinely needs pandas asks for it through
-        # `result_df`, which collects on demand and says what that costs.
+        # Not collected to the driver: a row holds an array of up to about
+        # 100,000 cells for the outermost ring, hundreds of millions of cells
+        # for a network build. `result_df` collects on demand.
         print("Generated airport-ring combinations (Spark; not collected).")
         return sdf
 
@@ -640,8 +607,7 @@ class AirportDetectionZoneGenerator:
         return self._result_df
 
     def save_to_parquet(self, output_path: str) -> None:
-        """
-        Save generated detection zones to a parquet file.
+        """Save generated detection zones to a parquet file.
 
         Args:
             output_path: Path to output parquet file.
@@ -658,8 +624,7 @@ class AirportDetectionZoneGenerator:
         max_radius_nm: float = 30.0,
         airport_types: Optional[List[str]] = None,
     ) -> pd.DataFrame:
-        """
-        Prepare detection zone data for use by the flight list pipeline.
+        """Prepare detection zone data for use by the flight list pipeline.
 
         Filters zones to the specified maximum radius and airport types,
         explodes hex arrays, adds H3 coordinates, and computes distance
@@ -694,10 +659,18 @@ class AirportDetectionZoneGenerator:
         # narrow it themselves at read time.
 
         # Explode hex arrays and remove nulls
-        df = df[[
-            "ident", "hex_id", "latitude_deg", "longitude_deg",
-            "min_c_radius_nm", "max_c_radius_nm", "type", "scheduled_service",
-        ]].explode("hex_id")
+        df = df[
+            [
+                "ident",
+                "hex_id",
+                "latitude_deg",
+                "longitude_deg",
+                "min_c_radius_nm",
+                "max_c_radius_nm",
+                "type",
+                "scheduled_service",
+            ]
+        ].explode("hex_id")
         df = df[~df.hex_id.isna()]
 
         # Get H3 coordinates for each hex
@@ -756,8 +729,7 @@ class AirportDetectionZoneGenerator:
         max_radius_nm: float = 30.0,
         airport_types: Optional[List[str]] = None,
     ) -> DataFrame:
-        """
-        Spark-native version of prepare_for_flight_list.
+        """Spark-native version of prepare_for_flight_list.
 
         Does all heavy work (explode, h3 lookups, bbox filter, distance) on
         executors and returns a Spark DataFrame. Use this when the result is
@@ -770,15 +742,20 @@ class AirportDetectionZoneGenerator:
             airport_types = ["large_airport", "medium_airport", "small_airport"]
 
         sdf = (
-            self._result_sdf
-            .filter(col("type").isin(airport_types))
+            self._result_sdf.filter(col("type").isin(airport_types))
             .filter(col("max_c_radius_nm") <= float(max_radius_nm))
             .select(
-                "ident", "hex_id", "latitude_deg", "longitude_deg",
+                "ident",
+                "hex_id",
+                "latitude_deg",
+                "longitude_deg",
                 # Carried through so consumers can narrow the radius at query
                 # time. Dropping these baked the detection radius into the
                 # table and made it un-sweepable without regenerating.
-                "min_c_radius_nm", "max_c_radius_nm", "type", "scheduled_service",
+                "min_c_radius_nm",
+                "max_c_radius_nm",
+                "type",
+                "scheduled_service",
             )
             .withColumn("hex_id", explode(col("hex_id")))
             .filter(col("hex_id").isNotNull())
@@ -787,9 +764,7 @@ class AirportDetectionZoneGenerator:
             .filter(self.cell_filter(col("lat"), col("lon")))
             .withColumn(
                 "center_hex_id",
-                _geo_to_h3_udf(
-                    col("latitude_deg"), col("longitude_deg"), lit(self.resolution)
-                ),
+                _geo_to_h3_udf(col("latitude_deg"), col("longitude_deg"), lit(self.resolution)),
             )
             .withColumn(
                 "distance_from_center",
@@ -890,7 +865,7 @@ class AirportDetectionZoneGenerator:
 
         total = 0
         for i in range(0, len(idents), batch):
-            chunk = idents[i:i + batch]
+            chunk = idents[i : i + batch]
             sdf = _prepared(airports_df.filter(col("ident").isin(chunk))).cache()
             for d in remote:
                 sdf.write.mode("overwrite" if i == 0 else "append").parquet(d)
@@ -899,8 +874,10 @@ class AirportDetectionZoneGenerator:
                 pdf.to_parquet(d / f"part-{i // batch:04d}.parquet", index=False)
             sdf.unpersist()
             total += len(pdf)
-            print(f"  batch {i // batch + 1:>3}: {len(chunk):>4} aerodromes, "
-                  f"{len(pdf):>9,} rows (total {total:,})")
+            print(
+                f"  batch {i // batch + 1:>3}: {len(chunk):>4} aerodromes, "
+                f"{len(pdf):>9,} rows (total {total:,})"
+            )
         return total
 
     def save_prepared_to_table(
@@ -909,8 +886,7 @@ class AirportDetectionZoneGenerator:
         airport_types: Optional[List[str]] = None,
         table_name: str = "h3_airport_detection_zones",
     ) -> None:
-        """
-        Run prepare_for_flight_list and write the result to a StorageManager table.
+        """Run prepare_for_flight_list and write the result to a StorageManager table.
 
         Uses the Spark-native pipeline so the driver never has to materialize
         the exploded hex DataFrame.
@@ -921,5 +897,13 @@ class AirportDetectionZoneGenerator:
             table_name: Target table name.
         """
         sdf = self.prepare_for_flight_list_spark(max_radius_nm, airport_types)
+        # A few large files rather than one per task: step 03 reads the whole
+        # table, and on S3 the time to read it grows with the number of files
+        # (thousands of 100 KB files took two minutes per read). Each airport's
+        # rows are kept together and in order, which keeps the files small
+        # (spread at random, the same rows took twice the space).
+        sdf = sdf.repartition(ZONE_FILES, "apt_ident").sortWithinPartitions(
+            "apt_ident", "apt_hex_id"
+        )
         self.storage.write_table(sdf, table_name, mode="overwrite")
         print(f"Saved prepared hex rows to table {table_name}.")

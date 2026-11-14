@@ -11,6 +11,7 @@ no area, so it contains no cells. The annulus it bounds is emitted by the next
 radius up -- which is why the published table's smallest `max_c_radius_nm` is
 5, and why nothing is lost by skipping it.
 """
+
 import json
 
 import pytest
@@ -82,23 +83,26 @@ def test_generate_does_not_collect_to_the_driver():
     strings into driver memory -- the driver was SIGKILLed (exit 137) every
     run. It went unnoticed while the polyfill was broken, because collecting
     21,712 empty arrays is free."""
+    import ast
     import inspect
 
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator as G
 
-    import ast
-
     tree = ast.parse(inspect.getsource(G.generate).lstrip())
     calls = [
-        n.func.attr for n in ast.walk(tree)
+        n.func.attr
+        for n in ast.walk(tree)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     ]
     # The word appears in the comment explaining why it is gone; what matters
     # is that nothing *calls* it.
     assert "toPandas" not in calls, "generate() must not collect"
     assert "_result_df" not in [
-        t.attr for n in ast.walk(tree) if isinstance(n, ast.Assign)
-        for t in n.targets if isinstance(t, ast.Attribute)
+        t.attr
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Attribute)
     ], "generate() must not populate the pandas result"
 
 
@@ -126,11 +130,10 @@ def test_step_00a_refuses_to_report_an_empty_zone_table_as_success():
     """The table committed empty, with _SUCCESS, through several runs while the
     log cheerfully printed "Generated 21712" -- the pre-explode ring count,
     which is the same whether the polyfill produced cells or NULLs."""
+    import ast
     import inspect
 
     from opdi import runner
-
-    import ast
 
     src = inspect.getsource(runner._step_00a_airport_zones)
     tree = ast.parse(src.lstrip())

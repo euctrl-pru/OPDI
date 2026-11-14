@@ -65,8 +65,7 @@ ARM_PREFIX_BY_COVERAGE = {
 
 #: The only places this script may ever write, independent of the prefixes above:
 #: a guard built from ``ARM_PREFIX`` could not notice ``ARM_PREFIX`` being wrong.
-ALLOWED_WRITE_ROOT = re.compile(
-    r"^s3a://eurocontrol/opdi(-world)?/research/adsc(_airframes)?/")
+ALLOWED_WRITE_ROOT = re.compile(r"^s3a://eurocontrol/opdi(-world)?/research/adsc(_airframes)?/")
 
 #: Where the read-only reference tables live, per coverage. The worldwide H3
 #: zones, runway grid and HexAero layouts are built for global aerodromes;
@@ -100,8 +99,8 @@ def set_coverage(label: str, adsc_airframes_only: bool = False) -> None:
     global ARM_PREFIX, COVERAGE, ADSC_AIRFRAMES_ONLY
     if label not in ARM_PREFIX_BY_COVERAGE:
         raise ValueError(
-            f"unknown coverage {label!r}; expected one of "
-            f"{tuple(ARM_PREFIX_BY_COVERAGE)}")
+            f"unknown coverage {label!r}; expected one of " f"{tuple(ARM_PREFIX_BY_COVERAGE)}"
+        )
     ARM_PREFIX = ARM_PREFIX_BY_COVERAGE[label]
     COVERAGE = label
     ADSC_AIRFRAMES_ONLY = adsc_airframes_only
@@ -127,12 +126,12 @@ def check_subset_steps(steps, arms=("merged",)) -> None:
         return
     if tuple(arms) != ("merged",):
         raise ValueError(
-            "--adsc-airframes-only ingests with --arm merged only: "
-            f"got {' '.join(arms)}")
+            "--adsc-airframes-only ingests with --arm merged only: " f"got {' '.join(arms)}"
+        )
     if "01b" not in steps or steps.index("01b") > steps.index("01"):
         raise ValueError(
-            "--adsc-airframes-only needs step 01b before step 01: "
-            f"got {' '.join(steps)}")
+            "--adsc-airframes-only needs step 01b before step 01: " f"got {' '.join(steps)}"
+        )
 
 
 def check_subset_inputs(adsb_present, adsc_days, day: date) -> None:
@@ -147,13 +146,15 @@ def check_subset_inputs(adsb_present, adsc_days, day: date) -> None:
         raise ValueError(
             "the subset's ADS-B input already holds "
             f"{', '.join(sorted(adsb_present))}: they were filtered on an earlier "
-            f"airframe list. Clear {ARM_PREFIX}/input first.")
+            f"airframe list. Clear {ARM_PREFIX}/input first."
+        )
     window = {(day + timedelta(days=n)).isoformat() for n in (-1, 0, 1)}
     found = set(adsc_days)
     if not found & window or found - window:
         raise ValueError(
             f"the ADS-C table holds {sorted(found)}, not the window of {day}: "
-            "the airframe list would be another day's, or empty.")
+            "the airframe list would be another day's, or empty."
+        )
 
 
 def log_dir_name(arm: str) -> str:
@@ -170,6 +171,7 @@ def is_subset_target(table_name: str) -> bool:
 def keep_adsc_airframes(adsb, adsc):
     """ADS-B rows of the airframes that appear in the ADS-C table."""
     return adsb.join(adsc.select("icao24").distinct(), "icao24", "left_semi")
+
 
 #: Reference data, read and never written. Resolved against the run's own
 #: ``warehouse_path`` (production), because re-deriving an H3 airport layout
@@ -235,7 +237,8 @@ def guard_write_path(path: str) -> None:
         raise AssertionError(
             f"refusing to write {path!r}: every table this script writes must "
             f"sit under {ARM_PREFIX!r}. A passthrough table is read-only and "
-            f"must never be written by an arm run.")
+            f"must never be written by an arm run."
+        )
 
 
 def redirect_arm(arm: str, reference_warehouse: str) -> None:
@@ -259,15 +262,13 @@ def redirect_arm(arm: str, reference_warehouse: str) -> None:
             f"answer twice."
         )
 
-    def write_table(self, df, table_name, mode="append", partition_by=None,
-                    partition_values=None):
+    def write_table(self, df, table_name, mode="append", partition_by=None, partition_values=None):
         guard_write_path(_s3_path(self, table_name))
         if ADSC_AIRFRAMES_ONLY and is_subset_target(table_name):
             df = keep_adsc_airframes(
-                df,
-                self.spark.read.parquet(arm_path(arm, "osn_adsc_statevectors")))
-        return orig_write(self, df, table_name, mode, partition_by,
-                          partition_values)
+                df, self.spark.read.parquet(arm_path(arm, "osn_adsc_statevectors"))
+            )
+        return orig_write(self, df, table_name, mode, partition_by, partition_values)
 
     StorageManager._s3_path = _s3_path
     StorageManager.write_table = write_table
@@ -284,8 +285,7 @@ def restore() -> None:
         _ORIG_WRITE = None
 
 
-def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
-            steps=STEPS) -> None:
+def run_arm(arm: str, day: date, executors: int, reference_warehouse: str, steps=STEPS) -> None:
     """One arm, one day, through the real per-day entry points.
 
     Coverage comes from :func:`set_coverage`, so the rows and the prefix they are
@@ -298,7 +298,9 @@ def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
     # Setting it explicitly keeps one source of truth for where reference data
     # is read from.
     cfg.project.warehouse_path = reference_warehouse
-    cfg.adsc.enabled = (arm == "merged")
+    # The prefix holds the tables directly, without a release folder.
+    cfg.project.release = ""
+    cfg.adsc.enabled = arm == "merged"
     cfg.spark.executor_instances = str(executors)
 
     print("=" * 72)
@@ -314,11 +316,13 @@ def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
 
     redirect_arm(arm, reference_warehouse)
     spark = SparkSessionManager.create_session(
-        app_name=f"adsc {arm} {day}", config=cfg, distributed=True)
+        app_name=f"adsc {arm} {day}", config=cfg, distributed=True
+    )
     try:
         kwargs = {
             "airports_hex_path": str(
-                REPO / "data" / "airport_hex" / "zones_res7_processed.parquet"),
+                REPO / "data" / "airport_hex" / "zones_res7_processed.parquet"
+            ),
             # Per-arm, and not optional.
             #
             # The ETL progress logs live on the driver's local disk, and one of
@@ -344,9 +348,11 @@ def run_arm(arm: str, day: date, executors: int, reference_warehouse: str,
                 check_subset_inputs(
                     storage.list_partitions("osn_statevectors_v2", "event_time_day"),
                     storage.list_partitions("osn_adsc_statevectors", "event_time_day"),
-                    day)
-            print(f"\n{'-' * 72}\n>>> arm {arm}  step {step}  day {day}\n"
-                  f"{'-' * 72}", flush=True)
+                    day,
+                )
+            print(
+                f"\n{'-' * 72}\n>>> arm {arm}  step {step}  day {day}\n" f"{'-' * 72}", flush=True
+            )
             run_day_step(spark, cfg, step, day, kwargs)
     finally:
         spark.stop()
@@ -357,29 +363,38 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--day", required=True, help="YYYY-MM-DD")
     ap.add_argument("--arm", choices=(*ARMS, "both"), default="both")
-    ap.add_argument("--steps", nargs="+", default=list(STEPS),
-                    help="subset of the per-day steps, in order")
+    ap.add_argument(
+        "--steps", nargs="+", default=list(STEPS), help="subset of the per-day steps, in order"
+    )
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument(
-        "--worldwide", action="store_true", default=False,
+        "--worldwide",
+        action="store_true",
+        default=False,
         help="Drop the coverage bounding box and run over the whole feed. Off "
-             "by default. ADS-C is a satellite feed and the European box "
-             "excludes 81%% of it, so this is the arm that measures what ADS-C "
-             "actually adds -- but APDF cannot score outside Europe, so a "
-             "worldwide run is a coverage study with no scored arm.")
+        "by default. ADS-C is a satellite feed and the European box "
+        "excludes 81%% of it, so this is the arm that measures what ADS-C "
+        "actually adds -- but APDF cannot score outside Europe, so a "
+        "worldwide run is a coverage study with no scored arm.",
+    )
     ap.add_argument(
-        "--adsc-airframes-only", action="store_true", default=False,
+        "--adsc-airframes-only",
+        action="store_true",
+        default=False,
         help="Keep only the ADS-B of airframes present in the ADS-C table, "
-             "under a separate prefix. The between-arm differences are "
-             "unchanged and the totals are not the feed's. Build the merged "
-             "arm first with --steps 01b 01 02 02a, then the base arm with "
-             "--steps 02 02a: 01b only runs with ADS-C enabled.")
+        "under a separate prefix. The between-arm differences are "
+        "unchanged and the totals are not the feed's. Build the merged "
+        "arm first with --steps 01b 01 02 02a, then the base arm with "
+        "--steps 02 02a: 01b only runs with ADS-C enabled.",
+    )
     ap.add_argument(
-        "--reference-warehouse", default=None,
+        "--reference-warehouse",
+        default=None,
         help="where the read-only reference tables live. Defaults to "
-             "opdi-prod for Europe and opdi-world for worldwide. opdi-prod, "
-             "not opdi: the bare `opdi` prefix holds an unpartitioned scratch "
-             "copy of the pipeline tables.")
+        "opdi-prod for Europe and opdi-world for worldwide. opdi-prod, "
+        "not opdi: the bare `opdi` prefix holds an unpartitioned scratch "
+        "copy of the pipeline tables.",
+    )
     args = ap.parse_args()
 
     # Before anything resolves a path. A run that wrote worldwide rows into the
@@ -388,16 +403,16 @@ def main() -> int:
     coverage = "worldwide" if args.worldwide else "europe"
     set_coverage(coverage, adsc_airframes_only=args.adsc_airframes_only)
     if args.adsc_airframes_only:
-        check_subset_steps(
-            args.steps, ARMS if args.arm == "both" else (args.arm,))
+        check_subset_steps(args.steps, ARMS if args.arm == "both" else (args.arm,))
     reference = args.reference_warehouse or REFERENCE_BY_COVERAGE[coverage]
 
     day = date.fromisoformat(args.day)
     arms = ARMS if args.arm == "both" else (args.arm,)
     for arm in arms:
         run_arm(arm, day, args.executors, reference, args.steps)
-    print(f"\nDone. {', '.join(arms)} written for {day} under {ARM_PREFIX} "
-          f"(coverage: {coverage})")
+    print(
+        f"\nDone. {', '.join(arms)} written for {day} under {ARM_PREFIX} " f"(coverage: {coverage})"
+    )
     return 0
 
 

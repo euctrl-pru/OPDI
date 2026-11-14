@@ -34,8 +34,9 @@ from pathlib import Path
 # Importing the config loads .env, which is where the S3 credentials live.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import opdi.config  # noqa: F401  -- imported for its .env side effect
 import provenance
+
+import opdi.config  # noqa: F401  -- imported for its .env side effect
 
 REPO = Path(__file__).resolve().parent.parent
 LOCAL_DIR = REPO / "reference"
@@ -106,16 +107,18 @@ def bucket_bytes(client) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--include", default="*.parquet",
-                    help="glob over reference/ filenames (default: *.parquet)")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="say what would be uploaded and stop")
-    ap.add_argument("--force", action="store_true",
-                    help="re-upload even when the remote size already matches")
+    ap.add_argument(
+        "--include", default="*.parquet", help="glob over reference/ filenames (default: *.parquet)"
+    )
+    ap.add_argument("--dry-run", action="store_true", help="say what would be uploaded and stop")
+    ap.add_argument(
+        "--force", action="store_true", help="re-upload even when the remote size already matches"
+    )
     args = ap.parse_args()
 
-    local = sorted(p for p in LOCAL_DIR.iterdir()
-                   if p.is_file() and fnmatch.fnmatch(p.name, args.include))
+    local = sorted(
+        p for p in LOCAL_DIR.iterdir() if p.is_file() and fnmatch.fnmatch(p.name, args.include)
+    )
     if not local:
         sys.exit(f"Nothing in {LOCAL_DIR} matches {args.include!r}.")
 
@@ -132,8 +135,10 @@ def main() -> int:
     client = _client()
     remote = remote_sizes(client)
     used = bucket_bytes(client)
-    print(f"Bucket {BUCKET}: {used / 2**30:.2f} GB used of ~{QUOTA_GB:.0f} GB "
-          f"(shared -- other projects' data is in this figure).")
+    print(
+        f"Bucket {BUCKET}: {used / 2**30:.2f} GB used of ~{QUOTA_GB:.0f} GB "
+        f"(shared -- other projects' data is in this figure)."
+    )
 
     todo, skipped = [], []
     for p in local:
@@ -149,8 +154,7 @@ def main() -> int:
         print("\nEverything is already mirrored.")
         return 0
 
-    adding = sum(p.stat().st_size for p, _ in todo
-                 if f"{PREFIX}/{p.name}" not in remote)
+    adding = sum(p.stat().st_size for p, _ in todo if f"{PREFIX}/{p.name}" not in remote)
     print()
     for p, key in todo:
         verb = "replace " if f"{PREFIX}/{p.name}" in remote else "upload  "
@@ -158,10 +162,12 @@ def main() -> int:
 
     projected = (used + adding) / 2**30
     if projected > QUOTA_GB - HEADROOM_GB:
-        sys.exit(f"\nWould take the bucket to {projected:.2f} GB, inside the "
-                 f"{HEADROOM_GB:.0f} GB headroom below the ~{QUOTA_GB:.0f} GB quota. "
-                 "Free space first -- an over-quota write fails at the end of a job, "
-                 "after the work and before the persist.")
+        sys.exit(
+            f"\nWould take the bucket to {projected:.2f} GB, inside the "
+            f"{HEADROOM_GB:.0f} GB headroom below the ~{QUOTA_GB:.0f} GB quota. "
+            "Free space first -- an over-quota write fails at the end of a job, "
+            "after the work and before the persist."
+        )
 
     if args.dry_run:
         print(f"\nDry run. Projected bucket: {projected:.2f} GB.")

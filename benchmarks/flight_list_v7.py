@@ -97,6 +97,14 @@ PERIODS = {
 }
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def redirect_candidates(table: str) -> None:
     """Point the endpoint candidate cache at a period's own copy.
 
@@ -114,12 +122,12 @@ def redirect_candidates(table: str) -> None:
     if getattr(StorageManager, "_v7_cand_redirect", False):
         return
     orig_path = StorageManager._s3_path
+
     # `_s3_path`, not the table name: `table_ref` registers a Spark temp view
     # named after the table, and `research/cand_2024` is not a legal SQL
     # identifier.
     def _s3_path(self, name, *a, **kw):
-        return orig_path(self, table if name == "opdi_endpoint_candidates"
-                         else name, *a, **kw)
+        return orig_path(self, table if name == "opdi_endpoint_candidates" else name, *a, **kw)
 
     StorageManager._s3_path = _s3_path
     StorageManager._v7_cand_redirect = True
@@ -153,10 +161,11 @@ def index_on_read(tables) -> None:
         if name in wanted and "h3_res_7" not in df.columns:
             import h3_pyspark
 
-            df = (df.withColumn("_res", F.lit(7))
-                    .withColumn("h3_res_7",
-                                h3_pyspark.geo_to_h3("lat", "lon", "_res"))
-                    .drop("_res"))
+            df = (
+                df.withColumn("_res", F.lit(7))
+                .withColumn("h3_res_7", h3_pyspark.geo_to_h3("lat", "lon", "_res"))
+                .drop("_res")
+            )
         return df
 
     StorageManager.read_table = read_table
@@ -183,14 +192,8 @@ def dominant_callsign(df, track_col: str):
     is deterministic rather than dependent on partitioning.
     """
     blank = F.trim(F.coalesce(F.col("callsign"), F.lit(""))) == ""
-    counts = (
-        df.filter(~blank)
-        .groupBy(track_col, "callsign")
-        .agg(F.count(F.lit(1)).alias("_n"))
-    )
-    rank = Window.partitionBy(track_col).orderBy(
-        F.col("_n").desc(), F.col("callsign").asc()
-    )
+    counts = df.filter(~blank).groupBy(track_col, "callsign").agg(F.count(F.lit(1)).alias("_n"))
+    rank = Window.partitionBy(track_col).orderBy(F.col("_n").desc(), F.col("callsign").asc())
     best = (
         counts.withColumn("_r", F.row_number().over(rank))
         .filter(F.col("_r") == 1)
@@ -205,8 +208,7 @@ def dominant_callsign(df, track_col: str):
     )
 
 
-def redirect_tracks(assign_table: str, tracks_table: str,
-                    fix_callsign: bool = False) -> None:
+def redirect_tracks(assign_table: str, tracks_table: str, fix_callsign: bool = False) -> None:
     """Point the flight list at a research segmentation's ``track_id``.
 
     The arm wrote only ``(icao24, event_time, track_id)``. The flight list
@@ -288,9 +290,11 @@ def guard_writes(allowed_prefix: str = "research/") -> None:
         if not (name.startswith(allowed_prefix) or dest.startswith(allowed_root)):
             raise RuntimeError(
                 f"refusing to write {name!r} (resolves to {dest!r}): this "
-                f"benchmark writes only under {allowed_prefix!r}")
-        print(f"  -> writing {name}" + (f" -> {dest}" if not
-                                        name.startswith(allowed_prefix) else ""))
+                f"benchmark writes only under {allowed_prefix!r}"
+            )
+        print(
+            f"  -> writing {name}" + (f" -> {dest}" if not name.startswith(allowed_prefix) else "")
+        )
         return orig_write(self, df, table_name, *a, **kw)
 
     StorageManager.write_table = write_table
@@ -321,6 +325,8 @@ def build_plan(args, period) -> dict:
     ``tracks`` is the track table the run reads: ``None`` to resolve it from the
     configuration, or an explicit name.
     """
+    from study_variants.detection import StudyDetectionConfig
+
     from opdi.config import DetectionConfig
 
     L = DetectionConfig.legacy
@@ -365,18 +371,15 @@ def build_plan(args, period) -> dict:
         ("L01_exact_rank", dict(trend_rank_by="haversine"), raw),
         ("L02_exact_radius", dict(trend_radius_exact=True), raw),
         ("L03_smooth_first", dict(trend_smooth_before_cut=True), raw),
-        ("L04_penalty",
-         dict(trend_sched_penalty_nm=S().trend_sched_penalty_nm), raw),
+        ("L04_penalty", dict(trend_sched_penalty_nm=S().trend_sched_penalty_nm), raw),
         ("L05_flcap", dict(trend_max_fl=S().trend_max_fl), raw),
         ("L06_margin", dict(trend_vote_margin=S().trend_vote_margin), raw),
-        ("L07_bearing",
-         dict(trend_bearing_tiebreak_nm=S().trend_bearing_tiebreak_nm), raw),
+        ("L07_bearing", dict(trend_bearing_tiebreak_nm=S().trend_bearing_tiebreak_nm), raw),
         # 2 -- roles and endpoint geometry. The endpoint values start at their
         # legacy settings so the switch of algorithm and the tuning of that
         # algorithm are two separate lines rather than one confounded one.
         ("L08_endpoint_departures", dict(adep_mode="endpoint"), raw),
-        ("L09_endpoint_radius",
-         dict(endpoint_radius_nm=S().endpoint_radius_nm), raw),
+        ("L09_endpoint_radius", dict(endpoint_radius_nm=S().endpoint_radius_nm), raw),
         # 3 -- the input. Identical configuration, cleaned tracks.
         ("L10_clean_tracks", {}, clean),
     ]
@@ -408,15 +411,17 @@ def build_plan(args, period) -> dict:
     # Each rejected change, applied to the shipped configuration on its own.
     # The delta against `shipped` is what says whether it should be on.
     rejected = {
-        "reject_radius20": (frm(S, trend_radius_nm=20.0),
-                            S().adep_mode, S().ades_mode, clean),
-        "reject_trend_ooa": (frm(S, trend_ooa=True),
-                             S().adep_mode, S().ades_mode, clean),
+        "reject_radius20": (frm(S, trend_radius_nm=20.0), S().adep_mode, S().ades_mode, clean),
+        "reject_trend_ooa": (
+            frm(StudyDetectionConfig, trend_ooa=True),
+            S().adep_mode,
+            S().ades_mode,
+            clean,
+        ),
         # `reject_margin2` rather than `margin0`: zero is now what ships, and
         # this measures the value it replaced. Kept because V6 shipped 2 and a
         # reader deserves the number that moved it.
-        "reject_margin2": (frm(S, trend_vote_margin=2),
-                           S().adep_mode, S().ades_mode, clean),
+        "reject_margin2": (frm(S, trend_vote_margin=2), S().adep_mode, S().ades_mode, clean),
     }
 
     modes = {
@@ -436,7 +441,10 @@ def build_plan(args, period) -> dict:
         for rd in args.grid_radius:
             grid[f"grid_fl{fl}_r{rd:g}"] = (
                 frm(S, trend_max_fl=int(fl), trend_radius_nm=float(rd)),
-                "trend", "trend", clean)
+                "trend",
+                "trend",
+                clean,
+            )
 
     return {**ladder, **modes, **rejected, **grid}
 
@@ -471,15 +479,19 @@ def verify_plan(plan: dict) -> None:
     from opdi.config import DetectionConfig
 
     def diff(a, b):
-        return [f.name for f in dataclasses.fields(DetectionConfig)
-                if getattr(a, f.name) != getattr(b, f.name)]
+        return [
+            f.name
+            for f in dataclasses.fields(DetectionConfig)
+            if getattr(a, f.name) != getattr(b, f.name)
+        ]
 
     shipped_cfg, shipped_adep, shipped_ades, shipped_tracks = plan["shipped"]
     if shipped_cfg != DetectionConfig():
         raise SystemExit(
             f"the run named 'shipped' is not DetectionConfig(): "
             f"{diff(shipped_cfg, DetectionConfig())}. Every figure attributed "
-            f"to the shipped configuration would describe something else.")
+            f"to the shipped configuration would describe something else."
+        )
 
     rungs = ladder_rungs(plan)
     if rungs:
@@ -489,35 +501,40 @@ def verify_plan(plan: dict) -> None:
             problems.append(f"detection differs in {diff(cfg, shipped_cfg)}")
         if (adep, ades) != (shipped_adep, shipped_ades):
             problems.append(
-                f"roles are {adep}/{ades}, shipped is "
-                f"{shipped_adep}/{shipped_ades}")
+                f"roles are {adep}/{ades}, shipped is " f"{shipped_adep}/{shipped_ades}"
+            )
         if tracks != shipped_tracks:
-            problems.append(f"tracks are {tracks!r}, shipped reads "
-                            f"{shipped_tracks!r}")
+            problems.append(f"tracks are {tracks!r}, shipped reads " f"{shipped_tracks!r}")
         if problems:
             raise SystemExit(
                 f"the last ladder rung ({rungs[-1]}) is not the shipped "
                 f"configuration: " + "; ".join(problems) + ". The ladder would "
-                "decompose a change that is not the one being made.")
+                "decompose a change that is not the one being made."
+            )
 
         first_cfg, _, _, first_tracks = plan[rungs[0]]
         if first_cfg != DetectionConfig.legacy():
             raise SystemExit(
                 f"the first ladder rung ({rungs[0]}) is not the legacy "
-                f"configuration: {diff(first_cfg, DetectionConfig.legacy())}.")
+                f"configuration: {diff(first_cfg, DetectionConfig.legacy())}."
+            )
         if first_tracks == shipped_tracks:
             raise SystemExit(
                 "the first ladder rung already reads the cleaned tracks, so "
-                "the cleaning rung would measure nothing.")
+                "the cleaning rung would measure nothing."
+            )
 
         for lo, hi in zip(rungs, rungs[1:]):
             if plan[lo] == plan[hi]:
                 raise SystemExit(
                     f"ladder rungs {lo} and {hi} are identical. A step that "
-                    f"changes nothing is not a measurement of that step.")
+                    f"changes nothing is not a measurement of that step."
+                )
 
-    print(f"plan verified: {len(plan)} runs, {len(rungs)} ladder rungs, "
-          f"ending at the shipped configuration")
+    print(
+        f"plan verified: {len(plan)} runs, {len(rungs)} ladder rungs, "
+        f"ending at the shipped configuration"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -525,20 +542,19 @@ def verify_plan(plan: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build(spark, cfg, month, run, detection, adep_mode, ades_mode, log_dir,
-          tracks_table):
+def build(spark, cfg, month, run, detection, adep_mode, ades_mode, log_dir, tracks_table):
     """Run step 03 for one configuration and return the table it wrote."""
-    from opdi.pipeline.flights import FlightListProcessor
+    # The study processor: the package's step 03 plus the `nearest` mode and
+    # the `trend_ooa` option these runs compare.
+    from study_variants.detection import StudyFlightListProcessor as FlightListProcessor
 
     cfg.detection = detection
     # Grid cells are scored and discarded, so they share one table rather than
     # leaving a prefix behind for each of twenty-eight combinations.
     table = OUT_TMPL.format(run="grid" if run.startswith("grid_") else run)
 
-    proc = FlightListProcessor(spark, cfg, log_dir=str(log_dir),
-                               tracks_table=tracks_table)
-    print(f"\n=== {run}: ADEP={adep_mode} ADES={ades_mode} "
-          f"tracks={proc.tracks_table} ===")
+    proc = FlightListProcessor(spark, cfg, log_dir=str(log_dir), tracks_table=tracks_table)
+    print(f"\n=== {run}: ADEP={adep_mode} ADES={ades_mode} " f"tracks={proc.tracks_table} ===")
     print(f"    {detection}")
     proc.process_dai(
         month=month,
@@ -581,43 +597,58 @@ def load_predictions(spark, table):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(PERIODS), default="2025")
-    ap.add_argument("--runs", nargs="+", required=True,
-                    help="run names, or the groups 'ladder', 'modes', "
-                         "'cleaning', 'grid', 'all'")
+    ap.add_argument(
+        "--runs",
+        nargs="+",
+        required=True,
+        help="run names, or the groups 'ladder', 'modes', " "'cleaning', 'grid', 'all'",
+    )
     ap.add_argument("--results-dir", type=Path, required=True)
-    ap.add_argument("--out-name", default=None,
-                    help="CSV basename; defaults to mode_comparison_v7.csv")
-    ap.add_argument("--k", type=float, default=2.0,
-                    help="wrong-answer weight in score = correct - k * wrong")
-    ap.add_argument("--per-airport", action="store_true",
-                    help="also emit per-aerodrome and per-type counts")
-    ap.add_argument("--pipeline-logs", type=Path,
-                    default=REPO / "OPDI_live" / "logs")
+    ap.add_argument(
+        "--out-name", default=None, help="CSV basename; defaults to mode_comparison_v7.csv"
+    )
+    ap.add_argument(
+        "--k", type=float, default=2.0, help="wrong-answer weight in score = correct - k * wrong"
+    )
+    ap.add_argument(
+        "--per-airport", action="store_true", help="also emit per-aerodrome and per-type counts"
+    )
+    ap.add_argument("--pipeline-logs", type=Path, default=REPO / "OPDI_live" / "logs")
     # FL25..FL300 in steps of 25, plus the legacy 40 and the shipped 60 so both
     # stay on the grid rather than being interpolated between neighbours.
-    ap.add_argument("--grid-fl", nargs="+", type=int,
-                    default=sorted({40, 60} | set(range(25, 301, 25))))
+    ap.add_argument(
+        "--grid-fl", nargs="+", type=int, default=sorted({40, 60} | set(range(25, 301, 25)))
+    )
     ap.add_argument("--grid-radius", nargs="+", type=float, default=[20.0, 30.0])
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="8g")
     ap.add_argument("--ui-port", type=int, default=4057)
-    ap.add_argument("--track-assign", default=None,
-                    help="assignment table whose track_id replaces the tracks' own "
-                         "(see redirect_tracks)")
-    ap.add_argument("--fix-callsign", action="store_true",
-                    help="label each redirected track with its most frequent "
-                         "non-blank callsign before the flight list reads it. "
-                         "Only meaningful with --track-assign; measures what "
-                         "flights.py's F.min('flight_id') costs an arm that "
-                         "does not group on callsign")
-    ap.add_argument("--candidates-table", default=None,
-                    help="endpoint-candidate table for this run, overriding the "
-                         "period's own. Required alongside --track-assign: "
-                         "candidates are derived from track_id, so a research "
-                         "arm must not share the production cache")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="print the plan and exit; no cluster needed")
+    ap.add_argument(
+        "--track-assign",
+        default=None,
+        help="assignment table whose track_id replaces the tracks' own " "(see redirect_tracks)",
+    )
+    ap.add_argument(
+        "--fix-callsign",
+        action="store_true",
+        help="label each redirected track with its most frequent "
+        "non-blank callsign before the flight list reads it. "
+        "Only meaningful with --track-assign; measures what "
+        "flights.py's F.min('flight_id') costs an arm that "
+        "does not group on callsign",
+    )
+    ap.add_argument(
+        "--candidates-table",
+        default=None,
+        help="endpoint-candidate table for this run, overriding the "
+        "period's own. Required alongside --track-assign: "
+        "candidates are derived from track_id, so a research "
+        "arm must not share the production cache",
+    )
+    ap.add_argument(
+        "--dry-run", action="store_true", help="print the plan and exit; no cluster needed"
+    )
     args = ap.parse_args()
 
     # Fail here rather than forty minutes in, at the write. A redirected
@@ -627,9 +658,11 @@ def main() -> None:
     # for, and only because the production table happens not to sit under
     # research/ -- which is luck, not a check.
     if args.track_assign and not args.candidates_table:
-        ap.error("--track-assign requires --candidates-table: endpoint candidates "
-                 "are derived from track_id, so a research arm cannot share the "
-                 "production cache (it is written with mode='overwrite')")
+        ap.error(
+            "--track-assign requires --candidates-table: endpoint candidates "
+            "are derived from track_id, so a research arm cannot share the "
+            "production cache (it is written with mode='overwrite')"
+        )
 
     sys.stdout.reconfigure(line_buffering=True)
     period = PERIODS[args.period]
@@ -660,13 +693,15 @@ def main() -> None:
     if args.dry_run:
         for r in runs:
             d, a, s, tr = plan[r]
-            print(f"  {r:<24} ADEP={a:<9} ADES={s:<9} tracks={str(tr):<22} "
-                  f"FL{d.trend_max_fl} r{d.trend_radius_nm:g} "
-                  f"m{d.trend_vote_margin} pen{d.trend_sched_penalty_nm:g} "
-                  f"rank={d.trend_rank_by} exact_r={d.trend_radius_exact} "
-                  f"smooth1st={d.trend_smooth_before_cut} "
-                  f"tie={d.trend_bearing_tiebreak_nm:g} ooa={d.trend_ooa} "
-                  f"e_r={d.endpoint_radius_nm:g}")
+            print(
+                f"  {r:<24} ADEP={a:<9} ADES={s:<9} tracks={str(tr):<22} "
+                f"FL{d.trend_max_fl} r{d.trend_radius_nm:g} "
+                f"m{d.trend_vote_margin} pen{d.trend_sched_penalty_nm:g} "
+                f"rank={d.trend_rank_by} exact_r={d.trend_radius_exact} "
+                f"smooth1st={d.trend_smooth_before_cut} "
+                f"tie={d.trend_bearing_tiebreak_nm:g} ooa={getattr(d, 'trend_ooa', False)} "
+                f"e_r={d.endpoint_radius_nm:g}"
+            )
         return
 
     out = args.results_dir
@@ -694,10 +729,9 @@ def main() -> None:
         src_log = args.pipeline_logs / cand_log
         if src_log.exists() and not (log_dir / cand_log).exists():
             import shutil
-            (shutil.copytree if src_log.is_dir() else shutil.copy2)(
-                src_log, log_dir / cand_log)
-            print(f"reusing endpoint candidate cache per {src_log}")
 
+            (shutil.copytree if src_log.is_dir() else shutil.copy2)(src_log, log_dir / cand_log)
+            print(f"reusing endpoint candidate cache per {src_log}")
 
     load_dotenv()
     osn_sample.RESEARCH_EXECUTORS = args.executors
@@ -724,15 +758,20 @@ def main() -> None:
         # explicit "research/tracks_clean" for 2024. This flag is only ever
         # used with `--runs shipped`, so that is the one table this run
         # actually pulls tracks from.
-        redirect_tracks(args.track_assign, period["tracks"] or "osn_tracks_clean",
-                        fix_callsign=args.fix_callsign)
+        redirect_tracks(
+            args.track_assign,
+            period["tracks"] or "osn_tracks_clean",
+            fix_callsign=args.fix_callsign,
+        )
 
     from opdi.config import OPDIConfig
 
     # The factory, not OPDIConfig() plus an attribute: the environment decides
     # the storage backend, and setting the field afterwards leaves the
     # StorageManager unwired, so every table looks absent.
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     month = datetime.strptime(period["months"][0], "%Y%m").date().replace(day=1)
 
     # A period with its own candidate cache must be recorded as already built,
@@ -761,30 +800,34 @@ def main() -> None:
         if month not in months:
             months.append(month)
             pd.DataFrame({"months": months}).to_parquet(log_path)
-        print(f"  {month:%Y-%m} marked as built: this period uses "
-              f"{period['candidates']}, made by the chain's own stage")
+        print(
+            f"  {month:%Y-%m} marked as built: this period uses "
+            f"{period['candidates']}, made by the chain's own stage"
+        )
 
     # Restricted to the days actually ingested. Without this the reference
     # spans the whole month while the flight lists cover three days, so every
     # flight on the other twenty-seven counts as an abstention and coverage
     # comes out about ten times too low.
     gt = label_ground_truth(
-        load_ground_truth(spark, period["months"], period["days"]),
-        airport_locations(spark))
+        load_ground_truth(spark, period["months"], period["days"]), airport_locations(spark)
+    )
     n_gt = gt.count()
     print(f"ground-truth flights: {n_gt:,}")
     if n_gt == 0:
         raise SystemExit(
             "no ground-truth flights for this period. Every run would score "
             "zero coverage, which is not a result -- check the reference data "
-            "covers these days.")
+            "covers these days."
+        )
     types = airport_types(spark) if args.per_airport else None
 
     rows, per_apt, per_type = [], [], []
     for run in runs:
         detection, adep_mode, ades_mode, tracks = plan[run]
-        table, resolved_tracks = build(spark, cfg, month, run, detection,
-                                       adep_mode, ades_mode, log_dir, tracks)
+        table, resolved_tracks = build(
+            spark, cfg, month, run, detection, adep_mode, ades_mode, log_dir, tracks
+        )
 
         pred, ident = load_predictions(spark, table)
         m = score(pred, ident, gt, k=args.k)
@@ -793,7 +836,8 @@ def main() -> None:
                 f"{run!r} scored zero coverage on both roles. With "
                 f"{n_gt:,} reference flights that means the identity join "
                 f"matched nothing, not that detection failed. Check icao24 "
-                f"case and callsign padding before reading anything into it.")
+                f"case and callsign padding before reading anything into it."
+            )
         # Two updates, in this order, and the order is the point.
         #
         # First every detection field, which records the configuration. Then the
@@ -808,17 +852,25 @@ def main() -> None:
         # version 6 shipped and version 7 exists to prevent, so the executed
         # value wins and the configured one is not kept: a reader of this CSV
         # wants to know what ran.
-        m.update({f.name: getattr(detection, f.name)
-                  for f in dataclasses.fields(detection)})
-        m.update(run=run, period=args.period, tracks_table=resolved_tracks,
-                 adep_mode=adep_mode, ades_mode=ades_mode)
+        m.update({f.name: getattr(detection, f.name) for f in dataclasses.fields(detection)})
+        m.update(
+            run=run,
+            period=args.period,
+            tracks_table=resolved_tracks,
+            adep_mode=adep_mode,
+            ades_mode=ades_mode,
+        )
         rows.append(m)
-        print(f"  ADEP cov={m['adep_coverage']:.2%} acc={m['adep_accuracy']:.2%} "
-              f"correct={m['adep_correct']:,} wrong={m['adep_wrong']:,} "
-              f"score={m['adep_score']:,.0f}")
-        print(f"  ADES cov={m['ades_coverage']:.2%} acc={m['ades_accuracy']:.2%} "
-              f"correct={m['ades_correct']:,} wrong={m['ades_wrong']:,} "
-              f"score={m['ades_score']:,.0f}")
+        print(
+            f"  ADEP cov={m['adep_coverage']:.2%} acc={m['adep_accuracy']:.2%} "
+            f"correct={m['adep_correct']:,} wrong={m['adep_wrong']:,} "
+            f"score={m['adep_score']:,.0f}"
+        )
+        print(
+            f"  ADES cov={m['ades_coverage']:.2%} acc={m['ades_accuracy']:.2%} "
+            f"correct={m['ades_correct']:,} wrong={m['ades_wrong']:,} "
+            f"score={m['ades_score']:,.0f}"
+        )
 
         if args.per_airport:
             for r in per_airport_counts(pred, ident, gt).collect():

@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "opdi"
 version = "2.0.0"
 description = "Open Performance Data Initiative - Aviation data processing pipeline"
-readme = "README.md"
-requires-python = ">=3.8"
+readme = "readme.md"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "EUROCONTROL", email = "pru-support@eurocontrol.int"}
@@ -21,8 +21,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -38,14 +36,18 @@ dependencies = [
     # v3. Left open at >=3.7.0, the driver resolved 4.5.0 while the executor
     # image pinned <4, and the two ran different APIs for weeks.
     "h3>=4,<5",
+    # Not used by the pipeline itself (it has its own H3 functions), but
+    # imported by study scripts under benchmarks/ and tests/, and installed in
+    # the executor image.
     "h3-pyspark>=1.0.0",
     "shapely>=2.0.0",
+    # Imported by the reference step 00b (airport layouts); osmnx needs it too.
+    "geopandas>=0.12.0",
     "pyproj>=3.4.0",
     "osmnx>=1.2.0",
     "pandas>=1.5.0",
     "pyarrow>=10.0.0",
     "numpy>=1.23.0",
-    "plotly>=5.0.0",
     "python-dateutil>=2.8.0",
     "requests>=2.28.0",
 ]
@@ -57,6 +59,25 @@ dev = [
     "black>=22.0.0",
     "mypy>=0.990",
     "ruff>=0.1.0",
+    "duckdb>=1.0.0",
+    "sqlglot>=25.0.0",
+]
+# Airflow, only on the machine that runs the scheduler (airflow/dags/).
+airflow = [
+    "apache-airflow==2.7.2",
+]
+# Building the airport layouts (reference step 00b) from a local
+# OpenStreetMap extract (opdi.reference.pbf_source, pbf_filter).
+reference = [
+    "osmium>=3.6.0",
+]
+# Reading the published files (opdi.published). The reader never starts
+# Spark or Java, but PySpark is a dependency of the package itself, so it is
+# installed as well.
+reader = [
+    "pyarrow>=10.0.0",
+    "duckdb>=1.0.0",
+    "pandas>=1.5.0",
 ]
 docs = [
     "sphinx>=7.0.0",
@@ -79,20 +100,62 @@ where = ["src"]
 [tool.setuptools.package-data]
 opdi = ["py.typed"]
 "opdi.reference" = ["data/*.csv", "data/*.md"]
+"opdi.sql" = ["*.sql", "trino/*.sql"]
 
 [tool.black]
 line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+target-version = ['py310', 'py311', 'py312']
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+select = ["E", "F", "W", "I", "N", "D", "B", "UP"]
+ignore = [
+    # The flight-list working columns are upper case (ADEP, ADES, DOF), and
+    # the pipeline names its local frames and imports after them.
+    "N803",
+    "N806",
+    "N812",
+    # The class docstring documents the constructor's arguments (Google
+    # style), so __init__ needs no docstring of its own.
+    "D107",
+    # The code writes Optional[...], List[...] and typing imports, which
+    # Python 3.10 still accepts; rewriting every annotation is a separate
+    # change.
+    "UP006",
+    "UP007",
+    "UP035",
+    "UP045",
+    # zip() without strict=: the code zips sequences of equal length.
+    "B905",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and study scripts are checked for errors, warnings and import order
+# (E, F, W, I) only: they are not an API, so the naming, docstring, bug-risk
+# and modern-syntax rules (N, D, B, UP) do not apply. They put their own
+# folders on sys.path before importing (E402).
+"tests/**" = ["D", "N", "B", "UP", "E402"]
+"benchmarks/**" = ["D", "N", "B", "UP", "E402"]
+# The report's style sheet is one literal string with long CSS rules.
+"benchmarks/build_track_v4_paper.py" = ["D", "N", "B", "UP", "E402", "E501"]
+"tools/**" = ["D"]
+# The Sphinx configuration is not part of the package.
+"docs/**" = ["D"]
+# The example builds each object to show how it is made; the calls that run
+# a step are commented out, so the objects are not used (F841).
+"examples/**" = ["D", "N", "B", "UP", "E402", "F841"]
+# Notebooks import in the cell where they first need a module (E402), and
+# their cells hold long lines of output-like code (E501).
+"notebooks/**" = ["D", "N", "B", "UP", "E402", "E501"]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
@@ -102,7 +165,6 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-# `opdi.py` at the repo root shadows the `src/opdi/` package whenever the root
-# ends up on sys.path -- which `python -m pytest` does implicitly by adding the
-# working directory. Prepending src/ resolves the clash for every invocation.
+# src/ first, so that the tests import the code of this checkout rather than
+# another installed copy of the package.
 pythonpath = ["src", "tests"]

@@ -1,13 +1,14 @@
-"""Level-segment detection, for KPI17 and KPI19.
+"""Level segments in climb and descent, and the level-off events built on them.
 
-Two arms, registered in :data:`LEVEL_ARMS` and selected by
-``EventConfig.level_method``. :func:`level_segments` is ICAO's anchored band,
-shipped in ``events_v0.1.0`` and unchanged; :func:`level_segments_pru` is PRU's
-rolling window, which defines level flight as a geometric property of the
-altitudes rather than as a test on the reported vertical rate. Both are
-published behaviour and neither can be shown better than the other, because no
-source OPDI can reach holds level-segment truth. The rest of this note
-describes the ICAO arm.
+Part of step 04. Two methods find the level segments, registered in
+:data:`LEVEL_ARMS` and chosen by ``EventConfig.level_method``:
+:func:`level_segments`, the altitude band of the ICAO definition, anchored at
+the start of each segment; and :func:`level_segments_pru` (the default), the
+rolling window of the Performance Review Unit (PRU), which reads level flight
+from the altitudes alone rather than from the reported vertical rate. No
+reference data records level segments, so neither can be shown to be better.
+The rest of this description is about the ICAO method.
+See https://www.opdi.aero/content/methods/vertical-events.html.
 
 KPI17 (level-off during climb) and KPI19 (level-off during descent) are the two
 vertical-efficiency indicators ADS-B can reach, and ICAO specifies them with a
@@ -40,13 +41,13 @@ segment cannot continue, then forward-fill the anchor within the resulting
 groups -- rather than with a UDF.
 """
 
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
 FT_PER_M = 3.28084
@@ -54,9 +55,8 @@ FTMIN_PER_MPS = 196.850394
 
 #: Per-sample distances to the flight's own aerodromes, attached upstream by
 #: :func:`opdi.pipeline.vertical_pru.attach_aerodrome_geometry`. Carried through
-#: the segment aggregation of *both* arms so that
-#: :func:`classify_level_offs` can apply ``level_analysis_radius_nm``, which has
-#: been declared since v0.1.0 and read by nothing.
+#: the segment aggregation of both methods so that
+#: :func:`classify_level_offs` can apply ``level_analysis_radius_nm``.
 DISTANCE_COLS = ("dist_adep_nm", "dist_ades_nm")
 
 #: Ceiling on the number of interpolation grid points :func:`level_segments_pru`
@@ -67,7 +67,7 @@ DISTANCE_COLS = ("dist_adep_nm", "dist_ades_nm")
 #: but per *partition*, and one pathological track pays it alone. At the default
 #: 10 s window this cap is 11.6 days of trajectory, which no real flight
 #: approaches -- but a track whose segmentation failed can span a month, and
-#: 260,000 points in one array is an executor OOM rather than a slow job.
+#: 260,000 points in one array would exhaust an executor's memory.
 #:
 #: A partition longer than the cap is **truncated at the tail**: the grid stops
 #: at the cap and level segments in the remainder are not reported. The error is
@@ -82,7 +82,7 @@ MAX_GRID_POINTS_PER_PARTITION = 100_000
 def _geometry_aggregations(sdf: DataFrame, time_col: str):
     """Aggregations carrying per-sample geometry out to the segment.
 
-    Only the columns the caller actually attached, so both arms stay pure
+    Only the columns the caller actually attached, so both methods stay pure
     column-in/column-out functions that a test can drive without storage.
 
     Each distance is taken at the end of the segment nearer its own
@@ -138,9 +138,8 @@ def level_segments(
     # A sample is "flat" when the step to the next one stays inside the band and
     # the vertical speed towards it is within the limit -- ICAO's start
     # condition, evaluated at every sample.
-    flat = (
-        (F.abs(F.col("_alt_next") - F.col("_alt_ft")) <= F.lit(config.level_band_limit_ft))
-        & (F.col("_roc") <= F.lit(config.level_vertical_speed_limit_ftmin))
+    flat = (F.abs(F.col("_alt_next") - F.col("_alt_ft")) <= F.lit(config.level_band_limit_ft)) & (
+        F.col("_roc") <= F.lit(config.level_vertical_speed_limit_ftmin)
     )
     work = work.withColumn("_flat", F.coalesce(flat, F.lit(False)))
 
@@ -206,9 +205,9 @@ def level_segments(
     else:
         out = out.withColumn("distance_nm", F.lit(None).cast("double"))
 
-    return out.filter(
-        F.col("duration_seconds") >= F.lit(config.level_min_duration_seconds)
-    ).drop("_group")
+    return out.filter(F.col("duration_seconds") >= F.lit(config.level_min_duration_seconds)).drop(
+        "_group"
+    )
 
 
 def level_segments_pru(
@@ -234,9 +233,9 @@ def level_segments_pru(
     `level_window_seconds` grid first, as PRU specifies, because a discrete
     track has no sample at every instant the window needs.
 
-    ``vert_rate_col`` is accepted and ignored, so that the two arms are
-    interchangeable through :data:`LEVEL_ARMS` without the caller knowing which
-    one it selected. Ignoring it is the whole point of this arm.
+    ``vert_rate_col`` is accepted and ignored, so that the two methods are
+    interchangeable through :data:`LEVEL_ARMS`. This method reads level flight
+    from the altitudes alone.
 
     Returns the same schema as :func:`level_segments`: the partition columns
     plus ``start_time``, ``end_time``, ``duration_seconds``, ``level_ft`` and
@@ -244,9 +243,7 @@ def level_segments_pru(
     """
     part = list(partition_cols)
     window_s = float(config.level_window_seconds)
-    carried = [
-        c for c in (*DISTANCE_COLS, "cumulative_distance_nm") if c in sdf.columns
-    ]
+    carried = [c for c in (*DISTANCE_COLS, "cumulative_distance_nm") if c in sdf.columns]
     elevations = [c for c in ("elev_adep_ft", "elev_ades_ft") if c in sdf.columns]
 
     real = sdf.select(
@@ -262,9 +259,7 @@ def level_segments_pru(
     # float in config. ``_t0 + i * window`` also keeps every grid instant an
     # exact multiple of the window away from the track's first sample, which is
     # what makes the geometry in the tests arithmetic.
-    bounds = real.groupBy(*part).agg(
-        F.min("_ts").alias("_t0"), F.max("_ts").alias("_t1")
-    )
+    bounds = real.groupBy(*part).agg(F.min("_ts").alias("_t0"), F.max("_ts").alias("_t1"))
     grid = (
         bounds.withColumn(
             "_i",
@@ -272,9 +267,7 @@ def level_segments_pru(
                 F.sequence(
                     F.lit(0).cast("long"),
                     F.least(
-                        F.floor(
-                            (F.col("_t1") - F.col("_t0")) / F.lit(window_s)
-                        ).cast("long"),
+                        F.floor((F.col("_t1") - F.col("_t0")) / F.lit(window_s)).cast("long"),
                         F.lit(MAX_GRID_POINTS_PER_PARTITION - 1).cast("long"),
                     ),
                 )
@@ -298,9 +291,7 @@ def level_segments_pru(
     if elevations:
         constant = Window.partitionBy(*part)
         for c in elevations:
-            combined = combined.withColumn(
-                c, F.first(F.col(c), ignorenulls=True).over(constant)
-            )
+            combined = combined.withColumn(c, F.first(F.col(c), ignorenulls=True).over(constant))
 
     # Real samples sort before the grid instant they coincide with, so a grid
     # point that lands on a sample interpolates from zero distance and takes
@@ -347,15 +338,15 @@ def level_segments_pru(
                 # and be distinct; outside the sampled span, and where two
                 # samples share a timestamp, the nearer value stands rather
                 # than a division by zero.
-                F.when(pt.isNotNull() & nt.isNotNull() & (nt != pt),
-                       pv + (nv - pv) * (F.col("_ts") - pt) / (nt - pt)),
+                F.when(
+                    pt.isNotNull() & nt.isNotNull() & (nt != pt),
+                    pv + (nv - pv) * (F.col("_ts") - pt) / (nt - pt),
+                ),
                 pv,
                 nv,
             ),
         )
-    combined = combined.drop(
-        *[f"{c}__{s}" for c in value_cols for s in ("pt", "pv", "nt", "nv")]
-    )
+    combined = combined.drop(*[f"{c}__{s}" for c in value_cols for s in ("pt", "pv", "nt", "nv")])
 
     # ``rangeBetween`` takes integral bounds, so the ordering key is whole
     # milliseconds rather than seconds. Sub-millisecond resolution is well
@@ -369,16 +360,13 @@ def level_segments_pru(
     whole = Window.partitionBy(*part)
     combined = combined.withColumn(
         "_span", F.max("_alt_ft").over(span_window) - F.min("_alt_ft").over(span_window)
-    ).withColumn(
-        "_t_last", F.max(F.when(~F.col("_is_grid"), F.col("_ts"))).over(whole)
-    )
+    ).withColumn("_t_last", F.max(F.when(~F.col("_is_grid"), F.col("_ts"))).over(whole))
 
     # A grid point whose window runs past the last sample is not level; it is
     # unmeasured. Without this every track would end in a spurious segment,
     # because a truncated window spans nothing and so always looks flat.
-    level = (
-        (F.col("_span") <= F.lit(config.level_window_height_ft()))
-        & (F.col("_ts") + F.lit(window_s) <= F.col("_t_last") + F.lit(1e-6))
+    level = (F.col("_span") <= F.lit(config.level_window_height_ft())) & (
+        F.col("_ts") + F.lit(window_s) <= F.col("_t_last") + F.lit(1e-6)
     )
     points = combined.filter(F.col("_is_grid")).withColumn(
         "_level", F.coalesce(level, F.lit(False))
@@ -425,9 +413,9 @@ def level_segments_pru(
     else:
         out = out.withColumn("distance_nm", F.lit(None).cast("double"))
 
-    return out.filter(
-        F.col("duration_seconds") >= F.lit(config.level_min_duration_seconds)
-    ).drop("_group", "_s0", "_s1", "_end")
+    return out.filter(F.col("duration_seconds") >= F.lit(config.level_min_duration_seconds)).drop(
+        "_group", "_s0", "_s1", "_end"
+    )
 
 
 def classify_level_offs(
@@ -455,32 +443,23 @@ def classify_level_offs(
     before_toc = F.col("end_time") <= toc_time
     after_tod = F.col("start_time") >= tod_time
 
-    # PRU measures both floors above the field. The shipped v0.1.0 code
-    # compared them against uncorrected pressure altitude, so the descent floor
-    # sat 1,416 ft too low at Zurich and was effectively right at Ibiza -- a
-    # per-aerodrome bias with nothing in the output to show it. The climb floor
-    # takes the departure field and the descent floor the arrival one: a climb
-    # level-off is near the departure aerodrome and a descent one near the
-    # arrival, so each floor has an unambiguous field.
+    # Both floors are measured above the airport (with
+    # level_floors_above_field); measured as pressure altitude, they would sit
+    # lower above the ground at a high airport. The climb floor uses the
+    # departure airport and the descent floor the arrival airport.
     climb_floor_ref = _floor_reference(segments, config, "elev_adep_ft")
     descent_floor_ref = _floor_reference(segments, config, "elev_ades_ft")
     climb_floor = climb_floor_ref >= F.lit(config.level_min_altitude_climb_ft)
     descent_floor = descent_floor_ref >= F.lit(config.level_min_altitude_descent_ft)
 
-    # ``level_analysis_radius_nm`` was declared in v0.1.0 and read by nothing.
-    # PRU measures the climb within 200 NM of departure and the descent within
-    # 200 NM of arrival, so each side tests its own distance -- and
-    # ``level_radius_enforced`` says whether the bound applies at all, because
-    # "whenever the distance columns are present" is not a choice a caller can
-    # make: the aerodrome join that attaches them is needed by every other
-    # family anyway.
+    # The climb is analysed within 200 NM of the departure airport and the
+    # descent within 200 NM of the arrival airport, so each side tests its own
+    # distance; ``level_radius_enforced`` says whether the bound applies.
     within_climb_radius = _within_radius(segments, config, "dist_adep_nm")
     within_descent_radius = _within_radius(segments, config, "dist_ades_nm")
 
     pct = F.lit(config.level_exclusion_box_pct / 100.0)
-    long_enough_to_be_cruise = F.col("duration_seconds") > F.lit(
-        config.level_exclusion_box_seconds
-    )
+    long_enough_to_be_cruise = F.col("duration_seconds") > F.lit(config.level_exclusion_box_seconds)
     in_climb_box = (F.col("level_ft") >= pct * toc_altitude_ft) & long_enough_to_be_cruise
     in_descent_box = (F.col("level_ft") >= pct * tod_altitude_ft) & long_enough_to_be_cruise
 
@@ -500,9 +479,8 @@ def _floor_reference(segments: DataFrame, config: "EventConfig", elevation_col: 
     """The altitude the minimum-altitude floors are compared against.
 
     Above the field when ``level_floors_above_field``, and above the 1013.25
-    datum otherwise -- which is v0.1.0's behaviour, kept reachable so released
-    data stays reproducible. A missing elevation coalesces to zero, i.e. back to
-    that same behaviour, rather than removing the flight's level-offs.
+    datum otherwise. A missing elevation counts as 0 ft, so the flight keeps its
+    level-offs.
     """
     if not config.level_floors_above_field or elevation_col not in segments.columns:
         return F.col("level_ft")
@@ -512,11 +490,8 @@ def _floor_reference(segments: DataFrame, config: "EventConfig", elevation_col: 
 def _within_radius(segments: DataFrame, config: "EventConfig", distance_col: str):
     """Whether a segment lies inside PRU's analysis radius.
 
-    Off under ``level_radius_enforced=False``, which is v0.1.0: the field was
-    declared and read by nothing, so every segment was classified at any
-    distance. The flag is what makes that reachable -- absence of the distance
-    column is *not* a way to ask for it, because the aerodrome join that
-    attaches the distances is needed by half the step regardless.
+    With ``level_radius_enforced=False`` every segment is classified,
+    whatever its distance.
 
     A segment whose distance is NULL -- no aerodrome named for that end, or no
     coordinates for it -- fails the test and is excluded when the bound is on.
@@ -535,12 +510,7 @@ def _within_radius(segments: DataFrame, config: "EventConfig", distance_col: str
     return F.col(distance_col) <= F.lit(config.level_analysis_radius_nm)
 
 
-#: The two level-segment arms, selected by ``EventConfig.level_method``.
-#:
-#: Both are published behaviour: ``icao`` is the anchored-band algorithm
-#: shipped in ``events_v0.1.0`` and ``pru`` the rolling window. A dict rather
-#: than a branch at the call site, so adding a third definition of level flight
-#: is a registration rather than an edit to every caller -- and so that
-#: ``EventConfig.__post_init__`` can reject an unknown name instead of letting
-#: it fall through to no level segments at all.
+#: The level segment methods, by the name ``EventConfig.level_method`` gives:
+#: ``icao``, the anchored band, and ``pru``, the rolling window.
+#: ``EventConfig.__post_init__`` refuses any other name.
 LEVEL_ARMS = {"icao": level_segments, "pru": level_segments_pru}

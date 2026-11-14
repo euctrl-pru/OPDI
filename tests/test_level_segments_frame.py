@@ -10,7 +10,7 @@ ordering keys are reversed, so the order is exactly inverted -- which matters,
 because the ordering deliberately places a real sample before the grid instant
 it coincides with.
 """
-import pytest
+
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
@@ -30,9 +30,11 @@ def _old(df):
     order = Window.partitionBy("track_id").orderBy("_ts", F.col("_is_grid").cast("int"))
     fwd = order.rowsBetween(Window.currentRow, Window.unboundedFollowing)
     known = F.when(F.col("v").isNotNull(), F.col("_ts"))
-    return df.withColumn("nt", F.first(known, True).over(fwd)) \
-             .withColumn("nv", F.first(F.col("v"), True).over(fwd)) \
-             .select("id", "nt", "nv")
+    return (
+        df.withColumn("nt", F.first(known, True).over(fwd))
+        .withColumn("nv", F.first(F.col("v"), True).over(fwd))
+        .select("id", "nt", "nv")
+    )
 
 
 def _new(df):
@@ -41,9 +43,11 @@ def _new(df):
     )
     fwd = rev.rowsBetween(Window.unboundedPreceding, Window.currentRow)
     known = F.when(F.col("v").isNotNull(), F.col("_ts"))
-    return df.withColumn("nt", F.last(known, True).over(fwd)) \
-             .withColumn("nv", F.last(F.col("v"), True).over(fwd)) \
-             .select("id", "nt", "nv")
+    return (
+        df.withColumn("nt", F.last(known, True).over(fwd))
+        .withColumn("nv", F.last(F.col("v"), True).over(fwd))
+        .select("id", "nt", "nv")
+    )
 
 
 def test_the_reversed_frame_gives_the_same_answer(spark):
@@ -66,12 +70,16 @@ def test_ties_between_a_real_sample_and_its_grid_instant_are_preserved(spark):
     """Both keys are reversed, so the inversion is exact. Reversing only `_ts`
     would flip the real-before-grid precedence the ordering exists to impose."""
     rows = [(0, "t1", 1.0, False, 5.0), (1, "t1", 1.0, True, None)]
-    df = spark.createDataFrame(rows, "id long, track_id string, _ts double, _is_grid boolean, v double")
+    df = spark.createDataFrame(
+        rows, "id long, track_id string, _ts double, _is_grid boolean, v double"
+    )
     assert _old(df).subtract(_new(df)).count() == 0
 
 
 def test_no_shrinking_frame_remains_in_the_interpolation():
-    import ast, inspect
+    import ast
+    import inspect
+
     from opdi.pipeline import level_segments
 
     src = inspect.getsource(level_segments)
@@ -79,8 +87,10 @@ def test_no_shrinking_frame_remains_in_the_interpolation():
     # `back` legitimately uses unboundedPreceding; what must not return is a
     # frame ending at unboundedFollowing.
     bad = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "rowsBetween"
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "attr", "") == "rowsBetween"
         and any(getattr(a, "attr", "") == "unboundedFollowing" for a in n.args)
     ]
     assert not bad, "a forward-shrinking frame is correct and quadratic"

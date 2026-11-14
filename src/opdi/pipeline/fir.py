@@ -28,9 +28,9 @@ from opdi.config import EventConfig
 from opdi.pipeline.holding import FT_PER_M
 from opdi.pipeline.holes import PIECE
 
-#: Version stamped on the event. Its two standard measurements carry the
-#: measurement versions every event's do.
-FIR_VERSION = "fir_v0.1.0"
+# FIR_VERSION is stamped on the event; its two standard measurements carry the
+# measurement versions every event's do.
+from opdi.versions import FIR_VERSION
 
 AIRSPACE_TABLE = "opdi_h3_airspace_ref"
 
@@ -39,8 +39,10 @@ _RES_MASK = 0xF << _RES_SHIFT
 
 
 def h3_parent_expr(cell_col, res: int):
-    """The lower-case hex index of ``cell_col``'s ancestor at ``res`` (0..7),
-    as a native column expression (no UDF)."""
+    """The H3 index of ``cell_col``'s parent cell at resolution ``res`` (0 to 7).
+
+    Lower-case hexadecimal, as a native column expression (no UDF).
+    """
     idx = F.conv(cell_col, 16, 10).cast("long")
     cleared = idx.bitwiseAND(lit(~_RES_MASK))
     with_res = cleared.bitwiseOR(lit(res << _RES_SHIFT))
@@ -50,24 +52,30 @@ def h3_parent_expr(cell_col, res: int):
 
 
 def load_fir_reference(storage) -> Optional[DataFrame]:
-    """The FIR layer of ``opdi_h3_airspace_ref``, or None when the table is
-    absent or still has the earlier port's per-cell schema (``h3_res_7``
-    columns, no ``h3_cell``/``h3_res``): that table was overwritten once per
-    polygon and holds one country, and step 00c must be re-run first."""
+    """The FIR layer of ``opdi_h3_airspace_ref``, or None when it cannot be used.
+
+    None when the table is absent, or has an older layout (``h3_res_7``
+    columns instead of ``h3_cell``/``h3_res``) that holds only one polygon;
+    step 00c must then be run again.
+    """
     if not storage.table_exists(AIRSPACE_TABLE):
         print(f"{AIRSPACE_TABLE} not found; xing-fir will not be computed.")
         return None
     ref = storage.read_table(AIRSPACE_TABLE)
     if "h3_cell" not in ref.columns or "h3_res" not in ref.columns:
-        print(f"{AIRSPACE_TABLE} has the pre-2026-11 schema (no h3_cell/h3_res); "
-              "re-run step 00c. xing-fir will not be computed.")
+        print(
+            f"{AIRSPACE_TABLE} has the pre-2026-11 schema (no h3_cell/h3_res); "
+            "re-run step 00c. xing-fir will not be computed."
+        )
         return None
     return ref.filter(col("airspace_type") == "FIR")
 
 
 def attach_fir(df: DataFrame, fir_ref: DataFrame, config: EventConfig) -> DataFrame:
-    """Add ``fir_code, fir_band_width, fir_area_km2, airac_cfmu, airac_validity_start,
-    airac_validity_end`` per sample (NULL when no volume matches).
+    """Add the FIR of each report and its definition (NULL outside every FIR).
+
+    The columns are ``fir_code``, ``fir_band_width``, ``fir_area_km2``,
+    ``airac_cfmu``, ``airac_validity_start`` and ``airac_validity_end``.
 
     One broadcast left join per resolution from 7 down to 0, each against the
     reference rows stored at that resolution and gated on the FL band; the
@@ -87,28 +95,39 @@ def attach_fir(df: DataFrame, fir_ref: DataFrame, config: EventConfig) -> DataFr
         ref_r = fir_ref.filter(col("h3_res") == r).select(
             col("h3_cell").alias(f"_c{r}"),
             col("code").alias(f"_code{r}"),
-            col("min_fl").alias(f"_lo{r}"), col("max_fl").alias(f"_hi{r}"),
+            col("min_fl").alias(f"_lo{r}"),
+            col("max_fl").alias(f"_hi{r}"),
             col("area_km2").alias(f"_area{r}"),
             col("airac_cfmu").alias(f"_airac{r}"),
             F.date_format(col("validity_start"), "yyyy-MM-dd").alias(f"_vs{r}"),
             F.date_format(col("validity_end"), "yyyy-MM-dd").alias(f"_ve{r}"),
         )
         parent = h3_parent_expr(col("h3_res_7"), r) if r < 7 else col("h3_res_7")
-        cond = (parent == col(f"_c{r}")) & (col("_fl") >= col(f"_lo{r}")) & (col("_fl") < col(f"_hi{r}"))
+        cond = (
+            (parent == col(f"_c{r}"))
+            & (col("_fl") >= col(f"_lo{r}"))
+            & (col("_fl") < col(f"_hi{r}"))
+        )
         df = df.join(F.broadcast(ref_r), cond, "left").drop(f"_c{r}")
-        candidates.append(F.struct(
-            (col(f"_hi{r}") - col(f"_lo{r}")).alias("band_width"),
-            col(f"_area{r}").alias("area_km2"),
-            col(f"_code{r}").alias("code"),
-            col(f"_airac{r}").alias("airac_cfmu"),
-            col(f"_vs{r}").alias("validity_start"),
-            col(f"_ve{r}").alias("validity_end"),
-        ))
+        candidates.append(
+            F.struct(
+                (col(f"_hi{r}") - col(f"_lo{r}")).alias("band_width"),
+                col(f"_area{r}").alias("area_km2"),
+                col(f"_code{r}").alias("code"),
+                col(f"_airac{r}").alias("airac_cfmu"),
+                col(f"_vs{r}").alias("validity_start"),
+                col(f"_ve{r}").alias("validity_end"),
+            )
+        )
     matched = F.filter(F.array(*candidates), lambda c: c["code"].isNotNull())
     best = F.try_element_at(F.array_sort(matched), lit(1))
     df = df.withColumn("_best", best)
     df = df.select(
-        *[c for c in df.columns if not (c.startswith(("_code", "_lo", "_hi", "_area", "_airac", "_vs", "_ve")))],
+        *[
+            c
+            for c in df.columns
+            if not (c.startswith(("_code", "_lo", "_hi", "_area", "_airac", "_vs", "_ve")))
+        ],
     )
     df = (
         df.withColumn("fir_code", col("_best.code"))
@@ -121,8 +140,10 @@ def attach_fir(df: DataFrame, fir_ref: DataFrame, config: EventConfig) -> DataFr
     )
     # Duplicates from a double match at one resolution: keep the best-ranked row.
     w = Window.partitionBy("track_id", PIECE).orderBy(
-        col("_ts").asc(), col("fir_band_width").asc_nulls_last(),
-        col("fir_area_km2").asc_nulls_last(), col("fir_code").asc_nulls_last(),
+        col("_ts").asc(),
+        col("fir_band_width").asc_nulls_last(),
+        col("fir_area_km2").asc_nulls_last(),
+        col("fir_code").asc_nulls_last(),
     )
     dup = F.lag("_ts").over(w) == col("_ts")
     return df.withColumn("_dup", F.coalesce(dup, lit(False))).filter(~col("_dup")).drop("_dup")
@@ -132,16 +153,30 @@ def _debounced_runs(df: DataFrame, config: EventConfig) -> DataFrame:
     """``fir_run`` = the volume code after short runs are absorbed into the run before."""
     w = Window.partitionBy("track_id", PIECE).orderBy("_ts")
     upto = w.rowsBetween(Window.unboundedPreceding, 0)
-    after = w.rowsBetween(1, Window.unboundedFollowing)
+    # The rows after this one, as the rows before it in the reversed order:
+    # a frame ending at the last row is rescanned for every row (quadratic in
+    # the track's length), a frame starting at the first row is not. Times
+    # are unique within a track, so both frames hold the same rows, and a
+    # minimum does not depend on their order.
+    after = (
+        Window.partitionBy("track_id", PIECE)
+        .orderBy(col("_ts").desc())
+        .rowsBetween(Window.unboundedPreceding, -1)
+    )
     whole = w.rowsBetween(Window.unboundedPreceding, Window.unboundedFollowing)
-    start = ~(col("fir_code").eqNullSafe(F.lag("fir_code").over(w))) | F.lag("fir_code").over(w).isNull() & F.lag("_ts").over(w).isNull()
+    start = (
+        ~(col("fir_code").eqNullSafe(F.lag("fir_code").over(w)))
+        | F.lag("fir_code").over(w).isNull() & F.lag("_ts").over(w).isNull()
+    )
     df = df.withColumn("_start", F.coalesce(start, lit(True)))
     df = df.withColumn("_run_start_ts", F.max(F.when(col("_start"), col("_ts"))).over(upto))
     prev_ts = F.lag("_ts").over(w)
     df = df.withColumn("_prev_ts", prev_ts)
     df = df.withColumn(
         "_run_last_ts",
-        F.coalesce(F.min(F.when(col("_start"), col("_prev_ts"))).over(after), F.max("_ts").over(whole)),
+        F.coalesce(
+            F.min(F.when(col("_start"), col("_prev_ts"))).over(after), F.max("_ts").over(whole)
+        ),
     )
     long = (col("_run_last_ts") - col("_run_start_ts")) >= config.fir_min_dwell_seconds
     df = df.withColumn("_long_code", F.when(long, col("fir_code")))
@@ -154,7 +189,9 @@ def _debounced_runs(df: DataFrame, config: EventConfig) -> DataFrame:
         ignorenulls=True,
     ).over(upto)
     df = df.withColumn("fir_run", F.when(long, col("fir_code")).otherwise(carried["c"]))
-    return df.drop("_start", "_run_start_ts", "_prev_ts", "_run_last_ts", "_long_code", "_long_seen")
+    return df.drop(
+        "_start", "_run_start_ts", "_prev_ts", "_run_last_ts", "_long_code", "_long_seen"
+    )
 
 
 def calculate_fir_events(
@@ -195,19 +232,27 @@ def calculate_fir_events(
     )
     seq = Window.partitionBy("track_id").orderBy("_ts")
     df = df.withColumn("crossing_seq", F.row_number().over(seq))
-    info = F.to_json(F.struct(
-        col("crossing_seq"),
-        col("_prev_run").alias("fir_from"),
-        col("fir_run").alias("fir_to"),
-        F.round(col("_fl"), 0).alias("fl"),
-        col("_bracket_s").alias("bracket_s"),
-        col("airac_cfmu"),
-        col("airac_validity_start"),
-        col("airac_validity_end"),
-    ))
+    info = F.to_json(
+        F.struct(
+            col("crossing_seq"),
+            col("_prev_run").alias("fir_from"),
+            col("fir_run").alias("fir_to"),
+            F.round(col("_fl"), 0).alias("fl"),
+            col("_bracket_s").alias("bracket_s"),
+            col("airac_cfmu"),
+            col("airac_validity_start"),
+            col("airac_validity_end"),
+        )
+    )
     return df.select(
-        col("track_id"), lit("xing-fir").alias("type"), col("event_time"),
-        col("lon"), col("lat"), (col("baro_altitude_c") * FT_PER_M).alias("altitude_ft"),
-        col("cumulative_distance_nm"), col("cumulative_time_s").cast("long"),
-        info.alias("info"), lit(FIR_VERSION).alias("version"),
+        col("track_id"),
+        lit("xing-fir").alias("type"),
+        col("event_time"),
+        col("lon"),
+        col("lat"),
+        (col("baro_altitude_c") * FT_PER_M).alias("altitude_ft"),
+        col("cumulative_distance_nm"),
+        col("cumulative_time_s").cast("long"),
+        info.alias("info"),
+        lit(FIR_VERSION).alias("version"),
     )

@@ -1,19 +1,18 @@
-"""
-Spark session management utilities for OPDI pipeline.
+"""Spark session management utilities for OPDI pipeline.
 
 Provides centralized Spark session creation with consistent configuration
 across all pipeline components.
 """
 
-import os
 from typing import Dict, Optional
+
 from pyspark.sql import SparkSession
-from opdi.config import OPDIConfig, SparkConfig, ProjectConfig
+
+from opdi.config import OPDIConfig
 
 
 class SparkSessionManager:
-    """
-    Factory for creating and managing Spark sessions with OPDI configurations.
+    """Factory for creating and managing Spark sessions with OPDI configurations.
 
     This class centralizes all Spark configuration logic, eliminating duplication
     across pipeline scripts and enabling environment-specific settings.
@@ -23,28 +22,28 @@ class SparkSessionManager:
     def create_session(
         app_name: str = "OPDI Pipeline",
         config: Optional[OPDIConfig] = None,
-        env: str = "dev",
+        env: str = "opensky",
         extra_configs: Optional[Dict[str, str]] = None,
         distributed: bool = False,
         container_image: Optional[str] = None,
     ) -> SparkSession:
-        """
-        Create a new Spark session with OPDI configuration.
+        """Create a new Spark session with OPDI configuration.
 
         Args:
             app_name: Name for the Spark application
             config: OPDI configuration object. If None, creates config for specified env
-            env: Environment name ("dev", "live", "local", "opensky") - used if config is None
+            env: Environment name ("local" or "opensky") - used if config is None
             extra_configs: Additional Spark configurations to override defaults
             distributed: If True, enable Kubernetes distributed mode (opensky env)
-            container_image: Override K8s executor container image (e.g. "my-registry/opdi-spark:v4.1.1")
+            container_image: Override the Kubernetes executor container image
+                (e.g. "my-registry/opdi-spark:v4.1.1").
 
         Returns:
             Configured SparkSession
 
         Example:
             >>> from opdi.utils.spark_helpers import SparkSessionManager
-            >>> spark = SparkSessionManager.create_session("Track Processing", env="live")
+            >>> spark = SparkSessionManager.create_session("Track Processing", env="opensky")
             >>> df = spark.table("project_opdi.osn_statevectors_v2")
         """
         if config is None:
@@ -80,16 +79,15 @@ class SparkSessionManager:
     def get_or_create(
         app_name: str = "OPDI Pipeline",
         config: Optional[OPDIConfig] = None,
-        env: str = "dev",
+        env: str = "opensky",
         distributed: bool = False,
     ) -> SparkSession:
-        """
-        Get existing Spark session or create new one if none exists.
+        """Get existing Spark session or create new one if none exists.
 
         Args:
             app_name: Name for the Spark application
             config: OPDI configuration object. If None, creates config for specified env
-            env: Environment name ("dev", "live", "local", "opensky")
+            env: Environment name ("local" or "opensky")
             distributed: If True, enable Kubernetes distributed mode (opensky env)
 
         Returns:
@@ -109,8 +107,7 @@ class SparkSessionManager:
 
     @staticmethod
     def stop_session(spark: SparkSession) -> None:
-        """
-        Stop the given Spark session and clean up resources.
+        """Stop the given Spark session and clean up resources.
 
         Args:
             spark: SparkSession to stop
@@ -129,10 +126,9 @@ class SparkSessionManager:
         master: str = "local[*]",
         extra_configs: Optional[Dict[str, str]] = None,
     ) -> SparkSession:
-        """
-        Create a lightweight Spark session for local testing.
+        """Create a lightweight Spark session for local testing.
 
-        This creates a minimal Spark session without Iceberg, Hive, or Azure dependencies,
+        This creates a minimal Spark session without Iceberg or Hive,
         suitable for unit testing and local development.
 
         Args:
@@ -155,6 +151,7 @@ class SparkSessionManager:
             "spark.executor.memory": "2G",
             "spark.sql.shuffle.partitions": "4",
             "spark.ui.showConsoleProgress": "false",
+            "spark.sql.session.timeZone": "UTC",
         }
 
         # Apply default configs
@@ -170,29 +167,45 @@ class SparkSessionManager:
 
 
 def get_spark(
-    env: str = "dev",
+    env: str = "opensky",
     app_name: str = "OPDI Pipeline",
     distributed: bool = False,
     container_image: Optional[str] = None,
 ) -> SparkSession:
-    """
-    Convenience function to get a Spark session with OPDI configuration.
+    """Convenience function to get a Spark session with OPDI configuration.
 
     This is a shorthand for SparkSessionManager.create_session().
 
     Args:
-        env: Environment name ("dev", "live", "local", "opensky")
+        env: Environment name ("local" or "opensky")
         app_name: Name for the Spark application
         distributed: If True, enable Kubernetes distributed mode (opensky env)
-        container_image: Override K8s executor container image (e.g. "my-registry/opdi-spark:v4.1.1")
+        container_image: Override the Kubernetes executor container image
+            (e.g. "my-registry/opdi-spark:v4.1.1").
 
     Returns:
         Configured SparkSession
 
     Example:
         >>> from opdi.utils.spark_helpers import get_spark
-        >>> spark = get_spark("opensky", distributed=True, container_image="my-registry/opdi-spark:v4.1.1")
+        >>> spark = get_spark(
+        ...     "opensky", distributed=True, container_image="my-registry/opdi-spark:v4.1.1"
+        ... )
     """
     return SparkSessionManager.create_session(
-        app_name=app_name, env=env, distributed=distributed, container_image=container_image,
+        app_name=app_name,
+        env=env,
+        distributed=distributed,
+        container_image=container_image,
     )
+
+
+def release_local_checkpoint(df) -> None:
+    """Free the data a ``df.localCheckpoint()`` holds on the executors.
+
+    ``unpersist`` does not reach it: the checkpointed data belong to the RDD
+    under the frame, which is released here. Call it only when nothing will
+    read ``df`` again; a later read fails (the data are gone), it never
+    gives other data.
+    """
+    df._jdf.queryExecution().analyzed().rdd().unpersist(False)

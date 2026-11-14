@@ -18,16 +18,20 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import osn_sample
+from adep_ades import (
+    airport_locations,
+    airport_types,
+    label_ground_truth,
+    load_ground_truth,
+    per_airport_counts,
+    per_type_counts,
+    score,
+)
+from osn_sample import build_spark, load_dotenv
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
-
-import osn_sample
-from tables import table, fixed
-from osn_sample import build_spark, load_dotenv
-from adep_ades import (
-    airport_locations, airport_types, label_ground_truth, load_ground_truth,
-    score, per_airport_counts, per_type_counts, error_pairs,
-)
+from tables import table
 
 FL_BASE = table("research/flight_list_{mode}")
 #: Default candidate cache. Overridable with --candidates so the same sweeps
@@ -43,8 +47,7 @@ RADII_NM = (5, 10, 20, 30, 40, 60, 80, 100, 110)
 #: The grid runs to 40,000 ft -- above typical cruise, so the curve is followed
 #: all the way to where it flattens rather than being cut off mid-rise at
 #: 20,000 ft, where 6 points of coverage still separated it from unrestricted.
-HEIGHTS_FT = (0, 500, 1000, 2000, 5000, 8000, 10000, 15000, 20000,
-              25000, 30000, 35000, 40000, 1e9)
+HEIGHTS_FT = (0, 500, 1000, 2000, 5000, 8000, 10000, 15000, 20000, 25000, 30000, 35000, 40000, 1e9)
 
 #: Scheduled-service penalties. 0 reproduces the unbiased ranking exactly and
 #: is the control for the tie-break.
@@ -111,24 +114,18 @@ def predictions_from_candidates(
     best = c.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1)
 
     ok = F.col("dist_nm") <= float(radius_nm)
-    ok = ok & (
-        F.col("on_ground")
-        | (F.col("elev_known") & (F.col("agl_ft") <= float(height_ft)))
-    )
-    apt = F.when(ok, F.col("apt_ident")).otherwise(
-        F.when(F.col("at_border"), F.lit("OOA"))
-    )
+    ok = ok & (F.col("on_ground") | (F.col("elev_known") & (F.col("agl_ft") <= float(height_ft))))
+    apt = F.when(ok, F.col("apt_ident")).otherwise(F.when(F.col("at_border"), F.lit("OOA")))
     best = best.withColumn("apt", apt)
 
-    return (
-        best.groupBy("track_id")
-        .pivot("role", ["adep", "ades"])
-        .agg(F.first("apt"))
-    )
+    return best.groupBy("track_id").pivot("role", ["adep", "ades"]).agg(F.first("apt"))
 
 
 def predictions_cone(
-    cand: DataFrame, radius_nm: float, slope_ft_nm: float, penalty_nm: float,
+    cand: DataFrame,
+    radius_nm: float,
+    slope_ft_nm: float,
+    penalty_nm: float,
     floor_ft: float = 1000.0,
 ) -> DataFrame:
     """The endpoint rule with an approach cone instead of a rectangle.
@@ -159,15 +156,11 @@ def predictions_cone(
     w = Window.partitionBy("track_id", "role").orderBy(F.col("_eff").asc_nulls_last())
     best = c.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1)
 
-    ceiling = F.greatest(
-        F.lit(float(floor_ft)), F.col("dist_nm") * F.lit(float(slope_ft_nm))
-    )
+    ceiling = F.greatest(F.lit(float(floor_ft)), F.col("dist_nm") * F.lit(float(slope_ft_nm)))
     ok = (F.col("dist_nm") <= float(radius_nm)) & (
         F.col("on_ground") | (F.col("elev_known") & (F.col("agl_ft") <= ceiling))
     )
-    apt = F.when(ok, F.col("apt_ident")).otherwise(
-        F.when(F.col("at_border"), F.lit("OOA"))
-    )
+    apt = F.when(ok, F.col("apt_ident")).otherwise(F.when(F.col("at_border"), F.lit("OOA")))
     return (
         best.withColumn("apt", apt)
         .groupBy("track_id")
@@ -201,16 +194,25 @@ def main() -> None:
     ap.add_argument("--executors", type=int, default=4)
     ap.add_argument("--ui-port", type=int, default=4041)
     ap.add_argument("--skip-sweeps", action="store_true")
-    ap.add_argument("--candidates", default=CANDIDATES,
-                    help="candidate cache to sweep (default: the 2025 table)")
-    ap.add_argument("--sweeps-only", action="store_true",
-                    help="skip the mode comparison and cross-checks, "
-                         "which read flight lists another run wrote")
-    ap.add_argument("--local", action="store_true",
-                    help="run in local mode. The benchmark inputs are small -- "
-                         "7.5M cached candidates, 233k flight records, 95k "
-                         "ground-truth flights -- so it does not need the "
-                         "cluster, and the namespace is shared.")
+    ap.add_argument(
+        "--candidates",
+        default=CANDIDATES,
+        help="candidate cache to sweep (default: the 2025 table)",
+    )
+    ap.add_argument(
+        "--sweeps-only",
+        action="store_true",
+        help="skip the mode comparison and cross-checks, "
+        "which read flight lists another run wrote",
+    )
+    ap.add_argument(
+        "--local",
+        action="store_true",
+        help="run in local mode. The benchmark inputs are small -- "
+        "7.5M cached candidates, 233k flight records, 95k "
+        "ground-truth flights -- so it does not need the "
+        "cluster, and the namespace is shared.",
+    )
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="8g")
     args = ap.parse_args()
@@ -246,28 +248,32 @@ def main() -> None:
     # cluster time producing numbers nothing reads, and leaves a second
     # mode_comparison.csv for someone to pick up by mistake.
     if args.sweeps_only:
-        print("\n  skipping the mode comparison and cross-checks (--sweeps-only):\n"
-              "  they read pipeline output written by another run.")
+        print(
+            "\n  skipping the mode comparison and cross-checks (--sweeps-only):\n"
+            "  they read pipeline output written by another run."
+        )
     else:
-        print("\n  NOTE: the mode comparison and cross-checks below read the\n"
-              "  flight lists under research/, not the candidate cache. Confirm\n"
-              "  they were written with the parameters under test.")
+        print(
+            "\n  NOTE: the mode comparison and cross-checks below read the\n"
+            "  flight lists under research/, not the candidate cache. Confirm\n"
+            "  they were written with the parameters under test."
+        )
         rows = []
         for mode in MODES:
             pred, ident = from_flight_list(spark, mode)
             m = score(pred, ident, gt)
             m["mode"] = mode
             rows.append(m)
-            print(f"  {mode:9} ADEP cov {m['adep_coverage']:6.2%} "
-                  f"acc {m['adep_accuracy']:6.2%}"
-                  f"   ADES cov {m['ades_coverage']:6.2%} "
-                  f"acc {m['ades_accuracy']:6.2%}")
-        spark.createDataFrame(rows).toPandas().to_csv(
-            out / "mode_comparison.csv", index=False)
+            print(
+                f"  {mode:9} ADEP cov {m['adep_coverage']:6.2%} "
+                f"acc {m['adep_accuracy']:6.2%}"
+                f"   ADES cov {m['ades_coverage']:6.2%} "
+                f"acc {m['ades_accuracy']:6.2%}"
+            )
+        spark.createDataFrame(rows).toPandas().to_csv(out / "mode_comparison.csv", index=False)
 
         pred, ident = from_flight_list(spark, "endpoint")
-        per_airport_counts(pred, ident, gt).toPandas().to_csv(
-            out / "per_airport.csv", index=False)
+        per_airport_counts(pred, ident, gt).toPandas().to_csv(out / "per_airport.csv", index=False)
         pt = per_type_counts(pred, ident, gt, airport_types(spark)).toPandas()
         pt.to_csv(out / "per_type.csv", index=False)
 
@@ -289,9 +295,11 @@ def main() -> None:
             m = score(p, ident_c, gt)
             m.update(radius_nm=float(r), slope_ft_nm=float(k), penalty_nm=10.0)
             cone.append(m)
-            print(f"  cone r<={r:>3} k={k:>5.0f} ft/NM  ADEP {m['adep_coverage']:6.2%}/"
-                  f"{m['adep_accuracy']:6.2%}   ADES {m['ades_coverage']:6.2%}/"
-                  f"{m['ades_accuracy']:6.2%}")
+            print(
+                f"  cone r<={r:>3} k={k:>5.0f} ft/NM  ADEP {m['adep_coverage']:6.2%}/"
+                f"{m['adep_accuracy']:6.2%}   ADES {m['ades_coverage']:6.2%}/"
+                f"{m['ades_accuracy']:6.2%}"
+            )
     spark.createDataFrame(cone).toPandas().to_csv(out / "sweep_cone.csv", index=False)
 
     # -- radius x height ----------------------------------------------------
@@ -302,9 +310,11 @@ def main() -> None:
             m = score(p, ident_c, gt)
             m.update(radius_nm=float(r), height_ft=float(h), penalty_nm=10.0)
             grid.append(m)
-            print(f"  r<={r:>3} h<={h:>10.0f}  ADEP {m['adep_coverage']:6.2%}/"
-                  f"{m['adep_accuracy']:6.2%}   ADES {m['ades_coverage']:6.2%}/"
-                  f"{m['ades_accuracy']:6.2%}")
+            print(
+                f"  r<={r:>3} h<={h:>10.0f}  ADEP {m['adep_coverage']:6.2%}/"
+                f"{m['adep_accuracy']:6.2%}   ADES {m['ades_coverage']:6.2%}/"
+                f"{m['ades_accuracy']:6.2%}"
+            )
     spark.createDataFrame(grid).toPandas().to_csv(out / "sweep_radius_height.csv", index=False)
 
     # -- scheduled-service penalty -----------------------------------------
@@ -314,8 +324,10 @@ def main() -> None:
         m = score(p, ident_c, gt)
         m.update(radius_nm=40.0, height_ft=15000.0, penalty_nm=float(q))
         pen.append(m)
-        print(f"  penalty {q:>3} NM   ADEP {m['adep_coverage']:6.2%}/{m['adep_accuracy']:6.2%}"
-              f"   ADES {m['ades_coverage']:6.2%}/{m['ades_accuracy']:6.2%}")
+        print(
+            f"  penalty {q:>3} NM   ADEP {m['adep_coverage']:6.2%}/{m['adep_accuracy']:6.2%}"
+            f"   ADES {m['ades_coverage']:6.2%}/{m['ades_accuracy']:6.2%}"
+        )
     spark.createDataFrame(pen).toPandas().to_csv(out / "sweep_penalty.csv", index=False)
 
     print(f"\nwritten to {out}")

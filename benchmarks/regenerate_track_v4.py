@@ -77,7 +77,7 @@ CORE = [
     "src/opdi/pipeline/segmentation/methods.py",
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/tracks.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "src/opdi/coverage.py",
 ]
 
@@ -96,10 +96,11 @@ def _grid_outputs(days):
 #: Written only when the grid picks a point (or is given one): the reasons
 #: reports are read at that point. A grid that picks none produces none.
 def _reasons_outputs(days):
-    return [f"{stem}_{d}.csv"
-            for stem in ("link_reasons", "link_positive_reasons",
-                         "link_negative_reasons")
-            for d in [*days, "pooled"]]
+    return [
+        f"{stem}_{d}.csv"
+        for stem in ("link_reasons", "link_positive_reasons", "link_negative_reasons")
+        for d in [*days, "pooled"]
+    ]
 
 
 def script_code_paths(script):
@@ -110,16 +111,21 @@ def script_code_paths(script):
     """
     tree = ast.parse((REPO / script).read_text())
     for node in tree.body:
-        if (isinstance(node, ast.Assign)
-                and any(getattr(t, "id", "") == "_CODE_PATHS" for t in node.targets)):
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", "") == "_CODE_PATHS" for t in node.targets
+        ):
             return list(ast.literal_eval(node.value))
     raise SystemExit(f"{script} declares no _CODE_PATHS")
 
 
 STAGE2_OUTPUTS = [
-    "link_flight_list.csv", "link_both_ends.csv", "link_events.csv",
-    "link_level_across_hole.csv", "link_distance_across_hole.csv",
-    "link_partition_check.csv", "link_movements.csv",
+    "link_flight_list.csv",
+    "link_both_ends.csv",
+    "link_events.csv",
+    "link_level_across_hole.csv",
+    "link_distance_across_hole.csv",
+    "link_partition_check.csv",
+    "link_movements.csv",
     "link_truth_all_flights.csv",
 ]
 
@@ -127,8 +133,9 @@ STAGE2_OUTPUTS = [
 class Job:
     """One analysis step: a command, its outputs, and what it depends on."""
 
-    def __init__(self, name, script, args, outputs, code_paths, notes="",
-                 optional=(), data_root=None):
+    def __init__(
+        self, name, script, args, outputs, code_paths, notes="", optional=(), data_root=None
+    ):
         self.name = name
         # ``data_root`` lets a later paper reuse this class with its own data.
         self.data = (data_root or DATA) / name
@@ -137,8 +144,7 @@ class Job:
         self.outputs = outputs
         # Union with what the script itself says its outputs depend on, so the
         # runner can never know less than the script that records them.
-        self.code_paths = list(dict.fromkeys(
-            [script, *code_paths, *script_code_paths(script)]))
+        self.code_paths = list(dict.fromkeys([script, *code_paths, *script_code_paths(script)]))
         self.notes = notes
         self.optional = set(optional)
 
@@ -146,8 +152,11 @@ class Job:
         reasons = {}
         manifest = provenance.load_manifest(self.data)
         for staged in self.outputs.values():
-            if (staged in self.optional and not (self.data / staged).is_file()
-                    and staged not in manifest):
+            if (
+                staged in self.optional
+                and not (self.data / staged).is_file()
+                and staged not in manifest
+            ):
                 continue  # never produced: the grid picked no point
             entry = manifest.get(staged)
             if entry is not None and entry.get("argv") != list(self.args):
@@ -172,8 +181,7 @@ class Job:
         the run can know.
         """
         with tempfile.TemporaryDirectory(prefix=f"trackv4_{self.name}_") as tmp:
-            cmd = [sys.executable, "-u", str(REPO / self.script),
-                   *self.args, "--results-dir", tmp]
+            cmd = [sys.executable, "-u", str(REPO / self.script), *self.args, "--results-dir", tmp]
             print(f"\n=== {self.name} ===\n  {' '.join(cmd[2:])}", flush=True)
             r = subprocess.run(cmd, cwd=REPO)
             if r.returncode != 0:
@@ -194,10 +202,16 @@ class Job:
                 self.data.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, self.data / staged)
                 own = provenance.load_manifest(tmp).get(produced, {})
-                provenance.record(self.data, staged, self.script, self.args,
-                                  self.code_paths, inputs=own.get("inputs"),
-                                  input_tables=list(own.get("input_tables") or {}),
-                                  notes=self.notes)
+                provenance.record(
+                    self.data,
+                    staged,
+                    self.script,
+                    self.args,
+                    self.code_paths,
+                    inputs=own.get("inputs"),
+                    input_tables=list(own.get("input_tables") or {}),
+                    notes=self.notes,
+                )
                 print(f"  staged {staged}")
 
 
@@ -206,53 +220,66 @@ def jobs() -> list:
         Job(
             name="final_grid",
             script="benchmarks/track_link_grid.py",
-            args=["--days", *DAYS, "--grid-json", json.dumps({
-                "link_min_implied_speed_kt": [315, 400],
-                "link_min_speed_ratio": [0.0, 0.85],
-                "link_min_stop_minutes": [0.0, 20.0, 35.0],
-                "link_max_gap_minutes": [360, 480, 600],
-                "link_cruise_floor_ft": [18000],
-                "link_old_edge_climb": [True],
-                "link_new_edge_descent": [False],
-            })],
+            args=[
+                "--days",
+                *DAYS,
+                "--grid-json",
+                json.dumps(
+                    {
+                        "link_min_implied_speed_kt": [315, 400],
+                        "link_min_speed_ratio": [0.0, 0.85],
+                        "link_min_stop_minutes": [0.0, 20.0, 35.0],
+                        "link_max_gap_minutes": [360, 480, 600],
+                        "link_cruise_floor_ft": [18000],
+                        "link_old_edge_climb": [True],
+                        "link_new_edge_descent": [False],
+                    }
+                ),
+            ],
             outputs={n: n for n in _grid_outputs(DAYS) + _reasons_outputs(DAYS)},
             optional=_reasons_outputs(DAYS),
             code_paths=CORE,
             notes="Final cruise-link grid over two days, pooled, with the "
-                  "recommendation and, when a point is chosen, the reasons "
-                  "reports read at it.",
+            "recommendation and, when a point is chosen, the reasons "
+            "reports read at it.",
         ),
         Job(
             name="final_edges",
             script="benchmarks/track_link_grid.py",
-            args=["--days", *DAYS, "--grid-json", json.dumps({
-                "link_min_implied_speed_kt": [400],
-                "link_min_speed_ratio": [0.0],
-                "link_min_stop_minutes": [0.0],
-                "link_max_gap_minutes": [600],
-                "link_old_edge_climb": [False, True],
-                "link_new_edge_descent": [False, True],
-                "link_cruise_floor_ft": [18000],
-            })],
-            outputs={n: n for n in ("link_grid_pooled.csv",
-                                    "link_controls_pooled.csv")},
+            args=[
+                "--days",
+                *DAYS,
+                "--grid-json",
+                json.dumps(
+                    {
+                        "link_min_implied_speed_kt": [400],
+                        "link_min_speed_ratio": [0.0],
+                        "link_min_stop_minutes": [0.0],
+                        "link_max_gap_minutes": [600],
+                        "link_old_edge_climb": [False, True],
+                        "link_new_edge_descent": [False, True],
+                        "link_cruise_floor_ft": [18000],
+                    }
+                ),
+            ],
+            outputs={n: n for n in ("link_grid_pooled.csv", "link_controls_pooled.csv")},
             code_paths=CORE,
-            notes="The chosen point with climb edges and descent edges each "
-                  "off and on.",
+            notes="The chosen point with climb edges and descent edges each " "off and on.",
         ),
         Job(
             name="stage2",
             script="benchmarks/track_link_pipeline_score.py",
             args=["--day", STAGE2_DAY],
             outputs={n: n for n in STAGE2_OUTPUTS},
-            code_paths=CORE + [
+            code_paths=CORE
+            + [
                 "src/opdi/pipeline/flights.py",
                 "src/opdi/pipeline/events.py",
                 "benchmarks/run_track_link_day.py",
             ],
             notes="Both arms at research/a10 through the real pipeline, one "
-                  "day on a 10% sample, scored against the flight list. "
-                  "Needs run_track_link_day.py to have built the arms.",
+            "day on a 10% sample, scored against the flight list. "
+            "Needs run_track_link_day.py to have built the arms.",
         ),
     ]
 
@@ -260,13 +287,16 @@ def jobs() -> list:
 def main(all_jobs=None, description=None) -> None:
     """Run or check the jobs. A later paper passes its own job list and docstring."""
     ap = argparse.ArgumentParser(description=description or __doc__)
-    ap.add_argument("--check", action="store_true",
-                    help="report staleness and exit; no cluster needed")
+    ap.add_argument(
+        "--check", action="store_true", help="report staleness and exit; no cluster needed"
+    )
     ap.add_argument("--force", action="store_true", help="re-run every job")
     ap.add_argument("--only", nargs="+", help="run only these jobs, by name")
-    ap.add_argument("--allow-stale", action="store_true",
-                    help="report staleness but exit 0 -- for rendering a draft "
-                         "without a cluster")
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="report staleness but exit 0 -- for rendering a draft " "without a cluster",
+    )
     args = ap.parse_args()
 
     todo = (all_jobs or jobs)()
@@ -276,8 +306,7 @@ def main(all_jobs=None, description=None) -> None:
     stale = {j.name: j.stale() for j in todo}
     any_stale = {k: v for k, v in stale.items() if v}
 
-    print(f"analysis at {provenance.git_sha()}"
-          f"{' (dirty)' if provenance.git_dirty() else ''}\n")
+    print(f"analysis at {provenance.git_sha()}" f"{' (dirty)' if provenance.git_dirty() else ''}\n")
     for j in todo:
         why = stale[j.name]
         if why:
@@ -291,9 +320,13 @@ def main(all_jobs=None, description=None) -> None:
         if any_stale and not args.allow_stale:
             raise SystemExit(
                 f"\n{len(any_stale)} job(s) stale. Run without --check to "
-                f"regenerate, or pass --allow-stale to render anyway.")
-        print("\nall outputs current" if not any_stale else
-              "\nrendering with stale outputs (--allow-stale)")
+                f"regenerate, or pass --allow-stale to render anyway."
+            )
+        print(
+            "\nall outputs current"
+            if not any_stale
+            else "\nrendering with stale outputs (--allow-stale)"
+        )
         return
 
     for j in todo:

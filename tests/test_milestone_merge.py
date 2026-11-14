@@ -7,10 +7,9 @@ collapses each pair at source, preferring the A-CDM arm and falling back to the
 legacy one, and records the arm in ``info.method`` so the mixture stays
 recoverable.
 """
+
 import datetime as dt
 import json
-
-import pytest
 
 from opdi.config import EventConfig
 from opdi.pipeline.events import merge_milestone_duplicates
@@ -22,8 +21,12 @@ def _events(spark, rows):
     """``(track_id, type, seconds_after_T0, method)`` onto the event frame."""
     return spark.createDataFrame(
         [
-            (t, ty, T0 + dt.timedelta(seconds=s),
-             json.dumps({"method": m}) if m is not None else json.dumps({}))
+            (
+                t,
+                ty,
+                T0 + dt.timedelta(seconds=s),
+                json.dumps({"method": m}) if m is not None else json.dumps({}),
+            )
             for t, ty, s, m in rows
         ],
         "track_id string, type string, event_time timestamp, info string",
@@ -38,10 +41,13 @@ def test_the_acdm_arm_wins_where_both_fired(spark):
     """A-CDM is the interpolated crossing of 15 ft above field elevation;
     legacy is the extreme *sample* of a detection window, which carries a
     measured +19 s median bias on departures."""
-    df = _events(spark, [
-        ("trk-1", "ATOT", 19, "legacy"),
-        ("trk-1", "ATOT", 0, "acdm"),
-    ])
+    df = _events(
+        spark,
+        [
+            ("trk-1", "ATOT", 19, "legacy"),
+            ("trk-1", "ATOT", 0, "acdm"),
+        ],
+    )
 
     out = merge_milestone_duplicates(df, EventConfig())
 
@@ -65,11 +71,14 @@ def test_a_legacy_only_flight_keeps_its_milestone(spark):
 
 def test_each_flight_is_resolved_on_its_own(spark):
     """One flight having both arms must not decide the other's."""
-    df = _events(spark, [
-        ("trk-1", "ATOT", 19, "legacy"),
-        ("trk-1", "ATOT", 0, "acdm"),
-        ("trk-2", "ATOT", 19, "legacy"),
-    ])
+    df = _events(
+        spark,
+        [
+            ("trk-1", "ATOT", 19, "legacy"),
+            ("trk-1", "ATOT", 0, "acdm"),
+            ("trk-2", "ATOT", 19, "legacy"),
+        ],
+    )
 
     got = _by_type(merge_milestone_duplicates(df, EventConfig()))
 
@@ -82,11 +91,14 @@ def test_the_two_merged_types_do_not_interfere(spark):
     """``ATOT`` and ``ALDT`` are resolved independently: a flight may have an
     A-CDM landing and only a legacy take-off, which is the common shape when
     reception differs between the two ends of the flight."""
-    df = _events(spark, [
-        ("trk-1", "ATOT", 19, "legacy"),
-        ("trk-1", "ALDT", 100, "legacy"),
-        ("trk-1", "ALDT", 95, "acdm"),
-    ])
+    df = _events(
+        spark,
+        [
+            ("trk-1", "ATOT", 19, "legacy"),
+            ("trk-1", "ALDT", 100, "legacy"),
+            ("trk-1", "ALDT", 95, "acdm"),
+        ],
+    )
 
     got = _by_type(merge_milestone_duplicates(df, EventConfig()))
 
@@ -99,11 +111,14 @@ def test_every_other_type_passes_through_untouched(spark):
     """A type with one source has nothing to disambiguate, so the merge must
     not deduplicate it -- two ``level-start`` rows on one flight are two real
     level segments, not a duplicate."""
-    df = _events(spark, [
-        ("trk-1", "level-start", 10, None),
-        ("trk-1", "level-start", 40, None),
-        ("trk-1", "AOBT", 0, None),
-    ])
+    df = _events(
+        spark,
+        [
+            ("trk-1", "level-start", 10, None),
+            ("trk-1", "level-start", 40, None),
+            ("trk-1", "AOBT", 0, None),
+        ],
+    )
 
     out = merge_milestone_duplicates(df, EventConfig())
 
@@ -113,11 +128,14 @@ def test_every_other_type_passes_through_untouched(spark):
 def test_an_unstamped_row_may_fill_a_gap_but_never_displace_an_arm(spark):
     """An absent method is neither arm. It sorts last so that a re-processed
     table carrying older rows cannot quietly outrank a stamped one."""
-    df = _events(spark, [
-        ("trk-1", "ATOT", 50, None),
-        ("trk-1", "ATOT", 19, "legacy"),
-        ("trk-2", "ATOT", 50, None),
-    ])
+    df = _events(
+        spark,
+        [
+            ("trk-1", "ATOT", 50, None),
+            ("trk-1", "ATOT", 19, "legacy"),
+            ("trk-2", "ATOT", 50, None),
+        ],
+    )
 
     got = _by_type(merge_milestone_duplicates(df, EventConfig()))
 
@@ -130,15 +148,16 @@ def test_a_tie_within_one_arm_resolves_deterministically(spark):
     """Two rows of the same method for one flight would otherwise be resolved
     by partition order. ``info`` on this table has already been bitten once by
     exactly that."""
-    df = _events(spark, [
-        ("trk-1", "ATOT", 30, "acdm"),
-        ("trk-1", "ATOT", 10, "acdm"),
-    ])
+    df = _events(
+        spark,
+        [
+            ("trk-1", "ATOT", 30, "acdm"),
+            ("trk-1", "ATOT", 10, "acdm"),
+        ],
+    )
 
     first = merge_milestone_duplicates(df, EventConfig()).collect()[0]["event_time"]
-    second = merge_milestone_duplicates(
-        df.repartition(4), EventConfig()
-    ).collect()[0]["event_time"]
+    second = merge_milestone_duplicates(df.repartition(4), EventConfig()).collect()[0]["event_time"]
 
     assert first == second == T0 + dt.timedelta(seconds=10)
 
@@ -146,13 +165,34 @@ def test_a_tie_within_one_arm_resolves_deterministically(spark):
 def test_the_unmerged_configuration_keeps_both_rows(spark):
     """v0.2.0 published both and told them apart by type string; reconstructing
     it must still produce both."""
-    df = _events(spark, [
-        ("trk-1", "ATOT", 19, "legacy"),
-        ("trk-1", "ATOT", 0, "acdm"),
-    ])
-
-    out = merge_milestone_duplicates(
-        df, EventConfig(merge_duplicate_milestones=False)
+    df = _events(
+        spark,
+        [
+            ("trk-1", "ATOT", 19, "legacy"),
+            ("trk-1", "ATOT", 0, "acdm"),
+        ],
     )
 
+    out = merge_milestone_duplicates(df, EventConfig(merge_duplicate_milestones=False))
+
     assert out.count() == 2
+
+
+def test_an_event_without_a_time_never_replaces_one_with_a_time(spark):
+    """The runway milestone is preferred, but not when it has no time: a
+    take-off time without a time says nothing, and the runway window time of
+    the same flight is kept instead."""
+    df = spark.createDataFrame(
+        [
+            ("trk-1", "ATOT", None, json.dumps({"method": "acdm"})),
+            ("trk-1", "ATOT", T0, json.dumps({"method": "legacy"})),
+            ("trk-2", "ALDT", None, json.dumps({"method": "legacy"})),
+            ("trk-2", "ALDT", T0, json.dumps({"method": "legacy"})),
+        ],
+        "track_id string, type string, event_time timestamp, info string",
+    )
+
+    out = _by_type(merge_milestone_duplicates(df, EventConfig()))
+
+    assert out[("trk-1", "ATOT")]["event_time"] == T0
+    assert out[("trk-2", "ALDT")]["event_time"] == T0

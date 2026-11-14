@@ -5,12 +5,9 @@ The runway name is the one part of this family APDF can score directly, via
 the benchmark is meant to measure rather than assume.
 """
 
-import datetime as dt
-
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
@@ -41,10 +38,30 @@ def thresholds(spark):
     # longitude is only cos(50.9) = 0.63 of a degree of latitude here, and
     # ignoring that put the first fixture's "07R" at 077.
     rows = [
-        (1, 1, "EBBR", False, "07R", APT_LAT - 0.003, APT_LON - 0.01305,
-         "25L", APT_LAT + 0.003, APT_LON + 0.01305),
-        (2, 1, "EBBR", False, "01", APT_LAT - 0.02, APT_LON - 0.0056,
-         "19", APT_LAT + 0.02, APT_LON + 0.0056),
+        (
+            1,
+            1,
+            "EBBR",
+            False,
+            "07R",
+            APT_LAT - 0.003,
+            APT_LON - 0.01305,
+            "25L",
+            APT_LAT + 0.003,
+            APT_LON + 0.01305,
+        ),
+        (
+            2,
+            1,
+            "EBBR",
+            False,
+            "01",
+            APT_LAT - 0.02,
+            APT_LON - 0.0056,
+            "19",
+            APT_LAT + 0.02,
+            APT_LON + 0.0056,
+        ),
     ]
     rwy = spark.createDataFrame(
         rows,
@@ -69,10 +86,15 @@ def _movement(spark, heading, climbing=True, n=8):
     return make_track(
         spark,
         [
-            {"t": i * 5, "lat": APT_LAT + i * 0.001, "lon": APT_LON + i * 0.001,
-             "baro_altitude": (300 + i * 100) / FT_PER_M,
-             "vert_rate": rate / FTMIN_PER_MPS,
-             "velocity": 160 / KT_PER_MPS, "heading": heading}
+            {
+                "t": i * 5,
+                "lat": APT_LAT + i * 0.001,
+                "lon": APT_LON + i * 0.001,
+                "baro_altitude": (300 + i * 100) / FT_PER_M,
+                "vert_rate": rate / FTMIN_PER_MPS,
+                "velocity": 160 / KT_PER_MPS,
+                "heading": heading,
+            }
             for i in range(n)
         ],
     ).withColumn("baro_altitude_c", F.col("baro_altitude"))
@@ -167,9 +189,12 @@ def test_an_arrival_needs_a_descent_not_a_climb(spark, thresholds):
     cannot be read as an arrival's."""
     climbing = _movement(spark, heading=70, climbing=True)
 
-    assert detect_runway_movements(
-        climbing, _ends(spark, "arrival"), thresholds, EventConfig()
-    ).collect() == []
+    assert (
+        detect_runway_movements(
+            climbing, _ends(spark, "arrival"), thresholds, EventConfig()
+        ).collect()
+        == []
+    )
 
 
 def test_an_arrival_is_matched_and_timed_at_its_last_sample(spark, thresholds):
@@ -185,22 +210,26 @@ def test_an_arrival_is_matched_and_timed_at_its_last_sample(spark, thresholds):
 
 
 def test_taxiing_is_excluded_by_the_groundspeed_gate(spark, thresholds):
-    slow = _movement(spark, heading=70).withColumn(
-        "velocity", F.lit(10 / KT_PER_MPS)
-    )
+    slow = _movement(spark, heading=70).withColumn("velocity", F.lit(10 / KT_PER_MPS))
 
-    assert detect_runway_movements(
-        slow, _ends(spark, "departure"), thresholds, EventConfig()
-    ).collect() == []
+    assert (
+        detect_runway_movements(
+            slow, _ends(spark, "departure"), thresholds, EventConfig()
+        ).collect()
+        == []
+    )
 
 
 def test_too_few_samples_do_not_name_a_runway(spark, thresholds):
     """traffic requires four; one spurious sample should not name a runway."""
     short = _movement(spark, heading=70, n=3)
 
-    assert detect_runway_movements(
-        short, _ends(spark, "departure"), thresholds, EventConfig()
-    ).collect() == []
+    assert (
+        detect_runway_movements(
+            short, _ends(spark, "departure"), thresholds, EventConfig()
+        ).collect()
+        == []
+    )
 
 
 def test_missing_reference_table_returns_none(spark):
@@ -219,13 +248,17 @@ def test_parallel_runways_are_separated_by_where_the_aircraft_actually_was(spark
     from opdi.pipeline.runways import cross_track_nm
 
     west = cross_track_nm(
-        F.lit(50.0), F.lit(4.02),      # aircraft, over the eastern runway
-        F.lit(50.0), F.lit(4.00),      # western threshold
+        F.lit(50.0),
+        F.lit(4.02),  # aircraft, over the eastern runway
+        F.lit(50.0),
+        F.lit(4.00),  # western threshold
         F.lit(0.0),
     )
     east = cross_track_nm(
-        F.lit(50.0), F.lit(4.02),
-        F.lit(50.0), F.lit(4.02),      # eastern threshold
+        F.lit(50.0),
+        F.lit(4.02),
+        F.lit(50.0),
+        F.lit(4.02),  # eastern threshold
         F.lit(0.0),
     )
     row = spark.range(1).select(west.alias("w"), east.alias("e")).collect()[0]

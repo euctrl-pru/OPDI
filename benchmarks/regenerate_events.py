@@ -54,7 +54,7 @@ SCORE = GT + ["benchmarks/events_score.py"]
 #: other than what it names.
 DETECT = SCORE + [
     "benchmarks/event_bench.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "src/opdi/pipeline/events.py",
     "src/opdi/pipeline/crossings.py",
     "src/opdi/pipeline/level_segments.py",
@@ -80,9 +80,7 @@ class Job:
 
     def stale(self):
         for produced, staged in self.outputs.items():
-            is_stale, why = provenance.is_stale(
-                DATA, staged, self.code_paths, self.inputs
-            )
+            is_stale, why = provenance.is_stale(DATA, staged, self.code_paths, self.inputs)
             if is_stale:
                 return why
         return ""
@@ -104,13 +102,17 @@ class Job:
                 src = Path(tmp) / produced
                 if not src.is_file():
                     raise SystemExit(
-                        f"{self.name}: expected {produced!r} but the job did not "
-                        f"produce it"
+                        f"{self.name}: expected {produced!r} but the job did not " f"produce it"
                     )
                 shutil.copy2(src, DATA / staged)
                 provenance.record(
-                    DATA, staged, self.script, self.args, self.code_paths,
-                    notes=self.notes, input_tables=self.inputs,
+                    DATA,
+                    staged,
+                    self.script,
+                    self.args,
+                    self.code_paths,
+                    notes=self.notes,
+                    input_tables=self.inputs,
                 )
 
 
@@ -136,10 +138,11 @@ def jobs():
             Job(
                 f"ladder_{period}",
                 "benchmarks/event_bench.py",
-                ["--period", period, "--out-name", f"ladder_{period}.csv",
-                 "--executors", "10"],
-                {f"ladder_{period}.csv": f"ladder_{period}.csv",
-                 f"inventory_{period}.csv": f"inventory_{period}.csv"},
+                ["--period", period, "--out-name", f"ladder_{period}.csv", "--executors", "10"],
+                {
+                    f"ladder_{period}.csv": f"ladder_{period}.csv",
+                    f"inventory_{period}.csv": f"inventory_{period}.csv",
+                },
                 DETECT,
                 "the cumulative ladder from events_v0.0.2 to the shipped "
                 "configuration, one rung per change, scored on this period -- "
@@ -154,9 +157,11 @@ def jobs():
                 f"compare_{period}",
                 "benchmarks/events_compare.py",
                 ["--period", period, "--executors", "6"],
-                {f"rings_{period}.csv": f"rings_{period}.csv",
-                 f"runway_{period}.csv": f"runway_{period}.csv",
-                 f"floor_{period}.csv": f"floor_{period}.csv"},
+                {
+                    f"rings_{period}.csv": f"rings_{period}.csv",
+                    f"runway_{period}.csv": f"runway_{period}.csv",
+                    f"floor_{period}.csv": f"floor_{period}.csv",
+                },
                 SCORE + ["benchmarks/events_compare.py", "benchmarks/event_bench.py"],
                 "ring crossings against C40/C100_CROSS_TIME and position, runway "
                 "identity against AP_C_RWY, and the spread between two "

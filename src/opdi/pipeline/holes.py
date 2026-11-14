@@ -1,10 +1,10 @@
-"""Holes inside a track.
+"""Holes inside a track: gaps in reception kept within one track.
 
 A **hole** is a silence longer than ``EventConfig.track_hole_seconds`` between
-two consecutive samples of one track. The samples between two holes are a
-**piece**. Until the ``cruise_linked`` track rule (A10) no track held a hole,
-because every gap that long started a new track; under it a track can span an
-ocean, with hours in the middle where nothing was received.
+two consecutive reports of one track. The reports between two holes are a
+**piece**. Under the v0.0.2 track rule every gap that long starts a new track,
+so a track has no hole; under the default rule (``cruise_linked``) a track can
+cross an ocean, with hours in the middle where nothing was received.
 
 Nothing was measured inside a hole, so a detector that pairs or interpolates
 samples must not do it across one: a level segment that "lasts" the three hours
@@ -14,8 +14,8 @@ adding ``piece`` to their partition. What belongs to the flight as a whole
 stays per track: first and last seen, the tops of climb and descent, the block
 and runway milestones, the flight list.
 
-The threshold equals the segmentation gap on purpose. A track built by an
-earlier rule has one piece, so its events are exactly what they were.
+The threshold equals the track rule's gap on purpose: a track built by the
+v0.0.2 rule has one piece, so its events are the same with or without pieces.
 """
 
 from pyspark.sql import DataFrame, Window

@@ -64,6 +64,14 @@ CAND_TABLE = "research/cand_2026"
 MONTH = date(2026, 6, 1)
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def redirect_candidates(table: str) -> None:
     """Point the endpoint-candidate cache's *physical path* at `table`.
 
@@ -83,9 +91,7 @@ def redirect_candidates(table: str) -> None:
     orig_path = StorageManager._s3_path
 
     def _s3_path(self, name, *a, **kw):
-        return orig_path(
-            self, table if name == "opdi_endpoint_candidates" else name, *a, **kw
-        )
+        return orig_path(self, table if name == "opdi_endpoint_candidates" else name, *a, **kw)
 
     StorageManager._s3_path = _s3_path
     StorageManager._fl2026_cand_redirect = True
@@ -99,10 +105,11 @@ def main() -> None:
     ap.add_argument("--driver-memory", default="8g")
     ap.add_argument("--ui-port", type=int, default=4058)
     ap.add_argument(
-        "--log-dir", type=Path,
+        "--log-dir",
+        type=Path,
         default=REPO / "benchmarks" / "logs_flight_list_2026",
         help="processing-progress log directory (own, not shared with "
-             "production or another research run)",
+        "production or another research run)",
     )
     args = ap.parse_args()
 
@@ -127,12 +134,12 @@ def main() -> None:
     # The factory, not OPDIConfig() plus an attribute: the environment decides
     # the storage backend, and setting it afterwards leaves StorageManager
     # unwired, so every table looks absent.
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
-    proc = FlightListProcessor(
-        spark, cfg, log_dir=str(args.log_dir), tracks_table=TRACKS_TABLE
-    )
+    proc = FlightListProcessor(spark, cfg, log_dir=str(args.log_dir), tracks_table=TRACKS_TABLE)
     print(
         f"=== flight_list_2026: ADEP={proc.detection.adep_mode} "
         f"ADES={proc.detection.ades_mode} tracks={proc.tracks_table} ==="

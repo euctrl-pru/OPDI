@@ -1,18 +1,15 @@
-"""
-OurAirports reference data ingestion.
+"""OurAirports reference data (step 00d).
 
-Downloads and loads airport reference datasets from OurAirports into
-Spark tables. Covers airports, runways, navaids, frequencies, countries,
-and regions.
-
-Ported from: OPDI-live/python/v2.0.0/00_etl_ourairports.py
+Downloads the OurAirports data files (airports, runways, navigation aids,
+frequencies, countries and regions) and writes them to the tables
+``oa_airports``, ``oa_runways`` and so on. The airports give positions and
+elevations; the runways give the thresholds used by the runway milestones.
 """
 
 from datetime import datetime
 from typing import Dict, Optional
 
 import pandas as pd
-
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     BooleanType,
@@ -37,101 +34,113 @@ DEFAULT_URLS: Dict[str, str] = {
 }
 
 # Spark schemas for each dataset
-SCHEMA_AIRPORTS = StructType([
-    StructField("id", IntegerType(), True),
-    StructField("ident", StringType(), True),
-    StructField("type", StringType(), True),
-    StructField("name", StringType(), True),
-    StructField("latitude_deg", DoubleType(), True),
-    StructField("longitude_deg", DoubleType(), True),
-    StructField("elevation_ft", IntegerType(), True),
-    StructField("continent", StringType(), True),
-    StructField("iso_country", StringType(), True),
-    StructField("iso_region", StringType(), True),
-    StructField("municipality", StringType(), True),
-    StructField("scheduled_service", StringType(), True),
-    StructField("gps_code", StringType(), True),
-    StructField("iata_code", StringType(), True),
-    StructField("local_code", StringType(), True),
-    StructField("home_link", StringType(), True),
-    StructField("wikipedia_link", StringType(), True),
-    StructField("keywords", StringType(), True),
-])
+SCHEMA_AIRPORTS = StructType(
+    [
+        StructField("id", IntegerType(), True),
+        StructField("ident", StringType(), True),
+        StructField("type", StringType(), True),
+        StructField("name", StringType(), True),
+        StructField("latitude_deg", DoubleType(), True),
+        StructField("longitude_deg", DoubleType(), True),
+        StructField("elevation_ft", IntegerType(), True),
+        StructField("continent", StringType(), True),
+        StructField("iso_country", StringType(), True),
+        StructField("iso_region", StringType(), True),
+        StructField("municipality", StringType(), True),
+        StructField("scheduled_service", StringType(), True),
+        StructField("gps_code", StringType(), True),
+        StructField("iata_code", StringType(), True),
+        StructField("local_code", StringType(), True),
+        StructField("home_link", StringType(), True),
+        StructField("wikipedia_link", StringType(), True),
+        StructField("keywords", StringType(), True),
+    ]
+)
 
-SCHEMA_RUNWAYS = StructType([
-    StructField("id", IntegerType(), True),
-    StructField("airport_ref", IntegerType(), True),
-    StructField("airport_ident", StringType(), True),
-    StructField("length_ft", IntegerType(), True),
-    StructField("width_ft", IntegerType(), True),
-    StructField("surface", StringType(), True),
-    StructField("lighted", BooleanType(), True),
-    StructField("closed", BooleanType(), True),
-    StructField("le_ident", StringType(), True),
-    StructField("le_latitude_deg", DoubleType(), True),
-    StructField("le_longitude_deg", DoubleType(), True),
-    StructField("le_elevation_ft", IntegerType(), True),
-    StructField("le_heading_degT", DoubleType(), True),
-    StructField("le_displaced_threshold_ft", IntegerType(), True),
-    StructField("he_ident", StringType(), True),
-    StructField("he_latitude_deg", DoubleType(), True),
-    StructField("he_longitude_deg", DoubleType(), True),
-    StructField("he_elevation_ft", IntegerType(), True),
-    StructField("he_heading_degT", DoubleType(), True),
-    StructField("he_displaced_threshold_ft", IntegerType(), True),
-])
+SCHEMA_RUNWAYS = StructType(
+    [
+        StructField("id", IntegerType(), True),
+        StructField("airport_ref", IntegerType(), True),
+        StructField("airport_ident", StringType(), True),
+        StructField("length_ft", IntegerType(), True),
+        StructField("width_ft", IntegerType(), True),
+        StructField("surface", StringType(), True),
+        StructField("lighted", BooleanType(), True),
+        StructField("closed", BooleanType(), True),
+        StructField("le_ident", StringType(), True),
+        StructField("le_latitude_deg", DoubleType(), True),
+        StructField("le_longitude_deg", DoubleType(), True),
+        StructField("le_elevation_ft", IntegerType(), True),
+        StructField("le_heading_degT", DoubleType(), True),
+        StructField("le_displaced_threshold_ft", IntegerType(), True),
+        StructField("he_ident", StringType(), True),
+        StructField("he_latitude_deg", DoubleType(), True),
+        StructField("he_longitude_deg", DoubleType(), True),
+        StructField("he_elevation_ft", IntegerType(), True),
+        StructField("he_heading_degT", DoubleType(), True),
+        StructField("he_displaced_threshold_ft", IntegerType(), True),
+    ]
+)
 
-SCHEMA_NAVAIDS = StructType([
-    StructField("id", IntegerType(), True),
-    StructField("filename", StringType(), True),
-    StructField("ident", StringType(), True),
-    StructField("name", StringType(), True),
-    StructField("type", StringType(), True),
-    StructField("frequency_khz", IntegerType(), True),
-    StructField("latitude_deg", DoubleType(), True),
-    StructField("longitude_deg", DoubleType(), True),
-    StructField("elevation_ft", IntegerType(), True),
-    StructField("iso_country", StringType(), True),
-    StructField("dme_frequency_khz", IntegerType(), True),
-    StructField("dme_channel", StringType(), True),
-    StructField("dme_latitude_deg", DoubleType(), True),
-    StructField("dme_longitude_deg", DoubleType(), True),
-    StructField("dme_elevation_ft", IntegerType(), True),
-    StructField("slaved_variation_deg", DoubleType(), True),
-    StructField("magnetic_variation_deg", DoubleType(), True),
-    StructField("usageType", StringType(), True),
-    StructField("power", StringType(), True),
-    StructField("associated_airport", StringType(), True),
-])
+SCHEMA_NAVAIDS = StructType(
+    [
+        StructField("id", IntegerType(), True),
+        StructField("filename", StringType(), True),
+        StructField("ident", StringType(), True),
+        StructField("name", StringType(), True),
+        StructField("type", StringType(), True),
+        StructField("frequency_khz", IntegerType(), True),
+        StructField("latitude_deg", DoubleType(), True),
+        StructField("longitude_deg", DoubleType(), True),
+        StructField("elevation_ft", IntegerType(), True),
+        StructField("iso_country", StringType(), True),
+        StructField("dme_frequency_khz", IntegerType(), True),
+        StructField("dme_channel", StringType(), True),
+        StructField("dme_latitude_deg", DoubleType(), True),
+        StructField("dme_longitude_deg", DoubleType(), True),
+        StructField("dme_elevation_ft", IntegerType(), True),
+        StructField("slaved_variation_deg", DoubleType(), True),
+        StructField("magnetic_variation_deg", DoubleType(), True),
+        StructField("usageType", StringType(), True),
+        StructField("power", StringType(), True),
+        StructField("associated_airport", StringType(), True),
+    ]
+)
 
-SCHEMA_AIRPORT_FREQUENCIES = StructType([
-    StructField("id", IntegerType(), True),
-    StructField("airport_ref", IntegerType(), True),
-    StructField("airport_ident", StringType(), True),
-    StructField("type", StringType(), True),
-    StructField("description", StringType(), True),
-    StructField("frequency_mhz", DoubleType(), True),
-])
+SCHEMA_AIRPORT_FREQUENCIES = StructType(
+    [
+        StructField("id", IntegerType(), True),
+        StructField("airport_ref", IntegerType(), True),
+        StructField("airport_ident", StringType(), True),
+        StructField("type", StringType(), True),
+        StructField("description", StringType(), True),
+        StructField("frequency_mhz", DoubleType(), True),
+    ]
+)
 
-SCHEMA_COUNTRIES = StructType([
-    StructField("id", IntegerType(), True),
-    StructField("code", StringType(), True),
-    StructField("name", StringType(), True),
-    StructField("continent", StringType(), True),
-    StructField("wikipedia_link", StringType(), True),
-    StructField("keywords", StringType(), True),
-])
+SCHEMA_COUNTRIES = StructType(
+    [
+        StructField("id", IntegerType(), True),
+        StructField("code", StringType(), True),
+        StructField("name", StringType(), True),
+        StructField("continent", StringType(), True),
+        StructField("wikipedia_link", StringType(), True),
+        StructField("keywords", StringType(), True),
+    ]
+)
 
-SCHEMA_REGIONS = StructType([
-    StructField("id", IntegerType(), True),
-    StructField("code", StringType(), True),
-    StructField("local_code", StringType(), True),
-    StructField("name", StringType(), True),
-    StructField("continent", StringType(), True),
-    StructField("iso_country", StringType(), True),
-    StructField("wikipedia_link", StringType(), True),
-    StructField("keywords", StringType(), True),
-])
+SCHEMA_REGIONS = StructType(
+    [
+        StructField("id", IntegerType(), True),
+        StructField("code", StringType(), True),
+        StructField("local_code", StringType(), True),
+        StructField("name", StringType(), True),
+        StructField("continent", StringType(), True),
+        StructField("iso_country", StringType(), True),
+        StructField("wikipedia_link", StringType(), True),
+        StructField("keywords", StringType(), True),
+    ]
+)
 
 SCHEMAS: Dict[str, StructType] = {
     "airports": SCHEMA_AIRPORTS,
@@ -144,8 +153,7 @@ SCHEMAS: Dict[str, StructType] = {
 
 
 class OurAirportsIngestion:
-    """
-    ETL pipeline for OurAirports reference data.
+    """ETL pipeline for OurAirports reference data.
 
     Downloads CSV datasets from OurAirports, loads them into Spark
     DataFrames with proper schemas, and writes them to database tables.
@@ -256,8 +264,7 @@ class OurAirportsIngestion:
         name: str,
         url: Optional[str] = None,
     ) -> int:
-        """
-        Download and ingest a single OurAirports dataset.
+        """Download and ingest a single OurAirports dataset.
 
         Args:
             name: Dataset name (airports, runways, navaids, etc.).
@@ -285,8 +292,7 @@ class OurAirportsIngestion:
         self,
         urls: Optional[Dict[str, str]] = None,
     ) -> Dict[str, int]:
-        """
-        Download and ingest all OurAirports datasets.
+        """Download and ingest all OurAirports datasets.
 
         Tables are created if they don't exist, then overwritten with
         fresh data.

@@ -47,7 +47,7 @@ from opdi.pipeline.holes import add_piece  # noqa: E402
 _CODE_PATHS = [
     "benchmarks/holding_labels_score.py",
     "src/opdi/pipeline/holding.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
 ]
 
 #: Aerodrome elevations (ft) for the labelled airports, from OurAirports.
@@ -65,6 +65,7 @@ SWEEP = {
 # Adapting the trajectories
 # ---------------------------------------------------------------------------
 
+
 def as_track_frame(spark, traj: pd.DataFrame, elevation_ft: float, step_s: float = 5.0):
     """The step 04 input shape from a traffic-format frame, thinned to one
     sample every ``step_s`` seconds per flight."""
@@ -78,30 +79,35 @@ def as_track_frame(spark, traj: pd.DataFrame, elevation_ft: float, step_s: float
     # step_s would leave a 20 s cadence there.
     df = df.assign(_bin=(secs // step_s).astype("int64")).sort_values(["flight_id", "timestamp"])
     df = df.drop_duplicates(["flight_id", "_bin"]).drop(columns="_bin")
-    out = pd.DataFrame({
-        "track_id": df["flight_id"].astype(str),
-        "icao24": df["icao24"].astype(str),
-        "callsign": df["callsign"].astype(str),
-        "event_time": df["timestamp"].dt.tz_convert(None),
-        "lat": df["latitude"].astype(float),
-        "lon": df["longitude"].astype(float),
-        "baro_altitude_c": df["altitude"].astype(float) / 3.28084,
-        "velocity": df["groundspeed"].astype(float) / 1.94384,
-        "heading": df["track"].astype(float),
-        "vert_rate": df["vertical_rate"].astype(float) / 196.850394,
-    })
+    out = pd.DataFrame(
+        {
+            "track_id": df["flight_id"].astype(str),
+            "icao24": df["icao24"].astype(str),
+            "callsign": df["callsign"].astype(str),
+            "event_time": df["timestamp"].dt.tz_convert(None),
+            "lat": df["latitude"].astype(float),
+            "lon": df["longitude"].astype(float),
+            "baro_altitude_c": df["altitude"].astype(float) / 3.28084,
+            "velocity": df["groundspeed"].astype(float) / 1.94384,
+            "heading": df["track"].astype(float),
+            "vert_rate": df["vertical_rate"].astype(float) / 196.850394,
+        }
+    )
     sdf = spark.createDataFrame(out)
     sdf = add_distance_measure(sdf)
     sdf = add_time_measure(sdf)
     sdf = add_piece(sdf, EventConfig().track_hole_seconds)
     return sdf.withColumn("elev_ades_ft", F.lit(float(elevation_ft))).withColumn(
-        "elev_adep_ft", F.lit(None).cast("double"))
+        "elev_adep_ft", F.lit(None).cast("double")
+    )
 
 
 def flights_of(traj: pd.DataFrame) -> pd.DataFrame:
     """``flight_id, callsign, start, stop`` per trajectory."""
     g = traj.groupby("flight_id")
-    out = g.agg(callsign=("callsign", "first"), start=("timestamp", "min"), stop=("timestamp", "max"))
+    out = g.agg(
+        callsign=("callsign", "first"), start=("timestamp", "min"), stop=("timestamp", "max")
+    )
     return out.reset_index()
 
 
@@ -111,10 +117,16 @@ def match_labels(labels: pd.DataFrame, traj_flights: pd.DataFrame) -> pd.DataFra
     match the trajectory's, so the join is on callsign and time."""
     lab = labels.copy()
     lab["callsign"] = lab["flight_id"].str.rsplit("_", n=1).str[0]
-    cand = lab.merge(traj_flights.rename(columns={"flight_id": "track_id", "start": "t_start",
-                                                  "stop": "t_stop"}), on="callsign", how="inner")
+    cand = lab.merge(
+        traj_flights.rename(
+            columns={"flight_id": "track_id", "start": "t_start", "stop": "t_stop"}
+        ),
+        on="callsign",
+        how="inner",
+    )
     inside = (cand["start"] >= cand["t_start"] - pd.Timedelta(minutes=5)) & (
-        cand["stop"] <= cand["t_stop"] + pd.Timedelta(minutes=5))
+        cand["stop"] <= cand["t_stop"] + pd.Timedelta(minutes=5)
+    )
     cand = cand[inside].drop(columns=["t_start", "t_stop"])
     return cand.drop_duplicates(["flight_id", "start"]).reset_index(drop=True)
 
@@ -122,6 +134,7 @@ def match_labels(labels: pd.DataFrame, traj_flights: pd.DataFrame) -> pd.DataFra
 # ---------------------------------------------------------------------------
 # Scoring (06_metrics.py, reimplemented)
 # ---------------------------------------------------------------------------
+
 
 def episodes_from_windows(windows: pd.DataFrame, flag: str) -> pd.DataFrame:
     """Consecutive positive windows of one flight form one episode."""
@@ -150,8 +163,9 @@ def episodes_from_windows(windows: pd.DataFrame, flag: str) -> pd.DataFrame:
 WINDOW_MIN_OVERLAP_S = 180.0
 
 
-def windows_from_episodes(labels: pd.DataFrame, episodes: pd.DataFrame,
-                          min_overlap_s: float = WINDOW_MIN_OVERLAP_S) -> pd.DataFrame:
+def windows_from_episodes(
+    labels: pd.DataFrame, episodes: pd.DataFrame, min_overlap_s: float = WINDOW_MIN_OVERLAP_S
+) -> pd.DataFrame:
     """Add ``hp_c``: at least ``min_overlap_s`` of the window lies inside a
     detected episode of its track (``0`` means any overlap)."""
     out = labels.copy()
@@ -196,22 +210,37 @@ def score(windows: pd.DataFrame) -> Dict[str, float]:
         rows.append((flight_id, d_t, d_c, inter, union, inter / union if union else 0.0))
     m = pd.DataFrame(rows, columns=["flight_id", "d_t", "d_c", "intersection", "union", "iou"])
     if m.empty:
-        return {"precision": float("nan"), "recall": float("nan"), "f1": float("nan"), "iou": float("nan"),
-                "n_flights": 0, "n_windows": len(windows), "n_positive": int(windows["hp"].sum()),
-                "n_detected_windows": int(windows["hp_c"].sum())}
+        return {
+            "precision": float("nan"),
+            "recall": float("nan"),
+            "f1": float("nan"),
+            "iou": float("nan"),
+            "n_flights": 0,
+            "n_windows": len(windows),
+            "n_positive": int(windows["hp"].sum()),
+            "n_detected_windows": int(windows["hp_c"].sum()),
+        }
     inter = m["intersection"].mean()
     d_t, d_c = m["d_t"].mean(), m["d_c"].mean()
     precision = inter / d_c if d_c else float("nan")
     recall = inter / d_t if d_t else float("nan")
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
-    return {"precision": float(precision), "recall": float(recall), "f1": float(f1),
-            "iou": float(m["iou"].mean()), "n_flights": int(len(m)), "n_windows": int(len(windows)),
-            "n_positive": int(windows["hp"].sum()), "n_detected_windows": int(windows["hp_c"].sum())}
+    return {
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "iou": float(m["iou"].mean()),
+        "n_flights": int(len(m)),
+        "n_windows": int(len(windows)),
+        "n_positive": int(windows["hp"].sum()),
+        "n_detected_windows": int(windows["hp_c"].sum()),
+    }
 
 
 # ---------------------------------------------------------------------------
 # Driving the detector
 # ---------------------------------------------------------------------------
+
 
 def detect(spark, sdf, config: EventConfig) -> pd.DataFrame:
     """Detected episodes ``track_id, start, stop`` plus the info fields."""
@@ -226,23 +255,66 @@ def detect(spark, sdf, config: EventConfig) -> pd.DataFrame:
     out = []
     for (track_id, _), v in by.items():
         if "holding-start" in v and "holding-end" in v:
-            out.append({"track_id": track_id,
-                        "start": pd.Timestamp(v["holding-start"], tz="UTC"),
-                        "stop": pd.Timestamp(v["holding-end"], tz="UTC"),
-                        **{k: v[k] for k in ("pattern", "direction", "circuits", "duration_s",
-                                             "distance_nm", "altitude_start_ft", "straight_pct")}})
-    return pd.DataFrame(out, columns=["track_id", "start", "stop", "pattern", "direction", "circuits",
-                                      "duration_s", "distance_nm", "altitude_start_ft", "straight_pct"])
+            out.append(
+                {
+                    "track_id": track_id,
+                    "start": pd.Timestamp(v["holding-start"], tz="UTC"),
+                    "stop": pd.Timestamp(v["holding-end"], tz="UTC"),
+                    **{
+                        k: v[k]
+                        for k in (
+                            "pattern",
+                            "direction",
+                            "circuits",
+                            "duration_s",
+                            "distance_nm",
+                            "altitude_start_ft",
+                            "straight_pct",
+                        )
+                    },
+                }
+            )
+    return pd.DataFrame(
+        out,
+        columns=[
+            "track_id",
+            "start",
+            "stop",
+            "pattern",
+            "direction",
+            "circuits",
+            "duration_s",
+            "distance_nm",
+            "altitude_start_ft",
+            "straight_pct",
+        ],
+    )
 
 
 def load_day(data_dir: Path, airport: str, day: pd.Timestamp) -> pd.DataFrame:
-    traj = pd.read_parquet(data_dir / f"{airport}_dataset.parquet.gz",
-                           columns=["timestamp", "icao24", "callsign", "latitude", "longitude",
-                                    "altitude", "groundspeed", "track", "vertical_rate", "flight_id"])
+    traj = pd.read_parquet(
+        data_dir / f"{airport}_dataset.parquet.gz",
+        columns=[
+            "timestamp",
+            "icao24",
+            "callsign",
+            "latitude",
+            "longitude",
+            "altitude",
+            "groundspeed",
+            "track",
+            "vertical_rate",
+            "flight_id",
+        ],
+    )
     traj["timestamp"] = pd.to_datetime(traj["timestamp"], utc=True)
     span = traj.groupby("flight_id")["timestamp"].agg(["min", "max"]).reset_index()
     keep = span[(span["min"] < day + pd.Timedelta(days=1)) & (span["max"] >= day)]["flight_id"]
-    return traj[traj["flight_id"].isin(set(keep))].sort_values(["flight_id", "timestamp"]).reset_index(drop=True)
+    return (
+        traj[traj["flight_id"].isin(set(keep))]
+        .sort_values(["flight_id", "timestamp"])
+        .reset_index(drop=True)
+    )
 
 
 def load_labels(data_dir: Path, airport: str, day: pd.Timestamp) -> pd.DataFrame:
@@ -250,7 +322,9 @@ def load_labels(data_dir: Path, airport: str, day: pd.Timestamp) -> pd.DataFrame
     labels = labels[labels["airport"] == airport.lower()].copy()
     labels["start"] = pd.to_datetime(labels["start"], utc=True)
     labels["stop"] = pd.to_datetime(labels["stop"], utc=True)
-    return labels[(labels["start"] >= day) & (labels["start"] < day + pd.Timedelta(days=1))].reset_index(drop=True)
+    return labels[
+        (labels["start"] >= day) & (labels["start"] < day + pd.Timedelta(days=1))
+    ].reset_index(drop=True)
 
 
 def run(spark, data_dir: Path, airports: List[str], day: pd.Timestamp, sweep: bool = True):
@@ -261,18 +335,29 @@ def run(spark, data_dir: Path, airports: List[str], day: pd.Timestamp, sweep: bo
         traj = load_day(data_dir, apt, day)
         labels = load_labels(data_dir, apt, day)
         matched = match_labels(labels, flights_of(traj))
-        print(f"{apt}: {traj.flight_id.nunique()} flights, {len(labels)} label windows, "
-              f"{len(matched)} matched, {int(matched.hp.sum())} positive", flush=True)
+        print(
+            f"{apt}: {traj.flight_id.nunique()} flights, {len(labels)} label windows, "
+            f"{len(matched)} matched, {int(matched.hp.sum())} positive",
+            flush=True,
+        )
         sdf = as_track_frame(spark, traj, ELEVATION_FT[apt]).cache()
         eps = detect(spark, sdf, shipped)
         windows = windows_from_episodes(matched, eps)
         per_airport_windows[apt] = windows
         s = score(windows)
         touch = score(windows_from_episodes(matched, eps, min_overlap_s=0.0))
-        scores.append({"airport": apt, "day": str(day.date()), **s,
-                       "n_episodes": len(eps), "n_flights_detected": eps.track_id.nunique(),
-                       "precision_any_overlap": touch["precision"], "recall_any_overlap": touch["recall"],
-                       "f1_any_overlap": touch["f1"]})
+        scores.append(
+            {
+                "airport": apt,
+                "day": str(day.date()),
+                **s,
+                "n_episodes": len(eps),
+                "n_flights_detected": eps.track_id.nunique(),
+                "precision_any_overlap": touch["precision"],
+                "recall_any_overlap": touch["recall"],
+                "f1_any_overlap": touch["f1"],
+            }
+        )
         episodes_all.append(eps.assign(airport=apt))
         if sweep:
             keys = list(SWEEP)
@@ -282,25 +367,51 @@ def run(spark, data_dir: Path, airports: List[str], day: pd.Timestamp, sweep: bo
                 sweep_rows.append({"airport": apt, **dict(zip(keys, values)), **s2})
         sdf.unpersist()
     all_windows = pd.concat(per_airport_windows.values(), ignore_index=True)
-    touch_all = score(pd.concat([windows_from_episodes(w.drop(columns=["hp_c"]), e, 0.0)
-                                 for w, e in zip(per_airport_windows.values(), episodes_all)]))
-    scores.append({"airport": "ALL", "day": str(day.date()), **score(all_windows),
-                   "n_episodes": sum(len(e) for e in episodes_all),
-                   "n_flights_detected": sum(e.track_id.nunique() for e in episodes_all),
-                   "precision_any_overlap": touch_all["precision"], "recall_any_overlap": touch_all["recall"],
-                   "f1_any_overlap": touch_all["f1"]})
-    return pd.DataFrame(scores), pd.DataFrame(sweep_rows), pd.concat(episodes_all, ignore_index=True)
+    touch_all = score(
+        pd.concat(
+            [
+                windows_from_episodes(w.drop(columns=["hp_c"]), e, 0.0)
+                for w, e in zip(per_airport_windows.values(), episodes_all)
+            ]
+        )
+    )
+    scores.append(
+        {
+            "airport": "ALL",
+            "day": str(day.date()),
+            **score(all_windows),
+            "n_episodes": sum(len(e) for e in episodes_all),
+            "n_flights_detected": sum(e.track_id.nunique() for e in episodes_all),
+            "precision_any_overlap": touch_all["precision"],
+            "recall_any_overlap": touch_all["recall"],
+            "f1_any_overlap": touch_all["f1"],
+        }
+    )
+    return (
+        pd.DataFrame(scores),
+        pd.DataFrame(sweep_rows),
+        pd.concat(episodes_all, ignore_index=True),
+    )
 
 
 def write(results_dir: Path, name: str, df: pd.DataFrame, argv: List[str], notes: str = "") -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(results_dir / name, index=False)
-    provenance.record(results_dir, name, "benchmarks/holding_labels_score.py", argv, [REPO / p for p in _CODE_PATHS],
-                      inputs={"rows": len(df)}, notes=notes)
+    provenance.record(
+        results_dir,
+        name,
+        "benchmarks/holding_labels_score.py",
+        argv,
+        [REPO / p for p in _CODE_PATHS],
+        inputs={"rows": len(df)},
+        notes=notes,
+    )
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--day", default="2019-10-01")
     ap.add_argument("--airports", nargs="+", default=["EGLL", "EIDW"])
     ap.add_argument("--data-dir", required=True)
@@ -311,22 +422,46 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     from pyspark.sql import SparkSession
 
-    spark = (SparkSession.builder.master("local[4]").appName("holding labels")
-             .config("spark.driver.memory", "8g").config("spark.sql.shuffle.partitions", "8")
-             .config("spark.sql.session.timeZone", "UTC").config("spark.ui.enabled", "false")
-             .getOrCreate())
+    spark = (
+        SparkSession.builder.master("local[4]")
+        .appName("holding labels")
+        .config("spark.driver.memory", "8g")
+        .config("spark.sql.shuffle.partitions", "8")
+        .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.ui.enabled", "false")
+        .getOrCreate()
+    )
     try:
         day = pd.Timestamp(args.day, tz="UTC")
-        scores, sweep, episodes = run(spark, Path(args.data_dir), args.airports, day, sweep=not args.no_sweep)
+        scores, sweep, episodes = run(
+            spark, Path(args.data_dir), args.airports, day, sweep=not args.no_sweep
+        )
     finally:
         spark.stop()
     print(scores.to_string(index=False))
     out = Path(args.results_dir)
-    write(out, f"holding_score_{args.day}.csv", scores, argv,
-          notes="Shipped thresholds against the Olive et al. 2019 labels; 06_metrics.py scoring.")
+    write(
+        out,
+        f"holding_score_{args.day}.csv",
+        scores,
+        argv,
+        notes="Shipped thresholds against the Olive et al. 2019 labels; 06_metrics.py scoring.",
+    )
     if not args.no_sweep:
-        write(out, f"holding_sweep_{args.day}.csv", sweep, argv, notes="Three-threshold grid, 27 points per airport.")
-    write(out, f"holding_episodes_{args.day}.csv", episodes, argv, notes="Detected episodes (shipped thresholds).")
+        write(
+            out,
+            f"holding_sweep_{args.day}.csv",
+            sweep,
+            argv,
+            notes="Three-threshold grid, 27 points per airport.",
+        )
+    write(
+        out,
+        f"holding_episodes_{args.day}.csv",
+        episodes,
+        argv,
+        notes="Detected episodes (shipped thresholds).",
+    )
     return 0
 
 

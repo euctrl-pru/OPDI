@@ -1,17 +1,15 @@
-"""Step 04b: milestones, runways, stands and ring crossings on the flight list.
+"""Step 04b: the main milestones, runways, stands and circle crossings on the flight list.
 
-``opdi_flight_events`` is long-form -- one row per (flight, milestone) -- while
-APDF, the ground truth OPDI benchmarks against, is flight-shaped. Every
-comparison therefore began by reshaping OPDI's output: three joins and a pivot
-to answer "when did this flight take off, from which runway, off which stand".
-This step does that reshaping once, at write time, and publishes the answer as
-columns beside the flight it belongs to.
+The flight events have one row per (flight, event). Most users want, for each
+flight, when it took off and landed, from which runway and stand, and when it
+crossed the distance circles around its airports. This step reads the events
+and adds those values as columns of the flight list, and corrects the
+departure and destination airports where a runway event names them.
 
-**Additive only.** Every column the flight list already had keeps its name, its
-type and its meaning, so current consumers are unaffected. What is added is
-:data:`ADDED_COLUMNS`, all nullable, all null for a flight whose events are
-missing -- which is most flights for most of them, because the ground milestones
-need surface reception.
+Every column the flight list already had keeps its name, type and meaning.
+The added columns are :data:`ADDED_COLUMNS`, all nullable, and NULL for a
+flight whose events are missing, which for the ground milestones is common,
+because they need reception on the airport surface.
 
 **The column set does not move with the configuration.** The six radii in
 :data:`FLIGHT_LIST_RING_RADII_NM` are always published, whether or not
@@ -32,8 +30,8 @@ from ..config import EventConfig
 
 #: The radii the flight list publishes, as ``C{NM}_ARR`` / ``C{NM}_DEP``.
 #:
-#: Fixed here rather than read from ``EventConfig.ring_radii_nm`` on purpose --
-#: see the module docstring. A radius the config does not emit yields a null
+#: Fixed here rather than read from ``EventConfig.ring_radii_nm``, so the
+#: columns are the same whatever the configuration. A radius the config does not emit yields a null
 #: column, not a missing one.
 FLIGHT_LIST_RING_RADII_NM = (40, 50, 60, 100, 110, 120)
 
@@ -42,15 +40,12 @@ FLIGHT_LIST_RING_RADII_NM = (40, 50, 60, 100, 110, 120)
 #: ``threshold.cast("int")``.
 _RING_TYPE = "xing-{nm}nm"
 
-#: The four merged milestone types of ``events_v0.3.0``. Under that vocabulary
-#: there is one event type per operational question: ``ATOT`` is the merge of
-#: the A-CDM ``airborne`` and the legacy ``ATOT``, ``ALDT`` of ``touchdown``
-#: and the legacy ``ALDT``, and ``AOBT``/``AIBT`` are the renamed
-#: ``off-block``/``on-block``. The merge, and the ``info.method`` that records
-#: which arm produced each value, belong to the event table; the flight list is
-#: the convenience view and carries the value alone. Against an older
-#: vocabulary these four columns come out null -- deliberately, rather than
-#: reimplementing the merge here, where the two would be free to disagree.
+#: The four milestone types of ``events_v0.3.0``, one event type per
+#: milestone: ``ATOT`` (the runway milestone ``airborne``, else the runway
+#: window take-off time), ``ALDT`` (``touchdown``, else the runway window
+#: landing time), ``AOBT`` and ``AIBT``. Which detector gave each value is in
+#: ``info.method`` of the event; the flight list carries the value alone. With
+#: the event types of release v0.0.2 these four columns are NULL.
 _ATOT, _ALDT, _AOBT, _AIBT = "ATOT", "ALDT", "AOBT", "AIBT"
 
 #: Parking-position types from ``pipeline.layout``, which builds them as
@@ -58,10 +53,10 @@ _ATOT, _ALDT, _AOBT, _AIBT = "ATOT", "ALDT", "AOBT", "AIBT"
 _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 
 #: Columns this step adds, in the order it adds them.
-#: Columns that say whether a row is a movement, rather than what happened
-#: during one. They exist because the flight list counts more movements than
-#: APDF does, and the excess is not spread evenly: it is departures (1.23x
-#: against arrivals' 1.03x, measured 2026-06-01..03).
+#: Columns that say whether a row counts as a movement (a departure or an
+#: arrival), rather than what happened during one. A flight list built from
+#: tracks holds rows that are not movements: a departure is often split into
+#: a short track that never leaves the stand and the flight itself.
 #:
 #: ``MOVEMENT_DEP``/``MOVEMENT_ARR`` are the ones to filter on: they answer
 #: "does this row count as a departure / an arrival", which is the only
@@ -69,22 +64,29 @@ _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 #: *why* a row does not count, which is what makes a surprising total
 #: diagnosable rather than merely surprising.
 #:
-#: ``TRACK_DURATION_MIN`` is published rather than used as a filter here. A
-#: duration threshold is a proxy for "is this a real flight" and leaks in both
-#: directions -- at 30 minutes it discards 4,364 departures that demonstrably
-#: took off while still admitting hour-long circuits -- so the honest thing is
-#: to hand consumers the number and let them choose, not to choose for them.
+#: ``TRACK_DURATION_MIN`` is published rather than used as a filter: a
+#: duration limit would drop real short flights and keep long circuits, so
+#: users can choose their own.
 MOVEMENT_COLUMNS = [
     "TRACK_DURATION_MIN",
-    "SUPERSEDED_DEP", "SUPERSEDED_ARR",   # why a row does not count
-    "MOVEMENT_DEP", "MOVEMENT_ARR",       # whether it counts -- filter on these
+    "SUPERSEDED_DEP",
+    "SUPERSEDED_ARR",  # why a row does not count
+    "MOVEMENT_DEP",
+    "MOVEMENT_ARR",  # whether it counts -- filter on these
 ]
 
 ADDED_COLUMNS = (
     [
-        "ATOT", "ALDT", "AOBT", "AIBT",
-        "RWY_DEP", "RWY_DEP_BEARING_DEG", "RWY_ARR", "RWY_ARR_BEARING_DEG",
-        "STND_DEP", "STND_ARR",
+        "ATOT",
+        "ALDT",
+        "AOBT",
+        "AIBT",
+        "RWY_DEP",
+        "RWY_DEP_BEARING_DEG",
+        "RWY_ARR",
+        "RWY_ARR_BEARING_DEG",
+        "STND_DEP",
+        "STND_ARR",
     ]
     + [f"C{nm}_ARR" for nm in FLIGHT_LIST_RING_RADII_NM]
     + [f"C{nm}_DEP" for nm in FLIGHT_LIST_RING_RADII_NM]
@@ -107,9 +109,9 @@ def _info(field: str) -> Column:
 def _runway() -> Column:
     """The runway an ``ATOT``/``ALDT`` event used.
 
-    Two spellings because the two arms that can produce the merged event spell
+    Two spellings because the two detectors that can produce the merged event spell
     it differently: ``events.calculate_runway_events`` writes ``runway``,
-    ``runway_ops._info`` writes ``rwy_ident``. Coalescing reads whichever arm
+    ``runway_ops._info`` writes ``rwy_ident``. Coalescing reads whichever one
     won for that flight without this module having to know which.
     """
     return F.coalesce(_info("runway"), _info("rwy_ident"))
@@ -128,12 +130,16 @@ def _runway_bearing() -> Column:
 
 def _first(cond: Column, value: Column) -> Column:
     """The *value* of the earliest matching event, or NULL if none match."""
-    return F.min(F.when(cond, F.struct(F.col("event_time").alias("t"), value.alias("v")))).getField("v")
+    return F.min(F.when(cond, F.struct(F.col("event_time").alias("t"), value.alias("v")))).getField(
+        "v"
+    )
 
 
 def _last(cond: Column, value: Column) -> Column:
     """The *value* of the latest matching event, or NULL if none match."""
-    return F.max(F.when(cond, F.struct(F.col("event_time").alias("t"), value.alias("v")))).getField("v")
+    return F.max(F.when(cond, F.struct(F.col("event_time").alias("t"), value.alias("v")))).getField(
+        "v"
+    )
 
 
 def _null_ts() -> Column:
@@ -152,14 +158,10 @@ FLIGHT_KEY_NAMES = ("flight_id", "track_id")
 #: departure and a landing is its arrival, so the aerodrome such an event names
 #: is the aerodrome of that leg -- not merely somewhere the aircraft once was.
 #:
-#: Stand, taxiway and apron events are deliberately **not** here. They prove
-#: presence, not which leg: a track routinely covers the previous arrival's
-#: taxi-in and a turnaround, so the aircraft parks at its *departure* field
-#: before pushing back. Measured on 2026-06-01, where both kinds of evidence
-#: exist they disagree on 19.2% of departures and 21.2% of arrivals -- and the
-#: runway evidence is the one that is leg-specific. Runway-only also costs
-#: nothing in reach: 20,879 departures and 23,521 arrivals against the ground
-#: family's 23,103 of each.
+#: Stand, taxiway and apron events are not here. They show that the aircraft
+#: was at an airport, not on which leg: a track often covers the previous
+#: arrival's taxi-in and a turnaround before the departure. Runway events are
+#: specific to the leg.
 DEPARTURE_RUNWAY_TYPES = ("ATOT", "line-up", "take-off-roll")
 ARRIVAL_RUNWAY_TYPES = ("ALDT", "touchdown", "runway-vacated")
 
@@ -172,7 +174,7 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
     to a named aerodrome's own pavement *while taking off or landing*. Where
     the two disagree, the pavement wins.
 
-    No first/last heuristic and no guard against inventing a landing: a
+    No first/last heuristic and no check against inventing a landing: a
     departure aerodrome is where the take-off happened and an arrival aerodrome
     is where the landing did. A track with no landing gets no ``ADES`` from
     here, which is the right answer rather than a case to special-case.
@@ -234,7 +236,8 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
             moved = value.isNotNull() & ~value.eqNullSafe(F.col(actual))
             listed = F.filter(
                 F.split(F.coalesce(F.col(alternatives), F.lit("")), ", "),
-                lambda x: (x != "") & ~x.eqNullSafe(final),
+                # Built at once inside this iteration, so `final` is current.
+                lambda x: (x != "") & ~x.eqNullSafe(final),  # noqa: B023
             )
             with_old = F.when(
                 moved & F.col(actual).isNotNull(), F.concat(listed, F.array(F.col(actual)))
@@ -245,16 +248,16 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
             # join, and a row this step does not touch must not change.
             out = out.withColumn(
                 alternatives,
-                F.when(F.col(alternatives).isNull() & ~moved, F.col(alternatives)).otherwise(cleaned),
+                F.when(F.col(alternatives).isNull() & ~moved, F.col(alternatives)).otherwise(
+                    cleaned
+                ),
             )
         out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
 
     return out.drop("_g_id", "_dep_apt", "_arr_apt")
 
 
-def add_movement_columns(
-    flight_list: DataFrame, config: Optional[EventConfig] = None
-) -> DataFrame:
+def add_movement_columns(flight_list: DataFrame, config: Optional[EventConfig] = None) -> DataFrame:
     """Mark the rows that are half of a movement already counted.
 
     A real departure is routinely cut into two tracks -- a ground fragment that
@@ -275,9 +278,8 @@ def add_movement_columns(
         departures = ADEP is not null and not SUPERSEDED_DEP
         arrivals   = ADES is not null and not SUPERSEDED_ARR
 
-    Measured over three days against APDF: departures fall from 1.23x to 1.11x
-    and arrivals from 1.03x to 1.02x, while **no flight with a detected
-    take-off or landing is marked** -- zero of 57,990 and zero of 58,000.
+    A flight with a detected take-off or landing is never marked.
+    See https://www.opdi.aero/content/methods/airports.html.
     """
     config = config or EventConfig()
     window_s = float(config.supersede_window_seconds)
@@ -295,21 +297,16 @@ def add_movement_columns(
     prev_arr = F.lag(last_s).over(arr_order)
 
     # The rule reads "this track has no take-off" as evidence. On a day whose
-    # events have not been extracted yet, *every* track has no take-off, and
-    # the absence means "not computed" rather than "did not fly" -- so the rule
-    # would mark real movements. Measured: day 2026-06-04 sat in the table with
-    # step 03 done and step 04 unfinished, and 7,610 of its departures were
-    # flagged on no evidence at all.
-    #
-    # A day is only judged once something in it has flown. This is per-day
-    # rather than per-row because that is the granularity at which step 04
-    # completes: the table is legitimately half-processed during a campaign,
-    # and a flag that is wrong until the next run is a flag a dashboard can
-    # read in the meantime.
+    # events have not been computed yet every track has no take-off, and the
+    # rule would mark real movements. So a day is judged only once some
+    # flight in it has a take-off; per day, because step 04 completes a day
+    # at a time.
     day = Window.partitionBy("DOF")
     day_processed = (
-        F.sum(F.when(F.col("ATOT").isNotNull() | F.col("ALDT").isNotNull(), 1)
-              .otherwise(0)).over(day) > 0
+        F.sum(F.when(F.col("ATOT").isNotNull() | F.col("ALDT").isNotNull(), 1).otherwise(0)).over(
+            day
+        )
+        > 0
     )
 
     superseded_dep = (
@@ -325,42 +322,29 @@ def add_movement_columns(
         & ((last_s - prev_arr) <= F.lit(window_s))
     )
 
-    # A "ghost": the row claims a leg, but nothing was seen to fly and no other
-    # end was named. That is not evidence of a movement, only of an aircraft
-    # near an aerodrome. They are the whole of the residual over-count -- at
-    # EBBR, 338 of a 342-departure excess -- and the superseded rule cannot
-    # reach them, because a ghost has no later real departure to be superseded
-    # by.
+    # A row that names a departure (or arrival) but where nothing was seen to
+    # fly and no other end was named shows only an aircraft near an airport,
+    # not a movement. The superseded rule cannot reach these rows, as no later
+    # departure follows them.
     #
-    # Guarded by ``day_processed`` for the same reason as above and more
-    # sharply: before step 04 runs, *every* row has a null ATOT, so every
-    # departure without a destination would be condemned as a ghost.
+    # Applied only on days with events (``day_processed``), for the reason
+    # above: before step 04 every row has a NULL ATOT.
     # ``left_dep``/``came_arr``: any ring crossing at all, which is positive
     # evidence the aircraft actually went somewhere. It is the part that makes
     # this rule survive poor coverage -- a take-off can be missed while the
     # same flight is still seen at 40 NM, and at the edge of the network that
     # is the common case, not the exception.
     #
-    # Coalesced across every ring rather than pinned to C40, so a configuration
+    # Coalesced across every ring rather than tied to C40, so a configuration
     # that does not emit 40 NM does not silently condemn every departure.
     left_dep = F.coalesce(*[F.col(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM])
     came_arr = F.coalesce(*[F.col(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM])
 
-    # Without the ring term this rule is a coverage detector wearing a movement
-    # detector's clothes. Measured: dropping rows on "no take-off and no other
-    # end" alone fixed EBBR (1.80x to 1.00x) and destroyed LTFM, which fell
-    # from 0.97x to **0.39x** -- because at the edge of coverage a real
-    # departure has no take-off and no destination either, and looks exactly
-    # like a ramp ghost. The network aggregate still read 0.96x, flattered by
-    # one aerodrome's under-count cancelling another's over-count.
-    ghost_dep = (
-        day_processed
-        & F.col("ATOT").isNull() & F.col("ADES").isNull() & left_dep.isNull()
-    )
-    ghost_arr = (
-        day_processed
-        & F.col("ALDT").isNull() & F.col("ADEP").isNull() & came_arr.isNull()
-    )
+    # Without the circle crossings this rule would remove real departures at
+    # the edge of coverage, which often have neither a take-off nor a
+    # destination either.
+    ghost_dep = day_processed & F.col("ATOT").isNull() & F.col("ADES").isNull() & left_dep.isNull()
+    ghost_arr = day_processed & F.col("ALDT").isNull() & F.col("ADEP").isNull() & came_arr.isNull()
 
     # The single question a consumer actually has. Composed here so that
     # counting movements is one predicate rather than three, and so the
@@ -369,8 +353,7 @@ def add_movement_columns(
     movement_arr = F.col("ADES").isNotNull() & ~superseded_arr & ~ghost_arr
 
     return (
-        flight_list
-        .withColumn("TRACK_DURATION_MIN", (last_s - first_s) / F.lit(60.0))
+        flight_list.withColumn("TRACK_DURATION_MIN", (last_s - first_s) / F.lit(60.0))
         # ``coalesce`` to False: a row with no ADEP has no next departure to be
         # superseded by, and NULL there would read as "unknown" when the answer
         # is simply no.
@@ -433,11 +416,8 @@ def enrich_flight_list(
     # against the aerodrome the evidence disagrees with.
     flight_list = correct_aerodromes(flight_list, events)
 
-    # Re-enriching is normal, not an error. Step 04b runs once per campaign day
-    # and rewrites every partition, so the second day necessarily meets a table
-    # the first day already enriched; a re-run after an events fix meets one
-    # too. Refusing made the step non-idempotent and stopped a campaign dead on
-    # its first retry.
+    # Enriching a flight list that was enriched before is normal: step 04b runs
+    # every day, and a day can be processed again.
     #
     # Every added column is *derived* -- recomputable from the events in full
     # -- so dropping the previous answer and recomputing is exactly right, and
@@ -450,9 +430,7 @@ def enrich_flight_list(
 
     radii = {float(r) for r in config.ring_radii_nm}
     ring_types = [
-        _RING_TYPE.format(nm=nm)
-        for nm in FLIGHT_LIST_RING_RADII_NM
-        if float(nm) in radii
+        _RING_TYPE.format(nm=nm) for nm in FLIGHT_LIST_RING_RADII_NM if float(nm) in radii
     ]
     wanted = [_ATOT, _ALDT, _AOBT, _AIBT, _STAND_EXIT, _STAND_ENTRY] + ring_types
 
@@ -471,7 +449,9 @@ def enrich_flight_list(
     narrowed = (
         events.select(
             F.col(_flight_key(events)).alias("_event_key"),
-            "type", "event_time", "info",
+            "type",
+            "event_time",
+            "info",
         )
         .filter(F.col("type").isin(wanted))
         .join(keys, F.col("_event_key") == F.col("_track_id"), "inner")
@@ -487,16 +467,10 @@ def enrich_flight_list(
             return _null_ts()
         if arrival:
             cond = (
-                (F.col("type") == type_)
-                & (direction == F.lit("inbound"))
-                & (apt == F.col("_ades"))
+                (F.col("type") == type_) & (direction == F.lit("inbound")) & (apt == F.col("_ades"))
             )
             return _last(cond, F.col("event_time"))
-        cond = (
-            (F.col("type") == type_)
-            & (direction == F.lit("outbound"))
-            & (apt == F.col("_adep"))
-        )
+        cond = (F.col("type") == type_) & (direction == F.lit("outbound")) & (apt == F.col("_adep"))
         return _first(cond, F.col("event_time"))
 
     # Departure milestones take the *earliest* matching event and arrival
@@ -510,14 +484,8 @@ def enrich_flight_list(
     # Each milestone must come from an event at the aerodrome of *its own leg*.
     # A track routinely covers the previous arrival's taxi-in, a turnaround and
     # this departure, so an ``entry-parking_position`` on it is as likely to be
-    # the stand the aircraft arrived on *last* night as this flight's. Without
-    # the check, 52% of published STND_ARR values were the stand at a different
-    # aerodrome; correcting ADEP/ADES from ground evidence only moved that to
-    # 48%, because the disagreement is real rather than an error -- the event
-    # belongs to a leg this row does not describe.
-    #
-    # The ring columns have always applied this test. The milestones did not,
-    # and the inconsistency was the bug.
+    # the stand the aircraft arrived on the night before as this flight's. The
+    # circle crossing columns apply the same test.
     # Filters what is demonstrably wrong, not what is merely unverifiable. An
     # event naming no aerodrome cannot be checked against the leg, and
     # discarding it would lose coverage to no purpose -- a null here means the
@@ -539,11 +507,31 @@ def enrich_flight_list(
         _first(is_dep(_ATOT), _runway_bearing()).alias("RWY_DEP_BEARING_DEG"),
         _last(is_arr(_ALDT), _runway()).alias("RWY_ARR"),
         _last(is_arr(_ALDT), _runway_bearing()).alias("RWY_ARR_BEARING_DEG"),
-        _first(is_dep(_STAND_EXIT), _info("osm_ref")).alias("STND_DEP"),
-        _last(is_arr(_STAND_ENTRY), _info("osm_ref")).alias("STND_ARR"),
+        _first(is_dep(_STAND_EXIT), _info("osm_ref")).alias("_stnd_dep_layout"),
+        _last(is_arr(_STAND_ENTRY), _info("osm_ref")).alias("_stnd_arr_layout"),
+        # The stand the block time itself was read from (``info.stand``), and
+        # its airport. Block times written without it give NULL here.
+        _first(is_(_AOBT), _info("stand")).alias("_aobt_stand"),
+        _first(is_(_AOBT), _info("apt_icao")).alias("_aobt_apt"),
+        _last(is_(_AIBT), _info("stand")).alias("_aibt_stand"),
+        _last(is_(_AIBT), _info("apt_icao")).alias("_aibt_apt"),
+        F.first("_adep").alias("_k_adep"),
+        F.first("_ades").alias("_k_ades"),
         *[ring(nm, arrival=True).alias(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM],
         *[ring(nm, arrival=False).alias(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM],
     )
+
+    # STND_DEP and STND_ARR are the stands of the AOBT and AIBT columns when
+    # those events name a stand at the flight's own airport, so the time and
+    # the stand of a row come from the same stand passage. Otherwise they are
+    # the first stand exit at ADEP and the last stand entry at ADES.
+    def _own_stand(stand: str, airport: str, leg: str, layout: str) -> Column:
+        at_leg = F.col(airport).isNull() | (F.col(airport) == F.col(leg))
+        return F.when(F.col(stand).isNotNull() & at_leg, F.col(stand)).otherwise(F.col(layout))
+
+    agg = agg.withColumn(
+        "STND_DEP", _own_stand("_aobt_stand", "_aobt_apt", "_k_adep", "_stnd_dep_layout")
+    ).withColumn("STND_ARR", _own_stand("_aibt_stand", "_aibt_apt", "_k_ades", "_stnd_arr_layout"))
 
     # LEFT, flight list on the left: a flight with no events at all must
     # survive with nulls rather than vanish, and the row count is part of the

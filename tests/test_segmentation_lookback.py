@@ -5,6 +5,7 @@ window, and an unbounded `F.last` reaches back past a gap break into the
 previous flight. `gap_minutes` became the bound only because it was to hand --
 the two quantities answer different questions, and this pins the difference.
 """
+
 from dataclasses import fields
 
 from opdi.pipeline.segmentation import SegmentationParams
@@ -54,15 +55,10 @@ def test_cell_key_reads_a_three_axis_row_as_the_unset_cell():
     import pathlib
     import sys
 
-    sys.path.insert(
-        0, str(pathlib.Path(__file__).resolve().parent.parent / "benchmarks")
-    )
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "benchmarks"))
     from track_sweep import cell_key
 
-    legacy_row = {"gap_minutes": "30", "low_alt_gap_minutes": "15",
-                  "low_alt_ft": "5000"}
+    legacy_row = {"gap_minutes": "30", "low_alt_gap_minutes": "15", "low_alt_ft": "5000"}
     assert cell_key(legacy_row) == (30.0, 15.0, 5000.0, None)
-    assert cell_key({**legacy_row, "callsign_lookback_minutes": ""}) == (
-        30.0, 15.0, 5000.0, None)
-    assert cell_key({**legacy_row, "callsign_lookback_minutes": "5"}) == (
-        30.0, 15.0, 5000.0, 5.0)
+    assert cell_key({**legacy_row, "callsign_lookback_minutes": ""}) == (30.0, 15.0, 5000.0, None)
+    assert cell_key({**legacy_row, "callsign_lookback_minutes": "5"}) == (30.0, 15.0, 5000.0, 5.0)

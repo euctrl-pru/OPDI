@@ -65,15 +65,22 @@ import track_truth  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import DataFrame, SparkSession, Window  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
+from study_variants.segmentation import StudySegmentationParams  # noqa: E402
 from track_score import boundary_offsets  # noqa: E402
 
 from opdi.config import OPDIConfig  # noqa: E402
-from opdi.pipeline.segmentation import SegmentationParams  # noqa: E402
 from opdi.pipeline.segmentation.base import FT_PER_M  # noqa: E402
 
-__all__ = ["inside_window", "containment_census", "census_ground_truth",
-           "null_rates", "gap_boundary_nulls", "pre_gap_stale_signature",
-           "gate_interval_summary", "boundary_histogram"]
+__all__ = [
+    "inside_window",
+    "containment_census",
+    "census_ground_truth",
+    "null_rates",
+    "gap_boundary_nulls",
+    "pre_gap_stale_signature",
+    "gate_interval_summary",
+    "boundary_histogram",
+]
 
 #: Days added on each side of the sampled window when loading ground truth for
 #: the census. One is enough for any flight in this data: the longest ECAC leg
@@ -98,8 +105,13 @@ BIN_SECONDS = 30
 #: Column order of each CSV, fixed here so the file the paper reads and the
 #: interface the plan declares cannot drift apart.
 CONTAINMENT_FIELDS = [
-    "period", "n_gt_flights", "n_wholly_inside", "n_clipped_start",
-    "n_clipped_end", "pct_kept", "median_observed_fraction_clipped",
+    "period",
+    "n_gt_flights",
+    "n_wholly_inside",
+    "n_clipped_start",
+    "n_clipped_end",
+    "pct_kept",
+    "median_observed_fraction_clipped",
     # The gate-to-gate interval, summarised per period so the paper reads these
     # from a CSV instead of quoting a measurement made in conversation. Per-side
     # coverage is the load-bearing pair: `aobt` has an NM fallback and sits near
@@ -108,28 +120,40 @@ CONTAINMENT_FIELDS = [
     # persisted. `gate_outside_window_pct` is the share of kept flights whose
     # gate interval crosses the sampled window's edge -- their taxi samples are
     # clipped by the day filter, in the flattering direction.
-    "gate_dep_measured_pct", "gate_arr_measured_pct",
-    "gate_b_dep_s", "gate_b_arr_s",
-    "gate_widen_dep_p50_s", "gate_widen_arr_p50_s",
+    "gate_dep_measured_pct",
+    "gate_arr_measured_pct",
+    "gate_b_dep_s",
+    "gate_b_arr_s",
+    "gate_widen_dep_p50_s",
+    "gate_widen_arr_p50_s",
     "gate_outside_window_pct",
 ]
 HIST_FIELDS = ["arm", "edge", "bin_lower_s", "bin_upper_s", "n"]
 TRAFFIC_FILL_FIELDS = [
-    "period", "n_gaps", "n_null_either_side", "null_pct", "n_no_gap_turnarounds",
+    "period",
+    "n_gaps",
+    "n_null_either_side",
+    "null_pct",
+    "n_no_gap_turnarounds",
     # The same gap count over the RAW table, before step 02a's masking. The
     # clean and raw rates answer different questions -- "what does A3's
     # predicate see on OPDI's data" versus "what would it see on the feed" --
     # and the distance between them is the cleaning's contribution, which is
     # the finding.
-    "raw_n_gaps", "raw_n_null_either_side", "raw_null_pct",
+    "raw_n_gaps",
+    "raw_n_null_either_side",
+    "raw_null_pct",
     # The mechanism, measured on raw: the sample immediately before a silence
     # is overwhelmingly either already NULL or an exact repeat of its
     # predecessor -- a coverage fade loses fresh altitude messages before it
     # loses messages altogether -- and ``mask_stale_broadcasts`` then masks
     # the repeats. The all-other-samples baselines sit beside them so the
     # concentration at the gap boundary is visible, not asserted.
-    "pregap_n", "pregap_repeat_pct", "pregap_null_pct",
-    "other_repeat_pct", "other_null_pct",
+    "pregap_n",
+    "pregap_repeat_pct",
+    "pregap_null_pct",
+    "other_repeat_pct",
+    "other_null_pct",
 ]
 
 #: Raw (pre-cleaning) counterpart of each period's track table, read only by
@@ -362,9 +386,9 @@ def boundary_histogram(
     try:
         # Long form: one row per (flight, edge). Both edges share a grid, so a
         # reader can put the departure and arrival panels side by side.
-        both = off.select(
-            F.lit("off").alias("edge"), F.col("off_s").alias("d")
-        ).unionByName(off.select(F.lit("land").alias("edge"), F.col("land_s").alias("d")))
+        both = off.select(F.lit("off").alias("edge"), F.col("off_s").alias("d")).unionByName(
+            off.select(F.lit("land").alias("edge"), F.col("land_s").alias("d"))
+        )
         clamped = F.greatest(F.least(F.col("d"), F.lit(span_seconds)), F.lit(-span_seconds))
         # floor() of the clamped value, then folded back by one at the top:
         # a value of exactly +span_seconds floors to `half`, one bin past the
@@ -387,12 +411,14 @@ def boundary_histogram(
     rows = []
     for edge in ("off", "land"):
         for b in range(-half, half):
-            rows.append({
-                "edge": edge,
-                "bin_lower_s": b * bin_seconds,
-                "bin_upper_s": (b + 1) * bin_seconds,
-                "n": counts.get((edge, b), 0),
-            })
+            rows.append(
+                {
+                    "edge": edge,
+                    "bin_lower_s": b * bin_seconds,
+                    "bin_upper_s": (b + 1) * bin_seconds,
+                    "n": counts.get((edge, b), 0),
+                }
+            )
 
     # The docstring promises the histogram sums to the sample. A NULL offset
     # would break that silently -- it lands in no bin at all -- so it is
@@ -427,7 +453,14 @@ def run_arm_histogram(spark, s3, arm_name, period, sv, gt, params, args):
     is a property of the arm that ``arms_<period>.csv`` already records.
     """
     rows, _meta = track_methods.run_arm(
-        spark, s3, arm_name, period, sv, gt, params, args.keep_assignments,
+        spark,
+        s3,
+        arm_name,
+        period,
+        sv,
+        gt,
+        params,
+        args.keep_assignments,
         score=lambda matched, extents, assign: boundary_histogram(
             matched, extents, args.bin_seconds, args.span_seconds
         ),
@@ -470,10 +503,7 @@ def null_rates(df: DataFrame, columns=None) -> dict:
     from opdi.cleaning.native import null_rate_report
 
     rates = null_rate_report(df) if columns is None else null_rate_report(df, columns)
-    return {
-        f"null_{NULL_SHORT_NAMES.get(c, c)}_pct": 100.0 * v
-        for c, v in rates.items()
-    }
+    return {f"null_{NULL_SHORT_NAMES.get(c, c)}_pct": 100.0 * v for c, v in rates.items()}
 
 
 def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) -> dict:
@@ -518,7 +548,9 @@ def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) 
     null_either_side = F.col("baro_altitude_ft").isNull() | prev_alt.isNull()
 
     annotated = sv.select(
-        "icao24", "event_time", "on_ground",
+        "icao24",
+        "event_time",
+        "on_ground",
         gap_min.alias("gap_min"),
         is_gap.alias("is_gap"),
         null_either_side.alias("null_either_side"),
@@ -528,9 +560,9 @@ def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) 
     try:
         counts = annotated.select(
             F.sum(F.when(F.col("is_gap"), 1).otherwise(0)).alias("n_gaps"),
-            F.sum(
-                F.when(F.col("is_gap") & F.col("null_either_side"), 1).otherwise(0)
-            ).alias("n_null_either_side"),
+            F.sum(F.when(F.col("is_gap") & F.col("null_either_side"), 1).otherwise(0)).alias(
+                "n_null_either_side"
+            ),
         ).collect()[0]
         n_gaps = counts["n_gaps"] or 0
         n_null = counts["n_null_either_side"] or 0
@@ -548,7 +580,10 @@ def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) 
             w.rowsBetween(Window.unboundedPreceding, 0)
         )
         runs = annotated.select(
-            "icao24", "event_time", "on_ground", "gap_min",
+            "icao24",
+            "event_time",
+            "on_ground",
+            "gap_min",
             is_run_start.alias("is_run_start"),
             run_id.alias("run_id"),
         ).filter(F.col("on_ground"))
@@ -559,13 +594,9 @@ def gap_boundary_nulls(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) 
             # Only gaps *within* the run count as internal: the run's first
             # row's `gap_min` is the gap leading *into* the stretch, from
             # whatever (on_ground or not) preceded it, not a gap inside it.
-            F.max(
-                F.when(~F.col("is_run_start"), F.col("gap_min"))
-            ).alias("max_internal_gap_min"),
+            F.max(F.when(~F.col("is_run_start"), F.col("gap_min"))).alias("max_internal_gap_min"),
         )
-        span_min = (
-            F.col("run_end").cast("long") - F.col("run_start").cast("long")
-        ) / 60.0
+        span_min = (F.col("run_end").cast("long") - F.col("run_start").cast("long")) / 60.0
         no_gap_turnaround = (span_min > F.lit(gap_minutes)) & (
             F.col("max_internal_gap_min").isNull()
             | (F.col("max_internal_gap_min") <= F.lit(gap_minutes))
@@ -612,9 +643,9 @@ def gate_interval_summary(gt: DataFrame) -> dict:
     n = agg["n"] or 0
     pct = lambda x: round(100.0 * (x or 0) / n, 2) if n else 0.0  # noqa: E731
 
-    p50 = gt.select(
-        widen_dep.alias("wd"), widen_arr.alias("wa")
-    ).approxQuantile(["wd", "wa"], [0.5], 0.001)
+    p50 = gt.select(widen_dep.alias("wd"), widen_arr.alias("wa")).approxQuantile(
+        ["wd", "wa"], [0.5], 0.001
+    )
 
     return {
         "gate_dep_measured_pct": pct(agg["dep_m"]),
@@ -627,9 +658,7 @@ def gate_interval_summary(gt: DataFrame) -> dict:
     }
 
 
-def pre_gap_stale_signature(
-    sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES
-) -> dict:
+def pre_gap_stale_signature(sv: DataFrame, gap_minutes: float = TRAFFIC_GAP_MINUTES) -> dict:
     """Is the sample before a silence a measurement, or the tail of a fade?
 
     Run on the RAW table, before any masking, or it measures nothing: after
@@ -655,9 +684,8 @@ def pre_gap_stale_signature(
     next_time = F.lead("event_time").over(w)
     prev_alt = F.lag("baro_altitude_ft").over(w)
 
-    pre_gap = (
-        (next_time.cast("long") - F.col("event_time").cast("long")) / 60.0
-        > F.lit(gap_minutes)
+    pre_gap = (next_time.cast("long") - F.col("event_time").cast("long")) / 60.0 > F.lit(
+        gap_minutes
     )
     repeats = (
         F.col("baro_altitude_ft").isNotNull()
@@ -672,11 +700,15 @@ def pre_gap_stale_signature(
     )
 
     def _rates(cond):
-        r = a.filter(cond).select(
-            F.count(F.lit(1)).alias("n"),
-            F.sum(F.when(F.col("repeats"), 1).otherwise(0)).alias("rep"),
-            F.sum(F.when(F.col("own_null"), 1).otherwise(0)).alias("nul"),
-        ).collect()[0]
+        r = (
+            a.filter(cond)
+            .select(
+                F.count(F.lit(1)).alias("n"),
+                F.sum(F.when(F.col("repeats"), 1).otherwise(0)).alias("rep"),
+                F.sum(F.when(F.col("own_null"), 1).otherwise(0)).alias("nul"),
+            )
+            .collect()[0]
+        )
         n = r["n"] or 0
         pct = lambda x: round(100.0 * (x or 0) / n, 2) if n else 0.0  # noqa: E731
         return n, pct(r["rep"]), pct(r["nul"])
@@ -778,25 +810,18 @@ def run_boundary_hist(spark, s3, args, period_cfg, days, out_path) -> dict:
     failure on the last arm would otherwise discard the earlier arms' numbers
     with no way back to them short of a full cluster re-run.
     """
-    sv = spark.read.parquet(period_cfg["tracks"]).filter(
-        F.to_date("event_time").isin(days)
-    )
+    sv = spark.read.parquet(period_cfg["tracks"]).filter(F.to_date("event_time").isin(days))
     sv = track_methods.attach_airport_context(spark, sv).cache()
-    gt = track_truth.load_flight_intervals(
-        spark, period_cfg["months"], days
-    ).cache()
+    gt = track_truth.load_flight_intervals(spark, period_cfg["months"], days).cache()
     n_sv, n_gt = sv.count(), gt.count()
     print(f"{n_sv:,} samples, {n_gt:,} ground-truth flights")
 
     cfg = OPDIConfig().segmentation
-    params = SegmentationParams(
+    # The four study thresholds keep their study values (StudySegmentationParams).
+    params = StudySegmentationParams(
         gap_minutes=cfg.gap_minutes,
         low_alt_gap_minutes=cfg.low_alt_gap_minutes,
         low_alt_ft=cfg.low_alt_ft,
-        ground_dwell_minutes=cfg.ground_dwell_minutes,
-        turnaround_max_height_ft=cfg.turnaround_max_height_ft,
-        turnaround_max_speed_kt=cfg.turnaround_max_speed_kt,
-        descent_floor_ft=cfg.descent_floor_ft,
     )
 
     fh = out_path.open("w", newline="")
@@ -806,9 +831,7 @@ def run_boundary_hist(spark, s3, args, period_cfg, days, out_path) -> dict:
         for arm in args.arms:
             print(f"\n=== {arm} ({args.period}) ===")
             track_methods.require_headroom(s3, f"arm {arm}")
-            arm_rows = run_arm_histogram(
-                spark, s3, arm, args.period, sv, gt, params, args
-            )
+            arm_rows = run_arm_histogram(spark, s3, arm, args.period, sv, gt, params, args)
             for r in arm_rows:
                 writer.writerow({k: r[k] for k in HIST_FIELDS})
             fh.flush()
@@ -845,9 +868,12 @@ def run_traffic_fill(spark, args, period_cfg, days, out_path) -> dict:
     ``gap_boundary_nulls`` reads (``icao24``, ``event_time``, ``on_ground``) is
     unit-bearing, so this is the only conversion this job needs.
     """
-    sv = spark.read.parquet(period_cfg["tracks"]).filter(
-        F.to_date("event_time").isin(days)
-    ).withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M).cache()
+    sv = (
+        spark.read.parquet(period_cfg["tracks"])
+        .filter(F.to_date("event_time").isin(days))
+        .withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M)
+        .cache()
+    )
     n_sv = sv.count()
     print(f"{n_sv:,} samples (clean)")
 
@@ -862,9 +888,12 @@ def run_traffic_fill(spark, args, period_cfg, days, out_path) -> dict:
     # stale-signature rates below say why. Raw tables are diagnostic-only
     # reads (see RAW_TRACKS); a missing period fails loudly here rather than
     # silently producing a clean-only row.
-    raw = spark.read.parquet(RAW_TRACKS[args.period]).filter(
-        F.to_date("event_time").isin(days)
-    ).withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M).cache()
+    raw = (
+        spark.read.parquet(RAW_TRACKS[args.period])
+        .filter(F.to_date("event_time").isin(days))
+        .withColumn("baro_altitude_ft", F.col("baro_altitude") * FT_PER_M)
+        .cache()
+    )
     n_raw = raw.count()
     print(f"{n_raw:,} samples (raw)")
 
@@ -884,23 +913,24 @@ def run_traffic_fill(spark, args, period_cfg, days, out_path) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "--job", choices=["containment", "boundary-hist", "traffic-fill"],
+        "--job",
+        choices=["containment", "boundary-hist", "traffic-fill"],
         required=True,
     )
     ap.add_argument("--period", choices=sorted(track_methods.PERIODS), default="2025")
     ap.add_argument("--results-dir", type=Path, required=True)
-    ap.add_argument("--out-name", default=None,
-                    help="default: <job>_<period>.csv")
-    ap.add_argument("--arms", nargs="+", default=list(DEFAULT_HIST_ARMS),
-                    help="boundary-hist only")
+    ap.add_argument("--out-name", default=None, help="default: <job>_<period>.csv")
+    ap.add_argument("--arms", nargs="+", default=list(DEFAULT_HIST_ARMS), help="boundary-hist only")
     ap.add_argument("--bin-seconds", type=int, default=BIN_SECONDS)
     ap.add_argument("--span-seconds", type=int, default=SPAN_SECONDS)
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4059)
-    ap.add_argument("--days", nargs="+", default=None,
-                    help="override the period's day list")
-    ap.add_argument("--keep-assignments", action="store_true",
-                    help="do not delete each arm's assignment table (default: delete)")
+    ap.add_argument("--days", nargs="+", default=None, help="override the period's day list")
+    ap.add_argument(
+        "--keep-assignments",
+        action="store_true",
+        help="do not delete each arm's assignment table (default: delete)",
+    )
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -931,13 +961,18 @@ def main() -> None:
     else:
         inputs = run_boundary_hist(spark, s3, args, period_cfg, days, out_path)
         tables = [period_cfg["tracks"]]
-        code = ["benchmarks/track_diagnostics.py", "benchmarks/track_truth.py",
-                "benchmarks/track_score.py",
-                "src/opdi/pipeline/segmentation/base.py",
-                "src/opdi/pipeline/segmentation/methods.py"]
+        code = [
+            "benchmarks/track_diagnostics.py",
+            "benchmarks/track_truth.py",
+            "benchmarks/track_score.py",
+            "src/opdi/pipeline/segmentation/base.py",
+            "src/opdi/pipeline/segmentation/methods.py",
+            "benchmarks/study_variants/segmentation.py",
+        ]
 
     provenance.record(
-        args.results_dir, out_name,
+        args.results_dir,
+        out_name,
         script="benchmarks/track_diagnostics.py",
         argv=sys.argv[1:],
         code_paths=code,

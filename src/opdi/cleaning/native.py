@@ -1,12 +1,13 @@
-"""
-Native Spark trajectory cleaning (pipeline step 02a).
+"""The stages of trajectory cleaning (step 02a), as Spark column expressions.
 
-Ported from the 2024 PRC Data Challenge winning solution (Alligier & Gianazza,
-ENAC), ``filterclassic.py``. Every stage here is a pure ``DataFrame ->
-DataFrame`` function, composable via ``DataFrame.transform``, expressed purely
-as column and window expressions partitioned by ``track_id`` -- the same idiom
-the rest of the pipeline uses. No ``applyInPandas``, no ``pandas_udf``, no
-``traffic`` dependency.
+The method follows the trajectory cleaning of the winning solution of the
+2024 PRC Data Challenge (Alligier and Gianazza, ENAC), ``filterclassic.py``.
+See https://www.opdi.aero/content/methods/trajectory-cleaning.html.
+
+Every stage here is a pure ``DataFrame -> DataFrame`` function, composable via
+``DataFrame.transform``, expressed purely as column and window expressions
+partitioned by ``track_id`` -- the same idiom the rest of the pipeline uses. No
+``applyInPandas``, no ``pandas_udf``, no ``traffic`` dependency.
 
 **Design: mask to NULL, keep the row.** The 2024 solution masks bad values and
 retains the row; the 2025 solution drops rows and resamples to 1 s. The 2024
@@ -46,7 +47,7 @@ PRC challenges, not oversights:
   ``get_wind`` call is commented out (``resqu/preprocessor.py:616-617``).
 """
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
@@ -138,15 +139,6 @@ def _next_valid(value: Column, target: Column) -> Column:
     on the reversed ordering asks the same question of a frame that *grows*,
     which Spark maintains incrementally in O(n).
 
-    Measured on one partition, identical output both ways:
-
-        rows    shrinking   reversed-growing
-        8,000       1.34s              0.14s
-        32,000     15.23s              0.12s
-
-    This was 94% of step 02a: one stage, 200 tasks, 94 minutes, while a
-    neighbouring stage moved the same 9 GB of shuffle in 14 seconds.
-
     The reversal is exact, not an approximation. "Nearest following row with a
     non-NULL value" and "nearest preceding row with a non-NULL value, read
     backwards" are the same row. Ties would be the one way they could differ,
@@ -172,6 +164,7 @@ def _angular_delta(current: Column, previous: Column) -> Column:
 # ---------------------------------------------------------------------------
 # Stage 1 -- duplicate removal
 # ---------------------------------------------------------------------------
+
 
 def drop_duplicate_statevectors(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """Drop duplicate ``(track_id, event_time)`` rows.
@@ -204,6 +197,7 @@ def drop_duplicate_statevectors(df: DataFrame, cfg: CleaningConfig) -> DataFrame
 # Stage 2 -- range validity
 # ---------------------------------------------------------------------------
 
+
 def mask_out_of_range_positions(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """NULL coordinates outside the physically possible range."""
     return df.withColumn(
@@ -218,6 +212,7 @@ def mask_out_of_range_positions(df: DataFrame, cfg: CleaningConfig) -> DataFrame
 # ---------------------------------------------------------------------------
 # Stage 3 -- stale-broadcast removal
 # ---------------------------------------------------------------------------
+
 
 def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """NULL values that were repeated rather than re-measured.
@@ -261,20 +256,18 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
         port does not: **the first sample of a track has no predecessor, so it
         cannot be a repeat of anything.**
 
-        Requiring ``prev.isNotNull()`` here -- as this did originally -- makes
-        every column of the first row "unchanged", which the caller then reads
-        as "stale" and NULLs. The result was that cleaning destroyed the
-        position of the first sample of every single track: measured at 100%
-        on 2025-06-05, which took ADEP detection on cleaned tracks to zero.
-        Absence of a predecessor is absence of evidence for a repeat, not
-        evidence of one.
+        Requiring ``prev.isNotNull()`` here would make every column of the
+        first row "unchanged", and the caller would remove the first position
+        of every track. No predecessor is no evidence of a repeat.
         """
         prev = F.lag(F.col(name)).over(w)
         return F.col(name).isNotNull() & (prev.isNull() | (F.col(name) != prev))
 
     def position_changed() -> Column:
-        """``changed("lat") | changed("lon")``, or the ``last_pos_update``
-        discriminator when the config asks for it and the row carries one.
+        """Whether the position changed since the previous report.
+
+        ``changed("lat") | changed("lon")``, or the ``last_pos_update`` test
+        when the configuration asks for it and the row carries one.
 
         A NULL ``last_pos_update`` -- data lacking the field entirely, or a
         row where it just wasn't populated -- falls back to plain
@@ -300,18 +293,13 @@ def mask_stale_broadcasts(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     # value to have been carried forward from.
     exempt = _sparse_mask(df, cfg)
     df = (
-        df.withColumn("_stale_latlon",
-                      ~exempt & ~F.coalesce(lat_or_lon, F.lit(False)))
-        .withColumn("_stale_position",
-                    ~exempt & ~F.coalesce(position, F.lit(False)))
-        .withColumn("_stale_speed",
-                    ~exempt & ~F.coalesce(speed, F.lit(False)))
+        df.withColumn("_stale_latlon", ~exempt & ~F.coalesce(lat_or_lon, F.lit(False)))
+        .withColumn("_stale_position", ~exempt & ~F.coalesce(position, F.lit(False)))
+        .withColumn("_stale_speed", ~exempt & ~F.coalesce(speed, F.lit(False)))
     )
 
     for name in ("lat", "lon"):
-        df = df.withColumn(
-            name, F.when(~F.col("_stale_latlon"), F.col(name))
-        )
+        df = df.withColumn(name, F.when(~F.col("_stale_latlon"), F.col(name)))
     df = df.withColumn(
         "baro_altitude",
         F.when(~F.col("_stale_position"), F.col("baro_altitude")),
@@ -405,11 +393,7 @@ def _mask_spikes_one_column(
     prev_value = _prev_valid(value, scaled, w)
     prev_time = _prev_valid(value, F.col(_T), w)
 
-    delta = (
-        _angular_delta(scaled, prev_value)
-        if name == "heading"
-        else scaled - prev_value
-    )
+    delta = _angular_delta(scaled, prev_value) if name == "heading" else scaled - prev_value
 
     df = df.withColumn("_d_dt", F.col(_T) - prev_time).withColumn("_d_dv", delta)
 
@@ -422,17 +406,11 @@ def _mask_spikes_one_column(
     # it carries the same unit as deriv1. It is not a rate of a rate.
     df = df.withColumn(
         "_d_f1",
-        F.when(
-            (F.abs(F.col("_d_dv")) / F.col("_d_dt")) >= F.lit(first_max), 1
-        ).otherwise(0),
+        F.when((F.abs(F.col("_d_dv")) / F.col("_d_dt")) >= F.lit(first_max), 1).otherwise(0),
     ).withColumn(
         "_d_f2",
         F.when(
-            (
-                F.lit(2.0)
-                * F.abs(F.col("_d_dv") - prev_dv)
-                / (F.col("_d_dt") + prev_dt)
-            )
+            (F.lit(2.0) * F.abs(F.col("_d_dv") - prev_dv) / (F.col("_d_dt") + prev_dt))
             >= F.lit(second_max),
             1,
         ).otherwise(0),
@@ -489,6 +467,7 @@ def mask_derivative_spikes(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
 # Stage 5 -- isolated-point removal
 # ---------------------------------------------------------------------------
 
+
 def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """NULL values too far in time from any other measurement of that column.
 
@@ -519,9 +498,7 @@ def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
         value = F.col(name)
         backward = F.col(_T) - _prev_valid(value, F.col(_T), w)
         forward = _next_valid(value, F.col(_T)) - F.col(_T)
-        gap = F.least(
-            F.coalesce(backward, sentinel), F.coalesce(forward, sentinel)
-        )
+        gap = F.least(F.coalesce(backward, sentinel), F.coalesce(forward, sentinel))
         df = df.withColumn(name, F.when((gap <= limit) | exempt, value))
 
     return df.drop(_T)
@@ -530,6 +507,7 @@ def mask_isolated_points(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
 # ---------------------------------------------------------------------------
 # Stage 6 -- gap segmentation
 # ---------------------------------------------------------------------------
+
 
 def add_segment_id(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
     """Add ``segment_id``, splitting a track at coverage holes.
@@ -558,6 +536,7 @@ def add_segment_id(df: DataFrame, cfg: CleaningConfig) -> DataFrame:
 # Composition
 # ---------------------------------------------------------------------------
 
+
 def clean_tracks(df: DataFrame, cfg: Optional[CleaningConfig] = None) -> DataFrame:
     """Run the full native cleaning pipeline over an ``osn_tracks`` frame.
 
@@ -584,9 +563,7 @@ def clean_tracks(df: DataFrame, cfg: Optional[CleaningConfig] = None) -> DataFra
     )
 
 
-def null_rate_report(
-    df: DataFrame, columns: Sequence[str] = CLEANED_COLUMNS
-) -> Dict[str, float]:
+def null_rate_report(df: DataFrame, columns: Sequence[str] = CLEANED_COLUMNS) -> Dict[str, float]:
     """Fraction of NULLs per column, for verifying a cleaning run.
 
     The pipeline verification asserts that null rates per stage stay within
@@ -599,10 +576,7 @@ def null_rate_report(
 
     row = df.select(
         F.count(F.lit(1)).alias("_n"),
-        *[
-            F.sum(F.when(F.col(c).isNull(), 1).otherwise(0)).alias(c)
-            for c in present
-        ],
+        *[F.sum(F.when(F.col(c).isNull(), 1).otherwise(0)).alias(c) for c in present],
     ).first()
 
     total = row["_n"] or 0

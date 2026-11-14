@@ -19,6 +19,7 @@ Run:
         --airports EBBR LSZH EICK EGGD \
         --build-only EDDP LPPT EGNT EGCC UGKO
 """
+
 import argparse
 import os
 import sys
@@ -29,22 +30,38 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pbf", required=True)
-    ap.add_argument("--parts", required=True,
-                    help="directory of <ICAO>.parquet built from Overpass")
-    ap.add_argument("--airports", nargs="+", required=True,
-                    help="airports to run the graded Section A comparison on "
-                         "(must have a baseline parquet under --parts)")
-    ap.add_argument("--build-only", nargs="*", default=[],
-                    help="airports with no Overpass baseline: Section B, "
-                         "build-only, no pass/fail")
-    ap.add_argument("--out", default=None,
-                    help="also write the comparison table to this file")
+    ap.add_argument(
+        "--parts", required=True, help="directory of <ICAO>.parquet built from Overpass"
+    )
+    ap.add_argument(
+        "--airports",
+        nargs="+",
+        required=True,
+        help="airports to run the graded Section A comparison on "
+        "(must have a baseline parquet under --parts)",
+    )
+    ap.add_argument(
+        "--build-only",
+        nargs="*",
+        default=[],
+        help="airports with no Overpass baseline: Section B, " "build-only, no pass/fail",
+    )
+    ap.add_argument("--out", default=None, help="also write the comparison table to this file")
     args = ap.parse_args()
 
     import osn_sample
+
     osn_sample.load_dotenv()
     spark = osn_sample.build_spark(2, "8g", distributed=False)
     spark.sparkContext.setLogLevel("ERROR")
@@ -54,7 +71,10 @@ def main() -> int:
     from opdi.reference.pbf_source import PbfLayoutSource
     from opdi.utils.storage import StorageManager
 
-    storage = StorageManager(spark, OPDIConfig.for_environment("opensky"))
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
+    storage = StorageManager(spark, cfg)
     src = PbfLayoutSource(args.pbf, storage)
 
     lines = []
@@ -81,11 +101,15 @@ def main() -> int:
     # Section A: graded comparison against a saved Overpass baseline.
     # ---------------------------------------------------------------------
     emit("=" * 100)
-    emit("SECTION A -- graded comparison against Overpass baselines "
-         f"({len(args.airports)} aerodromes)")
+    emit(
+        "SECTION A -- graded comparison against Overpass baselines "
+        f"({len(args.airports)} aerodromes)"
+    )
     emit("=" * 100)
-    header = (f"{'airport':8s} {'aeroway':18s} {'overpass':>9s} {'pbf':>9s} "
-              f"{'shared':>9s} {'only_op':>8s} {'only_pbf':>8s}")
+    header = (
+        f"{'airport':8s} {'aeroway':18s} {'overpass':>9s} {'pbf':>9s} "
+        f"{'shared':>9s} {'only_op':>8s} {'only_pbf':>8s}"
+    )
     emit(header)
 
     for apt in args.airports:
@@ -98,8 +122,10 @@ def main() -> int:
         for way in sorted(set(old["hexaero_aeroway"]) | set(new["hexaero_aeroway"])):
             a = set(old.loc[old["hexaero_aeroway"] == way, "hexaero_h3_id"])
             b = set(new.loc[new["hexaero_aeroway"] == way, "hexaero_h3_id"])
-            emit(f"{apt:8s} {way:18s} {len(a):9d} {len(b):9d} "
-                 f"{len(a & b):9d} {len(a - b):8d} {len(b - a):8d}")
+            emit(
+                f"{apt:8s} {way:18s} {len(a):9d} {len(b):9d} "
+                f"{len(a & b):9d} {len(a - b):8d} {len(b - a):8d}"
+            )
 
     # ---------------------------------------------------------------------
     # Section B: build-only, no baseline exists -- coverage, not correctness.
@@ -107,12 +133,16 @@ def main() -> int:
     if args.build_only:
         emit("")
         emit("=" * 100)
-        emit(f"SECTION B -- build-only, no Overpass baseline exists "
-             f"({len(args.build_only)} aerodromes)")
-        emit("No pass/fail is reported here: there is nothing to diff "
-             "against. This is evidence of COVERAGE (geometry now exists "
-             "where the Overpass path produced none), not of CORRECTNESS. "
-             "The correctness claim rests entirely on Section A.")
+        emit(
+            f"SECTION B -- build-only, no Overpass baseline exists "
+            f"({len(args.build_only)} aerodromes)"
+        )
+        emit(
+            "No pass/fail is reported here: there is nothing to diff "
+            "against. This is evidence of COVERAGE (geometry now exists "
+            "where the Overpass path produced none), not of CORRECTNESS. "
+            "The correctness claim rests entirely on Section A."
+        )
         emit("=" * 100)
         b_header = f"{'airport':8s} {'aeroway':18s} {'pbf_cells':>9s}"
         emit(b_header)
@@ -141,12 +171,16 @@ def main() -> int:
     emit("TIMING")
     emit("=" * 100)
     if first_call_elapsed is not None:
-        emit(f"first features_for() call (includes the one-time extract read): "
-             f"{first_call_elapsed:.1f}s")
+        emit(
+            f"first features_for() call (includes the one-time extract read): "
+            f"{first_call_elapsed:.1f}s"
+        )
     if per_airport_elapsed:
         avg = sum(per_airport_elapsed) / len(per_airport_elapsed)
-        emit(f"subsequent hexagonify_airport() calls: n={len(per_airport_elapsed)}, "
-             f"avg={avg*1000:.1f}ms, max={max(per_airport_elapsed)*1000:.1f}ms")
+        emit(
+            f"subsequent hexagonify_airport() calls: n={len(per_airport_elapsed)}, "
+            f"avg={avg*1000:.1f}ms, max={max(per_airport_elapsed)*1000:.1f}ms"
+        )
 
     # ---------------------------------------------------------------------
     # Assignment method -- which airports used the box fallback.
@@ -162,11 +196,14 @@ def main() -> int:
     for _, r in in_scope.sort_values("icao").iterrows():
         emit(f"  {r['icao']:8s} {r['method']:8s} n_features={r['n_features']}")
     if len(box_rows):
-        emit(f"NOTE: {len(box_rows)} airport(s) used the box fallback rather "
-             f"than a polygon: {', '.join(sorted(box_rows['icao']))}")
+        emit(
+            f"NOTE: {len(box_rows)} airport(s) used the box fallback rather "
+            f"than a polygon: {', '.join(sorted(box_rows['icao']))}"
+        )
     else:
-        emit("All in-scope airports were assigned by polygon containment "
-             "(no box fallback used).")
+        emit(
+            "All in-scope airports were assigned by polygon containment " "(no box fallback used)."
+        )
 
     if args.out:
         with open(args.out, "w") as fh:

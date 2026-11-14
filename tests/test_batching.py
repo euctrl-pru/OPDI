@@ -1,8 +1,8 @@
 """Choosing a batch: a month by time, a day by the track it belongs to."""
+
 import datetime as dt
 
 import pytest
-from pyspark.sql import functions as F
 
 from opdi.utils.batching import filter_batch
 

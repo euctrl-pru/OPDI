@@ -1,41 +1,79 @@
-"""
-OpenSky Network state vectors ingestion module.
+"""Step 01: ingestion of the OpenSky Network state vectors.
 
-Downloads and processes state vector data from OpenSky Network's MinIO server
-and writes to Iceberg tables with proper partitioning.
+A state vector is one position report of one aircraft: time, ICAO 24-bit
+address, call sign, position, barometric and geometric altitude (metres),
+ground speed and vertical rate (m/s), track angle and on-ground flag. This
+step reads the hourly state-vector files of the OpenSky archive for a range
+of days, keeps the reports inside the configured coverage, thins them to one
+report per aircraft every 5 seconds, and writes ``osn_statevectors_v2``,
+partitioned by day.
 """
 
 import os
 import subprocess
 import time
-from typing import List, Optional, Set, Dict, Tuple
+from calendar import timegm
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional, Set, Tuple, Union
 
-from datetime import date
-from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.functions import col, to_date, from_unixtime
+from pyspark.sql.functions import col, from_unixtime, to_date
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
 
-#: Thinning rules for :meth:`StateVectorIngestion._apply_filters`.
-#: ``modulo`` is what every published OPDI dataset was built with.
+#: The hourly state vector folders of the OpenSky archive, one ``hour=<unix>`` folder per hour.
+OSN_STATE_VECTORS = "s3a://opensky-hdfs-backup/tables_v4/state_vectors"
+
+
+def hour_paths(
+    start: Union[date, datetime],
+    end: Union[date, datetime],
+    base: str = OSN_STATE_VECTORS,
+) -> List[str]:
+    """The hourly folders of the archive from ``start`` to ``end`` (end excluded), in UTC.
+
+    ``start`` and ``end`` are days (from midnight) or times (from that hour).
+    Each folder is named after the Unix time of its first second.
+    """
+
+    def _as_time(value):
+        if isinstance(value, datetime):
+            return value.replace(minute=0, second=0, microsecond=0)
+        return datetime(value.year, value.month, value.day)
+
+    current, stop = _as_time(start), _as_time(end)
+    paths = []
+    while current < stop:
+        paths.append(f"{base}/hour={timegm(current.timetuple())}")
+        current += timedelta(hours=1)
+    return paths
+
+
+def _days_of_hours(start: Union[date, datetime], end: Union[date, datetime]) -> List[date]:
+    """The days of the hourly folders from ``start`` to ``end`` (see :func:`hour_paths`)."""
+    stamps = [int(p.rsplit("=", 1)[1]) for p in hour_paths(start, end, base="")]
+    return sorted({datetime.utcfromtimestamp(t).date() for t in stamps})
+
+
+#: Thinning rules for :meth:`StateVectorIngestion._apply_filters`. ``bucket``
+#: is the default of release v2.0.0; ``modulo`` the rule of release v0.0.2.
 DECIMATION_MODULO = "modulo"
 DECIMATION_BUCKET = "bucket"
 
 
-#: Distinguishes "the caller said nothing" from "the caller said worldwide".
-#: ``None`` used to mean the first; worldwide needs it to mean the second.
+#: Tells "the caller gave no box" (follow the configuration) from "the caller
+#: gave ``None``" (worldwide).
 _UNSET = object()
 
 
 class StateVectorIngestion:
-    """
-    Handles ingestion of OpenSky Network state vectors from MinIO storage.
+    """Step 01: read OpenSky state vectors, filter and thin them, and write them.
 
-    This class manages the complete workflow of downloading state vector parquet files
-    from OpenSky's S3-compatible MinIO server, processing them, and writing to
-    Iceberg tables with daily partitioning.
+    :meth:`ingest_from_s3` reads the archive directly over S3 (the ``opensky``
+    environment); :meth:`ingest` downloads the files with the MinIO client
+    first.
     """
 
     # Column name mapping from camelCase (OSN) to snake_case (OPDI standard)
@@ -69,14 +107,13 @@ class StateVectorIngestion:
         time_interval: int = 5,
         decimation: Optional[str] = None,
     ):
-        """
-        Initialize state vector ingestion.
+        """Prepare the ingestion.
 
         Args:
-            spark: Active SparkSession
-            config: OPDI configuration object
-            local_download_path: Local directory for temporary file downloads
-            log_file_path: Path to file tracking processed files
+            spark: Active Spark session.
+            config: OPDI configuration.
+            local_download_path: Local folder for downloaded files.
+            log_file_path: File that records the processed files.
             bbox: Bounding box as ``(min_lon, min_lat, max_lon, max_lat)``.
                   Omit it to follow ``config.coverage.bbox`` -- the European
                   box by default, ``None`` under ``worldwide=True``. Pass
@@ -84,10 +121,10 @@ class StateVectorIngestion:
                   configuration; pass a tuple to force a specific box.
             time_interval: Thinning interval in seconds. Defaults to 5. Set to 1
                   to keep every row.
-            decimation: Which thinning rule to apply. ``"modulo"`` (default)
-                  keeps rows where ``event_time % time_interval == 0``;
-                  ``"bucket"`` keeps one row per (aircraft, interval bin). See
-                  :meth:`_apply_filters` for why the default is what it is.
+            decimation: Thinning rule: ``"bucket"`` keeps one row per
+                  (aircraft, interval); ``"modulo"`` keeps rows where
+                  ``event_time % time_interval == 0``. Default:
+                  ``config.ingestion.decimation``. See :meth:`_apply_filters`.
         """
         self.spark = spark
         self.config = config
@@ -98,9 +135,8 @@ class StateVectorIngestion:
         self.batch_size = config.ingestion.batch_size
         self.bbox = config.coverage.bbox if bbox is _UNSET else bbox
         self.time_interval = time_interval
-        # None means "whatever the configuration says", so the rule is set in
-        # one place rather than at every call site. An explicit argument still
-        # wins, which is what lets the decimation benchmark run both arms.
+        # None follows the configuration; an explicit argument takes
+        # precedence (a study can compare both rules).
         if decimation is None:
             decimation = getattr(config.ingestion, "decimation", DECIMATION_MODULO)
         if decimation not in (DECIMATION_MODULO, DECIMATION_BUCKET):
@@ -122,31 +158,25 @@ class StateVectorIngestion:
 
         Two thinning rules are available.
 
-        ``modulo`` keeps the row at the one second per interval that is
-        congruent to zero. It is a *fixed-phase* sampler, so on a feed whose
-        rows arrive at arbitrary seconds it would delete far more than one row
-        in ``time_interval``. **This is the default because it is what every
-        published OPDI dataset was built with**, and because on the OSN archive
-        it costs nothing: that table is a complete 1 Hz grid, so the phase
-        always lands on a row.
+        ``bucket`` (default) divides time into intervals of ``time_interval``
+        seconds and keeps the last row of each (aircraft, interval), so a
+        track's final report is kept exactly.
 
-        ``bucket`` bins time into ``floor(t / time_interval)`` and keeps one row
-        per (aircraft, bin) -- the last, so a track's final observation is
-        preserved exactly. This is the rule the modulo filter is an
-        approximation of, and it is correct on a sparse feed.
+        ``modulo`` (release v0.0.2) keeps the row whose time is a multiple of
+        ``time_interval``. On the OpenSky archive, which has a row every second,
+        the two keep nearly the same rows; on a feed with rows at irregular
+        seconds, ``modulo`` would drop far more than it should.
 
-        Measured on three hours of the OSN archive, bucket keeps 1.002x the rows
-        of modulo and costs ~13% more wall clock, so it is offered rather than
-        adopted. See ``benchmarks/decimation_experiment.py`` and the
-        state-vector decimation study for the measurement. Switching rules
-        changes ``track_id`` for every downstream row, so it is not a drop-in
-        change to a published pipeline.
+        Changing the rule changes which reports form each track, and so the
+        ``track_id`` values.
         """
         if self.bbox:
             min_lon, min_lat, max_lon, max_lat = self.bbox
             df = df.filter(
-                (col("lon") >= min_lon) & (col("lon") <= max_lon)
-                & (col("lat") >= min_lat) & (col("lat") <= max_lat)
+                (col("lon") >= min_lon)
+                & (col("lon") <= max_lon)
+                & (col("lat") >= min_lat)
+                & (col("lat") <= max_lat)
             )
 
         if self.time_interval > 1:
@@ -166,9 +196,7 @@ class StateVectorIngestion:
         window -- one shuffle, and native Spark throughout.
         """
         rest = [c for c in df.columns if c != "event_time"]
-        binned = df.withColumn(
-            "_bin", col("event_time") - (col("event_time") % self.time_interval)
-        )
+        binned = df.withColumn("_bin", col("event_time") - (col("event_time") % self.time_interval))
         return (
             binned.groupBy("icao24", "_bin")
             .agg(F.max(F.struct("event_time", *rest)).alias("_s"))
@@ -176,8 +204,7 @@ class StateVectorIngestion:
         )
 
     def _execute_shell_command(self, command: str) -> tuple[str, str]:
-        """
-        Execute a shell command and return stdout and stderr.
+        """Execute a shell command and return stdout and stderr.
 
         Args:
             command: Shell command to execute
@@ -192,8 +219,7 @@ class StateVectorIngestion:
         return stdout.decode().strip(), stderr.decode().strip()
 
     def setup_minio_client(self) -> bool:
-        """
-        Set up MinIO client (mc) for accessing OpenSky Network data.
+        """Set up MinIO client (mc) for accessing OpenSky Network data.
 
         Requires OSN_USERNAME and OSN_KEY environment variables to be set.
 
@@ -204,15 +230,13 @@ class StateVectorIngestion:
             EnvironmentError: If OSN credentials are not set
         """
         if "OSN_USERNAME" not in os.environ or "OSN_KEY" not in os.environ:
-            raise EnvironmentError(
+            raise OSError(
                 "OSN_USERNAME and OSN_KEY environment variables must be set. "
                 "Obtain credentials from OpenSky Network."
             )
 
         print("Setting up MinIO client...")
-        self._execute_shell_command(
-            "curl -O https://dl.min.io/client/mc/release/linux-amd64/mc"
-        )
+        self._execute_shell_command("curl -O https://dl.min.io/client/mc/release/linux-amd64/mc")
         self._execute_shell_command("chmod +x mc")
 
         stdout, stderr = self._execute_shell_command(
@@ -231,8 +255,7 @@ class StateVectorIngestion:
         start_date: date,
         end_date: date,
     ) -> List[str]:
-        """
-        List available state vector files on OpenSky MinIO server.
+        """List available state vector files on OpenSky MinIO server.
 
         Files are named ``states_YYYY-MM-DD-HH.parquet``.  Only files
         whose date falls within ``[start_date, end_date)`` are returned.
@@ -267,20 +290,18 @@ class StateVectorIngestion:
         return filtered_files
 
     def load_processed_files(self) -> Set[str]:
-        """
-        Load the set of already processed files from log.
+        """Load the set of already processed files from log.
 
         Returns:
             Set of processed file names
         """
         if os.path.exists(self.log_file_path):
-            with open(self.log_file_path, "r") as f:
+            with open(self.log_file_path) as f:
                 return set(f.read().splitlines())
         return set()
 
     def mark_files_processed(self, file_names: List[str]) -> None:
-        """
-        Mark files as processed by appending to log file.
+        """Mark files as processed by appending to log file.
 
         Args:
             file_names: List of file names to mark as processed
@@ -290,8 +311,7 @@ class StateVectorIngestion:
                 f.write(file_name + "\n")
 
     def remove_partial_files(self) -> None:
-        """
-        Remove partially downloaded files (``*.parquet.part.minio``).
+        """Remove partially downloaded files (``*.parquet.part.minio``).
 
         MinIO creates ``.part`` files during download that may remain if
         download is interrupted. This cleans them up before processing.
@@ -308,8 +328,7 @@ class StateVectorIngestion:
                 print(f"Removed partial file: {filename}")
 
     def download_files(self, file_paths: List[str]) -> List[str]:
-        """
-        Download files from MinIO to local storage.
+        """Download files from MinIO to local storage.
 
         Args:
             file_paths: List of full MinIO file paths to download
@@ -338,8 +357,7 @@ class StateVectorIngestion:
         return downloaded_files
 
     def process_and_write_batch(self, file_names: List[str]) -> None:
-        """
-        Process downloaded files and write to Iceberg table.
+        """Process downloaded files and write to Iceberg table.
 
         Args:
             file_names: List of file names to process (must be in local_download_path)
@@ -368,50 +386,33 @@ class StateVectorIngestion:
         df_with_partition = df.withColumn("event_time_day", to_date(col("event_time")))
 
         # Repartition for efficient write
-        df_partitioned = df_with_partition.repartition("event_time_day").orderBy(
-            "event_time_day"
-        )
+        df_partitioned = df_with_partition.repartition("event_time_day").orderBy("event_time_day")
 
-# Partitioned by day, and the partition column is kept.
-        #
-        # It used to be dropped here on the grounds that Iceberg would add it
-        # back, which is true under Iceberg and false in the opensky
-        # environment, where the table is plain parquet on S3. Keeping it is
-        # what lets a single day be replaced, listed, or dropped without
-        # touching its neighbours.
-        #
-        # That matters because ingestion runs a day at a time over a window
-        # that overlaps its neighbours': day D needs D-1, D and D+1. Without
-        # per-day partitions the only options are to keep everything (~220 GB
-        # for a month) or to refetch the overlap every day (three times the
-        # network). With them, each calendar day is fetched once and dropped
-        # when the window has moved past it.
-        days = [r[0] for r in
-                df_partitioned.select("event_time_day").distinct().collect()]
+        # Partitioned by day, with the day column kept, so a single day can be
+        # replaced, listed or removed without touching the others. Day D needs
+        # the reports of D-1 to D+1, so a run keeps a three-day window and
+        # fetches each calendar day once.
+        days = [r[0] for r in df_partitioned.select("event_time_day").distinct().collect()]
         self.storage.write_table(
-            df_partitioned, "osn_statevectors_v2", mode="overwrite",
+            df_partitioned,
+            "osn_statevectors_v2",
+            mode="overwrite",
             partition_by=["event_time_day"],
             partition_values=[{"event_time_day": d} for d in days],
         )
 
-        # The row count is deliberately not printed here.
-        #
-        # `df_cleaned.count()` after the write is a second action on the same
-        # plan, so the whole ingestion -- the S3 read and every transform --
-        # ran twice, to produce a number for a log line. Nothing cached it in
-        # between.
-        #
-        # A diagnostic that costs as much as the step it describes has to be
-        # asked for. `OPDI_REPORT_INGEST_ROWS=1` restores it.
+        # The row count is printed only on request (OPDI_REPORT_INGEST_ROWS=1):
+        # counting after the write runs the whole ingestion a second time.
         if os.environ.get("OPDI_REPORT_INGEST_ROWS"):
-            print(f"Written {df_cleaned.count()} records to osn_statevectors_v2")
+            print(f"Written {df_partitioned.count()} records to osn_statevectors_v2")
         else:
-            print("Written statevectors to osn_statevectors_v2 "
-                  "(set OPDI_REPORT_INGEST_ROWS=1 for a row count)")
+            print(
+                "Written statevectors to osn_statevectors_v2 "
+                "(set OPDI_REPORT_INGEST_ROWS=1 for a row count)"
+            )
 
     def cleanup_local_files(self, file_names: List[str]) -> None:
-        """
-        Delete local files after successful processing to save disk space.
+        """Delete local files after successful processing to save disk space.
 
         Args:
             file_names: List of file names to delete
@@ -427,8 +428,7 @@ class StateVectorIngestion:
         end_date: date,
         dry_run: bool = False,
     ) -> Dict[str, int]:
-        """
-        Run the complete ingestion workflow.
+        """Run the complete ingestion workflow.
 
         Downloads state vectors in batches, processes them, and writes to Iceberg.
 
@@ -445,8 +445,8 @@ class StateVectorIngestion:
             >>> from opdi.utils.spark_helpers import get_spark
             >>> from opdi.config import OPDIConfig
             >>>
-            >>> config = OPDIConfig.for_environment("live")
-            >>> spark = get_spark("live", "State Vector Ingestion")
+            >>> config = OPDIConfig.for_environment("opensky")
+            >>> spark = get_spark("opensky", "State Vector Ingestion")
             >>> ingestion = StateVectorIngestion(spark, config)
             >>> stats = ingestion.ingest(start_date=date(2024, 1, 1), end_date=date(2024, 2, 1))
         """
@@ -459,9 +459,7 @@ class StateVectorIngestion:
         processed_files = self.load_processed_files()
 
         # Filter out already processed files
-        pending_files = [
-            f for f in files_to_download if f.split("/")[-1] not in processed_files
-        ]
+        pending_files = [f for f in files_to_download if f.split("/")[-1] not in processed_files]
 
         print(f"Total files: {len(files_to_download)}")
         print(f"Already processed: {len(files_to_download) - len(pending_files)}")
@@ -511,7 +509,7 @@ class StateVectorIngestion:
                 # Can be retried on next run
                 raise
 
-        print(f"\n=== Ingestion complete ===")
+        print("\n=== Ingestion complete ===")
         print(f"Files processed: {files_processed}")
 
         return {
@@ -521,20 +519,21 @@ class StateVectorIngestion:
 
     def ingest_from_s3(
         self,
-        start_date: date,
-        end_date: date,
-        s3_base_path: str = "s3a://opensky-hdfs-backup/tables_v4/state_vectors",
+        start_date: Union[date, datetime],
+        end_date: Union[date, datetime],
+        s3_base_path: str = OSN_STATE_VECTORS,
     ) -> int:
-        """
-        Ingest state vectors by reading directly from the OpenSky S3 bucket.
+        """Ingest state vectors by reading directly from the OpenSky S3 bucket.
 
         This method bypasses the MinIO CLI download and reads parquet
         partitions directly via Spark's S3A filesystem. Intended for
         the ``opensky`` environment.
 
         Args:
-            start_date: First day to ingest (inclusive).
-            end_date: Last day to ingest (exclusive).
+            start_date: First day to ingest (inclusive), or a time to start
+                at that hour.
+            end_date: Last day to ingest (exclusive), or a time to stop
+                before that hour.
             s3_base_path: S3 prefix for hourly state-vector partitions.
 
         Returns:
@@ -544,16 +543,7 @@ class StateVectorIngestion:
             >>> ingestion = StateVectorIngestion(spark, config)
             >>> rows = ingestion.ingest_from_s3(date(2025, 8, 1), date(2025, 8, 2))
         """
-        from datetime import datetime, timedelta
-
-        # Build list of hourly partition paths
-        current = datetime(start_date.year, start_date.month, start_date.day)
-        end_dt = datetime(end_date.year, end_date.month, end_date.day)
-        paths = []
-        while current < end_dt:
-            hour_ts = int(current.timestamp())
-            paths.append(f"{s3_base_path}/hour={hour_ts}")
-            current += timedelta(hours=1)
+        paths = hour_paths(start_date, end_date, s3_base_path)
 
         print(f"Reading {len(paths)} hourly partitions from S3 ({start_date} to {end_date})...")
         df = self.spark.read.option("mergeSchema", "true").parquet(*paths)
@@ -573,36 +563,35 @@ class StateVectorIngestion:
         # Convert Unix timestamp to Spark timestamp
         df = df.withColumn("event_time", from_unixtime(col("event_time")).cast("timestamp"))
 
-        row_count = df.count()
-        print(f"Read {row_count:,} state vectors.")
-
-        # Write via StorageManager, partitioned by day and replacing only the
-        # days present in this frame.
-        #
-        # This is the write the opensky environment actually uses -- the other
-        # one, in `_write_batch`, serves the local-file path. Partitioning only
-        # that one left this as a plain overwrite, so a per-day ingest wiped
-        # the whole table on every call and only the last day survived. Day D's
-        # segmentation then read a window that was two-thirds absent, claimed
-        # almost no tracks, and wrote an empty osn_tracks whose schema could
-        # not be inferred downstream.
+        # Partitioned by day, replacing only the days of the hours read, so
+        # ingesting one day keeps the others of the window. Each hourly folder
+        # holds the reports of its hour, so the days are known from the folders
+        # and the frame is computed once, by the write. (Counting the rows and
+        # listing the days first computed it three times, each time reading
+        # the archive again.)
         df = df.withColumn("event_time_day", to_date(col("event_time")))
-        days = [r[0] for r in df.select("event_time_day").distinct().collect()]
+        days = _days_of_hours(start_date, end_date)
         self.storage.write_table(
-            df, "osn_statevectors_v2", mode="overwrite",
+            df,
+            "osn_statevectors_v2",
+            mode="overwrite",
             partition_by=["event_time_day"],
             partition_values=[{"event_time_day": d} for d in days],
+        )
+        # Counted from the files just written (their footers), not from the archive.
+        row_count = (
+            self.storage.read_table("osn_statevectors_v2")
+            .filter(col("event_time_day").isin(days))
+            .count()
+            if days
+            else 0
         )
         print(f"Written to osn_statevectors_v2 ({row_count:,} rows).")
 
         return row_count
 
     def create_table_if_not_exists(self) -> None:
-        """
-        Create the osn_statevectors_v2 Iceberg table if it doesn't exist.
-
-        This should be run once before first ingestion.
-        """
+        """Create the ``osn_statevectors_v2`` Iceberg table if it does not exist."""
         from datetime import date
 
         today = date.today().strftime("%d %B %Y")

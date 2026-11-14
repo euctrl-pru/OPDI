@@ -78,10 +78,10 @@ SEG = [
     "src/opdi/pipeline/segmentation/__init__.py",
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/segmentation/methods.py",
-    "src/opdi/config.py",
+    "benchmarks/study_variants/segmentation.py",
+    "src/opdi/config",
 ]
-SCORE = ["benchmarks/track_truth.py", "benchmarks/track_score.py",
-         "benchmarks/osn_sample.py"]
+SCORE = ["benchmarks/track_truth.py", "benchmarks/track_score.py", "benchmarks/osn_sample.py"]
 #: ``track_methods.py`` is a dependency of four other jobs, not just the ladder
 #: it is named for. ``track_sweep`` and ``track_payoff`` import ``PERIODS`` and
 #: ``attach_airport_context`` from it -- which days a run covers, and the
@@ -107,8 +107,11 @@ DIAG = ["benchmarks/track_diagnostics.py"]
 #: exactly the sort of thing that has to be declared.
 CENSUS = DIAG + ["benchmarks/track_truth.py"] + METHODS
 #: The payoff runs the flight list, so it depends on the flight list too.
-FLIGHTS = ["benchmarks/flight_list_v7.py", "src/opdi/pipeline/flights.py",
-           "benchmarks/adep_ades.py"]
+FLIGHTS = [
+    "benchmarks/flight_list_v7.py",
+    "src/opdi/pipeline/flights.py",
+    "benchmarks/adep_ades.py",
+]
 
 #: **The five ``sweep_recommended_*`` outputs carry a narrower dependency set
 #: than the truth, and this constant is it.** They were produced by running
@@ -125,9 +128,13 @@ FLIGHTS = ["benchmarks/flight_list_v7.py", "src/opdi/pipeline/flights.py",
 #: left to be discovered, and the debt closes on the first re-run through this
 #: runner -- which stamps ``SEG + SCORE + METHODS``, at which point this
 #: constant should be deleted and the jobs given the wide set.
-SWEEP_AS_RECORDED = ["benchmarks/track_score.py", "benchmarks/track_truth.py",
-                     "src/opdi/pipeline/segmentation/base.py",
-                     "src/opdi/pipeline/segmentation/methods.py"]
+SWEEP_AS_RECORDED = [
+    "benchmarks/track_score.py",
+    "benchmarks/track_truth.py",
+    "src/opdi/pipeline/segmentation/base.py",
+    "src/opdi/pipeline/segmentation/methods.py",
+    "benchmarks/study_variants/segmentation.py",
+]
 
 #: The full stage-1 grid, as one command. Kept here rather than left to
 #: track_sweep.py's defaults so that changing those defaults marks this job
@@ -171,8 +178,7 @@ class Job:
         staged output carrying ``inputs: {}``.
         """
         with tempfile.TemporaryDirectory(prefix=f"tcv1_{self.name}_") as tmp:
-            cmd = [sys.executable, "-u", str(REPO / self.script),
-                   *self.args, "--results-dir", tmp]
+            cmd = [sys.executable, "-u", str(REPO / self.script), *self.args, "--results-dir", tmp]
             print(f"\n=== {self.name} ===\n  {' '.join(cmd[2:])}", flush=True)
             r = subprocess.run(cmd, cwd=REPO)
             if r.returncode != 0:
@@ -184,10 +190,16 @@ class Job:
                 DATA.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, DATA / staged)
                 own = provenance.load_manifest(tmp).get(produced, {})
-                provenance.record(DATA, staged, self.script, self.args,
-                                  self.code_paths, inputs=own.get("inputs"),
-                                  input_tables=list(own.get("input_tables") or {}),
-                                  notes=self.notes)
+                provenance.record(
+                    DATA,
+                    staged,
+                    self.script,
+                    self.args,
+                    self.code_paths,
+                    inputs=own.get("inputs"),
+                    input_tables=list(own.get("input_tables") or {}),
+                    notes=self.notes,
+                )
                 print(f"  staged {staged}")
 
 
@@ -196,18 +208,19 @@ def jobs() -> list:
 
     # --- the eight-arm ladder, both periods -----------------------------
     for period in ("2025", "2024"):
-        out.append(Job(
-            name=f"arms_{period}",
-            script="benchmarks/track_methods.py",
-            # --out-name is explicit: track_methods.py defaults to "arms.csv",
-            # so declaring the staged name alone leaves the job producing a
-            # file this spec never looks for.
-            args=["--period", period, "--arms", "all",
-                  "--out-name", f"arms_{period}.csv"],
-            outputs={f"arms_{period}.csv": f"arms_{period}.csv"},
-            code_paths=SEG + SCORE + METHODS,
-            notes="Eight segmentation arms scored against NM/APDF ground truth.",
-        ))
+        out.append(
+            Job(
+                name=f"arms_{period}",
+                script="benchmarks/track_methods.py",
+                # --out-name is explicit: track_methods.py defaults to "arms.csv",
+                # so declaring the staged name alone leaves the job producing a
+                # file this spec never looks for.
+                args=["--period", period, "--arms", "all", "--out-name", f"arms_{period}.csv"],
+                outputs={f"arms_{period}.csv": f"arms_{period}.csv"},
+                code_paths=SEG + SCORE + METHODS,
+                notes="Eight segmentation arms scored against NM/APDF ground truth.",
+            )
+        )
 
     # --- the parameter sweep, on the rule that ships ---------------------
     # The legacy sweep -- ``sweep_stage1``, ``sweep_stage1_ext``,
@@ -222,83 +235,167 @@ def jobs() -> list:
     # The legacy sweep located its optimum on a single day and re-measured a
     # shortlist on three; this one can afford three throughout, so the rank and
     # the deltas the paper quotes come from the paper's own sample.
-    out.append(Job(
-        name="sweep_recommended_2025_stage1",
-        script="benchmarks/track_sweep.py",
-        args=["--method", "recommended", "--period", "2025",
-              "--grid-gap", *GAP, "--grid-low-alt-gap", *LOW_GAP,
-              "--grid-low-alt-ft", *LOW_FT,
-              "--out-name", "sweep_recommended_2025_stage1.csv"],
-        outputs={"sweep_recommended_2025_stage1.csv":
-                 "sweep_recommended_2025_stage1.csv"},
-        code_paths=SWEEP_AS_RECORDED,
-        notes="The three-axis grid at `recommended`, lookback following "
-              "gap_minutes. 235 cells rather than 270: the grid drops every "
-              "cell whose low-altitude gap exceeds the general one, which is "
-              "inert.",
-    ))
+    out.append(
+        Job(
+            name="sweep_recommended_2025_stage1",
+            script="benchmarks/track_sweep.py",
+            args=[
+                "--method",
+                "recommended",
+                "--period",
+                "2025",
+                "--grid-gap",
+                *GAP,
+                "--grid-low-alt-gap",
+                *LOW_GAP,
+                "--grid-low-alt-ft",
+                *LOW_FT,
+                "--out-name",
+                "sweep_recommended_2025_stage1.csv",
+            ],
+            outputs={"sweep_recommended_2025_stage1.csv": "sweep_recommended_2025_stage1.csv"},
+            code_paths=SWEEP_AS_RECORDED,
+            notes="The three-axis grid at `recommended`, lookback following "
+            "gap_minutes. 235 cells rather than 270: the grid drops every "
+            "cell whose low-altitude gap exceeds the general one, which is "
+            "inert.",
+        )
+    )
     # low_alt_ft's optimum landed on the grid edge with the curve still rising.
     # An optimum at an edge is where you stopped looking, so the axis is
     # extended past it -- as its own job and its own file, not a --resume
     # append, so each file is reproducible by one command.
-    out.append(Job(
-        name="sweep_recommended_2025_stage1_ext",
-        script="benchmarks/track_sweep.py",
-        args=["--method", "recommended", "--period", "2025",
-              "--grid-gap", "40", "--grid-low-alt-gap", "20",
-              "--grid-low-alt-ft", "10000", "15000", "20000", "30000",
-              "--out-name", "sweep_recommended_2025_stage1_ext.csv"],
-        outputs={"sweep_recommended_2025_stage1_ext.csv":
-                 "sweep_recommended_2025_stage1_ext.csv"},
-        code_paths=SWEEP_AS_RECORDED,
-        notes="low_alt_ft past the edge its optimum landed on, held at the "
-              "best cell of the other two axes.",
-    ))
+    out.append(
+        Job(
+            name="sweep_recommended_2025_stage1_ext",
+            script="benchmarks/track_sweep.py",
+            args=[
+                "--method",
+                "recommended",
+                "--period",
+                "2025",
+                "--grid-gap",
+                "40",
+                "--grid-low-alt-gap",
+                "20",
+                "--grid-low-alt-ft",
+                "10000",
+                "15000",
+                "20000",
+                "30000",
+                "--out-name",
+                "sweep_recommended_2025_stage1_ext.csv",
+            ],
+            outputs={
+                "sweep_recommended_2025_stage1_ext.csv": "sweep_recommended_2025_stage1_ext.csv"
+            },
+            code_paths=SWEEP_AS_RECORDED,
+            notes="low_alt_ft past the edge its optimum landed on, held at the "
+            "best cell of the other two axes.",
+        )
+    )
     # The lookback axis, swept at TWO cells rather than one. A lookback that is
     # best at gap=40 need not be best at gap=30, and the paper's conclusion --
     # that the parameter should keep following gap_minutes -- is a claim about
     # both, so measuring one would not support it.
-    out.append(Job(
-        name="sweep_recommended_2025_stage2",
-        script="benchmarks/track_sweep.py",
-        args=["--method", "recommended", "--period", "2025",
-              "--grid-gap", "40", "--grid-low-alt-gap", "20",
-              "--grid-low-alt-ft", "10000",
-              "--grid-lookback", "0", "5", "10", "15", "20", "25", "30", "35",
-              "40", "45", "50", "60", "120",
-              "--out-name", "sweep_recommended_2025_stage2.csv"],
-        outputs={"sweep_recommended_2025_stage2.csv":
-                 "sweep_recommended_2025_stage2.csv"},
-        code_paths=SWEEP_AS_RECORDED,
-        notes="callsign_lookback_minutes at the cell the 2025 grid preferred.",
-    ))
-    out.append(Job(
-        name="sweep_recommended_2025_stage2b",
-        script="benchmarks/track_sweep.py",
-        args=["--method", "recommended", "--period", "2025",
-              "--grid-gap", "30", "--grid-low-alt-gap", "15",
-              "--grid-low-alt-ft", "5000",
-              "--grid-lookback", "15", "20", "25", "30", "35", "40", "50",
-              "--out-name", "sweep_recommended_2025_stage2b_shipped.csv"],
-        outputs={"sweep_recommended_2025_stage2b_shipped.csv":
-                 "sweep_recommended_2025_stage2b_shipped.csv"},
-        code_paths=SWEEP_AS_RECORDED,
-        notes="callsign_lookback_minutes at the cell that actually ships.",
-    ))
+    out.append(
+        Job(
+            name="sweep_recommended_2025_stage2",
+            script="benchmarks/track_sweep.py",
+            args=[
+                "--method",
+                "recommended",
+                "--period",
+                "2025",
+                "--grid-gap",
+                "40",
+                "--grid-low-alt-gap",
+                "20",
+                "--grid-low-alt-ft",
+                "10000",
+                "--grid-lookback",
+                "0",
+                "5",
+                "10",
+                "15",
+                "20",
+                "25",
+                "30",
+                "35",
+                "40",
+                "45",
+                "50",
+                "60",
+                "120",
+                "--out-name",
+                "sweep_recommended_2025_stage2.csv",
+            ],
+            outputs={"sweep_recommended_2025_stage2.csv": "sweep_recommended_2025_stage2.csv"},
+            code_paths=SWEEP_AS_RECORDED,
+            notes="callsign_lookback_minutes at the cell the 2025 grid preferred.",
+        )
+    )
+    out.append(
+        Job(
+            name="sweep_recommended_2025_stage2b",
+            script="benchmarks/track_sweep.py",
+            args=[
+                "--method",
+                "recommended",
+                "--period",
+                "2025",
+                "--grid-gap",
+                "30",
+                "--grid-low-alt-gap",
+                "15",
+                "--grid-low-alt-ft",
+                "5000",
+                "--grid-lookback",
+                "15",
+                "20",
+                "25",
+                "30",
+                "35",
+                "40",
+                "50",
+                "--out-name",
+                "sweep_recommended_2025_stage2b_shipped.csv",
+            ],
+            outputs={
+                "sweep_recommended_2025_stage2b_shipped.csv": "sweep_recommended_2025_stage2b_shipped.csv"  # noqa: E501
+            },
+            code_paths=SWEEP_AS_RECORDED,
+            notes="callsign_lookback_minutes at the cell that actually ships.",
+        )
+    )
     # 2024 over the eight cells spanning the one change 2025 wanted. It is the
     # job that decided nothing would be re-shipped: the gap ordering reverses.
-    out.append(Job(
-        name="sweep_recommended_2024_stage3",
-        script="benchmarks/track_sweep.py",
-        args=["--method", "recommended", "--period", "2024",
-              "--grid-gap", "30", "40", "--grid-low-alt-gap", "15", "20",
-              "--grid-low-alt-ft", "5000", "10000",
-              "--out-name", "sweep_recommended_2024_stage3.csv"],
-        outputs={"sweep_recommended_2024_stage3.csv":
-                 "sweep_recommended_2024_stage3.csv"},
-        code_paths=SWEEP_AS_RECORDED,
-        notes="Does 2025's preferred cell transfer to the second period? No.",
-    ))
+    out.append(
+        Job(
+            name="sweep_recommended_2024_stage3",
+            script="benchmarks/track_sweep.py",
+            args=[
+                "--method",
+                "recommended",
+                "--period",
+                "2024",
+                "--grid-gap",
+                "30",
+                "40",
+                "--grid-low-alt-gap",
+                "15",
+                "20",
+                "--grid-low-alt-ft",
+                "5000",
+                "10000",
+                "--out-name",
+                "sweep_recommended_2024_stage3.csv",
+            ],
+            outputs={"sweep_recommended_2024_stage3.csv": "sweep_recommended_2024_stage3.csv"},
+            code_paths=SWEEP_AS_RECORDED,
+            notes="Does 2025's preferred cell transfer to the second period? No.",
+        )
+    )
 
     # --- ADEP/ADES payoff: four CSVs, no jobs ----------------------------
     # payoff_2025/2024 and payoff_fixcallsign_2025/2024 stay in data/ and are
@@ -314,16 +411,24 @@ def jobs() -> list:
     # missing is its price, which is a number and not an argument. Ground
     # truth only -- no state vectors, no arms, no S3 writes.
     for period in ("2025", "2024"):
-        out.append(Job(
-            name=f"containment_{period}",
-            script="benchmarks/track_diagnostics.py",
-            args=["--job", "containment", "--period", period,
-                  "--out-name", f"containment_{period}.csv"],
-            outputs={f"containment_{period}.csv": f"containment_{period}.csv"},
-            code_paths=CENSUS,
-            notes="How many ground-truth flights the wholly-inside-the-window "
-                  "restriction excludes, and how much of each was visible.",
-        ))
+        out.append(
+            Job(
+                name=f"containment_{period}",
+                script="benchmarks/track_diagnostics.py",
+                args=[
+                    "--job",
+                    "containment",
+                    "--period",
+                    period,
+                    "--out-name",
+                    f"containment_{period}.csv",
+                ],
+                outputs={f"containment_{period}.csv": f"containment_{period}.csv"},
+                code_paths=CENSUS,
+                notes="How many ground-truth flights the wholly-inside-the-window "
+                "restriction excludes, and how much of each was visible.",
+            )
+        )
 
     # --- the boundary error as a distribution ---------------------------
     # p10/p50/p90 cannot tell a symmetric spread from a bimodal mixture, and
@@ -331,18 +436,29 @@ def jobs() -> list:
     # assignment table's worth of cluster time, and these are the arms whose
     # boundary numbers the paper discusses.
     for period in ("2025", "2024"):
-        out.append(Job(
-            name=f"boundary_hist_{period}",
-            script="benchmarks/track_diagnostics.py",
-            args=["--job", "boundary-hist", "--period", period,
-                  "--arms", "recommended", "legacy", "ground_anchored",
-                  "--out-name", f"boundary_hist_{period}.csv"],
-            outputs={f"boundary_hist_{period}.csv": f"boundary_hist_{period}.csv"},
-            code_paths=SEG + SCORE + METHODS + DIAG,
-            notes="Signed boundary offsets binned at 30 s over +/-1800 s. "
-                  "Shares track_score.boundary_offsets with boundary_error, so "
-                  "the bins and the published percentiles describe one sample.",
-        ))
+        out.append(
+            Job(
+                name=f"boundary_hist_{period}",
+                script="benchmarks/track_diagnostics.py",
+                args=[
+                    "--job",
+                    "boundary-hist",
+                    "--period",
+                    period,
+                    "--arms",
+                    "recommended",
+                    "legacy",
+                    "ground_anchored",
+                    "--out-name",
+                    f"boundary_hist_{period}.csv",
+                ],
+                outputs={f"boundary_hist_{period}.csv": f"boundary_hist_{period}.csv"},
+                code_paths=SEG + SCORE + METHODS + DIAG,
+                notes="Signed boundary offsets binned at 30 s over +/-1800 s. "
+                "Shares track_score.boundary_offsets with boundary_error, so "
+                "the bins and the published percentiles describe one sample.",
+            )
+        )
 
     # --- what A3's split predicate cannot see ----------------------------
     # traffic's Flight.split() is designed against a gap-filled frame; OPDI
@@ -353,30 +469,41 @@ def jobs() -> list:
     # neither segments nor scores, so it carries METHODS (for PERIODS) and
     # nothing from SEG or SCORE.
     for period in ("2025", "2024"):
-        out.append(Job(
-            name=f"traffic_fill_{period}",
-            script="benchmarks/track_diagnostics.py",
-            args=["--job", "traffic-fill", "--period", period,
-                  "--out-name", f"traffic_fill_{period}.csv"],
-            outputs={f"traffic_fill_{period}.csv": f"traffic_fill_{period}.csv"},
-            code_paths=DIAG + METHODS,
-            notes="How often A3's split predicate sees a NULL boundary "
-                  "altitude, and how many turnarounds no gap threshold "
-                  "could ever catch.",
-        ))
+        out.append(
+            Job(
+                name=f"traffic_fill_{period}",
+                script="benchmarks/track_diagnostics.py",
+                args=[
+                    "--job",
+                    "traffic-fill",
+                    "--period",
+                    period,
+                    "--out-name",
+                    f"traffic_fill_{period}.csv",
+                ],
+                outputs={f"traffic_fill_{period}.csv": f"traffic_fill_{period}.csv"},
+                code_paths=DIAG + METHODS,
+                notes="How often A3's split predicate sees a NULL boundary "
+                "altitude, and how many turnarounds no gap threshold "
+                "could ever catch.",
+            )
+        )
 
     return out
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--check", action="store_true",
-                    help="report staleness and exit; no cluster needed")
+    ap.add_argument(
+        "--check", action="store_true", help="report staleness and exit; no cluster needed"
+    )
     ap.add_argument("--force", action="store_true", help="re-run every job")
     ap.add_argument("--only", nargs="+", help="run only these jobs, by name")
-    ap.add_argument("--allow-stale", action="store_true",
-                    help="report staleness but exit 0 -- for rendering a draft "
-                         "without a cluster")
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="report staleness but exit 0 -- for rendering a draft " "without a cluster",
+    )
     args = ap.parse_args()
 
     todo = jobs()
@@ -386,8 +513,7 @@ def main() -> None:
     stale = {j.name: j.stale() for j in todo}
     any_stale = {k: v for k, v in stale.items() if v}
 
-    print(f"analysis at {provenance.git_sha()}"
-          f"{' (dirty)' if provenance.git_dirty() else ''}\n")
+    print(f"analysis at {provenance.git_sha()}" f"{' (dirty)' if provenance.git_dirty() else ''}\n")
     for j in todo:
         why = stale[j.name]
         if why:
@@ -401,9 +527,13 @@ def main() -> None:
         if any_stale and not args.allow_stale:
             raise SystemExit(
                 f"\n{len(any_stale)} job(s) stale. Run without --check to "
-                f"regenerate, or pass --allow-stale to render anyway.")
-        print("\nall outputs current" if not any_stale else
-              "\nrendering with stale outputs (--allow-stale)")
+                f"regenerate, or pass --allow-stale to render anyway."
+            )
+        print(
+            "\nall outputs current"
+            if not any_stale
+            else "\nrendering with stale outputs (--allow-stale)"
+        )
         return
 
     for j in todo:

@@ -1,4 +1,9 @@
-"""ADS-C ingestion (pipeline step 01b).
+"""Step 01b: ingestion of ADS-C position reports (off by default).
+
+ADS-C reports are mapped to the state-vector columns, with a ``source``
+column of ``"ADS-C"``, and written to ``config.adsc.table``; step 02 merges
+them with the ADS-B state vectors when :attr:`opdi.config.AdscConfig.enabled`
+is set.
 
 OpenSky publishes a ``readsb`` ADS-C topic beside the ADS-B archive:
 ``s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro``, hourly
@@ -6,34 +11,29 @@ partitions named ``hour=<unix seconds>``, snappy **parquet** despite the
 ``.avro`` in the topic name, carrying the Avro schema
 ``org.opensky.avro.readsb.Aircraft`` in the footer.
 
-**What arrives.** Measured over eleven days spanning 2023-09 to 2026-10
-(``benchmarks/adsc_census.py``): 409-32,206 rows/day worldwide, 140-5,420
-inside ``EUROPE_BBOX``, from 74-994 in-box airframes, at a median cadence of
-277-1,139 s. Populated on the 2026 study days: ``time``, ``hex``, ``lat``,
-``lon``, ``alt_baro_ft`` (100%), ``track`` (99.8%), ``flight`` (97%),
-``gs`` (62%), ``baro_rate`` (62%), ``squawk`` (46%).
+**What arrives.** A few hundred to a few tens of thousands of reports a day
+worldwide, one every few minutes per aircraft. The fields filled are
+``time``, ``hex``, ``lat``, ``lon``, ``alt_baro_ft``, ``track``, ``flight``
+and, for part of the reports, ``gs``, ``baro_rate`` and ``squawk``.
 
-**0.0% on every one of the eleven days** -- which is why none of them is
-carried: ``alt_geom``, ``ias``, ``tas``, ``mach``, ``mag_heading``,
-``true_heading``, ``roll``, ``track_rate``, ``geom_rate``, ``oat``, ``tat``,
-``wd``, ``ws``, ``nav_qnh``, ``nav_altitude_mcp``, ``nav_altitude_fms``,
-``nav_heading``, ``registration``, ``ac_type``, ``ac_desc``, ``category``.
-Constant placeholders rather than measurements: ``nic``=0, ``rc``=0,
-``seen``=0, ``seen_pos``=0, ``rssi``=-49.5, ``mlat``=[], ``tisb``=[].
+These fields are always empty and are not carried: ``alt_geom``, ``ias``,
+``tas``, ``mach``, ``mag_heading``, ``true_heading``, ``roll``, ``track_rate``,
+``geom_rate``, ``oat``, ``tat``, ``wd``, ``ws``, ``nav_qnh``,
+``nav_altitude_mcp``, ``nav_altitude_fms``, ``nav_heading``, ``registration``,
+``ac_type``, ``ac_desc``, ``category``. Constant placeholders rather than
+measurements: ``nic``=0, ``rc``=0, ``seen``=0, ``seen_pos``=0, ``rssi``=-49.5,
+``mlat``=[], ``tisb``=[].
 
-So the mapping below is short because the feed is narrow, not because anything
-was left out. ``benchmarks/adsc_census.py`` is the standing check on that
-claim.
+``benchmarks/adsc_census.py`` counts what the feed holds.
 
 **The feed's schema has grown.** ``track``, ``gs`` and ``baro_rate`` are empty
 before roughly 2025-09, and ``flight``, ``squawk`` and ``on_ground`` before
 roughly 2026-06. Ingesting a 2023 or 2024 day therefore writes rows with NULL
 ``velocity`` and ``vert_rate``; that is the feed, not a mapping fault.
 
-**Units are converted in, not out.** The feed is aviation (ft, kt, ft/min);
-OPDI storage is SI, mirroring OpenSky's own schema. The three factors are the
-same literals ``events.py`` and ``cleaning/native.py`` use, so the two cannot
-drift.
+**Units.** The feed is in aviation units (ft, kt, ft/min); the state
+vectors are in SI units, as OpenSky delivers ADS-B. The reports are converted
+on the way in, with the factors used throughout the pipeline.
 """
 
 from datetime import date, datetime, timedelta
@@ -54,10 +54,8 @@ __all__ = [
     "to_opdi_schema",
 ]
 
-#: Values of the ``source`` column. Named rather than inlined: the cleaner's
-#: exemption list, the merge, the trajectory cache and the Flight page's legend
-#: all have to agree on the spelling, and a typo in any one of them is a silent
-#: behaviour change rather than an error.
+#: Values of the ``source`` column, named once because the cleaning exemption,
+#: the merge and other readers must all spell them the same way.
 ADSB_SOURCE = "ADS-B"
 ADSC_SOURCE = "ADS-C"
 
@@ -81,12 +79,10 @@ def to_opdi_schema(df: DataFrame) -> DataFrame:
     Three fields are deliberately NULL rather than carried:
 
     * ``callsign`` -- the feed's ``flight`` is the IATA number (``LH133``), not
-      the ICAO callsign ADS-B broadcasts (``DLH133``). The production
-      segmentation arm breaks a track when the last non-blank callsign changes,
-      so carrying it would split every merged track at its first ADS-C sample.
-      A9 bridges NULLs by design (``F.last(..., ignorenulls=True)``), so NULL
-      is not a loss of grouping information -- it is the absence of a false
-      signal.
+      the ICAO callsign ADS-B broadcasts (``DLH133``). The default track rule
+      starts a new track when the call sign changes, so carrying it would
+      split every merged track at its first ADS-C report. The rule skips
+      NULL call signs, so a NULL loses nothing.
     * ``alert``, ``spi`` -- integer 0 on every row, a readsb default rather
       than an observation of an ATC indicator.
     * ``serials`` -- the receiving-station list of a terrestrial network has no
@@ -107,12 +103,12 @@ def to_opdi_schema(df: DataFrame) -> DataFrame:
         col("squawk").cast("string").alias("squawk"),
         (col("alt_baro_ft").cast("double") * lit(_FT_TO_M)).alias("baro_altitude"),
         (col("alt_geom").cast("double") * lit(_FT_TO_M)).alias("geo_altitude"),
-        (col("time").cast("double")
-         - F.coalesce(col("seen_pos").cast("double"), lit(0.0))
-         ).alias("last_pos_update"),
-        (col("time").cast("double")
-         - F.coalesce(col("seen").cast("double"), lit(0.0))
-         ).alias("last_contact"),
+        (col("time").cast("double") - F.coalesce(col("seen_pos").cast("double"), lit(0.0))).alias(
+            "last_pos_update"
+        ),
+        (col("time").cast("double") - F.coalesce(col("seen").cast("double"), lit(0.0))).alias(
+            "last_contact"
+        ),
         lit(None).cast("array<int>").alias("serials"),
         lit(ADSC_SOURCE).alias("source"),
     )
@@ -124,13 +120,9 @@ def shadow_filter(
     """ADS-C rows with no ADS-B row for the same airframe inside the window.
 
     The window is ``[t - before_seconds, t + after_seconds]`` around each ADS-C
-    report. **Asymmetric on purpose**: it is defined in a time base the two
-    feeds do not share. Measured against interpolated ADS-B, ADS-C reports sit
-    a median +1.48 s ahead of where ADS-B puts the aircraft at the same
-    timestamp, and the skew is a property of the individual airframe -- one in
-    twenty-five is persistently -12.9 s. A window centred on zero therefore
-    centres on the wrong instant for some aircraft, and the two sides have to
-    be settable independently.
+    report. The two sides can differ because the clocks of the two feeds are
+    not aligned: ADS-C reports are on average about 1.5 s ahead of ADS-B, by
+    an amount that differs between aircraft.
 
     Both frames carry ``icao24`` and a **timestamp** ``event_time``; the
     returned frame has exactly ``adsc``'s columns.
@@ -153,8 +145,8 @@ def shadow_filter(
     before, after = int(before_seconds), int(after_seconds)
     if before <= 0 or after <= 0:
         raise ValueError(
-            f"both half-windows must be positive, got before={before!r} "
-            f"after={after!r}")
+            f"both half-windows must be positive, got before={before!r} " f"after={after!r}"
+        )
     s = max(before, after)
 
     def bin_of(t):
@@ -165,9 +157,13 @@ def shadow_filter(
         col("icao24"),
         col("event_time"),
         adsc_t.alias("_t_adsc"),
-        F.explode(F.array(
-            bin_of(adsc_t) - 1, bin_of(adsc_t), bin_of(adsc_t) + 1,
-        )).alias("_bin"),
+        F.explode(
+            F.array(
+                bin_of(adsc_t) - 1,
+                bin_of(adsc_t),
+                bin_of(adsc_t) + 1,
+            )
+        ).alias("_bin"),
     )
 
     adsb_t = F.unix_timestamp("event_time").cast("double")
@@ -180,8 +176,7 @@ def shadow_filter(
     shadowed = (
         adsb_keys.join(
             F.broadcast(adsc_keys),
-            (col("_icao24") == col("icao24"))
-            & (adsb_keys["_bin"] == adsc_keys["_bin"]),
+            (col("_icao24") == col("icao24")) & (adsb_keys["_bin"] == adsc_keys["_bin"]),
             "inner",
         )
         # `t_adsb - t_adsc` in `[-before, +after]`: an ADS-B sample up to
@@ -199,9 +194,9 @@ def shadow_filter(
 
 
 class AdscIngestion:
-    """Reads the ADS-C topic and writes ``config.adsc.table``.
+    """Step 01b: read the ADS-C feed and write ``config.adsc.table``.
 
-    Deliberately **not** a subclass of
+    Not a subclass of
     :class:`~opdi.ingestion.osn_statevectors.StateVectorIngestion`, and
     deliberately not routed through its ``_apply_filters``: that method's job
     includes the 5 s thinning, and both of its rules are wrong here. ``modulo``
@@ -245,11 +240,10 @@ class AdscIngestion:
     def existing(self, paths: List[str]) -> List[str]:
         """The subset of *paths* that exists.
 
-        The archive has 24 gaps longer than a day since 2023-07, and the census
-        found days reading as few as 6 of 24 hourly partitions, so an absent
-        hour is routine. ``spark.read.parquet`` raises PATH_NOT_FOUND on the
-        first one, which would make a normal gap look like a bucket or
-        credentials failure.
+        Missing hours, and whole missing days, are normal in the ADS-C archive.
+        ``spark.read.parquet`` raises PATH_NOT_FOUND on the first missing
+        path, which would make a normal gap look like a storage or credentials
+        failure.
         """
         jvm = self.spark._jvm
         hconf = self.spark._jsc.hadoopConfiguration()
@@ -269,21 +263,23 @@ class AdscIngestion:
         """
         wanted = self.hour_paths(start_date, end_date)
         paths = self.existing(wanted)
-        print(f"ADS-C: {len(paths)}/{len(wanted)} hourly partitions present "
-              f"({start_date} to {end_date})")
+        print(
+            f"ADS-C: {len(paths)}/{len(wanted)} hourly partitions present "
+            f"({start_date} to {end_date})"
+        )
         if not paths:
             print("ADS-C: nothing to ingest; table left untouched")
             return 0
 
-        df = to_opdi_schema(
-            self.spark.read.option("mergeSchema", "true").parquet(*paths)
-        )
+        df = to_opdi_schema(self.spark.read.option("mergeSchema", "true").parquet(*paths))
 
         if self.bbox:
             min_lon, min_lat, max_lon, max_lat = self.bbox
             df = df.filter(
-                (col("lon") >= min_lon) & (col("lon") <= max_lon)
-                & (col("lat") >= min_lat) & (col("lat") <= max_lat)
+                (col("lon") >= min_lon)
+                & (col("lon") <= max_lon)
+                & (col("lat") >= min_lat)
+                & (col("lat") <= max_lat)
             )
 
         # Exact duplicates only -- same airframe, instant and position. The
@@ -306,21 +302,23 @@ class AdscIngestion:
         # cannot silently mean two different things by one timestamp.
         offset = float(self.config.adsc.time_offset_seconds)
         if offset:
-            print(f"ADS-C: applying a global time offset of {offset:+.3f} s. "
-                  f"The measured skew is per-airframe -- see AdscConfig.")
+            print(
+                f"ADS-C: applying a global time offset of {offset:+.3f} s. "
+                f"The measured skew is per-airframe -- see AdscConfig."
+            )
             df = df.withColumn("event_time", col("event_time") + lit(offset))
 
-        df = df.withColumn(
-            "event_time", from_unixtime(col("event_time")).cast("timestamp"))
+        df = df.withColumn("event_time", from_unixtime(col("event_time")).cast("timestamp"))
         df = df.withColumn("event_time_day", to_date(col("event_time")))
 
         rows = df.count()
         days = [r[0] for r in df.select("event_time_day").distinct().collect()]
         self.storage.write_table(
-            df, self.table, mode="overwrite",
+            df,
+            self.table,
+            mode="overwrite",
             partition_by=["event_time_day"],
             partition_values=[{"event_time_day": d} for d in days],
         )
-        print(f"ADS-C: written {rows:,} rows to {self.table} "
-              f"({len(days)} day partition(s))")
+        print(f"ADS-C: written {rows:,} rows to {self.table} " f"({len(days)} day partition(s))")
         return rows

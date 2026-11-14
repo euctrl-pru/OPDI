@@ -27,8 +27,8 @@ from pyspark.sql.types import (
 )
 
 from opdi.pipeline.flights import (
-    FlightListProcessor,
     OOA,
+    FlightListProcessor,
     angle_between,
     at_border,
     bearing_deg,
@@ -38,24 +38,26 @@ _EPOCH = dt.datetime(2025, 6, 5, 12, 0, 0)
 
 #: What `_compute_flight_table` reads: one row per (sample, candidate
 #: aerodrome), which is the shape `_categorize_landing_take_off` emits.
-CLASSIFIED = StructType([
-    StructField("icao24", StringType()),
-    StructField("flight_id", StringType()),
-    StructField("track_id", StringType()),
-    StructField("apt_ident", StringType()),
-    StructField("apt_latitude_deg", DoubleType()),
-    StructField("apt_longitude_deg", DoubleType()),
-    StructField("event_time", TimestampType()),
-    StructField("lat", DoubleType()),
-    StructField("lon", DoubleType()),
-    StructField("status", StringType()),
-    StructField("distance_from_center", IntegerType()),
-    StructField("first_seen", TimestampType()),
-    StructField("last_seen", TimestampType()),
-    StructField("DOF", DateType()),
-    StructField("take_off_count", IntegerType()),
-    StructField("landing_count", IntegerType()),
-])
+CLASSIFIED = StructType(
+    [
+        StructField("icao24", StringType()),
+        StructField("flight_id", StringType()),
+        StructField("track_id", StringType()),
+        StructField("apt_ident", StringType()),
+        StructField("apt_latitude_deg", DoubleType()),
+        StructField("apt_longitude_deg", DoubleType()),
+        StructField("event_time", TimestampType()),
+        StructField("lat", DoubleType()),
+        StructField("lon", DoubleType()),
+        StructField("status", StringType()),
+        StructField("distance_from_center", IntegerType()),
+        StructField("first_seen", TimestampType()),
+        StructField("last_seen", TimestampType()),
+        StructField("DOF", DateType()),
+        StructField("take_off_count", IntegerType()),
+        StructField("landing_count", IntegerType()),
+    ]
+)
 
 #: A landing track running due west along 50 N, ending at 4.000 E.
 #:
@@ -68,8 +70,8 @@ CLASSIFIED = StructType([
 #: Distance alone picks EBNO. They are 0.3 NM apart, well inside the 2 NM
 #: band, so the tie-break should overrule it and pick EBAL.
 AERODROMES = {
-    "EBAL": (50.0, 3.883),   # due west of the final fix
-    "EBNO": (50.070, 4.0),   # due north of it
+    "EBAL": (50.0, 3.883),  # due west of the final fix
+    "EBNO": (50.070, 4.0),  # due north of it
 }
 
 
@@ -82,11 +84,26 @@ def _landing_track(spark, n=8, step_s=30, start_lon=4.5, end_lon=4.0):
         t = _EPOCH + dt.timedelta(seconds=i * step_s)
         lon = start_lon + (end_lon - start_lon) * i / (n - 1)
         for apt, (alat, alon) in AERODROMES.items():
-            rows.append((
-                "abc123", "TEST01  ", "trk-1", apt, alat, alon,
-                t, 50.0, lon, "landing", 1,
-                first_seen, last_seen, _EPOCH.date(), 0, 1,
-            ))
+            rows.append(
+                (
+                    "abc123",
+                    "TEST01  ",
+                    "trk-1",
+                    apt,
+                    alat,
+                    alon,
+                    t,
+                    50.0,
+                    lon,
+                    "landing",
+                    1,
+                    first_seen,
+                    last_seen,
+                    _EPOCH.date(),
+                    0,
+                    1,
+                )
+            )
     return spark.createDataFrame(rows, schema=CLASSIFIED)
 
 
@@ -105,8 +122,9 @@ def test_angle_between_does_not_break_across_north(spark):
     """`%` keeps the sign of the dividend in Spark, so bearings straddling
     north came back as 340 degrees apart instead of 20 -- inverting the metric
     on every pair near the wrap. `pmod` is what makes this correct."""
-    df = spark.createDataFrame([(10.0, 350.0), (350.0, 10.0), (0.0, 180.0),
-                                (90.0, 270.0)], ["a", "b"])
+    df = spark.createDataFrame(
+        [(10.0, 350.0), (350.0, 10.0), (0.0, 180.0), (90.0, 270.0)], ["a", "b"]
+    )
     got = [r.d for r in df.select(angle_between(F.col("a"), F.col("b")).alias("d")).collect()]
     assert got == pytest.approx([20.0, 20.0, 180.0, 180.0], abs=1e-9)
 
@@ -114,13 +132,17 @@ def test_angle_between_does_not_break_across_north(spark):
 def test_bearing_deg_reads_the_cardinal_directions(spark):
     df = spark.createDataFrame(
         [(50.0, 4.0, 51.0, 4.0), (50.0, 4.0, 50.0, 5.0), (50.0, 4.0, 49.0, 4.0)],
-        ["y1", "x1", "y2", "x2"])
-    got = [r.b for r in df.select(
-        bearing_deg(F.col("y1"), F.col("x1"), F.col("y2"), F.col("x2")).alias("b")
-    ).collect()]
-    assert got[0] == pytest.approx(0.0, abs=0.5)     # north
-    assert got[1] == pytest.approx(90.0, abs=0.5)    # east
-    assert got[2] == pytest.approx(180.0, abs=0.5)   # south
+        ["y1", "x1", "y2", "x2"],
+    )
+    got = [
+        r.b
+        for r in df.select(
+            bearing_deg(F.col("y1"), F.col("x1"), F.col("y2"), F.col("x2")).alias("b")
+        ).collect()
+    ]
+    assert got[0] == pytest.approx(0.0, abs=0.5)  # north
+    assert got[1] == pytest.approx(90.0, abs=0.5)  # east
+    assert got[2] == pytest.approx(180.0, abs=0.5)  # south
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +167,7 @@ def test_course_is_null_on_too_few_samples(spark):
 
 def test_course_is_null_on_too_short_a_baseline(spark):
     """Eight fixes one second apart is half a minute of nothing."""
-    crs = FlightListProcessor._endpoint_courses(
-        _landing_track(spark, n=8, step_s=1)).collect()
+    crs = FlightListProcessor._endpoint_courses(_landing_track(spark, n=8, step_s=1)).collect()
     assert crs[0]["course"] is None
 
 
@@ -167,14 +188,16 @@ def test_the_sample_count_guard_counts_fixes_not_rows(spark):
 def test_distance_alone_picks_the_nearer_misaligned_aerodrome(spark):
     """The control. Without the tie-break, EBNO wins on distance."""
     out = FlightListProcessor._compute_flight_table(
-        _landing_track(spark), rank_by="haversine", bearing_tiebreak_nm=0.0)
+        _landing_track(spark), rank_by="haversine", bearing_tiebreak_nm=0.0
+    )
     assert _first(out, "ADES") == "EBNO"
 
 
 def test_the_tie_break_overrules_distance_inside_the_band(spark):
     """The result the study measured: same flight answered, answered right."""
     out = FlightListProcessor._compute_flight_table(
-        _landing_track(spark), rank_by="haversine", bearing_tiebreak_nm=2.0)
+        _landing_track(spark), rank_by="haversine", bearing_tiebreak_nm=2.0
+    )
     assert _first(out, "ADES") == "EBAL"
 
 
@@ -182,7 +205,8 @@ def test_the_tie_break_does_not_fire_outside_the_band(spark):
     """A band of 0.1 NM cannot reach the 0.3 NM gap between the two, so
     distance decides alone and the answer returns to the control's."""
     out = FlightListProcessor._compute_flight_table(
-        _landing_track(spark), rank_by="haversine", bearing_tiebreak_nm=0.1)
+        _landing_track(spark), rank_by="haversine", bearing_tiebreak_nm=0.1
+    )
     assert _first(out, "ADES") == "EBNO"
 
 
@@ -190,7 +214,8 @@ def test_the_tie_break_stands_down_without_a_course(spark):
     """A null alignment must not win the ordering. With too few fixes to read a
     course, the answer has to be the distance answer -- not an arbitrary one."""
     out = FlightListProcessor._compute_flight_table(
-        _landing_track(spark, n=3), rank_by="haversine", bearing_tiebreak_nm=2.0)
+        _landing_track(spark, n=3), rank_by="haversine", bearing_tiebreak_nm=2.0
+    )
     assert _first(out, "ADES") == "EBNO"
 
 
@@ -199,9 +224,11 @@ def test_the_tie_break_leaves_coverage_alone(spark):
     which is why it costs no coverage."""
     args = dict(rank_by="haversine")
     off = FlightListProcessor._compute_flight_table(
-        _landing_track(spark), bearing_tiebreak_nm=0.0, **args)
+        _landing_track(spark), bearing_tiebreak_nm=0.0, **args
+    )
     on = FlightListProcessor._compute_flight_table(
-        _landing_track(spark), bearing_tiebreak_nm=2.0, **args)
+        _landing_track(spark), bearing_tiebreak_nm=2.0, **args
+    )
     assert off.count() == on.count() == 1
     assert _first(off, "id") == _first(on, "id")
 
@@ -238,8 +265,10 @@ def test_at_border_is_false_everywhere_when_there_is_no_box(spark):
         [(26.8, 0.0), (0.0, 0.0), (-89.9, 179.9), (70.2, 49.6)],
         "lat double, lon double",
     )
-    got = [r.b for r in df.select(
-        at_border(F.col("lat"), F.col("lon"), bbox=None).alias("b")).collect()]
+    got = [
+        r.b
+        for r in df.select(at_border(F.col("lat"), F.col("lon"), bbox=None).alias("b")).collect()
+    ]
     assert got == [False, False, False, False]
 
 
@@ -248,11 +277,12 @@ def test_at_border_uses_the_box_it_is_given(spark):
     If this ever stops holding, `at_border` has gone back to a module constant.
     """
     df = spark.createDataFrame([(50.9, 4.48)], "lat double, lon double")
-    inside_europe = df.select(
-        at_border(F.col("lat"), F.col("lon")).alias("b")).collect()[0].b
-    at_edge_of_small = df.select(
-        at_border(F.col("lat"), F.col("lon"),
-                  bbox=(4.0, 50.5, 5.0, 51.5)).alias("b")).collect()[0].b
+    inside_europe = df.select(at_border(F.col("lat"), F.col("lon")).alias("b")).collect()[0].b
+    at_edge_of_small = (
+        df.select(at_border(F.col("lat"), F.col("lon"), bbox=(4.0, 50.5, 5.0, 51.5)).alias("b"))
+        .collect()[0]
+        .b
+    )
     assert inside_europe is False
     assert at_edge_of_small is True
 
@@ -261,11 +291,11 @@ def test_at_border_uses_the_box_it_is_given(spark):
 # Wiring: the configured box reaches both `at_border` call sites
 # ---------------------------------------------------------------------------
 #
-# `FlightListProcessor._endpoint_candidates_frame` does not exist -- the two
-# real places `at_border` and `OOA` meet are `_track_border_flags` (feeds
-# `trend`'s out-of-area label) and `build_endpoint_candidates` (feeds
-# `classify_endpoints`'s, by way of the `at_border` column it caches). Both
-# are exercised for real here; only `_get_data_within_timeframe` (needs S3)
+# In the package, `at_border` and `OOA` meet in `build_endpoint_candidates`
+# (feeds `classify_endpoints`'s label, by way of the `at_border` column it
+# caches). The study variant of `trend`'s out-of-area label is a second call
+# site, tested in tests/benchmarks/test_study_variants.py. The call is
+# exercised for real here; only `_get_data_within_timeframe` (needs S3)
 # and `_load_airports_hex` (needs the H3 reference tables) are stubbed, since
 # those are the only two dependencies this task did not touch and cannot
 # supply locally. Everything else -- the window functions, the join, the
@@ -275,28 +305,39 @@ def test_at_border_uses_the_box_it_is_given(spark):
 
 
 def _tracks_for_border_wiring(spark):
-    """Two samples of one track: enough columns for `_track_border_flags` and
-    `build_endpoint_candidates` to run their real logic end to end.
+    """Two samples of one track: enough columns for `build_endpoint_candidates`
+    (and the study variant's `_track_border_flags`) to run their real logic.
 
     The geometry is irrelevant -- `at_border` itself is replaced by a
     recorder in the test below, so nothing here depends on where these points
     actually are relative to any box.
     """
-    schema = StructType([
-        StructField("track_id", StringType()),
-        StructField("icao24", StringType()),
-        StructField("flight_id", StringType()),
-        StructField("event_time", TimestampType()),
-        StructField("lat", DoubleType()),
-        StructField("lon", DoubleType()),
-        StructField("baro_altitude", DoubleType()),
-        StructField("on_ground", BooleanType()),
-        StructField("h3_res_7", StringType()),
-    ])
+    schema = StructType(
+        [
+            StructField("track_id", StringType()),
+            StructField("icao24", StringType()),
+            StructField("flight_id", StringType()),
+            StructField("event_time", TimestampType()),
+            StructField("lat", DoubleType()),
+            StructField("lon", DoubleType()),
+            StructField("baro_altitude", DoubleType()),
+            StructField("on_ground", BooleanType()),
+            StructField("h3_res_7", StringType()),
+        ]
+    )
     rows = [
         ("trk-1", "abc123", "TEST01", _EPOCH, 50.0, 4.0, 1000.0, False, "871"),
-        ("trk-1", "abc123", "TEST01",
-         _EPOCH + dt.timedelta(seconds=60), 50.1, 4.1, 1200.0, False, "872"),
+        (
+            "trk-1",
+            "abc123",
+            "TEST01",
+            _EPOCH + dt.timedelta(seconds=60),
+            50.1,
+            4.1,
+            1200.0,
+            False,
+            "872",
+        ),
     ]
     return spark.createDataFrame(rows, schema=schema)
 
@@ -328,18 +369,17 @@ def _wiring_processor(spark, tmp_path, bbox):
     proc._get_data_within_timeframe = lambda table_name, month: _tracks_for_border_wiring(spark)
     proc._load_airports_hex = lambda *a, **kw: spark.createDataFrame(
         [],
-        "apt_hex_id string, apt_ident string, "
-        "apt_latitude_deg double, apt_longitude_deg double",
+        "apt_hex_id string, apt_ident string, " "apt_latitude_deg double, apt_longitude_deg double",
     )
     proc._endpoint_log = str(tmp_path / "endpoint_log.parquet")
     return proc
 
 
-def test_border_wiring_threads_the_configured_box_through_both_call_sites(
+def test_border_wiring_threads_the_configured_box_through_the_call_site(
     spark, tmp_path, monkeypatch
 ):
-    """The wiring this task adds: both call sites must pass the box the run
-    was configured with, not the module default and not a hardcoded value.
+    """The call site must pass the box the run was configured with, not the
+    module default and not a hardcoded value.
 
     The sentinel box is neither `EUROPE_BBOX` nor `None` on purpose. A test
     built on the European default could pass with the config ignored and the
@@ -362,10 +402,9 @@ def test_border_wiring_threads_the_configured_box_through_both_call_sites(
 
     proc = _wiring_processor(spark, tmp_path, sentinel_bbox)
 
-    proc._track_border_flags(_EPOCH.date()).collect()
     proc.build_endpoint_candidates(_EPOCH.date(), rebuild=True)
 
-    assert recorded == [sentinel_bbox, sentinel_bbox]
+    assert recorded == [sentinel_bbox]
 
 
 def test_version_is_new_unless_the_run_is_a_legacy_one():
@@ -444,7 +483,7 @@ def test_a_null_coordinate_gives_a_null_distance(spark):
     ).withColumn("d", haversine_nm(F.col("lat1"), F.col("lon1"), F.col("lat2"), F.col("lon2")))
     got = [r.d for r in df.collect()]
 
-    assert got[0] == pytest.approx(56, abs=3)   # a real distance
+    assert got[0] == pytest.approx(56, abs=3)  # a real distance
     assert got[1] is None
     assert got[2] is None
 
@@ -472,11 +511,13 @@ def test_the_distance_is_still_clamped_for_antipodal_points(spark):
 
 #: Shaped like the trend path just after its left join to the zone table:
 #: altitude in metres (SI storage), elevation in feet, and both nullable.
-_CUT_SCHEMA = StructType([
-    StructField("baro_altitude", DoubleType()),
-    StructField("apt_elevation_ft", DoubleType()),
-    StructField("flight_level", IntegerType()),
-])
+_CUT_SCHEMA = StructType(
+    [
+        StructField("baro_altitude", DoubleType()),
+        StructField("apt_elevation_ft", DoubleType()),
+        StructField("flight_level", IntegerType()),
+    ]
+)
 
 
 def _cut_row(alt_ft, elev_ft):
@@ -532,16 +573,16 @@ def test_attach_field_elevation_keeps_unmatched_rows(spark):
     sample that matched no aerodrome, and with it every track that has none.
     """
     proc = _processor_with_airports(spark, [("EHAM", -11.0), ("LTCE", 5763.0)])
-    cand = spark.createDataFrame(
-        [("EHAM",), ("LTCE",), (None,), ("ZZZZ",)], "apt_ident string"
-    )
-    got = {r["apt_ident"]: r["apt_elevation_ft"] for r in proc._attach_field_elevation(cand).collect()}
+    cand = spark.createDataFrame([("EHAM",), ("LTCE",), (None,), ("ZZZZ",)], "apt_ident string")
+    got = {
+        r["apt_ident"]: r["apt_elevation_ft"] for r in proc._attach_field_elevation(cand).collect()
+    }
 
     assert got["EHAM"] == pytest.approx(-11.0)
     assert got["LTCE"] == pytest.approx(5763.0)
-    assert got[None] is None          # matched no aerodrome
-    assert got["ZZZZ"] is None        # aerodrome absent from the reference
-    assert len(got) == 4              # nothing dropped
+    assert got[None] is None  # matched no aerodrome
+    assert got["ZZZZ"] is None  # aerodrome absent from the reference
+    assert len(got) == 4  # nothing dropped
 
 
 def test_max_field_elevation_comes_from_the_zone_table_not_the_world(spark):
@@ -550,9 +591,7 @@ def test_max_field_elevation_comes_from_the_zone_table_not_the_world(spark):
     14,000 ft that the bounding box excludes, widening the pre-filter by two
     thirds for aerodromes no sample can ever be joined to.
     """
-    proc = _processor_with_airports(
-        spark, [("EHAM", -11.0), ("LTCE", 5763.0), ("ZUDC", 14472.0)]
-    )
+    proc = _processor_with_airports(spark, [("EHAM", -11.0), ("LTCE", 5763.0), ("ZUDC", 14472.0)])
     zones = spark.createDataFrame([("EHAM",), ("LTCE",)], "apt_ident string")
     assert proc._max_field_elevation_ft(zones) == pytest.approx(5763.0)
 

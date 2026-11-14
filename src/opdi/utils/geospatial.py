@@ -1,5 +1,4 @@
-"""
-Geospatial utility functions for OPDI pipeline.
+"""Geospatial utility functions for OPDI pipeline.
 
 Provides functions for distance calculations, coordinate transformations,
 and geometry operations used throughout the aviation data pipeline.
@@ -7,9 +6,9 @@ and geometry operations used throughout the aviation data pipeline.
 
 import math
 from typing import Tuple
+
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
-
 
 # Earth radius constants
 EARTH_RADIUS_KM = 6371.0
@@ -23,8 +22,7 @@ METERS_TO_NM = 1.0 / 1852.0
 def haversine_distance(
     lat1: float, lon1: float, lat2: float, lon2: float, unit: str = "nm"
 ) -> float:
-    """
-    Calculate the great circle distance between two points on Earth using the Haversine formula.
+    """Calculate the great circle distance between two points on Earth using the Haversine formula.
 
     Args:
         lat1: Latitude of first point in degrees
@@ -52,10 +50,7 @@ def haversine_distance(
     dlat = lat2_rad - lat1_rad
     dlon = lon2_rad - lon1_rad
 
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
-    )
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     # Calculate distance
@@ -79,8 +74,7 @@ def add_cumulative_distance(
     track_id_col: str = "track_id",
     time_col: str = "event_time",
 ) -> DataFrame:
-    """
-    Calculate the great circle distance between consecutive points and cumulative distance.
+    """Calculate the great circle distance between consecutive points and cumulative distance.
 
     Uses native PySpark functions for distributed computation of distances along tracks.
 
@@ -103,9 +97,7 @@ def add_cumulative_distance(
     # Define window specs
     window_lag = Window.partitionBy(track_id_col).orderBy(time_col)
     window_cumsum = (
-        Window.partitionBy(track_id_col)
-        .orderBy(time_col)
-        .rowsBetween(Window.unboundedPreceding, 0)
+        Window.partitionBy(track_id_col).orderBy(time_col).rowsBetween(Window.unboundedPreceding, 0)
     )
 
     # Convert degrees to radians
@@ -134,9 +126,7 @@ def add_cumulative_distance(
     df = df.withColumn("segment_distance_nm", F.col("distance_km") * KM_TO_NM)
 
     # Calculate cumulative distance
-    df = df.withColumn(
-        "cumulative_distance_nm", F.sum("segment_distance_nm").over(window_cumsum)
-    )
+    df = df.withColumn("cumulative_distance_nm", F.sum("segment_distance_nm").over(window_cumsum))
 
     # Drop temporary columns
     df = df.drop("lat_rad", "lon_rad", "prev_lat_rad", "prev_lon_rad", "a", "c", "distance_km")
@@ -145,8 +135,7 @@ def add_cumulative_distance(
 
 
 def calculate_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Calculate the initial bearing (forward azimuth) between two points.
+    """Calculate the initial bearing (forward azimuth) between two points.
 
     Args:
         lat1: Latitude of first point in degrees
@@ -187,8 +176,7 @@ def calculate_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
 def destination_point(
     lat: float, lon: float, bearing: float, distance_nm: float
 ) -> Tuple[float, float]:
-    """
-    Calculate destination point given start point, bearing, and distance.
+    """Calculate destination point given start point, bearing, and distance.
 
     Args:
         lat: Starting latitude in degrees
@@ -233,8 +221,7 @@ def destination_point(
 
 
 def meters_to_flight_level(meters: float) -> int:
-    """
-    Convert altitude in meters to flight level.
+    """Convert altitude in meters to flight level.
 
     Flight level is altitude in hundreds of feet, so FL100 = 10,000 feet.
 
@@ -253,8 +240,7 @@ def meters_to_flight_level(meters: float) -> int:
 
 
 def flight_level_to_meters(flight_level: int) -> float:
-    """
-    Convert flight level to altitude in meters.
+    """Convert flight level to altitude in meters.
 
     Args:
         flight_level: Flight level (e.g., 100 for FL100)

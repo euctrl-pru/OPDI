@@ -1,21 +1,22 @@
-"""
-OpenSky Network aircraft database ingestion module.
+"""The OpenSky aircraft database (part of step 00).
 
-Downloads aircraft metadata from OpenSky Network and loads into Iceberg tables.
+Downloads the OpenSky Network aircraft database (registration, model, type
+code, ICAO aircraft class and operator per ICAO 24-bit address) and writes
+it to the table ``osn_aircraft_db``, which step 03 joins to the flight list.
 """
+
+from typing import Optional
 
 import pandas as pd
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, when, trim
-from typing import Optional
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import col, trim, when
 
 from opdi.config import OPDIConfig
 from opdi.utils.storage import StorageManager
 
 
 class AircraftDatabaseIngestion:
-    """
-    Handles ingestion of OpenSky Network aircraft database.
+    """Handles ingestion of OpenSky Network aircraft database.
 
     The aircraft database contains metadata about aircraft including:
     - ICAO 24-bit address
@@ -30,13 +31,13 @@ class AircraftDatabaseIngestion:
         config: OPDIConfig,
         url: Optional[str] = None,
     ):
-        """
-        Initialize aircraft database ingestion.
+        """Prepare the ingestion.
 
         Args:
-            spark: Active SparkSession
-            config: OPDI configuration object
-            url: URL to aircraft database CSV. If None, uses config default
+            spark: Active Spark session.
+            config: OPDI configuration.
+            url: Address of the aircraft database CSV file. Default:
+                ``config.ingestion.osn_aircraft_db_url``.
         """
         self.spark = spark
         self.config = config
@@ -45,8 +46,7 @@ class AircraftDatabaseIngestion:
         self.url = url or config.ingestion.osn_aircraft_db_url
 
     def download_and_convert(self) -> DataFrame:
-        """
-        Download aircraft database CSV and convert to Spark DataFrame.
+        """Download aircraft database CSV and convert to Spark DataFrame.
 
         Returns:
             Spark DataFrame with aircraft metadata
@@ -105,8 +105,7 @@ class AircraftDatabaseIngestion:
         return cleaned_df
 
     def write_to_table(self, df: DataFrame, mode: str = "append") -> None:
-        """
-        Write aircraft database to table.
+        """Write aircraft database to table.
 
         Args:
             df: DataFrame to write
@@ -116,8 +115,7 @@ class AircraftDatabaseIngestion:
         print(f"Written {df.count()} records to osn_aircraft_db (mode: {mode}).")
 
     def create_table_if_not_exists(self) -> None:
-        """
-        Create the osn_aircraft_db Iceberg table if it doesn't exist.
+        """Create the osn_aircraft_db Iceberg table if it doesn't exist.
 
         This should be run once before first ingestion.
         """
@@ -138,8 +136,7 @@ class AircraftDatabaseIngestion:
         print(f"Table {self.project}.osn_aircraft_db created/verified.")
 
     def ingest(self, mode: str = "append") -> int:
-        """
-        Run the complete ingestion workflow.
+        """Run the complete ingestion workflow.
 
         Downloads the aircraft database and writes to Iceberg table.
 
@@ -154,8 +151,8 @@ class AircraftDatabaseIngestion:
             >>> from opdi.utils.spark_helpers import get_spark
             >>> from opdi.config import OPDIConfig
             >>>
-            >>> config = OPDIConfig.for_environment("live")
-            >>> spark = get_spark("live", "Aircraft DB Ingestion")
+            >>> config = OPDIConfig.for_environment("opensky")
+            >>> spark = get_spark("opensky", "Aircraft DB Ingestion")
             >>> ingestion = AircraftDatabaseIngestion(spark, config)
             >>> count = ingestion.ingest(mode="overwrite")
             >>> print(f"Ingested {count} aircraft records")
@@ -172,8 +169,7 @@ class AircraftDatabaseIngestion:
         return record_count
 
     def get_aircraft_info(self, icao24: str) -> Optional[dict]:
-        """
-        Look up aircraft information by ICAO 24-bit address.
+        """Look up aircraft information by ICAO 24-bit address.
 
         Args:
             icao24: ICAO 24-bit transponder ID (e.g., "a12b34")

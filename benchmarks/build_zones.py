@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+
 from opdi.coverage import CoverageConfig
 
 AIRPORTS_TABLE = "s3a://eurocontrol/opdi/oa_airports"
@@ -41,16 +42,36 @@ AIRPORTS_TABLE = "s3a://eurocontrol/opdi/oa_airports"
 AIRPORT_TYPES = list(CoverageConfig().airport_types)
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--out", nargs="+", required=True,
-                    help="one or more destinations; s3a://, s3:// and hdfs:// "
-                         "are written from the executors, anything else is a "
-                         "local directory collected to the driver")
-    ap.add_argument("--batch", type=int, default=150,
-                    help="aerodromes per batch when a local destination is given")
-    ap.add_argument("--max-radius-nm", type=float, default=None,
-                    help="ring reach; defaults to the generator's outermost ring")
+    ap.add_argument(
+        "--out",
+        nargs="+",
+        required=True,
+        help="one or more destinations; s3a://, s3:// and hdfs:// "
+        "are written from the executors, anything else is a "
+        "local directory collected to the driver",
+    )
+    ap.add_argument(
+        "--batch",
+        type=int,
+        default=150,
+        help="aerodromes per batch when a local destination is given",
+    )
+    ap.add_argument(
+        "--max-radius-nm",
+        type=float,
+        default=None,
+        help="ring reach; defaults to the generator's outermost ring",
+    )
     ap.add_argument("--types", nargs="+", default=AIRPORT_TYPES)
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument("--ui-port", type=int, default=4041)
@@ -66,7 +87,10 @@ def main() -> None:
     from opdi.config import OPDIConfig
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
 
-    gen = AirportDetectionZoneGenerator(spark, OPDIConfig.for_environment("opensky"))
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The reference tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
+    gen = AirportDetectionZoneGenerator(spark, cfg)
     print(f"resolution {gen.resolution}, rings {gen.radii_nm}")
 
     # The ingested OurAirports table, not the public CSV: reachable from the

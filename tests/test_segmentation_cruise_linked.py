@@ -6,6 +6,7 @@ one, so unclear evidence means split. Later study stages score the link decision
 directly, which is why it is a pure function of named edge features and why some
 tests below drive ``linkable`` with literals.
 """
+
 import dataclasses
 import math
 import re
@@ -14,6 +15,9 @@ import pytest
 from conftest import make_track
 from pyspark.sql import Window
 from pyspark.sql import functions as F
+
+# The study rules the default rule is compared with live with the study scripts.
+from study_variants.segmentation import debounced, recommended  # noqa: E402
 
 from opdi.config import SegmentationConfig
 from opdi.pipeline.flights import EARTH_R_NM, haversine_nm
@@ -29,13 +33,11 @@ from opdi.pipeline.segmentation.methods import (
     LINK_EDGE_SAMPLES,
     PLACEHOLDER_ICAO24,
     cruise_linked,
-    debounced,
     debounced_callsign_change,
     link_checks,
     link_feature_columns,
-    select_link_features,
     linkable,
-    recommended,
+    select_link_features,
     stable_callsign,
 )
 
@@ -74,17 +76,13 @@ def _piece(start_s, lon, n=10, step_s=5, **overrides):
         "vert_rate": 0.0,
         "callsign": "DLH1",
     }
-    return [
-        {**base, **overrides, "t": start_s + i * step_s} for i in range(n)
-    ]
+    return [{**base, **overrides, "t": start_s + i * step_s} for i in range(n)]
 
 
-def _hole_samples(gap_min=191.0, nm=1530.0, before=None, after=None,
-                  n_before=10, n_after=10):
+def _hole_samples(gap_min=191.0, nm=1530.0, before=None, after=None, n_before=10, n_after=10):
     """Two pieces of one airframe with a hole between their edges at t=0 and t=gap."""
-    return (
-        _piece(-(n_before - 1) * 5, 0.0, n_before, **(before or {}))
-        + _piece(gap_min * 60, _lon(nm), n_after, **(after or {}))
+    return _piece(-(n_before - 1) * 5, 0.0, n_before, **(before or {})) + _piece(
+        gap_min * 60, _lon(nm), n_after, **(after or {})
     )
 
 
@@ -119,9 +117,7 @@ def _engine_frame(df):
             "_gap_minutes",
             (
                 F.unix_timestamp("_ts")
-                - F.unix_timestamp(
-                    F.lag("_ts").over(Window.partitionBy("_grp").orderBy("_ts"))
-                )
+                - F.unix_timestamp(F.lag("_ts").over(Window.partitionBy("_grp").orderBy("_ts")))
             )
             / 60.0,
         )
@@ -131,9 +127,7 @@ def _engine_frame(df):
 def _with_features(df, **kwargs):
     frame = _engine_frame(df)
     features = link_feature_columns(P, **kwargs)
-    return frame.select(
-        "event_time", *[c.alias(name) for name, c in features.items()]
-    )
+    return frame.select("event_time", *[c.alias(name) for name, c in features.items()])
 
 
 # --- the rule, on tracks ----------------------------------------------------
@@ -178,10 +172,10 @@ def test_the_cruise_floor_looks_at_exactly_five_samples_each_side(spark):
 
     # Samples 0-9 are the old piece (edge at 9), samples 10-19 the new (edge at 10).
     assert LINK_EDGE_SAMPLES == 5
-    assert n_tracks(with_one_low(5)) == 2    # fifth before the gap
-    assert n_tracks(with_one_low(4)) == 1    # sixth before the gap
-    assert n_tracks(with_one_low(14)) == 2   # fifth from the gap on
-    assert n_tracks(with_one_low(15)) == 1   # sixth from the gap on
+    assert n_tracks(with_one_low(5)) == 2  # fifth before the gap
+    assert n_tracks(with_one_low(4)) == 1  # sixth before the gap
+    assert n_tracks(with_one_low(14)) == 2  # fifth from the gap on
+    assert n_tracks(with_one_low(15)) == 1  # sixth from the gap on
 
 
 def test_descent_then_climb_splits(spark):
@@ -300,7 +294,7 @@ def test_placeholder_address_splits(spark):
 
 def test_no_position_within_the_window_fails_closed(spark):
     samples = _hole_samples()
-    for sample in samples[:10]:     # the whole old piece, 45 s of it
+    for sample in samples[:10]:  # the whole old piece, 45 s of it
         sample["lat"] = sample["lon"] = None
     df = make_track(spark, samples)
     assert n_tracks(df) == 2
@@ -314,7 +308,7 @@ def test_no_position_within_the_window_fails_closed(spark):
     )
     assert all(r["_brk"] is not None for r in rows)
     assert rows[10]["_brk"] is True
-    assert rows[0]["_brk"] is False     # the group's first sample has no gap at all
+    assert rows[0]["_brk"] is False  # the group's first sample has no gap at all
 
 
 # --- edge positions, read through blank samples --------------------------------
@@ -451,10 +445,10 @@ def test_the_antimeridian_is_crossed_the_short_way(spark):
 def test_short_gaps_behave_as_debounced(spark):
     """Everything but a long gap is A9's, verbatim."""
     samples = _piece(0, 0.0, n=8)
-    samples += _piece(40, 0.0, n=5, step_s=2, callsign="XXX9")     # flicker, 8 s long
+    samples += _piece(40, 0.0, n=5, step_s=2, callsign="XXX9")  # flicker, 8 s long
     samples += _piece(50, 0.0, n=8)
-    samples += _piece(20 * 60, 0.1, n=8)                           # 20 min at cruise
-    samples += _piece(40 * 60, 0.2, n=8, baro_altitude=1000.0)     # 20 min, low
+    samples += _piece(20 * 60, 0.1, n=8)  # 20 min at cruise
+    samples += _piece(40 * 60, 0.2, n=8, baro_altitude=1000.0)  # 20 min, low
     samples += _piece(50 * 60, 0.2, n=8, callsign="BAW2", baro_altitude=1000.0)
     df = make_track(spark, samples)
     assert _partition(df, cruise_linked()) == _partition(df, debounced())
@@ -464,10 +458,10 @@ def test_short_gaps_behave_as_debounced(spark):
 def test_debounced_partition_is_unchanged(spark):
     """The extraction, pinned by hand as well as by the unmodified debounce suite."""
     samples = _piece(0, 0.0, n=8, step_s=5)
-    samples += _piece(40, 0.0, n=1, callsign="XXX9")                # flicker
+    samples += _piece(40, 0.0, n=1, callsign="XXX9")  # flicker
     samples += _piece(45, 0.0, n=8, step_s=5)
-    samples += _piece(85, 0.0, n=8, step_s=5, callsign="BAW2")      # genuine change
-    samples += _piece(40 * 60, 1.0, n=8, step_s=5, callsign="BAW2")   # long gap
+    samples += _piece(85, 0.0, n=8, step_s=5, callsign="BAW2")  # genuine change
+    samples += _piece(40 * 60, 1.0, n=8, step_s=5, callsign="BAW2")  # long gap
     df = make_track(spark, samples)
 
     t = [float(s["t"]) for s in samples]
@@ -539,16 +533,34 @@ def test_both_edge_allowances_are_on_by_default():
 
 def test_a_climbing_old_edge_links_by_default(spark):
     df = _hole(spark, before=CLIMBING)
-    assert n_tracks(df, dataclasses.replace(SHIPPED, link_cruise_floor_ft=25000.0,
-                                            link_min_implied_speed_kt=315.0,
-                                            link_max_gap_minutes=360.0)) == 1
+    assert (
+        n_tracks(
+            df,
+            dataclasses.replace(
+                SHIPPED,
+                link_cruise_floor_ft=25000.0,
+                link_min_implied_speed_kt=315.0,
+                link_max_gap_minutes=360.0,
+            ),
+        )
+        == 1
+    )
 
 
 def test_a_descending_new_edge_links_by_default(spark):
     df = _hole(spark, after=DESCENDING)
-    assert n_tracks(df, dataclasses.replace(SHIPPED, link_cruise_floor_ft=25000.0,
-                                            link_min_implied_speed_kt=315.0,
-                                            link_max_gap_minutes=360.0)) == 1
+    assert (
+        n_tracks(
+            df,
+            dataclasses.replace(
+                SHIPPED,
+                link_cruise_floor_ft=25000.0,
+                link_min_implied_speed_kt=315.0,
+                link_max_gap_minutes=360.0,
+            ),
+        )
+        == 1
+    )
 
 
 def test_descent_off_by_name_reproduces_the_version_4_rule(spark):
@@ -558,7 +570,8 @@ def test_descent_off_by_name_reproduces_the_version_4_rule(spark):
     assert n_tracks(_hole(spark, after=at_12000), SHIPPED) == 1
     assert n_tracks(_hole(spark, after=at_12000), no_descent) == 2
     assert _partition(_hole(spark), cruise_linked(), SHIPPED) == _partition(
-        _hole(spark), cruise_linked(), no_descent)
+        _hole(spark), cruise_linked(), no_descent
+    )
 
 
 def test_a_descending_new_edge_below_the_low_altitude_limit_still_splits(spark):
@@ -567,8 +580,9 @@ def test_a_descending_new_edge_below_the_low_altitude_limit_still_splits(spark):
 
 
 def test_two_vertical_rates_do_not_make_a_descent_by_default(spark):
-    samples = _hole_samples(after={"baro_altitude": 12000.0 / FT_PER_M,
-                                   "vert_rate": -1000.0 / FPM_PER_MPS})
+    samples = _hole_samples(
+        after={"baro_altitude": 12000.0 / FT_PER_M, "vert_rate": -1000.0 / FPM_PER_MPS}
+    )
     for s in samples[12:]:
         s["vert_rate"] = None
     assert n_tracks(make_track(spark, samples), SHIPPED) == 2
@@ -701,9 +715,7 @@ def _unshared_position_features(p):
     seconds = w.orderBy(F.unix_timestamp(F.col("_ts")))
     position = F.when(
         F.col("lat").isNotNull() & F.col("lon").isNotNull(),
-        F.struct(
-            F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")
-        ),
+        F.struct(F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")),
     )
     span_s = int(p.link_edge_position_minutes * 60)
     old_edge_ts = F.lag(F.col("_ts")).over(w)
@@ -753,11 +765,15 @@ def test_the_single_read_gives_the_values_of_the_separate_reads(spark, name):
     frame = _engine_frame(make_track(spark, _single_read_fixtures()[name]))
     new = link_feature_columns(P)
     old = _unshared_position_features(P)
-    rows = frame.select(
-        "event_time",
-        *[new[k].alias(f"new_{k}") for k in old],
-        *[old[k].alias(f"old_{k}") for k in old],
-    ).orderBy("event_time").collect()
+    rows = (
+        frame.select(
+            "event_time",
+            *[new[k].alias(f"new_{k}") for k in old],
+            *[old[k].alias(f"old_{k}") for k in old],
+        )
+        .orderBy("event_time")
+        .collect()
+    )
     assert any(r["old_position_gap_min"] is not None for r in rows) or name == "no position at all"
     for r in rows:
         assert r["new_position_gap_min"] == r["old_position_gap_min"]
@@ -945,9 +961,11 @@ def test_features_ignore_every_parameter_the_grid_varies(spark):
 
     def collect(params):
         f = link_feature_columns(params)
-        return frame.select(
-            "event_time", *[c.alias(k) for k, c in f.items()]
-        ).orderBy("event_time").collect()
+        return (
+            frame.select("event_time", *[c.alias(k) for k, c in f.items()])
+            .orderBy("event_time")
+            .collect()
+        )
 
     assert collect(P) == collect(varied)
 
@@ -964,7 +982,7 @@ def test_a_caller_window_scopes_every_feature(spark):
     a_samples += _piece(191 * 60, _lon(1530.0), callsign="")
 
     b_samples = _piece(-102, 0.0, n=20, callsign="BAW2", baro_altitude=9000.0)
-    b_samples[14]["callsign"] = "KLM8"     # t = -32
+    b_samples[14]["callsign"] = "KLM8"  # t = -32
     b_samples += _piece(3, 0.0, n=1, callsign="BAW2", baro_altitude=9000.0)
     b_samples += _piece(191 * 60 + 4, _lon(1600.0), callsign="BAW2")
 
@@ -975,8 +993,10 @@ def test_a_caller_window_scopes_every_feature(spark):
         return rows.select(*names).collect()
 
     def shared(control):
-        both = make_track(spark, a_samples).withColumn("control_id", F.lit("a")).unionByName(
-            make_track(spark, b_samples).withColumn("control_id", F.lit("b"))
+        both = (
+            make_track(spark, a_samples)
+            .withColumn("control_id", F.lit("a"))
+            .unionByName(make_track(spark, b_samples).withColumn("control_id", F.lit("b")))
         )
         features = link_feature_columns(P, Window.partitionBy("control_id").orderBy("_ts"))
         rows = _engine_frame(both).select(
@@ -1052,9 +1072,7 @@ def test_no_altitude_in_the_window_splits_at_the_old_edge(spark, blank_s, tracks
 
 
 def test_no_rate_in_the_window_stays_neutral(spark):
-    samples = _hole_samples(
-        before={"vert_rate": None}, after={"vert_rate": None}
-    )
+    samples = _hole_samples(before={"vert_rate": None}, after={"vert_rate": None})
     assert n_tracks(make_track(spark, samples)) == 1
     row = _hole_row(spark, samples)
     assert row["vr_before_fpm"] is None
@@ -1160,6 +1178,7 @@ def test_each_field_finds_its_own_samples(spark):
     only_rate = {"baro_altitude": None, "vert_rate": up, "velocity": None}
     only_alt = {"baro_altitude": alt_ft / FT_PER_M, "vert_rate": None, "velocity": None}
     only_speed = {"baro_altitude": None, "vert_rate": None}
+
     def side(order):
         return [dict(fields) for fields in order for _ in range(5)]
 
@@ -1172,8 +1191,7 @@ def test_each_field_finds_its_own_samples(spark):
     for s in after:
         s.setdefault("velocity", EDGE_MPS)
     before = [
-        {**s, "t": -i, "lat": 0.0, "lon": 0.0, "callsign": "DLH1"}
-        for i, s in enumerate(near_first)
+        {**s, "t": -i, "lat": 0.0, "lon": 0.0, "callsign": "DLH1"} for i, s in enumerate(near_first)
     ]
     for s in before:
         s.setdefault("velocity", EDGE_MPS)
@@ -1190,7 +1208,7 @@ def test_each_field_finds_its_own_samples(spark):
 
 
 def test_only_the_nearest_five_values_of_a_field_count(spark):
-    """Blanks, then five at cruise, then one low: the low one is the sixth value, not the sixth row."""
+    """Blanks, five at cruise, then one low: the low one is the sixth value, not the sixth row."""
     samples = _piece(-45, 0.0)
     samples += _piece(3600, _lon(480.0), n=8, step_s=1, baro_altitude=None)
     samples += _piece(3608, _lon(480.0), n=5, step_s=1)
@@ -1198,7 +1216,7 @@ def test_only_the_nearest_five_values_of_a_field_count(spark):
     assert n_tracks(make_track(spark, samples)) == 1
     assert _hole_row(spark, samples)["alt_after_ft"] == pytest.approx(CRUISE_M * FT_PER_M)
 
-    samples[10 + 12]["baro_altitude"] = 3000.0 / FT_PER_M     # now the fifth value
+    samples[10 + 12]["baro_altitude"] = 3000.0 / FT_PER_M  # now the fifth value
     assert n_tracks(make_track(spark, samples)) == 2
 
 
@@ -1419,12 +1437,24 @@ _CHECK_CASES = [
     (_STOP_ON, {"gc_nm": 1960.0}, []),
     # The same distance with 215 min between positions leaves 34 min, room for a stop.
     (_STOP_ON, {"gc_nm": 1960.0, "position_gap_min": 215.0}, ["no_time_for_a_stop"]),
-    (_STOP_ON, {"gc_nm": None}, [
-        "implied_speed_not_too_slow", "implied_speed_not_impossible", "no_time_for_a_stop",
-    ]),
-    (_STOP_ON, {"gc_nm": 1960.0, "position_gap_min": None}, [
-        "implied_speed_not_too_slow", "implied_speed_not_impossible", "no_time_for_a_stop",
-    ]),
+    (
+        _STOP_ON,
+        {"gc_nm": None},
+        [
+            "implied_speed_not_too_slow",
+            "implied_speed_not_impossible",
+            "no_time_for_a_stop",
+        ],
+    ),
+    (
+        _STOP_ON,
+        {"gc_nm": 1960.0, "position_gap_min": None},
+        [
+            "implied_speed_not_too_slow",
+            "implied_speed_not_impossible",
+            "no_time_for_a_stop",
+        ],
+    ),
     # Several at once: every failing test says so.
     (P, {"alt_after_ft": 20000.0, "cs_after": "BAW2"}, ["cruise_at_new_edge", "callsign_agrees"]),
     # Off, direction buys nothing, and the edge feature it would read is not needed.
@@ -1452,15 +1482,26 @@ _CHECK_CASES = [
     (_DIRECTIONAL, {"alt_after_ft": 5000.0, "vr_after_fpm": -1500.0}, []),
     # A climb at the old edge and a descent at the new one, which is the whole flight's
     # shape, and descend-then-climb still applies unchanged.
-    (_DIRECTIONAL, {"alt_before_ft": 9000.0, "vr_before_fpm": 1500.0,
-                    "alt_after_ft": 9000.0, "vr_after_fpm": -1500.0}, []),
+    (
+        _DIRECTIONAL,
+        {
+            "alt_before_ft": 9000.0,
+            "vr_before_fpm": 1500.0,
+            "alt_after_ft": 9000.0,
+            "vr_after_fpm": -1500.0,
+        },
+        [],
+    ),
     (_DIRECTIONAL, {"vr_before_fpm": -1500.0, "vr_after_fpm": 1500.0}, ["not_descend_then_climb"]),
     # One rate of five cannot carry a direction: three are needed, on that edge's frame.
     (_DIRECTIONAL, {**_CLIMB_EDGE, "vr_before_samples": 3.0}, []),
     (_DIRECTIONAL, {**_CLIMB_EDGE, "vr_before_samples": 2.0}, ["cruise_at_old_edge"]),
     (_DIRECTIONAL, {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0, "vr_after_samples": 3.0}, []),
-    (_DIRECTIONAL, {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0, "vr_after_samples": 2.0},
-     ["cruise_at_new_edge"]),
+    (
+        _DIRECTIONAL,
+        {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0, "vr_after_samples": 2.0},
+        ["cruise_at_new_edge"],
+    ),
     (_DIRECTIONAL, {**_CLIMB_EDGE, "vr_after_samples": 0.0}, []),
     # At cruise the count does not matter: rates stay neutral there.
     (_DIRECTIONAL, {"vr_before_samples": 0.0, "vr_after_samples": 0.0}, []),
@@ -1468,15 +1509,24 @@ _CHECK_CASES = [
     # and the speed floor stands in. 900 kt would fail 0.85 x edge speed at any implied speed.
     (_DIRECTIONAL_RATIO_ON, {**_CLIMB_EDGE, "spd_before_kt": 900.0}, []),
     (_DIRECTIONAL_RATIO_ON, {**_CLIMB_EDGE, "spd_before_kt": None}, []),
-    (_DIRECTIONAL_RATIO_ON, {**_CLIMB_EDGE, "gc_nm": 100.0},
-     ["implied_speed_not_too_slow", "not_slow_for_this_flight"]),
+    (
+        _DIRECTIONAL_RATIO_ON,
+        {**_CLIMB_EDGE, "gc_nm": 100.0},
+        ["implied_speed_not_too_slow", "not_slow_for_this_flight"],
+    ),
     # An old edge at cruise is still read against its own speed, direction on or not.
     (_DIRECTIONAL_RATIO_ON, {"spd_before_kt": 900.0}, ["not_slow_for_this_flight"]),
-    (_DIRECTIONAL_RATIO_ON, {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0, "spd_before_kt": 900.0},
-     ["not_slow_for_this_flight"]),
+    (
+        _DIRECTIONAL_RATIO_ON,
+        {"alt_after_ft": 20000.0, "vr_after_fpm": -1500.0, "spd_before_kt": 900.0},
+        ["not_slow_for_this_flight"],
+    ),
     # And with direction off, a slow edge below the floor gets no such allowance.
-    (_RATIO_ON, {**_CLIMB_EDGE, "spd_before_kt": 900.0},
-     ["cruise_at_old_edge", "not_slow_for_this_flight"]),
+    (
+        _RATIO_ON,
+        {**_CLIMB_EDGE, "spd_before_kt": 900.0},
+        ["cruise_at_old_edge", "not_slow_for_this_flight"],
+    ),
 ]
 
 
@@ -1489,9 +1539,11 @@ def _feature_literals(hole):
 def test_link_checks_name_each_failing_test_and_linkable_is_their_and(spark, p, changes, failing):
     f = _feature_literals({**_GOOD_HOLE, **changes})
     checks = link_checks(f, p)
-    row = spark.range(1).select(
-        *[c.alias(name) for name, c in checks.items()], linkable(f, p).alias("linked")
-    ).first()
+    row = (
+        spark.range(1)
+        .select(*[c.alias(name) for name, c in checks.items()], linkable(f, p).alias("linked"))
+        .first()
+    )
     assert list(checks) == _CHECK_NAMES
     verdicts = {name: row[name] for name in _CHECK_NAMES}
     assert all(v is True or v is False for v in verdicts.values()), verdicts
@@ -1539,7 +1591,9 @@ def test_edge_samples_within_one_second_are_taken_in_time_order(spark):
     ] + [{**one, "t": float(t), "baro_altitude": high} for t in (-3, -2, -1, 0)]
     earlier_low = [dict(s) for s in old]
     earlier_low[0]["baro_altitude"], earlier_low[1]["baro_altitude"] = (
-        earlier_low[1]["baro_altitude"], earlier_low[0]["baro_altitude"])
+        earlier_low[1]["baro_altitude"],
+        earlier_low[0]["baro_altitude"],
+    )
     after = _piece(191 * 60, _lon(1530.0))
     no_climb = dataclasses.replace(SHIPPED, link_old_edge_climb=False)
 

@@ -50,16 +50,16 @@ def _cell(lat, lon):
 
 class TestRunwayCells:
     def test_covers_both_zones(self):
-        cells = runway_cells(
-            THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES
-        )
+        cells = runway_cells(THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES)
         kinds = {c.zone for c in cells}
         assert kinds == {RUNWAY_ZONE, APPROACH_ZONE}
 
     def test_midpoint_cell_is_runway(self):
         cells = {
             c.h3_id: c.zone
-            for c in runway_cells(THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES)
+            for c in runway_cells(
+                THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES
+            )
         }
         mid_lat = THR_LAT + 1.0 / NM_PER_DEG_LAT  # 1 NM along a 2 NM strip
         mid_cell = _cell(mid_lat, THR_LON)
@@ -69,7 +69,9 @@ class TestRunwayCells:
     def test_one_nm_before_threshold_is_approach(self):
         cells = {
             c.h3_id: c.zone
-            for c in runway_cells(THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES)
+            for c in runway_cells(
+                THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES
+            )
         }
         # 1 NM south of the threshold, along the reciprocal (away-from-runway)
         # bearing -- inside the 3 NM approach corridor, outside the runway
@@ -82,7 +84,9 @@ class TestRunwayCells:
     def test_one_nm_to_the_side_is_absent(self):
         cells = {
             c.h3_id
-            for c in runway_cells(THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES)
+            for c in runway_cells(
+                THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES
+            )
         }
         # 1 NM east of the runway midpoint -- far outside the ~45 m-wide
         # rectangle, and nowhere near the approach corridor (which sits south
@@ -95,7 +99,9 @@ class TestRunwayCells:
     def test_null_width_defaults_to_documented_constant(self):
         with_none = {
             c.h3_id
-            for c in runway_cells(THR_LAT, THR_LON, FAR_LAT, FAR_LON, None, approach_nm=3.0, res=RES)
+            for c in runway_cells(
+                THR_LAT, THR_LON, FAR_LAT, FAR_LON, None, approach_nm=3.0, res=RES
+            )
         }
         with_default = {
             c.h3_id
@@ -112,11 +118,15 @@ class TestRunwayCells:
         cover arrivals from either end of a physical runway."""
         from_le = {
             c.h3_id: c.zone
-            for c in runway_cells(THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES)
+            for c in runway_cells(
+                THR_LAT, THR_LON, FAR_LAT, FAR_LON, WIDTH_FT, approach_nm=3.0, res=RES
+            )
         }
         from_he = {
             c.h3_id: c.zone
-            for c in runway_cells(FAR_LAT, FAR_LON, THR_LAT, THR_LON, WIDTH_FT, approach_nm=3.0, res=RES)
+            for c in runway_cells(
+                FAR_LAT, FAR_LON, THR_LAT, THR_LON, WIDTH_FT, approach_nm=3.0, res=RES
+            )
         }
         before_thr_cell = _cell(THR_LAT - 1.0 / NM_PER_DEG_LAT, THR_LON)
         beyond_far_cell = _cell(FAR_LAT + 1.0 / NM_PER_DEG_LAT, FAR_LON)
@@ -164,9 +174,12 @@ class TestStripCells:
 
     def test_missing_both_positions_and_headings_raises(self):
         row = _row(
-            le_latitude_deg=None, le_longitude_deg=None,
-            he_latitude_deg=None, he_longitude_deg=None,
-            le_heading_degT=None, he_heading_degT=None,
+            le_latitude_deg=None,
+            le_longitude_deg=None,
+            he_latitude_deg=None,
+            he_longitude_deg=None,
+            le_heading_degT=None,
+            he_heading_degT=None,
         )
         with pytest.raises(NullGeometryError):
             _strip_cells(row, RES)
@@ -218,7 +231,22 @@ def _airports_df(spark):
 class TestRunwayGridGenerator:
     def test_schema_both_zones_and_stable_strip_id(self, spark, tmp_path):
         runways = spark.createDataFrame(
-            [(1, "TEST", "07", THR_LAT, THR_LON, 0.0, "25", FAR_LAT, FAR_LON, 180.0, 12000.0, WIDTH_FT)],
+            [
+                (
+                    1,
+                    "TEST",
+                    "07",
+                    THR_LAT,
+                    THR_LON,
+                    0.0,
+                    "25",
+                    FAR_LAT,
+                    FAR_LON,
+                    180.0,
+                    12000.0,
+                    WIDTH_FT,
+                )
+            ],
             RUNWAY_ROW_SCHEMA,
         )
         storage = StubStorage({"oa_airports": _airports_df(spark), "oa_runways": runways})
@@ -250,8 +278,34 @@ class TestRunwayGridGenerator:
         far2_lon = THR_LON + 0.05 + 2.0 / NM_PER_DEG_LAT / math.cos(math.radians(THR_LAT))
         runways = spark.createDataFrame(
             [
-                (1, "TEST", "07", THR_LAT, THR_LON, 0.0, "25", FAR_LAT, FAR_LON, 180.0, 12000.0, WIDTH_FT),
-                (2, "TEST", "09", THR_LAT, THR_LON + 0.05, 90.0, "27", far2_lat, far2_lon, 270.0, 12000.0, WIDTH_FT),
+                (
+                    1,
+                    "TEST",
+                    "07",
+                    THR_LAT,
+                    THR_LON,
+                    0.0,
+                    "25",
+                    FAR_LAT,
+                    FAR_LON,
+                    180.0,
+                    12000.0,
+                    WIDTH_FT,
+                ),
+                (
+                    2,
+                    "TEST",
+                    "09",
+                    THR_LAT,
+                    THR_LON + 0.05,
+                    90.0,
+                    "27",
+                    far2_lat,
+                    far2_lon,
+                    270.0,
+                    12000.0,
+                    WIDTH_FT,
+                ),
             ],
             RUNWAY_ROW_SCHEMA,
         )
@@ -266,7 +320,22 @@ class TestRunwayGridGenerator:
 
     def test_resume_skips_previously_successful_airport(self, spark, tmp_path):
         runways = spark.createDataFrame(
-            [(1, "TEST", "07", THR_LAT, THR_LON, 0.0, "25", FAR_LAT, FAR_LON, 180.0, 12000.0, WIDTH_FT)],
+            [
+                (
+                    1,
+                    "TEST",
+                    "07",
+                    THR_LAT,
+                    THR_LON,
+                    0.0,
+                    "25",
+                    FAR_LAT,
+                    FAR_LON,
+                    180.0,
+                    12000.0,
+                    WIDTH_FT,
+                )
+            ],
             RUNWAY_ROW_SCHEMA,
         )
         storage = StubStorage({"oa_airports": _airports_df(spark), "oa_runways": runways})
@@ -312,10 +381,34 @@ class TestRunwayGridGenerator:
         )
         runways = spark.createDataFrame(
             [
-                (1, "TEST", "07", THR_LAT, THR_LON, 0.0, "25",
-                 FAR_LAT, FAR_LON, 180.0, 12000.0, WIDTH_FT),
-                (2, "TES2", "07", THR_LAT + 0.5, THR_LON + 0.5, 0.0, "25",
-                 FAR_LAT + 0.5, FAR_LON + 0.5, 180.0, 12000.0, WIDTH_FT),
+                (
+                    1,
+                    "TEST",
+                    "07",
+                    THR_LAT,
+                    THR_LON,
+                    0.0,
+                    "25",
+                    FAR_LAT,
+                    FAR_LON,
+                    180.0,
+                    12000.0,
+                    WIDTH_FT,
+                ),
+                (
+                    2,
+                    "TES2",
+                    "07",
+                    THR_LAT + 0.5,
+                    THR_LON + 0.5,
+                    0.0,
+                    "25",
+                    FAR_LAT + 0.5,
+                    FAR_LON + 0.5,
+                    180.0,
+                    12000.0,
+                    WIDTH_FT,
+                ),
             ],
             RUNWAY_ROW_SCHEMA,
         )
@@ -326,7 +419,7 @@ class TestRunwayGridGenerator:
 
         assert sorted(success) == ["TES2", "TEST"]
         assert failed == []
-        assert len(storage.written) == 1           # ONE write for two airports
+        assert len(storage.written) == 1  # ONE write for two airports
         _, mode, sdf = storage.written[0]
         assert mode == "overwrite"
         assert set(sdf.toPandas()["apt_icao"]) == {"TEST", "TES2"}

@@ -46,6 +46,7 @@ import osn_sample  # noqa: E402
 import provenance  # noqa: E402
 from osn_sample import build_spark, load_dotenv  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
+from study_variants.segmentation import register_study_arms  # noqa: E402
 from track_methods import (  # noqa: E402
     ASSIGN_BASE,
     BUCKET,
@@ -58,6 +59,9 @@ from track_methods import (  # noqa: E402
 from opdi.config import OPDIConfig  # noqa: E402
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id  # noqa: E402
 from opdi.pipeline.segmentation.methods import ARMS  # noqa: E402
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 
 #: The run name in flight_list_v7.py whose parameters V7 recommends: the
 #: *shipped* configuration, ``(S(), S().adep_mode, S().ades_mode, clean)``
@@ -120,8 +124,7 @@ def delete_prefix(s3, prefix: str) -> tuple:
     return n, freed
 
 
-def stage_assignments(period: str, arms: list, days: list, executors: int,
-                       ui_port: int) -> None:
+def stage_assignments(period: str, arms: list, days: list, executors: int, ui_port: int) -> None:
     """Write one (icao24, event_time, track_id) table per arm, then stop Spark.
 
     Reads the shared track table and applies ``attach_airport_context`` once,
@@ -176,19 +179,28 @@ def main():
     ap.add_argument("--arms", nargs="+", default=["all"])
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--executors", type=int, default=10)
-    ap.add_argument("--fix-callsign", action="store_true",
-                    help="pass --fix-callsign to the flight list: label each "
-                         "track with its most frequent non-blank callsign. "
-                         "Isolates how much of an arm's ADEP/ADES result is "
-                         "flights.py's F.min('flight_id') rather than the "
-                         "segmentation itself")
     ap.add_argument(
-        "--days", nargs="+", default=None,
+        "--fix-callsign",
+        action="store_true",
+        help="pass --fix-callsign to the flight list: label each "
+        "track with its most frequent non-blank callsign. "
+        "Isolates how much of an arm's ADEP/ADES result is "
+        "flights.py's F.min('flight_id') rather than the "
+        "segmentation itself",
+    )
+    ap.add_argument(
+        "--days",
+        nargs="+",
+        default=None,
         help="override the period's day list, e.g. a single day for a smoke test",
     )
-    ap.add_argument("--ui-port", type=int, default=4058,
-                     help="Spark UI port for the staging session (the "
-                          "flight_list_v7.py subprocess picks its own)")
+    ap.add_argument(
+        "--ui-port",
+        type=int,
+        default=4058,
+        help="Spark UI port for the staging session (the "
+        "flight_list_v7.py subprocess picks its own)",
+    )
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -213,10 +225,14 @@ def main():
             assign = f"{ASSIGN_BASE}/{arm}/{args.period}"
             out = args.results_dir / f"_payoff_{arm}_{args.period}.csv"
             cmd = [
-                sys.executable, str(REPO / "benchmarks" / "flight_list_v7.py"),
-                "--period", args.period,
-                "--runs", V7_RECOMMENDED_RUN,
-                "--track-assign", assign,
+                sys.executable,
+                str(REPO / "benchmarks" / "flight_list_v7.py"),
+                "--period",
+                args.period,
+                "--runs",
+                V7_RECOMMENDED_RUN,
+                "--track-assign",
+                assign,
                 # Its own candidate table, per arm. Endpoint candidates are
                 # derived from track_id, so they cannot be shared: with one
                 # table each arm would be scored against whichever arm wrote
@@ -224,10 +240,14 @@ def main():
                 # mode="overwrite", so pointing at it would destroy data this
                 # study does not own. flight_list_v7 refuses --track-assign
                 # without this flag.
-                "--candidates-table", candidates_table(arm, args.period),
-                "--results-dir", str(args.results_dir),
-                "--out-name", out.name,
-                "--executors", str(args.executors),
+                "--candidates-table",
+                candidates_table(arm, args.period),
+                "--results-dir",
+                str(args.results_dir),
+                "--out-name",
+                out.name,
+                "--executors",
+                str(args.executors),
             ]
             if args.fix_callsign:
                 cmd.append("--fix-callsign")
@@ -248,13 +268,14 @@ def main():
         # nothing and is a no-op.
         for arm in arms:
             n_del, freed = delete_assignment(s3, arm, args.period)
-            print(f"  -- deleted {n_del} objects ({freed / 1e9:.3f} GB) "
-                  f"for {arm}/{args.period}")
-            n_del, freed = delete_prefix(
-                s3, f"opdi/{candidates_table(arm, args.period)}/"
+            print(
+                f"  -- deleted {n_del} objects ({freed / 1e9:.3f} GB) " f"for {arm}/{args.period}"
             )
-            print(f"  -- deleted {n_del} candidate objects "
-                  f"({freed / 1e9:.3f} GB) for {arm}/{args.period}")
+            n_del, freed = delete_prefix(s3, f"opdi/{candidates_table(arm, args.period)}/")
+            print(
+                f"  -- deleted {n_del} candidate objects "
+                f"({freed / 1e9:.3f} GB) for {arm}/{args.period}"
+            )
 
     if not rows:
         return
@@ -266,11 +287,17 @@ def main():
         w.writerows(rows)
 
     provenance.record(
-        args.results_dir, final.name,
-        script="benchmarks/track_payoff.py", argv=sys.argv[1:],
-        code_paths=["benchmarks/track_payoff.py", "benchmarks/flight_list_v7.py",
-                    "src/opdi/pipeline/flights.py",
-                    "src/opdi/pipeline/segmentation/methods.py"],
+        args.results_dir,
+        final.name,
+        script="benchmarks/track_payoff.py",
+        argv=sys.argv[1:],
+        code_paths=[
+            "benchmarks/track_payoff.py",
+            "benchmarks/flight_list_v7.py",
+            "src/opdi/pipeline/flights.py",
+            "src/opdi/pipeline/segmentation/methods.py",
+            "benchmarks/study_variants/segmentation.py",
+        ],
         inputs={"arms": len(arms)},
         notes=f"V7 run '{V7_RECOMMENDED_RUN}' held fixed; only track_id varies.",
     )

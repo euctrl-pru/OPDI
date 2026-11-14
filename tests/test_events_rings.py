@@ -10,9 +10,8 @@ import datetime as dt
 import json
 
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import _EPOCH, make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline.events import calculate_ring_crossing_events
@@ -58,8 +57,12 @@ def _approach(spark, distances_nm):
         make_track(
             spark,
             [
-                {"t": i * 60, "lat": EBBR_LAT + d / 60.0, "lon": EBBR_LON,
-                 "baro_altitude": 10000 / FT_PER_M}
+                {
+                    "t": i * 60,
+                    "lat": EBBR_LAT + d / 60.0,
+                    "lon": EBBR_LON,
+                    "baro_altitude": 10000 / FT_PER_M,
+                }
                 for i, d in enumerate(distances_nm)
             ],
         )
@@ -97,9 +100,7 @@ def test_an_arrival_crosses_every_configured_ring_inbound(spark, storage):
     rows = calculate_ring_crossing_events(sdf, MONTH, storage, EventConfig()).collect()
     got = sorted((r.type, json.loads(r.info)["direction"]) for r in _at(rows, "EBBR"))
 
-    assert got == sorted(
-        (f"xing-{int(r)}nm", "inbound") for r in EventConfig().ring_radii_nm
-    )
+    assert got == sorted((f"xing-{int(r)}nm", "inbound") for r in EventConfig().ring_radii_nm)
 
 
 def test_the_departure_aerodrome_gets_its_own_rings(spark, storage):
@@ -127,8 +128,11 @@ def test_the_crossing_is_interpolated_not_snapped(spark, storage):
 def test_the_info_matches_apdfs_column_set(spark, storage):
     sdf = _approach(spark, [120, 90, 60, 45, 35, 20, 10])
 
-    row = _at(calculate_ring_crossing_events(
-        sdf, MONTH, storage, EventConfig()).collect(), "EBBR", "xing-40nm")[0]
+    row = _at(
+        calculate_ring_crossing_events(sdf, MONTH, storage, EventConfig()).collect(),
+        "EBBR",
+        "xing-40nm",
+    )[0]
     info = json.loads(row.info)
 
     # C40_CROSS_{TIME,LAT,LON,FL} + C40_BEARING, column for column.
@@ -136,17 +140,21 @@ def test_the_info_matches_apdfs_column_set(spark, storage):
     assert info["apt_icao"] == "EBBR"
     assert info["flight_level"] == pytest.approx(100.0, abs=0.5)
     # Approaching from due north, so the aircraft bears 000 from the aerodrome.
-    assert info["bearing"] == pytest.approx(0.0, abs=1.0) or info["bearing"] == pytest.approx(360.0, abs=1.0)
+    assert info["bearing"] == pytest.approx(0.0, abs=1.0) or info["bearing"] == pytest.approx(
+        360.0, abs=1.0
+    )
 
 
 def test_a_departure_and_return_gives_both_directions(spark, storage):
     """Every crossing, not just the first -- a go-around leaves and re-enters."""
     sdf = _approach(spark, [35, 45, 60, 45, 35, 20])
 
-    rows = _at(calculate_ring_crossing_events(
-        sdf, MONTH, storage, EventConfig()).collect(), "EBBR", "xing-40nm")
-    info = [(json.loads(r.info)["crossing_seq"], json.loads(r.info)["direction"])
-            for r in rows]
+    rows = _at(
+        calculate_ring_crossing_events(sdf, MONTH, storage, EventConfig()).collect(),
+        "EBBR",
+        "xing-40nm",
+    )
+    info = [(json.loads(r.info)["crossing_seq"], json.loads(r.info)["direction"]) for r in rows]
 
     assert info == [(1, "outbound"), (2, "inbound")]
 
@@ -155,8 +163,11 @@ def test_a_track_holding_on_the_ring_emits_nothing(spark, storage):
     """The dead band again: an aircraft orbiting at 40 NM is not crossing it."""
     sdf = _approach(spark, [40.2, 39.9, 40.3, 39.8, 40.1, 39.9])
 
-    rows = _at(calculate_ring_crossing_events(
-        sdf, MONTH, storage, EventConfig()).collect(), "EBBR", "xing-40nm")
+    rows = _at(
+        calculate_ring_crossing_events(sdf, MONTH, storage, EventConfig()).collect(),
+        "EBBR",
+        "xing-40nm",
+    )
 
     assert rows == []
 

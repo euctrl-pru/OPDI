@@ -56,9 +56,7 @@ class StubStorage:
             "hexaero_airport_layouts": (
                 layouts if layouts is not None else _default_layouts(spark)
             ),
-            "oa_airports": (
-                airports if airports is not None else _default_airports(spark)
-            ),
+            "oa_airports": (airports if airports is not None else _default_airports(spark)),
         }
 
     def table_exists(self, name):
@@ -79,8 +77,7 @@ def _default_flight_list(spark):
     """
     return spark.createDataFrame(
         [("trk-1", dt.datetime(2024, 6, 1, 12, 0), ADEP, "ZZZZ", None, None)],
-        "id string, dof timestamp, adep string, ades string, "
-        "adep_p string, ades_p string",
+        "id string, dof timestamp, adep string, ades string, " "adep_p string, ades_p string",
     )
 
 
@@ -139,10 +136,18 @@ def _sample_at(spark, height_above_field_ft, field_elev_ft, h3_cell=H3_CELL_TAXI
     baro_altitude_c = altitude_ft / FT_PER_M
     rows = [
         (
-            "trk-1", "abc123", "SAS123",
+            "trk-1",
+            "abc123",
+            "SAS123",
             dt.datetime(2024, 6, 1, 12, 0, i * 10),
-            55.618, 12.656, baro_altitude_c, 90.0, 0.0,
-            h3_cell, float(i) * 0.01, float(i * 10),
+            55.618,
+            12.656,
+            baro_altitude_c,
+            90.0,
+            0.0,
+            h3_cell,
+            float(i) * 0.01,
+            float(i * 10),
         )
         for i in range(2)
     ]
@@ -172,15 +177,17 @@ def _track_over_a_runway(spark, field_elev_ft=FIELD_ELEV_FT):
     ``FIELD_ELEV_FT`` (3,000 ft) does not -- it exists to demonstrate the
     fix, not to survive the config it fixes -- so a legacy-config caller
     must pass a low ``field_elev_ft`` (e.g. ``0.0``) explicitly."""
-    return _sample_at(spark, height_above_field_ft=0.0, field_elev_ft=field_elev_ft,
-                       h3_cell=H3_CELL_RUNWAY)
+    return _sample_at(
+        spark, height_above_field_ft=0.0, field_elev_ft=field_elev_ft, h3_cell=H3_CELL_RUNWAY
+    )
 
 
 def _track_over_a_taxiway(spark):
     """Same geometry as ``_track_over_a_runway``, on the taxiway hexagon
     instead -- the only variable between the two fixtures is aeroway type."""
-    return _sample_at(spark, height_above_field_ft=0.0, field_elev_ft=FIELD_ELEV_FT,
-                       h3_cell=H3_CELL_TAXIWAY)
+    return _sample_at(
+        spark, height_above_field_ft=0.0, field_elev_ft=FIELD_ELEV_FT, h3_cell=H3_CELL_TAXIWAY
+    )
 
 
 def test_the_gate_is_measured_above_the_field_not_above_the_datum(spark):
@@ -199,14 +206,16 @@ def test_the_gate_is_measured_above_the_field_not_above_the_datum(spark):
 def test_runway_features_are_not_emitted_as_entry_runway_in_v4(spark):
     """`entry-runway`/`exit-runway` are retired: the runway family replaces them
     with line-up, runway-vacated and the two crossing types."""
-    out = calculate_airport_events(_track_over_a_runway(spark), MONTH,
-                                   StubStorage(spark), EventConfig())
+    out = calculate_airport_events(
+        _track_over_a_runway(spark), MONTH, StubStorage(spark), EventConfig()
+    )
     assert out.filter(F.col("type").rlike("runway")).count() == 0
 
 
 def test_taxiway_and_stand_events_are_unchanged(spark):
-    out = calculate_airport_events(_track_over_a_taxiway(spark), MONTH,
-                                   StubStorage(spark), EventConfig())
+    out = calculate_airport_events(
+        _track_over_a_taxiway(spark), MONTH, StubStorage(spark), EventConfig()
+    )
     assert sorted({r["type"] for r in out.collect()}) == ["entry-taxiway", "exit-taxiway"]
 
 
@@ -232,13 +241,16 @@ def test_a_legacy_run_still_emits_entry_and_exit_runway(spark):
     is about the runway-retirement condition alone, not the gate.
     """
     out = calculate_airport_events(
-        _track_over_a_runway(spark, field_elev_ft=0.0), MONTH,
-        StubStorage(spark), EventConfig.legacy(),
+        _track_over_a_runway(spark, field_elev_ft=0.0),
+        MONTH,
+        StubStorage(spark),
+        EventConfig.legacy(),
     )
     types = {r["type"] for r in out.collect()}
-    assert {"entry-runway", "exit-runway"} <= types, (
-        f"expected entry-runway and exit-runway in {sorted(types)}"
-    )
+    assert {
+        "entry-runway",
+        "exit-runway",
+    } <= types, f"expected entry-runway and exit-runway in {sorted(types)}"
 
 
 _GROUND_SCHEMA = (
@@ -259,10 +271,19 @@ def _surface_samples(spark, on_ground=True, h3_cell=H3_CELL_TAXIWAY):
     """
     rows = [
         (
-            "trk-1", "abc123", "SAS123",
+            "trk-1",
+            "abc123",
+            "SAS123",
             dt.datetime(2024, 6, 1, 12, 0, i * 10),
-            55.618, 12.656, None, 90.0, 0.0,
-            h3_cell, float(i) * 0.01, float(i * 10), on_ground,
+            55.618,
+            12.656,
+            None,
+            90.0,
+            0.0,
+            h3_cell,
+            float(i) * 0.01,
+            float(i * 10),
+            on_ground,
         )
         for i in range(2)
     ]

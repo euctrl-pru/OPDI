@@ -21,6 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+import build_track_v4_paper as v4  # noqa: E402
 from build_track_v4_paper import (  # noqa: E402
     CODE_CONSTANTS,
     MissingValue,
@@ -36,7 +37,6 @@ from build_track_v4_paper import (  # noqa: E402
     upper_95,
     where,
 )
-import build_track_v4_paper as v4  # noqa: E402
 
 #: ``OPDI_PAPER_DIR_V5``, not the v4 builder's ``OPDI_PAPER_DIR``: one shared
 #: name would point both builders at one paper.
@@ -57,24 +57,35 @@ SUBTITLE = (
 #: study, and figures that come from the code or from the trace of version 4's run,
 #: never measurements of this version.
 ALLOWED_LITERALS = {
-    "30",    # the gap that starts a new track, minutes
-    "3",     # hours a day's run used to read back; the three vertical rates
-    "5",     # the 5% limit
-    "1",     # the 1% limit; the 1 NM tolerance
-    "0.1",   # the 0.1% limit
-    "95",    # confidence of the upper bounds
-    "300",   # checkable climb holes version 4 wanted
-    "60",    # the callsign lookback, minutes
-    "128",   # the group at which Spark's aggregation falls back to sorting
-    "279",   # flight-list rows without a track in version 4's pipeline day
-    "119",   # checkable descent holes version 4 counted its 3 false joins in
+    "30",  # the gap that starts a new track, minutes
+    "3",  # hours a day's run used to read back; the three vertical rates
+    "5",  # the 5% limit
+    "1",  # the 1% limit; the 1 NM tolerance
+    "0.1",  # the 0.1% limit
+    "95",  # confidence of the upper bounds
+    "300",  # checkable climb holes version 4 wanted
+    "60",  # the callsign lookback, minutes
+    "128",  # the group at which Spark's aggregation falls back to sorting
+    "279",  # flight-list rows without a track in version 4's pipeline day
+    "119",  # checkable descent holes version 4 counted its 3 false joins in
     "2026",  # the date of the A8 boundary
-    "08", "27",
-    "4",     # version 4
-    "2", "6", "7", "8", "9", "10", "6.1", "6.2", "6.3",   # section numbers
-    "02", "04",   # pipeline steps 02 to 04b
-    "5,000", # the low-altitude limit a descent edge must stay above, feet
-    "50", "20",  # the descent candidates' floors: checkable holes, crossing holes linked
+    "08",
+    "27",
+    "4",  # version 4
+    "2",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "6.1",
+    "6.2",
+    "6.3",  # section numbers
+    "02",
+    "04",  # pipeline steps 02 to 04b
+    "5,000",  # the low-altitude limit a descent edge must stay above, feet
+    "50",
+    "20",  # the descent candidates' floors: checkable holes, crossing holes linked
 }
 
 #: What the independent audit ran, from its report
@@ -91,15 +102,23 @@ def class_constant(cls, name, relative):
     for node in ast.parse(path.read_text()).body:
         if isinstance(node, ast.ClassDef) and node.name == cls:
             for item in node.body:
-                if (isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
-                        and item.target.id == name and isinstance(item.value, ast.Constant)):
+                if (
+                    isinstance(item, ast.AnnAssign)
+                    and isinstance(item.target, ast.Name)
+                    and item.target.id == name
+                    and isinstance(item.value, ast.Constant)
+                ):
                     return item.value.value
     raise MissingValue(f"no {cls}.{name} in {path}")
 
 
 def descent_shipped():
     """Whether the code ships with the descending-edge allowance on."""
-    return bool(class_constant("SegmentationConfig", "link_new_edge_descent", "src/opdi/config.py"))
+    return bool(
+        class_constant(
+            "SegmentationConfig", "link_new_edge_descent", "src/opdi/config/segmentation.py"
+        )
+    )
 
 
 def _shipped(grid):
@@ -119,8 +138,11 @@ def plural(count, noun):
 def build_context(data):
     """Every placeholder of the report, as formatted strings."""
     data = Path(data)
-    c = {key: n(code_constant(*where_from)) for key, where_from in CODE_CONSTANTS.items()
-         if key in ("edge_samples", "min_rates")}
+    c = {
+        key: n(code_constant(*where_from))
+        for key, where_from in CODE_CONSTANTS.items()
+        if key in ("edge_samples", "min_rates")
+    }
 
     # --- two days against Network Manager ---
     grid = read_csv(data, "two_days/link_grid_pooled.csv")
@@ -140,8 +162,14 @@ def build_context(data):
         edge_position_min=n(num(rec, "link_edge_position_minutes")),
         read_back_hours=n(
             math.ceil(gap / 60)
-            + math.ceil(max(num(rec, "link_callsign_lookback_minutes"),
-                            num(rec, "link_edge_position_minutes"), 0.5) / 60)
+            + math.ceil(
+                max(
+                    num(rec, "link_callsign_lookback_minutes"),
+                    num(rec, "link_edge_position_minutes"),
+                    0.5,
+                )
+                / 60
+            )
         ),
         gap_60=n(60),
         gap_360=n(360),
@@ -163,25 +191,48 @@ def build_context(data):
 
     def share_row(name, flights, base, new, base_tracks, new_tracks):
         return [
-            name, n(flights), f"{n(base)} ({pct(base, flights)})", f"{n(new)} ({pct(new, flights)})",
-            f"{base_tracks / flights:.2f}", f"{new_tracks / flights:.2f}",
+            name,
+            n(flights),
+            f"{n(base)} ({pct(base, flights)})",
+            f"{n(new)} ({pct(new, flights)})",
+            f"{base_tracks / flights:.2f}",
+            f"{new_tracks / flights:.2f}",
         ]
 
     c["table_one_track"] = table(
-        ["Flights", "Number", "In one track, previous rule", "In one track, new rule",
-         "Tracks per flight, previous", "Tracks per flight, new"],
         [
-            share_row("Crossing the edge of the European box", cf,
-                      num(rec, "base_crossing_flights_in_one_track"),
-                      num(rec, "crossing_flights_in_one_track"),
-                      num(rec, "base_crossing_tracks"), num(rec, "crossing_tracks")),
-            share_row("All others", of,
-                      num(rec, "base_other_flights_in_one_track"),
-                      num(rec, "other_flights_in_one_track"),
-                      num(rec, "base_other_tracks"), num(rec, "other_tracks")),
-            share_row("All", fl, num(rec, "base_flights_in_one_track"),
-                      num(rec, "flights_in_one_track"),
-                      num(rec, "base_tracks_on_flights"), num(rec, "tracks_on_flights")),
+            "Flights",
+            "Number",
+            "In one track, previous rule",
+            "In one track, new rule",
+            "Tracks per flight, previous",
+            "Tracks per flight, new",
+        ],
+        [
+            share_row(
+                "Crossing the edge of the European box",
+                cf,
+                num(rec, "base_crossing_flights_in_one_track"),
+                num(rec, "crossing_flights_in_one_track"),
+                num(rec, "base_crossing_tracks"),
+                num(rec, "crossing_tracks"),
+            ),
+            share_row(
+                "All others",
+                of,
+                num(rec, "base_other_flights_in_one_track"),
+                num(rec, "other_flights_in_one_track"),
+                num(rec, "base_other_tracks"),
+                num(rec, "other_tracks"),
+            ),
+            share_row(
+                "All",
+                fl,
+                num(rec, "base_flights_in_one_track"),
+                num(rec, "flights_in_one_track"),
+                num(rec, "base_tracks_on_flights"),
+                num(rec, "tracks_on_flights"),
+            ),
         ],
     )
 
@@ -215,7 +266,9 @@ def build_context(data):
         positive_rate=pct(num(rec, "positive_linked"), positive),
     )
     if rec.get("within_limits") != "True":
-        raise MissingValue("the shipped setting is no longer within the limits: the prose needs rewriting")
+        raise MissingValue(
+            "the shipped setting is no longer within the limits: the prose needs rewriting"
+        )
 
     # --- reappearing on descent ---
     candidates = read_csv(data, "descent/descent_candidates.csv")
@@ -233,7 +286,7 @@ def build_context(data):
         for day in (c["day_new"], c["day_old"]):
             path = data / "descent" / f"{stem}_{day}.csv"
             if not path.is_file() and path.with_suffix(".csv.gz").is_file():
-                path = path.with_suffix(".csv.gz")   # the controls are gzipped
+                path = path.with_suffix(".csv.gz")  # the controls are gzipped
             if not path.is_file():
                 raise MissingValue(f"missing {path}")
             opener = gzip.open if path.suffix == ".gz" else open
@@ -242,15 +295,21 @@ def build_context(data):
             rows += len(day_rows)
             if stem == "descent_holes":
                 relabelled += [
-                    r for r in day_rows
-                    if r["event_outside_box_inside"] == "True" and r["descent_edge"] == "True"
+                    r
+                    for r in day_rows
+                    if r["event_outside_box_inside"] == "True"
+                    and r["descent_edge"] == "True"
                     and r["other_checks_pass"] == "True"
                 ]
         exported[stem] = rows
     if not relabelled:
-        raise MissingValue("no hole linked by descent had an event outside the box: the prose needs rewriting")
+        raise MissingValue(
+            "no hole linked by descent had an event outside the box: the prose needs rewriting"
+        )
     if any(r["callsign_state"] != "both_equal" for r in relabelled):
-        raise MissingValue("a relabelled descent hole has differing or blank callsigns: the prose needs rewriting")
+        raise MissingValue(
+            "a relabelled descent hole has differing or blank callsigns: the prose needs rewriting"
+        )
 
     def span(column, digits=0):
         values = sorted(float(r[column]) for r in relabelled)
@@ -264,10 +323,13 @@ def build_context(data):
         descent_holes_exported=n(exported["descent_holes"]),
         descent_controls_exported=n(exported["descent_controls"]),
         descent_floor_ft=n(code_constant("DESCENT_FLOOR_FT", "benchmarks/track_link_descent.py")),
-        descent_max_gap_min=n(code_constant("DESCENT_MAX_GAP_MIN", "benchmarks/track_link_descent.py")),
+        descent_max_gap_min=n(
+            code_constant("DESCENT_MAX_GAP_MIN", "benchmarks/track_link_descent.py")
+        ),
         descent_adopted=adopted,
         descent_chosen=(
-            "the descending edge as defined, with no extra condition" if chosen_name == "none"
+            "the descending edge as defined, with no extra condition"
+            if chosen_name == "none"
             else chosen_name or "none"
         ),
         descent_relabelled=n(len(relabelled)),
@@ -276,16 +338,34 @@ def build_context(data):
         relabelled_gap_range=span("gap_min"),
         relabelled_speed_range=span("implied_kt"),
         table_descent_candidates=table(
-            ["Condition", "Holes kept", "On crossing flights", "Checkable", "False joins",
-             "Hidden landings joined", "Upper bound, 95%", "Qualifies"],
+            [
+                "Condition",
+                "Holes kept",
+                "On crossing flights",
+                "Checkable",
+                "False joins",
+                "Hidden landings joined",
+                "Upper bound, 95%",
+                "Qualifies",
+            ],
             [
                 [
-                    "no extra condition" if r["candidate"] == "none" else r["candidate"].replace("+", " and "),
-                    n(num(r, "real_linked")), n(num(r, "real_crossing_linked")),
-                    n(num(r, "real_checkable")), n(num(r, "real_false_joins")),
+                    (
+                        "no extra condition"
+                        if r["candidate"] == "none"
+                        else r["candidate"].replace("+", " and ")
+                    ),
+                    n(num(r, "real_linked")),
+                    n(num(r, "real_crossing_linked")),
+                    n(num(r, "real_checkable")),
+                    n(num(r, "real_false_joins")),
                     f"{n(num(r, 'controls_joined'))} of {n(num(r, 'controls'))}",
                     bound(r, "controls_joined_upper_95"),
-                    "yes" if r["adoptable"] == "True" else ("limits only" if r["within_limits"] == "True" else "no"),
+                    (
+                        "yes"
+                        if r["adoptable"] == "True"
+                        else ("limits only" if r["within_limits"] == "True" else "no")
+                    ),
                 ]
                 for r in candidates
             ],
@@ -394,7 +474,10 @@ def build_context(data):
     c.update(time_base=_minutes(total("debounced")), time_new=_minutes(total("cruise_linked")))
 
     truth = read_csv(data, "pipeline_day/link_truth_all_flights.csv")
-    t = {key: one(truth, label=key) for key in ("true_link", "false_join", "unknown", "airframe_not_in_truth")}
+    t = {
+        key: one(truth, label=key)
+        for key in ("true_link", "false_join", "unknown", "airframe_not_in_truth")
+    }
     c.update(
         truth_holes=n(sum(num(r, "holes") for r in t.values())),
         truth_true=n(num(t["true_link"], "holes")),
@@ -413,12 +496,25 @@ def build_context(data):
     c.update(ev_aobt=event_change("AOBT"), ev_aibt=event_change("AIBT"))
     for kind in ("first_seen", "last_seen", "top-of-climb", "top-of-descent"):
         if -num(one(events, type=kind), "change") != num(level, "scored_holes"):
-            raise MissingValue(f"{kind} did not fall by the number of scored holes: the prose needs rewriting")
-    c["table_events"] = table(
-        ["Event type (on aircraft with a linked hole)", "Previous rule", "New rule", "Change"],
-        [[f"`{r['type']}`", n(num(r, "debounced_events")), n(num(r, "cruise_linked_events")),
-          f"{int(num(r, 'change')):+d}"] for r in sorted(changed, key=lambda r: num(r, "change"))],
-    ) if changed else "No event type changed in number on the aircraft with a linked hole."
+            raise MissingValue(
+                f"{kind} did not fall by the number of scored holes: the prose needs rewriting"
+            )
+    c["table_events"] = (
+        table(
+            ["Event type (on aircraft with a linked hole)", "Previous rule", "New rule", "Change"],
+            [
+                [
+                    f"`{r['type']}`",
+                    n(num(r, "debounced_events")),
+                    n(num(r, "cruise_linked_events")),
+                    f"{int(num(r, 'change')):+d}",
+                ]
+                for r in sorted(changed, key=lambda r: num(r, "change"))
+            ],
+        )
+        if changed
+        else "No event type changed in number on the aircraft with a linked hole."
+    )
 
     # --- provenance ---
     shas = set()

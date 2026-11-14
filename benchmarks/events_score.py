@@ -68,9 +68,9 @@ def align(truth: DataFrame, detected: DataFrame) -> DataFrame:
         "error_s",
         F.col("det_time").cast("double") - F.col("gt_time").cast("double"),
     )
-    nearest = Window.partitionBy(
-        "icao24", "callsign", "day", "milestone"
-    ).orderBy(F.abs(F.col("error_s")).asc_nulls_last())
+    nearest = Window.partitionBy("icao24", "callsign", "day", "milestone").orderBy(
+        F.abs(F.col("error_s")).asc_nulls_last()
+    )
     return j.withColumn("_r", F.row_number().over(nearest)).filter(F.col("_r") == 1).drop("_r")
 
 
@@ -100,8 +100,7 @@ def align_by_detector(truth: DataFrame, detected: DataFrame) -> DataFrame:
         *[F.col(c) for c in cols],
         F.col("det_type"),
         F.col("event_time").alias("det_time"),
-        *[F.col(c) for c in ("det_runway", "det_lat", "det_lon")
-          if c in detected.columns],
+        *[F.col(c) for c in ("det_runway", "det_lat", "det_lon") if c in detected.columns],
     )
     # The detector list has to come from the data: a left join cannot invent a
     # row for a detector that produced nothing for this truth movement, and
@@ -115,18 +114,13 @@ def align_by_detector(truth: DataFrame, detected: DataFrame) -> DataFrame:
         "error_s",
         F.col("det_time").cast("double") - F.col("gt_time").cast("double"),
     )
-    nearest = Window.partitionBy(
-        "icao24", "callsign", "day", "milestone", "det_type"
-    ).orderBy(F.abs(F.col("error_s")).asc_nulls_last())
-    return (
-        j.withColumn("_r", F.row_number().over(nearest))
-        .filter(F.col("_r") == 1)
-        .drop("_r")
+    nearest = Window.partitionBy("icao24", "callsign", "day", "milestone", "det_type").orderBy(
+        F.abs(F.col("error_s")).asc_nulls_last()
     )
+    return j.withColumn("_r", F.row_number().over(nearest)).filter(F.col("_r") == 1).drop("_r")
 
 
-def align_by_priority(truth: DataFrame, detected: DataFrame,
-                      priority: "list[str]") -> DataFrame:
+def align_by_priority(truth: DataFrame, detected: DataFrame, priority: "list[str]") -> DataFrame:
     """:func:`align`, resolving ties by a **fixed detector preference**.
 
     :func:`align` keeps whichever detection is nearest the reference. That is
@@ -151,8 +145,7 @@ def align_by_priority(truth: DataFrame, detected: DataFrame,
         *[F.col(c) for c in cols],
         F.col("det_type"),
         F.col("event_time").alias("det_time"),
-        *[F.col(c) for c in ("det_runway", "det_lat", "det_lon")
-          if c in detected.columns],
+        *[F.col(c) for c in ("det_runway", "det_lat", "det_lon") if c in detected.columns],
     )
     rank = F.lit(len(priority))
     for i, name in enumerate(priority):
@@ -170,11 +163,7 @@ def align_by_priority(truth: DataFrame, detected: DataFrame,
     chosen = Window.partitionBy(*cols).orderBy(
         F.col("_pref").asc_nulls_last(), F.abs(F.col("error_s")).asc_nulls_last()
     )
-    return (
-        j.withColumn("_r", F.row_number().over(chosen))
-        .filter(F.col("_r") == 1)
-        .drop("_r")
-    )
+    return j.withColumn("_r", F.row_number().over(chosen)).filter(F.col("_r") == 1).drop("_r")
 
 
 def score(aligned: DataFrame, group_cols=("milestone",)) -> DataFrame:
@@ -188,14 +177,10 @@ def score(aligned: DataFrame, group_cols=("milestone",)) -> DataFrame:
         F.expr("percentile_approx(abs(error_s), 0.9)").alias("p90_abs_s"),
     ]
     for t in TOLERANCES_S:
-        aggs.append(
-            F.sum(F.when(F.abs(err) <= t, 1).otherwise(0)).alias(f"within_{t}s")
-        )
+        aggs.append(F.sum(F.when(F.abs(err) <= t, 1).otherwise(0)).alias(f"within_{t}s"))
 
     out = aligned.groupBy(*group_cols).agg(*aggs)
-    out = out.withColumn(
-        "coverage_pct", F.round(100.0 * F.col("n_detected") / F.col("n_truth"), 2)
-    )
+    out = out.withColumn("coverage_pct", F.round(100.0 * F.col("n_detected") / F.col("n_truth"), 2))
     for t in TOLERANCES_S:
         out = out.withColumn(
             f"within_{t}s_pct",
@@ -267,17 +252,18 @@ def score_runways(aligned: DataFrame) -> DataFrame:
         return None
     a = aligned.filter(F.col("gt_runway").isNotNull())
     norm = lambda c: F.upper(F.trim(F.col(c)))  # noqa: E731
-    return a.groupBy("milestone").agg(
-        F.count(F.lit(1)).alias("n_truth"),
-        F.sum(F.when(F.col("det_runway").isNotNull(), 1).otherwise(0)).alias("n_named"),
-        F.sum(
-            F.when(norm("det_runway") == norm("gt_runway"), 1).otherwise(0)
-        ).alias("n_exact"),
-    ).withColumn(
-        "exact_pct_of_named",
-        F.round(100.0 * F.col("n_exact") / F.nullif(F.col("n_named"), F.lit(0)), 2),
-    ).withColumn(
-        "named_pct", F.round(100.0 * F.col("n_named") / F.col("n_truth"), 2)
+    return (
+        a.groupBy("milestone")
+        .agg(
+            F.count(F.lit(1)).alias("n_truth"),
+            F.sum(F.when(F.col("det_runway").isNotNull(), 1).otherwise(0)).alias("n_named"),
+            F.sum(F.when(norm("det_runway") == norm("gt_runway"), 1).otherwise(0)).alias("n_exact"),
+        )
+        .withColumn(
+            "exact_pct_of_named",
+            F.round(100.0 * F.col("n_exact") / F.nullif(F.col("n_named"), F.lit(0)), 2),
+        )
+        .withColumn("named_pct", F.round(100.0 * F.col("n_named") / F.col("n_truth"), 2))
     )
 
 

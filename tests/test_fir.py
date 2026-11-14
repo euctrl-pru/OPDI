@@ -4,7 +4,6 @@ import json
 import random
 
 import h3
-import pytest
 from navigation_fixtures import fly, legs_to_samples, make_track, measured
 from pyspark.sql import functions as F
 
@@ -28,8 +27,21 @@ def _ref(spark, volumes, res=7):
     for code, lo, hi, area, x0, x1 in volumes:
         poly = h3.LatLngPoly([(LAT0, x0), (LAT1, x0), (LAT1, x1), (LAT0, x1)])
         for cell in h3.compact_cells(h3.polygon_to_cells(poly, res)):
-            rows.append(("FIR", code, code, "524", "2024-11-28", "2024-12-26", lo, hi, float(area),
-                         cell, h3.get_resolution(cell)))
+            rows.append(
+                (
+                    "FIR",
+                    code,
+                    code,
+                    "524",
+                    "2024-11-28",
+                    "2024-12-26",
+                    lo,
+                    hi,
+                    float(area),
+                    cell,
+                    h3.get_resolution(cell),
+                )
+            )
     return spark.createDataFrame(rows, AIRSPACE_SCHEMA)
 
 
@@ -47,10 +59,15 @@ TWO = [("AAAA", 0, 999, 1e4, -2.0, 0.0), ("BBBB", 0, 999, 1e4, 0.0, 2.0)]
 
 def test_h3_parent_expr_matches_the_library(spark):
     random.seed(1)
-    cells = [h3.latlng_to_cell(random.uniform(-80, 80), random.uniform(-180, 180), 7) for _ in range(20)]
+    cells = [
+        h3.latlng_to_cell(random.uniform(-80, 80), random.uniform(-180, 180), 7) for _ in range(20)
+    ]
     df = spark.createDataFrame([(c,) for c in cells], "cell string")
     for r in range(0, 8):
-        got = {row.cell: row.p for row in df.withColumn("p", h3_parent_expr(F.col("cell"), r)).collect()}
+        got = {
+            row.cell: row.p
+            for row in df.withColumn("p", h3_parent_expr(F.col("cell"), r)).collect()
+        }
         assert got == {c: h3.cell_to_parent(c, r) for c in cells}, r
 
 
@@ -65,10 +82,12 @@ def test_a_straight_flight_across_the_boundary_gives_one_crossing(spark):
     assert info["fir_from"] == "AAAA" and info["fir_to"] == "BBBB"
     assert info["crossing_seq"] == 1
     assert info["airac_cfmu"] == "524"
-    assert info["airac_validity_start"] == "2024-11-28" and info["airac_validity_end"] == "2024-12-26"
+    assert (
+        info["airac_validity_start"] == "2024-11-28" and info["airac_validity_end"] == "2024-12-26"
+    )
     assert abs(info["fl"] - 330) <= 1
     assert 0 < info["bracket_s"] <= 10
-    assert abs(row.lon) < 0.05           # at the boundary
+    assert abs(row.lon) < 0.05  # at the boundary
     assert row.cumulative_distance_nm > 0
 
 
@@ -96,7 +115,9 @@ def test_no_crossing_across_a_hole(spark):
 def test_a_climb_through_the_band_boundary_is_a_crossing(spark):
     layered = [("AAAAFIR", 0, 195, 1e4, -2.0, 2.0), ("AAAAUIR", 195, 999, 1e4, -2.0, 2.0)]
     # Climb from FL150 to FL250 at 2,000 ft/min, then level: 300 s of climb.
-    sdf = _track(spark, [(300, 0, 2000.0), (300, 0, 0)], lat0=51.0, lon0=-1.0, hdg0=90.0, alt_ft=15000.0)
+    sdf = _track(
+        spark, [(300, 0, 2000.0), (300, 0, 0)], lat0=51.0, lon0=-1.0, hdg0=90.0, alt_ft=15000.0
+    )
     rows = calculate_fir_events(sdf, _ref(spark, layered), EventConfig()).collect()
     assert len(rows) == 1
     info = json.loads(rows[0].info)
@@ -132,14 +153,18 @@ def test_missing_reference_table_skips_the_family(spark):
             return True
 
         def read_table(self, name):
-            return spark.createDataFrame([("FIR", "AAAA", "x")], "airspace_type string, code string, h3_res_7 string")
+            return spark.createDataFrame(
+                [("FIR", "AAAA", "x")], "airspace_type string, code string, h3_res_7 string"
+            )
 
     assert load_fir_reference(OldTable()) is None
 
 
 def test_off_flag_returns_none(spark):
     sdf = _track(spark, [(60, 0, 0)])
-    assert calculate_fir_events(sdf, _ref(spark, TWO), EventConfig(emit_fir_crossings=False)) is None
+    assert (
+        calculate_fir_events(sdf, _ref(spark, TWO), EventConfig(emit_fir_crossings=False)) is None
+    )
 
 
 def test_a_volume_stored_at_resolution_zero_is_found(spark):

@@ -13,7 +13,6 @@ pipeline is tuned against, which is both a silent change to the ADEP/ADES
 candidate set and, at H3 resolution 7 out to 110 NM, enough data to OOM every
 executor in the namespace.
 """
-import pytest
 
 from opdi.config import OPDIConfig
 from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator
@@ -34,15 +33,18 @@ IN_BOX = (50.9, 4.48)
 
 
 def test_only_large_and_medium_airports_get_zones(spark):
-    df = _airports(spark, [
-        ("EBBR", "large_airport", *IN_BOX),
-        ("EBCI", "medium_airport", *IN_BOX),
-        ("EBXX", "small_airport", *IN_BOX),
-        ("EBHE", "heliport", *IN_BOX),
-        ("EBCL", "closed", *IN_BOX),
-        ("EBSB", "seaplane_base", *IN_BOX),
-        ("EBBP", "balloonport", *IN_BOX),
-    ])
+    df = _airports(
+        spark,
+        [
+            ("EBBR", "large_airport", *IN_BOX),
+            ("EBCI", "medium_airport", *IN_BOX),
+            ("EBXX", "small_airport", *IN_BOX),
+            ("EBHE", "heliport", *IN_BOX),
+            ("EBCL", "closed", *IN_BOX),
+            ("EBSB", "seaplane_base", *IN_BOX),
+            ("EBBP", "balloonport", *IN_BOX),
+        ],
+    )
     kept = {r["ident"] for r in _gen(spark)._filter_airports_spark(df).collect()}
     assert kept == {"EBBR", "EBCI"}
 
@@ -56,10 +58,13 @@ def test_a_closed_aerodrome_is_not_a_destination(spark):
 
 def test_the_bounding_box_still_applies(spark):
     """Type filtering is in addition to the box, not instead of it."""
-    df = _airports(spark, [
-        ("EBBR", "large_airport", *IN_BOX),
-        ("KJFK", "large_airport", 40.64, -73.78),   # outside the box
-    ])
+    df = _airports(
+        spark,
+        [
+            ("EBBR", "large_airport", *IN_BOX),
+            ("KJFK", "large_airport", 40.64, -73.78),  # outside the box
+        ],
+    )
     kept = {r["ident"] for r in _gen(spark)._filter_airports_spark(df).collect()}
     assert kept == {"EBBR"}
 
@@ -74,7 +79,8 @@ def test_the_type_set_matches_the_other_reference_builds(spark):
     on ``config.coverage.airport_types``, asked for by every reference
     generator alike, so this asserts the same behaviour through that seam."""
     assert _gen(spark).config.coverage.airport_types == (
-        "large_airport", "medium_airport",
+        "large_airport",
+        "medium_airport",
     )
 
 
@@ -95,10 +101,13 @@ def test_the_type_set_can_be_widened_deliberately(spark):
         airport_types=("large_airport", "small_airport"),
     )
     gen = AirportDetectionZoneGenerator(spark, cfg)
-    df = _airports(spark, [
-        ("EBBR", "large_airport", *IN_BOX),
-        ("EBXX", "small_airport", *IN_BOX),
-        ("EBCI", "medium_airport", *IN_BOX),
-    ])
+    df = _airports(
+        spark,
+        [
+            ("EBBR", "large_airport", *IN_BOX),
+            ("EBXX", "small_airport", *IN_BOX),
+            ("EBCI", "medium_airport", *IN_BOX),
+        ],
+    )
     kept = {r["ident"] for r in gen._filter_airports_spark(df).collect()}
     assert kept == {"EBBR", "EBXX"}

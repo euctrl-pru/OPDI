@@ -3,7 +3,6 @@
 import json
 import math
 
-import pytest
 from navigation_fixtures import fly
 from pyspark.sql import functions as F
 
@@ -11,13 +10,27 @@ from opdi.config import EventConfig
 from opdi.pipeline.point_merge import PMS_VERSION, calculate_point_merge_events
 from opdi.reference.point_merge import PMS_SCHEMA
 
-MP = (52.0, 0.0)          # the merge point
+MP = (52.0, 0.0)  # the merge point
 SPEED = 250.0
-R_NM = 16.0               # the leg's distance from the merge point
+R_NM = 16.0  # the leg's distance from the merge point
 
 
 def _ref(spark, apt="XXXX"):
-    row = (apt, f"{apt}-ALL", "MERGE", MP[0], MP[1], 15.0, 17.0, 7000.0, 9000.0, None, None, "test", "high")
+    row = (
+        apt,
+        f"{apt}-ALL",
+        "MERGE",
+        MP[0],
+        MP[1],
+        15.0,
+        17.0,
+        7000.0,
+        9000.0,
+        None,
+        None,
+        "test",
+        "high",
+    )
     return spark.createDataFrame([row], PMS_SCHEMA)
 
 
@@ -37,18 +50,53 @@ def _arc_then_direct(spark, arc_s=180.0, direct=True, ades="XXXX", offset_deg=0.
     last = samples_sdf.orderBy(F.col("event_time").desc()).first()
     if direct:
         # Turn onto the bearing to the merge point and fly through it.
-        brg = math.degrees(math.atan2(
-            math.radians(MP[1] - last.lon) * math.cos(math.radians(last.lat)),
-            math.radians(MP[0] - last.lat)))
-        tail = fly(spark, [(300, 0.0, 0.0)], lat0=last.lat, lon0=last.lon, hdg0=(brg + offset_deg) % 360,
-                   alt_ft=8000.0, speed_kt=SPEED, t0=float(last.cumulative_time_s) + 5)
+        brg = math.degrees(
+            math.atan2(
+                math.radians(MP[1] - last.lon) * math.cos(math.radians(last.lat)),
+                math.radians(MP[0] - last.lat),
+            )
+        )
+        tail = fly(
+            spark,
+            [(300, 0.0, 0.0)],
+            lat0=last.lat,
+            lon0=last.lon,
+            hdg0=(brg + offset_deg) % 360,
+            alt_ft=8000.0,
+            speed_kt=SPEED,
+            t0=float(last.cumulative_time_s) + 5,
+        )
     else:
-        tail = fly(spark, [(300, 0.0, 0.0)], lat0=last.lat, lon0=last.lon, hdg0=float(last.heading),
-                   alt_ft=8000.0, speed_kt=SPEED, t0=float(last.cumulative_time_s) + 5)
-    cols = ["track_id", "icao24", "lat", "lon", "baro_altitude", "geo_altitude", "velocity",
-            "heading", "vert_rate", "on_ground", "last_contact", "last_pos_update", "callsign",
-            "near_airport", "field_elev_ft", "event_time"]
+        tail = fly(
+            spark,
+            [(300, 0.0, 0.0)],
+            lat0=last.lat,
+            lon0=last.lon,
+            hdg0=float(last.heading),
+            alt_ft=8000.0,
+            speed_kt=SPEED,
+            t0=float(last.cumulative_time_s) + 5,
+        )
+    cols = [
+        "track_id",
+        "icao24",
+        "lat",
+        "lon",
+        "baro_altitude",
+        "geo_altitude",
+        "velocity",
+        "heading",
+        "vert_rate",
+        "on_ground",
+        "last_contact",
+        "last_pos_update",
+        "callsign",
+        "near_airport",
+        "field_elev_ft",
+        "event_time",
+    ]
     from navigation_fixtures import measured
+
     raw = samples_sdf.select(*cols).unionByName(tail.select(*cols))
     return measured(raw).withColumn("ades", F.lit(ades))
 
@@ -91,8 +139,9 @@ def test_a_curved_turn_in_that_reaches_the_merge_point_still_counts(spark):
 
 def test_a_direct_without_an_arc_gives_only_the_merge_point(spark):
     # Straight at the merge point from 25 NM north.
-    sdf = fly(spark, [(600, 0.0, 0.0)], lat0=MP[0] + 25 / 60.0, lon0=MP[1], hdg0=180.0,
-              alt_ft=8000.0).withColumn("ades", F.lit("XXXX"))
+    sdf = fly(
+        spark, [(600, 0.0, 0.0)], lat0=MP[0] + 25 / 60.0, lon0=MP[1], hdg0=180.0, alt_ft=8000.0
+    ).withColumn("ades", F.lit("XXXX"))
     rows = calculate_point_merge_events(sdf, _ref(spark), EventConfig()).collect()
     assert [r.type for r in rows] == ["pms-merge-point"]
     assert json.loads(rows[0].info)["via_leg"] is False
@@ -108,15 +157,23 @@ def test_a_leg_is_not_paired_across_a_hole(spark):
     # is shorter than the 90 s minimum, so no leg pair survives.
     lat0 = MP[0] + R_NM / 60.0
     rate = -_arc_rate(True)
-    sdf = fly(spark, [(80, rate, 0.0), (-2400, 0, 0), (80, rate, 0.0)],
-              lat0=lat0, lon0=MP[1], hdg0=90.0, alt_ft=8000.0).withColumn("ades", F.lit("XXXX"))
+    sdf = fly(
+        spark,
+        [(80, rate, 0.0), (-2400, 0, 0), (80, rate, 0.0)],
+        lat0=lat0,
+        lon0=MP[1],
+        hdg0=90.0,
+        alt_ft=8000.0,
+    ).withColumn("ades", F.lit("XXXX"))
     rows = calculate_point_merge_events(sdf, _ref(spark), EventConfig()).collect()
     assert not [r for r in rows if r.type.startswith("pms-leg")]
 
 
 def test_off_flag_returns_none(spark):
     sdf = _arc_then_direct(spark)
-    assert calculate_point_merge_events(sdf, _ref(spark), EventConfig(emit_point_merge=False)) is None
+    assert (
+        calculate_point_merge_events(sdf, _ref(spark), EventConfig(emit_point_merge=False)) is None
+    )
 
 
 def test_blanked_headings_on_the_direct_do_not_lose_the_leg(spark):
@@ -126,18 +183,51 @@ def test_blanked_headings_on_the_direct_do_not_lose_the_leg(spark):
     arc_end = sdf.agg(F.min("cumulative_time_s")).first()[0] + 180
     sdf = sdf.withColumn(
         "heading",
-        F.when((F.col("cumulative_time_s") > arc_end) & (F.col("cumulative_time_s") % 10 == 0), None)
-        .otherwise(F.col("heading")),
+        F.when(
+            (F.col("cumulative_time_s") > arc_end) & (F.col("cumulative_time_s") % 10 == 0), None
+        ).otherwise(F.col("heading")),
     )
-    types = sorted(r.type for r in calculate_point_merge_events(sdf, _ref(spark), EventConfig()).collect())
+    types = sorted(
+        r.type for r in calculate_point_merge_events(sdf, _ref(spark), EventConfig()).collect()
+    )
     assert types == ["pms-leg-entry", "pms-leg-exit", "pms-merge-point"]
 
 
 def test_two_merge_points_a_mile_apart_give_one_leg_and_one_merge_point(spark):
     # The same system twice, its points 0.9 NM apart (Dublin 28L/28R): one
     # leg pair, one pms-merge-point, no duplicate ids.
-    rows = [("XXXX", "XXXX-28", "MERGE", MP[0], MP[1], 15.0, 17.0, 7000.0, 9000.0, None, None, "test", "high"),
-            ("XXXX", "XXXX-28", "MERGE2", MP[0] + 0.015, MP[1], 15.0, 17.0, 7000.0, 9000.0, None, None, "test", "high")]
+    rows = [
+        (
+            "XXXX",
+            "XXXX-28",
+            "MERGE",
+            MP[0],
+            MP[1],
+            15.0,
+            17.0,
+            7000.0,
+            9000.0,
+            None,
+            None,
+            "test",
+            "high",
+        ),
+        (
+            "XXXX",
+            "XXXX-28",
+            "MERGE2",
+            MP[0] + 0.015,
+            MP[1],
+            15.0,
+            17.0,
+            7000.0,
+            9000.0,
+            None,
+            None,
+            "test",
+            "high",
+        ),
+    ]
     ref = spark.createDataFrame(rows, PMS_SCHEMA)
     sdf = _arc_then_direct(spark)
     out = calculate_point_merge_events(sdf, ref, EventConfig()).collect()

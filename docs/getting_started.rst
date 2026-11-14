@@ -7,11 +7,11 @@ the OPDI package.
 Prerequisites
 -------------
 
-- **Python** >= 3.8
-- **Apache Spark** >= 3.3.0
-- Access to a Cloudera environment (production) or a local Spark cluster
-- For OpenSky data ingestion: ``OSN_USERNAME`` and ``OSN_KEY`` environment
-  variables
+- **Python** 3.10 or later and **Java** 17
+- **Apache Spark** 3.5 or later (PySpark is installed with the package)
+- A local Spark session, or the OpenSky Network cluster (``opensky``
+  environment) with S3 credentials (``AWS_ACCESS_KEY_ID``,
+  ``AWS_SECRET_ACCESS_KEY``)
 
 Installation
 ------------
@@ -21,7 +21,8 @@ Install from source (editable mode)
 
 .. code-block:: bash
 
-   cd OPDI-dev
+   git clone https://github.com/euctrl-pru/opdi.git
+   cd opdi
    pip install -e .
 
 Install with development tools
@@ -39,12 +40,11 @@ Dependencies
 All required dependencies are declared in ``pyproject.toml`` and installed
 automatically:
 
-- PySpark >= 3.3.0
-- H3 >= 3.7.0 and h3-pyspark >= 1.0.0
+- PySpark >= 3.5.1
+- h3 version 4 and h3-pyspark >= 1.0.0
 - Shapely >= 2.0.0
 - Pandas >= 1.5.0
 - NumPy >= 1.23.0
-- Plotly >= 5.0.0
 - And more -- see ``pyproject.toml`` for the full list.
 
 Building the documentation
@@ -72,8 +72,8 @@ Quick Start
    from opdi.config import OPDIConfig
    from opdi.utils.spark_helpers import get_spark
 
-   config = OPDIConfig.for_environment("dev")  # "dev", "live", or "local"
-   spark = get_spark(env="dev", app_name="My OPDI App")
+   config = OPDIConfig.for_environment("opensky")  # "opensky" or "local"
+   spark = get_spark(env="opensky", app_name="My OPDI App")
 
 2. Ingest the aircraft database
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -111,25 +111,22 @@ Always stop the Spark session when you are finished:
 Environment Configuration
 -------------------------
 
-OPDI supports three environments:
+OPDI supports two environments:
 
-+-----------+--------------------------------------------------+
-| Name      | Description                                      |
-+===========+==================================================+
-| ``dev``   | Development -- moderate memory, suitable for      |
-|           | prototyping                                      |
-+-----------+--------------------------------------------------+
-| ``live``  | Production -- full resource allocation on the     |
-|           | Cloudera cluster                                 |
-+-----------+--------------------------------------------------+
-| ``local`` | Local testing -- lightweight Spark session        |
-+-----------+--------------------------------------------------+
++-------------+------------------------------------------------+
+| Name        | Description                                    |
++=============+================================================+
+| ``opensky`` | Production on the OpenSky cluster: parquet     |
+|             | tables on S3, Spark executors on Kubernetes    |
++-------------+------------------------------------------------+
+| ``local``   | Local testing -- lightweight Spark session      |
++-------------+------------------------------------------------+
 
 Override Spark settings when needed:
 
 .. code-block:: python
 
-   config = OPDIConfig.for_environment("dev")
+   config = OPDIConfig.for_environment("opensky")
    config.spark.driver_memory = "16G"
    config.spark.executor_memory = "20G"
 

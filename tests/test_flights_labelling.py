@@ -1,11 +1,11 @@
 """The flight list must label a track with the callsign it actually flew."""
+
 from opdi.pipeline.flights import dominant_flight_id
 
 
 def _label(df):
     """The one-row-per-track label frame, as a dict, for readable assertions."""
-    return {r["track_id"]: r["_dominant_flight_id"]
-            for r in dominant_flight_id(df).collect()}
+    return {r["track_id"]: r["_dominant_flight_id"] for r in dominant_flight_id(df).collect()}
 
 
 def test_blank_samples_do_not_win_the_label(spark):
@@ -45,8 +45,7 @@ def test_a_track_that_never_broadcast_a_callsign_has_no_row(spark):
     blank, the join does. A caller using an inner join would silently lose the
     flight, which is why Step 4 specifies a left join and a coalesce.
     """
-    df = spark.createDataFrame(
-        [("t1", ""), ("t1", "")], "track_id string, flight_id string")
+    df = spark.createDataFrame([("t1", ""), ("t1", "")], "track_id string, flight_id string")
     assert _label(df) == {}
 
 
@@ -75,6 +74,7 @@ def test_two_tracks_are_labelled_independently(spark):
 
 # --- resolve_flight_id: the invariant the rest of the module depends on ------
 
+
 def test_resolution_gives_every_sample_of_a_track_one_callsign(spark):
     """flight_id is a grouping key at ten sites and is never aggregated.
 
@@ -102,8 +102,7 @@ def test_resolution_does_not_add_or_drop_samples(spark):
     from opdi.pipeline.flights import resolve_flight_id
 
     df = spark.createDataFrame(
-        [("t1", "SAS123"), ("t1", ""), ("t2", "KLM456"), ("t2", "KLM456"),
-         ("t3", ""), ("t3", "")],
+        [("t1", "SAS123"), ("t1", ""), ("t2", "KLM456"), ("t2", "KLM456"), ("t3", ""), ("t3", "")],
         "track_id string, flight_id string",
     )
     assert resolve_flight_id(df).count() == df.count() == 6
@@ -114,8 +113,7 @@ def test_resolution_leaves_an_unlabelled_track_blank_not_null(spark):
     past those comparisons and reappear as a different bug."""
     from opdi.pipeline.flights import resolve_flight_id
 
-    df = spark.createDataFrame(
-        [("t1", ""), ("t1", "")], "track_id string, flight_id string")
+    df = spark.createDataFrame([("t1", ""), ("t1", "")], "track_id string, flight_id string")
     assert [r["flight_id"] for r in resolve_flight_id(df).collect()] == ["", ""]
 
 
@@ -201,11 +199,15 @@ def test_the_reader_resolves_over_rows_a_later_dropna_would_remove(spark):
     path asked. Here ZZZ999 is the majority only if the position-less rows
     count, which is also what the V7 benchmark counts.
     """
-    out = _read(spark, [
-        ("t1", None, "ZZZ999", _ts(0)),
-        ("t1", None, "ZZZ999", _ts(1)),
-        ("t1", 50.0, "AAA111", _ts(2)),
-    ], _TRACK_SCHEMA)
+    out = _read(
+        spark,
+        [
+            ("t1", None, "ZZZ999", _ts(0)),
+            ("t1", None, "ZZZ999", _ts(1)),
+            ("t1", 50.0, "AAA111", _ts(2)),
+        ],
+        _TRACK_SCHEMA,
+    )
     assert {r["flight_id"] for r in out.collect()} == {"ZZZ999"}
 
 
@@ -219,8 +221,7 @@ def test_the_reader_leaves_other_tables_alone(spark):
     """It also reads opdi_flight_list and opdi_endpoint_candidates. Renaming or
     resolving those would be a silent schema change to tables that have their
     own meaning for these columns."""
-    out = _read(spark, [("t1", 50.0, "SAS123", _ts(0))], _TRACK_SCHEMA,
-                table="opdi_flight_list")
+    out = _read(spark, [("t1", 50.0, "SAS123", _ts(0))], _TRACK_SCHEMA, table="opdi_flight_list")
     assert "callsign" in out.columns and "flight_id" not in out.columns
 
 
@@ -233,12 +234,18 @@ def test_the_reader_does_not_resolve_when_the_run_stamps_a_legacy_version(spark)
     released lists carry the spaces. So the exemption is on the version stamp,
     not on an argument about homogeneity.
     """
-    out = _read(spark, [
-        ("t1", 50.0, "        ", _ts(0)),
-        ("t1", 50.0, None, _ts(1)),
-    ], _TRACK_SCHEMA, legacy=True)
+    out = _read(
+        spark,
+        [
+            ("t1", 50.0, "        ", _ts(0)),
+            ("t1", 50.0, None, _ts(1)),
+        ],
+        _TRACK_SCHEMA,
+        legacy=True,
+    )
     assert sorted(r["flight_id"] or "<null>" for r in out.collect()) == [
-        "        ", "<null>",
+        "        ",
+        "<null>",
     ]
 
 
@@ -252,9 +259,7 @@ def _overflights(spark, sv_rows, fl_ids=(), legacy=False):
     from datetime import date
 
     sv = spark.createDataFrame(sv_rows, _OF_SCHEMA)
-    fl = spark.createDataFrame(
-        [(i, _ts(0)) for i in fl_ids], "id string, first_seen timestamp"
-    )
+    fl = spark.createDataFrame([(i, _ts(0)) for i in fl_ids], "id string, first_seen timestamp")
     proc = _processor({"osn_tracks": sv, "opdi_flight_list": fl}, legacy=legacy)
     return proc._fetch_overflights(date(2025, 6, 1)).collect()
 
@@ -272,29 +277,36 @@ def test_an_overflight_is_named_by_the_callsign_its_track_flew(spark):
     until the crew sets it. These rows land in ``opdi_flight_list`` next to the
     detected flights, so a blank here is a blank in the published table.
     """
-    rows = _overflights(spark, [
-        _sv_row("t1", None, 0),
-        _sv_row("t1", "", 2),
-        _sv_row("t1", "RYR456", 4),
-        _sv_row("t1", "RYR456", 6),
-        _sv_row("t1", "RYR456", 8),
-    ])
+    rows = _overflights(
+        spark,
+        [
+            _sv_row("t1", None, 0),
+            _sv_row("t1", "", 2),
+            _sv_row("t1", "RYR456", 4),
+            _sv_row("t1", "RYR456", 6),
+            _sv_row("t1", "RYR456", 8),
+        ],
+    )
     assert [r["FLT_ID"] for r in rows] == ["RYR456"]
 
 
 def test_an_overflight_track_still_yields_exactly_one_row(spark):
     """This path cannot fan out -- it reduces to one row per track before the
     rename -- and resolution must not be what introduces a fan-out."""
-    rows = _overflights(spark, [
-        _sv_row("t1", "", 0),
-        _sv_row("t1", "RYR456", 5),
-        _sv_row("t1", "EZY789", 6),
-        _sv_row("t1", "RYR456", 7),
-        _sv_row("t2", "KLM111", 0),
-        _sv_row("t2", "KLM111", 9),
-    ])
+    rows = _overflights(
+        spark,
+        [
+            _sv_row("t1", "", 0),
+            _sv_row("t1", "RYR456", 5),
+            _sv_row("t1", "EZY789", 6),
+            _sv_row("t1", "RYR456", 7),
+            _sv_row("t2", "KLM111", 0),
+            _sv_row("t2", "KLM111", 9),
+        ],
+    )
     assert sorted((r["id"], r["FLT_ID"]) for r in rows) == [
-        ("t1", "RYR456"), ("t2", "KLM111"),
+        ("t1", "RYR456"),
+        ("t2", "KLM111"),
     ]
 
 
@@ -317,11 +329,15 @@ def test_a_legacy_overflight_keeps_the_value_its_release_published(spark):
     code path nothing exercises until someone re-runs a legacy month, which is
     how it would quietly rot.
     """
-    rows = _overflights(spark, [
-        _sv_row("t1", None, 0),
-        _sv_row("t1", "RYR456", 4),
-        _sv_row("t1", "RYR456", 8),
-    ], legacy=True)
+    rows = _overflights(
+        spark,
+        [
+            _sv_row("t1", None, 0),
+            _sv_row("t1", "RYR456", 4),
+            _sv_row("t1", "RYR456", 8),
+        ],
+        legacy=True,
+    )
     assert [r["FLT_ID"] for r in rows] == [None]
 
 
@@ -332,10 +348,14 @@ def test_a_legacy_overflight_keeps_a_padded_blank_callsign_verbatim(spark):
     so a reconstruction rule would turn it into NULL and the release carries
     spaces. Only skipping resolution reproduces it.
     """
-    rows = _overflights(spark, [
-        _sv_row("t1", "        ", 0),
-        _sv_row("t1", "        ", 6),
-    ], legacy=True)
+    rows = _overflights(
+        spark,
+        [
+            _sv_row("t1", "        ", 0),
+            _sv_row("t1", "        ", 6),
+        ],
+        legacy=True,
+    )
     assert [r["FLT_ID"] for r in rows] == ["        "]
 
 
@@ -343,8 +363,12 @@ def test_an_overflight_already_in_the_flight_list_is_still_excluded(spark):
     """The anti-join is the point of the method; resolution must not disturb it."""
     rows = _overflights(
         spark,
-        [_sv_row("t1", "RYR456", 0), _sv_row("t1", "RYR456", 6),
-         _sv_row("t2", "KLM111", 0), _sv_row("t2", "KLM111", 6)],
+        [
+            _sv_row("t1", "RYR456", 0),
+            _sv_row("t1", "RYR456", 6),
+            _sv_row("t2", "KLM111", 0),
+            _sv_row("t2", "KLM111", 6),
+        ],
         fl_ids=("t1",),
     )
     assert [r["id"] for r in rows] == ["t2"]

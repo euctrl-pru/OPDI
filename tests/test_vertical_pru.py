@@ -22,9 +22,8 @@ import datetime as dt
 import json
 
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import _EPOCH, make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline.elevation import attach_field_elevation
@@ -99,8 +98,7 @@ def _climb_crossing_200nm(spark):
     """
     return _outbound(
         spark,
-        [(1000 * i, 5.0 * i) for i in range(31)]
-        + [(30000, 5.0 * i) for i in range(31, 61)],
+        [(1000 * i, 5.0 * i) for i in range(31)] + [(30000, 5.0 * i) for i in range(31, 61)],
     )
 
 
@@ -122,14 +120,16 @@ def _hold(spark, level_ft, seconds):
     """One level segment starting 600 s into the climb."""
     start = _EPOCH + dt.timedelta(seconds=600)
     return spark.createDataFrame(
-        [(
-            "trk-1",
-            start,
-            start + dt.timedelta(seconds=seconds),
-            float(seconds),
-            float(level_ft),
-            None,
-        )],
+        [
+            (
+                "trk-1",
+                start,
+                start + dt.timedelta(seconds=seconds),
+                float(seconds),
+                float(level_ft),
+                None,
+            )
+        ],
         schema=SEGMENT_SCHEMA,
     )
 
@@ -147,15 +147,17 @@ def test_a_long_level_high_in_the_box_moves_the_top_back(spark):
     """27,500 ft is 91.7% of 30,000, so it is inside the 90% box; 360 s exceeds
     the 300 s limit. Both conditions hold, so this hold is cruise and the top
     moves back to where it started."""
-    tops = pru_tops(_climb(spark), _hold(spark, level_ft=27500, seconds=360),
-                    EventConfig()).collect()[0]
+    tops = pru_tops(
+        _climb(spark), _hold(spark, level_ft=27500, seconds=360), EventConfig()
+    ).collect()[0]
     assert tops["toc_relocated"] is True
     assert tops["toc_cco_time"] < tops["toc_d200_time"]
 
 
 def test_a_short_level_in_the_box_does_not_move_the_top(spark):
-    tops = pru_tops(_climb(spark), _hold(spark, level_ft=27500, seconds=240),
-                    EventConfig()).collect()[0]
+    tops = pru_tops(
+        _climb(spark), _hold(spark, level_ft=27500, seconds=240), EventConfig()
+    ).collect()[0]
     assert tops["toc_relocated"] is False
     assert tops["toc_cco_time"] == tops["toc_d200_time"]
 
@@ -163,16 +165,18 @@ def test_a_short_level_in_the_box_does_not_move_the_top(spark):
 def test_a_long_level_below_the_box_does_not_move_the_top(spark):
     """20,000 ft is 67% of 30,000, below the 90% floor: that is a level-off,
     not cruise, and it must be reported as one rather than relocating the top."""
-    tops = pru_tops(_climb(spark), _hold(spark, level_ft=20000, seconds=600),
-                    EventConfig()).collect()[0]
+    tops = pru_tops(
+        _climb(spark), _hold(spark, level_ft=20000, seconds=600), EventConfig()
+    ).collect()[0]
     assert tops["toc_relocated"] is False
 
 
 def test_the_analysis_stops_at_the_200nm_ring(spark):
     """A step climb 250 NM out is cruise-altitude optimisation, not a top of
     climb, and PRU's radius exists precisely to exclude it."""
-    tops = pru_tops(_climb_then_step_climb_at_250nm(spark), _no_segments(spark),
-                    EventConfig()).collect()[0]
+    tops = pru_tops(
+        _climb_then_step_climb_at_250nm(spark), _no_segments(spark), EventConfig()
+    ).collect()[0]
     assert tops["toc_d200_alt_ft"] == pytest.approx(30000, abs=50)
 
 
@@ -180,8 +184,7 @@ def test_the_events_name_the_algorithm_that_produced_them(spark):
     """Both tops are published, so every row has to say which one it is. The
     PRU pair carries ``method: "pru"`` and the D200 position it was relocated
     from; the fuzzy pair is stamped where it is built."""
-    events = pru_top_events(_climb(spark), _hold(spark, level_ft=27500, seconds=360),
-                            EventConfig())
+    events = pru_top_events(_climb(spark), _hold(spark, level_ft=27500, seconds=360), EventConfig())
     by_type = {r["type"]: r for r in events.collect()}
 
     assert set(by_type) == {"top-of-climb", "top-of-descent"}
@@ -213,17 +216,18 @@ class StubStorage:
 
 def _airport_storage(spark):
     """One flight, EHAM to LSZH, with both aerodromes in OurAirports."""
-    return StubStorage({
-        "opdi_flight_list": spark.createDataFrame(
-            [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH")],
-            "id string, dof timestamp, adep string, ades string",
-        ),
-        "oa_airports": spark.createDataFrame(
-            [("EHAM", 52.309, 4.764, -11.0), ("LSZH", 47.458, 8.548, 1416.0)],
-            "ident string, latitude_deg double, longitude_deg double, "
-            "elevation_ft double",
-        ),
-    })
+    return StubStorage(
+        {
+            "opdi_flight_list": spark.createDataFrame(
+                [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH")],
+                "id string, dof timestamp, adep string, ades string",
+            ),
+            "oa_airports": spark.createDataFrame(
+                [("EHAM", 52.309, 4.764, -11.0), ("LSZH", 47.458, 8.548, 1416.0)],
+                "ident string, latitude_deg double, longitude_deg double, " "elevation_ft double",
+            ),
+        }
+    )
 
 
 def _bare(spark):
@@ -235,9 +239,7 @@ def test_aerodrome_geometry_attaches_both_ends(spark):
     """Both ends, and coordinates as well as elevation: the PRU radius is
     measured from the departure aerodrome in climb and the arrival one in
     descent, so one end is never enough."""
-    row = attach_aerodrome_geometry(
-        _bare(spark), MONTH, _airport_storage(spark)
-    ).collect()[0]
+    row = attach_aerodrome_geometry(_bare(spark), MONTH, _airport_storage(spark)).collect()[0]
 
     assert row["adep"] == "EHAM"
     assert row["adep_lat"] == pytest.approx(52.309)
@@ -256,13 +258,17 @@ def test_a_duplicated_flight_list_id_fails_loudly(spark):
     inflated counts in exactly the ladder the study reports. Nothing in the
     output would say so, which is why this is an error and not a warning.
     """
-    duplicated = StubStorage({
-        "opdi_flight_list": spark.createDataFrame(
-            [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH"),
-             ("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "EDDF")],
-            "id string, dof timestamp, adep string, ades string",
-        ),
-    })
+    duplicated = StubStorage(
+        {
+            "opdi_flight_list": spark.createDataFrame(
+                [
+                    ("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH"),
+                    ("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "EDDF"),
+                ],
+                "id string, dof timestamp, adep string, ades string",
+            ),
+        }
+    )
 
     with pytest.raises(ValueError, match="distinct ids"):
         attach_aerodrome_geometry(_bare(spark), MONTH, duplicated)

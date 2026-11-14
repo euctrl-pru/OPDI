@@ -16,13 +16,19 @@ decides whether debouncing introduces a new class of merge.
 
 Read-only. Writes nothing.
 """
+
 import argparse
 
-from pyspark.sql import functions as F, Window
+from pyspark.sql import Window
+from pyspark.sql import functions as F
+from study_variants.segmentation import register_study_arms  # noqa: E402
 
 from opdi.config import OPDIConfig, SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.methods import ARMS
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 from opdi.utils.spark_helpers import SparkSessionManager
 from opdi.utils.storage import StorageManager
 
@@ -60,42 +66,54 @@ def analyze_arm(sv, arm_name: str, hold: float, params_base):
         .filter((F.col("span_s") >= SPAN_FLOOR_S) & (F.col("n_samples") >= SAMPLE_FLOOR))
     ).cache()
 
-    track_counts = per_cs.groupBy("track_id").agg(
-        F.count(F.lit(1)).alias("n_dense")
-    )
+    track_counts = per_cs.groupBy("track_id").agg(F.count(F.lit(1)).alias("n_dense"))
     target_tracks = track_counts.filter(F.col("n_dense") >= 2)
 
     detail = (
-        per_cs.join(target_tracks.select("track_id"), "track_id", "inner")
-        .withColumn(
+        per_cs.join(target_tracks.select("track_id"), "track_id", "inner").withColumn(
             "rank",
             F.row_number().over(Window.partitionBy("track_id").orderBy("first_ts")),
         )
     ).cache()
 
     pair = (
-        detail.filter(F.col("rank") == 1)
-        .select("track_id", F.col("_cs").alias("cs1"), F.col("n_samples").alias("n1"), F.col("span_s").alias("span1"))
-        .join(
-            detail.filter(F.col("rank") == 2).select(
-                "track_id", F.col("_cs").alias("cs2"), F.col("n_samples").alias("n2"), F.col("span_s").alias("span2")
-            ),
-            "track_id",
+        (
+            detail.filter(F.col("rank") == 1)
+            .select(
+                "track_id",
+                F.col("_cs").alias("cs1"),
+                F.col("n_samples").alias("n1"),
+                F.col("span_s").alias("span1"),
+            )
+            .join(
+                detail.filter(F.col("rank") == 2).select(
+                    "track_id",
+                    F.col("_cs").alias("cs2"),
+                    F.col("n_samples").alias("n2"),
+                    F.col("span_s").alias("span2"),
+                ),
+                "track_id",
+            )
         )
-    ).withColumn("lev", F.levenshtein(F.col("cs1"), F.col("cs2"))).withColumn(
-        "prefix_rel",
-        F.col("cs2").startswith(F.col("cs1")) | F.col("cs1").startswith(F.col("cs2")),
-    ).withColumn(
-        "string_dissimilar", (F.col("lev") > 2) & (~F.col("prefix_rel"))
-    ).filter(F.col("string_dissimilar")).cache()
+        .withColumn("lev", F.levenshtein(F.col("cs1"), F.col("cs2")))
+        .withColumn(
+            "prefix_rel",
+            F.col("cs2").startswith(F.col("cs1")) | F.col("cs1").startswith(F.col("cs2")),
+        )
+        .withColumn("string_dissimilar", (F.col("lev") > 2) & (~F.col("prefix_rel")))
+        .filter(F.col("string_dissimilar"))
+        .cache()
+    )
 
     n_genuine = pair.count()
 
     print(f"\n=== arm={arm_name}  hold={hold}s ===")
     print(f"  total tracks: {n_tracks:,}")
-    print(f"  tracks with 2+ refined-dense genuine-merge callsigns"
-          f" (span>={SPAN_FLOOR_S}s, samples>={SAMPLE_FLOOR}, lev>2 & not prefix): {n_genuine:,}")
-    print(f"  sample genuine-merge tracks (up to 5):")
+    print(
+        f"  tracks with 2+ refined-dense genuine-merge callsigns"
+        f" (span>={SPAN_FLOOR_S}s, samples>={SAMPLE_FLOOR}, lev>2 & not prefix): {n_genuine:,}"
+    )
+    print("  sample genuine-merge tracks (up to 5):")
     pair.select("track_id", "cs1", "n1", "span1", "cs2", "n2", "span2", "lev").orderBy(
         F.desc("span1")
     ).show(5, False)
@@ -115,6 +133,8 @@ def main() -> None:
 
     config = OPDIConfig.for_environment("opensky")
     config.project.warehouse_path = args.warehouse
+    # The prefix holds the tables directly, without a release folder.
+    config.project.release = ""
     config.spark.executor_instances = args.executors
     spark = SparkSessionManager.create_session(
         app_name="debounced vs recommended merge", config=config, distributed=True
@@ -124,9 +144,7 @@ def main() -> None:
     sv = (
         storage.read_table("osn_tracks_clean")
         .filter(F.col("dof").cast("date") == F.lit(args.day))
-        .select(
-            "icao24", "track_id", "event_time", "callsign", "baro_altitude", "velocity"
-        )
+        .select("icao24", "track_id", "event_time", "callsign", "baro_altitude", "velocity")
     ).cache()
     sv.count()  # materialize once, shared by both arms
 
@@ -139,15 +157,20 @@ def main() -> None:
     print(f"  debounced   (hold=30): total_tracks={n_deb:,}  refined_genuine_merges={g_deb:,}")
     print(f"  ratio debounced/recommended: {ratio:.2f}x")
     if 0.8 <= ratio <= 1.2:
-        print("  VERDICT: counts approx equal (within 20%) -- debounce introduces"
-              " no new genuine merges; the refined-merge population is pre-existing"
-              " and orthogonal to this change.")
+        print(
+            "  VERDICT: counts approx equal (within 20%) -- debounce introduces"
+            " no new genuine merges; the refined-merge population is pre-existing"
+            " and orthogonal to this change."
+        )
     elif ratio > 1.2:
-        print("  VERDICT: debounced substantially EXCEEDS recommended -- debounce"
-              " is fusing additional genuine flights. Real regression.")
+        print(
+            "  VERDICT: debounced substantially EXCEEDS recommended -- debounce"
+            " is fusing additional genuine flights. Real regression."
+        )
     else:
-        print("  VERDICT: debounced is substantially BELOW recommended -- unexpected,"
-              " investigate.")
+        print(
+            "  VERDICT: debounced is substantially BELOW recommended -- unexpected," " investigate."
+        )
 
     spark.stop()
 

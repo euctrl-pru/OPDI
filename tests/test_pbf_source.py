@@ -7,6 +7,7 @@ about how OSM actually encodes aprons and stands (closed ways that are areas,
 multipolygon relations, missing width tags), and a hand-built fixture would
 encode this author's assumptions about that rather than the reality.
 """
+
 import os
 
 import pandas as pd
@@ -14,8 +15,9 @@ import pytest
 
 pytest.importorskip("osmium")
 
-from opdi.reference.pbf_source import read_aeroway_features
 from opdi.reference.h3_airport_layouts import AEROWAY_TAGS
+from opdi.reference.pbf_source import read_aeroway_features
+
 AEROWAY_TAGS_SET = set(AEROWAY_TAGS)
 
 PBF = "/home/jupyter/work/osm/luxembourg-latest.osm.pbf"
@@ -42,9 +44,9 @@ def test_reads_the_aeroway_families_the_layout_grid_needs():
     kinds = set(gdf["aeroway"])
     for tag in ("runway", "taxiway", "apron", "hangar", "parking_position"):
         assert tag in kinds, f"{tag} missing from a real extract that has it"
-    assert "parking_position" in kinds, (
-        "stands are the whole point: AOBT/AIBT are anchored on parking_position"
-    )
+    assert (
+        "parking_position" in kinds
+    ), "stands are the whole point: AOBT/AIBT are anchored on parking_position"
 
 
 @needs_luxembourg
@@ -87,8 +89,9 @@ def test_no_tag_is_silently_dropped_by_element_type_branching():
     not evidence the reader is broken -- see the AEROWAY_TAGS test above for
     `threshold`/`deicing_pad`, which are exactly that case.
     """
-    import osmium
     from collections import Counter
+
+    import osmium
 
     from opdi.reference.h3_airport_layouts import AEROWAY_TAGS
 
@@ -124,8 +127,7 @@ def test_no_way_survives_when_its_area_counterpart_is_present():
     area_ids = set(gdf.loc[gdf["element"] == "area", "id"])
     way_ids = set(gdf.loc[gdf["element"] == "way", "id"])
     assert area_ids & way_ids == set(), (
-        "way ids duplicated by an area of the same orig_id: "
-        f"{area_ids & way_ids}"
+        "way ids duplicated by an area of the same orig_id: " f"{area_ids & way_ids}"
     )
 
 
@@ -144,9 +146,7 @@ def test_no_way_survives_when_its_area_counterpart_is_present():
 def _write_osm(tmp_path, name: str, body: str) -> str:
     path = tmp_path / name
     path.write_text(
-        "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\">\n"
-        + body
-        + "\n</osm>\n"
+        "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\">\n" + body + "\n</osm>\n"
     )
     return str(path)
 
@@ -287,13 +287,17 @@ class _Storage:
     def __init__(self, spark):
         self._t = {
             "oa_airports": spark.createDataFrame(
-                [("ELLX", 49.6233, 6.2044, "large_airport"),
-                 ("EBBR", 50.9014, 4.4844, "large_airport")],
+                [
+                    ("ELLX", 49.6233, 6.2044, "large_airport"),
+                    ("EBBR", 50.9014, 4.4844, "large_airport"),
+                ],
                 "ident string, latitude_deg double, longitude_deg double, type string",
             ),
             "oa_runways": spark.createDataFrame(
-                [("ELLX", 49.6266, 6.1867, 49.6200, 6.2247),
-                 ("EBBR", 50.9010, 4.4700, 50.9060, 4.5000)],
+                [
+                    ("ELLX", 49.6266, 6.1867, 49.6200, 6.2247),
+                    ("EBBR", 50.9010, 4.4700, 50.9060, 4.5000),
+                ],
                 "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
                 "he_latitude_deg double, he_longitude_deg double",
             ),
@@ -507,13 +511,17 @@ class _NodeAndPolygonStorage:
     def __init__(self, spark):
         self._t = {
             "oa_airports": spark.createDataFrame(
-                [("AAAA", 49.0000, 6.0000, "large_airport"),
-                 ("BBBB", 51.0000, 8.0000, "large_airport")],
+                [
+                    ("AAAA", 49.0000, 6.0000, "large_airport"),
+                    ("BBBB", 51.0000, 8.0000, "large_airport"),
+                ],
                 "ident string, latitude_deg double, longitude_deg double, type string",
             ),
             "oa_runways": spark.createDataFrame(
-                [("AAAA", 48.9990, 5.9990, 49.0010, 6.0010),
-                 ("BBBB", 50.9990, 7.9990, 51.0010, 8.0010)],
+                [
+                    ("AAAA", 48.9990, 5.9990, 49.0010, 6.0010),
+                    ("BBBB", 50.9990, 7.9990, 51.0010, 8.0010),
+                ],
                 "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
                 "he_latitude_deg double, he_longitude_deg double",
             ),
@@ -569,9 +577,9 @@ def test_an_aerodrome_with_only_a_node_falls_back_to_its_bbox(tmp_path, spark):
     src = PbfLayoutSource(pbf, _NodeAndPolygonStorage(spark))
     aaaa = src.features_for("AAAA")
     bbbb = src.features_for("BBBB")
-    assert len(aaaa) == 1 and (aaaa["ref"] == "A1").all(), (
-        "AAAA has a real aerodrome polygon and must be assigned by containment"
-    )
+    assert (
+        len(aaaa) == 1 and (aaaa["ref"] == "A1").all()
+    ), "AAAA has a real aerodrome polygon and must be assigned by containment"
     assert len(bbbb) == 1 and (bbbb["ref"] == "B1").all(), (
         "BBBB's aerodrome is mapped as a bare node -- it has no area, so the "
         "stand must still reach it through the runway-extent box fallback"
@@ -669,9 +677,7 @@ class _EmptyPolygonStorage:
         return self._t[name]
 
 
-def test_an_aerodrome_whose_polygon_contains_no_features_falls_back_to_its_bbox(
-    tmp_path, spark
-):
+def test_an_aerodrome_whose_polygon_contains_no_features_falls_back_to_its_bbox(tmp_path, spark):
     """EFIT: an icao-tagged aerodrome polygon exists in the extract, but
     every one of the airport's aeroway features sits outside it -- about
     3 km away in the real case. Before this fix, "has a polygon" alone was
@@ -730,10 +736,12 @@ class _EmptyStorage:
     def __init__(self, spark):
         self._t = {
             "oa_airports": spark.createDataFrame(
-                [], "ident string, latitude_deg double, longitude_deg double, type string",
+                [],
+                "ident string, latitude_deg double, longitude_deg double, type string",
             ),
             "oa_runways": spark.createDataFrame(
-                [], "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
+                [],
+                "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
                 "he_latitude_deg double, he_longitude_deg double",
             ),
         }
@@ -790,17 +798,14 @@ def test_an_overlapping_feature_is_assigned_to_the_smaller_polygon(tmp_path, spa
     large = src.features_for("LRGE")
     small = src.features_for("SMAL")
     assert "OVERLAP" not in set(large["ref"]), (
-        "the stand is inside both polygons but must not go to the larger, "
-        "less specific one"
+        "the stand is inside both polygons but must not go to the larger, " "less specific one"
     )
-    assert "OVERLAP" in set(small["ref"]), (
-        "the smaller, more specific polygon must claim an overlapping feature"
-    )
+    assert "OVERLAP" in set(
+        small["ref"]
+    ), "the smaller, more specific polygon must claim an overlapping feature"
 
 
-def test_equal_area_overlap_is_assigned_to_the_alphabetically_first_icao(
-    tmp_path, spark
-):
+def test_equal_area_overlap_is_assigned_to_the_alphabetically_first_icao(tmp_path, spark):
     """Two equal-area polygons leave the area sort with nothing to decide, so
     the tie-break has to be a deterministic rule, not accident of file or
     join order. BBBB's way is written before AAAA's in the fixture, so a
@@ -844,9 +849,7 @@ def test_equal_area_overlap_is_assigned_to_the_alphabetically_first_icao(
     src = PbfLayoutSource(pbf, _EmptyStorage(spark))
     aaaa = src.features_for("AAAA")
     bbbb = src.features_for("BBBB")
-    assert "TIE" in set(aaaa["ref"]), (
-        "equal-area overlap must go to the alphabetically first icao"
-    )
+    assert "TIE" in set(aaaa["ref"]), "equal-area overlap must go to the alphabetically first icao"
     assert "TIE" not in set(bbbb["ref"])
 
 
@@ -874,13 +877,17 @@ class _OverlappingStorage:
     def __init__(self, spark):
         self._t = {
             "oa_airports": spark.createDataFrame(
-                [("AAAA", 49.0000, 6.0000, "medium_airport"),
-                 ("BBBB", 49.0080, 6.0000, "medium_airport")],
+                [
+                    ("AAAA", 49.0000, 6.0000, "medium_airport"),
+                    ("BBBB", 49.0080, 6.0000, "medium_airport"),
+                ],
                 "ident string, latitude_deg double, longitude_deg double, type string",
             ),
             "oa_runways": spark.createDataFrame(
-                [("AAAA", 49.0000, 6.0000, 49.0010, 6.0010),
-                 ("BBBB", 49.0080, 6.0000, 49.0090, 6.0010)],
+                [
+                    ("AAAA", 49.0000, 6.0000, 49.0010, 6.0010),
+                    ("BBBB", 49.0080, 6.0000, 49.0090, 6.0010),
+                ],
                 "airport_ident string, le_latitude_deg double, le_longitude_deg double, "
                 "he_latitude_deg double, he_longitude_deg double",
             ),
@@ -921,9 +928,9 @@ def test_hexagonify_uses_the_pbf_source_when_given_one(spark):
     assert df["hexaero_osm_id"].notna().all(), "hexaero_osm_id is null on the PBF path"
     assert df["hexaero_type"].notna().all(), "hexaero_type is null on the PBF path"
     assert df["hexaero_osm_id"].map(type).eq(int).all(), "hexaero_osm_id is not int"
-    assert df["hexaero_type"].isin(["node", "way", "area", "relation"]).all(), (
-        "hexaero_type is not a valid OSM element type"
-    )
+    assert (
+        df["hexaero_type"].isin(["node", "way", "area", "relation"]).all()
+    ), "hexaero_type is not a valid OSM element type"
 
     # First end-to-end run of the full pipeline (read -> assign -> widths ->
     # polygon conversion -> H3) -- a family silently lost between
@@ -945,9 +952,7 @@ def _fake_overpass_gdf():
     import geopandas as gpd
     from shapely.geometry import LineString, Point
 
-    index = pd.MultiIndex.from_tuples(
-        [("way", 111), ("node", 222)], names=["element", "id"]
-    )
+    index = pd.MultiIndex.from_tuples([("way", 111), ("node", 222)], names=["element", "id"])
     data = {
         "geometry": [
             LineString([(6.20, 49.62), (6.21, 49.63)]),
@@ -982,9 +987,7 @@ def test_hexagonify_pins_reset_index_on_the_overpass_branch(monkeypatch):
     assert set(df["hexaero_type"]) == {"way", "node"}
 
 
-def test_a_feature_in_overlapping_boxes_goes_to_the_nearer_aerodrome_only(
-    tmp_path, spark
-):
+def test_a_feature_in_overlapping_boxes_goes_to_the_nearer_aerodrome_only(tmp_path, spark):
     """The overlap case the ELLX/EBBR test cannot exercise, because nothing in
     the Luxembourg extract is anywhere near Belgium. Here the two aerodromes
     are ~0.89 km apart, so their boxes genuinely overlap (see

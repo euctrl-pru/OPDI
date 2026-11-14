@@ -94,7 +94,7 @@ CORE = [
     "src/opdi/ingestion/osn_adsc.py",
     "src/opdi/pipeline/tracks.py",
     "src/opdi/cleaning/native.py",
-    "src/opdi/config.py",
+    "src/opdi/config",
     "src/opdi/coverage.py",
     "benchmarks/run_adsc_day.py",
 ]
@@ -106,8 +106,16 @@ DAYS = ["2026-06-05", "2026-06-06", "2026-06-07"]
 #: archive's gap list, so "the extra columns are always empty" is a claim about
 #: the archive and not about one Sunday in June.
 CENSUS_DAYS = [
-    "2023-09-01", "2024-03-01", "2024-09-02", "2025-03-01", "2025-09-01",
-    "2026-03-22", "2026-06-01", "2026-06-05", "2026-06-06", "2026-06-07",
+    "2023-09-01",
+    "2024-03-01",
+    "2024-09-02",
+    "2025-03-01",
+    "2025-09-01",
+    "2026-03-22",
+    "2026-06-01",
+    "2026-06-05",
+    "2026-06-06",
+    "2026-06-07",
     "2026-10-15",
 ]
 
@@ -145,8 +153,7 @@ class Job:
         the run can know.
         """
         with tempfile.TemporaryDirectory(prefix=f"adscv1_{self.name}_") as tmp:
-            cmd = [sys.executable, "-u", str(REPO / self.script),
-                   *self.args, "--results-dir", tmp]
+            cmd = [sys.executable, "-u", str(REPO / self.script), *self.args, "--results-dir", tmp]
             print(f"\n=== {self.name} ===\n  {' '.join(cmd[2:])}", flush=True)
             r = subprocess.run(cmd, cwd=REPO)
             if r.returncode != 0:
@@ -158,10 +165,16 @@ class Job:
                 DATA.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, DATA / staged)
                 own = provenance.load_manifest(tmp).get(produced, {})
-                provenance.record(DATA, staged, self.script, self.args,
-                                  self.code_paths, inputs=own.get("inputs"),
-                                  input_tables=list(own.get("input_tables") or {}),
-                                  notes=self.notes)
+                provenance.record(
+                    DATA,
+                    staged,
+                    self.script,
+                    self.args,
+                    self.code_paths,
+                    inputs=own.get("inputs"),
+                    input_tables=list(own.get("input_tables") or {}),
+                    notes=self.notes,
+                )
                 print(f"  staged {staged}")
 
 
@@ -170,76 +183,97 @@ def jobs() -> list:
         Job(
             name="census",
             script="benchmarks/adsc_census.py",
-            args=["--days", *CENSUS_DAYS, "--out-name", "adsc_census.csv",
-                  "--local"],
+            args=["--days", *CENSUS_DAYS, "--out-name", "adsc_census.csv", "--local"],
             outputs={"adsc_census.csv": "adsc_census.csv"},
             code_paths=[],
             notes="What the raw ADS-C topic contains, eleven days across the "
-                  "archive: rows, in-box rows, airframes, median cadence, "
-                  "altitude and geography bands inside the coverage box, "
-                  "exact duplicates, and the fill rate of every column. Reads "
-                  "the topic directly -- no pipeline code can change this "
-                  "answer, which is why it depends on none.",
+            "archive: rows, in-box rows, airframes, median cadence, "
+            "altitude and geography bands inside the coverage box, "
+            "exact duplicates, and the fill rate of every column. Reads "
+            "the topic directly -- no pipeline code can change this "
+            "answer, which is why it depends on none.",
         ),
         Job(
             name="gain_2026",
             script="benchmarks/adsc_coverage_gain.py",
-            args=["--days", *DAYS,
-                  "--gain-name", "adsc_gain_2026.csv",
-                  "--holes-name", "adsc_holes_2026.csv"],
-            outputs={"adsc_gain_2026.csv": "adsc_gain_2026.csv",
-                     "adsc_holes_2026.csv": "adsc_holes_2026.csv"},
+            args=[
+                "--days",
+                *DAYS,
+                "--gain-name",
+                "adsc_gain_2026.csv",
+                "--holes-name",
+                "adsc_holes_2026.csv",
+            ],
+            outputs={
+                "adsc_gain_2026.csv": "adsc_gain_2026.csv",
+                "adsc_holes_2026.csv": "adsc_holes_2026.csv",
+            },
             code_paths=CORE,
             notes="Rows, tracks, track-hours and segments per arm; the "
-                  "reception holes ADS-C closed; the two-callsign "
-                  "merge-neutrality guard. Reads both arms at "
-                  "research/adsc/{base,merged}, built by run_adsc_day.py.",
+            "reception holes ADS-C closed; the two-callsign "
+            "merge-neutrality guard. Reads both arms at "
+            "research/adsc/{base,merged}, built by run_adsc_day.py.",
         ),
         Job(
             name="time_sync_2026",
             script="benchmarks/adsc_time_sync.py",
-            args=["--days", *DAYS,
-                  "--pairs-name", "adsc_time_sync_pairs_2026.csv",
-                  "--out-name", "adsc_time_sync_2026.csv"],
-            outputs={"adsc_time_sync_pairs_2026.csv":
-                         "adsc_time_sync_pairs_2026.csv",
-                     "adsc_time_sync_2026.csv": "adsc_time_sync_2026.csv"},
+            args=[
+                "--days",
+                *DAYS,
+                "--pairs-name",
+                "adsc_time_sync_pairs_2026.csv",
+                "--out-name",
+                "adsc_time_sync_2026.csv",
+            ],
+            outputs={
+                "adsc_time_sync_pairs_2026.csv": "adsc_time_sync_pairs_2026.csv",
+                "adsc_time_sync_2026.csv": "adsc_time_sync_2026.csv",
+            },
             code_paths=CORE,
             notes="Along/cross decomposition of each ADS-C report against "
-                  "ADS-B interpolated to the same instant, per airframe. "
-                  "Reads the shared inputs at research/adsc/input, so it does "
-                  "not depend on either arm having been built.",
+            "ADS-B interpolated to the same instant, per airframe. "
+            "Reads the shared inputs at research/adsc/input, so it does "
+            "not depend on either arm having been built.",
         ),
         Job(
             name="events_2026",
             script="benchmarks/adsc_events_compare.py",
-            args=["--out-name", "adsc_events_2026.csv",
-                  "--by-airport-name", "adsc_events_by_airport_2026.csv"],
-            outputs={"adsc_events_2026.csv": "adsc_events_2026.csv",
-                     "adsc_events_by_airport_2026.csv":
-                         "adsc_events_by_airport_2026.csv"},
-            code_paths=CORE + [
+            args=[
+                "--out-name",
+                "adsc_events_2026.csv",
+                "--by-airport-name",
+                "adsc_events_by_airport_2026.csv",
+            ],
+            outputs={
+                "adsc_events_2026.csv": "adsc_events_2026.csv",
+                "adsc_events_by_airport_2026.csv": "adsc_events_by_airport_2026.csv",
+            },
+            code_paths=CORE
+            + [
                 "benchmarks/events_gt.py",
                 "benchmarks/events_score.py",
                 "benchmarks/event_bench.py",
                 "src/opdi/pipeline/events.py",
             ],
             notes="Both arms against APDF 202606 over the twenty V4 study "
-                  "aerodromes, through one truth frame: per milestone and per "
-                  "aerodrome.",
+            "aerodromes, through one truth frame: per milestone and per "
+            "aerodrome.",
         ),
     ]
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--check", action="store_true",
-                    help="report staleness and exit; no cluster needed")
+    ap.add_argument(
+        "--check", action="store_true", help="report staleness and exit; no cluster needed"
+    )
     ap.add_argument("--force", action="store_true", help="re-run every job")
     ap.add_argument("--only", nargs="+", help="run only these jobs, by name")
-    ap.add_argument("--allow-stale", action="store_true",
-                    help="report staleness but exit 0 -- for rendering a draft "
-                         "without a cluster")
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="report staleness but exit 0 -- for rendering a draft " "without a cluster",
+    )
     args = ap.parse_args()
 
     todo = jobs()
@@ -249,8 +283,7 @@ def main() -> None:
     stale = {j.name: j.stale() for j in todo}
     any_stale = {k: v for k, v in stale.items() if v}
 
-    print(f"analysis at {provenance.git_sha()}"
-          f"{' (dirty)' if provenance.git_dirty() else ''}\n")
+    print(f"analysis at {provenance.git_sha()}" f"{' (dirty)' if provenance.git_dirty() else ''}\n")
     for j in todo:
         why = stale[j.name]
         if why:
@@ -264,9 +297,13 @@ def main() -> None:
         if any_stale and not args.allow_stale:
             raise SystemExit(
                 f"\n{len(any_stale)} job(s) stale. Run without --check to "
-                f"regenerate, or pass --allow-stale to render anyway.")
-        print("\nall outputs current" if not any_stale else
-              "\nrendering with stale outputs (--allow-stale)")
+                f"regenerate, or pass --allow-stale to render anyway."
+            )
+        print(
+            "\nall outputs current"
+            if not any_stale
+            else "\nrendering with stale outputs (--allow-stale)"
+        )
         return
 
     for j in todo:

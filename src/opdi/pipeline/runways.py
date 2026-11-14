@@ -24,10 +24,10 @@ from typing import TYPE_CHECKING, Optional
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
-from opdi.pipeline.flights import angle_between, bearing_deg, haversine_nm
+from opdi.utils.geometry import angle_between, bearing_deg, haversine_nm
 
 FT_PER_M = 3.28084
 FTMIN_PER_MPS = 196.850394
@@ -102,14 +102,10 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         # (some tests) may not. A missing column is a typed null, which the
         # coalesce below then turns into the documented default -- so the
         # extent is optional input, never a hard schema requirement.
-        return (
-            F.col(name).cast("double") if name in rwy.columns
-            else F.lit(None).cast("double")
-        )
+        return F.col(name).cast("double") if name in rwy.columns else F.lit(None).cast("double")
 
     length_nm = (
-        F.coalesce(_extent("length_ft"), F.lit(DEFAULT_RWY_LENGTH_FT))
-        / F.lit(FT_PER_NM)
+        F.coalesce(_extent("length_ft"), F.lit(DEFAULT_RWY_LENGTH_FT)) / F.lit(FT_PER_NM)
     ).alias("rwy_length_nm")
     half_width_nm = F.coalesce(
         _extent("width_ft") / F.lit(2.0) / F.lit(FT_PER_NM),
@@ -122,8 +118,10 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         F.col("le_latitude_deg").cast("double").alias("thr_lat"),
         F.col("le_longitude_deg").cast("double").alias("thr_lon"),
         bearing_deg(
-            F.col("le_latitude_deg"), F.col("le_longitude_deg"),
-            F.col("he_latitude_deg"), F.col("he_longitude_deg"),
+            F.col("le_latitude_deg"),
+            F.col("le_longitude_deg"),
+            F.col("he_latitude_deg"),
+            F.col("he_longitude_deg"),
         ).alias("rwy_bearing"),
         length_nm,
         half_width_nm,
@@ -134,8 +132,10 @@ def runway_thresholds(storage) -> Optional[DataFrame]:
         F.col("he_latitude_deg").cast("double").alias("thr_lat"),
         F.col("he_longitude_deg").cast("double").alias("thr_lon"),
         bearing_deg(
-            F.col("he_latitude_deg"), F.col("he_longitude_deg"),
-            F.col("le_latitude_deg"), F.col("le_longitude_deg"),
+            F.col("he_latitude_deg"),
+            F.col("he_longitude_deg"),
+            F.col("le_latitude_deg"),
+            F.col("le_longitude_deg"),
         ).alias("rwy_bearing"),
         length_nm,
         half_width_nm,
@@ -154,7 +154,7 @@ def detect_runway_movements(
     ``ends`` is one row per (track_id, apt_ident, role) with the aerodrome
     position and elevation; ``role`` is ``"departure"`` or ``"arrival"``.
 
-    The gates are traffic's: within ``runway_max_dist_nm`` of the aerodrome,
+    The limits are those of the traffic library: within ``runway_max_dist_nm`` of the aerodrome,
     below ``runway_max_height_ft`` above the field, groundspeed above
     ``runway_min_groundspeed_kt``, and a vertical rate beyond
     ``runway_min_vert_rate_ftmin`` in the direction the role implies. What
@@ -173,9 +173,7 @@ def detect_runway_movements(
     )
     roc = F.col("vert_rate") * FTMIN_PER_MPS
     gs_kt = F.col("velocity") * KT_PER_MPS
-    dist_nm = haversine_nm(
-        F.col("lat"), F.col("lon"), F.col("apt_lat"), F.col("apt_lon")
-    )
+    dist_nm = haversine_nm(F.col("lat"), F.col("lon"), F.col("apt_lat"), F.col("apt_lon"))
 
     climbing = roc > F.lit(config.runway_min_vert_rate_ftmin)
     descending = roc < -F.lit(config.runway_min_vert_rate_ftmin)
@@ -227,18 +225,18 @@ def detect_runway_movements(
     cand = cand.withColumn(
         "cross_track_nm",
         cross_track_nm(
-            F.col("median_lat"), F.col("median_lon"),
-            F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing"),
+            F.col("median_lat"),
+            F.col("median_lon"),
+            F.col("thr_lat"),
+            F.col("thr_lon"),
+            F.col("rwy_bearing"),
         ),
     )
     from pyspark.sql.window import Window
 
     best = Window.partitionBy("track_id", "role").orderBy(
-        F.col("cross_track_nm").asc(), F.col("bearing_error").asc(),
+        F.col("cross_track_nm").asc(),
+        F.col("bearing_error").asc(),
         F.col("rwy_ident").asc(),
     )
-    return (
-        cand.withColumn("_r", F.row_number().over(best))
-        .filter(F.col("_r") == 1)
-        .drop("_r")
-    )
+    return cand.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1).drop("_r")

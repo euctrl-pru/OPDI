@@ -6,17 +6,15 @@ dropped, and the NULL handling that let an incomplete fuzzy rule win -- plus
 the crossing path that now routes through ``pipeline/crossings.py``.
 """
 
-import pytest
+from conftest import make_track
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-from conftest import make_track
-
 from opdi.config import EventConfig
 from opdi.pipeline.events import (
+    _smooth_phase,
     calculate_horizontal_segment_events,
     calculate_threshold_crossing_events,
-    _smooth_phase,
 )
 
 FT_PER_M = 3.28084
@@ -49,9 +47,7 @@ def _labelled(spark, labels, step_s=5):
         "flight_phase",
         F.element_at(
             F.array(*[F.lit(x) for x in labels]),
-            F.row_number()
-            .over(Window.partitionBy("track_id").orderBy("event_time"))
-            .cast("int"),
+            F.row_number().over(Window.partitionBy("track_id").orderBy("event_time")).cast("int"),
         ),
     )
 
@@ -59,6 +55,7 @@ def _labelled(spark, labels, step_s=5):
 # ---------------------------------------------------------------------------
 # D2 -- the smoothing OpenAP applies and the port dropped
 # ---------------------------------------------------------------------------
+
 
 def test_smoothing_removes_a_single_flickering_sample(spark):
     """One stray label is exactly what injects a spurious level-start/end pair."""
@@ -84,9 +81,7 @@ def test_smoothing_keeps_a_real_sustained_transition(spark):
 
 def test_smoothing_is_off_when_the_window_is_zero(spark):
     """``legacy()`` sets the window to zero and must be a pass-through."""
-    df = make_track(spark, [{"t": i * 5} for i in range(5)]).withColumn(
-        "flight_phase", F.lit("CL")
-    )
+    df = make_track(spark, [{"t": i * 5} for i in range(5)]).withColumn("flight_phase", F.lit("CL"))
 
     assert _smooth_phase(df, 0.0).collect() == df.collect()
     assert EventConfig.legacy().phase_twindow_seconds == 0.0
@@ -95,6 +90,7 @@ def test_smoothing_is_off_when_the_window_is_zero(spark):
 # ---------------------------------------------------------------------------
 # D4 -- a rule with a NULL input must abstain, not win
 # ---------------------------------------------------------------------------
+
 
 def test_a_rule_with_a_missing_input_does_not_win(spark):
     """`F.least` skips NULLs, so a two-of-three rule can out-score a complete
@@ -126,8 +122,7 @@ def test_a_complete_rule_still_wins(spark):
     is under test, and a cruise phase is what produces a level segment.
     """
     samples = [
-        {"t": i * 5, "baro_altitude": _m(35000), "vert_rate": 0.0,
-         "velocity": 600 / KT_PER_MPS}
+        {"t": i * 5, "baro_altitude": _m(35000), "vert_rate": 0.0, "velocity": 600 / KT_PER_MPS}
         for i in range(4)
     ]
     sdf = _measured(make_track(spark, samples))
@@ -145,6 +140,7 @@ def test_a_complete_rule_still_wins(spark):
 # D8 -- the crossing path, wired through the new detector
 # ---------------------------------------------------------------------------
 
+
 def test_crossing_events_carry_sequence_and_direction(spark):
     profile = [9000, 9500, 10500, 11000, 10500, 9500, 9000, 9500, 10500, 11000]
     sdf = _measured(
@@ -152,7 +148,8 @@ def test_crossing_events_carry_sequence_and_direction(spark):
     )
 
     rows = [
-        r for r in calculate_threshold_crossing_events(sdf, EventConfig()).collect()
+        r
+        for r in calculate_threshold_crossing_events(sdf, EventConfig()).collect()
         if r.type == "xing-fl100"
     ]
     rows.sort(key=lambda r: r.event_time)
@@ -169,9 +166,14 @@ def test_crossing_events_carry_sequence_and_direction(spark):
 def test_crossing_events_emit_the_published_type_shape(spark):
     """One type per level, per the agreed schema -- not per direction."""
     sdf = _measured(
-        make_track(spark, [{"t": 0, "baro_altitude": _m(4000)},
-                           {"t": 5, "baro_altitude": _m(11000)},
-                           {"t": 10, "baro_altitude": _m(12000)}])
+        make_track(
+            spark,
+            [
+                {"t": 0, "baro_altitude": _m(4000)},
+                {"t": 5, "baro_altitude": _m(11000)},
+                {"t": 10, "baro_altitude": _m(12000)},
+            ],
+        )
     )
 
     types = {r.type for r in calculate_threshold_crossing_events(sdf, EventConfig()).collect()}
@@ -210,9 +212,12 @@ def _departure(spark, field_elev_ft, with_elevation=True):
         make_track(
             spark,
             [
-                {"t": i * 5, "baro_altitude": _m(a),
-                 "vert_rate": 0.0 if i < len(on_ground) else 12.0,
-                 "velocity": (20 if i < len(on_ground) else 250) / KT_PER_MPS}
+                {
+                    "t": i * 5,
+                    "baro_altitude": _m(a),
+                    "vert_rate": 0.0 if i < len(on_ground) else 12.0,
+                    "velocity": (20 if i < len(on_ground) else 250) / KT_PER_MPS,
+                }
                 for i, a in enumerate(on_ground + climb)
             ],
         )
@@ -230,7 +235,9 @@ def test_a_high_elevation_departure_gets_no_takeoff_without_the_fix(spark):
     -- which requires prev_phase == GND -- is never emitted at all."""
     sdf = _departure(spark, 5000, with_elevation=False)
 
-    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig.legacy()).collect()}
+    types = {
+        r.type for r in calculate_horizontal_segment_events(sdf, EventConfig.legacy()).collect()
+    }
 
     assert "take-off" not in types
 
@@ -246,7 +253,8 @@ def test_the_same_departure_yields_a_takeoff_with_the_fix(spark):
 def test_a_sea_level_departure_is_unaffected(spark):
     """The fix must not change what already worked."""
     with_fix = {
-        r.type for r in calculate_horizontal_segment_events(_departure(spark, 0), GROUND_CONTACT).collect()
+        r.type
+        for r in calculate_horizontal_segment_events(_departure(spark, 0), GROUND_CONTACT).collect()
     }
 
     assert "take-off" in with_fix
@@ -265,9 +273,11 @@ def test_a_missing_elevation_degrades_to_the_published_behaviour(spark):
 def test_the_arrival_end_elevation_also_counts(spark):
     """Both ends are attached because a track is on the ground at one of them;
     a landing at a high field must resolve against ADES, not ADEP."""
-    sdf = _departure(spark, 5000).withColumn(
-        "elev_adep_ft", F.lit(None).cast("double")
-    ).withColumn("elev_ades_ft", F.lit(5000.0))
+    sdf = (
+        _departure(spark, 5000)
+        .withColumn("elev_adep_ft", F.lit(None).cast("double"))
+        .withColumn("elev_ades_ft", F.lit(5000.0))
+    )
 
     types = {r.type for r in calculate_horizontal_segment_events(sdf, GROUND_CONTACT).collect()}
 
@@ -292,27 +302,39 @@ def _cruise_traj(n_cruise, step=60):
     """
     samples, t = [], 0
     for alt in range(10000, 35000, 5000):
-        samples.append({"t": t, "baro_altitude": _m(alt),
-                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        samples.append(
+            {
+                "t": t,
+                "baro_altitude": _m(alt),
+                "vert_rate": _m(2000) / 60,
+                "velocity": 300 / KT_PER_MPS,
+            }
+        )
         t += step
     for _ in range(n_cruise):
-        samples.append({"t": t, "baro_altitude": _m(35000),
-                        "vert_rate": 0.0, "velocity": 600 / KT_PER_MPS})
+        samples.append(
+            {"t": t, "baro_altitude": _m(35000), "vert_rate": 0.0, "velocity": 600 / KT_PER_MPS}
+        )
         t += step
     for alt in range(30000, 5000, -5000):
-        samples.append({"t": t, "baro_altitude": _m(alt),
-                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        samples.append(
+            {
+                "t": t,
+                "baro_altitude": _m(alt),
+                "vert_rate": -_m(2000) / 60,
+                "velocity": 300 / KT_PER_MPS,
+            }
+        )
         t += step
     return samples
 
 
 def _counts(spark, samples, config):
-    out = calculate_horizontal_segment_events(
-        _measured(make_track(spark, samples)), config
-    )
+    out = calculate_horizontal_segment_events(_measured(make_track(spark, samples)), config)
     types = [r.type for r in out.collect()]
-    return {t: types.count(t) for t in
-            ("level-start", "level-end", "top-of-climb", "top-of-descent")}
+    return {
+        t: types.count(t) for t in ("level-start", "level-end", "top-of-climb", "top-of-descent")
+    }
 
 
 def test_a_one_sample_cruise_emits_both_a_start_and_an_end(spark):
@@ -374,22 +396,34 @@ def _level_off_traj(trailing_abstention, step=60):
     """
     samples, t = [], 0
     for alt in (8000, 11000):
-        samples.append({"t": t, "baro_altitude": _m(alt),
-                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        samples.append(
+            {
+                "t": t,
+                "baro_altitude": _m(alt),
+                "vert_rate": _m(2000) / 60,
+                "velocity": 300 / KT_PER_MPS,
+            }
+        )
         t += step
     for _ in range(3):
-        samples.append({"t": t, "baro_altitude": _m(15000),
-                        "vert_rate": 0.0, "velocity": 300 / KT_PER_MPS})
+        samples.append(
+            {"t": t, "baro_altitude": _m(15000), "vert_rate": 0.0, "velocity": 300 / KT_PER_MPS}
+        )
         t += step
     if trailing_abstention:
         # No velocity -> the cruise rule is incomplete -> the classifier
         # abstains and flight_phase is NULL.
-        samples.append({"t": t, "baro_altitude": _m(15000),
-                        "vert_rate": 0.0, "velocity": None})
+        samples.append({"t": t, "baro_altitude": _m(15000), "vert_rate": 0.0, "velocity": None})
         t += step
     for alt in (12000, 9000, 6000):
-        samples.append({"t": t, "baro_altitude": _m(alt),
-                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        samples.append(
+            {
+                "t": t,
+                "baro_altitude": _m(alt),
+                "vert_rate": -_m(2000) / 60,
+                "velocity": 300 / KT_PER_MPS,
+            }
+        )
         t += step
     return samples
 
@@ -430,17 +464,35 @@ def test_scattered_abstentions_do_not_shatter_one_level_segment(spark):
     """
     samples, t, step = [], 0, 60
     for alt in (8000, 11000):
-        samples.append({"t": t, "baro_altitude": _m(alt),
-                        "vert_rate": _m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        samples.append(
+            {
+                "t": t,
+                "baro_altitude": _m(alt),
+                "vert_rate": _m(2000) / 60,
+                "velocity": 300 / KT_PER_MPS,
+            }
+        )
         t += step
     for i in range(6):
-        samples.append({"t": t, "baro_altitude": _m(15000), "vert_rate": 0.0,
-                        # every other sample abstains
-                        "velocity": None if i % 2 else 300 / KT_PER_MPS})
+        samples.append(
+            {
+                "t": t,
+                "baro_altitude": _m(15000),
+                "vert_rate": 0.0,
+                # every other sample abstains
+                "velocity": None if i % 2 else 300 / KT_PER_MPS,
+            }
+        )
         t += step
     for alt in (12000, 9000, 6000):
-        samples.append({"t": t, "baro_altitude": _m(alt),
-                        "vert_rate": -_m(2000) / 60, "velocity": 300 / KT_PER_MPS})
+        samples.append(
+            {
+                "t": t,
+                "baro_altitude": _m(alt),
+                "vert_rate": -_m(2000) / 60,
+                "velocity": 300 / KT_PER_MPS,
+            }
+        )
         t += step
 
     got = _counts(spark, samples, EventConfig())
