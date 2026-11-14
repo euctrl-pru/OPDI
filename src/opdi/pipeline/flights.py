@@ -28,7 +28,6 @@ from pyspark.sql.functions import (
     collect_list,
     concat_ws,
     cos,
-    expr,
     lit,
     radians,
     row_number,
@@ -1198,12 +1197,23 @@ class FlightListProcessor:
         # The airport is read from the row ranked first; `first()` would
         # take whichever row the aggregation meets first, which is not always
         # the ranked one.
+        # The other candidates in rank order: a list collected as the rows come
+        # would follow the order Spark meets them in, which changes between runs.
+        others = F.sort_array(
+            collect_list(
+                when(
+                    ~col("is_most_likely"),
+                    F.struct(col("row_number").alias("r"), col("apt_ident").alias("a")),
+                )
+            )
+        )
         result_df = df_numbered.groupBy(key_columns).agg(
             f_max(when(col("is_most_likely"), col("apt_ident"))).alias("most_likely_airport"),
-            collect_list(expr("case when not is_most_likely then apt_ident end")).alias(
-                "potential_airports"
-            ),
+            others.alias("_others"),
         )
+        result_df = result_df.withColumn(
+            "potential_airports", F.transform(col("_others"), lambda x: x["a"])
+        ).drop("_others")
 
         result_df = result_df.select(
             *key_columns, col("most_likely_airport"), col("potential_airports")
@@ -1268,7 +1278,9 @@ class FlightListProcessor:
             "track_id", "icao24", "flight_id", "role", "apt", "source", "event_time"
         )
 
-        # The other candidate airports, nearest first, for ADEP_P and ADES_P.
+        # The other candidate airports, nearest first (then by code), for
+        # ADEP_P and ADES_P. Sorted, not collected as the rows come, so that
+        # every run lists them in the same order.
         others = (
             cand.join(
                 chosen.select("track_id", "role", col("apt").alias("_chosen")),
@@ -1277,7 +1289,13 @@ class FlightListProcessor:
             )
             .filter(col("apt_ident") != col("_chosen"))
             .groupBy("track_id", "role")
-            .agg(collect_list("apt_ident").alias("potential"))
+            .agg(
+                F.sort_array(
+                    collect_list(F.struct(col("dist_nm").alias("d"), col("apt_ident").alias("a")))
+                ).alias("_others")
+            )
+            .withColumn("potential", F.transform(col("_others"), lambda x: x["a"]))
+            .drop("_others")
         )
 
         j = chosen.join(others, ["track_id", "role"], "left")
