@@ -1589,7 +1589,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     r.add_argument("--day", required=True, help="YYYY-MM-DD")
     r.add_argument("--run", choices=("inputs", *RUNS, "all"), required=True)
     r.add_argument("--steps", nargs="+", default=None, help="a subset of the part's steps")
-    r.add_argument("--executors", type=int, default=8)
+    r.add_argument("--executors", type=int, default=12, help="at most 12 on the cluster")
     r.add_argument("--sample-mod", type=int, default=1, help="keep one aircraft in N")
     r.add_argument("--need-gb", type=float, default=NEED_GB, help="free space needed, GB")
     r.add_argument("--keep-tracks", action="store_true", help="keep each run's osn_tracks")
