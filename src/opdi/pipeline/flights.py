@@ -13,6 +13,7 @@ thresholds are those of :class:`opdi.config.DetectionConfig`.
 See https://www.opdi.aero/content/methods/airports.html.
 """
 
+import functools
 import os
 from datetime import date, datetime
 from typing import List, Optional
@@ -218,6 +219,32 @@ def resolve_flight_id(sv: DataFrame, track_col: str = "track_id") -> DataFrame:
     )
 
 
+def _releases_zones(method):
+    """Let go of the zones kept on the executors when the outermost call returns.
+
+    :meth:`FlightListProcessor._load_airports_hex` keeps the zone table on
+    the executors for the rest of a step. The public methods that can read
+    it carry this decorator: the first one entered lets the zones go when it
+    returns or fails, and the calls nested inside it keep them.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        depth = getattr(self, "_zone_users", 0)
+        self._zone_users = depth + 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._zone_users = depth
+            if depth == 0:
+                zones = getattr(self, "_zones", None)
+                if zones is not None:
+                    zones.unpersist()
+                    self._zones = None
+
+    return wrapper
+
+
 class FlightListProcessor:
     """Step 03: build the flight list from the tracks.
 
@@ -410,6 +437,8 @@ class FlightListProcessor:
             # candidates, trend), and each read of the table opens all of its
             # files again. Kept data that an executor loses are read again
             # from the table, so a lost executor never changes the result.
+            # The public method that started the work lets them go when it
+            # returns (``_releases_zones``).
             if getattr(self, "_zones", None) is None:
                 self._zones = self.storage.read_table("h3_airport_detection_zones").cache()
             return self._zones
@@ -432,6 +461,7 @@ class FlightListProcessor:
         sdf_apt: DataFrame,
         max_radius_nm: float,
         sched_penalty_nm: float = 0.0,
+        broadcast_reports: bool = False,
     ) -> DataFrame:
         """Candidate (report, airport) pairs, with their exact distance.
 
@@ -442,6 +472,12 @@ class FlightListProcessor:
         ``sched_penalty_nm`` is added to the distance of an airport without
         scheduled service, so that a small or military field near the
         departure track does not win on distance alone. 0 means no penalty.
+
+        ``broadcast_reports`` sends the reports in ``sv`` to every executor
+        instead of moving both sides by cell. Only for the end reports of one
+        day (two per track, about 350,000 rows worldwide): over a month they
+        are some 10 million rows, too many to copy to every executor and to
+        the driver.
         """
         radius_col = next(
             (c for c in ("apt_max_c_radius_nm", "max_c_radius_nm") if c in sdf_apt.columns),
@@ -450,11 +486,12 @@ class FlightListProcessor:
         if radius_col:
             sdf_apt = sdf_apt.filter(col(radius_col) <= float(max_radius_nm))
 
-        # The end reports (two per track) are few beside the zones, so they
-        # are sent to every executor and the zones are not moved. Moving both
+        # The end reports of one day are few beside the zones, so they are
+        # sent to every executor and the zones are not moved. Moving both
         # sides by cell put the cells of busy airports, where many tracks end
         # and many zones overlap, into a few long tasks.
-        j = sdf_apt.join(F.broadcast(sv), sv.h3_res_7 == sdf_apt.apt_hex_id, "inner")
+        reports = F.broadcast(sv) if broadcast_reports else sv
+        j = sdf_apt.join(reports, sv.h3_res_7 == sdf_apt.apt_hex_id, "inner")
         j = j.withColumn(
             "dist_nm",
             haversine_nm(col("lat"), col("lon"), col("apt_latitude_deg"), col("apt_longitude_deg")),
@@ -525,6 +562,7 @@ class FlightListProcessor:
         self._max_elev_ft = float(row[0]) if row and row[0] is not None else 0.0
         return self._max_elev_ft
 
+    @_releases_zones
     def build_endpoint_candidates(
         self,
         month: date,
@@ -573,7 +611,13 @@ class FlightListProcessor:
         )
 
         sdf_apt = self._load_airports_hex()
-        cand = self._candidates(ends, sdf_apt, max_radius_nm=max_radius_nm)
+        # Broadcast only for one day (see ``_candidates``).
+        cand = self._candidates(
+            ends,
+            sdf_apt,
+            max_radius_nm=max_radius_nm,
+            broadcast_reports=self._batch_day is not None,
+        )
 
         # The zones carry no airport data, so the elevation comes from
         # OurAirports. Without it the height test could only be met by
@@ -1477,6 +1521,7 @@ class FlightListProcessor:
     #: :meth:`_get_data_within_timeframe` as the default batch selector.
     _batch_day = None
 
+    @_releases_zones
     def process_day(
         self,
         day: date,
@@ -1512,11 +1557,8 @@ class FlightListProcessor:
             self.process_overflights(day, skip_if_processed)
         finally:
             self._batch_day = None
-            zones = getattr(self, "_zones", None)
-            if zones is not None:
-                zones.unpersist()
-                self._zones = None
 
+    @_releases_zones
     def process_dai(
         self,
         month: date,
@@ -1645,6 +1687,7 @@ class FlightListProcessor:
         self._mark_month_processed(month, self._dai_log)
         print(f"DAI processing complete for {month}.")
 
+    @_releases_zones
     def process_overflights(
         self,
         month: date,
@@ -1678,6 +1721,7 @@ class FlightListProcessor:
         self._mark_month_processed(month, self._overflight_log)
         print(f"Overflight processing complete for {month}.")
 
+    @_releases_zones
     def process_date_range(
         self,
         start_month: date,
