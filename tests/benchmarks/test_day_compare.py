@@ -177,6 +177,10 @@ def test_without_a_subcommand_the_events_are_compared():
     assert args.command == "events"
     args = c.parse(["statevectors", "--before", "a", "--after", "b", "--out", "x.csv"])
     assert args.command == "statevectors" and args.day is None
+    assert c.inputs_of("flightlist", "a", "b", None) == [
+        f"{c.PREFIX}/a/opdi_flight_list",
+        f"{c.PREFIX}/b/opdi_flight_list",
+    ]
 
 
 def test_the_manifest_records_the_command_line_and_the_inputs(tmp_path, monkeypatch):

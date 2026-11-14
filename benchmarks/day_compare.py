@@ -42,7 +42,9 @@ of tracks, the track ids in each run and in both.
     day_compare.py tracks --day 2026-06-14 --before m12before --after m12after --out ...
     day_compare.py statevectors --before s2before --after s2after --out ...
 
-``tracks`` compares ``osn_tracks`` and ``osn_tracks_clean`` of the day on
+``flightlist`` compares the working flight list of the day (step 03, and
+04b when it ran) on the track id. ``tracks`` compares ``osn_tracks`` and
+``osn_tracks_clean`` of the day on
 ``(track_id, event_time)``; ``statevectors`` compares the whole
 ``osn_statevectors_v2`` of both runs on ``(icao24, event_time)``. The output
 and the input tables are recorded in the ``_manifest.json`` beside the CSV
@@ -401,7 +403,7 @@ def write_rows(path: Path, rows: list[dict]) -> None:
             writer.writerow({k: r.get(k, "") for k in COLUMNS})
 
 
-SUBCOMMANDS = ("events", "tracks", "statevectors")
+SUBCOMMANDS = ("events", "tracks", "statevectors", "flightlist")
 
 
 def table(label: str, name: str) -> str:
@@ -416,6 +418,8 @@ def inputs_of(command: str, before: str, after: str, day: date | None) -> list[s
         return [table(label, n) for label in (before, after) for n in names]
     if command == "statevectors":
         return [table(label, "osn_statevectors_v2") for label in (before, after)]
+    if command == "flightlist":
+        return [table(label, "opdi_flight_list") for label in (before, after)]
     return [
         published(label, kind, day)
         for label in (before, after)
@@ -484,6 +488,14 @@ def main(argv=None) -> int:
                     for label in (args.before, args.after)
                 )
                 rows += compare_content(tb, ta, ["track_id", "event_time"], name, id_col="track_id")
+        elif args.command == "flightlist":
+            fb, fa = (
+                spark.read.parquet(table(label, "opdi_flight_list")).filter(
+                    F.col("DOF") == F.lit(day)
+                )
+                for label in (args.before, args.after)
+            )
+            rows = compare_content(fb, fa, ["id"], "opdi_flight_list")
         elif args.command == "statevectors":
             sb, sa = (
                 spark.read.parquet(table(label, "osn_statevectors_v2"))
