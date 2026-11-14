@@ -13,7 +13,7 @@ import os
 import subprocess
 import time
 from calendar import timegm
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 from pyspark.sql import DataFrame, SparkSession
@@ -27,6 +27,19 @@ from opdi.utils.storage import StorageManager
 OSN_STATE_VECTORS = "s3a://opensky-hdfs-backup/tables_v4/state_vectors"
 
 
+def _utc_hour(value: Union[date, datetime]) -> datetime:
+    """The start of the hour of ``value`` in UTC, as a naive datetime.
+
+    A day is read from its midnight. A naive datetime is a time in UTC; one
+    with a time zone is converted to UTC first.
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.replace(minute=0, second=0, microsecond=0)
+    return datetime(value.year, value.month, value.day)
+
+
 def hour_paths(
     start: Union[date, datetime],
     end: Union[date, datetime],
@@ -34,16 +47,12 @@ def hour_paths(
 ) -> List[str]:
     """The hourly folders of the archive from ``start`` to ``end`` (end excluded), in UTC.
 
-    ``start`` and ``end`` are days (from midnight) or times (from that hour).
-    Each folder is named after the Unix time of its first second.
+    ``start`` and ``end`` are days (from midnight UTC) or times (from that
+    hour). A time without a time zone is a time in UTC; a time with one is
+    converted to UTC. Each folder is named after the Unix time of its first
+    second.
     """
-
-    def _as_time(value):
-        if isinstance(value, datetime):
-            return value.replace(minute=0, second=0, microsecond=0)
-        return datetime(value.year, value.month, value.day)
-
-    current, stop = _as_time(start), _as_time(end)
+    current, stop = _utc_hour(start), _utc_hour(end)
     paths = []
     while current < stop:
         paths.append(f"{base}/hour={timegm(current.timetuple())}")
@@ -529,9 +538,17 @@ class StateVectorIngestion:
         partitions directly via Spark's S3A filesystem. Intended for
         the ``opensky`` environment.
 
+        Every day folder of ``osn_statevectors_v2`` that the hours read touch
+        is replaced as a whole, by the reports of those hours only: a part of
+        a day replaces the day by that part. The folders are emptied before
+        the archive has been read in full, so a read that fails leaves those
+        days absent from the table. The step is then not marked done, and the
+        next run fetches the days again. Reports outside the hours read are
+        left out, so no other day folder changes.
+
         Args:
             start_date: First day to ingest (inclusive), or a time to start
-                at that hour.
+                at that hour. Times without a time zone are in UTC.
             end_date: Last day to ingest (exclusive), or a time to stop
                 before that hour.
             s3_base_path: S3 prefix for hourly state-vector partitions.
@@ -556,6 +573,13 @@ class StateVectorIngestion:
         # Handle legacy 'time' column
         if "time" in df.columns:
             df = df.withColumnRenamed("time", "event_time")
+
+        # Only the reports of the hours read. Each hourly folder holds the
+        # reports of its hour; a report of another hour would be written into
+        # a day folder that this call did not replace.
+        lo = timegm(_utc_hour(start_date).timetuple())
+        hi = timegm(_utc_hour(end_date).timetuple())
+        df = df.filter((col("event_time") >= lo) & (col("event_time") < hi))
 
         # Apply bounding box and time interval filters (before timestamp conversion)
         df = self._apply_filters(df)

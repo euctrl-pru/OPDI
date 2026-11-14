@@ -36,7 +36,7 @@ vectors are in SI units, as OpenSky delivers ADS-B. The reports are converted
 on the way in, with the factors used throughout the pipeline.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import List, Optional, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
@@ -229,13 +229,10 @@ class AdscIngestion:
         schema already carries a data column called ``hour`` and the two would
         collide with "Found duplicate column(s)".
         """
-        current = datetime(start_date.year, start_date.month, start_date.day)
-        end_dt = datetime(end_date.year, end_date.month, end_date.day)
-        out = []
-        while current < end_dt:
-            out.append(f"{self.base}/hour={int(current.timestamp())}")
-            current += timedelta(hours=1)
-        return out
+        from opdi.ingestion.osn_statevectors import hour_paths
+
+        # In UTC whatever the machine's time zone (see ``hour_paths``).
+        return hour_paths(start_date, end_date, base=self.base)
 
     def existing(self, paths: List[str]) -> List[str]:
         """The subset of *paths* that exists.
