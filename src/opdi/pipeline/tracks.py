@@ -96,8 +96,9 @@ def keep_aircraft_seen_in(df, claim_start, claim_end):
         .distinct()
     )
     # A join condition rather than ``on="icao24"``, which would move the
-    # column to the front.
-    return df.join(seen, df["icao24"] == seen["_seen_icao24"], "left_semi")
+    # column to the front. NULL-safe: reports without an address are one
+    # group for the track rule, and they are kept when the day has some.
+    return df.join(seen, df["icao24"].eqNullSafe(seen["_seen_icao24"]), "left_semi")
 
 
 def keep_tracks_starting_in(df, claim_start, claim_end):

@@ -21,6 +21,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 from conftest import make_track
 from pyspark.sql import SparkSession
@@ -797,3 +798,95 @@ def test_leaving_out_the_aircraft_not_seen_on_the_day_keeps_the_tracks(spark):
     filtered = keep_tracks_starting_in(keep_aircraft_seen_in(df, day, end), day, end)
     assert sorted(plain.collect()) == sorted(filtered.collect())
     assert filtered.count() > 0
+
+
+def test_reports_without_an_address_are_kept_when_the_day_has_some(spark):
+    """Reports with no ``icao24`` form tracks like any other group; the filter
+    keeps them when the day holds one, as it keeps an aircraft seen on the day."""
+    from opdi.pipeline.tracks import keep_aircraft_seen_in
+
+    day = dt.datetime(2026, 6, 14)
+    end = day + dt.timedelta(days=1)
+    rows = [
+        ("a", day + dt.timedelta(hours=1)),
+        (None, day - dt.timedelta(hours=2)),
+        (None, day + dt.timedelta(hours=2)),
+        (None, day + dt.timedelta(hours=26)),
+    ]
+    df = spark.createDataFrame(rows, "icao24 string, event_time timestamp")
+    kept = keep_aircraft_seen_in(df, day, end)
+    assert sorted(kept.collect(), key=repr) == sorted(
+        (spark.createDataFrame(rows, "icao24 string, event_time timestamp").collect()), key=repr
+    )
+    # With no report without an address on the day, those of the other days go.
+    off_day = [r for r in rows if not (r[0] is None and day <= r[1] < end)]
+    kept = keep_aircraft_seen_in(
+        spark.createDataFrame(off_day, "icao24 string, event_time timestamp"), day, end
+    )
+    assert [r.icao24 for r in kept.collect()] == ["a"]
+
+
+def test_the_track_step_gives_the_same_tracks_with_and_without_the_aircraft_filter(
+    spark, tmp_path, monkeypatch
+):
+    """Step 02 on the golden day, with reports added of an aircraft seen only
+    the day before and of reports without an address: the same track ids and
+    rows for the day with the filter as without it."""
+    import golden_pipeline
+
+    import opdi.pipeline.tracks as tracks
+    from opdi.periodrun import run_day_step
+    from opdi.utils.storage import StorageManager
+
+    config = golden_pipeline.configuration("default", str(tmp_path / "wh"))
+    golden_pipeline.write_inputs(spark, config, "default")
+    storage = StorageManager(spark, config)
+    sv = storage.read_table("osn_statevectors_v2")
+    first = sorted(r.icao24 for r in sv.select("icao24").distinct().collect())[0]
+    one = sv.filter(F.col("icao24") == first)
+    t0 = one.agg(F.min("event_time")).first()[0]
+    # Moved to start two hours before the day.
+    shift = t0 - (dt.datetime.combine(golden_pipeline.DAY, dt.time()) - dt.timedelta(hours=2))
+    seconds = int(shift.total_seconds())
+    earlier = one.withColumn(
+        "event_time", F.col("event_time") - F.make_dt_interval(secs=F.lit(seconds))
+    ).withColumn("event_time_day", F.to_date("event_time"))
+    no_address = F.lit(None).cast("string")
+    extra = (
+        # An aircraft received only in the hours before the day.
+        earlier.withColumn("icao24", F.lit("zz0001"))
+        # Reports without an address, on the day and the day before.
+        .unionByName(one.withColumn("icao24", no_address)).unionByName(
+            earlier.withColumn("icao24", no_address)
+        )
+    )
+    rows = sv.unionByName(extra).localCheckpoint(eager=True)
+    storage.write_table(
+        rows, "osn_statevectors_v2", mode="overwrite", partition_by=["event_time_day"]
+    )
+
+    def run(label):
+        run_day_step(spark, config, "02", golden_pipeline.DAY, {"log_dir": str(tmp_path / label)})
+        out = storage.read_table("osn_tracks")
+        out = out.select(
+            *[
+                (
+                    F.to_json(F.col(f.name)).alias(f.name)
+                    if f.dataType.typeName() in ("array", "map", "struct")
+                    else F.col(f.name)
+                )
+                for f in out.schema.fields
+            ]
+        ).toPandas()
+        spark.catalog.clearCache()
+        cols = sorted(out.columns)
+        return out[cols].sort_values(cols).reset_index(drop=True)
+
+    filtered = run("with")
+    monkeypatch.setattr(tracks, "keep_aircraft_seen_in", lambda df, start, end: df)
+    plain = run("without")
+
+    assert set(filtered["track_id"]) == set(plain["track_id"])
+    pd.testing.assert_frame_equal(filtered, plain)
+    assert filtered["icao24"].isna().any()
+    assert "zz0001" not in set(filtered["icao24"].dropna())
