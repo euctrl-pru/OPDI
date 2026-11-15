@@ -28,6 +28,7 @@ OPENSKY_CLUSTER_SETTINGS = {
     # of them tiny (the median one ran 0.4 s); with 104 it took 1,507 and 1,506 s
     # instead of 1,662 and 1,692 s on 13 executors (-10%, 33,600 instead of
     # 35,750 to 36,250 executor-seconds). Steps 03, 04b and 09 unchanged.
+    # Step 02 uses 416 (OPENSKY_STEP_SETTINGS).
     "spark.sql.shuffle.partitions": "104",
     # Copies lost with an executor are made again on another one, so the
     # kept frames of step 04 (kept twice, see
@@ -53,6 +54,24 @@ OPENSKY_CLUSTER_SETTINGS = {
     # each stage, so that the event log shows how close a step comes to the
     # container's limit. Read from /proc; no measurable cost.
     "spark.executor.processTreeMetrics.enabled": "true",
+}
+
+#: Spark settings of single steps of the ``opensky`` cluster, set by
+#: :func:`opdi.periodrun.run_day_step` for the time of the step only (see
+#: :attr:`SparkConfig.step_settings`). Measured on the worldwide day
+#: 2026-06-14 (the processing speed note of the portal, partition_tests.csv).
+OPENSKY_STEP_SETTINGS = {
+    # Step 02 sorts the reports of each aircraft for its window functions.
+    # With 104 parts each part held about 420 MB of compressed shuffle data,
+    # more than a task's share of memory: the step spilled 166 GB to the
+    # executors' local disks and took 1,630 and 1,596 s. With 416 parts it
+    # spilled nothing and took 1,484 and 1,446 s (-9%, 36,300 instead of
+    # 38,700 executor-seconds); 208 parts were as fast (1,468 and 1,449 s)
+    # but left 0.9 GiB of the 13.5 GiB container instead of 1.9 GiB at the
+    # peak, 832 parts were slower (1,521 s). The tracks were the same row for
+    # row. Step 02a does not spill with 104 parts and is slower with 416
+    # (842 and 837 s against 706 and 727 s), so it keeps the session's 104.
+    "02": {"spark.sql.shuffle.partitions": "416"},
 }
 
 #: Environment variable that names the warehouse of the ``opensky``
@@ -202,6 +221,7 @@ class OPDIConfig:
                     # uses and allow fewer executors.
                     k8s_executor_cores_limit="2",
                     cluster_settings=dict(OPENSKY_CLUSTER_SETTINGS),
+                    step_settings={k: dict(v) for k, v in OPENSKY_STEP_SETTINGS.items()},
                 ),
             )
         else:

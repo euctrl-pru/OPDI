@@ -105,6 +105,22 @@ class SparkConfig:
     cluster_settings: Dict[str, str] = field(default_factory=dict)
     """Further Spark settings for a run with executors on Kubernetes only, added by
     :meth:`to_distributed_config`. A session on one machine (the tests) never gets them."""
+    step_settings: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    """Spark settings for one step only, by step id, for a run with executors on
+    Kubernetes: :func:`opdi.periodrun.run_day_step` sets them before the step and
+    puts the session's values back after it (see :meth:`settings_for_step`).
+    Only settings Spark accepts while a session runs (``spark.sql.*``) can be
+    given here."""
+
+    def settings_for_step(self, step: str) -> Dict[str, str]:
+        """The settings of :attr:`step_settings` for ``step``.
+
+        Empty without executors on Kubernetes, so a session on one machine
+        (the tests) is never changed.
+        """
+        if not self.k8s_master:
+            return {}
+        return dict(self.step_settings.get(step, {}))
 
     # Feature flags
     enable_hive: bool = True

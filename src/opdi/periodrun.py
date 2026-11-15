@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -483,7 +484,40 @@ def _shared_log_dir(storage) -> str:
     return os.path.join("OPDI_live", "state", digest, "logs")
 
 
+@contextmanager
+def step_spark_settings(spark, config, step: str):
+    """Set the Spark settings of ``step`` for the time of the step.
+
+    The settings are :meth:`SparkConfig.settings_for_step`; afterwards the
+    session's own values are put back.
+    """
+    wanted = config.spark.settings_for_step(step)
+    before = {key: spark.conf.get(key, None) for key in wanted}
+    for key, value in wanted.items():
+        spark.conf.set(key, value)
+    try:
+        yield wanted
+    finally:
+        for key, value in before.items():
+            if value is None:
+                spark.conf.unset(key)
+            else:
+                spark.conf.set(key, value)
+
+
 def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
+    """Run one pipeline step for the tracks that started on ``day``.
+
+    The step runs with its own Spark settings (:func:`step_spark_settings`).
+    See :func:`_run_day_step` for what each step does.
+    """
+    with step_spark_settings(spark, config, step) as wanted:
+        if wanted:
+            print("  settings of this step: " + ", ".join(f"{k}={v}" for k, v in wanted.items()))
+        _run_day_step(spark, config, step, day, kwargs)
+
+
+def _run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
     """Run one pipeline step for the tracks that started on ``day``.
 
     Each processor's ``process_day`` reads the day's own tracks, whole,
@@ -511,7 +545,7 @@ def run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
         if storage.use_s3:
             local = _shared_log_dir(storage)
             storage.pull_logs(local)
-            run_day_step(spark, config, step, day, dict(kwargs, log_dir=local))
+            _run_day_step(spark, config, step, day, dict(kwargs, log_dir=local))
             storage.push_logs(local)
             return
 
