@@ -144,9 +144,10 @@ def test_the_v4_baseline_is_v0_1_0_and_nothing_else():
 
     assert differing == set(V4_BASE)
     # Nine reconstructed v0.1.0 fields, the released distance method
-    # (distance_v0.0.2, turned off by V09), and the three settings of the
-    # plausibility study (V13 to V15).
-    assert len(V4_BASE) == 16
+    # (distance_v0.0.2, turned off by V09), the three settings of the
+    # plausibility study (V13 to V15), and the take-off that must end in the
+    # air (V16).
+    assert len(V4_BASE) == 17
 
 
 def test_the_last_v4_rung_is_exactly_what_ships():

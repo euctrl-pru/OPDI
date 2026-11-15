@@ -22,7 +22,7 @@ movement was a departure at all -- and the classification that produced them
 travels with every event in ``info``, so the decision is auditable from the
 published row rather than reconstructible only from the code.
 
-Each traversal is classified by three measurements over its own samples:
+Each traversal is classified by four measurements over its own samples:
 
 * **alignment** -- the angle between the traversal's median ground track and
   the runway's bearing, folded to [0, 90] so a reciprocal landing counts as
@@ -35,7 +35,14 @@ Each traversal is classified by three measurements over its own samples:
   where the answer is a threshold comparison that gets published. A departure
   from the lower of a flight's two aerodromes has a negative height throughout
   under the permissive reading, and the detector abstains on the whole
-  movement.
+  movement;
+* **ground flag** -- whether the report that gives the exit height is flagged
+  on the ground by the transponder. A take-off ends in the air, so a pass
+  whose "above 15 ft" at the end comes from a report on the ground is no
+  take-off (:attr:`~opdi.config.EventConfig.runway_take_off_needs_air_report`).
+  On the ground the barometric height can read 20 to 60 ft, and a landing
+  roll read from the far end of the runway, with no approach before it,
+  otherwise starts low and ends high like a take-off;
 
 giving ``departure``, ``arrival``, ``crossing`` -- or NULL, which means
 abstain. The classes cannot overlap: ``runway_align_max_deg`` (30) and
@@ -240,7 +247,13 @@ ACDM_NAMES = {"airborne": "ATOT", "touchdown": "ALDT"}
 
 
 def classify_traversal(
-    align_deg, max_gs_kt, entry_height_ft, exit_height_ft, duration_seconds, config: "EventConfig"
+    align_deg,
+    max_gs_kt,
+    entry_height_ft,
+    exit_height_ft,
+    duration_seconds,
+    config: "EventConfig",
+    exit_on_ground=None,
 ):
     """Departure, arrival, crossing -- or NULL, which means abstain.
 
@@ -250,12 +263,22 @@ def classify_traversal(
     a taxiing one. Abstention is a deliberate output, not a gap: naming the
     wrong milestone corrupts a movement count, naming none is an explicit null
     a consumer can see.
+
+    ``exit_on_ground`` is whether the report that gives ``exit_height_ft`` is
+    flagged on the ground. With
+    :attr:`~opdi.config.EventConfig.runway_take_off_needs_air_report`, a pass
+    whose exit height comes from such a report is not a departure: the
+    transponder says the wheels are on the runway, so a height above
+    ``runway_airborne_height_ft`` there is an altitude error, not a lift-off.
+    A NULL flag counts as not on the ground.
     """
     aligned = align_deg <= F.lit(config.runway_align_max_deg)
     fast = max_gs_kt > F.lit(config.runway_roll_speed_kt)
     airborne_h = F.lit(config.runway_airborne_height_ft)
 
     departure = aligned & fast & (entry_height_ft < airborne_h) & (exit_height_ft >= airborne_h)
+    if config.runway_take_off_needs_air_report and exit_on_ground is not None:
+        departure = departure & ~F.coalesce(exit_on_ground, F.lit(False))
     arrival = aligned & fast & (entry_height_ft >= airborne_h) & (exit_height_ft < airborne_h)
     crossing = (
         (align_deg >= F.lit(config.runway_cross_min_deg))
@@ -456,6 +479,7 @@ def runway_traversals(
     work = work.withColumn("_gs_kt", F.col("velocity") * F.lit(KT_PER_MPS))
     work = work.withColumn("_alt_ft", F.col("baro_altitude_c") * F.lit(FT_PER_M))
     work = work.withColumn("_flight_id", _col_or_null(sv, "flight_id", "string"))
+    work = work.withColumn("_on_ground", _col_or_null(sv, "on_ground", "boolean"))
 
     # ``min_by``/``max_by``, never ``first``/``last``: the latter take partition
     # order, not time order (see ``airport_events_ordered``). For an arrival the earliest sample is
@@ -497,6 +521,11 @@ def runway_traversals(
         ),
         F.max_by("_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))).alias(
             "exit_height_ft"
+        ),
+        # The ground flag of the same report as ``exit_height_ft``: a height
+        # read on a report flagged on the ground is not a lift-off.
+        F.max_by("_on_ground", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))).alias(
+            "exit_on_ground"
         ),
         F.min_by("lat", "event_time").alias("entry_lat"),
         F.min_by("lon", "event_time").alias("entry_lon"),
@@ -553,6 +582,7 @@ def runway_traversals(
             F.col("exit_height_ft"),
             F.col("duration_seconds"),
             config,
+            exit_on_ground=F.col("exit_on_ground"),
         ),
     )
     # Classify before the direction pick and drop the abstentions first, so a
@@ -589,6 +619,7 @@ def runway_traversals(
         F.col("cross_track_nm"),
         F.col("entry_height_ft"),
         F.col("exit_height_ft"),
+        F.col("exit_on_ground"),
         F.col("entry_lat"),
         F.col("entry_lon"),
         F.col("exit_lat"),

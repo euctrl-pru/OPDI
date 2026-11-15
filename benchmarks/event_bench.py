@@ -231,6 +231,10 @@ LADDER = [
     # the smallest identifier (2026-11); changes only the info of layout events
     # and block times.
     ("L20_deterministic_layout_element", {"layout_deterministic_element": True}),
+    # A pass over a runway is a take-off only if it ends on a report in the
+    # air (2026-11); changes the runway milestones of a landing roll read
+    # from the far end of the runway, and what depends on them.
+    ("L21_take_off_needs_air_report", {"runway_take_off_needs_air_report": True}),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
@@ -274,6 +278,7 @@ V4_BASE = dict(
     interpolate_crossings_over_missing_values=False,
     block_times_on_ground_only=False,
     plausibility_checks=False,
+    runway_take_off_needs_air_report=False,
     events_version="events_v0.1.0",
 )
 
@@ -325,6 +330,7 @@ LADDER_V4 = [
     ("V13_crossings_over_missing_values", {"interpolate_crossings_over_missing_values": True}),
     ("V14_block_times_on_ground", {"block_times_on_ground_only": True}),
     ("V15_plausibility_checks", {"plausibility_checks": True}),
+    ("V16_take_off_needs_air_report", {"runway_take_off_needs_air_report": True}),
 ]
 
 #: Rungs that are allowed to be config-identical to the rung before them,

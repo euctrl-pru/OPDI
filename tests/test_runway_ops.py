@@ -1321,3 +1321,351 @@ def test_the_runway_carries_its_true_bearing(spark):
     info = json.loads(out.filter(F.col("type") == "ALDT").collect()[0]["info"])
     assert info["runway"] == "07"
     assert info["runway_bearing_deg"] == pytest.approx(70.0, abs=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Telling a take-off from a landing roll.
+#
+# Each pass below is laid out on the centreline of strip 07/25 of `_grid` and
+# `_thresholds`: ``along`` is the distance in NM from the threshold of 07, so
+# the runway is 0 to 2 NM, the approach to 07 is below 0 and the approach to
+# 25 is above 2. A report flagged on the ground can carry a barometric height
+# of 20 to 60 ft, as the reports of a landing roll at Krakow (EPKK, 791 ft)
+# and Tbilisi (UGTB, 1,624 ft) do on 2026-06-14.
+# ---------------------------------------------------------------------------
+
+#: Elevation of Krakow (EPKK), in feet, where the real landing rolls that
+#: these passes copy were received.
+_EPKK_FT = 791.0
+
+
+def _strip_pass(spark, rows, elev_ft=0.0, apt="EBBR"):
+    """A track along strip 07/25 from ``(t, along_nm, height_ft, kt, on_ground, heading)``.
+
+    ``height_ft`` and ``kt`` may be None (a report without altitude or
+    without speed). The H3 cell follows the position: ``cell-air`` short of
+    either threshold, ``cell-rwy`` between them. ``along`` None is a report on
+    a taxiway beside the runway, in a cell that is not part of the runway zones.
+    """
+    samples, cells = [], []
+    for t, along, height_ft, kt, on_ground, heading in rows:
+        if along is None:
+            lat, lon = 50.01, 4.0
+        elif along >= 0:
+            lat, lon = _dest(50.0, 4.0, 70.0, along)
+        else:
+            lat, lon = _dest(50.0, 4.0, 250.0, -along)
+        samples.append(
+            {
+                "t": t,
+                "lat": lat,
+                "lon": lon,
+                "baro_altitude": None if height_ft is None else _m(elev_ft + height_ft),
+                "velocity": None if kt is None else _mps(kt),
+                "vert_rate": 0.0,
+                "heading": heading,
+                "on_ground": on_ground,
+            }
+        )
+        if along is None:
+            cells.append("cell-twy")
+        else:
+            cells.append("cell-rwy" if 0.0 <= along <= 2.0 else "cell-air")
+    sv = _prepared(make_track(spark, samples), elev_ft, elev_ft, apt, apt)
+    return _as_flown(sv, cells=cells, apt=(apt,))
+
+
+def _runway_family(spark, sv, config=None, apt="EBBR"):
+    """The traversals and the milestones of ``sv``, as plain lists."""
+    config = config or EventConfig()
+    traversals = runway_traversals(sv, _grid(spark, apt), _thresholds(spark, apt), config)
+    milestones = runway_milestones(sv, traversals, config)
+    passes = [(r["rwy_ident"], r["class"]) for r in traversals.collect()]
+    events = [
+        ((r["event_time"] - _EPOCH).total_seconds(), r["type"], json.loads(r["info"]))
+        for r in milestones.orderBy("event_time").collect()
+    ]
+    return passes, events
+
+
+def _types(events):
+    return [e[1] for e in events]
+
+
+#: The landing roll of track 125d8109002954fc_1781461239 (RYR2TJ, 2026-06-14),
+#: landing on runway 25 at Krakow: the last approach reports at 309 to 234 ft,
+#: 20 s without a position, the first report on the runway at 9 ft and 109 kt,
+#: then reports flagged on the ground that read 34 and 59 ft above the airport
+#: and carry no speed. Read from the far end, as a pass over runway 07, it
+#: starts below 15 ft and ends above it: the shape of a take-off.
+_LANDING_ROLL_25 = [
+    (0, 3.00, 309.0, 134.0, False, 250.0),
+    (5, 2.72, 259.0, 135.0, False, 250.0),
+    (10, 2.45, 234.0, 135.0, False, 250.0),
+    (30, 1.90, 9.0, 109.0, False, 250.0),
+    (35, 1.76, None, 101.0, True, 250.0),
+    (40, 1.64, 34.0, None, True, 250.0),
+    (45, 1.54, None, None, True, 250.0),
+    (50, 1.45, 59.0, None, True, 250.0),
+] + [(55 + 5 * i, 1.40 - 0.03 * i, None, None, True, 250.0) for i in range(10)]
+
+
+def test_a_landing_roll_with_high_ground_altitudes_is_not_a_take_off(spark):
+    """The defect: the landing roll gave a take-off time 20 to 60 s after the
+    landing, at the destination, with a ``line-up`` and a ``take-off-roll``.
+
+    The report that reads 59 ft is flagged on the ground, so it is no
+    evidence that the aircraft left the runway, and the pass is no take-off.
+    The pass over 25, which holds the approach, ends at the same report and
+    is not an arrival either: the family says nothing about this movement,
+    and the take-off time of the flight is left to the other method.
+    """
+    sv = _strip_pass(spark, _LANDING_ROLL_25, elev_ft=_EPKK_FT, apt="EPKK")
+    passes, events = _runway_family(spark, sv, apt="EPKK")
+
+    assert ("07", "departure") not in passes
+    for kind in ("line-up", "take-off-roll", "ATOT"):
+        assert kind not in _types(events)
+
+
+def test_without_the_setting_the_landing_roll_reads_as_a_take_off(spark):
+    """``runway_take_off_needs_air_report`` off gives the earlier reading:
+    a departure on 07, and a take-off time on the landing roll where the
+    height passes 15 ft between 9 ft (t = 30 s) and 34 ft (t = 40 s)."""
+    sv = _strip_pass(spark, _LANDING_ROLL_25, elev_ft=_EPKK_FT, apt="EPKK")
+    passes, events = _runway_family(
+        spark, sv, EventConfig(runway_take_off_needs_air_report=False), apt="EPKK"
+    )
+
+    assert passes == [("07", "departure")]
+    assert _types(events) == ["line-up", "take-off-roll", "ATOT"]
+    assert events[2][0] == pytest.approx(32.4, abs=0.01)
+
+
+def test_the_setting_is_off_in_the_release_settings():
+    assert EventConfig().runway_take_off_needs_air_report is True
+    assert EventConfig.legacy().runway_take_off_needs_air_report is False
+
+
+def test_a_rejected_take_off_gives_no_take_off_and_no_landing(spark):
+    """Accelerates to 110 kt on the ground, slows down and leaves the runway.
+
+    Its reports are flagged on the ground and read up to 40 ft above the
+    airport: low at the start, high at the end, like a take-off. Without the
+    flag it would get a take-off time on the runway.
+    """
+    rows = [
+        (0, 0.05, 9.0, 10.0, True, 70.0),
+        (5, 0.06, None, 30.0, True, 70.0),
+        (10, 0.12, None, 60.0, True, 70.0),
+        (15, 0.22, 25.0, 90.0, True, 70.0),
+        (20, 0.36, None, 110.0, True, 70.0),
+        (25, 0.50, 40.0, 90.0, True, 70.0),
+        (30, 0.61, None, 60.0, True, 70.0),
+        (35, 0.68, 40.0, 30.0, True, 70.0),
+        (40, 0.72, None, 15.0, True, 70.0),
+    ]
+    sv = _strip_pass(spark, rows, elev_ft=_EPKK_FT, apt="EPKK")
+    _, events = _runway_family(spark, sv, apt="EPKK")
+    for kind in ("ATOT", "ALDT", "line-up", "take-off-roll", "runway-vacated"):
+        assert kind not in _types(events)
+    _, before = _runway_family(
+        spark, sv, EventConfig(runway_take_off_needs_air_report=False), apt="EPKK"
+    )
+    assert "ATOT" in _types(before)
+
+
+#: A take-off on 07 with the flags a transponder sets: on the ground while
+#: holding and rolling, in the air from the first report above the runway.
+_TAKE_OFF_07 = [(5 * i, 0.02, 0.0, 10.0, True, 70.0) for i in range(4)] + [
+    (20, 0.05, 0.0, 60.0, True, 70.0),
+    (25, 0.15, 0.0, 90.0, True, 70.0),
+    (30, 0.32, 0.0, 120.0, True, 70.0),
+    (35, 0.55, 0.0, 145.0, True, 70.0),
+    (40, 0.80, 100.0, 160.0, False, 70.0),
+    (45, 1.05, 400.0, 165.0, False, 70.0),
+    (50, 1.30, 700.0, 170.0, False, 70.0),
+]
+
+
+def test_a_normal_take_off_is_still_a_take_off(spark):
+    sv = _strip_pass(spark, _TAKE_OFF_07)
+    passes, events = _runway_family(spark, sv)
+
+    assert passes == [("07", "departure")]
+    assert _types(events) == ["line-up", "take-off-roll", "ATOT"]
+    # 15 ft is 15 % of the way from 0 ft (t = 35 s) to 100 ft (t = 40 s).
+    assert events[2][0] == pytest.approx(35.75, abs=0.01)
+
+
+def test_a_take_off_first_received_during_the_roll_is_still_a_take_off(spark):
+    """The first report is at 90 kt on the runway: no line-up was seen, but
+    the roll and the lift-off were."""
+    sv = _strip_pass(spark, _TAKE_OFF_07[5:])
+    passes, events = _runway_family(spark, sv)
+
+    assert passes == [("07", "departure")]
+    assert "ATOT" in _types(events)
+    assert "take-off-roll" in _types(events)
+
+
+def _landing_07(on_ground_rollout=True):
+    """The arrival profile `_ARRIVAL` with the ground flag after touchdown."""
+    rows = []
+    for t, along, height_ft, kt in _ARRIVAL:
+        rows.append((t, along, height_ft, kt, on_ground_rollout and height_ft == 0.0, 70.0))
+    return rows
+
+
+def test_a_normal_landing_is_still_a_landing_and_no_take_off(spark):
+    sv = _strip_pass(spark, _landing_07())
+    passes, events = _runway_family(spark, sv)
+
+    assert passes == [("07", "arrival")]
+    assert _types(events) == [RUNWAY_THRESHOLD_CROSSING, "ALDT", "runway-vacated"]
+
+
+def test_a_landing_whose_reception_ends_during_the_roll_is_still_a_landing(spark):
+    """The last report is at 110 kt, 5 ft above the runway."""
+    rows = _landing_07()[:6]
+    sv = _strip_pass(spark, rows)
+    passes, events = _runway_family(spark, sv)
+
+    assert passes == [("07", "arrival")]
+    assert "ALDT" in _types(events)
+    assert "ATOT" not in _types(events)
+
+
+def test_a_touch_and_go_keeps_its_take_off(spark):
+    """Touches down on 07 just past the threshold, rolls on the ground and
+    lifts off again before the end of the runway.
+
+    The take-off is real and stays. The pass over 07, which holds the
+    approach, ends in the climb, so it is not an arrival: the touchdown of a
+    touch-and-go is not given by this family, with or without the setting.
+    """
+    rows = [
+        (0, -1.00, 330.0, 135.0, False, 70.0),
+        (5, -0.60, 200.0, 135.0, False, 70.0),
+        (10, -0.25, 80.0, 132.0, False, 70.0),
+        (15, 0.05, 10.0, 130.0, False, 70.0),
+        (20, 0.30, 0.0, 125.0, True, 70.0),
+        (25, 0.55, 0.0, 120.0, True, 70.0),
+        (30, 0.80, 0.0, 122.0, True, 70.0),
+        (35, 1.05, 0.0, 128.0, True, 70.0),
+        (40, 1.30, 40.0, 135.0, False, 70.0),
+        (45, 1.55, 150.0, 140.0, False, 70.0),
+        (50, 1.80, 300.0, 140.0, False, 70.0),
+        (55, 2.10, 450.0, 140.0, False, 70.0),
+        (60, 2.40, 600.0, 140.0, False, 70.0),
+    ]
+    sv = _strip_pass(spark, rows)
+    _, events = _runway_family(spark, sv)
+    _, before = _runway_family(spark, sv, EventConfig(runway_take_off_needs_air_report=False))
+
+    take_offs = [e for e in events if e[1] == "ATOT"]
+    assert take_offs, "the take-off of the touch-and-go was lost"
+    # Lifted off between t = 35 s (0 ft) and t = 40 s (40 ft).
+    assert 35.0 < take_offs[-1][0] <= 40.0
+    assert events == before
+
+
+def test_a_landing_then_a_later_take_off_in_one_track_gives_both(spark):
+    """Lands on 07, taxis off for ten minutes, and departs from 25.
+
+    Both movements are real: the take-off after the landing stays.
+    """
+    landing = _landing_07()
+    taxi = [(90 + 30 * i, None, None, 15.0, True, 160.0) for i in range(20)]
+    take_off = [(700 + t, 2.0 - along, h, kt, g, 250.0) for t, along, h, kt, g, _ in _TAKE_OFF_07]
+    sv = _strip_pass(spark, landing + taxi + take_off)
+    passes, events = _runway_family(spark, sv)
+
+    assert sorted(passes) == [("07", "arrival"), ("25", "departure")]
+    times = {e[1]: e[0] for e in events}
+    assert times["ALDT"] < times["ATOT"]
+    assert times["ATOT"] == pytest.approx(735.75, abs=0.01)
+
+
+def test_a_backtrack_before_the_take_off_is_still_a_take_off(spark):
+    """Enters the runway near its far end, taxis back along it at 25 kt,
+    turns at the threshold of 07, and takes off on 07."""
+    back = [(10 * i, 1.9 - 0.07 * i, 0.0, 25.0, True, 250.0) for i in range(26)]
+    turn = [(260, 0.05, 0.0, 5.0, True, 160.0), (270, 0.03, 0.0, 5.0, True, 70.0)]
+    roll = [(280 + t, along, h, kt, g, hd) for t, along, h, kt, g, hd in _TAKE_OFF_07[4:]]
+    sv = _strip_pass(spark, back + turn + roll)
+    passes, events = _runway_family(spark, sv)
+
+    assert [p[1] for p in passes] == ["departure"]
+    times = {e[1]: e[0] for e in events}
+    assert times["ATOT"] == pytest.approx(315.75, abs=0.01)
+    # The roll starts at the first report at 50 kt or more (60 kt, t = 300 s).
+    assert times["take-off-roll"] == pytest.approx(300.0)
+
+
+def test_a_slow_aircraft_on_the_runway_gives_no_take_off(spark):
+    """A helicopter that lifts off from the runway at 40 kt: never as fast
+    as a take-off roll (50 kt), so no take-off is read, as before."""
+    rows = [
+        (5 * i, 0.05 + 0.05 * i, 0.0 if i < 4 else 60.0 * (i - 3), 40.0, i < 4, 70.0)
+        for i in range(9)
+    ]
+    sv = _strip_pass(spark, rows)
+    passes, events = _runway_family(spark, sv)
+
+    assert passes == []
+    assert events == []
+
+
+def test_a_go_around_over_the_runway_gives_no_take_off_and_no_landing(spark):
+    """Down to 40 ft over the runway, never on the ground, then a climb to
+    1,600 ft: a go-around, not a landing followed by a take-off."""
+    rows = [
+        (0, -2.00, 700.0, 140.0, False, 70.0),
+        (10, -1.00, 340.0, 138.0, False, 70.0),
+        (20, -0.50, 180.0, 136.0, False, 70.0),
+        (30, 0.10, 60.0, 135.0, False, 70.0),
+        (40, 0.60, 40.0, 138.0, False, 70.0),
+        (50, 1.10, 300.0, 145.0, False, 70.0),
+        (60, 1.60, 700.0, 150.0, False, 70.0),
+        (70, 2.10, 1100.0, 155.0, False, 70.0),
+        (80, 2.60, 1600.0, 160.0, False, 70.0),
+    ]
+    sv = _strip_pass(spark, rows)
+    _, events = _runway_family(spark, sv)
+    for kind in ("ATOT", "ALDT", "line-up", "take-off-roll"):
+        assert kind not in _types(events)
+
+    # Climbing at 2,000 ft/min after the lowest point.
+    climb = F.when(F.col("event_time") > F.lit(_EPOCH + dt.timedelta(seconds=40)), _m(2000.0) / 60)
+    ga = go_arounds(
+        sv.withColumn("ades_lat", F.lit(50.0))
+        .withColumn("ades_lon", F.lit(4.0))
+        .withColumn("vert_rate", climb.otherwise(-_m(800.0) / 60)),
+        EventConfig(),
+    ).collect()
+    assert len(ga) == 1
+    assert (ga[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(40.0)
+
+
+def test_the_take_off_time_of_the_other_method_is_kept_for_that_flight(spark):
+    """The track was first received just after the take-off, so the runway
+    pass method has no take-off at the departure airport. With the landing
+    roll no longer read as a take-off, the merge keeps the take-off time of
+    the runway window method, near the first report of the track."""
+    from opdi.pipeline.events import merge_milestone_duplicates
+
+    sv = _strip_pass(spark, _LANDING_ROLL_25, elev_ft=_EPKK_FT, apt="EPKK")
+    config = EventConfig()
+    traversals = runway_traversals(sv, _grid(spark, "EPKK"), _thresholds(spark, "EPKK"), config)
+    found = runway_milestones(sv, traversals, config)
+    other = spark.createDataFrame(
+        [("trk-1", "ATOT", _EPOCH - dt.timedelta(seconds=5400), json.dumps({"method": "legacy"}))],
+        "track_id string, type string, event_time timestamp, info string",
+    )
+    events = found.select("track_id", "type", "event_time", "info").unionByName(other)
+
+    kept = merge_milestone_duplicates(events, config).filter(F.col("type") == "ATOT").collect()
+    assert len(kept) == 1
+    assert json.loads(kept[0]["info"])["method"] == "legacy"
+    assert kept[0]["event_time"] == _EPOCH - dt.timedelta(seconds=5400)
