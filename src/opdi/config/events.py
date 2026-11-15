@@ -482,7 +482,7 @@ class EventConfig:
     """Write ``info.context`` on each hold:
 
     * ``arrival``: the flight lands at its destination at most
-      :attr:`holding_arrival_max_minutes` after the end of the hold, which
+      :attr:`holding_arrival_max_seconds` after the end of the hold, which
       ends at most :attr:`holding_arrival_max_distance_nm` from that airport;
     * ``en-route``: the flight lands, but later or further away;
     * ``other``: a local flight (departure equal to destination, or no
@@ -496,8 +496,8 @@ class EventConfig:
     the same step. Delay statistics should use ``arrival``. Off in release
     v0.0.2."""
 
-    holding_arrival_max_minutes: float = 60.0
-    """Longest time, in minutes, from the end of a hold to the landing at
+    holding_arrival_max_seconds: float = 3600.0
+    """Longest time, in seconds, from the end of a hold to the landing at
     the destination for the hold to be an ``arrival`` hold."""
 
     holding_arrival_max_distance_nm: float = 150.0
@@ -610,14 +610,14 @@ class EventConfig:
     On an arc the heading turns with the bearing from the merge point; on a
     straight line that only grazes the circle at the leg distance it does
     not. A leg shorter than :attr:`pms_leg_turn_test_max_seconds` must turn
-    by at least :attr:`pms_leg_min_turn_share` of its bearing sweep. A leg
+    by at least :attr:`pms_leg_min_turn_share_pct` of its bearing sweep. A leg
     whose altitude rises by more than :attr:`pms_leg_max_climb_ft` from
     entry to exit is a missed approach or a climbing turn near the airport,
     not a sequencing leg. Off in release v0.0.2."""
 
-    pms_leg_min_turn_share: float = 0.3
-    """Smallest heading change of a short leg, as a share of its bearing
-    sweep (real arcs measure 0.6 to 0.8, straight segments 0 to 0.03)."""
+    pms_leg_min_turn_share_pct: float = 30.0
+    """Smallest heading change of a short leg, in percent of its bearing
+    sweep (real arcs measure 60 to 80 %, straight segments 0 to 3 %)."""
 
     pms_leg_turn_test_max_seconds: float = 180.0
     """Legs shorter than this, in seconds, must turn with the arc (see
@@ -830,7 +830,7 @@ class EventConfig:
 
     layout_merge_parked_passages: bool = True
     """Join two consecutive passages of one element when the aircraft moved
-    less than :attr:`layout_merge_max_move_m` between them and entered no
+    less than :attr:`layout_merge_max_move_ft` between them and entered no
     other element in between.
 
     A parked aircraft whose position jitters across the edge of an element by
@@ -839,8 +839,8 @@ class EventConfig:
     than :attr:`airport_trace_gap_seconds` (42 entry/exit pairs for one
     aircraft parked at a hangar for 19 hours). Off in release v0.0.2."""
 
-    layout_merge_max_move_m: float = 50.0
-    """Largest distance, in metres, between the exit of a passage and the
+    layout_merge_max_move_ft: float = 165.0
+    """Largest distance, in feet (165 ft is about 50 m), between the exit of a passage and the
     entry of the next passage of the same element for the two to be joined."""
 
     layout_mark_track_edges: bool = True

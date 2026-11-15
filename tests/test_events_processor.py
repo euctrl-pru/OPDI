@@ -1005,7 +1005,7 @@ def test_a_navigation_only_top_up_still_computes_go_arounds(spark, stub_storage,
 
     seen = {}
 
-    def capture(geo, config, go_arounds=None):
+    def capture(geo, config, go_arounds=None, runway_events=None):
         seen["go_arounds"] = go_arounds
         return None
 

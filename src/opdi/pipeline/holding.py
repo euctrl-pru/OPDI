@@ -343,7 +343,7 @@ def _context(episodes: DataFrame, runway_events: DataFrame, config: EventConfig)
     )
     arrival = (
         (col("_land_apt") == ades)
-        & ((col("_land_ts") - col("end_ts")) <= config.holding_arrival_max_minutes * 60.0)
+        & ((col("_land_ts") - col("end_ts")) <= config.holding_arrival_max_seconds)
         & (to_ades_nm <= config.holding_arrival_max_distance_nm)
     )
     context = (

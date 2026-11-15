@@ -371,9 +371,9 @@ def calculate_airport_events(
     return one_element_per_passage(apt_events, config)
 
 
-#: Knots per metre per second, and metres per nautical mile.
+#: Knots per metre per second, and feet per nautical mile.
 KT_PER_MS = 1.94384
-M_PER_NM = 1852.0
+FT_PER_NM = 6076.12
 
 
 def _keep_slow_reports(labelled: DataFrame, window_spec, config: EventConfig) -> DataFrame:
@@ -437,7 +437,7 @@ def _merge_parked_passages(passages: DataFrame, config: EventConfig) -> DataFram
     See :attr:`~opdi.config.EventConfig.layout_merge_parked_passages`. A
     passage is joined to the previous passage of the same element when the
     distance between that one's exit and this one's entry is under
-    :attr:`~opdi.config.EventConfig.layout_merge_max_move_m` and no passage
+    :attr:`~opdi.config.EventConfig.layout_merge_max_move_ft` and no passage
     of another element of the track started in between.
     """
     by_element = Window.partitionBy("track_id", "osm_id").orderBy("entry_time")
@@ -447,19 +447,19 @@ def _merge_parked_passages(passages: DataFrame, config: EventConfig) -> DataFram
         F.max("entry_time").over(by_entry.rowsBetween(Window.unboundedPreceding, -1)),
     )
     prev_exit = lag("exit_time", 1).over(by_element)
-    moved_m = (
+    moved_ft = (
         haversine_nm(
             lag("exit_lat", 1).over(by_element),
             lag("exit_lon", 1).over(by_element),
             col("entry_lat"),
             col("entry_lon"),
         )
-        * M_PER_NM
+        * FT_PER_NM
     )
     # ``_last_entry_before`` is the latest entry of any passage before this
     # one; the previous passage of this element started before its own exit,
     # so a later entry is that of another element.
-    joined = (moved_m < F.lit(config.layout_merge_max_move_m)) & (
+    joined = (moved_ft < F.lit(config.layout_merge_max_move_ft)) & (
         col("_last_entry_before") <= prev_exit
     )
     passages = passages.withColumn("_new_stay", ~F.coalesce(joined, lit(False)))

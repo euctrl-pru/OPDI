@@ -213,7 +213,7 @@ def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
         leg_sweep = F.abs(_wrap_deg(col("_from_mp_end") - col("_from_mp_start")))
         turns = (col("duration_s") >= config.pms_leg_turn_test_max_seconds) | (
             F.abs(F.coalesce(col("_turn_deg"), lit(0.0)))
-            >= config.pms_leg_min_turn_share * leg_sweep
+            >= config.pms_leg_min_turn_share_pct / 100.0 * leg_sweep
         )
         climbs = (col("end_alt_ft") - col("start_alt_ft")) > config.pms_leg_max_climb_ft
         legs = legs.filter(F.coalesce(turns, lit(True)) & ~F.coalesce(climbs, lit(False))).drop(
