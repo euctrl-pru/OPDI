@@ -3285,7 +3285,42 @@ def clock(x) -> str:
     return datetime.fromtimestamp(x, timezone.utc).strftime("%H:%M:%S")
 
 
-def compare_markdown(before: str, after: str, rows: list[dict], lost, reasons, timing) -> str:
+def content_lines(content: list[dict]) -> list[str]:
+    """The content comparison as a table: changed event types first, then the unchanged ones."""
+    ev = [r for r in content if r["part"] == "events"]
+    changed = [r for r in ev if r.get("matched_share") != 1.0 or r.get("note")]
+    same = [r["item"] for r in ev if r not in changed]
+    out = ["## Content of every event type", ""]
+    if changed:
+        out += [
+            "| type | before | after | matched | only before | only after | fields differing |",
+            "|---|---:|---:|---:|---:|---:|---|",
+        ]
+        for r in changed:
+            cells = [
+                fmt_md(r[k]) for k in ("before", "after", "matched", "only_before", "only_after")
+            ]
+            out.append(f"| {r['item']} | " + " | ".join(cells) + f" | {r.get('note') or ''} |")
+        out.append("")
+    out.append(
+        f"Unchanged in every event and field ({len(same)} types): "
+        + (", ".join(same) or "none")
+        + "."
+    )
+    fl = [r for r in content if r["part"] == "flight list" and r["item"] == "rows"]
+    if fl:
+        r = fl[0]
+        out.append(
+            f"Flight list: {fmt_md(r['before'])} rows before, {fmt_md(r['after'])} after,"
+            f" {fmt_md(r['matched'])} matched on ID; {r.get('note', '')}."
+        )
+    out.append("")
+    return out
+
+
+def compare_markdown(
+    before: str, after: str, rows: list[dict], lost, reasons, timing, content=None
+) -> str:
     lines = [f"# {before} against {after}", ""]
     n_lost = int((lost["fate"] == "lost").sum()) if len(lost) else 0
     n_moved = len(lost) - n_lost
@@ -3336,6 +3371,8 @@ def compare_markdown(before: str, after: str, rows: list[dict], lost, reasons, t
                     f" {fmt_md(r['after'], s_)} | {fmt_md(r['change'], s_)} |"
                 )
         lines.append("")
+    if content:
+        lines += content_lines(content)
     if len(lost):
         lines += [
             "## Confirmed events lost or moved",
@@ -3427,6 +3464,7 @@ def compare(args) -> int:
     n_lost = int((lost["fate"] == "lost").sum()) if len(lost) else 0
     timing = (events_seconds(mb), events_seconds(ma))
     code, reasons = verdict(n_lost, args.allow, *timing)
+    content = None
     if not args.no_content:
         with spark_lock(f"compare {before} {after}"):
             content = content_comparison(before, after)
@@ -3441,7 +3479,7 @@ def compare(args) -> int:
         print(
             f"content: {len(same)} event types unchanged in every field; see {out / 'content.csv'}"
         )
-    md = compare_markdown(before, after, rows, lost, reasons, timing)
+    md = compare_markdown(before, after, rows, lost, reasons, timing, content)
     (out / "compare.md").write_text(md)
     print(md)
     print(f"\nfiles in {out}")

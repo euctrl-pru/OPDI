@@ -488,3 +488,42 @@ def test_share():
     assert cs.share(1, 4) == 0.25
     assert cs.share(1, 0) is None
     assert math.isclose(cs.share(2, 3), 2 / 3)
+
+
+def test_content_lines_changed_types_first():
+    content = [
+        {
+            "part": "events",
+            "item": "ATOT",
+            "before": 10,
+            "after": 9,
+            "matched": 9,
+            "only_before": 1,
+            "only_after": 0,
+            "matched_share": 0.9,
+            "note": "info differs on 2",
+        },
+        {
+            "part": "events",
+            "item": "xing-fl50",
+            "before": 5,
+            "after": 5,
+            "matched": 5,
+            "only_before": 0,
+            "only_after": 0,
+            "matched_share": 1.0,
+            "note": "",
+        },
+        {
+            "part": "flight list",
+            "item": "rows",
+            "before": 3,
+            "after": 3,
+            "matched": 3,
+            "note": "every other column equal on all matched rows (44 columns)",
+        },
+    ]
+    out = cs.content_lines(content)
+    assert "| ATOT | 10 | 9 | 9 | 1 | 0 | info differs on 2 |" in out
+    assert "Unchanged in every event and field (1 types): xing-fl50." in out
+    assert any(line.startswith("Flight list: 3 rows before") for line in out)
