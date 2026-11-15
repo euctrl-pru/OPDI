@@ -656,6 +656,90 @@ class EventConfig:
     v0.0.2) the event names whichever of them Spark keeps, which can differ
     between two runs of the same day."""
 
+    # -- surface events: passages, air reports, parked aircraft, vehicles --
+    # (work package 6 of the corrections after the spot checks of one day)
+    layout_element_per_passage: bool = True
+    """Choose the element of overlapping layout elements once per passage,
+    so that every entry has its exit on the same element.
+
+    Elements of one kind often overlap (a named taxiway drawn as several
+    ways, stands drawn over a taxilane). Two passages of one kind that start
+    at the same report keep only the longer one; then two that end at the
+    same report keep only the longer one. Between passages of equal length,
+    the element with the smallest identifier is kept. The passage kept covers
+    the time of the ones dropped. Without it, entries and exits choose their
+    element separately (:attr:`layout_deterministic_element`), and about one
+    taxiway entry in eight had no exit on the same element. Off in release
+    v0.0.2."""
+
+    layout_air_report_must_be_slow: bool = True
+    """Admit a report that is not flagged on the ground to the layout
+    matching only if it is slow and close to the ground: at most
+    :attr:`layout_air_report_max_speed_kt` and at most
+    :attr:`layout_air_report_max_height_ft` above the airport.
+
+    The speed is the largest of the reported ground speed and the speeds
+    between this report and the reports just before and after it in the same
+    element (from their positions, when they are at most
+    :attr:`layout_position_speed_max_gap_seconds` apart). A report with no
+    known speed is admitted. Reports flagged on the ground are always
+    admitted. This keeps aircraft on approach, climbing out, passing low
+    over the airport or helicopters hovering over an apron out of the
+    surface events, and keeps transponders that never set the ground flag
+    while taxiing (at 2 to 8 kt). Off in release v0.0.2."""
+
+    layout_air_report_max_speed_kt: float = 50.0
+    """Highest ground speed, in knots, of a report not flagged on the ground
+    that is still matched to the layout (taxiing is 5 to 30 kt)."""
+
+    layout_air_report_max_height_ft: float = 300.0
+    """Highest height above the airport, in feet, of a report not flagged on
+    the ground that is still matched to the layout. Barometric altitude on
+    the ground reads up to about 250 ft from the airport's elevation on days
+    of high or low pressure."""
+
+    layout_position_speed_max_gap_seconds: float = 30.0
+    """Longest time, in seconds, between two reports whose positions give a
+    ground speed for :attr:`layout_air_report_must_be_slow`."""
+
+    layout_merge_parked_passages: bool = True
+    """Join two consecutive passages of one element when the aircraft moved
+    less than :attr:`layout_merge_max_move_m` between them and entered no
+    other element in between.
+
+    A parked aircraft whose position jitters across the edge of an element by
+    a few metres, or whose positions arrive only every few minutes inside a
+    hangar, otherwise gives a new entry and exit after every absence of more
+    than :attr:`airport_trace_gap_seconds` (42 entry/exit pairs for one
+    aircraft parked at a hangar for 19 hours). Off in release v0.0.2."""
+
+    layout_merge_max_move_m: float = 50.0
+    """Largest distance, in metres, between the exit of a passage and the
+    entry of the next passage of the same element for the two to be joined."""
+
+    layout_mark_track_edges: bool = True
+    """Set ``info.at_track_start`` on an entry made at the first report with
+    a position of its track, and ``info.at_track_end`` on an exit made at the
+    last one. Such an entry or exit is when reception started or stopped
+    (for example a transponder switched on at the stand), not a movement.
+    Off in release v0.0.2."""
+
+    layout_mark_ground_only: bool = True
+    """Set ``info.ground_only`` on the layout events of a track that never
+    leaves the ground and whose aircraft type is unknown or a vehicle type
+    (:attr:`layout_vehicle_typecodes`): in practice airport vehicles with
+    transponders. A track never leaves the ground when it has no report that
+    is not flagged on the ground and has an altitude. Towed aircraft with a
+    known type are not marked. The events are kept. Off in release
+    v0.0.2."""
+
+    layout_vehicle_typecodes: tuple = ("SERV", "GRND", "GND", "TWR")
+    """Aircraft type codes of the aircraft database that are not aircraft,
+    for :attr:`layout_mark_ground_only`: service vehicles (``SERV``), ground
+    vehicles and marshallers (``GRND``, ``GND``) and fixed transmitters
+    (``TWR``). On 14 June 2026 the flight list held 561 rows with these
+    codes, all without a destination."""
+
     # -- plausibility checks ----------------------------------------------
     #
     # Events that the aircraft's own track clearly contradicts are removed
@@ -809,6 +893,12 @@ class EventConfig:
             interpolate_crossings_over_missing_values=False,
             airport_events_ordered=False,
             layout_deterministic_element=False,
+            # Work package 6 (surface events, holding, point merge).
+            layout_element_per_passage=False,
+            layout_air_report_must_be_slow=False,
+            layout_merge_parked_passages=False,
+            layout_mark_track_edges=False,
+            layout_mark_ground_only=False,
             feeds_from_clean_tracks=False,
             deterministic_event_ids=False,
             # No distance circles in release v0.0.2.
