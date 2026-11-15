@@ -27,6 +27,7 @@ from pyspark.sql.functions import col, lit
 from opdi.config import EventConfig
 from opdi.pipeline.holding import FT_PER_M
 from opdi.pipeline.holes import PIECE
+from opdi.utils.geometry import haversine_nm
 
 # FIR_VERSION is stamped on the event; its two standard measurements carry the
 # measurement versions every event's do.
@@ -194,6 +195,38 @@ def _debounced_runs(df: DataFrame, config: EventConfig) -> DataFrame:
     )
 
 
+def _with_vertical(crossings: DataFrame, fir_ref: DataFrame) -> DataFrame:
+    """Add ``_vertical``: the regions before and after lie one above the other.
+
+    Each region's flight-level band is the lowest and highest level of its
+    volumes in the reference. Two regions lie one above the other when their
+    bands do not overlap (a lower FIR up to FL195 and an upper UIR from
+    FL195, say). False when they overlap, and when a band is unknown.
+    Joined on the crossings only, which are few, with the band table
+    broadcast.
+    """
+    bands = fir_ref.groupBy("code").agg(F.min("min_fl").alias("lo"), F.max("max_fl").alias("hi"))
+    before = F.broadcast(
+        bands.select(
+            col("code").alias("_from_code"),
+            col("lo").alias("_from_lo"),
+            col("hi").alias("_from_hi"),
+        )
+    )
+    after = F.broadcast(
+        bands.select(
+            col("code").alias("_to_code"), col("lo").alias("_to_lo"), col("hi").alias("_to_hi")
+        )
+    )
+    out = crossings.join(before, col("_prev_run") == col("_from_code"), "left").join(
+        after, col("fir_run") == col("_to_code"), "left"
+    )
+    apart = (col("_from_hi") <= col("_to_lo")) | (col("_to_hi") <= col("_from_lo"))
+    return out.withColumn("_vertical", F.coalesce(apart, lit(False))).drop(
+        "_from_code", "_from_lo", "_from_hi", "_to_code", "_to_lo", "_to_hi"
+    )
+
+
 def calculate_fir_events(
     sdf: DataFrame, fir_ref: Optional[DataFrame], config: EventConfig
 ) -> Optional[DataFrame]:
@@ -203,6 +236,18 @@ def calculate_fir_events(
     plus ``piece`` and the cumulative columns); ``fir_ref`` the frame from
     ``load_fir_reference``. None when the family is off or the reference is
     absent.
+
+    Three settings of :class:`~opdi.config.EventConfig` apply:
+
+    * :attr:`~opdi.config.EventConfig.fir_needs_position`: only reports with
+      a latitude and a longitude are looked up, so a crossing always has a
+      position, and never comes from the map cell of a position cleaning
+      removed;
+    * :attr:`~opdi.config.EventConfig.crossing_max_implied_speed_kt`: a
+      crossing whose report and the last report in the region before it imply
+      a higher ground speed is not given (a position jump);
+    * :attr:`~opdi.config.EventConfig.fir_flag_vertical`: ``info.vertical``
+      says whether the two regions lie one above the other.
     """
     if not config.emit_fir_crossings or fir_ref is None:
         return None
@@ -210,6 +255,8 @@ def calculate_fir_events(
         print("h3_res_7 is not in the input; xing-fir will not be computed.")
         return None
     df = sdf.filter(col("event_time").isNotNull() & col("h3_res_7").isNotNull())
+    if config.fir_needs_position:
+        df = df.filter(col("lat").isNotNull() & col("lon").isNotNull())
     if PIECE not in df.columns:
         df = df.withColumn(PIECE, lit(0))
     df = attach_fir(df, fir_ref, config)
@@ -224,26 +271,50 @@ def calculate_fir_events(
     prev_run = F.last("fir_run", ignorenulls=True).over(before)
     prev_ts = F.last(known_ts, ignorenulls=True).over(before)
     crossing = col("fir_run").isNotNull() & prev_run.isNotNull() & (col("fir_run") != prev_run)
+    max_kt = config.crossing_max_implied_speed_kt
+    if max_kt is not None:
+        # The position of the last report in the region before, from the
+        # same report as its time.
+        known_pos = F.when(
+            col("fir_run").isNotNull() & col("lat").isNotNull() & col("lon").isNotNull(),
+            F.struct(col("_ts").alias("t"), col("lat").alias("lat"), col("lon").alias("lon")),
+        )
+        df = df.withColumn("_prev_pos", F.last(known_pos, ignorenulls=True).over(before))
     df = (
         df.withColumn("_prev_run", prev_run)
         .withColumn("_bracket_s", col("_ts") - prev_ts)
         .withColumn("_crossing", crossing)
         .filter(col("_crossing"))
     )
+    if max_kt is not None:
+        prev = col("_prev_pos")
+        dist_nm = haversine_nm(prev["lat"], prev["lon"], col("lat"), col("lon"))
+        dt_s = col("_ts") - prev["t"]
+        too_fast = F.when(dt_s > 0, dist_nm / dt_s * lit(3600.0) > lit(float(max_kt))).otherwise(
+            dist_nm > 0
+        )
+        # Unknown (no position on one side) keeps the crossing. It still
+        # counts in ``crossing_seq``, as a crossing that cannot be placed does
+        # in the other crossing families.
+        df = df.withColumn("_too_fast", F.coalesce(too_fast, lit(False)))
     seq = Window.partitionBy("track_id").orderBy("_ts")
     df = df.withColumn("crossing_seq", F.row_number().over(seq))
-    info = F.to_json(
-        F.struct(
-            col("crossing_seq"),
-            col("_prev_run").alias("fir_from"),
-            col("fir_run").alias("fir_to"),
-            F.round(col("_fl"), 0).alias("fl"),
-            col("_bracket_s").alias("bracket_s"),
-            col("airac_cfmu"),
-            col("airac_validity_start"),
-            col("airac_validity_end"),
-        )
-    )
+    if max_kt is not None:
+        df = df.filter(~col("_too_fast"))
+    fields = [
+        col("crossing_seq"),
+        col("_prev_run").alias("fir_from"),
+        col("fir_run").alias("fir_to"),
+        F.round(col("_fl"), 0).alias("fl"),
+        col("_bracket_s").alias("bracket_s"),
+        col("airac_cfmu"),
+        col("airac_validity_start"),
+        col("airac_validity_end"),
+    ]
+    if config.fir_flag_vertical:
+        df = _with_vertical(df, fir_ref)
+        fields.append(col("_vertical").alias("vertical"))
+    info = F.to_json(F.struct(*fields))
     return df.select(
         col("track_id"),
         lit("xing-fir").alias("type"),

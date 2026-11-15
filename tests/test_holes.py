@@ -204,7 +204,11 @@ def test_a_crossing_inside_a_hole_is_not_emitted(spark):
 
 def test_a_crossing_between_ordinary_samples_is_still_emitted(spark):
     sdf = add_piece(_climb_through_fl245(spark, hole=False), 1800.0)
-    events = calculate_threshold_crossing_events(sdf, EventConfig())
+    # The two halves of the fixture are 16 degrees of longitude apart, which
+    # without the hole is a jump; the speed limit is off to test the hole only.
+    events = calculate_threshold_crossing_events(
+        sdf, EventConfig(crossing_max_implied_speed_kt=None)
+    )
     assert events.filter(F.col("type") == "xing-fl245").count() == 1
 
 

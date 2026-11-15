@@ -548,6 +548,89 @@ class EventConfig:
     values depend on it as well.
     See https://www.opdi.aero/content/methods/measurements.html."""
 
+    # -- crossings, rings, FIR and the two measurements (work package 5) --
+    crossing_max_implied_speed_kt: Optional[float] = 1000.0
+    """Highest ground speed, in knots, that the two reports a crossing is
+    placed between may imply. The speed is the great-circle distance between
+    their positions divided by the time between them. A flight-level, ring or
+    FIR crossing whose two reports imply more is not given: the position
+    jumped (a spoofed or corrupted position), and a jump across all six
+    distance circles at once would otherwise give six crossings within
+    seconds. A crossing whose reports lack a position is not tested. Like a
+    crossing that cannot be placed, it still counts in ``crossing_seq``.
+    Real reception gaps over the ocean imply 390 to 560 kt and are kept.
+    None in release v0.0.2 (no test)."""
+
+    crossing_value_max_gap_seconds: Optional[float] = 30.0
+    """Seconds within which a crossing takes the values its own two reports
+    lack from the nearest reports that have them. A flight-level crossing is
+    placed between two reports with an altitude, and one of them often has no
+    position: the position is then interpolated in time between the nearest
+    report with a position before and the nearest one after, each at most this
+    many seconds away. A distance-circle crossing is placed between two
+    reports with a position, and one of them can have no altitude: each then
+    takes its last known altitude, at most this many seconds old. Without a
+    report close enough the value stays empty. None in release v0.0.2."""
+
+    rings_around_flight_list_airports: bool = True
+    """Draw the distance circles around the departure and destination airports
+    that the flight list publishes. Step 04b lets a runway event replace an
+    airport found from the trajectory
+    (:func:`opdi.pipeline.flight_list_milestones.correct_aerodromes`). With
+    this setting step 04 applies the same function to the events it writes
+    before it computes the circles, so a circle never names an airport the
+    flight list does not have, and running steps 04 and 04b again gives the
+    same circles. Off in release v0.0.2 (the airports of step 03)."""
+
+    fir_needs_position: bool = True
+    """Look up the FIR only of reports whose position survived cleaning.
+    Cleaning blanks an untrusted latitude and longitude but keeps the map
+    cell ``h3_res_7`` computed from them, so without this setting a FIR
+    crossing can come from a position the pipeline itself rejected, and be
+    published without a position."""
+
+    fir_flag_vertical: bool = True
+    """Write ``info.vertical`` on each FIR crossing: true when the two regions
+    lie one above the other (their flight-level bands do not overlap), as a
+    lower FIR and the upper UIR of the same area. Such a crossing is a climb
+    or descent through the boundary level, not a crossing of a lateral
+    boundary; it is published as before, and the field lets a user count
+    lateral crossings only."""
+
+    distance_max_implied_speed_kt: Optional[float] = 1000.0
+    """Highest ground speed, in knots, of a step of the distance flown. A step
+    from the last known position to the next one that implies more is not
+    added: the position jumped (two aircraft under one transponder address, a
+    shifted or spoofed position). The next step is measured from the new
+    position. Real reception gaps over the ocean imply 390 to 560 kt and are
+    still bridged by the straight line. None in release v0.0.2 and in
+    ``distance_v0.0.3`` (no test)."""
+
+    distance_between_positions: bool = True
+    """Give a report without a position the distance flown interpolated in
+    time between the last report with a position before it and the next one
+    after it, when both are in the same piece of track (no gap longer than
+    :attr:`track_hole_seconds` between them). Without it the distance stays at
+    its value at the last known position and catches up at the next one, so
+    an event inside a stretch without positions shows a distance too small,
+    and the distance can go down between two events. Before the first known
+    position the distance is unknown (empty), not 0; after the last known
+    position it stays at its last value."""
+
+    measure_every_event: bool = True
+    """Give every event both measurements, the distance flown and the time
+    passed, from its own time, once all event families are joined. Events
+    whose family gives no distance (level-offs, off-block and in-block times,
+    the take-off and landing times of the runway window) get the distance
+    interpolated in time between the events before and after them on the same
+    track that have one. A measurement without a value is not written."""
+
+    time_passed_from_first_seen: bool = True
+    """Count the time passed of every event from the ``first_seen`` event of
+    its track, by reading that event's time, so the two always agree. Without
+    it the time passed counts from the track's first report, which can
+    differ from ``first_seen``."""
+
     # -- one event type per question -----------------------------------
     merge_duplicate_milestones: Optional[bool] = None
     """Publish one event type per milestone, where two detectors give the
@@ -828,5 +911,15 @@ class EventConfig:
             emit_fir_crossings=False,
             plausibility_checks=False,
             runway_take_off_needs_air_report=False,
+            # Work package 5: crossings, rings, FIR and the two measurements.
+            crossing_max_implied_speed_kt=None,
+            crossing_value_max_gap_seconds=None,
+            rings_around_flight_list_airports=False,
+            fir_needs_position=False,
+            fir_flag_vertical=False,
+            distance_max_implied_speed_kt=None,
+            distance_between_positions=False,
+            measure_every_event=False,
+            time_passed_from_first_seen=False,
             events_version=LEGACY_EVENTS_VERSION,
         )

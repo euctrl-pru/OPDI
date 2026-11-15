@@ -4,6 +4,7 @@ import json
 import random
 
 import h3
+import pytest
 from navigation_fixtures import fly, legs_to_samples, make_track, measured
 from pyspark.sql import functions as F
 
@@ -195,3 +196,89 @@ def test_a_crossing_across_a_long_blank_is_still_a_crossing(spark):
     # the last *known* long run, which is AAAA itself), so the bracket is one
     # or two samples, not the whole blank.
     assert info["bracket_s"] <= 10
+
+
+# ---------------------------------------------------------------------------
+# Work package 5: positions removed by cleaning, position jumps, vertical
+# ---------------------------------------------------------------------------
+
+
+def _cleaned_after_boundary(spark):
+    """Eastbound across the AAAA/BBBB boundary (lon 0). Cleaning removed the
+    positions of the first two minutes in BBBB, but the map cell computed
+    from them stayed (spot check xing-fir#05 and #33: the crossing was then
+    published without a position)."""
+    samples = legs_to_samples([(1500, 0, 0)], lat0=51.0, lon0=-1.5, hdg0=90.0, alt_ft=33000.0)
+    sdf = _with_cells(measured(make_track(spark, samples)))
+    lon_now = F.col("lon")
+    blank = (lon_now > 0) & (lon_now < 0.25)
+    return sdf.withColumn("lat", F.when(blank, None).otherwise(F.col("lat"))).withColumn(
+        "lon", F.when(blank, None).otherwise(lon_now)
+    )
+
+
+def test_a_fir_crossing_is_placed_on_a_report_that_kept_its_position(spark):
+    rows = calculate_fir_events(
+        _cleaned_after_boundary(spark), _ref(spark, TWO), EventConfig()
+    ).collect()
+
+    assert len(rows) == 1
+    assert rows[0].lat is not None and rows[0].lon == pytest.approx(0.25, abs=0.03)
+    assert json.loads(rows[0].info)["bracket_s"] > 60
+
+
+def test_without_the_setting_the_crossing_has_no_position(spark):
+    config = EventConfig(fir_needs_position=False)
+
+    rows = calculate_fir_events(_cleaned_after_boundary(spark), _ref(spark, TWO), config).collect()
+
+    assert len(rows) == 1 and rows[0].lat is None
+    assert EventConfig.legacy().fir_needs_position is False
+
+
+def _spoofed(spark):
+    """Spot check xing-fir#33: positions jump from the aircraft's own region
+    to a fixed point about 75 NM away within 5 s, stay there for five
+    minutes, and jump back."""
+    samples = legs_to_samples([(900, 0, 0)], lat0=51.0, lon0=-1.9, hdg0=90.0, alt_ft=33000.0)
+    for s in samples:
+        if 300 <= s["t"] < 600:
+            s["lat"], s["lon"] = 51.0, 0.5
+    return _with_cells(measured(make_track(spark, samples)))
+
+
+def test_a_jump_into_another_region_and_back_gives_no_crossing(spark):
+    rows = calculate_fir_events(_spoofed(spark), _ref(spark, TWO), EventConfig()).collect()
+
+    assert rows == []
+
+
+def test_without_the_speed_limit_the_jump_gives_two_crossings(spark):
+    config = EventConfig(crossing_max_implied_speed_kt=None)
+
+    rows = calculate_fir_events(_spoofed(spark), _ref(spark, TWO), config).collect()
+
+    assert len(rows) == 2
+
+
+def test_a_climb_from_the_lower_into_the_upper_region_is_flagged_vertical(spark):
+    layered = [("AAAAFIR", 0, 195, 1e4, -2.0, 2.0), ("AAAAUIR", 195, 999, 1e4, -2.0, 2.0)]
+    sdf = _track(
+        spark, [(300, 0, 2000.0), (300, 0, 0)], lat0=51.0, lon0=-1.0, hdg0=90.0, alt_ft=15000.0
+    )
+
+    rows = calculate_fir_events(sdf, _ref(spark, layered), EventConfig()).collect()
+
+    assert len(rows) == 1 and json.loads(rows[0].info)["vertical"] is True
+
+
+def test_a_lateral_crossing_is_not_flagged_vertical(spark):
+    sdf = _track(spark, [(1500, 0, 0)], lat0=51.0, lon0=-1.5, hdg0=90.0, alt_ft=33000.0)
+
+    rows = calculate_fir_events(sdf, _ref(spark, TWO), EventConfig()).collect()
+    off = calculate_fir_events(
+        sdf, _ref(spark, TWO), EventConfig(fir_flag_vertical=False)
+    ).collect()
+
+    assert json.loads(rows[0].info)["vertical"] is False
+    assert "vertical" not in json.loads(off[0].info)
