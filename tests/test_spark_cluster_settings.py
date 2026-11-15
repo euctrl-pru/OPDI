@@ -8,6 +8,8 @@ KEPT = {
     "spark.storage.replication.proactive": "true",
     "spark.task.maxFailures": "8",
     "spark.stage.maxConsecutiveAttempts": "8",
+    "spark.excludeOnFailure.enabled": "true",
+    "spark.excludeOnFailure.task.maxTaskAttemptsPerExecutor": "1",
     "spark.hadoop.fs.s3a.retry.throttle.interval": "1s",
     "spark.hadoop.fs.s3a.connection.request.timeout": "120s",
 }
@@ -39,6 +41,18 @@ def test_the_executors_fit_the_namespace_quota():
     assert distributed["spark.executor.memory"] == "11g"
     assert n * cores <= 30 - 4
     assert n * pod <= (192 - 16) * 1024
+
+
+def test_a_failed_task_is_retried_on_another_executor():
+    # One attempt per executor and task: the next attempt goes elsewhere, so
+    # an executor that is dying cannot use up all the attempts of a task.
+    distributed = OPDIConfig.for_environment("opensky").spark.to_distributed_config()
+    assert distributed["spark.excludeOnFailure.enabled"] == "true"
+    assert distributed["spark.excludeOnFailure.task.maxTaskAttemptsPerExecutor"] == "1"
+    for env in ("local", "opensky"):
+        cfg = OPDIConfig.for_environment(env)
+        local = cfg.spark.to_spark_config(cfg.project)
+        assert not any(key.startswith("spark.excludeOnFailure") for key in local)
 
 
 def test_a_session_on_one_machine_gets_none_of_them():
