@@ -66,6 +66,7 @@ MODULES = [
     "run_airspace_events_day",
     "run_debounced_day",
     "run_track_link_day",
+    "spot_checks",
     "study_variants",
     "study_variants.detection",
     "study_variants.segmentation",
