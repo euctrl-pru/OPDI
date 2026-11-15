@@ -1428,6 +1428,37 @@ def test_a_landing_roll_with_high_ground_altitudes_is_not_a_take_off(spark):
         assert kind not in _types(events)
 
 
+#: The landing roll of track be5169cc81c6c0c0_1781443564 (KORF, 2026-06-14),
+#: landing on runway 23: the last approach report above the runway, then
+#: reports at 0 ft while slowing from 135 kt to 86 kt, one at 50 ft that is
+#: not flagged on the ground, and then only reports flagged on the ground,
+#: without altitude. Read over runway 05 it starts at 0 ft and ends at
+#: 50 ft; the pass ends on the ground all the same.
+_LANDING_ROLL_23 = [
+    (0, 2.60, 250.0, 136.0, False, 218.0),
+    (5, 2.30, 125.0, 136.0, False, 218.0),
+    (10, 1.95, 0.0, 135.0, False, 218.0),
+    (15, 1.75, 0.0, None, False, 218.0),
+    (20, 1.58, 0.0, 86.0, False, 218.0),
+    (25, 1.47, 0.0, None, False, 218.0),
+    (30, 1.38, 50.0, None, False, 218.0),
+] + [(35 + 5 * i, 1.32 - 0.03 * i, None, None, True, 218.0) for i in range(10)]
+
+
+def test_a_landing_roll_that_ends_on_reports_on_the_ground_is_not_a_take_off(spark):
+    """The report that reads 50 ft is not flagged on the ground, but every
+    report after it is: the pass ends with the aircraft on the runway."""
+    rows = [(t, along, h, kt, g, 250.0) for t, along, h, kt, g, _ in _LANDING_ROLL_23]
+    sv = _strip_pass(spark, rows)
+    passes, events = _runway_family(spark, sv)
+
+    assert ("07", "departure") not in passes
+    for kind in ("line-up", "take-off-roll", "ATOT"):
+        assert kind not in _types(events)
+    _, before = _runway_family(spark, sv, EventConfig(runway_take_off_needs_air_report=False))
+    assert "ATOT" in _types(before)
+
+
 def test_without_the_setting_the_landing_roll_reads_as_a_take_off(spark):
     """``runway_take_off_needs_air_report`` off gives the earlier reading:
     a departure on 07, and a take-off time on the landing roll where the

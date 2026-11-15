@@ -293,9 +293,10 @@ class EventConfig:
     a fast turn-off is not read as a take-off roll."""
 
     runway_take_off_needs_air_report: bool = True
-    """Read a pass over a runway as a take-off only if the report that shows
-    the aircraft above :attr:`runway_airborne_height_ft` at the end of the
-    pass is not flagged on the ground.
+    """Read a pass over a runway as a take-off only if it ends in the air:
+    neither the report that shows the aircraft above
+    :attr:`runway_airborne_height_ft` at the end of the pass nor the last
+    report of the pass is flagged on the ground.
 
     A take-off ends with the aircraft in the air. On the ground, the
     barometric altitude of a report can read 20 to 60 ft above the airport's
@@ -303,8 +304,8 @@ class EventConfig:
     pressure of the day. Without this setting, a landing roll then looks like
     a take-off when it is read in the opposite direction of the runway (from
     the far end, with no approach before it): it starts low, just after the
-    touchdown, and ends "above 15 ft" on reports that the transponder flags
-    on the ground. The take-off time, ``line-up`` and ``take-off-roll`` are
+    touchdown, and ends "above 15 ft" on a report at or just before the
+    reports that the transponder flags on the ground. The take-off time, ``line-up`` and ``take-off-roll`` are
     then placed on the landing roll. Reports without the flag count as not
     on the ground. Off in release v0.0.2. See
     https://www.opdi.aero/content/methods/runway-milestones.html."""
