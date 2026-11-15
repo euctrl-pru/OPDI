@@ -11,7 +11,7 @@ See https://www.opdi.aero/content/methods/surface-events.html.
 """
 
 from datetime import date
-from typing import Optional
+from typing import Optional, Sequence
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -39,7 +39,7 @@ from pyspark.sql.window import Window
 
 from opdi.config import EventConfig
 from opdi.pipeline.elevation import attach_field_elevation, height_above_field_ft
-from opdi.pipeline.flights import resolve_flight_id
+from opdi.pipeline.flights import resolve_flight_id, with_endpoint_candidates
 from opdi.utils.datetime_helpers import get_start_end_of_month
 from opdi.utils.storage import StorageManager
 
@@ -50,7 +50,9 @@ from opdi.utils.storage import StorageManager
 from opdi.versions import LEGACY_EVENTS_VERSION
 
 
-def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:
+def flight_aerodrome_sets(
+    month: date, storage: "StorageManager", endpoint_roles: Sequence[str] = ()
+) -> DataFrame:
     """``id`` and ``apt``: the airports each flight of ``month`` may be at.
 
     The array holds ``adep``, ``ades`` and the two lists of other candidate
@@ -58,6 +60,11 @@ def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:
     flight with an unknown ADES does not match every layout row with a blank
     airport code. Shared with the runway milestones, so both use the same
     airports for a flight.
+
+    ``endpoint_roles`` (``"adep"``, ``"ades"``) adds every airport of the
+    table ``opdi_endpoint_candidates`` for that end of the track (110 NM),
+    for a flight list whose lists hold only the nearer airports
+    (:func:`opdi.pipeline.flights.wide_search_roles`).
 
     A missing flight list raises an error; the caller decides what that
     means.
@@ -85,6 +92,7 @@ def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:
         )
         .withColumn("apt", F.array_remove(col("apt"), ""))
         .select("id", "apt")
+        .transform(lambda fl: with_endpoint_candidates(fl, storage, endpoint_roles))
     )
 
 
@@ -93,6 +101,7 @@ def calculate_airport_events(
     month: date,
     storage: "StorageManager",
     config: Optional[EventConfig] = None,
+    endpoint_roles: Sequence[str] = (),
 ) -> DataFrame:
     """Entry and exit events of the parts of an airport, by H3 layout matching.
 
@@ -101,6 +110,8 @@ def calculate_airport_events(
         month: Month (or day) being processed, to read the flight list.
         storage: :class:`~opdi.utils.storage.StorageManager`.
         config: Event settings; the defaults when omitted.
+        endpoint_roles: Ends of the track whose 110 NM candidate airports are
+            searched too (see :func:`flight_aerodrome_sets`).
 
     Returns:
         The entry and exit events.
@@ -108,7 +119,7 @@ def calculate_airport_events(
     config = config or EventConfig()
 
     # The same airports as the runway milestones use.
-    flight_list = flight_aerodrome_sets(month, storage)
+    flight_list = flight_aerodrome_sets(month, storage, endpoint_roles)
 
     sv_f = sv.withColumnRenamed("callsign", "flight_id")
     sv_f = sv_f.fillna({"flight_id": ""})
