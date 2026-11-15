@@ -1607,8 +1607,8 @@ def test_a_take_off_followed_by_a_circuit_and_a_landing_in_one_pass_keeps_its_ta
 
     Less than 300 s pass between the two, so the take-off and the landing are
     one pass over 07, which ends on the ground. The pass also holds reports in
-    the air well above the runway (400 and 700 ft), so it is not a landing roll
-    misread: the take-off stays. Shape of the circuits at Rocky Mountain
+    the air above the runway (180 and 250 ft, a slow climb), so it is not a
+    landing roll misread: the take-off stays. Shape of the circuits at Rocky Mountain
     Metropolitan (KBJC) and Hillsboro (KHIO) on 2026-06-14.
     """
     circuit = [
@@ -1616,7 +1616,12 @@ def test_a_take_off_followed_by_a_circuit_and_a_landing_in_one_pass_keeps_its_ta
         (300, -0.50, 300.0, 70.0, False, 70.0),
         (310, 0.10, 20.0, 65.0, False, 70.0),
     ] + [(315 + 5 * i, 0.20 + 0.05 * i, None, None, True, 70.0) for i in range(6)]
-    sv = _strip_pass(spark, _TAKE_OFF_07 + circuit)
+    # A slow climb, as at KBJC: 100, 180 and 250 ft while still over the runway.
+    take_off = [
+        (t, along, {400.0: 180.0, 700.0: 250.0}.get(h, h), kt, g, hd)
+        for t, along, h, kt, g, hd in _TAKE_OFF_07
+    ]
+    sv = _strip_pass(spark, take_off + circuit)
     passes, events = _runway_family(spark, sv)
 
     assert ("07", "departure") in passes

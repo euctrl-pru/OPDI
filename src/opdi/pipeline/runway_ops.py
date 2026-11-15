@@ -170,14 +170,16 @@ APPROACH_CORRIDOR_HALF_WIDTH_NM = 0.5
 GOAROUND_HYSTERESIS_FT = 50.0
 
 #: Heights above the airport, in feet, between which a report not flagged on
-#: the ground shows the aircraft clearly in the air. On the ground the
-#: barometric height of a report reads up to about 150 ft (20 to 60 ft from the
-#: pressure of the day, plus altitudes rounded to 100 ft by some
-#: transponders), hence the lower bound; a garbled altitude reads tens of
-#: thousands of feet, hence the upper one. A pass with two such reports that
-#: ends on the ground is a take-off and a later landing, not a landing roll.
-#: Properties of the signal, like :data:`AIRBORNE_HYSTERESIS_FT`.
-CLEARLY_AIRBORNE_MIN_FT = 300.0
+#: the ground shows the aircraft clearly in the air. On 2026-06-14, the
+#: reports not flagged on the ground in the two minutes after a landing roll
+#: misread as a take-off were at most 25 ft above the airport (the pressure of
+#: the day, and altitudes rounded to 25 or 100 ft), while a light aircraft
+#: climbing out of a circuit passes 150 to 300 ft within the approach area at
+#: the far end of the runway; hence the lower bound. A garbled altitude reads
+#: tens of thousands of feet, hence the upper one. A pass with two such
+#: reports that ends on the ground is a take-off and a later landing, not a
+#: landing roll. Properties of the signal, like :data:`AIRBORNE_HYSTERESIS_FT`.
+CLEARLY_AIRBORNE_MIN_FT = 100.0
 CLEARLY_AIRBORNE_MAX_FT = 3000.0
 
 #: What a traversal is, for windowing purposes.

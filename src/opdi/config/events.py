@@ -297,7 +297,7 @@ class EventConfig:
     the report that shows the aircraft above
     :attr:`runway_airborne_height_ft` at the end of the pass is not flagged
     on the ground, and neither is the last report of the pass, unless the
-    pass also holds two reports in the air 300 to 3,000 ft above the airport
+    pass also holds two reports in the air 100 to 3,000 ft above the airport
     (a take-off and a landing on the same runway a few minutes apart, as in
     a circuit).
 
