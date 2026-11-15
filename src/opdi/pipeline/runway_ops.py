@@ -92,6 +92,7 @@ if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
 
 from opdi.pipeline.crossings import missing_value_options, threshold_crossings
 from opdi.pipeline.elevation import (
+    field_elevation_ft,
     height_above_aerodrome_ft,
     height_above_elevation_ft,
 )
@@ -182,6 +183,39 @@ GOAROUND_HYSTERESIS_FT = 50.0
 CLEARLY_AIRBORNE_MIN_FT = 100.0
 CLEARLY_AIRBORNE_MAX_FT = 3000.0
 
+#: The track's ground altitude at an airport (see
+#: :func:`_ground_altitude_ft`). A report is evidence of the ground when it is
+#: flagged on the ground, or slower than :data:`GROUND_EVIDENCE_MAX_KT` with a
+#: vertical rate of at most :data:`GROUND_EVIDENCE_MAX_FTMIN`. Reports with an
+#: altitude within :data:`GROUND_NEAR_SECONDS` of such a report are read too,
+#: because airliners send no altitude on the ground: their last report before
+#: touchdown and their first reports on the take-off roll are the nearest
+#: altitudes to the ground there are. Of those, the highest at most
+#: :data:`GROUND_PLATEAU_FT` above the lowest, and not climbing or descending
+#: faster than :data:`GROUND_PLATEAU_MAX_FTMIN`, is the ground altitude;
+#: altitudes come in steps of 25 ft, so the plateau of a take-off roll reads
+#: as one or two steps. A ground altitude more than :data:`GROUND_MAX_OFFSET_FT` from the
+#: airport's elevation is not a pressure error (about 27 ft per hPa, so
+#: 1,000 ft is about 37 hPa from standard) and is not used. Properties of the
+#: signal, like :data:`AIRBORNE_HYSTERESIS_FT`.
+GROUND_EVIDENCE_MAX_KT = 30.0
+GROUND_EVIDENCE_MAX_FTMIN = 300.0
+GROUND_NEAR_SECONDS = 30.0
+GROUND_PLATEAU_FT = 30.0
+GROUND_PLATEAU_MAX_FTMIN = 500.0
+GROUND_MAX_OFFSET_FT = 1000.0
+
+#: How far back before a departure pass the reports are read, in seconds,
+#: to tell whether the take-off started on the ground
+#: (:attr:`~opdi.config.EventConfig.runway_line_up_needs_ground_report`).
+#: Sixty seconds holds the taxi onto the runway, or the final approach of a
+#: touch-and-go.
+DEPARTURE_LEAD_SECONDS = 60.0
+
+#: Speed, in knots, below which a report without altitude counts as on the
+#: ground for a go-around (a landing roll or a taxi).
+GOAROUND_GROUND_MAX_KT = 50.0
+
 #: What a traversal is, for windowing purposes.
 #:
 #: ``apt_ident`` must be in the key. ``trace_id`` restarts at 0 for every
@@ -210,6 +244,11 @@ TRAVERSAL_INFO = (
     # ``_info`` builds the published JSON on the far side of
     # ``threshold_crossings``, which keeps only the columns it is told to.
     "rwy_bearing",
+    # Whether heights were measured above the track's own ground altitude
+    # (``track``) or the airport's elevation (``elevation``); NULL, and left
+    # out of ``info``, without
+    # :attr:`~opdi.config.EventConfig.runway_height_above_track_ground`.
+    "height_reference",
 )
 
 #: The standard event frame, as ``events.py`` shapes it. Declared explicitly so
@@ -271,6 +310,7 @@ def classify_traversal(
     exit_on_ground=None,
     last_on_ground=None,
     air_reports=None,
+    crossing=None,
 ):
     """Departure, arrival, crossing -- or NULL, which means abstain.
 
@@ -297,6 +337,10 @@ def classify_traversal(
       its take-off stays.
 
     A NULL flag counts as not on the ground.
+
+    ``crossing``, when given, is the crossing test computed by the caller
+    (:func:`_corrected_traversals` reads it from the reports on the runway
+    only) and replaces the one built here from the other arguments.
     """
     aligned = align_deg <= F.lit(config.runway_align_max_deg)
     fast = max_gs_kt > F.lit(config.runway_roll_speed_kt)
@@ -312,13 +356,14 @@ def classify_traversal(
             )
             departure = departure & ~ends_low_on_ground
     arrival = aligned & fast & (entry_height_ft >= airborne_h) & (exit_height_ft < airborne_h)
-    crossing = (
-        (align_deg >= F.lit(config.runway_cross_min_deg))
-        & (max_gs_kt <= F.lit(config.runway_taxi_speed_kt))
-        & (duration_seconds <= F.lit(config.runway_crossing_max_seconds))
-        & (entry_height_ft < airborne_h)
-        & (exit_height_ft < airborne_h)
-    )
+    if crossing is None:
+        crossing = (
+            (align_deg >= F.lit(config.runway_cross_min_deg))
+            & (max_gs_kt <= F.lit(config.runway_taxi_speed_kt))
+            & (duration_seconds <= F.lit(config.runway_crossing_max_seconds))
+            & (entry_height_ft < airborne_h)
+            & (exit_height_ft < airborne_h)
+        )
     return (
         F.when(departure, F.lit("departure"))
         .when(arrival, F.lit("arrival"))
@@ -436,6 +481,19 @@ def runway_traversals(
         F.col("rwy_length_nm"),
         F.col("rwy_half_width_nm"),
     )
+    if _traversal_corrections_on(config) and "thr_elev_ft" in thresholds.columns:
+        # The threshold's own elevation, for an airport the flight list names
+        # only as an alternative (see ``own_field_elevation_ft``).
+        dir_thr = thresholds.select(
+            F.col("apt_ident").alias("_t_apt"),
+            F.col("rwy_ident"),
+            F.col("thr_lat"),
+            F.col("thr_lon"),
+            F.col("rwy_bearing"),
+            F.col("rwy_length_nm"),
+            F.col("rwy_half_width_nm"),
+            F.col("thr_elev_ft"),
+        )
     cand = near.join(
         F.broadcast(dir_thr),
         (F.col("apt_icao") == F.col("_t_apt"))
@@ -483,6 +541,9 @@ def runway_traversals(
         & (F.col("_along") >= -F.lit(APPROACH_CORRIDOR_NM))
         & (F.col("_cross") <= F.lit(APPROACH_CORRIDOR_HALF_WIDTH_NM))
     )
+    if _traversal_corrections_on(config):
+        return _corrected_traversals(sv, cand, on_runway, on_approach, thresholds, config)
+
     work = cand.filter(on_runway | on_approach).drop("_along", "_cross")
 
     # One direction is one candidate traversal, so the session -- and the trace
@@ -681,6 +742,496 @@ def runway_traversals(
 
 
 # ---------------------------------------------------------------------------
+# Traversals with the corrections of work package 2
+# ---------------------------------------------------------------------------
+
+
+def _traversal_corrections_on(config: "EventConfig") -> bool:
+    """Whether any setting that changes how traversals are built is on."""
+    return bool(
+        config.runway_height_above_track_ground
+        or config.runway_direction_by_motion
+        or config.runway_events_on_runway_reports
+        or config.runway_crossing_ground_without_altitude
+    )
+
+
+def own_field_elevation_ft(sdf: DataFrame, apt_ident):
+    """The published elevation of the aerodrome ``apt_ident`` itself.
+
+    :func:`~opdi.pipeline.elevation.field_elevation_ft` for the flight's two
+    airports. For another airport of the flight's airport list (a nearby
+    airport the flight list names as an alternative), the elevation of the
+    runway threshold (``thr_elev_ft``, from OurAirports) rather than the
+    higher of the flight's two airports, which can be hundreds of feet off.
+    """
+    two_fields = field_elevation_ft(sdf, apt_ident)
+    if "thr_elev_ft" not in sdf.columns or "adep" not in sdf.columns:
+        return two_fields
+    named = (apt_ident == F.col("adep")) | (apt_ident == F.col("ades"))
+    return F.when(F.coalesce(named, F.lit(False)), two_fields).otherwise(
+        F.coalesce(F.col("thr_elev_ft"), two_fields)
+    )
+
+
+def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft):
+    """The track's barometric altitude on the ground at the airport, in feet.
+
+    One value per ``(track_id, apt_icao)``, returned as a column of ``work``
+    (window functions over that partition, so no join). Read from the
+    reports of the pass frame (runway and approach area of the airport):
+
+    * evidence of the ground: a report flagged on the ground, or slower than
+      :data:`GROUND_EVIDENCE_MAX_KT` with a vertical rate of at most
+      :data:`GROUND_EVIDENCE_MAX_FTMIN`;
+    * the altitudes read: those of such reports, and those of reports within
+      :data:`GROUND_NEAR_SECONDS` of one (airliners send no altitude on the
+      ground, so the last report before touchdown and the first reports of
+      the take-off roll stand for it);
+    * the value: the highest of the altitudes at most :data:`GROUND_PLATEAU_FT`
+      above the lowest of them (and not climbing or descending faster than
+      :data:`GROUND_PLATEAU_MAX_FTMIN`, except the lowest). Altitudes come in
+      steps of 25 ft, so a take-off roll reads two values, and the higher is
+      taken: measured from the lower, the roll itself would read 25 ft, above
+      ``runway_airborne_height_ft``. The reports that show the ground are
+      used when they carry altitudes; the reports near them otherwise.
+
+    NULL when the track has no such report at this airport, or when the value
+    is more than :data:`GROUND_MAX_OFFSET_FT` from ``elevation_ft``.
+    """
+    by_apt = Window.partitionBy("track_id", "apt_icao")
+    ordered = by_apt.orderBy("event_time")
+    t = F.col("event_time").cast("double")
+    gs_kt = F.col("velocity") * F.lit(KT_PER_MPS)
+    vr = F.abs(_col_or_null(work, "vert_rate", "double") * F.lit(FTMIN_PER_MPS))
+    evidence = F.coalesce(F.col("_on_ground"), F.lit(False)) | F.coalesce(
+        (gs_kt < F.lit(GROUND_EVIDENCE_MAX_KT))
+        & (F.coalesce(vr, F.lit(0.0)) <= F.lit(GROUND_EVIDENCE_MAX_FTMIN)),
+        F.lit(False),
+    )
+    ev_t = F.when(evidence, t)
+    prev_ev = F.last(ev_t, ignorenulls=True).over(
+        ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    next_ev = F.first(ev_t, ignorenulls=True).over(
+        ordered.rowsBetween(Window.currentRow, Window.unboundedFollowing)
+    )
+    near = (
+        evidence
+        | F.coalesce(t - prev_ev <= F.lit(GROUND_NEAR_SECONDS), F.lit(False))
+        | F.coalesce(next_ev - t <= F.lit(GROUND_NEAR_SECONDS), F.lit(False))
+    )
+    # A report descending or climbing fast is not on the plateau (the flare
+    # before a touchdown), unless it is the lowest there is.
+    steady = F.coalesce(vr <= F.lit(GROUND_PLATEAU_MAX_FTMIN), F.lit(True))
+
+    def plateau_top(values):
+        low = F.min(values).over(by_apt)
+        on_plateau = (values <= low + F.lit(GROUND_PLATEAU_FT)) & (steady | (values == low))
+        top = F.max(F.when(on_plateau, values)).over(by_apt)
+        return F.when(F.abs(top - elevation_ft) <= F.lit(GROUND_MAX_OFFSET_FT), top)
+
+    # The reports that show the ground, where they carry an altitude; else
+    # the reports near them.
+    direct = plateau_top(F.when(evidence, alt_ft))
+    nearby = plateau_top(F.when(near, alt_ft))
+    work = work.withColumn("_g_ref", F.coalesce(direct, nearby))
+    return work
+
+
+def _corrected_traversals(
+    sv: DataFrame,
+    cand: DataFrame,
+    on_runway,
+    on_approach,
+    thresholds: DataFrame,
+    config: "EventConfig",
+) -> DataFrame:
+    """:func:`runway_traversals` with the settings of work package 2.
+
+    Each setting changes one part and leaves the others as they are:
+
+    * :attr:`~opdi.config.EventConfig.runway_height_above_track_ground`:
+      heights above the track's ground altitude at the airport
+      (:func:`_ground_altitude_ft`), else above the airport's own elevation
+      (:func:`own_field_elevation_ft`);
+    * :attr:`~opdi.config.EventConfig.runway_direction_by_motion`: passes
+      numbered per runway (both directions together), the direction named by
+      the motion, one pass per runway, class and number, and one runway among
+      parallel ones;
+    * :attr:`~opdi.config.EventConfig.runway_events_on_runway_reports`: the
+      times and positions of the first and last report on the runway itself,
+      and crossings classified from those reports only;
+    * :attr:`~opdi.config.EventConfig.runway_crossing_ground_without_altitude`:
+      a report flagged on the ground without altitude is at height 0 for a
+      crossing, and no crossing is kept in a pass that is a take-off or a
+      landing on the same runway.
+    """
+    by_motion = config.runway_direction_by_motion
+    on_rwy_only = config.runway_events_on_runway_reports
+    ground_x = config.runway_crossing_ground_without_altitude
+
+    work = (
+        cand.withColumn("_on_rwy", on_runway)
+        .filter(on_runway | on_approach)
+        .withColumn("_alt_ft", F.col("baro_altitude_c") * F.lit(FT_PER_M))
+        .withColumn("_gs_kt", F.col("velocity") * F.lit(KT_PER_MPS))
+        .withColumn("_flight_id", _col_or_null(sv, "flight_id", "string"))
+        .withColumn("_on_ground", _col_or_null(sv, "on_ground", "boolean"))
+        .withColumn("_cum_nm", _col_or_null(sv, "cumulative_distance_nm", "double"))
+        .withColumn("_cum_s", _col_or_null(sv, "cumulative_time_s", "double"))
+    )
+    if "thr_elev_ft" not in work.columns:
+        work = work.withColumn("thr_elev_ft", F.lit(None).cast("double"))
+
+    if config.runway_height_above_track_ground:
+        elevation = own_field_elevation_ft(work, F.col("apt_icao"))
+        work = work.withColumn("_elev_ft", elevation)
+        work = _ground_altitude_ft(work, F.col("_alt_ft"), F.col("_elev_ft"))
+        work = work.withColumn("_ref_ft", F.coalesce(F.col("_g_ref"), F.col("_elev_ft")))
+        work = work.withColumn(
+            "_h_ref",
+            F.when(F.col("_g_ref").isNotNull(), F.lit("track")).otherwise(F.lit("elevation")),
+        )
+        work = work.withColumn("_h_ft", F.col("_alt_ft") - F.col("_ref_ft"))
+    else:
+        work = work.withColumn("_ref_ft", F.lit(None).cast("double"))
+        work = work.withColumn("_h_ref", F.lit(None).cast("string"))
+        work = work.withColumn("_h_ft", height_above_aerodrome_ft(work, F.col("apt_icao")))
+
+    # Pass numbers: per runway (both directions together) with the motion
+    # setting, so the two readings of one passage carry one number; per
+    # direction otherwise.
+    session_keys = (
+        ("track_id", "apt_icao", "strip_id") if by_motion else ("track_id", "strip_id", "rwy_ident")
+    )
+    ordered = Window.partitionBy(*session_keys).orderBy("event_time")
+    work = work.withColumn(
+        "_gap",
+        F.col("event_time").cast("long") - F.lag(F.col("event_time").cast("long")).over(ordered),
+    )
+    work = work.withColumn(
+        "trace_id",
+        F.sum(F.when(F.col("_gap") > F.lit(config.airport_trace_gap_seconds), 1).otherwise(0))
+        .over(ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow))
+        .cast("string"),
+    )
+
+    # A report flagged on the ground with no altitude is on the ground, for
+    # the crossing test only.
+    if ground_x:
+        work = work.withColumn(
+            "_hx",
+            F.when(
+                F.col("_h_ft").isNull() & F.coalesce(F.col("_on_ground"), F.lit(False)),
+                F.lit(0.0),
+            ).otherwise(F.col("_h_ft")),
+        )
+    else:
+        work = work.withColumn("_hx", F.col("_h_ft"))
+
+    has_h = F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))
+    rwy_t = F.when(F.col("_on_rwy"), F.col("event_time"))
+    rwy_hx_t = F.when(F.col("_on_rwy") & F.col("_hx").isNotNull(), F.col("event_time"))
+    hx_t = F.when(F.col("_hx").isNotNull(), F.col("event_time"))
+    agg = work.groupBy(
+        "track_id",
+        "apt_icao",
+        "strip_id",
+        "rwy_ident",
+        "thr_lat",
+        "thr_lon",
+        "rwy_bearing",
+        "rwy_length_nm",
+        "rwy_half_width_nm",
+        "le_ident",
+        "he_ident",
+        "trace_id",
+    ).agg(
+        F.min("event_time").alias("entry_time"),
+        F.max("event_time").alias("exit_time"),
+        F.max("_gs_kt").alias("max_gs_kt"),
+        F.expr("percentile_approx(heading, 0.5)").alias("median_track_deg"),
+        F.min_by("_h_ft", has_h).alias("entry_height_ft"),
+        F.max_by("_h_ft", has_h).alias("exit_height_ft"),
+        F.coalesce(F.max_by("_on_ground", has_h), F.lit(False)).alias("exit_on_ground"),
+        F.coalesce(F.max_by("_on_ground", "event_time"), F.lit(False)).alias("last_on_ground"),
+        F.sum(
+            F.when(
+                ~F.coalesce(F.col("_on_ground"), F.lit(False))
+                & (F.col("_h_ft") > F.lit(CLEARLY_AIRBORNE_MIN_FT))
+                & (F.col("_h_ft") < F.lit(CLEARLY_AIRBORNE_MAX_FT)),
+                1,
+            ).otherwise(0)
+        ).alias("air_reports"),
+        F.min_by("lat", "event_time").alias("entry_lat"),
+        F.min_by("lon", "event_time").alias("entry_lon"),
+        F.max_by("lat", "event_time").alias("exit_lat"),
+        F.max_by("lon", "event_time").alias("exit_lon"),
+        F.min_by("_alt_ft", "event_time").alias("entry_altitude_ft"),
+        F.max_by("_alt_ft", "event_time").alias("exit_altitude_ft"),
+        F.min_by("_flight_id", "event_time").alias("osn_flight_id"),
+        F.count(F.lit(1)).alias("n_samples"),
+        # The ground altitude and which reference it is (constant per pass).
+        F.first("_ref_ft", ignorenulls=True).alias("ground_ref_ft"),
+        F.first("_h_ref", ignorenulls=True).alias("height_reference"),
+        # The motion: the median track of the fast reports (rolling,
+        # climbing out, on final), where a heading is known.
+        F.expr(
+            f"percentile_approx(CASE WHEN _gs_kt >= {float(config.runway_roll_speed_kt)} "
+            "THEN heading END, 0.5)"
+        ).alias("fast_track_deg"),
+        F.expr("percentile_approx(_cross, 0.5)").alias("median_cross_nm"),
+        # The reports on the runway itself.
+        F.sum(F.when(F.col("_on_rwy"), 1).otherwise(0)).alias("n_rwy"),
+        F.min(rwy_t).alias("rwy_entry_time"),
+        F.max(rwy_t).alias("rwy_exit_time"),
+        F.min_by("lat", rwy_t).alias("rwy_entry_lat"),
+        F.min_by("lon", rwy_t).alias("rwy_entry_lon"),
+        F.min_by("_alt_ft", rwy_t).alias("rwy_entry_altitude_ft"),
+        F.min_by("_cum_nm", rwy_t).alias("rwy_entry_cum_nm"),
+        F.min_by("_cum_s", rwy_t).alias("rwy_entry_cum_s"),
+        F.max_by("lat", rwy_t).alias("rwy_exit_lat"),
+        F.max_by("lon", rwy_t).alias("rwy_exit_lon"),
+        F.max_by("_alt_ft", rwy_t).alias("rwy_exit_altitude_ft"),
+        F.max_by("_cum_nm", rwy_t).alias("rwy_exit_cum_nm"),
+        F.max_by("_cum_s", rwy_t).alias("rwy_exit_cum_s"),
+        F.max(F.when(F.col("_on_rwy"), F.col("_gs_kt"))).alias("rwy_max_gs_kt"),
+        F.expr("percentile_approx(CASE WHEN _on_rwy THEN heading END, 0.5)").alias("rwy_track_deg"),
+        F.min_by("_hx", rwy_hx_t).alias("rwy_entry_height_ft"),
+        F.max_by("_hx", rwy_hx_t).alias("rwy_exit_height_ft"),
+        F.min_by("_hx", hx_t).alias("x_entry_height_ft"),
+        F.max_by("_hx", hx_t).alias("x_exit_height_ft"),
+    )
+    agg = agg.withColumn(
+        "duration_seconds",
+        (F.col("exit_time").cast("double") - F.col("entry_time").cast("double")),
+    )
+
+    def folded(track):
+        return F.least(
+            angle_between(track, F.col("rwy_bearing")),
+            angle_between(track, F.col("rwy_bearing") + F.lit(180.0)),
+        )
+
+    cand2 = agg.withColumn("align_deg", folded(F.col("median_track_deg")))
+    cand2 = cand2.withColumn(
+        "bearing_error_deg", angle_between(F.col("median_track_deg"), F.col("rwy_bearing"))
+    )
+    cand2 = cand2.withColumn(
+        "cross_track_nm",
+        cross_track_nm(
+            F.col("entry_lat"),
+            F.col("entry_lon"),
+            F.col("thr_lat"),
+            F.col("thr_lon"),
+            F.col("rwy_bearing"),
+        ),
+    )
+    cand2 = cand2.withColumn("_xt", F.round(F.col("cross_track_nm"), 3))
+
+    # The crossing test, on the reports on the runway with
+    # ``runway_events_on_runway_reports``, else on the whole pass; heights
+    # with the ground flag standing in for a missing altitude under
+    # ``runway_crossing_ground_without_altitude``.
+    if on_rwy_only:
+        x_align = folded(F.col("rwy_track_deg"))
+        x_gs = F.col("rwy_max_gs_kt")
+        x_dur = F.col("rwy_exit_time").cast("double") - F.col("rwy_entry_time").cast("double")
+        x_entry_h, x_exit_h = F.col("rwy_entry_height_ft"), F.col("rwy_exit_height_ft")
+        x_present = F.col("n_rwy") >= F.lit(1)
+    else:
+        x_align, x_gs, x_dur = F.col("align_deg"), F.col("max_gs_kt"), F.col("duration_seconds")
+        x_entry_h, x_exit_h = F.col("x_entry_height_ft"), F.col("x_exit_height_ft")
+        x_present = F.lit(True)
+    airborne_h = F.lit(config.runway_airborne_height_ft)
+    crossing = (
+        x_present
+        & (x_align >= F.lit(config.runway_cross_min_deg))
+        & (x_gs <= F.lit(config.runway_taxi_speed_kt))
+        & (x_dur <= F.lit(config.runway_crossing_max_seconds))
+        & (x_entry_h < airborne_h)
+        & (x_exit_h < airborne_h)
+    )
+    cand2 = cand2.withColumn(
+        "class",
+        classify_traversal(
+            F.col("align_deg"),
+            F.col("max_gs_kt"),
+            F.col("entry_height_ft"),
+            F.col("exit_height_ft"),
+            F.col("duration_seconds"),
+            config,
+            exit_on_ground=F.col("exit_on_ground"),
+            last_on_ground=F.col("last_on_ground"),
+            air_reports=F.col("air_reports"),
+            crossing=crossing,
+        ),
+    )
+    cand2 = cand2.filter(F.col("class").isNotNull())
+    move = F.col("class").isin("departure", "arrival")
+
+    if ground_x:
+        # A take-off, a landing or the turn-off after it is not a crossing of
+        # the same runway: drop a crossing reading of a pass that also reads
+        # as a movement on this runway.
+        same_pass = Window.partitionBy("track_id", "apt_icao", "strip_id", "trace_id")
+        cand2 = cand2.withColumn(
+            "_pass_moves", F.max(F.when(move, 1).otherwise(0)).over(same_pass)
+        ).filter(move | (F.col("_pass_moves") == 0))
+        cand2 = cand2.drop("_pass_moves")
+
+    if not by_motion:
+        best = Window.partitionBy("track_id", "strip_id", "trace_id").orderBy(
+            F.col("_xt").asc(),
+            F.col("bearing_error_deg").asc(),
+            F.col("rwy_ident").asc(),
+        )
+        out = (
+            cand2.withColumn("_r", F.row_number().over(best))
+            .filter(F.col("_r") == 1)
+            .drop("_r", "_xt")
+        )
+    else:
+        out = _by_motion(cand2.drop("_xt"), thresholds, move)
+
+    return out.select(
+        F.col("track_id"),
+        F.col("apt_icao").alias("apt_ident"),
+        F.col("rwy_ident"),
+        F.col("rwy_bearing"),
+        F.col("thr_lat"),
+        F.col("thr_lon"),
+        F.col("strip_id"),
+        F.col("trace_id"),
+        F.col("entry_time"),
+        F.col("exit_time"),
+        F.col("duration_seconds"),
+        F.col("max_gs_kt"),
+        F.col("median_track_deg"),
+        F.col("align_deg"),
+        F.col("bearing_error_deg"),
+        F.col("cross_track_nm"),
+        F.col("entry_height_ft"),
+        F.col("exit_height_ft"),
+        F.col("exit_on_ground"),
+        F.col("last_on_ground"),
+        F.col("air_reports"),
+        F.col("entry_lat"),
+        F.col("entry_lon"),
+        F.col("exit_lat"),
+        F.col("exit_lon"),
+        F.col("entry_altitude_ft"),
+        F.col("exit_altitude_ft"),
+        F.col("n_samples"),
+        F.col("osn_flight_id"),
+        F.col("class"),
+        F.col("ground_ref_ft"),
+        F.col("height_reference"),
+        F.col("n_rwy"),
+        F.col("rwy_entry_time"),
+        F.col("rwy_exit_time"),
+        F.col("rwy_entry_lat"),
+        F.col("rwy_entry_lon"),
+        F.col("rwy_entry_altitude_ft"),
+        F.col("rwy_entry_cum_nm"),
+        F.col("rwy_entry_cum_s"),
+        F.col("rwy_exit_lat"),
+        F.col("rwy_exit_lon"),
+        F.col("rwy_exit_altitude_ft"),
+        F.col("rwy_exit_cum_nm"),
+        F.col("rwy_exit_cum_s"),
+    )
+
+
+def _by_motion(cand2: DataFrame, thresholds: DataFrame, move) -> DataFrame:
+    """Name each movement by its direction of motion and keep one per pass.
+
+    1. The motion is the median track of the fast reports (``fast_track_deg``),
+       else of all reports. A take-off or landing read in the direction more
+       than 90 degrees from it is renamed to the opposite direction of the
+       same runway (its threshold and bearing).
+    2. Per runway, pass number and class, one reading is kept: for a
+       take-off, the reading over the runway and the climb-out beyond its far
+       end (the one that was renamed); for a landing, the reading over the
+       approach and the runway (not renamed). Then the smallest bearing error.
+    3. Of passes of one class at one airport whose times overlap (parallel
+       runways), the one with reports on its runway and the smallest median
+       distance from its centre line.
+    """
+    motion = F.coalesce(F.col("fast_track_deg"), F.col("median_track_deg"))
+    cand2 = cand2.withColumn(
+        "_renamed",
+        F.coalesce(
+            move & (angle_between(motion, F.col("rwy_bearing")) > F.lit(90.0)), F.lit(False)
+        ),
+    )
+    recip = thresholds.select(
+        F.col("apt_ident").alias("_o_apt"),
+        F.col("rwy_ident").alias("_o_ident"),
+        F.col("thr_lat").alias("_o_lat"),
+        F.col("thr_lon").alias("_o_lon"),
+        F.col("rwy_bearing").alias("_o_bearing"),
+    )
+    other = F.when(F.col("rwy_ident") == F.col("le_ident"), F.col("he_ident")).otherwise(
+        F.col("le_ident")
+    )
+    cand2 = cand2.withColumn("_other", other).join(
+        F.broadcast(recip),
+        (F.col("apt_icao") == F.col("_o_apt")) & (F.col("_other") == F.col("_o_ident")),
+        "left",
+    )
+    # Renamed only where the opposite direction exists in the thresholds.
+    swap = F.col("_renamed") & F.col("_o_ident").isNotNull()
+    for target, source in (
+        ("rwy_ident", "_o_ident"),
+        ("thr_lat", "_o_lat"),
+        ("thr_lon", "_o_lon"),
+        ("rwy_bearing", "_o_bearing"),
+    ):
+        cand2 = cand2.withColumn(target, F.when(swap, F.col(source)).otherwise(F.col(target)))
+    cand2 = cand2.withColumn("_renamed", swap).drop(
+        "_other", "_o_apt", "_o_ident", "_o_lat", "_o_lon", "_o_bearing"
+    )
+    cand2 = cand2.withColumn("bearing_error_deg", angle_between(motion, F.col("rwy_bearing")))
+
+    natural = F.when(F.col("class") == "departure", F.col("_renamed")).otherwise(~F.col("_renamed"))
+    per_pass = Window.partitionBy("track_id", "apt_icao", "strip_id", "trace_id", "class").orderBy(
+        natural.desc(), F.col("bearing_error_deg").asc_nulls_last(), F.col("rwy_ident").asc()
+    )
+    cand2 = cand2.withColumn("_r", F.row_number().over(per_pass)).filter(F.col("_r") == 1)
+
+    # Parallel runways: passes of one class at one airport whose times
+    # overlap are one movement.
+    by_time = Window.partitionBy("track_id", "apt_icao", "class").orderBy(
+        "entry_time", "exit_time", "strip_id"
+    )
+    cand2 = cand2.withColumn(
+        "_prev_exit",
+        F.max("exit_time").over(by_time.rowsBetween(Window.unboundedPreceding, -1)),
+    )
+    cand2 = cand2.withColumn(
+        "_group",
+        F.sum(
+            F.when(
+                F.col("_prev_exit").isNull() | (F.col("entry_time") > F.col("_prev_exit")), 1
+            ).otherwise(0)
+        ).over(by_time.rowsBetween(Window.unboundedPreceding, Window.currentRow)),
+    )
+    one = Window.partitionBy("track_id", "apt_icao", "class", "_group").orderBy(
+        (F.col("n_rwy") > 0).desc(),
+        F.col("median_cross_nm").asc_nulls_last(),
+        F.col("strip_id").asc(),
+        F.col("rwy_ident").asc(),
+    )
+    return (
+        cand2.withColumn("_r", F.row_number().over(one))
+        .filter(F.col("_r") == 1)
+        .drop("_r", "_renamed", "_prev_exit", "_group")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Milestones
 # ---------------------------------------------------------------------------
 
@@ -744,6 +1295,7 @@ def _info(milestone: Optional[str], method: Optional[str] = None, bracket: bool 
             (
                 F.col("bracket_seconds").cast("double") if bracket else F.lit(None).cast("double")
             ).alias("bracket_s"),
+            F.col("height_reference").cast("string").alias("height_reference"),
         )
     )
 
@@ -776,7 +1328,10 @@ _HEIGHT_INPUTS = ("adep", "ades", "elev_adep_ft", "elev_ades_ft")
 
 
 def _traversal_samples(
-    sv: DataFrame, traversals: DataFrame, lead_seconds: float = 0.0
+    sv: DataFrame,
+    traversals: DataFrame,
+    lead_seconds: float = 0.0,
+    departure_lead_seconds: float = 0.0,
 ) -> DataFrame:
     """The state vectors belonging to each traversal, one row per pair.
 
@@ -798,6 +1353,14 @@ def _traversal_samples(
     outside the polygon, and everything else filters to ``_in_polygon``,
     because entry, exit and the reported positions are statements about
     occupancy. See :data:`ARRIVAL_LEAD_SECONDS`.
+
+    ``departure_lead_seconds`` does the same for ``departure`` traversals
+    (:data:`DEPARTURE_LEAD_SECONDS`), for the test of whether a take-off
+    started on the ground.
+
+    Where the traversal carries ``ground_ref_ft`` (the track's ground
+    altitude, see :func:`_ground_altitude_ft`), ``height_ft`` is measured
+    above it.
     """
     carried = [c for c in _HEIGHT_INPUTS if c in sv.columns]
     s = sv.select(
@@ -811,6 +1374,7 @@ def _traversal_samples(
         (F.col("velocity") * F.lit(KT_PER_MPS)).alias("gs_kt"),
         F.col("cumulative_distance_nm").cast("double").alias("cumulative_distance_nm"),
         F.col("cumulative_time_s").cast("double").alias("cumulative_time_s"),
+        _col_or_null(sv, "on_ground", "boolean").alias("on_ground"),
     )
     t = traversals.select(
         F.col("track_id"),
@@ -826,13 +1390,23 @@ def _traversal_samples(
         F.col("align_deg"),
         _col_or_null(traversals, "osn_flight_id", "string").alias("osn_flight_id"),
         F.col("class").alias("traversal_class"),
+        _col_or_null(traversals, "height_reference", "string").alias("height_reference"),
+        _col_or_null(traversals, "ground_ref_ft", "double").alias("ground_ref_ft"),
     )
     t = t.withColumn(
         "_window_start",
         F.when(
             F.col("traversal_class") == F.lit("arrival"),
             F.timestamp_seconds(F.col("entry_time").cast("double") - F.lit(float(lead_seconds))),
-        ).otherwise(F.col("entry_time")),
+        )
+        .when(
+            (F.col("traversal_class") == F.lit("departure"))
+            & F.lit(float(departure_lead_seconds) > 0.0),
+            F.timestamp_seconds(
+                F.col("entry_time").cast("double") - F.lit(float(departure_lead_seconds))
+            ),
+        )
+        .otherwise(F.col("entry_time")),
     )
     joined = t.join(
         s,
@@ -842,9 +1416,12 @@ def _traversal_samples(
         "inner",
     ).drop("_s_track", "_window_start")
     joined = joined.withColumn("_in_polygon", F.col("event_time") >= F.col("entry_time"))
-    return joined.withColumn(
-        "height_ft", height_above_aerodrome_ft(joined, F.col("apt_ident"))
-    ).drop("baro_altitude_c", *carried)
+    height = height_above_aerodrome_ft(joined, F.col("apt_ident"))
+    height = F.when(
+        F.col("ground_ref_ft").isNotNull(),
+        F.col("baro_altitude_c") * F.lit(FT_PER_M) - F.col("ground_ref_ft"),
+    ).otherwise(height)
+    return joined.withColumn("height_ft", height).drop("baro_altitude_c", "ground_ref_ft", *carried)
 
 
 def _at_extreme(sdf: DataFrame, ascending: bool) -> DataFrame:
@@ -859,7 +1436,7 @@ def _at_extreme(sdf: DataFrame, ascending: bool) -> DataFrame:
     return sdf.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1).drop("_r")
 
 
-def _roll_start(sdf: DataFrame, config: "EventConfig") -> DataFrame:
+def _roll_start(sdf: DataFrame, config: "EventConfig", speed_col: str = "gs_kt") -> DataFrame:
     """The sample at which the take-off roll *began*.
 
     Run-length over the ordered window: mark the fast samples, sessionise where
@@ -885,11 +1462,14 @@ def _roll_start(sdf: DataFrame, config: "EventConfig") -> DataFrame:
     holding for the width of the hole, and a traversal is allowed to span up to
     ``airport_trace_gap_seconds`` of one: the hold has to measure continuous
     observation, not elapsed time.
+
+    ``speed_col`` is the ground speed in knots that is read (the reported
+    one by default).
     """
     ordered = Window.partitionBy(*TRAVERSAL_KEY).orderBy("event_time")
     running = ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)
 
-    work = sdf.withColumn("_fast", F.col("gs_kt") >= F.lit(config.runway_roll_speed_kt))
+    work = sdf.withColumn("_fast", F.col(speed_col) >= F.lit(config.runway_roll_speed_kt))
     work = work.withColumn("_prev_fast", F.lag("_fast").over(ordered))
     work = work.withColumn(
         "_gap",
@@ -1025,6 +1605,136 @@ def _threshold_plane(sdf: DataFrame, config: "EventConfig") -> DataFrame:
     )
 
 
+def _with_speed(sdf: DataFrame) -> DataFrame:
+    """Add ``_speed_kt``: the reported ground speed, else one from positions.
+
+    The speed from positions is the distance from the previous report of the
+    traversal frame that has a position, over the time between the two, when
+    that is more than 0 and at most :data:`ROLL_MAX_GAP_SECONDS`. It is given
+    on reports with a position only. Ground reports almost never carry a
+    speed (about 1 in 100 on a measured day), while their positions show the
+    take-off roll clearly.
+    """
+    ordered = Window.partitionBy(*TRAVERSAL_KEY).orderBy("event_time")
+    before = ordered.rowsBetween(Window.unboundedPreceding, -1)
+    positioned = F.col("lat").isNotNull() & F.col("lon").isNotNull()
+    prev = F.last(
+        F.when(
+            positioned,
+            F.struct(
+                F.col("event_time").cast("double").alias("t"),
+                F.col("lat").alias("lat"),
+                F.col("lon").alias("lon"),
+            ),
+        ),
+        ignorenulls=True,
+    ).over(before)
+    work = sdf.withColumn("_prev_pos", prev)
+    dt = F.col("event_time").cast("double") - F.col("_prev_pos.t")
+    derived = F.when(
+        positioned & (dt > F.lit(0.0)) & (dt <= F.lit(ROLL_MAX_GAP_SECONDS)),
+        haversine_nm(F.col("_prev_pos.lat"), F.col("_prev_pos.lon"), F.col("lat"), F.col("lon"))
+        / (dt / F.lit(3600.0)),
+    )
+    return work.withColumn("_speed_kt", F.coalesce(F.col("gs_kt"), derived)).drop("_prev_pos")
+
+
+def _ground_starts(dep: DataFrame, config: "EventConfig") -> DataFrame:
+    """The departure traversals that start on the ground, as their keys.
+
+    ``dep`` holds the departure samples with ``_speed_kt`` (see
+    :func:`_with_speed`), including the :data:`DEPARTURE_LEAD_SECONDS`
+    before the traversal (``_in_polygon`` false). The *fast run* starts at
+    the first report of the traversal at :attr:`runway_roll_speed_kt` or
+    more (or at its end, when there is none). A take-off starts on the ground
+    when, before the fast run, a report is flagged on the ground or slower
+    than that speed; or, when no fast report in the air comes before the
+    fast run (reception starts during the roll), when the first fast report
+    is flagged on the ground. A touch-and-go has its final approach before
+    the fast run, a track that reappears in the air has neither.
+    """
+    roll_kt = F.lit(config.runway_roll_speed_kt)
+    key = Window.partitionBy(*TRAVERSAL_KEY)
+    flagged = F.coalesce(F.col("on_ground"), F.lit(False))
+    fast_in = F.col("_in_polygon") & F.coalesce(F.col("_speed_kt") >= roll_kt, F.lit(False))
+    work = dep.withColumn(
+        "_anchor",
+        F.coalesce(
+            F.min(F.when(fast_in, F.col("event_time"))).over(key),
+            F.max("event_time").over(key),
+        ),
+    )
+    before = F.col("event_time") < F.col("_anchor")
+    ground_like = flagged | F.coalesce(F.col("_speed_kt") < roll_kt, F.lit(False))
+    air_fast = ~flagged & F.coalesce(F.col("_speed_kt") >= roll_kt, F.lit(False))
+    agg = work.groupBy(*TRAVERSAL_KEY).agg(
+        F.max(F.when(before & ground_like, 1).otherwise(0)).alias("_ground_before"),
+        F.max(F.when(before & air_fast, 1).otherwise(0)).alias("_air_before"),
+        F.max(F.when((F.col("event_time") == F.col("_anchor")) & flagged, 1).otherwise(0)).alias(
+            "_anchor_ground"
+        ),
+    )
+    return agg.filter(
+        (F.col("_ground_before") == 1)
+        | ((F.col("_air_before") == 0) & (F.col("_anchor_ground") == 1))
+    ).select(*TRAVERSAL_KEY)
+
+
+def _on_runway_event(traversals: DataFrame, cls: str, type_: str, which: str) -> DataFrame:
+    """An event at the first or last report on the runway of each traversal.
+
+    ``which`` is ``"entry"`` (first) or ``"exit"`` (last); only traversals of
+    class ``cls``; read from the traversal row. None when the traversal holds
+    no report on the runway
+    (:attr:`~opdi.config.EventConfig.runway_events_on_runway_reports`).
+    """
+    t = traversals.filter(
+        (F.col("class") == F.lit(cls)) & F.col(f"rwy_{which}_time").isNotNull()
+    ).select(
+        *[F.col(c) for c in TRAVERSAL_KEY],
+        F.col("rwy_bearing"),
+        F.col("class").alias("traversal_class"),
+        F.col("align_deg"),
+        F.col("max_gs_kt"),
+        F.col("osn_flight_id"),
+        F.col("height_reference"),
+        F.col(f"rwy_{which}_time").alias("event_time"),
+        F.col(f"rwy_{which}_lat").alias("lat"),
+        F.col(f"rwy_{which}_lon").alias("lon"),
+        F.col(f"rwy_{which}_altitude_ft").alias("altitude_ft"),
+        F.col(f"rwy_{which}_cum_nm").alias("cumulative_distance_nm"),
+        F.col(f"rwy_{which}_cum_s").alias("cumulative_time_s"),
+    )
+    return _event(t, type_, "event_time")
+
+
+def _last_low_threshold_crossing(crossings: DataFrame, config: "EventConfig") -> DataFrame:
+    """The last threshold crossing of each landing traversal, if low enough.
+
+    Crossings more than
+    :attr:`~opdi.config.EventConfig.runway_threshold_crossing_max_height_ft`
+    above the ground are dropped (a low pass, an overflight), then the last
+    one before the end of the traversal is kept: earlier ones belong to a
+    circuit or a low approach flown before the landing.
+    """
+    low = crossings.filter(
+        F.col("height_ft") <= F.lit(config.runway_threshold_crossing_max_height_ft)
+    )
+    last = Window.partitionBy(*TRAVERSAL_KEY).orderBy(F.col("event_time").desc())
+    return low.withColumn("_r", F.row_number().over(last)).filter(F.col("_r") == 1).drop("_r")
+
+
+def _one_row_per_instant(events: DataFrame) -> DataFrame:
+    """One row per ``(track_id, type, event_time)``.
+
+    The event id is built from these three (and the version), so two rows
+    with the same three would share an id. Kept: the first by ``info``, so
+    the choice does not depend on how Spark split the data.
+    """
+    w = Window.partitionBy("track_id", "type", "event_time").orderBy(F.col("info").asc())
+    return events.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1).drop("_r")
+
+
 def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig") -> DataFrame:
     """The eight traversal-derived A-CDM milestones, as standard events.
 
@@ -1053,7 +1763,14 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
     touch_down = ACDM_NAMES["touchdown"] if merged else "touchdown"
     method = "acdm" if merged else None
 
-    samples = _traversal_samples(sv, traversals, lead_seconds=ARRIVAL_LEAD_SECONDS)
+    ground_start = config.runway_line_up_needs_ground_report
+    on_rwy_only = config.runway_events_on_runway_reports and "rwy_entry_time" in traversals.columns
+    samples = _traversal_samples(
+        sv,
+        traversals,
+        lead_seconds=ARRIVAL_LEAD_SECONDS,
+        departure_lead_seconds=DEPARTURE_LEAD_SECONDS if ground_start else 0.0,
+    )
     bounded = samples.filter(F.col("_in_polygon"))
 
     dep = bounded.filter(F.col("traversal_class") == "departure")
@@ -1061,26 +1778,73 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
     xing = bounded.filter(F.col("traversal_class") == "crossing")
     arr_approach = samples.filter(F.col("traversal_class") == "arrival")
 
+    # The first report on the runway and the start of the roll; with
+    # ``runway_line_up_needs_ground_report``, only for a take-off that started
+    # on the ground.
+    dep_trav = traversals
+    if config.runway_roll_speed_from_positions or ground_start:
+        dep_speed = _with_speed(samples.filter(F.col("traversal_class") == "departure"))
+    if ground_start:
+        starts = _ground_starts(dep_speed, config)
+        dep_trav = traversals.join(starts, list(TRAVERSAL_KEY), "left_semi")
+        dep_lined = dep.join(starts, list(TRAVERSAL_KEY), "left_semi")
+        dep_speed = dep_speed.join(starts, list(TRAVERSAL_KEY), "left_semi")
+    else:
+        dep_lined = dep
+    line_up = (
+        _on_runway_event(dep_trav, "departure", "line-up", "entry")
+        if on_rwy_only
+        else _event(_at_extreme(dep_lined, True), "line-up", "entry_time")
+    )
+    if config.runway_roll_speed_from_positions:
+        rolling = dep_speed.filter(
+            F.col("_in_polygon")
+            & F.col("lat").isNotNull()
+            & F.col("lon").isNotNull()
+            & F.col("_speed_kt").isNotNull()
+        )
+        roll = _event(_roll_start(rolling, config, "_speed_kt"), "take-off-roll", "event_time")
+    else:
+        roll = _event(_roll_start(dep_lined, config), "take-off-roll", "event_time")
+
+    threshold = _threshold_plane(arr_approach, config)
+    if config.runway_threshold_crossing_last_only:
+        threshold = _last_low_threshold_crossing(threshold, config)
+
     parts = [
         # A departure: lined up, rolling, then off the deck.
-        _event(_at_extreme(dep, True), "line-up", "entry_time"),
-        _event(_roll_start(dep, config), "take-off-roll", "event_time"),
+        line_up,
+        roll,
         _event(_height_crossing(dep, config, "up"), lift_off, "event_time", method, bracket=True),
         # An arrival: over the threshold, wheels down, off the strip.
-        _event(_threshold_plane(arr_approach, config), RUNWAY_THRESHOLD_CROSSING, "event_time"),
+        _event(threshold, RUNWAY_THRESHOLD_CROSSING, "event_time"),
         _event(
             _height_crossing(arr, config, "down"), touch_down, "event_time", method, bracket=True
         ),
-        _event(_at_extreme(arr, False), "runway-vacated", "exit_time"),
+        (
+            _on_runway_event(traversals, "arrival", "runway-vacated", "exit")
+            if on_rwy_only
+            else _event(_at_extreme(arr, False), "runway-vacated", "exit_time")
+        ),
         # A crossing is not a movement: it gets its two instants and nothing
         # else, so it can never be counted as one.
-        _event(_at_extreme(xing, True), "runway-crossing-entry", "entry_time"),
-        _event(_at_extreme(xing, False), "runway-crossing-vacated", "exit_time"),
+        (
+            _on_runway_event(traversals, "crossing", "runway-crossing-entry", "entry")
+            if on_rwy_only
+            else _event(_at_extreme(xing, True), "runway-crossing-entry", "entry_time")
+        ),
+        (
+            _on_runway_event(traversals, "crossing", "runway-crossing-vacated", "exit")
+            if on_rwy_only
+            else _event(_at_extreme(xing, False), "runway-crossing-vacated", "exit_time")
+        ),
     ]
 
     out = parts[0]
     for part in parts[1:]:
         out = out.unionByName(part)
+    if config.runway_direction_by_motion:
+        out = _one_row_per_instant(out)
     return out
 
 
@@ -1089,7 +1853,53 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
 # ---------------------------------------------------------------------------
 
 
-def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
+def _in_approach_corridor(
+    excursion: DataFrame, thresholds: DataFrame, config: "EventConfig"
+) -> DataFrame:
+    """The excursions whose lowest point lies on a runway's extended centre line.
+
+    The lowest point (``lat``/``lon``) is in the corridor of a runway of the
+    destination (``ades``) when its along-track distance from that runway's
+    threshold is between ``-goaround_corridor_length_nm`` and the runway's
+    length, and its distance from the centre line is at most
+    ``goaround_corridor_half_width_nm``. An excursion is kept when one runway
+    has it in its corridor, and also when the destination has no runway in
+    ``thresholds`` or the lowest point has no position: an unknown fact keeps
+    the event.
+    """
+    thr = F.broadcast(
+        thresholds.select(
+            F.col("apt_ident").alias("_c_apt"),
+            F.col("thr_lat").alias("_c_lat"),
+            F.col("thr_lon").alias("_c_lon"),
+            F.col("rwy_bearing").alias("_c_brg"),
+            F.col("rwy_length_nm").alias("_c_len"),
+        )
+    )
+    along = along_track_nm(
+        F.col("lat"), F.col("lon"), F.col("_c_lat"), F.col("_c_lon"), F.col("_c_brg")
+    )
+    across = cross_track_nm(
+        F.col("lat"), F.col("lon"), F.col("_c_lat"), F.col("_c_lon"), F.col("_c_brg")
+    )
+    inside = (
+        (F.col("ades") == F.col("_c_apt"))
+        & (along >= -F.lit(config.goaround_corridor_length_nm))
+        & (along <= F.col("_c_len"))
+        & (across <= F.lit(config.goaround_corridor_half_width_nm))
+    )
+    in_corridor = excursion.join(thr, inside, "left_semi")
+    unknown = excursion.filter(F.col("lat").isNull() | F.col("lon").isNull()).unionByName(
+        excursion.filter(F.col("lat").isNotNull() & F.col("lon").isNotNull()).join(
+            thr, F.col("ades") == F.col("_c_apt"), "left_anti"
+        )
+    )
+    return in_corridor.unionByName(unknown)
+
+
+def go_arounds(
+    sv: DataFrame, config: "EventConfig", thresholds: Optional[DataFrame] = None
+) -> DataFrame:
     """Go-arounds: a descent near the destination followed by a climb back.
 
     A go-around is a descent below ``goaround_trigger_height_ft`` near the
@@ -1118,6 +1928,16 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
     columns. Heights here are measured against ``elev_ades_ft`` alone: the
     detector is anchored at the destination by construction, so there is no
     ambiguity to be permissive about.
+
+    With :attr:`~opdi.config.EventConfig.goaround_excludes_landings`, an
+    excursion that holds a report on the ground (flagged, or slower than
+    :data:`GOAROUND_GROUND_MAX_KT` without altitude), lasts longer than
+    ``goaround_max_excursion_seconds`` or holds a gap longer than
+    ``goaround_max_gap_seconds`` is not a go-around. With
+    :attr:`~opdi.config.EventConfig.goaround_in_approach_corridor` and
+    ``thresholds`` (:func:`opdi.pipeline.runways.runway_thresholds`), the
+    lowest point must lie in the approach corridor of a runway of the
+    destination (see :func:`_in_approach_corridor`).
     """
     if not config.emit_runway_milestones:
         return _empty_milestones(sv)
@@ -1142,10 +1962,27 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
         F.col("cumulative_time_s").cast("double").alias("cumulative_time_s"),
         _col_or_null(sv, "ades", "string").alias("ades"),
         _col_or_null(sv, "flight_id", "string").alias("osn_flight_id"),
+        *(
+            [
+                # A report on the ground: flagged, or slow without an
+                # altitude (a landing roll or a taxi; airliners send no
+                # altitude on the ground).
+                (
+                    F.coalesce(_col_or_null(sv, "on_ground", "boolean"), F.lit(False))
+                    | F.coalesce(
+                        F.col("baro_altitude_c").isNull()
+                        & (F.col("velocity") * F.lit(KT_PER_MPS) < F.lit(GOAROUND_GROUND_MAX_KT)),
+                        F.lit(False),
+                    )
+                ).alias("_ground")
+            ]
+            if config.goaround_excludes_landings
+            else []
+        ),
     )
 
     crossings = threshold_crossings(
-        work,
+        work.drop("_ground") if "_ground" in work.columns else work,
         value_col="height_ft",
         thresholds=[config.goaround_trigger_height_ft, config.goaround_recovery_height_ft],
         hysteresis=GOAROUND_HYSTERESIS_FT,
@@ -1205,7 +2042,20 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
         "inner",
     ).drop("_w_track")
 
+    extra = []
+    if config.goaround_excludes_landings:
+        by_excursion = Window.partitionBy("track_id", "_from").orderBy("event_time")
+        inside = inside.withColumn(
+            "_step",
+            F.col("event_time").cast("double")
+            - F.lag(F.col("event_time").cast("double")).over(by_excursion),
+        )
+        extra = [
+            F.max(F.when(F.col("_ground"), 1).otherwise(0)).alias("_landed"),
+            F.max("_step").alias("_max_step"),
+        ]
     excursion = inside.groupBy("track_id", "_from", "_to").agg(
+        *extra,
         F.min("height_ft").alias("low_height_ft"),
         F.max("roc_ft_min").alias("max_roc_ft_min"),
         F.min_by("event_time", "height_ft").alias("low_time"),
@@ -1228,6 +2078,15 @@ def go_arounds(sv: DataFrame, config: "EventConfig") -> DataFrame:
         # Initiated on final, not somewhere else entirely.
         & (F.col("low_dist_nm") <= F.lit(config.goaround_radius_nm))
     )
+    if config.goaround_excludes_landings:
+        duration = F.col("_to").cast("double") - F.col("_from").cast("double")
+        excursion = excursion.filter(
+            (F.col("_landed") == 0)
+            & (duration <= F.lit(config.goaround_max_excursion_seconds))
+            & (F.coalesce(F.col("_max_step"), F.lit(0.0)) <= F.lit(config.goaround_max_gap_seconds))
+        )
+    if config.goaround_in_approach_corridor and thresholds is not None:
+        excursion = _in_approach_corridor(excursion, thresholds, config)
 
     return excursion.select(
         F.col("track_id"),

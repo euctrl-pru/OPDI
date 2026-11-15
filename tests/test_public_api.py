@@ -312,6 +312,7 @@ NAMES = {
     "opdi.pipeline.runway_ops": (
         "MILESTONE_SCHEMA",
         "RUNWAY_THRESHOLD_CROSSING",
+        "_ground_altitude_ft",
         "along_track_nm",
         "classify_traversal",
         "go_arounds",
