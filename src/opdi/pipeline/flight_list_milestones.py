@@ -27,6 +27,7 @@ from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
 from ..config import EventConfig
+from ..utils.geometry import haversine_nm
 
 #: The radii the flight list publishes, as ``C{NM}_ARR`` / ``C{NM}_DEP``.
 #:
@@ -166,7 +167,135 @@ DEPARTURE_RUNWAY_TYPES = ("ATOT", "line-up", "take-off-roll")
 ARRIVAL_RUNWAY_TYPES = ("ALDT", "touchdown", "runway-vacated")
 
 
-def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
+# -- what the track shows (work package 4) ------------------------------------
+
+#: Events whose altitude shows how high the track flew: the tops and the
+#: flight-level crossings. Read for :attr:`EventConfig.movement_flags_need_track_evidence`.
+_HEIGHT_TYPES = (
+    "top-of-climb",
+    "top-of-descent",
+    "xing-fl50",
+    "xing-fl70",
+    "xing-fl100",
+    "xing-fl245",
+)
+
+#: Prefix of the per-track columns :func:`_track_evidence` adds to the flight
+#: list for the time of step 04b; all are dropped before the frame is returned.
+_EV = "_ev_"
+
+
+def _event_column(events: DataFrame, *names: str) -> Column:
+    """The first of ``names`` the events frame has, or NULL.
+
+    The stored events table names the position ``longitude``/``latitude``
+    and the altitude ``altitude``; a detector frame names them ``lon``/``lat``
+    and ``altitude_ft``.
+    """
+    for name in names:
+        if name in events.columns:
+            return F.col(name).cast("double")
+    return F.lit(None).cast("double")
+
+
+def _track_evidence(events: DataFrame) -> DataFrame:
+    """Per track, what its events show about where it began and ended.
+
+    One row per flight key, with:
+
+    * ``_ev_dep_apt`` / ``_ev_dep_method``: airport and ``info.method`` of the
+      earliest departure runway event (:data:`DEPARTURE_RUNWAY_TYPES`) that
+      names an airport;
+    * ``_ev_arr_apt`` / ``_ev_arr_method`` / ``_ev_arr_t``: the same for the
+      latest arrival runway event, and its time;
+    * ``_ev_last_dep_t``: the time of the latest departure runway event;
+    * ``_ev_first_lat`` / ``_ev_first_lon`` and ``_ev_last_lat`` /
+      ``_ev_last_lon``: the position of the ``first_seen`` and ``last_seen``
+      events (the first and last report with a position, see
+      :attr:`EventConfig.seen_from_measured_reports`);
+    * ``_ev_max_alt_ft``: the highest altitude among the tops and flight-level
+      crossings (:data:`_HEIGHT_TYPES`), in feet.
+
+    One aggregation over the events, keyed like the milestone columns.
+    """
+    key = _flight_key(events)
+    apt = F.coalesce(_info("apt_icao"), _info("osm_airport"))
+    lat = _event_column(events, "latitude", "lat")
+    lon = _event_column(events, "longitude", "lon")
+    alt = _event_column(events, "altitude", "altitude_ft")
+    named = apt.isNotNull()
+    dep = F.col("type").isin(*DEPARTURE_RUNWAY_TYPES) & named
+    arr = F.col("type").isin(*ARRIVAL_RUNWAY_TYPES) & named
+    positioned = lat.isNotNull() & lon.isNotNull()
+    first = (F.col("type") == "first_seen") & positioned
+    last = (F.col("type") == "last_seen") & positioned
+    method = _info("method")
+    agg = events.groupBy(F.col(key).alias(f"{_EV}id")).agg(
+        _first(dep, F.struct(apt.alias("a"), method.alias("m"))).alias("_dep"),
+        _last(
+            arr, F.struct(apt.alias("a"), method.alias("m"), F.col("event_time").alias("t"))
+        ).alias("_arr"),
+        F.max(F.when(dep, F.col("event_time"))).alias(f"{_EV}last_dep_t"),
+        _first(first, F.struct(lat.alias("y"), lon.alias("x"))).alias("_fs"),
+        _last(last, F.struct(lat.alias("y"), lon.alias("x"))).alias("_ls"),
+        F.max(F.when(F.col("type").isin(*_HEIGHT_TYPES), alt)).alias(f"{_EV}max_alt_ft"),
+    )
+    return agg.select(
+        f"{_EV}id",
+        F.col("_dep.a").alias(f"{_EV}dep_apt"),
+        F.col("_dep.m").alias(f"{_EV}dep_method"),
+        F.col("_arr.a").alias(f"{_EV}arr_apt"),
+        F.col("_arr.m").alias(f"{_EV}arr_method"),
+        F.col("_arr.t").alias(f"{_EV}arr_t"),
+        f"{_EV}last_dep_t",
+        F.col("_fs.y").alias(f"{_EV}first_lat"),
+        F.col("_fs.x").alias(f"{_EV}first_lon"),
+        F.col("_ls.y").alias(f"{_EV}last_lat"),
+        F.col("_ls.x").alias(f"{_EV}last_lon"),
+        f"{_EV}max_alt_ft",
+    )
+
+
+def _with_airport(
+    frame: DataFrame, airports: Optional[DataFrame], ident: Column, prefix: str
+) -> DataFrame:
+    """Add ``{prefix}lat``, ``{prefix}lon`` and ``{prefix}elev_ft`` of the airport ``ident``.
+
+    ``airports`` is ``oa_airports`` (``ident``, ``latitude_deg``,
+    ``longitude_deg``, ``elevation_ft``), sent to every executor. Without it
+    the three columns are NULL, and the tests that need them read as unknown.
+    """
+    if airports is None:
+        return (
+            frame.withColumn(f"{prefix}lat", F.lit(None).cast("double"))
+            .withColumn(f"{prefix}lon", F.lit(None).cast("double"))
+            .withColumn(f"{prefix}elev_ft", F.lit(None).cast("double"))
+        )
+    ref = airports.select(
+        F.col("ident").alias(f"{prefix}ident"),
+        F.col("latitude_deg").cast("double").alias(f"{prefix}lat"),
+        F.col("longitude_deg").cast("double").alias(f"{prefix}lon"),
+        F.col("elevation_ft").cast("double").alias(f"{prefix}elev_ft"),
+    ).dropDuplicates([f"{prefix}ident"])
+    return frame.join(F.broadcast(ref), ident == F.col(f"{prefix}ident"), "left").drop(
+        f"{prefix}ident"
+    )
+
+
+def _named(frame: DataFrame, name: str) -> Optional[str]:
+    """The spelling ``frame`` uses for the column ``name`` (any case), or None."""
+    for actual in frame.columns:
+        if actual.upper() == name.upper():
+            return actual
+    return None
+
+
+def correct_aerodromes(
+    flight_list: DataFrame,
+    events: DataFrame,
+    config: Optional[EventConfig] = None,
+    airports: Optional[DataFrame] = None,
+) -> DataFrame:
     """Let a runway event overrule the flight list's inferred aerodrome.
 
     ``ADEP``/``ADES`` come from trajectory geometry relative to aerodrome
@@ -182,7 +311,16 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
     ``ADEP_SOURCE``/``ADES_SOURCE`` become ``"runway_event"`` where the value
     came from here, so a correction is never silent and the evidence can be
     told from the inference it replaced.
+
+    With :attr:`EventConfig.aerodrome_correction_checks_track`, the runway
+    event must also fit the track: the flight list must already carry the
+    columns of :func:`_track_evidence` (``_ev_*``), and ``airports`` gives
+    the airports' positions. A distance that cannot be measured (no airport
+    table, no position) does not stop the event.
     """
+    if config is not None and config.aerodrome_correction_checks_track:
+        return _correct_aerodromes_on_track(flight_list, config, airports)
+
     key = _flight_key(events)
     apt = F.coalesce(_info("apt_icao"), _info("osm_airport"))
 
@@ -202,6 +340,56 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
     )
 
     out = flight_list.join(per_track, flight_list["id"] == F.col("_g_id"), "left")
+    return _apply_aerodromes(out)
+
+
+def _correct_aerodromes_on_track(
+    flight_list: DataFrame, config: EventConfig, airports: Optional[DataFrame]
+) -> DataFrame:
+    """:func:`correct_aerodromes` with the checks against the track.
+
+    Reads the ``_ev_*`` columns of :func:`_track_evidence` on ``flight_list``
+    and keeps them. See :attr:`EventConfig.aerodrome_correction_checks_track`.
+    """
+    radius = float(config.aerodrome_correction_radius_nm)
+    out = _with_airport(flight_list, airports, F.col(f"{_EV}dep_apt"), "_rd_")
+    out = _with_airport(out, airports, F.col(f"{_EV}arr_apt"), "_ra_")
+
+    def not_legacy(method: str) -> Column:
+        return ~F.coalesce(F.col(method) == F.lit("legacy"), F.lit(False))
+
+    def near(lat: str, lon: str, prefix: str) -> Column:
+        # Unknown (no position, no airport) counts as near.
+        d = haversine_nm(F.col(lat), F.col(lon), F.col(f"{prefix}lat"), F.col(f"{prefix}lon"))
+        return F.coalesce(d <= F.lit(radius), F.lit(True))
+
+    dep_ok = (
+        F.col(f"{_EV}dep_apt").isNotNull()
+        & not_legacy(f"{_EV}dep_method")
+        & near(f"{_EV}first_lat", f"{_EV}first_lon", "_rd_")
+    )
+    after_departures = F.col(f"{_EV}last_dep_t").isNull() | (
+        F.col(f"{_EV}arr_t") >= F.col(f"{_EV}last_dep_t")
+    )
+    arr_ok = (
+        F.col(f"{_EV}arr_apt").isNotNull()
+        & not_legacy(f"{_EV}arr_method")
+        & after_departures
+        & near(f"{_EV}last_lat", f"{_EV}last_lon", "_ra_")
+    )
+    out = out.withColumn("_dep_apt", F.when(dep_ok, F.col(f"{_EV}dep_apt"))).withColumn(
+        "_arr_apt", F.when(arr_ok, F.col(f"{_EV}arr_apt"))
+    )
+    out = out.drop(*[c for c in out.columns if c.startswith("_rd_") or c.startswith("_ra_")])
+    return _apply_aerodromes(out)
+
+
+def _apply_aerodromes(out: DataFrame) -> DataFrame:
+    """Write ``_dep_apt`` / ``_arr_apt`` into ADEP / ADES, their sources and lists.
+
+    The second half of :func:`correct_aerodromes`: where ``_dep_apt``
+    (``_arr_apt``) is not NULL it replaces the airport.
+    """
     new_adep, new_ades = F.col("_dep_apt"), F.col("_arr_apt")
 
     # Written back under the frame's *own* spelling. Spark resolves column
@@ -254,10 +442,14 @@ def correct_aerodromes(flight_list: DataFrame, events: DataFrame) -> DataFrame:
             )
         out = out.withColumn(actual, F.coalesce(value, F.col(actual)))
 
-    return out.drop("_g_id", "_dep_apt", "_arr_apt")
+    return out.drop(*[c for c in ("_g_id", "_dep_apt", "_arr_apt") if c in out.columns])
 
 
-def add_movement_columns(flight_list: DataFrame, config: Optional[EventConfig] = None) -> DataFrame:
+def add_movement_columns(
+    flight_list: DataFrame,
+    config: Optional[EventConfig] = None,
+    airports: Optional[DataFrame] = None,
+) -> DataFrame:
     """Mark the rows that are half of a movement already counted.
 
     A real departure is routinely cut into two tracks -- a ground fragment that
@@ -280,6 +472,11 @@ def add_movement_columns(flight_list: DataFrame, config: Optional[EventConfig] =
 
     A flight with a detected take-off or landing is never marked.
     See https://www.opdi.aero/content/methods/airports.html.
+
+    With :attr:`EventConfig.movement_flags_need_track_evidence` and the
+    ``_ev_*`` columns of :func:`_track_evidence` on ``flight_list``, the
+    flags also read what the track shows (``airports`` gives the airports'
+    positions and elevations).
     """
     config = config or EventConfig()
     window_s = float(config.supersede_window_seconds)
@@ -343,8 +540,39 @@ def add_movement_columns(flight_list: DataFrame, config: Optional[EventConfig] =
     # Without the circle crossings this rule would remove real departures at
     # the edge of coverage, which often have neither a take-off nor a
     # destination either.
-    ghost_dep = day_processed & F.col("ATOT").isNull() & F.col("ADES").isNull() & left_dep.isNull()
-    ghost_arr = day_processed & F.col("ALDT").isNull() & F.col("ADEP").isNull() & came_arr.isNull()
+    left_dep = left_dep.isNotNull()
+    came_arr = came_arr.isNotNull()
+
+    evidence = (
+        getattr(config, "movement_flags_need_track_evidence", False)
+        and f"{_EV}max_alt_ft" in flight_list.columns
+    )
+    if evidence:
+        # What the track shows (EventConfig.movement_flags_need_track_evidence):
+        # how high it flew above each airport, and how far its other end lies.
+        flight_list = _with_airport(flight_list, airports, F.col("ADEP"), "_md_")
+        flight_list = _with_airport(flight_list, airports, F.col("ADES"), "_ma_")
+        height = float(config.movement_airborne_height_ft)
+        distance = float(config.movement_left_distance_nm)
+
+        def flew_above(prefix: str) -> Column:
+            above = F.col(f"{_EV}max_alt_ft") - F.coalesce(F.col(f"{prefix}elev_ft"), F.lit(0.0))
+            return F.coalesce(above > F.lit(height), F.lit(False))
+
+        def far_from(lat: str, lon: str, prefix: str) -> Column:
+            d = haversine_nm(F.col(lat), F.col(lon), F.col(f"{prefix}lat"), F.col(f"{prefix}lon"))
+            return F.coalesce(d > F.lit(distance), F.lit(False))
+
+        flew_dep, flew_arr = flew_above("_md_"), flew_above("_ma_")
+        # A superseded row is a ground fragment at a named airport.
+        superseded_dep = F.col("ADEP").isNotNull() & superseded_dep & ~flew_dep
+        superseded_arr = F.col("ADES").isNotNull() & superseded_arr & ~flew_arr
+        # Climbing away from the airport, or ending far from it, is leaving it.
+        left_dep = left_dep | flew_dep | far_from(f"{_EV}last_lat", f"{_EV}last_lon", "_md_")
+        came_arr = came_arr | flew_arr | far_from(f"{_EV}first_lat", f"{_EV}first_lon", "_ma_")
+
+    ghost_dep = day_processed & F.col("ATOT").isNull() & F.col("ADES").isNull() & ~left_dep
+    ghost_arr = day_processed & F.col("ALDT").isNull() & F.col("ADEP").isNull() & ~came_arr
 
     # The single question a consumer actually has. Composed here so that
     # counting movements is one predicate rather than three, and so the
@@ -352,7 +580,7 @@ def add_movement_columns(flight_list: DataFrame, config: Optional[EventConfig] =
     movement_dep = F.col("ADEP").isNotNull() & ~superseded_dep & ~ghost_dep
     movement_arr = F.col("ADES").isNotNull() & ~superseded_arr & ~ghost_arr
 
-    return (
+    out = (
         flight_list.withColumn("TRACK_DURATION_MIN", (last_s - first_s) / F.lit(60.0))
         # ``coalesce`` to False: a row with no ADEP has no next departure to be
         # superseded by, and NULL there would read as "unknown" when the answer
@@ -362,6 +590,9 @@ def add_movement_columns(flight_list: DataFrame, config: Optional[EventConfig] =
         .withColumn("MOVEMENT_DEP", F.coalesce(movement_dep, F.lit(False)))
         .withColumn("MOVEMENT_ARR", F.coalesce(movement_arr, F.lit(False)))
     )
+    if evidence:
+        out = out.drop(*[c for c in out.columns if c.startswith("_md_") or c.startswith("_ma_")])
+    return out
 
 
 def _flight_key(events: DataFrame) -> str:
@@ -381,6 +612,7 @@ def enrich_flight_list(
     flight_list: DataFrame,
     events: DataFrame,
     config: Optional[EventConfig] = None,
+    airports: Optional[DataFrame] = None,
 ) -> DataFrame:
     """Add the milestone, runway, stand and ring columns to a flight list.
 
@@ -399,6 +631,11 @@ def enrich_flight_list(
             is enriching from.
         config: supplies ``ring_radii_nm``. A radius it does not list still
             gets its column, filled with nulls.
+        airports: ``oa_airports`` (``ident``, ``latitude_deg``,
+            ``longitude_deg``, ``elevation_ft``), read by the checks of
+            :attr:`EventConfig.aerodrome_correction_checks_track` and
+            :attr:`EventConfig.movement_flags_need_track_evidence`. Without
+            it those checks treat every distance and height as unknown.
 
     Returns:
         The flight list plus :data:`ADDED_COLUMNS`.
@@ -410,11 +647,20 @@ def enrich_flight_list(
     """
     config = config or EventConfig()
 
+    # Work package 4: what the track shows, for the checks of the airport
+    # correction and of the movement flags. One aggregation of the events,
+    # joined once; its columns (_ev_*) are dropped before the return.
+    if config.aerodrome_correction_checks_track or config.movement_flags_need_track_evidence:
+        evidence = _track_evidence(events)
+        flight_list = flight_list.join(
+            evidence, flight_list["id"] == evidence[f"{_EV}id"], "left"
+        ).drop(f"{_EV}id")
+
     # Before anything else reads adep/ades. The ring columns filter on them, the
     # movement rules test them, and the milestone columns are chosen relative to
     # them -- correcting afterwards would leave every one of those computed
     # against the aerodrome the evidence disagrees with.
-    flight_list = correct_aerodromes(flight_list, events)
+    flight_list = correct_aerodromes(flight_list, events, config, airports)
 
     # Enriching a flight list that was enriched before is normal: step 04b runs
     # every day, and a day can be processed again.
@@ -495,31 +741,34 @@ def enrich_flight_list(
     is_dep = lambda t: (F.col("type") == F.lit(t)) & _matches("_adep")  # noqa: E731
     is_arr = lambda t: (F.col("type") == F.lit(t)) & _matches("_ades")  # noqa: E731
     is_ = lambda t: F.col("type") == F.lit(t)  # noqa: E731
-    agg = narrowed.groupBy("_track_id").agg(
-        _first(is_dep(_ATOT), F.col("event_time")).alias("ATOT"),
-        _last(is_arr(_ALDT), F.col("event_time")).alias("ALDT"),
-        _first(is_(_AOBT), F.col("event_time")).alias("AOBT"),
-        _last(is_(_AIBT), F.col("event_time")).alias("AIBT"),
-        # The runway of the very event the time was taken from, not of some
-        # other ATOT on the same track: same predicate, same extreme, so the
-        # pair cannot disagree.
-        _first(is_dep(_ATOT), _runway()).alias("RWY_DEP"),
-        _first(is_dep(_ATOT), _runway_bearing()).alias("RWY_DEP_BEARING_DEG"),
-        _last(is_arr(_ALDT), _runway()).alias("RWY_ARR"),
-        _last(is_arr(_ALDT), _runway_bearing()).alias("RWY_ARR_BEARING_DEG"),
-        _first(is_dep(_STAND_EXIT), _info("osm_ref")).alias("_stnd_dep_layout"),
-        _last(is_arr(_STAND_ENTRY), _info("osm_ref")).alias("_stnd_arr_layout"),
-        # The stand the block time itself was read from (``info.stand``), and
-        # its airport. Block times written without it give NULL here.
-        _first(is_(_AOBT), _info("stand")).alias("_aobt_stand"),
-        _first(is_(_AOBT), _info("apt_icao")).alias("_aobt_apt"),
-        _last(is_(_AIBT), _info("stand")).alias("_aibt_stand"),
-        _last(is_(_AIBT), _info("apt_icao")).alias("_aibt_apt"),
-        F.first("_adep").alias("_k_adep"),
-        F.first("_ades").alias("_k_ades"),
-        *[ring(nm, arrival=True).alias(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM],
-        *[ring(nm, arrival=False).alias(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM],
-    )
+    if config.milestones_on_own_leg:
+        agg = _aggregate_on_own_leg(narrowed, is_dep, is_arr, ring_types)
+    else:
+        agg = narrowed.groupBy("_track_id").agg(
+            _first(is_dep(_ATOT), F.col("event_time")).alias("ATOT"),
+            _last(is_arr(_ALDT), F.col("event_time")).alias("ALDT"),
+            _first(is_(_AOBT), F.col("event_time")).alias("AOBT"),
+            _last(is_(_AIBT), F.col("event_time")).alias("AIBT"),
+            # The runway of the very event the time was taken from, not of some
+            # other ATOT on the same track: same predicate, same extreme, so the
+            # pair cannot disagree.
+            _first(is_dep(_ATOT), _runway()).alias("RWY_DEP"),
+            _first(is_dep(_ATOT), _runway_bearing()).alias("RWY_DEP_BEARING_DEG"),
+            _last(is_arr(_ALDT), _runway()).alias("RWY_ARR"),
+            _last(is_arr(_ALDT), _runway_bearing()).alias("RWY_ARR_BEARING_DEG"),
+            _first(is_dep(_STAND_EXIT), _info("osm_ref")).alias("_stnd_dep_layout"),
+            _last(is_arr(_STAND_ENTRY), _info("osm_ref")).alias("_stnd_arr_layout"),
+            # The stand the block time itself was read from (``info.stand``), and
+            # its airport. Block times written without it give NULL here.
+            _first(is_(_AOBT), _info("stand")).alias("_aobt_stand"),
+            _first(is_(_AOBT), _info("apt_icao")).alias("_aobt_apt"),
+            _last(is_(_AIBT), _info("stand")).alias("_aibt_stand"),
+            _last(is_(_AIBT), _info("apt_icao")).alias("_aibt_apt"),
+            F.first("_adep").alias("_k_adep"),
+            F.first("_ades").alias("_k_ades"),
+            *[ring(nm, arrival=True).alias(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM],
+            *[ring(nm, arrival=False).alias(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM],
+        )
 
     # STND_DEP and STND_ARR are the stands of the AOBT and AIBT columns when
     # those events name a stand at the flight's own airport, so the time and
@@ -543,9 +792,97 @@ def enrich_flight_list(
     # in this order reproduces ADDED_COLUMNS exactly, which is the published
     # column order.
     milestones = [c for c in ADDED_COLUMNS if c not in MOVEMENT_COLUMNS]
-    return add_movement_columns(
+    out = add_movement_columns(
         flight_list.join(agg, flight_list["id"] == agg["_track_id"], "left")
         .drop("_track_id")
         .select(*flight_list.columns, *milestones),
         config,
+        airports,
+    )
+    internal = [c for c in out.columns if c.startswith(_EV)]
+    if internal:
+        out = out.drop(*internal)
+    return out
+
+
+def _aggregate_on_own_leg(narrowed: DataFrame, is_dep, is_arr, ring_types) -> DataFrame:
+    """The milestone columns, each taken on the right side of the take-off or landing.
+
+    The aggregation of :func:`enrich_flight_list` with
+    :attr:`EventConfig.milestones_on_own_leg`: the take-off time ``ATOT``
+    and landing time ``ALDT`` of the row are found first (a window over each
+    flight's events, no second pass over the data), then
+
+    * ``AOBT``: the latest off-block at ADEP not after ``ATOT``;
+    * ``AIBT``: the earliest in-block at ADES not before ``ALDT``;
+    * the stands: from that same block event, else the last stand exit at
+      ADEP not after ``ATOT`` and the first stand entry at ADES not before
+      ``ALDT``;
+    * ``C{NM}_DEP``: the first outbound crossing at ADEP not before
+      ``ATOT``; ``C{NM}_ARR``: the last inbound crossing at ADES not after
+      ``ALDT``.
+
+    Without a take-off (landing) time, the departure (arrival) columns take
+    the earliest (latest) matching event at the airport, as before.
+    """
+    t = F.col("event_time")
+    per_flight = Window.partitionBy("_track_id")
+    narrowed = narrowed.withColumn(
+        "_atot_t", F.min(F.when(is_dep(_ATOT), t)).over(per_flight)
+    ).withColumn("_aldt_t", F.max(F.when(is_arr(_ALDT), t)).over(per_flight))
+    atot, aldt = F.col("_atot_t"), F.col("_aldt_t")
+    known_atot = F.max(atot).isNotNull()
+    known_aldt = F.max(aldt).isNotNull()
+
+    def before_takeoff(cond: Column, value: Column) -> Column:
+        """Latest matching event not after ATOT, or the earliest without ATOT."""
+        return F.when(known_atot, _last(cond & (t <= atot), value)).otherwise(_first(cond, value))
+
+    def after_landing(cond: Column, value: Column) -> Column:
+        """Earliest matching event not before ALDT, or the latest without ALDT."""
+        return F.when(known_aldt, _first(cond & (t >= aldt), value)).otherwise(_last(cond, value))
+
+    apt = _info("apt_icao")
+    direction = _info("direction")
+
+    def ring(nm: int, arrival: bool) -> Column:
+        type_ = _RING_TYPE.format(nm=nm)
+        if type_ not in ring_types:
+            return _null_ts()
+        if arrival:
+            cond = (
+                (F.col("type") == type_)
+                & (direction == F.lit("inbound"))
+                & (apt == F.col("_ades"))
+                & (aldt.isNull() | (t <= aldt))
+            )
+            return _last(cond, t)
+        cond = (
+            (F.col("type") == type_)
+            & (direction == F.lit("outbound"))
+            & (apt == F.col("_adep"))
+            & (atot.isNull() | (t >= atot))
+        )
+        return _first(cond, t)
+
+    aobt, aibt = is_dep(_AOBT), is_arr(_AIBT)
+    return narrowed.groupBy("_track_id").agg(
+        _first(is_dep(_ATOT), t).alias("ATOT"),
+        _last(is_arr(_ALDT), t).alias("ALDT"),
+        before_takeoff(aobt, t).alias("AOBT"),
+        after_landing(aibt, t).alias("AIBT"),
+        _first(is_dep(_ATOT), _runway()).alias("RWY_DEP"),
+        _first(is_dep(_ATOT), _runway_bearing()).alias("RWY_DEP_BEARING_DEG"),
+        _last(is_arr(_ALDT), _runway()).alias("RWY_ARR"),
+        _last(is_arr(_ALDT), _runway_bearing()).alias("RWY_ARR_BEARING_DEG"),
+        before_takeoff(is_dep(_STAND_EXIT), _info("osm_ref")).alias("_stnd_dep_layout"),
+        after_landing(is_arr(_STAND_ENTRY), _info("osm_ref")).alias("_stnd_arr_layout"),
+        before_takeoff(aobt, _info("stand")).alias("_aobt_stand"),
+        before_takeoff(aobt, apt).alias("_aobt_apt"),
+        after_landing(aibt, _info("stand")).alias("_aibt_stand"),
+        after_landing(aibt, apt).alias("_aibt_apt"),
+        F.first("_adep").alias("_k_adep"),
+        F.first("_ades").alias("_k_ades"),
+        *[ring(nm, arrival=True).alias(f"C{nm}_ARR") for nm in FLIGHT_LIST_RING_RADII_NM],
+        *[ring(nm, arrival=False).alias(f"C{nm}_DEP") for nm in FLIGHT_LIST_RING_RADII_NM],
     )

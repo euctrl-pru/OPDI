@@ -98,7 +98,17 @@ def enrich_day(
     if removed:
         print(f"  removed {removed:,} repeated ID(s): the flight list holds one row per flight")
 
-    enriched = enrich_flight_list(flight_list, events, config)
+    # The airports' positions and elevations, for the checks of the airport
+    # correction and of the movement flags (work package 4).
+    airports = None
+    if (
+        config.aerodrome_correction_checks_track or config.movement_flags_need_track_evidence
+    ) and storage.table_exists("oa_airports"):
+        airports = storage.read_table("oa_airports").select(
+            "ident", "latitude_deg", "longitude_deg", "elevation_ft"
+        )
+
+    enriched = enrich_flight_list(flight_list, events, config, airports)
 
     # The day folders are named, so a day without flights also replaces what
     # an earlier run left in the staging table.
