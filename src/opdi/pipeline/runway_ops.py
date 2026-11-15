@@ -170,9 +170,9 @@ APPROACH_CORRIDOR_HALF_WIDTH_NM = 0.5
 GOAROUND_HYSTERESIS_FT = 50.0
 
 #: Heights above the airport, in feet, between which a report not flagged on
-#: the ground shows the aircraft clearly in the air. On 2026-06-14, the
-#: reports not flagged on the ground in the two minutes after a landing roll
-#: misread as a take-off were at most 25 ft above the airport (the pressure of
+#: the ground shows the aircraft clearly in the air. On a measured worldwide
+#: day, the reports not flagged on the ground in the two minutes after a
+#: landing roll misread as a take-off were at most 25 ft above the airport (the pressure of
 #: the day, and altitudes rounded to 25 or 100 ft), while a light aircraft
 #: climbing out of a circuit passes 150 to 300 ft within the approach area at
 #: the far end of the runway; hence the lower bound. A garbled altitude reads
