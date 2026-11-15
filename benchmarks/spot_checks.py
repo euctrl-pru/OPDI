@@ -1213,6 +1213,32 @@ def event_sheet(meta, ex, events, reports, airports, runways, day) -> str:
         if not _is_missing(ex.get(c)):
             ms.append(f"{c} {_cell(ex.get(c), 1)} {unit}")
     out.append("- **Measurements**: " + (" · ".join(ms) if ms else "none"))
+    if meta.get("kind") == "measurement" or not _is_missing(ex.get("distance_flown_nm")):
+        checks = []
+        pa, pb = _apt_pos(ex.get("adep"), airports), _apt_pos(ex.get("ades"), airports)
+        if pa and pb:
+            gc = float(haversine_nm(pa[0], pa[1], pb[0], pb[1]))
+            checks.append(f"great circle {ex.get('adep')} to {ex.get('ades')} {gc:,.1f} NM")
+        if not _is_missing(ex.get("nm_rte_len_nm")):
+            checks.append(f"Network Manager route length {float(ex['nm_rte_len_nm']):,.0f} NM")
+        if not _is_missing(ex.get("excess_nm")):
+            gcf = float(ex["distance_flown_nm"]) - float(ex["excess_nm"])
+            checks.append(
+                f"great circle from the first report to the event {gcf:,.1f} NM "
+                f"(distance flown minus it {float(ex['excess_nm']):+,.1f} NM)"
+            )
+        el = seconds_between(et, ex.get("trk_first_time"))
+        if el is not None:
+            checks.append(f"time since the track's first report {el:,.0f} s")
+        if not _is_missing(ex.get("elapsed_diff_s")):
+            checks.append(f"time passed minus it {float(ex['elapsed_diff_s']):+,.0f} s")
+        if not _is_missing(ex.get("pair_diff_s")):
+            checks.append(
+                f"published duration minus the time between the two events "
+                f"{float(ex['pair_diff_s']):+,.0f} s"
+            )
+        if checks:
+            out.append("- **Independent figures**: " + " · ".join(checks))
     out.append(
         f"- **Gaps**: {_cell(ex.get('prev_gap_s'))} s since the previous event · "
         f"{_cell(ex.get('next_gap_s'))} s to the next"
@@ -2477,6 +2503,7 @@ def write_sheets(samples: Path) -> int:
             cand = pd.read_parquet(cand_path) if cand_path.exists() else None
             item_meta = {
                 "name": m["name"],
+                "kind": m["kind"],
                 "profile": m["profile"],
                 "record": tuple(m["record_col"]) if m.get("record_col") else None,
                 "pair": tuple(m["pair"]) if m.get("pair") else None,
