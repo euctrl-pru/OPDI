@@ -88,11 +88,22 @@ def point_day_timing_here():
 RUN_PARTS = (("01", "02", "02a", "03", "04", "04b"), ("09",))
 
 
+#: Spark settings of every part. A task that fails on an executor is retried on
+#: another one: twice a dying executor refused all eight attempts of one task
+#: within a second, which ended the step.
+RUN_CONF = (
+    "spark.eventLog.logStageExecutorMetrics=true",
+    "spark.excludeOnFailure.enabled=true",
+    "spark.excludeOnFailure.task.maxTaskAttemptsPerExecutor=1",
+)
+
+
 def day_timing_args(day: str, label: str, steps, executors: int) -> list:
     """The ``day_timing run`` arguments of one part of ``run-day``."""
     args = ["run", "--day", day, "--label", label, "--steps", *steps]
     args += ["--executors", str(executors), "--s3", "production", "--out", str(JOB / "timing")]
-    args += ["--conf", "spark.eventLog.logStageExecutorMetrics=true"]
+    for item in RUN_CONF:
+        args += ["--conf", item]
     if any(s in ("01", "02", "02a") for s in steps):
         args += ["--full", "--drop-intermediates"]
     elif "02a" not in steps:
