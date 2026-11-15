@@ -198,6 +198,35 @@ class EventConfig:
     the reported value is sometimes stale on the ground. 30 kt is the top of
     normal taxi speeds; a push-back moves at 2 to 5 kt."""
 
+    # -- block times and stands (work package 3 of the 2026-06-14 corrections)
+    ground_movement_through_reports_without_speed: bool = True
+    """Read ground movement across reports whose speed is not known.
+
+    On the airport surface about 40% of the reports carry no position and
+    under 1% a reported ground speed, so the speed is mostly derived from
+    two positions. With this setting the speed is derived between a report
+    with a position and the previous report with a position, when the two
+    are at most :attr:`ground_speed_max_position_gap_seconds` apart, and a
+    report whose speed is not known keeps the moving or standing state of
+    the last report whose speed is known. A movement then ends only at a
+    report that shows the aircraft standing (a speed of at most
+    :attr:`ground_speed_threshold_kt`) or after a silence of more than
+    :attr:`airport_trace_gap_seconds` without any known speed. A movement
+    still starts and ends at a report whose speed is known.
+
+    Without it, the speed is derived from the report just before, so it is
+    unknown after every report without a position, and an unknown speed ends
+    the movement: a taxi whose positioned reports alternate with reports
+    without position looks like a standstill, and the take-off or landing
+    roll is taken as the movement. Off in release v0.0.2."""
+
+    ground_speed_max_position_gap_seconds: float = 30.0
+    """Longest time, in seconds, between two reports with a position from
+    which a ground speed is derived, with
+    :attr:`ground_movement_through_reports_without_speed`. Over a longer
+    time the aircraft may have stopped and moved again in between, so the
+    average speed would say little."""
+
     # -- runway identification for take-off and landing times ------------
     runway_max_dist_nm: float = 5.0
     """Only reports within this distance of the airport, in NM, are used to
@@ -803,6 +832,8 @@ class EventConfig:
             emit_level_offs=False,
             ground_speed_derive_from_position=False,
             block_times_on_ground_only=False,
+            # Work package 3 of the 2026-06-14 corrections.
+            ground_movement_through_reports_without_speed=False,
             phase_require_complete_rules=False,
             crossing_all_occurrences=False,
             crossing_interpolate=False,

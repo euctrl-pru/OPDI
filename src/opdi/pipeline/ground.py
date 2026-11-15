@@ -62,6 +62,36 @@ def _derived_groundspeed_kt(ordered: Window, time_col: str) -> Column:
     return F.percentile_approx(raw_kt, 0.5).over(ordered.rowsBetween(-1, 1))
 
 
+def _derived_groundspeed_between_positions_kt(
+    ordered: Window, time_col: str, max_gap_seconds: float
+) -> Column:
+    """Ground speed in knots derived between reports that have a position.
+
+    The rule of ``ground_movement_through_reports_without_speed``. For a
+    report with a position: the distance from the last earlier report with a
+    position over the time between the two, when that time is at most
+    ``max_gap_seconds``; then the median of that value and of the values of
+    the reports just before and after (a report without one is skipped). A
+    report without a position gets no derived speed. On the airport surface
+    reports without position are common, and a speed taken only from the
+    report just before would be unknown after each of them.
+    """
+    has_position = F.col("lat").isNotNull() & F.col("lon").isNotNull()
+    t = F.col(time_col).cast("double")
+    before = ordered.rowsBetween(Window.unboundedPreceding, -1)
+    prev_lat = F.last(F.when(has_position, F.col("lat")), ignorenulls=True).over(before)
+    prev_lon = F.last(F.when(has_position, F.col("lon")), ignorenulls=True).over(before)
+    prev_t = F.last(F.when(has_position, t), ignorenulls=True).over(before)
+    dt_s = t - prev_t
+    dist_nm = haversine_nm(prev_lat, prev_lon, F.col("lat"), F.col("lon"))
+    raw_kt = F.when(
+        has_position & (dt_s > 0) & (dt_s <= F.lit(float(max_gap_seconds))),
+        dist_nm / (dt_s / 3600.0),
+    )
+    median_kt = F.percentile_approx(raw_kt, 0.5).over(ordered.rowsBetween(-1, 1))
+    return F.when(has_position, median_kt)
+
+
 def _movement_runs(
     sdf: DataFrame,
     config: "EventConfig",
@@ -85,7 +115,15 @@ def _movement_runs(
     reported_kt = F.col("velocity") * KT_PER_MPS
     gs_kt = reported_kt
     has_position = "lat" in sdf.columns and "lon" in sdf.columns
-    derived_kt = _derived_groundspeed_kt(ordered, time_col) if has_position else None
+    bridge = config.ground_movement_through_reports_without_speed
+    if not has_position:
+        derived_kt = None
+    elif bridge:
+        derived_kt = _derived_groundspeed_between_positions_kt(
+            ordered, time_col, config.ground_speed_max_position_gap_seconds
+        )
+    else:
+        derived_kt = _derived_groundspeed_kt(ordered, time_col)
     if config.ground_speed_derive_from_position and has_position:
         # Fill the gaps, do not replace: the reported speed is used wherever
         # `velocity` exists, the derived one only where it is missing (see
@@ -110,6 +148,35 @@ def _movement_runs(
 
     # Sessionise runs of movement, then keep runs long enough to be a push
     # rather than a wobble in the speed field.
+    if bridge:
+        # A report whose speed is not known (``_moving`` NULL) neither starts
+        # nor ends a run: the state before it is kept. A run is broken by a
+        # report showing the aircraft standing, or by more than
+        # ``airport_trace_gap_seconds`` (or ``break_after_seconds``) without
+        # any known speed.
+        before = ordered.rowsBetween(Window.unboundedPreceding, -1)
+        t = F.col(time_col).cast("double")
+        known_t = F.when(F.col("_moving").isNotNull(), t)
+        work = work.withColumn(
+            "_prev", F.last(F.col("_moving"), ignorenulls=True).over(before)
+        ).withColumn("_prev_known_t", F.last(known_t, ignorenulls=True).over(before))
+        gap = float(
+            break_after_seconds
+            if break_after_seconds is not None
+            else config.airport_trace_gap_seconds
+        )
+        silence = t - F.col("_prev_known_t") > F.lit(gap)
+        starts = F.col("_moving") & (
+            ~F.coalesce(F.col("_prev"), F.lit(False)) | F.coalesce(silence, F.lit(False))
+        )
+        work = work.withColumn("_new_run", F.when(starts, 1).otherwise(0))
+        work = work.withColumn(
+            "_run",
+            F.sum("_new_run").over(
+                ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+            ),
+        )
+        return _sustained_runs(work, config, partition_cols, time_col)
     work = work.withColumn("_prev", F.lag("_moving").over(ordered))
     starts = F.col("_moving") & ~F.coalesce(F.col("_prev"), F.lit(False))
     if break_after_seconds is not None:
@@ -122,6 +189,17 @@ def _movement_runs(
         F.sum("_new_run").over(ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)),
     )
 
+    return _sustained_runs(work, config, partition_cols, time_col)
+
+
+def _sustained_runs(
+    work: DataFrame,
+    config: "EventConfig",
+    partition_cols: Sequence[str],
+    time_col: str,
+) -> DataFrame:
+    """The runs of moving reports (``_run``), each with its start and end, kept
+    when they last at least ``ground_move_min_seconds``."""
     t_run = F.col(time_col)
     runs = (
         work.filter(F.col("_moving"))

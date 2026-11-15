@@ -752,3 +752,166 @@ def test_without_runway_times_no_block_time_names_one(spark):
         _reports(spark, DEPARTURE), _stands(spark, DEPARTURE_STANDS), None, EventConfig()
     ).collect()
     assert rows and all(r.bound_time is None and r.bound_method is None for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Movement across reports whose speed is not known (work package 3, item 1)
+# ---------------------------------------------------------------------------
+
+
+def _surface(start_s, end_s, kt, step_s=10, positions="all", reported=False, on_ground=True):
+    """Surface reports every ``step_s`` seconds: ``positions`` says which carry
+    a position ("all", "none", or "alternate": every second one, starting
+    with one without), ``reported`` whether they carry the reported speed.
+    No altitude, as on most surface reports."""
+    out = []
+    for i, s in enumerate(range(start_s, end_s, step_s)):
+        has_pos = positions == "all" or (positions == "alternate" and i % 2 == 1)
+        out.append((s, kt, has_pos, reported, on_ground, None))
+    return out
+
+
+def _airborne(start_s, end_s, kt, alt_ft, step_s=10):
+    return [(s, kt, True, True, False, alt_ft / FT_PER_M) for s in range(start_s, end_s, step_s)]
+
+
+def _sparse(spark, legs, track="trk-1"):
+    """Reports advancing north at each report's speed; the position and the
+    reported speed are left out where the leg says so."""
+    rows, lat, last = [], 50.0, None
+    for leg in legs:
+        for s, kt, has_pos, reported, gnd, alt_m in leg:
+            if last is not None:
+                lat += kt * (s - last) / 3600.0 / NM_PER_DEG
+            last = s
+            rows.append(
+                (
+                    track,
+                    _at(s),
+                    lat if has_pos else None,
+                    4.0 if has_pos else None,
+                    _kt(kt) if reported else None,
+                    alt_m,
+                    gnd,
+                )
+            )
+    return spark.createDataFrame(rows, _REPORT_DDL)
+
+
+def _blocks_with(spark, reports, stands, runway, config):
+    rows = block_events(reports, stands, runway, config).collect()
+    return sorted(
+        [(r.block, (r.event_time - _EPOCH).total_seconds()) for r in rows], key=lambda x: x[1]
+    )
+
+
+_NO_BRIDGE = EventConfig(ground_movement_through_reports_without_speed=False)
+
+
+def test_the_setting_of_movement_through_reports_without_speed():
+    assert EventConfig().ground_movement_through_reports_without_speed is True
+    assert EventConfig().ground_speed_max_position_gap_seconds == 30.0
+    assert EventConfig.legacy().ground_movement_through_reports_without_speed is False
+
+
+def test_a_taxi_whose_positions_alternate_with_reports_without_position_is_movement(spark):
+    """AOBT#14 (LEZL) and AIBT#17 (YMML): every second surface report has no
+    position and none has a reported speed. The speed derived from the
+    previous positioned report, 10 s earlier, shows the taxi; the off-block
+    time is the first positioned report of the push, at 65 s."""
+    legs = [
+        _surface(0, 60, 0, step_s=5, positions="alternate"),
+        _surface(60, 400, 15, step_s=5, positions="alternate"),
+        _airborne(400, 600, 160, 3000),
+    ]
+    stands = _stands(spark, DEPARTURE_STANDS)
+    runway = _runway(spark, [("ATOT", 400)])
+
+    assert _blocks_with(spark, _sparse(spark, legs), stands, runway, EventConfig()) == [
+        ("off", 65.0)
+    ]
+    assert _blocks_with(spark, _sparse(spark, legs), stands, runway, _NO_BRIDGE) == []
+
+
+def test_a_silence_of_positions_during_the_taxi_does_not_cut_the_push_back_off(spark):
+    """AOBT#14 (LEZL): a slow push seen on two positioned reports, then 70 s
+    of reports without position, then the taxi. The push is shorter than the
+    30 s a movement must last, so without the bridge the off-block time is
+    the start of the taxi after the silence (150 s); with it, the start of
+    the push (60 s)."""
+    legs = [
+        _surface(0, 60, 0),
+        _surface(60, 80, 4),
+        _surface(80, 150, 4, positions="none"),
+        _surface(150, 400, 15),
+        _airborne(400, 600, 160, 3000),
+    ]
+    stands = _stands(spark, DEPARTURE_STANDS)
+    runway = _runway(spark, [("ATOT", 400)])
+
+    assert _blocks_with(spark, _sparse(spark, legs), stands, runway, EventConfig()) == [
+        ("off", 60.0)
+    ]
+    assert _blocks_with(spark, _sparse(spark, legs), stands, runway, _NO_BRIDGE) == [("off", 150.0)]
+
+
+def test_an_in_block_is_the_end_of_the_taxi_and_not_of_the_landing_roll(spark):
+    """AIBT#16 (EGCC): the landing roll carries reported speeds, the taxi-in
+    only positions every second report. Without the bridge the roll is the
+    last movement and its end the in-block time; with it, the end of the
+    taxi at the stand (the last positioned report before the stand, 1,295 s,
+    is already slow in the median of three)."""
+    legs = [
+        _airborne(700, 1000, 140, 1500),
+        _surface(1000, 1040, 100, step_s=5, reported=True),
+        _surface(1040, 1300, 15, step_s=5, positions="alternate"),
+        _surface(1300, 1420, 0),
+    ]
+    stands = _stands(spark, ARRIVAL_STANDS)
+    runway = _runway(spark, [("ALDT", 1000)])
+
+    new = _blocks_with(spark, _sparse(spark, legs), stands, runway, EventConfig())
+    old = _blocks_with(spark, _sparse(spark, legs), stands, runway, _NO_BRIDGE)
+
+    assert new == [("on", 1285.0)]
+    assert old == [("on", 1040.0)]
+
+
+def test_a_stop_shown_by_positions_still_ends_the_movement(spark):
+    """A real stop gives positioned reports that do not move: the movement
+    ends there, so the in-block time is the end of the taxi, not the last
+    report at the stand."""
+    legs = [
+        _airborne(700, 1000, 140, 1500),
+        _surface(1000, 1300, 15),
+        _surface(1300, 1420, 0),
+    ]
+    got = _blocks_with(
+        spark,
+        _sparse(spark, legs),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ALDT", 1000)]),
+        EventConfig(),
+    )
+
+    assert got == [("on", 1290.0)]
+
+
+def test_reports_without_position_at_the_stand_do_not_extend_the_movement(spark):
+    """After the taxi-in, 20 minutes of reports without position at the stand
+    (the aircraft is parked; nothing tells its speed): the in-block time is
+    the last report that showed movement, not the last report of the track."""
+    legs = [
+        _airborne(700, 1000, 140, 1500),
+        _surface(1000, 1300, 15),
+        _surface(1300, 2500, 0, positions="none"),
+    ]
+    got = _blocks_with(
+        spark,
+        _sparse(spark, legs),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ALDT", 1000)]),
+        EventConfig(),
+    )
+
+    assert got == [("on", 1290.0)]
