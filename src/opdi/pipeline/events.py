@@ -103,6 +103,7 @@ from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
 from opdi.pipeline.vertical_pru import (
     aerodrome_distances,
     attach_aerodrome_geometry,
+    attach_nearest_position,
     pru_top_events,
     pru_tops,
 )
@@ -397,7 +398,13 @@ def calculate_level_off_events(
         col("end_time").alias("event_time"),
         *common,
     )
-    return starts.unionByName(ends)
+    level_offs = starts.unionByName(ends)
+    # Work package 1: a position, distance and time like other events.
+    if config.level_offs_get_position:
+        level_offs = attach_nearest_position(
+            level_offs, sdf_input, config.vertical_position_window_s
+        )
+    return level_offs
 
 
 #: The columns of :data:`REJECTED_TABLE`: those of ``opdi_flight_events``,
