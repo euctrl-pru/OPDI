@@ -118,13 +118,13 @@ def test_record_lines_shares_and_differences():
     assert r["share within 60 s"] == (0.6, 5)
     assert r["share within 300 s"] == (0.8, 5)
     # with seconds: -10, 45, 200 -> two within 60 s of three
-    assert r["share within 60 s (records with seconds)"][0] == pytest.approx(2 / 3)
-    assert r["median |difference| s"] == (45.0, 5)
-    assert r["mean difference s (within 300 s; + = event later)"] == (pytest.approx(63.75), 4)
+    assert r["share within 60 s, records with seconds"][0] == pytest.approx(2 / 3)
+    assert r["median absolute difference s"] == (45.0, 5)
+    assert r["mean difference s, within 300 s"] == (pytest.approx(63.75), 4)
     a = _rows(rows, "AOBT")
     assert a["events with a record"] == (0, 2)
     assert a["share within 60 s"] == (None, 0)
-    assert a["median |difference| s"] == (None, 0)
+    assert a["median absolute difference s"] == (None, 0)
 
 
 def test_category_lines_share_per_item():
@@ -202,9 +202,39 @@ def test_scorecard_round_trip_and_markdown(tmp_path):
         "x", back, {"scope": "sample", "steps": ["04", "04b"], "commit": "abc"}
     )
     assert "## i. against airport records" in md
-    assert "| AOBT | block time in the air | 5 | 50 | 10.0% | b1.2 |" in md
+    assert "| block time in the air | b1.2 | 5 | 50 | 10.0% | AOBT |" in md
+    assert "| ATOT | 43.2% | 100 |" in md
     assert "43.2%" in md
     assert "## v. time" in md
+
+
+def test_counter_table_totals_and_worst_items():
+    rows = [
+        cs.row("iii", "ATOT (acdm)", "without a position", 2, 10, "a2.C6"),
+        cs.row("iii", "ALDT (acdm)", "without a position", 6, 20, "a2.C6"),
+        cs.row("iii", "level-end", "without a position", 0, 70, "a2.C6"),
+        cs.row("iii", "AOBT", "in the air", 0, 5, "b1.2"),
+        cs.row("iii", "AIBT", "in the air", 0, 5, "b1.2"),
+    ]
+    lines = cs.counter_table(rows)
+    assert lines[2] == (
+        "| without a position | a2.C6 | 8 | 100 | 8.0% | ALDT (acdm) 6 of 20; ATOT (acdm) 2 of 10 |"
+    )
+    assert lines[3] == "| in the air | b1.2 | 0 | 10 | 0.0% | 0 in 2 items |"
+
+
+def test_pivot_tables_group_items_with_the_same_measures():
+    rows = [
+        cs.row("ii", "ADEP", "share right", 0.9, 10),
+        cs.row("ii", "ADEP", "share wrong", 0.1, 10),
+        cs.row("ii", "ADES", "share right", 0.8, 10),
+        cs.row("ii", "ADES", "share wrong", 0.2, 10),
+        cs.row("ii", "type", "share agrees", 0.5, 4),
+    ]
+    out = cs.pivot_tables(rows)
+    assert out[0] == "| item | share right | share wrong | n |"
+    assert "| ADES | 80.0% | 20.0% | 10 |" in out
+    assert "| item | share agrees | n |" in out
 
 
 def test_compare_rows_changes_and_missing_lines():
@@ -337,7 +367,7 @@ def test_agreement_rows():
         {
             "section": "i",
             "item": "ATOT",
-            "measure": "median |difference| s",
+            "measure": "median absolute difference s",
             "value": "20",
             "count": "100",
         },
@@ -357,7 +387,7 @@ def test_agreement_rows():
         {
             "section": "i",
             "item": "ATOT",
-            "measure": "median |difference| s",
+            "measure": "median absolute difference s",
             "value": "20",
             "count": "1000",
         },
@@ -368,7 +398,7 @@ def test_agreement_rows():
     assert v[("AIBT", "odd")] == "differs"
     assert v[("rare", "odd")] == "too few on the sample"
     assert v[("ATOT", "share within 60 s")] == "agrees"
-    assert ("ATOT", "median |difference| s") not in v  # not a share
+    assert ("ATOT", "median absolute difference s") not in v  # not a share
     assert ("ATOT", "events") not in v  # section iv is not compared
 
 

@@ -317,8 +317,11 @@ def example_track_ids(samples: Path = SAMPLES) -> list[str]:
     return sorted(ids)
 
 
-def spark_session(name: str, executors: int = EXECUTORS):
-    """A session on the cluster with the ``opensky`` settings and the run settings."""
+def spark_session(name: str, executors: int = EXECUTORS, eventlog: Path | None = None):
+    """A session on the cluster with the ``opensky`` settings and the run settings.
+
+    With ``eventlog``, Spark writes its event log there (to time the parts).
+    """
     from opdi.config import OPDIConfig
     from opdi.utils.spark_helpers import SparkSessionManager
 
@@ -327,6 +330,18 @@ def spark_session(name: str, executors: int = EXECUTORS):
     cfg.spark.executor_instances = str(executors)
     extra = {k: v for k, v in (c.split("=", 1) for c in RUN_CONF)}
     extra["spark.sql.session.timeZone"] = "UTC"
+    if eventlog is not None:
+        if eventlog.exists():
+            for p in sorted(eventlog.rglob("*"), reverse=True):
+                p.unlink() if p.is_file() else p.rmdir()
+        eventlog.mkdir(parents=True, exist_ok=True)
+        extra.update(
+            {
+                "spark.eventLog.enabled": "true",
+                "spark.eventLog.dir": f"file://{eventlog}",
+                "spark.eventLog.compress": "false",
+            }
+        )
     return SparkSessionManager.create_session(
         app_name=name, config=cfg, distributed=True, extra_configs=extra
     )
@@ -2050,7 +2065,7 @@ def count_event_counters(X, counters) -> list[tuple]:
         for i, (name, *_rest) in enumerate(counters):
             if r[f"b{i}"]:
                 out.append((name, r["item"], r[f"n{i}"], r[f"b{i}"]))
-    return sorted(out)
+    return out
 
 
 def count_other(fr: dict, inp: dict) -> list[tuple]:
@@ -3069,8 +3084,11 @@ def score(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     with spark_lock(f"score {args.label}"):
-        spark = spark_session(f"corrections scorecard {args.label}")
+        log = OUT / "eventlog" / f"score_{args.label}"
+        spark = spark_session(f"corrections scorecard {args.label}", eventlog=log)
+        sc = spark.sparkContext
         try:
+            sc.setJobGroup("step-frames", "frames")
             import events_gt
 
             events_gt.assert_utc_session(spark)
@@ -3078,11 +3096,14 @@ def score(args) -> int:
             inp = score_inputs(spark, args.label, scope)
             fr = build_frames(spark, inp)
             print(f"  {time.monotonic() - t0:.0f} s: frames built", flush=True)
+            sc.setJobGroup("step-i", "section i")
             matched, n_ev, records, found, flr = match_records(spark, fr)
             rows = section_i(matched, n_ev, records, found, flr)
             print(f"  {time.monotonic() - t0:.0f} s: section i", flush=True)
+            sc.setJobGroup("step-ii", "section ii")
             rows += nm_lines(nm_frame(spark, fr))
             print(f"  {time.monotonic() - t0:.0f} s: section ii", flush=True)
+            sc.setJobGroup("step-iii", "section iii")
             counters = event_counters()
             counts = count_event_counters(fr["X"], counters)
             text = {n: (f, m) for n, f, m, _b, _o in counters}
@@ -3099,6 +3120,7 @@ def score(args) -> int:
                 counts, {k: v[0] for k, v in text.items()}, {k: v[1] for k, v in text.items()}
             )
             print(f"  {time.monotonic() - t0:.0f} s: other counters", flush=True)
+            sc.setJobGroup("step-iv", "section iv")
             rows += section_iv(fr, inp)
             # The events of the record types, for ``compare``.
             keep = (
@@ -3109,6 +3131,16 @@ def score(args) -> int:
             )
         finally:
             spark.stop()
+    import day_timing
+
+    stages = day_timing.stage_rows(day_timing.event_log_lines(log), f"score {args.label}")
+    for part in ("frames", "i", "ii", "iii", "iv"):
+        mine = [r for r in stages if r["step"] == part]
+        print(
+            f"  part {part}: {sum(float(r['seconds'] or 0) for r in mine):.0f} s in stages, "
+            f"{sum(float(r['executor_run_s'] or 0) for r in mine):.0f} executor-seconds"
+        )
+    day_timing.print_summary(stages, 6)
     rows += section_v(meta)
     # One row per confirmed event: an event can stand for two items (ATOT and
     # "ATOT (acdm)"); the first item is kept.
@@ -3495,20 +3527,27 @@ def record_lines(matched, events: dict, records: dict, found: dict, finding="") 
             row(
                 "i",
                 item,
-                "share within 60 s (records with seconds)",
+                "share within 60 s, records with seconds",
                 share(int(((a <= 60) & sub).sum()), int(sub.sum())),
                 int(sub.sum()),
                 finding,
             )
         )
         out.append(
-            row("i", item, "median |difference| s", float(np.median(a)) if n else None, n, finding)
+            row(
+                "i",
+                item,
+                "median absolute difference s",
+                float(np.median(a)) if n else None,
+                n,
+                finding,
+            )
         )
         out.append(
             row(
                 "i",
                 item,
-                "p90 |difference| s",
+                "p90 absolute difference s",
                 float(np.percentile(a, 90)) if n else None,
                 n,
                 finding,
@@ -3519,7 +3558,7 @@ def record_lines(matched, events: dict, records: dict, found: dict, finding="") 
             row(
                 "i",
                 item,
-                "mean difference s (within 300 s; + = event later)",
+                "mean difference s, within 300 s",
                 float(near.mean()) if len(near) else None,
                 len(near),
                 finding,
@@ -3704,8 +3743,83 @@ def is_share_measure(measure: str) -> bool:
     )
 
 
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def pivot_tables(rows: list[dict]) -> list[str]:
+    """Rows of one section as tables with one line per item and one column per measure.
+
+    Items with the same measures share a table. A last column ``n`` is added
+    when every measure of an item rests on the same count.
+    """
+    order: list[str] = []
+    by_item: dict = {}
+    for r in rows:
+        if r["item"] not in by_item:
+            order.append(r["item"])
+            by_item[r["item"]] = []
+        by_item[r["item"]].append(r)
+    groups: dict = {}
+    for item in order:
+        sig = tuple(r["measure"] for r in by_item[item])
+        groups.setdefault(sig, []).append(item)
+    out = []
+    for sig, items in groups.items():
+        counts = {item: {str(r["count"]) for r in by_item[item]} for item in items}
+        same = all(len(c) == 1 for c in counts.values())
+        head = ["item", *sig] + (["n"] if same else [])
+        out.append("| " + " | ".join(head) + " |")
+        out.append("|---|" + "---:|" * (len(head) - 1))
+        for item in items:
+            cells = [fmt_md(r["value"], is_share_measure(r["measure"])) for r in by_item[item]]
+            if same:
+                cells.append(fmt_md(next(iter(counts[item]))))
+            out.append(f"| {item} | " + " | ".join(cells) + " |")
+        out.append("")
+    return out
+
+
+def counter_table(rows: list[dict], top: int = 6) -> list[str]:
+    """Section iii as one line per odd case: the total and the items with the most cases."""
+    order: list[str] = []
+    by: dict = {}
+    for r in rows:
+        if r["measure"] not in by:
+            order.append(r["measure"])
+            by[r["measure"]] = []
+        by[r["measure"]].append(r)
+    out = [
+        "| odd case | finding | n | of | share | items with the most (n of) |",
+        "|---|---|---:|---:|---:|---|",
+    ]
+    for m in order:
+        rs = by[m]
+        n = sum(_num(r["value"]) or 0 for r in rs)
+        base = sum(_num(r["count"]) or 0 for r in rs)
+        if len(rs) == 1:
+            items = rs[0]["item"]
+        else:
+            worst = sorted(rs, key=lambda r: -(_num(r["value"]) or 0))[:top]
+            items = "; ".join(
+                f"{r['item']} {fmt_md(r['value'])} of {fmt_md(r['count'])}"
+                for r in worst
+                if (_num(r["value"]) or 0) > 0
+            )
+            items = items or f"0 in {len(rs)} items"
+        out.append(
+            f"| {m} | {rs[0].get('finding', '')} | {fmt_md(n)} | {fmt_md(base)} |"
+            f" {fmt_md(share(n, base), True)} | {items} |"
+        )
+    out.append("")
+    return out
+
+
 def scorecard_markdown(label: str, rows: list[dict], meta: dict | None = None) -> str:
-    """The scorecard as markdown: one table per section."""
+    """The scorecard as markdown: tables of items (i, ii, iv, v), one line per odd case (iii)."""
     lines = [f"# Scorecard {label}", ""]
     if meta:
         lines.append(
@@ -3722,24 +3836,11 @@ def scorecard_markdown(label: str, rows: list[dict], meta: dict | None = None) -
             continue
         lines += [f"## {sec}. {title}", ""]
         if sec == "iii":
-            lines += [
-                "| item | odd case | n | of | share | finding |",
-                "|---|---|---:|---:|---:|---|",
-            ]
-            for r in rs:
-                lines.append(
-                    f"| {r['item']} | {r['measure']} | {fmt_md(r['value'])} | {fmt_md(r['count'])}"
-                    f" | {fmt_md(value_share(r), True)} | {r.get('finding', '')} |"
-                )
+            lines.append("n odd cases of the items counted; the CSV has every item of every case.")
+            lines.append("")
+            lines += counter_table(rs)
         else:
-            lines += ["| item | measure | value | count |", "|---|---|---:|---:|"]
-            for r in rs:
-                lines.append(
-                    f"| {r['item']} | {r['measure']} |"
-                    f" {fmt_md(r['value'], is_share_measure(r['measure']))} |"
-                    f" {fmt_md(r['count'])} |"
-                )
-        lines.append("")
+            lines += pivot_tables(rs)
     return "\n".join(lines)
 
 
@@ -3941,6 +4042,8 @@ def main(argv=None) -> int:
     g.add_argument("sample")
     g.add_argument("day")
     g.add_argument("--tolerance", type=float, default=0.02)
+    m = sub.add_parser("render", help="write the markdown of a scorecard again from its CSV")
+    m.add_argument("label")
     d = sub.add_parser("clean", help="delete the tables of one run on the bucket")
     d.add_argument("label")
     sub.add_parser("_step03", help=argparse.SUPPRESS)
@@ -3959,6 +4062,13 @@ def main(argv=None) -> int:
         return agree(args)
     if args.command == "clean":
         return clean(args)
+    if args.command == "render":
+        p = _scorecard_path(args.label)
+        p.with_suffix(".md").write_text(
+            scorecard_markdown(args.label, read_scorecard(p), load_meta(args.label))
+        )
+        print(p.with_suffix(".md"))
+        return 0
     raise SystemExit(f"unknown command {args.command}")
 
 
