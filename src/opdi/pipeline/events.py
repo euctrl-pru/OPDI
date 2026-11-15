@@ -79,6 +79,7 @@ from pyspark.sql.window import Window
 
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
+from opdi.pipeline.detector_altitude import altitude_for_detectors, flight_altitude_only
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
 from opdi.pipeline.flights import resolve_flight_id
 from opdi.pipeline.ground import block_events, block_times, movement_window
@@ -1671,6 +1672,10 @@ class FlightEventProcessor:
         # and two distances); ``_runway_traversal_family`` caches its own
         # smaller copy for the time it uses it.
         geo = self._with_aerodrome_geometry(sdf_input, month)
+        # Work package 1: the vertical detectors (tops, level-offs and
+        # flight-level crossings) do not read the altitude of reports flagged
+        # on the ground; the other detectors do.
+        vgeo = flight_altitude_only(geo, self.events)
 
         # The level segments are detected once and shared by the level-offs
         # and the vertical profile tops, which are defined on the same
@@ -1682,13 +1687,13 @@ class FlightEventProcessor:
             # column is dropped afterwards because tops and level-offs join on
             # the track.
             segments = LEVEL_ARMS[self.events.level_method](
-                geo, self.events, partition_cols=("track_id", PIECE)
+                vgeo, self.events, partition_cols=("track_id", PIECE)
             ).drop(PIECE)
             segments.cache()
             if self.events.emit_pru_tops or (
                 self.events.emit_level_offs and self.events.level_anchor == "pru"
             ):
-                tops = pru_tops(geo, segments, self.events)
+                tops = pru_tops(vgeo, segments, self.events)
                 tops.cache()
 
         df_events = None
@@ -1735,20 +1740,21 @@ class FlightEventProcessor:
         if calc_vertical:
             print(f"Calculating vertical events (FL crossings) for batch: {batch_id}")
             # The v0.0.2 settings run the release v0.0.2 crossing method.
+            crossing_input = flight_altitude_only(sdf_input, self.events)
             if self.events.crossing_all_occurrences:
-                add(calculate_threshold_crossing_events(sdf_input, self.events))
+                add(calculate_threshold_crossing_events(crossing_input, self.events))
             else:
-                add(calculate_vertical_crossing_events(sdf_input))
+                add(calculate_vertical_crossing_events(crossing_input))
 
             if df_events is not None and self.events.emit_level_offs:
                 add(
                     calculate_level_off_events(
-                        geo, df_events, self.events, segments=segments, tops=tops
+                        vgeo, df_events, self.events, segments=segments, tops=tops
                     )
                 )
 
             if self.events.emit_pru_tops:
-                add(pru_top_events(geo, segments, self.events, tops=tops))
+                add(pru_top_events(vgeo, segments, self.events, tops=tops))
 
             # ATOT/ALDT from the runway window and the runway milestones
             # airborne/touchdown give the same two moments by different means.
@@ -2133,9 +2139,17 @@ class FlightEventProcessor:
             print("osn_tracks_clean not found; falling back to raw osn_tracks.")
         print(f"Reading tracks from: {source}")
 
-        sdf_input = (
-            self._get_data_within_timeframe(source, month, day=day).select(*TRACK_COLUMNS).cache()
-        )
+        # Work package 1: the altitude every detector reads (see
+        # ``pipeline/detector_altitude.py``), set as the reports are read.
+        cleaned = source == "osn_tracks_clean"
+        read_columns = list(TRACK_COLUMNS)
+        if cleaned and self.events.altitude_from_cleaning:
+            read_columns.append("baro_altitude")
+        sdf_input = altitude_for_detectors(
+            self._get_data_within_timeframe(source, month, day=day).select(*read_columns),
+            self.events,
+            cleaned_tracks=cleaned,
+        ).cache()
 
         batch_id = month.strftime("%Y%m%d") + "_"
 
