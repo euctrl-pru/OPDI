@@ -408,16 +408,26 @@ them (`src/opdi/config/environments.py`), the most the namespace quota holds:
 30 CPUs and 192 GiB in all, of which the pod that runs the driver takes 4 CPUs
 and 16 GiB.
 
-| Step | What it does | Time | Second run |
-|---|---|---|---|
-| 01 | fetch and thin one day of reports | 384 s | 396 s |
-| 02 | build the tracks | 1,677 s | 1,738 s |
-| 02a | clean the tracks | 744 s | 751 s |
-| 03 | flight list | 356 s | 359 s |
-| 04 | events and measurements | 1,550 s | 1,542 s |
-| 04b | milestones in the flight list | 79 s | 97 s |
-| 09 | published files | 209 s | 234 s |
-| **all** | | **4,999 s (1.4 h)** | 5,117 s |
+| Step | What it does | Time | Second run | With 416 parts for step 02 |
+|---|---|---|---|---|
+| 01 | fetch and thin one day of reports | 384 s | 396 s | 383 s |
+| 02 | build the tracks | 1,677 s | 1,738 s | 1,446 s |
+| 02a | clean the tracks | 744 s | 751 s | 706 s |
+| 03 | flight list | 356 s | 359 s | 344 s |
+| 04 | events and measurements | 1,550 s | 1,542 s | 1,519 s |
+| 04b | milestones in the flight list | 79 s | 97 s | 48 s |
+| 09 | published files | 209 s | 234 s | 163 s |
+| **all** | | **4,999 s (1.4 h)** | 5,117 s | **4,609 s (1.3 h)** |
+
+The last column is the same day measured step by step with
+`benchmarks/day_timing.py` after step 02 was given 416 shuffle parts
+(`OPENSKY_STEP_SETTINGS` in `src/opdi/config/environments.py`): step 02 then
+spills nothing to the executors' local disks (166 GB with 104 parts) and takes
+1,446 and 1,484 s in two runs instead of 1,630 and 1,596 s with 104 in the
+same session; the tracks are the same row for row. The other steps keep 104
+parts. The steps of that column ran as separate runs from stored inputs, so
+their sum leaves out the starts between steps; it published the same 161,881
+flights and 6,692,084 events as the runs before.
 
 Step 01 of a daily run fetches one new day (the day after the one
 processed); the day before and the day itself are already there from the
@@ -428,11 +438,13 @@ the step before to leave the quota adds about 15 s each.
 
 The settings that brought a day from about 6,200 s (12 executors, Spark's
 defaults) to this are, each measured on the same day: 13 executors instead of
-12 (step 04 -5%), 104 shuffle parts instead of 200 (step 04 -10% more), and
+12 (step 04 -5%), 104 shuffle parts instead of 200 (step 04 -10% more), 416
+for step 02 alone (step 02 -9%), and
 2.5 GiB outside the heap instead of Spark's default 1.2 GiB, without which
 every executor was killed for memory in step 09 and the lost work was done
 again. The comparison of every setting tried is in the processing speed note
-of the portal (`papers/processing-speed-v1/data/settings_tests.csv`).
+of the portal (`papers/processing-speed-v1/data/settings_tests.csv`, and
+`partition_tests.csv` for the shuffle parts of steps 02 and 02a).
 
 The number and size of the executors and the shuffle parts do not change the
 results; neither does losing executors during a step (tested by deleting one

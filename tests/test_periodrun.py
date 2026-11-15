@@ -464,7 +464,7 @@ def test_a_day_has_the_window_its_segmentation_will_read():
 
     from opdi import periodrun
 
-    src = inspect.getsource(periodrun.run_day_step)
+    src = inspect.getsource(periodrun._run_day_step)
     assert "day - timedelta(days=1)" in src
     assert "day + timedelta(days=1)" in src
 
@@ -717,7 +717,7 @@ def test_the_ingest_fetches_only_what_is_missing_and_drops_only_what_passed():
 
     from opdi import periodrun
 
-    src = inspect.getsource(periodrun.run_day_step)
+    src = inspect.getsource(periodrun._run_day_step)
     assert "list_partitions" in src, "must know what is already on disk"
     assert "d.isoformat() not in present" in src, "fetch only the missing days"
     assert "drop_partitions" in src, "drop only the days the window passed"
@@ -730,7 +730,7 @@ def test_stale_days_are_dropped_after_fetching_not_before():
 
     from opdi import periodrun
 
-    src = inspect.getsource(periodrun.run_day_step)
+    src = inspect.getsource(periodrun._run_day_step)
     assert src.index("for d in missing:") < src.index("drop_partitions")
 
 
@@ -1058,7 +1058,7 @@ def test_publishing_is_dispatched_per_day():
 
     from opdi import periodrun
 
-    src = inspect.getsource(periodrun.run_day_step)
+    src = inspect.getsource(periodrun._run_day_step)
     assert 'step == "09"' in src and "publish_day" in src
 
 

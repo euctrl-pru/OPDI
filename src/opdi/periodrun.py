@@ -491,7 +491,7 @@ def step_spark_settings(spark, config, step: str):
     The settings are :meth:`SparkConfig.settings_for_step`; afterwards the
     session's own values are put back.
     """
-    wanted = config.spark.settings_for_step(step)
+    wanted = config.spark.settings_for_step(step) if config is not None else {}
     before = {key: spark.conf.get(key, None) for key in wanted}
     for key, value in wanted.items():
         spark.conf.set(key, value)
