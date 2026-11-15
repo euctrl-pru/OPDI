@@ -825,7 +825,13 @@ def calculate_horizontal_segment_events(
     # ``pipeline/holes.py``): a level segment then ends at the hole it meets.
     # Without it the results are those of a track without holes.
     pieces = [PIECE] if PIECE in sdf_input.columns else []
-    df = sdf_input.select(*wanted, *elevations, *pieces)
+    # Work package 1: the ground flag tells the level segments from the ground.
+    ground_flag = (
+        ["on_ground"]
+        if config.level_segment_not_on_ground and "on_ground" in sdf_input.columns
+        else []
+    )
+    df = sdf_input.select(*wanted, *elevations, *pieces, *ground_flag)
     use_agl = config.phase_ground_above_field and len(elevations) == 2
 
     # Convert units: meters -> feet, m/s -> ft/min, m/s -> knots
@@ -907,6 +913,30 @@ def calculate_horizontal_segment_events(
     )
 
     df = _smooth_phase(df, config.phase_twindow_seconds)
+
+    if config.level_segment_not_on_ground:
+        # Work package 1: a report flagged on the ground, or lower than the
+        # ground ceiling above the departure or destination airport, is not
+        # level flight, even at the speed of a take-off or landing roll (where
+        # the speed rules of OpenAP favour "level" over "ground").
+        if use_agl:
+            low = (
+                col("alt") - F.coalesce(col("elev_adep_ft"), lit(0.0))
+                < lit(config.phase_ground_ceiling_ft)
+            ) | (
+                col("alt") - F.coalesce(col("elev_ades_ft"), lit(0.0))
+                < lit(config.phase_ground_ceiling_ft)
+            )
+        else:
+            low = col("alt") < lit(config.phase_ground_ceiling_ft)
+        if ground_flag:
+            low = low | F.coalesce(col("on_ground"), lit(False))
+        df = df.withColumn(
+            "flight_phase",
+            F.when(
+                col("flight_phase").isin("CR", "LVL") & F.coalesce(low, lit(False)), lit("GND")
+            ).otherwise(col("flight_phase")),
+        )
 
     df = (
         df.withColumnRenamed("alt", "altitude_ft")
@@ -1050,9 +1080,34 @@ def calculate_horizontal_segment_events(
         milestone_types = milestone_types.otherwise(F.array())
     df = df.withColumn("milestone_types", milestone_types)
 
+    if config.level_segment_min_duration_applied:
+        # Work package 1: the duration of each level segment, from its first
+        # to its last level report; a segment shorter than
+        # ``level_min_duration_seconds`` gives no level-start/level-end.
+        # Within one number of ``_level_seg`` the level reports are those of
+        # one segment: a new level phase after any other phase starts a new
+        # number.
+        df = df.withColumn(
+            "_level_seg",
+            f_sum(when(col("start_of_segment"), 1).otherwise(0)).over(
+                window_phase.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+            ),
+        )
+        segment = Window.partitionBy("track_id", *pieces, "_level_seg")
+        level_time = when(col("flight_phase").isin("CR", "LVL"), col("event_time").cast("double"))
+        df = df.withColumn(
+            "_level_seg_s",
+            f_max(level_time).over(segment) - f_min(level_time).over(segment),
+        )
+
     # Explode to one row per event
     df_exploded = df.select("*", explode(col("milestone_types")).alias("type"))
     df_exploded = df_exploded.filter("type IS NOT NULL")
+    if config.level_segment_min_duration_applied:
+        df_exploded = df_exploded.filter(
+            ~col("type").isin("level-start", "level-end")
+            | (col("_level_seg_s") >= lit(float(config.level_min_duration_seconds)))
+        )
 
     df_events = df_exploded.select(
         col("track_id"),
