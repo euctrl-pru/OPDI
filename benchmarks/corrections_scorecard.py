@@ -420,9 +420,11 @@ def _write_subset(args) -> int:
         tracks = spark.read.parquet(f"{PREFIX}/{DAY_RUN}/osn_tracks_clean").filter(
             F.col("dof") == day
         )
-        fl = spark.read.parquet(f"{PREFIX}/{DAY_STEP03}/opdi_flight_list").filter(
-            F.col("DOF") == day
-        )
+        # Every folder step 03 wrote: besides the day it writes a few rows
+        # under the next day and under no day (NULL, finding f2.G), and step
+        # 04 reads them too (without them it wrote 1,315 fewer events).
+        fl_all = spark.read.parquet(f"{PREFIX}/{DAY_STEP03}/opdi_flight_list")
+        fl = fl_all.filter(F.col("DOF") == day)
         cand = spark.read.parquet(f"{PREFIX}/{DAY_STEP03}/opdi_endpoint_candidates")
         ids = tracks.select("track_id").distinct()
 
@@ -499,7 +501,7 @@ def _write_subset(args) -> int:
         tracks.join(keep, "track_id", "left_semi").repartition(32, "track_id").write.mode(
             "overwrite"
         ).partitionBy("dof").parquet(f"{root}/osn_tracks_clean")
-        fl.join(keep.withColumnRenamed("track_id", "ID"), "ID", "left_semi").repartition(
+        fl_all.join(keep.withColumnRenamed("track_id", "ID"), "ID", "left_semi").repartition(
             1
         ).write.mode("overwrite").partitionBy("DOF").parquet(f"{root}/opdi_flight_list")
         cand.join(keep, "track_id", "left_semi").repartition(8).write.mode("overwrite").parquet(
@@ -577,14 +579,14 @@ def _copy_flight_list_on_start(spark_manager, source: str, target: str) -> None:
     orig = spark_manager.create_session
 
     def create_session(*a, **k):
-        from pyspark.sql import functions as F
 
         spark = orig(*a, **k)
         t0 = time.monotonic()
         check_write_path(target + "/")
+        # All its folders: step 04 also reads the rows step 03 wrote under
+        # the next day and under no day.
         (
             spark.read.parquet(source)
-            .filter(F.col("DOF") == F.lit(DAY).cast("date"))
             .repartition(1)
             .write.mode("overwrite")
             .partitionBy("DOF")
