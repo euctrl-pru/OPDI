@@ -1601,6 +1601,29 @@ def test_a_touch_and_go_keeps_its_take_off(spark):
     assert events == before
 
 
+def test_a_take_off_followed_by_a_circuit_and_a_landing_in_one_pass_keeps_its_take_off(spark):
+    """A light aircraft flying circuits: it takes off on 07, flies a circuit
+    of four minutes out of sight of the runway zones, and lands on 07 again.
+
+    Less than 300 s pass between the two, so the take-off and the landing are
+    one pass over 07, which ends on the ground. The pass also holds reports in
+    the air well above the runway (400 and 700 ft), so it is not a landing roll
+    misread: the take-off stays. Shape of the circuits at Rocky Mountain
+    Metropolitan (KBJC) and Hillsboro (KHIO) on 2026-06-14.
+    """
+    circuit = [
+        (290, -1.00, 600.0, 75.0, False, 70.0),
+        (300, -0.50, 300.0, 70.0, False, 70.0),
+        (310, 0.10, 20.0, 65.0, False, 70.0),
+    ] + [(315 + 5 * i, 0.20 + 0.05 * i, None, None, True, 70.0) for i in range(6)]
+    sv = _strip_pass(spark, _TAKE_OFF_07 + circuit)
+    passes, events = _runway_family(spark, sv)
+
+    assert ("07", "departure") in passes
+    times = {e[1]: e[0] for e in events}
+    assert times["ATOT"] == pytest.approx(35.75, abs=0.01)
+
+
 def test_a_landing_then_a_later_take_off_in_one_track_gives_both(spark):
     """Lands on 07, taxis off for ten minutes, and departs from 25.
 

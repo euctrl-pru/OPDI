@@ -39,7 +39,9 @@ Each traversal is classified by four measurements over its own samples:
 * **ground flag** -- whether the report that gives the exit height, or the
   last report of the pass, is flagged on the ground by the transponder. A
   take-off ends in the air, so a pass that ends on the ground is no
-  take-off (:attr:`~opdi.config.EventConfig.runway_take_off_needs_air_report`).
+  take-off, unless it also climbed clearly into the air before (a take-off
+  and a landing on the same runway a few minutes apart, as in a circuit);
+  see :attr:`~opdi.config.EventConfig.runway_take_off_needs_air_report`.
   On the ground the barometric height can read 20 to 60 ft, and a landing
   roll read from the far end of the runway, with no approach before it,
   otherwise starts low and ends high like a take-off;
@@ -167,6 +169,17 @@ APPROACH_CORRIDOR_HALF_WIDTH_NM = 0.5
 #: normal approach must not enter and leave the trigger repeatedly.
 GOAROUND_HYSTERESIS_FT = 50.0
 
+#: Heights above the airport, in feet, between which a report not flagged on
+#: the ground shows the aircraft clearly in the air. On the ground the
+#: barometric height of a report reads up to about 150 ft (20 to 60 ft from the
+#: pressure of the day, plus altitudes rounded to 100 ft by some
+#: transponders), hence the lower bound; a garbled altitude reads tens of
+#: thousands of feet, hence the upper one. A pass with two such reports that
+#: ends on the ground is a take-off and a later landing, not a landing roll.
+#: Properties of the signal, like :data:`AIRBORNE_HYSTERESIS_FT`.
+CLEARLY_AIRBORNE_MIN_FT = 300.0
+CLEARLY_AIRBORNE_MAX_FT = 3000.0
+
 #: What a traversal is, for windowing purposes.
 #:
 #: ``apt_ident`` must be in the key. ``trace_id`` restarts at 0 for every
@@ -254,6 +267,8 @@ def classify_traversal(
     duration_seconds,
     config: "EventConfig",
     exit_on_ground=None,
+    last_on_ground=None,
+    air_reports=None,
 ):
     """Departure, arrival, crossing -- or NULL, which means abstain.
 
@@ -264,22 +279,36 @@ def classify_traversal(
     wrong milestone corrupts a movement count, naming none is an explicit null
     a consumer can see.
 
-    ``exit_on_ground`` is whether the pass ends on the ground: the report that
-    gives ``exit_height_ft``, or the last report of the pass, is flagged on
-    the ground. With
-    :attr:`~opdi.config.EventConfig.runway_take_off_needs_air_report`, such a
-    pass is not a departure: the transponder says the wheels are on the
-    runway at the end, so a height above ``runway_airborne_height_ft`` there
-    is an altitude error, not a lift-off. A NULL flag counts as not on the
-    ground.
+    With :attr:`~opdi.config.EventConfig.runway_take_off_needs_air_report`,
+    a pass that ends on the ground is not a departure:
+
+    * ``exit_on_ground``: the report that gives ``exit_height_ft`` is flagged
+      on the ground. The transponder says the wheels are on the runway, so a
+      height above ``runway_airborne_height_ft`` there is an altitude error,
+      not a lift-off;
+    * ``last_on_ground``: the last report of the pass is flagged on the
+      ground, and fewer than two reports of the pass (``air_reports``) are in
+      the air between :data:`CLEARLY_AIRBORNE_MIN_FT` and
+      :data:`CLEARLY_AIRBORNE_MAX_FT`. A pass that climbed that high and
+      ends on the ground is a take-off followed by a landing on the same
+      runway less than ``airport_trace_gap_seconds`` later (a circuit), and
+      its take-off stays.
+
+    A NULL flag counts as not on the ground.
     """
     aligned = align_deg <= F.lit(config.runway_align_max_deg)
     fast = max_gs_kt > F.lit(config.runway_roll_speed_kt)
     airborne_h = F.lit(config.runway_airborne_height_ft)
 
     departure = aligned & fast & (entry_height_ft < airborne_h) & (exit_height_ft >= airborne_h)
-    if config.runway_take_off_needs_air_report and exit_on_ground is not None:
-        departure = departure & ~F.coalesce(exit_on_ground, F.lit(False))
+    if config.runway_take_off_needs_air_report:
+        if exit_on_ground is not None:
+            departure = departure & ~F.coalesce(exit_on_ground, F.lit(False))
+        if last_on_ground is not None and air_reports is not None:
+            ends_low_on_ground = F.coalesce(last_on_ground, F.lit(False)) & (
+                F.coalesce(air_reports, F.lit(0)) < F.lit(2)
+            )
+            departure = departure & ~ends_low_on_ground
     arrival = aligned & fast & (entry_height_ft >= airborne_h) & (exit_height_ft < airborne_h)
     crossing = (
         (align_deg >= F.lit(config.runway_cross_min_deg))
@@ -523,16 +552,23 @@ def runway_traversals(
         F.max_by("_h_ft", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))).alias(
             "exit_height_ft"
         ),
-        # On the ground at the end of the pass: the report that gives
-        # ``exit_height_ft``, or the last report of the pass, is flagged on the
-        # ground. A height read there is not a lift-off.
-        (
-            F.coalesce(
-                F.max_by("_on_ground", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))),
-                F.lit(False),
-            )
-            | F.coalesce(F.max_by("_on_ground", "event_time"), F.lit(False))
+        # The ground flag of the report that gives ``exit_height_ft``: a
+        # height read on a report flagged on the ground is not a lift-off.
+        F.coalesce(
+            F.max_by("_on_ground", F.when(F.col("_h_ft").isNotNull(), F.col("event_time"))),
+            F.lit(False),
         ).alias("exit_on_ground"),
+        # The ground flag of the last report of the pass, with or without a
+        # height, and the reports clearly in the air (see ``classify_traversal``).
+        F.coalesce(F.max_by("_on_ground", "event_time"), F.lit(False)).alias("last_on_ground"),
+        F.sum(
+            F.when(
+                ~F.coalesce(F.col("_on_ground"), F.lit(False))
+                & (F.col("_h_ft") > F.lit(CLEARLY_AIRBORNE_MIN_FT))
+                & (F.col("_h_ft") < F.lit(CLEARLY_AIRBORNE_MAX_FT)),
+                1,
+            ).otherwise(0)
+        ).alias("air_reports"),
         F.min_by("lat", "event_time").alias("entry_lat"),
         F.min_by("lon", "event_time").alias("entry_lon"),
         F.max_by("lat", "event_time").alias("exit_lat"),
@@ -589,6 +625,8 @@ def runway_traversals(
             F.col("duration_seconds"),
             config,
             exit_on_ground=F.col("exit_on_ground"),
+            last_on_ground=F.col("last_on_ground"),
+            air_reports=F.col("air_reports"),
         ),
     )
     # Classify before the direction pick and drop the abstentions first, so a
@@ -626,6 +664,8 @@ def runway_traversals(
         F.col("entry_height_ft"),
         F.col("exit_height_ft"),
         F.col("exit_on_ground"),
+        F.col("last_on_ground"),
+        F.col("air_reports"),
         F.col("entry_lat"),
         F.col("entry_lon"),
         F.col("exit_lat"),
