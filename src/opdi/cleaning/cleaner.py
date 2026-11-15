@@ -22,6 +22,16 @@ from opdi.utils.storage import StorageManager
 SOURCE_TABLE = "osn_tracks"
 TARGET_TABLE = "osn_tracks_clean"
 
+#: The column comment of ``cumulative_distance_nm`` in :data:`TARGET_TABLE`.
+#: Step 02a copies the column from :data:`SOURCE_TABLE` unchanged, so it is
+#: measured on the positions before cleaning; the distance flown that OPDI
+#: publishes is computed again in step 04, from the cleaned positions.
+CUMULATIVE_DISTANCE_COMMENT = (
+    "Cumulative distance from track start, NM, on the positions before cleaning "
+    "(step 02). The published distance flown is computed in step 04 from the "
+    "cleaned positions."
+)
+
 
 class TrackCleaner:
     """Step 02a: clean the tracks of a day or a month.
@@ -206,7 +216,7 @@ class TrackCleaner:
             h3_res_7 STRING COMMENT 'H3 cell at resolution 7.',
             h3_res_12 STRING COMMENT 'H3 cell at resolution 12.',
             segment_distance_nm DOUBLE COMMENT 'Distance from the previous state vector, NM.',
-            cumulative_distance_nm DOUBLE COMMENT 'Cumulative distance from track start, NM.',
+            cumulative_distance_nm DOUBLE COMMENT '{CUMULATIVE_DISTANCE_COMMENT}',
             geo_altitude_c DOUBLE COMMENT 'Checked GNSS altitude, metres (step 02).',
             baro_altitude_c DOUBLE COMMENT 'Checked barometric altitude, metres (step 02).',
             segment_id STRING COMMENT 'Contiguous sub-track: splits track_id at coverage holes.'
