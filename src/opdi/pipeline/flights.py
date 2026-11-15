@@ -160,7 +160,7 @@ def at_border(lat, lon, margin_nm: float = BORDER_MARGIN_NM, bbox=BBOX):
     )
 
 
-def dominant_flight_id(df: DataFrame, track_col: str = "track_id") -> DataFrame:
+def dominant_flight_id(df: DataFrame, track_col: str = "track_id", trim: bool = False) -> DataFrame:
     """The call sign each track broadcast most often, one row per track.
 
     Blank call signs are not counted. Ties are broken on the call sign
@@ -171,12 +171,18 @@ def dominant_flight_id(df: DataFrame, track_col: str = "track_id") -> DataFrame:
     Args:
         df: Reports with ``flight_id`` (the call sign) and ``track_col``.
         track_col: Column holding the track id.
+        trim: Remove the spaces around each call sign before counting, so
+            that ``'ABC1    '`` and ``'ABC1'`` are one call sign
+            (:attr:`DetectionConfig.call_sign_trimmed`).
 
     Returns:
         One row per track: ``track_col`` and ``_dominant_flight_id``.
     """
     blank = F.trim(F.coalesce(F.col("flight_id"), lit(""))) == ""
-    counts = df.filter(~blank).groupBy(track_col, "flight_id").agg(F.count(lit(1)).alias("_n"))
+    labelled = df.filter(~blank)
+    if trim:
+        labelled = labelled.withColumn("flight_id", F.trim(F.col("flight_id")))
+    counts = labelled.groupBy(track_col, "flight_id").agg(F.count(lit(1)).alias("_n"))
     rank = Window.partitionBy(track_col).orderBy(F.col("_n").desc(), F.col("flight_id").asc())
     return (
         counts.withColumn("_r", row_number().over(rank))
@@ -185,7 +191,7 @@ def dominant_flight_id(df: DataFrame, track_col: str = "track_id") -> DataFrame:
     )
 
 
-def resolve_flight_id(sv: DataFrame, track_col: str = "track_id") -> DataFrame:
+def resolve_flight_id(sv: DataFrame, track_col: str = "track_id", trim: bool = False) -> DataFrame:
     """Give every report of a track the one call sign the track flew.
 
     This module groups and joins on ``flight_id`` (the call sign). That is
@@ -203,11 +209,13 @@ def resolve_flight_id(sv: DataFrame, track_col: str = "track_id") -> DataFrame:
     Args:
         sv: Reports with ``flight_id`` and ``track_col``.
         track_col: Column holding the track id.
+        trim: Give the call sign without the spaces around it (see
+            :func:`dominant_flight_id`).
 
     Returns:
         The same reports, with ``flight_id`` replaced by the track's call sign.
     """
-    labels = dominant_flight_id(sv, track_col)
+    labels = dominant_flight_id(sv, track_col, trim=trim)
     return (
         sv.join(labels, on=track_col, how="left")
         .withColumn(
@@ -215,6 +223,82 @@ def resolve_flight_id(sv: DataFrame, track_col: str = "track_id") -> DataFrame:
             F.coalesce(F.col("_dominant_flight_id"), lit("")),
         )
         .drop("_dominant_flight_id")
+    )
+
+
+#: Columns of a report that carry a measured value besides the position. The
+#: cleaning of step 02a blanks a value that was repeated rather than measured
+#: again, so a report with none of them left carries nothing new.
+MEASURED_VALUE_COLUMNS = ("baro_altitude", "geo_altitude", "velocity", "heading", "vert_rate")
+
+
+def seen_rank(df: DataFrame) -> Column:
+    """How a report counts for ``first_seen`` and ``last_seen``.
+
+    0 for a report with a measured position (``lat`` and ``lon`` not blank),
+    1 for a report with another measured value (one of
+    :data:`MEASURED_VALUE_COLUMNS` present in ``df``), 2 for a report with
+    neither. The first (last) report of the lowest rank a track has is its
+    first (last) seen (:attr:`EventConfig.seen_from_measured_reports`).
+    """
+    others = [col(c).isNotNull() for c in MEASURED_VALUE_COLUMNS if c in df.columns]
+    any_other = functools.reduce(lambda a, b: a | b, others) if others else lit(False)
+    return (
+        when(col("lat").isNotNull() & col("lon").isNotNull(), lit(0))
+        .when(any_other, lit(1))
+        .otherwise(lit(2))
+    )
+
+
+def wide_search_roles(detection) -> tuple:
+    """The track ends whose 110 NM candidate airports step 04 searches too.
+
+    With :attr:`DetectionConfig.alternatives_within_endpoint_radius`, the
+    lists ``ADEP_P`` / ``ADES_P`` of the ``endpoint`` method hold only the
+    airports within the detection radius. The runway and layout events are
+    still looked for at every airport within 110 NM, as before, so step 04
+    reads them from ``opdi_endpoint_candidates`` for the ends named by the
+    ``endpoint`` method. Empty when the setting is off.
+    """
+    if detection is None or not getattr(detection, "alternatives_within_endpoint_radius", False):
+        return ()
+    return tuple(
+        role
+        for role, mode in (("adep", detection.adep_mode), ("ades", detection.ades_mode))
+        if mode == "endpoint"
+    )
+
+
+def with_endpoint_candidates(flights: DataFrame, storage, roles) -> DataFrame:
+    """Add to ``apt`` the candidate airports of the given track ends.
+
+    Args:
+        flights: ``id`` and ``apt`` (array of airport codes).
+        storage: Storage that holds ``opdi_endpoint_candidates``.
+        roles: Ends of the track (``"adep"``, ``"ades"``) whose candidates
+            are added. Empty, or without the table, ``flights`` is returned
+            unchanged.
+
+    Returns:
+        ``id`` and ``apt``, the array holding each airport once.
+    """
+    if not roles or not storage.table_exists("opdi_endpoint_candidates"):
+        return flights
+    cand = (
+        storage.read_table("opdi_endpoint_candidates")
+        .filter(col("role").isin(*roles))
+        .groupBy(col("track_id").alias("_cand_id"))
+        .agg(F.collect_set("apt_ident").alias("_cand_apt"))
+    )
+    return (
+        flights.join(cand, flights["id"] == cand["_cand_id"], "left")
+        .withColumn(
+            "apt",
+            F.array_distinct(
+                F.concat(col("apt"), F.coalesce(col("_cand_apt"), F.array().cast("array<string>")))
+            ),
+        )
+        .select("id", "apt")
     )
 
 
@@ -338,6 +422,15 @@ class FlightListProcessor:
             return "osn_tracks_clean"
         return "osn_tracks"
 
+    def _seen_from_measured_reports(self) -> bool:
+        """Whether first and last seen come from measured reports.
+
+        Read from :attr:`EventConfig.seen_from_measured_reports`, so that the
+        flight list and the events use one definition.
+        """
+        events = getattr(getattr(self, "config", None), "events", None)
+        return bool(getattr(events, "seen_from_measured_reports", False))
+
     def _version_for(self, path: str) -> str:
         """The ``version`` written on a row produced by method ``path``.
 
@@ -415,7 +508,8 @@ class FlightListProcessor:
         df = df.withColumnRenamed("callsign", "flight_id")
         if self._version_for("trend") != FLIGHT_LIST_VERSION:
             return df
-        return resolve_flight_id(df)
+        trim = bool(getattr(getattr(self, "detection", None), "call_sign_trimmed", False))
+        return resolve_flight_id(df, trim=trim)
 
     def _load_airports_hex(self, airports_hex_path: Optional[str] = None) -> DataFrame:
         """The airport detection zones (``h3_airport_detection_zones``).
@@ -439,7 +533,10 @@ class FlightListProcessor:
             # The public method that started the work lets them go when it
             # returns (``_releases_zones``).
             if getattr(self, "_zones", None) is None:
-                self._zones = self.storage.read_table("h3_airport_detection_zones").cache()
+                zones = self.storage.read_table("h3_airport_detection_zones")
+                if getattr(self.detection, "skip_duplicate_airports", False):
+                    zones = self._without_duplicate_airports(zones)
+                self._zones = zones.cache()
             return self._zones
         if airports_hex_path:
             df_apt = pd.read_parquet(airports_hex_path)
@@ -449,6 +546,28 @@ class FlightListProcessor:
             "AirportDetectionZoneGenerator.save_prepared_to_table() first, "
             "or provide airports_hex_path."
         )
+
+    def _without_duplicate_airports(self, zones: DataFrame) -> DataFrame:
+        """The zones less those of OurAirports records marked as duplicates.
+
+        The codes are read from ``oa_airports`` (a few records in the world)
+        and the zones of those codes are left out
+        (:attr:`DetectionConfig.skip_duplicate_airports`). Without the table
+        the zones are returned as they are.
+        """
+        if not self.storage.table_exists("oa_airports"):
+            return zones
+        from opdi.ingestion.ourairports import is_duplicate_airport
+
+        oa = self.storage.read_table("oa_airports")
+        idents = [
+            r["ident"]
+            for r in oa.filter(is_duplicate_airport(col("name"))).select("ident").collect()
+            if r["ident"] is not None
+        ]
+        if not idents:
+            return zones
+        return zones.filter(~col("apt_ident").isin(idents))
 
     # ------------------------------------------------------------------
     # DAI processing (Departures / Arrivals / Internal)
@@ -584,29 +703,73 @@ class FlightListProcessor:
         sv = sv.dropna(subset=["lat", "lon", "track_id"])
         sv = sv.fillna({"flight_id": ""})
 
+        d = getattr(self, "detection", None)
+        needs_climb = getattr(d, "endpoint_airborne_needs_climb", False)
+        both_ends = getattr(d, "endpoint_ids_from_both_ends", False)
+
         w = Window.partitionBy("track_id").orderBy("event_time")
+        extra = []
+        if needs_climb:
+            # The climb after the first report (DetectionConfig.
+            # endpoint_airborne_needs_climb): the first and the last known
+            # altitude within the next `endpoint_climb_window_s` seconds. The
+            # reports are ordered by their time in seconds, which orders them
+            # as `event_time` does, so the row numbers below and the time
+            # window share one sort.
+            sv = sv.withColumn("_t", col("event_time").cast("double"))
+            w = Window.partitionBy("track_id").orderBy("_t")
+            w_climb = w.rangeBetween(0, int(round(float(d.endpoint_climb_window_s))))
+            sv = (
+                sv.withColumn("_alt_n", F.count("baro_altitude").over(w_climb))
+                .withColumn("_alt_0", F.first("baro_altitude", ignorenulls=True).over(w_climb))
+                .withColumn("_alt_1", F.last("baro_altitude", ignorenulls=True).over(w_climb))
+            )
         ends = (
             sv.withColumn("_rn", row_number().over(w))
-            .withColumn("_rr", row_number().over(w.orderBy(col("event_time").desc())))
+            .withColumn(
+                "_rr",
+                row_number().over(w.orderBy(col("_t" if needs_climb else "event_time").desc())),
+            )
             .filter((col("_rn") == 1) | (col("_rr") == 1))
             .withColumn("role", when(col("_rn") == 1, lit("adep")).otherwise(lit("ades")))
             .withColumn(
                 "at_border",
                 at_border(col("lat"), col("lon"), bbox=self.config.coverage.bbox),
             )
-            .select(
-                "track_id",
-                "icao24",
-                "flight_id",
-                "role",
-                "event_time",
-                "lat",
-                "lon",
-                "baro_altitude",
-                "on_ground",
-                "at_border",
-                "h3_res_7",
+        )
+        if needs_climb:
+            # In feet; NULL on the last report, and where fewer than two
+            # altitudes are known (the climb is then unknown).
+            ends = ends.withColumn(
+                "climb_ft",
+                when(
+                    (col("role") == "adep") & (col("_alt_n") >= 2),
+                    (col("_alt_1") - col("_alt_0")) * FT_PER_M,
+                ),
             )
+            extra.append("climb_ft")
+        if both_ends:
+            # The track's first and last report with a position, on both end
+            # rows, so a track whose other end has no airport nearby still
+            # knows them (DetectionConfig.endpoint_ids_from_both_ends).
+            w_track = Window.partitionBy("track_id")
+            ends = ends.withColumn(
+                "track_first_seen", f_min("event_time").over(w_track)
+            ).withColumn("track_last_seen", f_max("event_time").over(w_track))
+            extra += ["track_first_seen", "track_last_seen"]
+        ends = ends.select(
+            "track_id",
+            "icao24",
+            "flight_id",
+            "role",
+            "event_time",
+            "lat",
+            "lon",
+            "baro_altitude",
+            "on_ground",
+            "at_border",
+            "h3_res_7",
+            *extra,
         )
 
         sdf_apt = self._load_airports_hex()
@@ -650,9 +813,15 @@ class FlightListProcessor:
             "lat",
             "lon",
         ]
-        for extra in ("apt_min_c_radius_nm", "apt_max_c_radius_nm", "apt_scheduled", "apt_type"):
-            if extra in cand.columns:
-                keep.append(extra)
+        for name in (
+            "apt_min_c_radius_nm",
+            "apt_max_c_radius_nm",
+            "apt_scheduled",
+            "apt_type",
+            *extra,
+        ):
+            if name in cand.columns:
+                keep.append(name)
 
         # Overwrite, not append: building the same month again must replace it.
         self.storage.write_table(cand.select(*keep), "opdi_endpoint_candidates", mode="overwrite")
@@ -686,6 +855,18 @@ class FlightListProcessor:
         """
         sv = self._get_data_within_timeframe(self.tracks_table, month)
 
+        measured = self._seen_from_measured_reports()
+        if measured:
+            # First and last seen over the reports with a position, before the
+            # reports without an altitude are left out
+            # (EventConfig.seen_from_measured_reports).
+            sv = sv.dropna(subset=["lat", "lon", "track_id"])
+            w_seen = Window.partitionBy("track_id")
+            t = F.to_timestamp(col("event_time"))
+            sv = sv.withColumn("first_seen", f_min(t).over(w_seen)).withColumn(
+                "last_seen", f_max(t).over(w_seen)
+            )
+
         sv_f = sv.dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
         # Everything below groups and joins on flight_id, which holds one value
         # per track (see _get_data_within_timeframe).
@@ -707,12 +888,15 @@ class FlightListProcessor:
             "on_ground",
             "h3_res_7",
         ]
+        if measured:
+            columns_of_interest += ["first_seen", "last_seen"]
         sv_f = sv_f.select(columns_of_interest)
 
         # Per-track first/last seen and DOF
-        window_track = Window.partitionBy("track_id")
-        sv_f = sv_f.withColumn("first_seen", f_min("event_time").over(window_track))
-        sv_f = sv_f.withColumn("last_seen", f_max("event_time").over(window_track))
+        if not measured:
+            window_track = Window.partitionBy("track_id")
+            sv_f = sv_f.withColumn("first_seen", f_min("event_time").over(window_track))
+            sv_f = sv_f.withColumn("last_seen", f_max("event_time").over(window_track))
         sv_f = sv_f.withColumn("DOF", to_date("first_seen"))
 
         # Smooth before the altitude cut, so the moving average at the ceiling
@@ -791,13 +975,16 @@ class FlightListProcessor:
         return sv_nearby_apt.filter(trend_altitude_cut(self.detection))
 
     @staticmethod
-    def _best_candidates(cand: DataFrame, sched_penalty_nm: float) -> DataFrame:
-        """The best candidate airport per (track, end).
+    def _ranked_distance(
+        cand: DataFrame, sched_penalty_nm: float, waiver: Optional[tuple] = None
+    ) -> DataFrame:
+        """Add ``_eff``: the distance by which the candidates are ranked.
 
-        Ranked by distance plus ``sched_penalty_nm`` for an airport without
-        scheduled service, computed here so the penalty can be changed
-        without rebuilding the candidate table. The airport code breaks an
-        exact tie, so the same candidates always give the same airport.
+        The distance plus ``sched_penalty_nm`` for an airport without
+        scheduled service. ``waiver``, a pair (radius in NM, height in feet),
+        leaves the penalty out where the end report is at that airport: flagged
+        on the ground, or within the radius and no higher than the height above
+        it (:attr:`DetectionConfig.sched_penalty_waived_at_field`).
         """
         scheduled = "apt_scheduled" if "apt_scheduled" in cand.columns else None
         penalty = (
@@ -805,7 +992,28 @@ class FlightListProcessor:
             if scheduled and sched_penalty_nm
             else lit(0.0)
         )
-        cand = cand.withColumn("_eff", col("dist_nm") + penalty)
+        if waiver is not None and scheduled and sched_penalty_nm:
+            radius_nm, height_ft = waiver
+            at_field = F.coalesce(col("on_ground"), lit(False)) | F.coalesce(
+                (col("dist_nm") <= float(radius_nm)) & (col("agl_ft") <= float(height_ft)),
+                lit(False),
+            )
+            penalty = when(at_field, lit(0.0)).otherwise(penalty)
+        return cand.withColumn("_eff", col("dist_nm") + penalty)
+
+    @staticmethod
+    def _best_candidates(
+        cand: DataFrame, sched_penalty_nm: float, waiver: Optional[tuple] = None
+    ) -> DataFrame:
+        """The best candidate airport per (track, end).
+
+        Ranked by distance plus ``sched_penalty_nm`` for an airport without
+        scheduled service (see :meth:`_ranked_distance`), computed here so the
+        penalty can be changed without rebuilding the candidate table. The
+        airport code breaks an exact tie, so the same candidates always give
+        the same airport.
+        """
+        cand = FlightListProcessor._ranked_distance(cand, sched_penalty_nm, waiver)
         w = Window.partitionBy("track_id", "role").orderBy(
             col("_eff").asc_nulls_last(), col("apt_ident").asc()
         )
@@ -819,6 +1027,8 @@ class FlightListProcessor:
         abstention_height_ft: float = 15000.0,
         sched_penalty_nm: float = 10.0,
         ooa: bool = True,
+        waiver: Optional[tuple] = None,
+        min_climb_ft: Optional[float] = None,
     ) -> DataFrame:
         """Name one airport per track end from the candidate table.
 
@@ -827,6 +1037,12 @@ class FlightListProcessor:
         of it and no more than ``abstention_height_ft`` above its elevation,
         or flagged on the ground. Otherwise, when the report is at the edge of
         the covered area (``ooa``), it gives the code ``OOA``; else NULL.
+
+        ``waiver`` is passed to :meth:`_ranked_distance`. With
+        ``min_climb_ft``, a first report in the air names the departure
+        airport only when the altitude rose by at least that many feet after
+        it (column ``climb_ft`` of the candidate table); an unknown climb
+        (NULL, or a table without the column) leaves the test as before.
 
         The airport test comes before the edge test: an airport close to the
         edge of the box (Ponta Delgada, about 8 NM inside it) must still be
@@ -839,7 +1055,7 @@ class FlightListProcessor:
         if mode != "endpoint":
             raise ValueError(f"classify_endpoints: unsupported mode {mode!r}")
 
-        best = FlightListProcessor._best_candidates(cand, sched_penalty_nm)
+        best = FlightListProcessor._best_candidates(cand, sched_penalty_nm, waiver)
 
         ok = col("dist_nm") <= float(abstention_radius_nm)
         # A report on the ground passes the height test by itself: surface
@@ -849,6 +1065,15 @@ class FlightListProcessor:
         ok = ok & (
             col("on_ground") | (col("elev_known") & (col("agl_ft") <= float(abstention_height_ft)))
         )
+        if min_climb_ft is not None and "climb_ft" in best.columns:
+            # A first report in the air, followed by no climb, is an aircraft
+            # passing by or arriving, not a departure.
+            not_climbing = (
+                (col("role") == "adep")
+                & ~F.coalesce(col("on_ground"), lit(False))
+                & (col("climb_ft") < float(min_climb_ft))
+            )
+            ok = ok & ~F.coalesce(not_climbing, lit(False))
 
         apt = when(ok, col("apt_ident"))
         source = when(ok, lit("aerodrome"))
@@ -995,6 +1220,8 @@ class FlightListProcessor:
         rank_by: str = "ring",
         bearing_tiebreak_nm: float = 0.0,
         version: str = FLIGHT_LIST_VERSION,
+        last_landing_window_s: Optional[float] = None,
+        waiver: Optional[tuple] = None,
     ) -> DataFrame:
         """The flight table of the ``trend`` method.
 
@@ -1017,11 +1244,28 @@ class FlightListProcessor:
             bearing_tiebreak_nm: Distance band within which the course
                 decides between candidates; 0 turns it off.
             version: Version string to write.
+            last_landing_window_s: When given, the landing airports whose
+                last nearby report lies within this many seconds of the
+                latest one are ranked before the others
+                (:attr:`DetectionConfig.trend_last_landing`).
+            waiver: A pair (radius in NM, height in feet): no penalty for an
+                airport without scheduled service when the closest report
+                is flagged on the ground, or within the radius and no higher
+                than the height above it
+                (:attr:`DetectionConfig.sched_penalty_waived_at_field`).
 
         Returns:
             The flight table with ADEP, ADES and the track's columns.
         """
         df = df.filter(df.status != "ambiguous")
+
+        if last_landing_window_s is not None:
+            # The time of each candidate's last report near it, before only
+            # the closest report is kept (DetectionConfig.trend_last_landing).
+            per_apt_all = Window.partitionBy(
+                ["icao24", "flight_id", "track_id", "status", "apt_ident"]
+            )
+            df = df.withColumn("_last_near", f_max("event_time").over(per_apt_all))
 
         # Candidate selection, by one of two rules.
         #
@@ -1088,6 +1332,12 @@ class FlightListProcessor:
         ]
         if sched_penalty_nm:
             keep += [c for c in ("apt_scheduled", "scheduled_service") if c in df_min.columns]
+        if last_landing_window_s is not None:
+            keep.append("_last_near")
+        if waiver is not None and sched_penalty_nm:
+            keep += [
+                c for c in ("on_ground", "baro_altitude", "apt_elevation_ft") if c in df_min.columns
+            ]
         df_min = df_min.select(*keep)
 
         # Get time range per track-airport-status
@@ -1140,18 +1390,54 @@ class FlightListProcessor:
                     "trend_sched_penalty_nm has no effect. Regenerate step 00a."
                 )
             else:
-                flight_table = flight_table.withColumn(
-                    "_eff_km",
-                    col("distance_km")
-                    + when(col(sched_col) == "yes", lit(0.0)).otherwise(
-                        lit(float(sched_penalty_nm) * 1.852)
-                    ),
+                penalty_km = when(col(sched_col) == "yes", lit(0.0)).otherwise(
+                    lit(float(sched_penalty_nm) * 1.852)
                 )
+                if waiver is not None:
+                    # No penalty for the airport the aircraft is at.
+                    radius_nm, height_ft = waiver
+                    near = col("distance_km") <= lit(float(radius_nm) * 1.852)
+                    if "baro_altitude" in flight_table.columns:
+                        elev = (
+                            col("apt_elevation_ft")
+                            if "apt_elevation_ft" in flight_table.columns
+                            else lit(None).cast("double")
+                        )
+                        near = near & (
+                            height_above_field(col("baro_altitude"), elev) <= lit(float(height_ft))
+                        )
+                    else:
+                        near = lit(False)
+                    ground = (
+                        F.coalesce(col("on_ground"), lit(False))
+                        if "on_ground" in flight_table.columns
+                        else lit(False)
+                    )
+                    at_field = ground | F.coalesce(near, lit(False))
+                    penalty_km = when(at_field, lit(0.0)).otherwise(penalty_km)
+                flight_table = flight_table.withColumn("_eff_km", col("distance_km") + penalty_km)
                 order_col = col("_eff_km")
 
         # The ordering key. Distance decides, except among candidates that
         # distance cannot separate.
         order_by = [order_col.asc_nulls_last()]
+
+        recent = None
+        if last_landing_window_s is not None:
+            # Landings ending more than the window before the latest landing of
+            # the track (a stop in the middle of it) rank after the others.
+            w_track = Window.partitionBy(key_columns)
+            flight_table = flight_table.withColumn(
+                "_recent",
+                (col("status") != "landing")
+                | (
+                    unix_timestamp("_last_near")
+                    >= unix_timestamp(f_max("_last_near").over(w_track))
+                    - lit(float(last_landing_window_s))
+                ),
+            )
+            recent = col("_recent")
+            order_by = [recent.desc()] + order_by
 
         if bearing_tiebreak_nm:
             # The course cannot name an airport on its own: every airport on
@@ -1174,10 +1460,11 @@ class FlightListProcessor:
             )
             band_km = float(bearing_tiebreak_nm) * 1.852
             w_best = Window.partitionBy(key_columns)
-            flight_table = flight_table.withColumn(
-                "_best_km", f_min(order_col).over(w_best)
-            ).withColumn("_in_band", order_col <= col("_best_km") + lit(band_km))
-            order_by = [
+            best = f_min(order_col if recent is None else when(recent, order_col)).over(w_best)
+            flight_table = flight_table.withColumn("_best_km", best).withColumn(
+                "_in_band", order_col <= col("_best_km") + lit(band_km)
+            )
+            order_by = ([recent.desc()] if recent is not None else []) + [
                 # Inside the band first, then best-aligned within it, and only
                 # then distance. A track with no usable course has a null
                 # alignment, which sorts last inside the band and leaves the
@@ -1266,6 +1553,10 @@ class FlightListProcessor:
         classified: DataFrame,
         cand: DataFrame,
         version: str = FLIGHT_LIST_VERSION,
+        alternatives_radius_nm: Optional[float] = None,
+        sched_penalty_nm: float = 0.0,
+        waiver: Optional[tuple] = None,
+        both_ends: bool = False,
     ) -> DataFrame:
         """The flight table of the ``endpoint`` method.
 
@@ -1273,16 +1564,34 @@ class FlightListProcessor:
         method can serve either end. ``adep_source`` and ``ades_source`` say
         how each airport was decided: ``aerodrome``, ``out_of_area`` or
         ``undetermined``.
+
+        With ``alternatives_radius_nm``, ``ADEP_P`` and ``ADES_P`` list only
+        the other candidates within that distance, in the order of the choice
+        (:meth:`_ranked_distance` with ``sched_penalty_nm`` and ``waiver``);
+        otherwise every candidate, nearest first. With ``both_ends``, the
+        address, call sign, first and last time seen come from whichever end
+        has a row (columns ``track_first_seen`` / ``track_last_seen`` of the
+        candidate table), so no row is left without them.
         """
-        chosen = classified.select(
-            "track_id", "icao24", "flight_id", "role", "apt", "source", "event_time"
-        )
+        both_ends = both_ends and "track_first_seen" in classified.columns
+        chosen_cols = ["track_id", "icao24", "flight_id", "role", "apt", "source", "event_time"]
+        if both_ends:
+            chosen_cols += ["track_first_seen", "track_last_seen"]
+        chosen = classified.select(*chosen_cols)
 
         # The other candidate airports, nearest first (then by code), for
         # ADEP_P and ADES_P. Sorted, not collected as the rows come, so that
         # every run lists them in the same order.
+        if alternatives_radius_nm is not None:
+            listed = FlightListProcessor._ranked_distance(cand, sched_penalty_nm, waiver).filter(
+                col("dist_nm") <= float(alternatives_radius_nm)
+            )
+            rank_key = col("_eff")
+        else:
+            listed = cand
+            rank_key = col("dist_nm")
         others = (
-            cand.join(
+            listed.join(
                 chosen.select("track_id", "role", col("apt").alias("_chosen")),
                 ["track_id", "role"],
                 "left",
@@ -1291,7 +1600,7 @@ class FlightListProcessor:
             .groupBy("track_id", "role")
             .agg(
                 F.sort_array(
-                    collect_list(F.struct(col("dist_nm").alias("d"), col("apt_ident").alias("a")))
+                    collect_list(F.struct(rank_key.alias("d"), col("apt_ident").alias("a")))
                 ).alias("_others")
             )
             .withColumn("potential", F.transform(col("_others"), lambda x: x["a"]))
@@ -1302,7 +1611,7 @@ class FlightListProcessor:
 
         def side(role: str, prefix: str) -> DataFrame:
             d = j.filter(col("role") == role)
-            return d.select(
+            cols = [
                 col("track_id"),
                 col("icao24"),
                 col("flight_id"),
@@ -1310,12 +1619,34 @@ class FlightListProcessor:
                 col("source").alias(f"{prefix.lower()}_source"),
                 col("potential").alias(f"{prefix}_P"),
                 col("event_time").alias("first_seen" if role == "adep" else "last_seen"),
-            )
+            ]
+            if both_ends:
+                tag = prefix.lower()
+                cols += [
+                    col("track_first_seen").alias(f"_fs_{tag}"),
+                    col("track_last_seen").alias(f"_ls_{tag}"),
+                ]
+            return d.select(*cols)
 
         dep = side("adep", "ADEP")
-        arr = side("ades", "ADES").drop("icao24", "flight_id")
-
-        ft = dep.join(arr, "track_id", "outer")
+        if both_ends:
+            # The address and the call sign of the track, from either end
+            # (DetectionConfig.endpoint_ids_from_both_ends).
+            arr = (
+                side("ades", "ADES")
+                .withColumnRenamed("icao24", "_icao24_ades")
+                .withColumnRenamed("flight_id", "_flight_id_ades")
+            )
+            ft = dep.join(arr, "track_id", "outer")
+            ft = (
+                ft.withColumn("icao24", F.coalesce(col("icao24"), col("_icao24_ades")))
+                .withColumn("flight_id", F.coalesce(col("flight_id"), col("_flight_id_ades")))
+                .withColumn("first_seen", F.coalesce(col("_fs_adep"), col("_fs_ades")))
+                .withColumn("last_seen", F.coalesce(col("_ls_adep"), col("_ls_ades")))
+            )
+        else:
+            arr = side("ades", "ADES").drop("icao24", "flight_id")
+            ft = dep.join(arr, "track_id", "outer")
         ft = ft.withColumn("DOF", to_date(col("first_seen")))
         ft = ft.withColumn("version", lit(version))
         ft = (
@@ -1424,14 +1755,41 @@ class FlightListProcessor:
 
         window_track = Window.partitionBy("track_id")
         sv = sv.withColumn("event_time", F.to_timestamp(col("event_time")))
-        sv = sv.withColumn("first_seen", f_min("event_time").over(window_track))
-        sv = sv.withColumn("last_seen", f_max("event_time").over(window_track))
+        if self._seen_from_measured_reports():
+            # The first and last report with a measured position, or with any
+            # measured value when the track has no position
+            # (EventConfig.seen_from_measured_reports). The smallest
+            # (rank, time) and (rank, minus time) over the track give both
+            # without sorting its reports.
+            sv = sv.withColumn("_seen_rank", seen_rank(sv))
+            first = f_min(F.struct(col("_seen_rank").alias("r"), col("event_time").alias("t")))
+            last = f_min(
+                F.struct(
+                    col("_seen_rank").alias("r"),
+                    (-col("event_time").cast("double")).alias("t"),
+                    col("event_time").alias("ts"),
+                )
+            )
+            sv = sv.withColumn("_first", first.over(window_track)).withColumn(
+                "_last", last.over(window_track)
+            )
+            sv = sv.withColumn("first_seen", col("_first.t")).withColumn(
+                "last_seen", col("_last.ts")
+            )
+            # Keep only the first row per track.
+            sv_f = sv.filter(
+                (col("_seen_rank") == col("_first.r")) & (col("event_time") == col("first_seen"))
+            )
+            sv_f = sv_f.withColumn("DOF", to_date("first_seen"))
+        else:
+            sv = sv.withColumn("first_seen", f_min("event_time").over(window_track))
+            sv = sv.withColumn("last_seen", f_max("event_time").over(window_track))
 
-        # Keep only the first row per track
-        sv_f = sv.filter(col("first_seen") == col("event_time"))
+            # Keep only the first row per track
+            sv_f = sv.filter(col("first_seen") == col("event_time"))
 
-        sv_f = sv_f.withColumn("event_date", to_date("event_time"))
-        sv_f = sv_f.withColumn("DOF", f_min("event_date").over(window_track))
+            sv_f = sv_f.withColumn("event_date", to_date("event_time"))
+            sv_f = sv_f.withColumn("DOF", f_min("event_date").over(window_track))
         sv_f = sv_f.withColumnRenamed("track_id", "id")
         sv_f = sv_f.withColumnRenamed("icao24", "ICAO24")
         sv_f = sv_f.withColumnRenamed("flight_id", "FLT_ID")
@@ -1651,6 +2009,14 @@ class FlightListProcessor:
 
         tables: dict = {}
 
+        # The penalty for an airport without scheduled service is not added
+        # for the airport the aircraft is at (both methods).
+        waiver = (
+            (d.sched_penalty_waiver_radius_nm, d.sched_penalty_waiver_height_ft)
+            if getattr(d, "sched_penalty_waived_at_field", False)
+            else None
+        )
+
         if "trend" in needed:
             sdf_apt = self._load_airports_hex(airports_hex_path)
             sv_nearby = self._fetch_and_label_sv(month, sdf_apt)
@@ -1665,6 +2031,12 @@ class FlightListProcessor:
                 rank_by=getattr(d, "trend_rank_by", "ring"),
                 bearing_tiebreak_nm=getattr(d, "trend_bearing_tiebreak_nm", 0.0),
                 version=self._version_for("trend"),
+                last_landing_window_s=(
+                    d.trend_last_landing_window_s
+                    if getattr(d, "trend_last_landing", False)
+                    else None
+                ),
+                waiver=waiver,
             )
             tables["trend"] = self._trend_sources(t, month)
 
@@ -1683,9 +2055,25 @@ class FlightListProcessor:
                 abstention_radius_nm=abstention_radius_nm,
                 abstention_height_ft=abstention_height_ft,
                 sched_penalty_nm=sched_penalty_nm,
+                waiver=waiver,
+                min_climb_ft=(
+                    d.endpoint_min_climb_ft
+                    if getattr(d, "endpoint_airborne_needs_climb", False)
+                    else None
+                ),
             )
             tables[m] = self._flight_table_from_endpoints(
-                classified, cand, version=self._version_for(m)
+                classified,
+                cand,
+                version=self._version_for(m),
+                alternatives_radius_nm=(
+                    abstention_radius_nm
+                    if getattr(d, "alternatives_within_endpoint_radius", False)
+                    else None
+                ),
+                sched_penalty_nm=sched_penalty_nm,
+                waiver=waiver,
+                both_ends=getattr(d, "endpoint_ids_from_both_ends", False),
             )
 
         flight_table = self._merge_roles(tables[adep_mode], tables[ades_mode], adep_mode, ades_mode)
