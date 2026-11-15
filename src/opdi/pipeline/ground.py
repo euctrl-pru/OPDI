@@ -198,8 +198,10 @@ def _sustained_runs(
     partition_cols: Sequence[str],
     time_col: str,
 ) -> DataFrame:
-    """The runs of moving reports (``_run``), each with its start and end, kept
-    when they last at least ``ground_move_min_seconds``."""
+    """The runs of moving reports (``_run``), each with its start and end.
+
+    A run is kept when it lasts at least ``ground_move_min_seconds``.
+    """
     t_run = F.col(time_col)
     runs = (
         work.filter(F.col("_moving"))
@@ -275,6 +277,9 @@ def block_times(
 TAKE_OFF_TYPES = ("ATOT", "airborne")
 LANDING_TYPES = ("ALDT", "touchdown")
 _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
+#: Seconds within which a stand passage counts as starting at the track's
+#: first report (ending at its last), for ``block_time_from_last_stand_stop``.
+_EDGE_SECONDS = 5.0
 
 
 def _report_on_ground(sdf: DataFrame, config: "EventConfig") -> Column:
@@ -412,6 +417,31 @@ def block_events(
     single-leg track is often not received. When the stand passage lies in
     the same part, the event names the stand and its airport; otherwise it
     names none.
+
+    The settings of work package 3 of the 2026-06-14 corrections change these
+    rules where they are on (the default):
+
+    * ``block_time_stand_at_same_airport``: the stand passage must lie in
+      the same part and last at least ``block_time_min_stand_dwell_seconds``
+      (30 s); a passage elsewhere in the track licenses nothing.
+    * ``block_time_from_last_stand_stop``: in a part with such a passage, the
+      stand stop is the last passage of at least 10 minutes before the
+      take-off (the first after the landing), else the longest; the time is
+      the start (end) of the movement after (before) the longest stop that
+      overlaps it, and names that stand (see :func:`_from_stand_stop`).
+    * ``block_time_stand_longest_dwell``: elsewhere, the stand named is the
+      longest passage of the part.
+    * ``block_time_off_the_runway``: a standstill is judged on speed, the
+      ground flag only where no speed is known; no time within
+      ``block_time_min_seconds_from_runway_time`` (60 s) of its take-off or
+      landing, after the line-up or before the runway is vacated.
+    * ``block_time_one_part_per_leg``: a track with only a take-off (only a
+      landing) has one ground part before (after) it, so each time carries
+      the take-off or landing of its leg.
+    * ``block_time_needs_flight``: no time on a track that never leaves the
+      ground (no take-off or landing time and no stretch in flight).
+    * ``layout_ref_missing_as_null``: a stand named "None", "nan" or ""
+      names no stand.
 
     Args:
         sdf: the position reports, with the airport elevations and distances
@@ -590,6 +620,16 @@ def block_events(
         F.col("_first_arr") < F.col("_first_dep")
     )
     ends_without_landing = F.col("_last_arr").isNull() | (F.col("_last_dep") > F.col("_last_arr"))
+    if config.block_time_one_part_per_leg:
+        # Never NULL: a track with a take-off and no landing has no ground
+        # part without take-off at its start, and one with a landing and no
+        # take-off none without landing at its end.
+        starts_without_take_off = F.col("_first_dep").isNull() | (
+            F.col("_first_arr").isNotNull() & (F.col("_first_arr") < F.col("_first_dep"))
+        )
+        ends_without_landing = F.col("_last_arr").isNull() | (
+            F.col("_last_dep").isNotNull() & (F.col("_last_dep") > F.col("_last_arr"))
+        )
     no_bound = [
         F.lit(None).cast("timestamp").alias("_bound"),
         F.lit(None).cast("string").alias("_bound_method"),
@@ -646,20 +686,42 @@ def block_events(
     runs = runs.join(first_last, runs["track_id"] == first_last["_fl_track"], "inner").drop(
         "_fl_track"
     )
-    runs = runs.withColumn(
-        "_starts_still",
-        F.coalesce(
-            (F.col("_from_kt") <= slow)
-            | (F.col("_from_flagged") & (F.col("_from") > F.col("_t_first"))),
-            F.lit(False),
-        ),
-    ).withColumn(
-        "_ends_still",
-        F.coalesce(
-            (F.col("_to_kt") <= slow) | (F.col("_to_flagged") & (F.col("_to") < F.col("_t_last"))),
-            F.lit(False),
-        ),
-    )
+    if config.block_time_off_the_runway:
+        # On speed where the speed is known; the flag "on the ground" only
+        # where it is not (the take-off and landing rolls are flagged too).
+        runs = runs.withColumn(
+            "_starts_still",
+            F.coalesce(
+                F.when(F.col("_from_kt").isNotNull(), F.col("_from_kt") <= slow).otherwise(
+                    F.col("_from_flagged") & (F.col("_from") > F.col("_t_first"))
+                ),
+                F.lit(False),
+            ),
+        ).withColumn(
+            "_ends_still",
+            F.coalesce(
+                F.when(F.col("_to_kt").isNotNull(), F.col("_to_kt") <= slow).otherwise(
+                    F.col("_to_flagged") & (F.col("_to") < F.col("_t_last"))
+                ),
+                F.lit(False),
+            ),
+        )
+    else:
+        runs = runs.withColumn(
+            "_starts_still",
+            F.coalesce(
+                (F.col("_from_kt") <= slow)
+                | (F.col("_from_flagged") & (F.col("_from") > F.col("_t_first"))),
+                F.lit(False),
+            ),
+        ).withColumn(
+            "_ends_still",
+            F.coalesce(
+                (F.col("_to_kt") <= slow)
+                | (F.col("_to_flagged") & (F.col("_to") < F.col("_t_last"))),
+                F.lit(False),
+            ),
+        )
 
     # The first movement of each part gives its off-block time and the last
     # its in-block time, each only when it starts (ends) at a standstill; a
@@ -680,6 +742,7 @@ def block_events(
             F.col("_hi").alias("_s_hi"),
             "_bound",
             "_bound_method",
+            F.col("_lo").alias("_part_lo"),
         )
     )
     on = (
@@ -697,6 +760,7 @@ def block_events(
             F.col("_hi").alias("_s_hi"),
             "_bound",
             "_bound_method",
+            F.col("_lo").alias("_part_lo"),
         )
     )
 
@@ -737,6 +801,7 @@ def block_events(
         F.col("_next_from").alias("_s_hi"),
         F.col("_lo").alias("_bound"),
         F.col("_lo_method").alias("_bound_method"),
+        F.col("_lo").alias("_part_lo"),
     )
     split_off = stop.filter(F.coalesce(F.col("_next_starts_still"), F.lit(False))).select(
         "track_id",
@@ -746,6 +811,7 @@ def block_events(
         F.col("_hi").alias("_s_hi"),
         F.col("_hi").alias("_bound"),
         F.col("_hi_method").alias("_bound_method"),
+        F.col("_lo").alias("_part_lo"),
     )
     candidates = off.unionByName(on).unionByName(split_on).unionByName(split_off)
 
@@ -754,51 +820,330 @@ def block_events(
     # before it), for an in-block time the last stand entry at or before it
     # (else the first one after it).
     info = F.col("info") if "info" in airport_events.columns else F.lit(None).cast("string")
+    stand_ref = F.get_json_object(info, "$.osm_ref")
+    if config.layout_ref_missing_as_null:
+        stand_ref = missing_ref_as_null(stand_ref)
     stands = airport_events.filter(F.col("type").isin(_STAND_EXIT, _STAND_ENTRY)).select(
         F.col("track_id").alias("_s_track"),
         F.when(F.col("type") == _STAND_EXIT, F.lit("off")).otherwise(F.lit("on")).alias("_s_block"),
         F.col("event_time").alias("stand_time"),
-        F.get_json_object(info, "$.osm_ref").alias("stand"),
+        stand_ref.alias("stand"),
         F.get_json_object(info, "$.osm_airport").alias("stand_airport"),
+        F.get_json_object(info, "$.opdi_time_in_use_s").cast("double").alias("stand_dwell"),
     )
     stands = _kept(stands, checkpoints)
-    matched = candidates.join(
-        stands,
+    out_cols = [
+        "track_id",
+        "block",
+        "event_time",
+        "stand_time",
+        "stand",
+        "stand_airport",
+        "_s_lo",
+        "_s_hi",
+        "_bound",
+        "_bound_method",
+    ]
+
+    anchored = None
+    if config.block_time_from_last_stand_stop:
+        # Each part with a stand stop of its own gives its time from that
+        # stop; the other parts keep the first (last) movement.
+        anchored_parts = [
+            (off_parts, "off", True),
+            (on_parts, "on", True),
+            (
+                split.select(
+                    "track_id",
+                    "_lo",
+                    "_hi",
+                    F.col("_hi").alias("_bound"),
+                    F.col("_hi_method").alias("_bound_method"),
+                ),
+                "off",
+                False,
+            ),
+            (
+                split.select(
+                    "track_id",
+                    "_lo",
+                    "_hi",
+                    F.col("_lo").alias("_bound"),
+                    F.col("_lo_method").alias("_bound_method"),
+                ),
+                "on",
+                False,
+            ),
+        ]
+        found = [
+            _from_stand_stop(part, runs, stands, side, at_edge, config)
+            for part, side, at_edge in anchored_parts
+        ]
+        anchored, had_stop = found[0]
+        for times, stops in found[1:]:
+            anchored = anchored.unionByName(times)
+            had_stop = had_stop.unionByName(stops)
+        # The parts that have a stand stop: their first (last) movement is
+        # not read, whether or not the stand stop gave a time.
+        candidates = candidates.join(
+            had_stop,
+            (F.col("track_id") == F.col("_h_track"))
+            & (F.col("block") == F.col("_h_block"))
+            & (F.col("_part_lo") == F.col("_h_lo")),
+            "left_anti",
+        )
+
+    stand_window = (
         (F.col("track_id") == F.col("_s_track"))
         & (F.col("block") == F.col("_s_block"))
         & (F.col("stand_time") >= F.col("_s_lo"))
-        & (F.col("stand_time") <= F.col("_s_hi")),
-        "left",
+        & (F.col("stand_time") <= F.col("_s_hi"))
     )
-    # A part with no stand passage of its own still gives its time when the
-    # track passed a stand elsewhere (the stand at the start of a departure
-    # is often not received); the time then names no stand.
-    anywhere = stands.select(
-        F.col("_s_track").alias("_a_track"), F.col("_s_block").alias("_a_block")
-    ).distinct()
-    matched = matched.join(
-        anywhere,
-        (F.col("track_id") == F.col("_a_track")) & (F.col("block") == F.col("_a_block")),
-        "inner",
-    ).drop("_a_track", "_a_block")
+    if config.block_time_stand_at_same_airport:
+        # A stand passage of at least block_time_min_stand_dwell_seconds in
+        # the same part licenses the time.
+        long_enough = stands.filter(
+            F.col("stand_dwell") >= F.lit(float(config.block_time_min_stand_dwell_seconds))
+        )
+        matched = candidates.join(long_enough, stand_window, "inner")
+    else:
+        matched = candidates.join(stands, stand_window, "left")
+        # A part with no stand passage of its own still gives its time when
+        # the track passed a stand elsewhere (the stand at the start of a
+        # departure is often not received); the time then names no stand.
+        anywhere = stands.select(
+            F.col("_s_track").alias("_a_track"), F.col("_s_block").alias("_a_block")
+        ).distinct()
+        matched = matched.join(
+            anywhere,
+            (F.col("track_id") == F.col("_a_track")) & (F.col("block") == F.col("_a_block")),
+            "inner",
+        ).drop("_a_track", "_a_block")
     st = F.col("stand_time").cast("double")
     ev = F.col("event_time").cast("double")
     off_side = F.col("block") == "off"
     preferred = F.when(off_side, st >= ev).otherwise(st <= ev)
-    pick = Window.partitionBy("track_id", "block", "event_time").orderBy(
-        preferred.desc_nulls_last(), F.abs(st - ev).asc_nulls_last(), "stand_time"
-    )
-    return (
+    order = [preferred.desc_nulls_last(), F.abs(st - ev).asc_nulls_last(), "stand_time"]
+    if config.block_time_stand_longest_dwell:
+        order = [F.col("stand_dwell").desc_nulls_last()] + order
+    pick = Window.partitionBy("track_id", "block", "event_time").orderBy(*order)
+    picked = (
         matched.withColumn("_rank", F.row_number().over(pick))
         .filter(F.col("_rank") == 1)
+        .select(*out_cols)
+    )
+    if anchored is not None:
+        picked = picked.unionByName(anchored)
+
+    if config.block_time_off_the_runway:
+        picked = _off_the_runway(picked, runway_events, config)
+    if config.block_time_needs_flight:
+        # A track that never leaves the ground: no take-off or landing time
+        # and no stretch in flight.
+        flying = span.filter(
+            F.col("_first_air").isNotNull()
+            | F.coalesce(F.col("_has_dep"), F.lit(False))
+            | F.coalesce(F.col("_has_arr"), F.lit(False))
+        ).select(F.col("track_id").alias("_f_track"))
+        picked = picked.join(flying, F.col("track_id") == F.col("_f_track"), "left_semi")
+
+    return picked.select(
+        "track_id",
+        "block",
+        "event_time",
+        "stand_time",
+        "stand",
+        "stand_airport",
+        F.col("_bound").alias("bound_time"),
+        F.col("_bound_method").alias("bound_method"),
+    )
+
+
+def missing_ref_as_null(ref: Column) -> Column:
+    """The name of a layout element, with a missing name as NULL.
+
+    OpenStreetMap elements without a ``ref`` tag reach the layout table as
+    the text ``"None"`` or ``"nan"`` (how Python writes a missing value as
+    text), or as an empty text. Each of these becomes NULL here.
+    """
+    return F.when(F.lower(F.trim(ref)).isin("none", "nan", ""), F.lit(None)).otherwise(ref)
+
+
+def _from_stand_stop(
+    parts: DataFrame,
+    runs: DataFrame,
+    stands: DataFrame,
+    side: str,
+    at_edge: bool,
+    config: "EventConfig",
+) -> DataFrame:
+    """Block times of ``side`` (``"off"`` or ``"on"``) read from the stand stop of each part.
+
+    The rule of ``block_time_from_last_stand_stop``. The stand stop of a part
+    is a stand passage of its own (an exit for ``"off"``, an entry for
+    ``"on"``) of at least ``block_time_min_stand_dwell_seconds``: for an
+    off-block time the last one of at least
+    ``block_time_long_stand_stop_seconds``, else the longest; for an in-block
+    time the first such one, else the longest. With ``at_edge``, a passage
+    that starts at the first report of the part (off-block) or ends at its
+    last (in-block) counts as long too: the aircraft stood there while it
+    was not received. The passage covers the times from its entry to its
+    exit (``opdi_time_in_use_s``).
+
+    The stops of the part are the times between two movements; with
+    ``at_edge``, also the time between the start of the part and its first
+    movement (off-block: the track starts at the stand) or between its last
+    movement and its end (in-block: the track ends at the stand). The
+    longest stop that overlaps the passage is the stand stop. The off-block
+    time is the start of the movement after it, the in-block time the end of
+    the movement before it, each only from (to) a standstill.
+
+    Returns the block times, and the parts that have a stand stop
+    (``_h_track``, ``_h_block``, ``_h_lo``: the track, the side and the
+    start of the part).
+    """
+    off = side == "off"
+    dwell = F.col("stand_dwell")
+    st = F.col("stand_time").cast("double")
+    passages = stands.filter(
+        (F.col("_s_block") == side)
+        & (dwell >= F.lit(float(config.block_time_min_stand_dwell_seconds)))
+    )
+    a = parts.join(
+        passages,
+        (F.col("track_id") == F.col("_s_track"))
+        & (F.col("stand_time") >= F.col("_lo"))
+        & (F.col("stand_time") <= F.col("_hi")),
+        "inner",
+    )
+    is_long = dwell >= F.lit(float(config.block_time_long_stand_stop_seconds))
+    if at_edge:
+        # A passage cut by the start (end) of reception: the aircraft stood
+        # there before it was first received (after it was last received),
+        # so the passage counts as a long stop whatever its length.
+        edge = F.col("_lo").cast("double") if off else F.col("_hi").cast("double")
+        p_edge = st - dwell if off else st + dwell
+        is_long = is_long | (F.abs(p_edge - edge) <= F.lit(_EDGE_SECONDS))
+    long_time = F.when(is_long, st)
+    choice = Window.partitionBy("track_id", "_lo").orderBy(
+        is_long.desc(),
+        long_time.desc_nulls_last() if off else long_time.asc_nulls_last(),
+        dwell.desc(),
+        "stand_time",
+    )
+    a = (
+        a.withColumn("_rank", F.row_number().over(choice))
+        .filter(F.col("_rank") == 1)
+        .withColumn("_p_in", st - dwell if off else st)
+        .withColumn("_p_out", st if off else st + dwell)
+        .drop("_rank", "_s_track", "_s_block")
+    )
+    had_stop = a.select(
+        F.col("track_id").alias("_h_track"),
+        F.lit(side).alias("_h_block"),
+        F.col("_lo").alias("_h_lo"),
+    )
+
+    r = a.join(runs, "track_id", "inner").filter(
+        (F.col("_to") >= F.col("_lo")) & (F.col("_from") <= F.col("_hi"))
+    )
+    by_start = Window.partitionBy("track_id", "_lo").orderBy("_from")
+    if off:
+        stop_from = F.lag("_to").over(by_start)
+        if at_edge:
+            stop_from = F.coalesce(stop_from, F.col("_lo"))
+        r = r.withColumn("_stop_from", stop_from.cast("double")).withColumn(
+            "_stop_to", F.col("_from").cast("double")
+        )
+        keep = (F.col("_from") >= F.col("_lo")) & (F.col("_from") <= F.col("_hi"))
+        time_col, still = "_from", "_starts_still"
+    else:
+        stop_to = F.lead("_from").over(by_start)
+        if at_edge:
+            stop_to = F.coalesce(stop_to, F.col("_hi"))
+        r = r.withColumn("_stop_from", F.col("_to").cast("double")).withColumn(
+            "_stop_to", stop_to.cast("double")
+        )
+        keep = (F.col("_to") >= F.col("_lo")) & (F.col("_to") <= F.col("_hi"))
+        time_col, still = "_to", "_ends_still"
+    r = r.filter(
+        keep
+        & F.col("_stop_from").isNotNull()
+        & F.col("_stop_to").isNotNull()
+        & (F.col("_stop_from") <= F.col("_p_out"))
+        & (F.col("_stop_to") >= F.col("_p_in"))
+    )
+    longest = Window.partitionBy("track_id", "_lo").orderBy(
+        (F.col("_stop_to") - F.col("_stop_from")).desc(), "_from"
+    )
+    times = (
+        r.withColumn("_rank", F.row_number().over(longest))
+        .filter((F.col("_rank") == 1) & F.col(still))
         .select(
             "track_id",
-            "block",
-            "event_time",
+            F.lit(side).alias("block"),
+            F.col(time_col).alias("event_time"),
             "stand_time",
             "stand",
             "stand_airport",
-            F.col("_bound").alias("bound_time"),
-            F.col("_bound_method").alias("bound_method"),
+            F.col("_lo").alias("_s_lo"),
+            F.col("_hi").alias("_s_hi"),
+            "_bound",
+            "_bound_method",
         )
     )
+    return times, had_stop
+
+
+def _off_the_runway(
+    blocks: DataFrame, runway_events: Optional[DataFrame], config: "EventConfig"
+) -> DataFrame:
+    """``blocks`` without the times on the runway or next to the take-off or landing.
+
+    The rule of ``block_time_off_the_runway``. An off-block time is dropped
+    when it lies less than ``block_time_min_seconds_from_runway_time`` before
+    the take-off of its leg (``_bound``), or after the last ``line-up`` before
+    that take-off; an in-block time when it lies less than that after the
+    landing of its leg, or before the first ``runway-vacated`` after it.
+    """
+    gap = F.lit(float(config.block_time_min_seconds_from_runway_time))
+    ev = F.col("event_time").cast("double")
+    bound = F.col("_bound").cast("double")
+    near = F.when(F.col("block") == "off", bound - ev).otherwise(ev - bound) < gap
+    blocks = blocks.filter(~F.coalesce(near, F.lit(False)))
+    if runway_events is None:
+        return blocks
+    marks = runway_events.filter(
+        F.col("type").isin("line-up", "runway-vacated") & F.col("event_time").isNotNull()
+    ).select(
+        F.col("track_id").alias("_r_track"),
+        F.when(F.col("type") == "line-up", F.lit("off")).otherwise(F.lit("on")).alias("_r_block"),
+        F.col("event_time").alias("_r_time"),
+    )
+    # The line-up of the take-off is the last one before it within the part,
+    # the runway-vacated of the landing the first one after it.
+    keys = ["track_id", "block", "event_time", "_bound"]
+    on_runway = (
+        blocks.filter(F.col("_bound").isNotNull())
+        .join(
+            marks,
+            (F.col("track_id") == F.col("_r_track"))
+            & (F.col("block") == F.col("_r_block"))
+            & F.when(
+                F.col("block") == "off",
+                (F.col("_r_time") <= F.col("_bound")) & (F.col("_r_time") >= F.col("_s_lo")),
+            ).otherwise(
+                (F.col("_r_time") >= F.col("_bound")) & (F.col("_r_time") <= F.col("_s_hi"))
+            ),
+            "inner",
+        )
+        .groupBy(*keys)
+        .agg(F.max("_r_time").alias("_lineup"), F.min("_r_time").alias("_vacated"))
+        .filter(
+            F.when(F.col("block") == "off", F.col("event_time") >= F.col("_lineup")).otherwise(
+                F.col("event_time") <= F.col("_vacated")
+            )
+        )
+        .select(*keys)
+    )
+    return blocks.join(on_runway, keys, "left_anti")
