@@ -2206,6 +2206,85 @@ def count_other(fr: dict, inp: dict) -> list[tuple]:
     )
     out.append(("pms_split", "pms-leg-exit", r["n"] or 0, r["b"]))
 
+    # Point-merge legs that climb more than 500 ft from entry to exit (e2.C3).
+    lg = (
+        E.filter(c("type").isin("pms-leg-entry", "pms-leg-exit"))
+        .groupBy("flight_id", "pms_id", "leg_seq")
+        .agg(
+            F.max(F.when(c("type") == "pms-leg-entry", c("alt"))).alias("_a0"),
+            F.max(F.when(c("type") == "pms-leg-exit", c("alt"))).alias("_a1"),
+        )
+    )
+    r = (
+        lg.filter(c("_a0").isNotNull() & c("_a1").isNotNull())
+        .agg(F.count("*").alias("b"), F.sum((c("_a1") - c("_a0") > 500).cast("int")).alias("n"))
+        .first()
+    )
+    out.append(("pms_leg_climb", "pms-leg-exit", r["n"] or 0, r["b"]))
+
+    # Taxiway passages overlapping a stand passage of the track by more than
+    # 600 s: the aircraft is parked, not taxiing (b2.5).
+    tw = E.filter(c("type") == "entry-taxiway").select(
+        "_eid", "flight_id", c("ts").alias("_t0"), (c("ts") + c("tiu")).alias("_t1")
+    )
+    pp = E.filter(c("type") == "entry-parking_position").select(
+        "flight_id", c("ts").alias("_p0"), (c("ts") + c("tiu")).alias("_p1")
+    )
+    ov = (
+        tw.join(pp, "flight_id")
+        .filter(F.least("_t1", "_p1") - F.greatest("_t0", "_p0") > 600)
+        .select("_eid")
+        .distinct()
+        .count()
+    )
+    out.append(("taxiway_parked", "entry-taxiway", ov, tw.count()))
+
+    # Level-offs read against the reports inside them (c2.1, c2.2): made of
+    # repeated altitudes (at most one cleaned altitude, three or more of the
+    # detector's), or on an aircraft on the ground (more than half its
+    # reports flagged on the ground). Each level-off is cut into minutes
+    # (at most 6 h) to meet the reports of the same minutes.
+    lo = E.filter(c("type").isin(*LEVEL_OFF_STARTS) & c("i_duration_s").isNotNull()).select(
+        "_eid",
+        "flight_id",
+        c("ts").alias("_t0"),
+        (c("ts") + F.least(c("i_duration_s"), F.lit(21600.0))).alias("_t1"),
+    )
+    lo = lo.withColumn("_b", F.explode(F.sequence(F.floor(c("_t0") / 60), F.floor(c("_t1") / 60))))
+    rp = T.select(
+        c("track_id").alias("flight_id"),
+        c("ts").alias("_rt"),
+        "baro_altitude",
+        "baro_altitude_c",
+        "on_ground",
+        F.floor(c("ts") / 60).alias("_b"),
+    )
+    inside = lo.join(rp, ["flight_id", "_b"]).filter(c("_rt").between(c("_t0"), c("_t1")))
+    per = inside.groupBy("_eid").agg(
+        F.count("baro_altitude").alias("_na"),
+        F.count("baro_altitude_c").alias("_nc"),
+        F.avg(F.coalesce(c("on_ground"), F.lit(False)).cast("double")).alias("_g"),
+    )
+    r = (
+        lo.select("_eid")
+        .distinct()
+        .join(per, "_eid", "left")
+        .agg(
+            F.count("*").alias("b"),
+            F.sum(
+                (
+                    (F.coalesce(c("_na"), F.lit(0)) <= 1) & (F.coalesce(c("_nc"), F.lit(0)) >= 3)
+                ).cast("int")
+            ).alias("rep"),
+            F.sum((F.coalesce(c("_g"), F.lit(0.0)) > 0.5).cast("int")).alias("gnd"),
+        )
+        .first()
+    )
+    out += [
+        ("lo_repeats", "level-off starts", r["rep"] or 0, r["b"]),
+        ("lo_parked", "level-off starts", r["gnd"] or 0, r["b"]),
+    ]
+
     # Info fields added by the corrections, wherever they appear.
     for field, value in INFO_FLAGS:
         v = _info(field)
@@ -2605,6 +2684,22 @@ OTHER_TEXT = {
             "leg followed within 180 s by the next leg of the same system at the same distance (a"
             " split leg)"
         ),
+    ),
+    "pms_leg_climb": (
+        "e2.C3 WP6.4",
+        "point-merge leg climbing more than 500 ft from entry to exit",
+    ),
+    "taxiway_parked": (
+        "b2.5",
+        "taxiway passage overlapping a stand passage of the track by more than 600 s",
+    ),
+    "lo_repeats": (
+        "c2.1 WP1.1",
+        "level-off made of repeated altitudes (cleaned altitude once or never, detector 3+ times)",
+    ),
+    "lo_parked": (
+        "c2.2 WP1.4",
+        "level-off on an aircraft on the ground (more than half its reports flagged)",
     ),
     "fl_same_by_source": ("f1.1", "departure equal to destination, by ADEP / ADES source"),
     "fl_null_day": ("f2.G WP4.8", "row with a NULL day (DOF), among the day's rows and those"),
