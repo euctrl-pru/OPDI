@@ -1708,7 +1708,12 @@ class FlightEventProcessor:
         def keep_runway(frame: Optional[DataFrame]) -> Optional[DataFrame]:
             # Cached because the block family reads these rows and the write
             # reads them again; both read the same rows.
-            if frame is None or not self.events.block_times_on_ground_only:
+            # Work package 6: the holding and point-merge families read them
+            # too (holding_context, pms_merge_point_conditions).
+            if frame is None or not (
+                self.events.block_times_on_ground_only
+                or (self.events.emit_holding and self.events.holding_context)
+            ):
                 return frame
             frame = frame.cache()
             runway_frames.append(frame)
@@ -1818,9 +1823,22 @@ class FlightEventProcessor:
 
         if calc_navigation:
             ev = self.events
+            # Work package 6: the take-off and landing times of this call give
+            # each hold its context and bound the merge-point passages.
+            runway_times = None
+            for frame in runway_frames:
+                part = frame.select("track_id", "type", "event_time", "info")
+                runway_times = part if runway_times is None else runway_times.unionByName(part)
             if ev.emit_holding:
                 print(f"Calculating holding events for batch: {batch_id}")
-                add(calculate_holding_events(geo, ev, go_arounds=df_go_arounds))
+                add(
+                    calculate_holding_events(
+                        geo,
+                        ev,
+                        go_arounds=df_go_arounds,
+                        runway_events=runway_times if ev.holding_context else None,
+                    )
+                )
             if ev.emit_point_merge:
                 print(f"Calculating point merge events for batch: {batch_id}")
                 pms_ref = point_merge_systems_for_day(self.spark, day or month)

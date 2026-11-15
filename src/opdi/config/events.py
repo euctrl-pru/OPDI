@@ -455,6 +455,64 @@ class EventConfig:
     ``go-around`` of the same track is left out: repeated approaches are not
     holds."""
 
+    # Work package 6: which label and context a hold gets, where it starts
+    # and ends.
+    holding_pattern_by_straight_share: bool = True
+    """Decide ``info.pattern`` on the share of straight reports alone: an
+    ``orbit`` below :attr:`holding_orbit_max_straight_pct`, else a
+    ``racetrack``. Without it (:attr:`holding_orbit_max_turn_deg`) a
+    continuous circle of more than one and a quarter turns was a
+    ``racetrack``. Off in release v0.0.2."""
+
+    holding_trim_to_main_direction: bool = True
+    """Start and end a hold at its first and last report turning in its main
+    direction (the direction of its net turn). Without it, a turn the other
+    way just before or after the hold (a lead-in turn, the turn back after
+    leaving the stack) is counted in the hold. The straight legs of a
+    racetrack lie between turning reports and stay inside. Off in release
+    v0.0.2."""
+
+    holding_altitude_from_known_reports: bool = True
+    """Take the altitude of ``holding-start`` and ``holding-end`` from the
+    first and last report of the hold that has one, rather than from its
+    first and last report, which can have none. The time and position stay
+    those of the first and last report. Off in release v0.0.2."""
+
+    holding_context: bool = True
+    """Write ``info.context`` on each hold:
+
+    * ``arrival``: the flight lands at its destination at most
+      :attr:`holding_arrival_max_minutes` after the end of the hold, which
+      ends at most :attr:`holding_arrival_max_distance_nm` from that airport;
+    * ``en-route``: the flight lands, but later or further away;
+    * ``other``: a local flight (departure equal to destination, or no
+      destination), no landing after the hold, a track with
+      :attr:`holding_other_min_episodes` holds or more, or holds making up
+      more than :attr:`holding_other_max_share_pct` of the flight's time in
+      the air. Aerial work, survey, firefighting and training flights that
+      circle meet the holding definition; they fall here.
+
+    The landings are the take-off and landing times (``ATOT``, ``ALDT``) of
+    the same step. Delay statistics should use ``arrival``. Off in release
+    v0.0.2."""
+
+    holding_arrival_max_minutes: float = 60.0
+    """Longest time, in minutes, from the end of a hold to the landing at
+    the destination for the hold to be an ``arrival`` hold."""
+
+    holding_arrival_max_distance_nm: float = 150.0
+    """Largest distance, in NM, from the end of a hold to the destination
+    for the hold to be an ``arrival`` hold."""
+
+    holding_other_min_episodes: int = 3
+    """A track with this many holds or more is circling for another purpose
+    than waiting to land: its holds are ``other``."""
+
+    holding_other_max_share_pct: float = 50.0
+    """Share, in percent, of the time in the air (from the take-off to the
+    landing) above which the holds of a track are ``other``. Not applied to a
+    track whose take-off was not seen."""
+
     # -- point merge -------------------------------------------------------
     emit_point_merge: bool = True
     """Publish ``pms-leg-entry``, ``pms-leg-exit`` and ``pms-merge-point``
@@ -899,6 +957,10 @@ class EventConfig:
             layout_merge_parked_passages=False,
             layout_mark_track_edges=False,
             layout_mark_ground_only=False,
+            holding_pattern_by_straight_share=False,
+            holding_trim_to_main_direction=False,
+            holding_altitude_from_known_reports=False,
+            holding_context=False,
             feeds_from_clean_tracks=False,
             deterministic_event_ids=False,
             # No distance circles in release v0.0.2.
