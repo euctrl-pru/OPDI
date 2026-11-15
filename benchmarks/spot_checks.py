@@ -729,7 +729,7 @@ EARTH_RADIUS_NM = 3440.065
 #: Lines of a table of reports, and of the whole-flight profile.
 MAX_REPORT_LINES = 40
 #: Events of the track listed in full up to this many; beyond, the nearest in time.
-MAX_EVENT_LINES = 60
+MAX_EVENT_LINES = 30
 
 
 def thin(dts, n: int = MAX_REPORT_LINES, nearest: int = 16, keep=()):
@@ -892,6 +892,11 @@ SHORT_INFO = (
 )
 
 
+def round_floats(text: str, digits: int = 2) -> str:
+    """``text`` with every decimal number cut to ``digits`` decimals (for reading only)."""
+    return re.sub(r"(-?\d+\.\d{%d})\d+" % digits, r"\1", str(text))
+
+
 def short_info(text, width: int = 70) -> str:
     """The main ``info`` fields of an event as ``key=value``, cut to ``width`` characters."""
     info = parse_info(text)
@@ -962,7 +967,9 @@ def _apt_pos(ident, airports):
     return float(a["latitude_deg"]), float(a["longitude_deg"])
 
 
-def report_table(reports, event_time, day, apt, airports, title, n=MAX_REPORT_LINES, mark=True):
+def report_table(
+    reports, event_time, day, apt, airports, title, n=MAX_REPORT_LINES, mark=True, nearest=16
+):
     """A markdown table of position reports around ``event_time``.
 
     ``reports``: ``event_time``, ``lat``, ``lon``, ``alt_m`` (cleaned
@@ -985,7 +992,7 @@ def report_table(reports, event_time, day, apt, airports, title, n=MAX_REPORT_LI
         keep.append(int(before[-1]))
     if len(after):
         keep.append(int(after[0]))
-    idx = thin(dts, n=n, keep=keep)
+    idx = thin(dts, n=n, keep=keep, nearest=nearest)
     elev = _elev(apt, airports)
     pos = _apt_pos(apt, airports)
     has_cum = "cum_nm" in r.columns
@@ -999,11 +1006,12 @@ def report_table(reports, event_time, day, apt, airports, title, n=MAX_REPORT_LI
     if has_cum:
         head += " flown NM |"
         sep += "---:|"
-    apt_note = (
-        f"height above {apt}, elevation {elev:,.0f} ft"
-        if elev is not None
-        else f"height unknown ({apt or 'no airport'} has no elevation)"
-    )
+    if elev is not None:
+        apt_note = f"height above {apt}, elevation {elev:,.0f} ft"
+    elif _is_missing(apt) or not apt:
+        apt_note = "height unknown: no airport concerned"
+    else:
+        apt_note = f"height unknown: no elevation for {apt}"
     lines = [
         f"**{title}** ({len(idx)} of {len(r)} reports shown; {apt_note}; "
         "`*` nearest the event, `<` `>` the reports either side; alt `~` = removed by cleaning, raw value)",  # noqa: E501
@@ -1057,8 +1065,14 @@ def report_table(reports, event_time, day, apt, airports, title, n=MAX_REPORT_LI
     return "\n".join(lines) + "\n"
 
 
-def events_table(events, event_id, event_time, day) -> str:
-    """The events of the track in time order, the example marked ``◀``."""
+def events_table(events, event_id, event_time, day, surface_window_s=None) -> str:
+    """The events of the track in time order, the example marked ``◀``.
+
+    With ``surface_window_s``, entries and exits of the airport layout are
+    listed only within that many seconds of the example (they are many); the
+    others are counted in the title. At most :data:`MAX_EVENT_LINES` lines,
+    the nearest in time.
+    """
     import numpy as np
 
     if events is None or len(events) == 0:
@@ -1067,9 +1081,18 @@ def events_table(events, event_id, event_time, day) -> str:
     dts = np.array([seconds_between(t, event_time) or 0.0 for t in e["event_time"]])
     idx = list(range(len(e)))
     note = ""
-    if len(e) > MAX_EVENT_LINES:
-        idx = sorted(np.argsort(np.abs(dts), kind="stable")[:MAX_EVENT_LINES].tolist())
-        note = f"; the {MAX_EVENT_LINES} nearest in time shown"
+    if surface_window_s is not None:
+        layout = e["type"].str.match(r"^(entry|exit)-").to_numpy()
+        far = layout & (np.abs(dts) > surface_window_s) & (e["event_id"] != event_id).to_numpy()
+        idx = [i for i in idx if not far[i]]
+        if far.any():
+            note += (
+                f"; {int(far.sum())} layout entries and exits more than "
+                f"{surface_window_s / 60:.0f} min away not listed"
+            )
+    if len(idx) > MAX_EVENT_LINES:
+        idx = sorted(sorted(idx, key=lambda i: abs(dts[i]))[:MAX_EVENT_LINES])
+        note += f"; the {MAX_EVENT_LINES} nearest in time shown"
     lines = [
         f"**Events of the track** ({len(e)}{note}; `◀` = this example)",
         "",
@@ -1209,7 +1232,12 @@ def event_sheet(meta, ex, events, reports, airports, runways, day) -> str:
         f"share of reports within 60 s flagged on the ground {_cell(ex.get('ctx_on_ground'), 2)}",
     ]
     out.append("- **Event**: " + " · ".join(ev))
-    out.append(f"- **info**: `{ex.get('info') or ''}`")
+    out.append(f"- **info**: `{round_floats(ex.get('info') or '')}`")
+    if not _is_missing(ex.get("dup_rows")) and int(ex["dup_rows"]) > 1:
+        out.append(
+            f"- **Same event_id on {int(ex['dup_rows'])} published rows** "
+            "(the other rows are in the events of the track below)"
+        )
     ms = []
     for c, unit in (
         ("distance_flown_nm", "NM"),
@@ -1300,7 +1328,8 @@ def event_sheet(meta, ex, events, reports, airports, runways, day) -> str:
             line += "; threshold not in OurAirports"
         for k in ("align_deg", "max_gs_kt", "traversal_class", "milestone", "method"):
             if k in info:
-                line += f" · {k} {info[k]}"
+                v = info[k]
+                line += f" · {k} {round(v, 1) if isinstance(v, float) else v}"
         out.append(line)
     if "osm_aeroway" in info or "osm_id" in info:
         out.append(
@@ -1313,7 +1342,7 @@ def event_sheet(meta, ex, events, reports, airports, runways, day) -> str:
             f"- **FIR crossing**: from {info.get('fir_from', '?')} to {info.get('fir_to', '?')} "
             f"at FL {info.get('fl', '?')}; bracket {info.get('bracket_s', '?')} s"
         )
-    elif "bracket_s" in info:
+    elif "bracket_s" in info and str(ex.get("type", "")).startswith("xing-"):
         out.append(
             f"- **Crossing**: direction {info.get('direction', '?')}, crossing number "
             f"{info.get('crossing_seq', '?')}, bracket {info.get('bracket_s')} s "
@@ -1331,7 +1360,10 @@ def event_sheet(meta, ex, events, reports, airports, runways, day) -> str:
     out += _record_lines(ex, day, meta.get("record"))
     out.append(_flight_line(ex, day))
     out.append("")
-    out.append(events_table(events, ex.get("event_id"), et, day))
+    surface = (
+        900 if str(ex.get("type", "")).startswith(("entry-", "exit-", "AOBT", "AIBT")) else 180
+    )
+    out.append(events_table(events, ex.get("event_id"), et, day, surface_window_s=surface))
     if reports is not None and len(reports):
         win = reports[reports["part"] == "window"]
         prof = reports[reports["part"] == "profile"]
@@ -1345,7 +1377,9 @@ def event_sheet(meta, ex, events, reports, airports, runways, day) -> str:
         )
         if len(prof):
             out.append(
-                report_table(prof, et, day, apt, airports, "Altitude profile of the whole flight")
+                report_table(
+                    prof, et, day, apt, airports, "Altitude profile of the whole flight", nearest=4
+                )
             )
     else:
         out.append("**Reports**: none within 3 min.\n")
@@ -1462,6 +1496,7 @@ def flight_sheet(meta, ex, events, reports, candidates, airports, day) -> str:
                 airports,
                 "Whole track, Δ from the first report, height above adep",
                 mark=False,
+                nearest=2,
             )
         )
     return "\n".join(out) + "\n"
@@ -2313,6 +2348,21 @@ def sample(args) -> int:
         sid = spark.createDataFrame(all_ids[["event_id"]].drop_duplicates(), "event_id string")
         pool_rows = em.join(F.broadcast(sid), "event_id").toPandas()
         pool_rows = _to_naive(pool_rows)
+        # One event can be published on several rows with the same event_id
+        # (a runway milestone named for two runways at the same time). The
+        # example keeps the first; the sheet says how many rows share the id.
+        n_rows = pool_rows.groupby("event_id")["event_id"].transform("size")
+        pool_rows = pool_rows.assign(dup_rows=n_rows).drop_duplicates("event_id")
+        dups = (
+            em.groupBy("type", "event_id")
+            .count()
+            .filter("count > 1")
+            .groupBy("type")
+            .agg(F.count(F.lit(1)).alias("ids"), F.sum("count").alias("rows"))
+            .toPandas()
+        )
+        duplicates = {r["type"]: (int(r["ids"]), int(r["rows"])) for _, r in dups.iterrows()}
+        print(f"  event ids on more than one row: {duplicates}", flush=True)
         print(f"  pool rows to the driver: {len(pool_rows):,}", flush=True)
         meta = []
         chosen = []
@@ -2401,8 +2451,14 @@ def sample(args) -> int:
                 fam / f"{base}_candidates.parquet", index=False
             )
         note = ""
+        if it["kind"] == "event" and it["name"] in duplicates:
+            ids_, rows_ = duplicates[it["name"]]
+            note += (
+                f"Event ids published on more than one row: {ids_:,} ids on {rows_:,} rows "
+                "(counted in the rows above). "
+            )
         if it["kind"] == "event" and it["name"] in rejected:
-            note = f"Removed by the plausibility checks on the day (not published, not counted above): {rejected[it['name']]:,}."  # noqa: E501
+            note += f"Removed by the plausibility checks on the day (not published, not counted above): {rejected[it['name']]:,}."  # noqa: E501
         (fam / f"summary_{base}.md").write_text(
             summary_markdown(it["name"], total, rows, record, note)
         )
@@ -2415,6 +2471,9 @@ def sample(args) -> int:
                 "with_record": record["with_record"] if record else "",
                 "record": record["what"] if record else "",
                 "rejected": rejected.get(it["name"], "") if it["kind"] == "event" else "",
+                "duplicate_ids": (
+                    duplicates.get(it["name"], (0, 0))[0] if it["kind"] == "event" else ""
+                ),
                 "drawn": len(ex),
                 "methods_page": it["page"],
                 "source": it["source"],
@@ -2455,6 +2514,7 @@ INVENTORY_COLUMNS = (
     "with_record",
     "record",
     "rejected",
+    "duplicate_ids",
     "drawn",
     "methods_page",
     "source",
@@ -2467,7 +2527,9 @@ named in the table's title, from its OurAirports elevation. Ground speed "gs" in
 (kt), vertical rate "vr" in feet per minute, heading "hdg" in degrees from true north,
 "gnd" G = report flagged on the ground. In the reports, `*` is the report nearest the
 event, `<` and `>` the last report before and the first after it; an altitude shown as
-`~1,234` was removed by the cleaning step (the raw value is shown). The event's own row
+`~1,234` was removed by the cleaning step (the raw value is shown); an empty cell means
+the report has no such value (not sent, or removed by cleaning). Reports further than 30 s
+from the event are thinned to one per 10 s. The event's own row
 in the list of the track's events is marked `◀`. "Airport record" is the airport
 operator's record of the same flight (EUROCONTROL Airport Operator Data Flow), "Network
 Manager" its flight plan record (matched on icao24 and call sign, nearest within 6 h).
@@ -2502,8 +2564,8 @@ def write_sheets(samples: Path) -> int:
         index += [
             f"## {fam}: {what}",
             "",
-            "| item | kind | rows on the day | with a record | removed by checks | examples | files | detector |",  # noqa: E501
-            "|---|---|---:|---:|---:|---:|---|---|",
+            "| item | kind | rows on the day | with a record | removed by checks | ids on two rows | examples | files | detector |",  # noqa: E501
+            "|---|---|---:|---:|---:|---:|---:|---|---|",
         ]
         for m in items:
             base = item_file_name(m["name"])
@@ -2564,6 +2626,7 @@ def write_sheets(samples: Path) -> int:
             files = f"`{fam}/{base}.md`, `summary_{base}.md`, `{base}.parquet`"
             index.append(
                 f"| {m['name']} | {m['kind']} | {m['count']:,} | {m['with_record']} | {m['rejected']} | "  # noqa: E501
+                f"{m.get('duplicate_ids', '')} | "
                 f"{len(ex)} | {files} | `{m['source']}` |"
             )
             inv.append({**{k: m.get(k, "") for k in INVENTORY_COLUMNS}, "drawn": len(ex)})

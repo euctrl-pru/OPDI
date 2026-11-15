@@ -431,6 +431,7 @@ def test_write_sheets_builds_index_inventory_and_one_file_per_item(tmp_path):
         "with_record": 600,
         "record": "take-off time",
         "rejected": 3,
+        "duplicate_ids": 2,
         "drawn": 1,
         "methods_page": "methods/takeoff-landing.qmd",
         "source": "src/opdi/pipeline/runway_ops.py",
@@ -446,7 +447,7 @@ def test_write_sheets_builds_index_inventory_and_one_file_per_item(tmp_path):
     assert sheet.startswith("# ATOT: 1 examples of 1,234 on 2026-06-14")
     assert "### ATOT · ATOT#03" in sheet
     index = (tmp_path / "INDEX.md").read_text()
-    assert "## a_runway" in index and "| ATOT | event | 1,234 | 600 | 3 | 1 |" in index
+    assert "## a_runway" in index and "| ATOT | event | 1,234 | 600 | 3 | 2 | 1 |" in index
     inv = pd.read_csv(tmp_path / "inventory.csv")
     assert list(inv.columns) == list(s.INVENTORY_COLUMNS)
     assert (
