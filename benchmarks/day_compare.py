@@ -411,10 +411,10 @@ def table(label: str, name: str) -> str:
     return f"{PREFIX}/{label}/{name}"
 
 
-def inputs_of(command: str, before: str, after: str, day: date | None) -> list[str]:
+def inputs_of(command: str, before: str, after: str, day: date | None, tables=None) -> list[str]:
     """The folders a comparison reads, for the manifest."""
     if command == "tracks":
-        names = ["osn_tracks", "osn_tracks_clean"]
+        names = list(tables or ("osn_tracks", "osn_tracks_clean"))
         return [table(label, n) for label in (before, after) for n in names]
     if command == "statevectors":
         return [table(label, "osn_statevectors_v2") for label in (before, after)]
@@ -458,6 +458,14 @@ def parse(argv: list):
         p.add_argument("--out", type=Path, required=True)
         p.add_argument("--executors", type=int, default=6)
         p.add_argument("--notes", default="", help="what the two runs are, for the manifest")
+        if name == "tracks":
+            p.add_argument(
+                "--tables",
+                nargs="+",
+                choices=("osn_tracks", "osn_tracks_clean"),
+                default=["osn_tracks", "osn_tracks_clean"],
+                help="the tables of tracks to compare (a run of step 02 alone has no clean tracks)",
+            )
     return ap.parse_args(argv)
 
 
@@ -482,7 +490,7 @@ def main(argv=None) -> int:
 
         if args.command == "tracks":
             rows = []
-            for name in ("osn_tracks", "osn_tracks_clean"):
+            for name in args.tables:
                 tb, ta = (
                     spark.read.parquet(table(label, name)).filter(F.col("dof") == F.lit(day))
                     for label in (args.before, args.after)
@@ -518,7 +526,12 @@ def main(argv=None) -> int:
     finally:
         spark.stop()
     write_rows(args.out, rows)
-    stamp(args.out, argv, inputs_of(args.command, args.before, args.after, day), args.notes)
+    stamp(
+        args.out,
+        argv,
+        inputs_of(args.command, args.before, args.after, day, getattr(args, "tables", None)),
+        args.notes,
+    )
     for r in rows:
         print(
             f"{r['part']:<22} {str(r['item']):<34} {str(r.get('before', '')):>14} "

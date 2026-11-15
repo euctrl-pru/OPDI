@@ -310,7 +310,7 @@ def test_read_tables_are_read_from_the_other_run_and_never_written(monkeypatch):
         published.PublishedLayout, "for_storage", published.PublishedLayout.for_storage
     )
     monkeypatch.setattr(t, "READ_FROM", "ref")
-    monkeypatch.setattr(t, "READ_TABLES", frozenset({"opdi_flight_list"}))
+    monkeypatch.setattr(t, "READ_TABLES", {"opdi_flight_list": "ref"})
     t.redirect("cand", False)
     storage = StorageManager.__new__(StorageManager)
     assert storage._s3_path("opdi_flight_list") == f"{t.PREFIX}/ref/opdi_flight_list"
@@ -319,3 +319,40 @@ def test_read_tables_are_read_from_the_other_run_and_never_written(monkeypatch):
         storage.write_table(None, "opdi_flight_list")
     with pytest.raises(AssertionError, match="read from run ref"):
         storage.drop_partitions("opdi_flight_list", "DOF", [])
+
+
+def test_read_tables_name_or_name_at_label():
+    assert t.read_tables(["osn_tracks", "osn_tracks_clean@clean"], "build") == {
+        "osn_tracks": "build",
+        "osn_tracks_clean": "clean",
+    }
+    assert t.read_tables(None, None) == {}
+
+
+def test_set_changes_one_field_and_refuses_unknown_ones():
+    cfg = t.build_config(13)
+    t.apply_setting(cfg, "events.plausibility_checks=false")
+    t.apply_setting(cfg, "events.block_times_on_ground_only=False")
+    assert cfg.events.plausibility_checks is False
+    assert cfg.events.block_times_on_ground_only is False
+    with pytest.raises(SystemExit, match="no field"):
+        t.apply_setting(cfg, "events.no_such_switch=true")
+    with pytest.raises(SystemExit, match="group.field=value"):
+        t.apply_setting(cfg, "plausibility_checks")
+
+
+def test_tracks_named_in_read_tables_come_from_that_run(monkeypatch):
+    from opdi.output import published
+    from opdi.utils.storage import StorageManager
+
+    for name in ("_s3_path", "write_table", "drop_partitions"):
+        monkeypatch.setattr(StorageManager, name, getattr(StorageManager, name))
+    monkeypatch.setattr(
+        published.PublishedLayout, "for_storage", published.PublishedLayout.for_storage
+    )
+    monkeypatch.setattr(t, "READ_FROM", None)
+    monkeypatch.setattr(t, "READ_TABLES", {"osn_tracks_clean": "clean"})
+    t.redirect("events", False)
+    storage = StorageManager.__new__(StorageManager)
+    assert storage._s3_path("osn_tracks_clean") == f"{t.PREFIX}/clean/osn_tracks_clean"
+    assert storage._s3_path("osn_tracks") == f"{t.INPUT_WAREHOUSE}/osn_tracks"

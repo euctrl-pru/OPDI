@@ -942,7 +942,9 @@ def run_analyse(args, argv) -> int:
             [REPO / p for p in _CODE_PATHS],
             inputs={**inputs, "rows": int(len(table))},
             input_tables=[EVENTS, FLIGHT_LIST, f"{TRACKS}/dof={args.day}", AIRPORTS],
-            notes="Context from the working table " + scratch_path(args.day),
+            notes=(
+                "Context from the working table " + scratch_path(args.day) + ". " + NOTES
+            ).strip(),
         )
         print(f"wrote {out / name} ({len(table)} rows)")
     print(json.dumps(inputs, indent=1, default=str))
@@ -1403,10 +1405,7 @@ def run_before_after(args, argv) -> int:
             [REPO / p for p in _CODE_PATHS + _AFTER_CODE_PATHS],
             inputs={**inputs, "rows": int(len(frame))},
             input_tables=[EVENTS, AFTER_EVENTS, AFTER_REJECTED, FLIGHT_LIST, TRACKS],
-            notes=(
-                "Before: the events of research/airspace_events/on. After: step 04 run by "
-                "benchmarks/run_plausibility_day.py under " + AFTER_ROOT + "."
-            ),
+            notes=(f"Before: {EVENTS}. After: {AFTER_ROOT}. " + NOTES).strip(),
         )
         print(f"wrote {out / name} ({len(frame)} rows)")
     print(table.to_string())
@@ -1452,27 +1451,62 @@ def run_clean_after(args) -> int:
     return 0
 
 
+def set_paths(args) -> None:
+    """Point the study at other tables: the events before, the events after,
+    the flight list and the cleaned tracks. The defaults are those of the
+    first study (the tracks of the warehouse, the airspace events study)."""
+    global EVENTS, FLIGHT_LIST, TRACKS, AFTER_ROOT, AFTER_EVENTS, AFTER_REJECTED, NOTES
+    EVENTS = getattr(args, "events", None) or EVENTS
+    FLIGHT_LIST = getattr(args, "flight_list", None) or FLIGHT_LIST
+    TRACKS = getattr(args, "tracks", None) or TRACKS
+    if getattr(args, "after_root", None):
+        AFTER_ROOT = args.after_root.rstrip("/")
+        AFTER_EVENTS = f"{AFTER_ROOT}/opdi_flight_events"
+        AFTER_REJECTED = f"{AFTER_ROOT}/opdi_flight_events_rejected"
+    NOTES = getattr(args, "notes", None) or ""
+
+
+#: What the runs are, recorded in the manifest (``--notes``).
+NOTES = ""
+
+
+def _paths_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--events", default=None, help=f"the events before (default {EVENTS})")
+    p.add_argument("--flight-list", default=None, help=f"the flight list (default {FLIGHT_LIST})")
+    p.add_argument("--tracks", default=None, help=f"the cleaned tracks (default {TRACKS})")
+    p.add_argument(
+        "--after-root",
+        default=None,
+        help=f"the folder of the events after and the removed events (default {AFTER_ROOT})",
+    )
+    p.add_argument("--notes", default="", help="what the runs are, for the manifest")
+    return p
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("context")
+    paths = _paths_parser()
+    c = sub.add_parser("context", parents=[paths])
     c.add_argument("--day", required=True)
     c.add_argument("--window-s", type=float, default=60.0)
     c.add_argument("--executors", type=int, default=8)
-    a = sub.add_parser("analyse")
+    a = sub.add_parser("analyse", parents=[paths])
     a.add_argument("--day", required=True)
     a.add_argument("--results-dir", required=True)
     a.add_argument("--cache-dir", default=None)
     k = sub.add_parser("clean")
     k.add_argument("--day", required=True)
-    b = sub.add_parser("before-after")
+    b = sub.add_parser("before-after", parents=[paths])
     b.add_argument("--day", required=True)
     b.add_argument("--results-dir", required=True)
     b.add_argument("--executors", type=int, default=8)
     sub.add_parser("clean-after")
     args = ap.parse_args(argv)
+    set_paths(args)
     if args.cmd == "context":
         return run_context(args)
     if args.cmd == "analyse":

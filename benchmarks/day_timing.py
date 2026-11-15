@@ -158,7 +158,8 @@ USE_COMPACT_ZONES = False
 STATEVECTORS_FROM = None
 #: Set by ``--read-from`` and ``--read-tables``: read these tables from that run, never write them.
 READ_FROM = None
-READ_TABLES: frozenset = frozenset()
+#: Table -> label of the run it is read from (``--read-tables name`` or ``name@label``).
+READ_TABLES: dict = {}
 
 
 def table_path(label: str, table: str, builds_tracks: bool) -> str:
@@ -197,7 +198,9 @@ def redirect(label: str, builds_tracks: bool) -> None:
         if table_name == "osn_statevectors_v2" and STATEVECTORS_FROM:
             return table_path(STATEVECTORS_FROM, table_name, builds_tracks)
         if table_name in READ_TABLES:
-            return table_path(READ_FROM, table_name, builds_tracks)
+            # The run named for it, even for the tracks (which a run that does
+            # not build them otherwise reads from the warehouse).
+            return f"{PREFIX}/{READ_TABLES[table_name]}/{table_name}"
         return table_path(label, table_name, builds_tracks)
 
     def write_table(self, df, table_name, mode="append", partition_by=None, partition_values=None):
@@ -527,6 +530,43 @@ def build_config(executors: int, cores: int | None = None, memory: str | None = 
     return cfg
 
 
+def read_tables(items, default_label) -> dict:
+    """``--read-tables`` as table -> label: ``name`` is read from ``--read-from``,
+    ``name@label`` from the run ``label``."""
+    out = {}
+    for item in items or ():
+        name, _, label = item.partition("@")
+        out[name] = label or default_label
+    return out
+
+
+def apply_setting(cfg, item: str) -> None:
+    """Set one field of the configuration from ``group.field=value``.
+
+    ``value`` is read as ``true``/``false``, a whole number, a decimal number
+    or else text; the field must exist, so a typing error stops the run.
+    """
+    key, sep, text = item.partition("=")
+    group_name, dot, field = key.partition(".")
+    if not sep or not dot:
+        raise SystemExit(f"--set wants group.field=value, not {item!r}")
+    group = getattr(cfg, group_name)
+    if not hasattr(group, field):
+        raise SystemExit(f"--set: {group_name} has no field {field!r}")
+    low = text.lower()
+    if low in ("true", "false"):
+        value = low == "true"
+    else:
+        try:
+            value = int(text)
+        except ValueError:
+            try:
+                value = float(text)
+            except ValueError:
+                value = text
+    setattr(group, field, value)
+
+
 def count_day_rows(spark, label: str, step: str, day: date, builds_tracks: bool):
     """Rows the step wrote for the day, from the Parquet footers."""
     from pyspark.sql import functions as F
@@ -658,7 +698,9 @@ def run(args) -> int:
     from run_track_link_day import QUOTA_GB, bucket_used_gb, check_free_space
 
     if args.full:
-        args.needed_gb = max(args.needed_gb, FULL_DAY_NEED_GB["01"])
+        # What the first step writes; a run that starts at step 02 reads the
+        # reports another run fetched and needs room for the tracks only.
+        args.needed_gb = max(args.needed_gb, FULL_DAY_NEED_GB.get(args.steps[0], 3.0))
 
     day = date.fromisoformat(args.day)
     label = args.label
@@ -681,6 +723,8 @@ def run(args) -> int:
     check_free_space(used, QUOTA_GB, args.needed_gb)
 
     cfg = build_config(args.executors, args.cores, args.memory)
+    for item in args.set or []:
+        apply_setting(cfg, item)
     # ``patience``: the study settings (10-minute request timeout, 10 retries),
     # with which the earlier rounds were measured; ``production``: none, so
     # Hadoop's defaults, as the daily run has them.
@@ -701,12 +745,13 @@ def run(args) -> int:
         }
     )
     global USE_COMPACT_ZONES, STATEVECTORS_FROM, READ_FROM, READ_TABLES
-    if bool(args.read_from) != bool(args.read_tables):
-        raise SystemExit("--read-from and --read-tables go together")
+    plain = [x for x in args.read_tables or () if "@" not in x]
+    if bool(args.read_from) != bool(plain):
+        raise SystemExit("--read-from goes with --read-tables names that have no @label")
     READ_FROM = args.read_from
-    READ_TABLES = frozenset(args.read_tables or ())
-    if READ_FROM:
-        check_write_path(f"{PREFIX}/{READ_FROM}/")
+    READ_TABLES = read_tables(args.read_tables, READ_FROM)
+    for source in set(READ_TABLES.values()):
+        check_write_path(f"{PREFIX}/{source}/")
     USE_COMPACT_ZONES = bool(args.compact_zones)
     STATEVECTORS_FROM = args.statevectors_from
     if STATEVECTORS_FROM and "01" in args.steps:
@@ -731,6 +776,8 @@ def run(args) -> int:
         settings += f" executor heap={args.memory}"
     if args.compact_zones:
         settings += " zones=8 files"
+    for item in args.set or []:
+        settings += f" {item}"
     cores = int(cfg.spark.executor_cores)
     step_rows = []
     status = 0
@@ -1043,6 +1090,11 @@ def main(argv=None) -> int:
     r.add_argument("--needed-gb", type=float, default=3.0)
     r.add_argument("--conf", action="append", help="extra Spark setting key=value")
     r.add_argument(
+        "--set",
+        action="append",
+        help="a pipeline setting group.field=value, e.g. events.plausibility_checks=false",
+    )
+    r.add_argument(
         "--compact-zones", action="store_true", help="read the zones from the 8-file copy"
     )
     r.add_argument(
@@ -1053,7 +1105,12 @@ def main(argv=None) -> int:
     r.add_argument(
         "--read-from", default=None, help="label of the run whose --read-tables this run reads"
     )
-    r.add_argument("--read-tables", nargs="+", default=None, help="tables read from --read-from")
+    r.add_argument(
+        "--read-tables",
+        nargs="+",
+        default=None,
+        help="tables read from --read-from, or name@label to read one from another run",
+    )
     r.add_argument(
         "--s3",
         choices=("patience", "production"),
