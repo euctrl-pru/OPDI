@@ -1713,6 +1713,7 @@ class FlightEventProcessor:
             if frame is None or not (
                 self.events.block_times_on_ground_only
                 or (self.events.emit_holding and self.events.holding_context)
+                or (self.events.emit_point_merge and self.events.pms_merge_point_conditions)
             ):
                 return frame
             frame = frame.cache()
@@ -1842,7 +1843,7 @@ class FlightEventProcessor:
             if ev.emit_point_merge:
                 print(f"Calculating point merge events for batch: {batch_id}")
                 pms_ref = point_merge_systems_for_day(self.spark, day or month)
-                add(calculate_point_merge_events(geo, pms_ref, ev))
+                add(calculate_point_merge_events(geo, pms_ref, ev, runway_events=runway_times))
             if ev.emit_fir_crossings:
                 print(f"Calculating FIR crossings for batch: {batch_id}")
                 add(calculate_fir_events(sdf_input, load_fir_reference(self.storage), ev))

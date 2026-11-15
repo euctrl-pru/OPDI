@@ -578,6 +578,74 @@ class EventConfig:
     at least twice as far out, for the leg to count. ``pms-merge-point`` is
     set at the closest approach."""
 
+    # Work package 6: where a leg ends, split legs, straight or climbing
+    # legs, and which passages of a merge point count.
+    pms_extend_leg_exit: bool = True
+    """Move the exit of a leg past the last report the window test accepts,
+    report by report, while the aircraft is still moving along the arc
+    (track 60 to 120 degrees off the bearing to the merge point) and within
+    :attr:`pms_leg_exit_tolerance_nm` of the distance of the last accepted
+    report. The window test looks 45 s ahead and fails as soon as the
+    turn towards the merge point enters the window, so without this the exit
+    is about 25 s before the aircraft leaves the arc and leg times are about
+    15 % short. The entry is not moved. Off in release v0.0.2."""
+
+    pms_leg_exit_tolerance_nm: float = 0.5
+    """Largest change, in NM, of the distance to the merge point over which
+    the exit of a leg is moved (see :attr:`pms_extend_leg_exit`)."""
+
+    pms_join_split_legs: bool = True
+    """Count two stretches on the arc of one merge point as one leg when the
+    second starts at most :attr:`pms_join_max_gap_seconds` after the first
+    ends and both turn the same way about the merge point. A gap of a minute
+    in the positions otherwise splits one leg into two, each with a shorter
+    time and distance. Off in release v0.0.2."""
+
+    pms_join_max_gap_seconds: float = 120.0
+    """Longest time, in seconds, between two stretches joined into one leg."""
+
+    pms_leg_must_turn: bool = True
+    """Keep a leg only if it turns with the arc and does not climb.
+
+    On an arc the heading turns with the bearing from the merge point; on a
+    straight line that only grazes the circle at the leg distance it does
+    not. A leg shorter than :attr:`pms_leg_turn_test_max_seconds` must turn
+    by at least :attr:`pms_leg_min_turn_share` of its bearing sweep. A leg
+    whose altitude rises by more than :attr:`pms_leg_max_climb_ft` from
+    entry to exit is a missed approach or a climbing turn near the airport,
+    not a sequencing leg. Off in release v0.0.2."""
+
+    pms_leg_min_turn_share: float = 0.3
+    """Smallest heading change of a short leg, as a share of its bearing
+    sweep (real arcs measure 0.6 to 0.8, straight segments 0 to 0.03)."""
+
+    pms_leg_turn_test_max_seconds: float = 180.0
+    """Legs shorter than this, in seconds, must turn with the arc (see
+    :attr:`pms_leg_must_turn`). Published legs are chains of straight
+    segments, so a longer leg may be straight for a while."""
+
+    pms_leg_max_climb_ft: float = 500.0
+    """Largest rise in altitude, in feet, from the entry to the exit of a
+    leg."""
+
+    pms_merge_point_conditions: bool = True
+    """Publish ``pms-merge-point`` only for a passage that can be an arrival
+    through the system: after every take-off of the track, descending or
+    level (at most :attr:`pms_merge_point_max_climb_ftmin`), at
+    :attr:`pms_merge_point_min_speed_kt` or more, for a system that serves
+    the runway landed on where the system's name and the landing say which
+    (``RJTT-34L`` serves runway 34, ``LIME-ALL`` any runway), and one per
+    approach (the passage that follows a leg, else the closest to its merge
+    point). Without it every passage within :attr:`pms_merge_point_radius_nm`
+    of a listed merge point counts, departures and light aircraft included.
+    Off in release v0.0.2."""
+
+    pms_merge_point_min_speed_kt: float = 150.0
+    """Lowest ground speed, in knots, of a merge-point passage."""
+
+    pms_merge_point_max_climb_ftmin: float = 500.0
+    """Highest vertical rate, in feet per minute, of a merge-point passage."""
+
     # -- FIR crossings -----------------------------------------------------
     emit_fir_crossings: bool = True
     """Publish ``xing-fir`` (version ``fir_v0.1.0``): one event at each
@@ -961,6 +1029,10 @@ class EventConfig:
             holding_trim_to_main_direction=False,
             holding_altitude_from_known_reports=False,
             holding_context=False,
+            pms_extend_leg_exit=False,
+            pms_join_split_legs=False,
+            pms_leg_must_turn=False,
+            pms_merge_point_conditions=False,
             feeds_from_clean_tracks=False,
             deterministic_event_ids=False,
             # No distance circles in release v0.0.2.
