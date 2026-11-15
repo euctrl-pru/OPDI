@@ -331,3 +331,67 @@ def test_the_interpolation_grid_is_bounded(spark, monkeypatch):
     assert len(segs) == 1
     assert segs[0].end_time == _EPOCH + dt.timedelta(seconds=40)
     assert segs[0].duration_seconds == pytest.approx(40.0)
+
+
+# --- the level method reads only measured altitudes (level_max_sample_gap_seconds)
+
+
+def _pru(spark, samples, config=None):
+    """``samples``: (seconds, altitude in ft or None). Five-second reports."""
+    sdf = make_track(
+        spark, [{"t": t, "baro_altitude": None if a is None else _m(a)} for t, a in samples]
+    ).withColumn("baro_altitude_c", F.col("baro_altitude"))
+    return level_segments_pru(sdf, config or EventConfig()).orderBy("start_time").collect()
+
+
+def test_no_level_off_where_reception_ends_in_a_climb(spark):
+    """Shape of level-off-climb-start#08 (c9cadc43af737499_1781443854): an
+    A21N climbing at 1,000 ft/min when reception is lost; OpenSky repeats the
+    last state for about 5 min, and the cleaning removes the repeated
+    altitudes. Held flat to the last report, that was a 290 s level-off."""
+    climb = [(t, 5000 + 1000 * t / 60) for t in range(0, 65, 5)]
+    repeats = [(t, None) for t in range(65, 360, 5)]
+    assert _pru(spark, climb + repeats) == []
+    old = _pru(spark, climb + repeats, EventConfig(level_max_sample_gap_seconds=None))
+    assert len(old) == 1 and old[0].duration_seconds >= 280
+
+
+def test_no_level_off_before_the_first_altitude(spark):
+    """Shape of level-off-climb-start#37 (356e116126b3f9ba_1781452654): parked
+    at KBOS, the reports on the stand carry no altitude, then the take-off.
+    Held back to the first report, the first airborne altitude was a
+    3,050 s level-off at the stand."""
+    parked = [(t, None) for t in range(0, 3050, 5)]
+    climb = [(t, 4125 + 2000 * (t - 3050) / 60) for t in range(3050, 3200, 5)]
+    assert _pru(spark, parked + climb) == []
+    old = _pru(spark, parked + climb, EventConfig(level_max_sample_gap_seconds=None))
+    assert old and old[0].duration_seconds >= 3000
+
+
+def test_no_level_off_between_altitudes_far_apart(spark):
+    """Shape of level-off-climb-start#40 (82185a5c175c06cd_1781417834): a B772
+    parked all day with a few altitudes hours apart (34,000, 36,100,
+    13,475 ft). A straight line between them changes by less than
+    300 ft/min, which made a 5 h level-off."""
+    samples = [(0, 34000), (5, 34000), (7200, 36100), (7205, 36100), (18000, 13475)]
+    assert _pru(spark, samples) == []
+    assert _pru(spark, samples, EventConfig(level_max_sample_gap_seconds=None))
+
+
+def test_a_level_with_an_altitude_every_30_s_is_still_level(spark):
+    """A level stretch whose altitudes arrive every 30 s (the gap is under the
+    60 s limit) stays one level segment."""
+    samples = [(t, 23000) for t in range(0, 841, 30)]
+    segs = _pru(spark, samples)
+    assert len(segs) == 1
+    assert segs[0].duration_seconds == pytest.approx(840.0)
+
+
+def test_a_gap_after_a_level_stretch_does_not_shorten_it(spark):
+    """Level at 10,000 ft every 5 s up to t+100, then nothing until t+200.
+    The window that ends at t+100 is measured; the hole after it is not."""
+    samples = [(t, 10000) for t in range(0, 101, 5)] + [(200, 10000), (205, 10000)]
+    segs = _pru(spark, samples)
+    assert [(s.start_time, s.end_time) for s in segs] == [
+        (_EPOCH, _EPOCH + dt.timedelta(seconds=100))
+    ]

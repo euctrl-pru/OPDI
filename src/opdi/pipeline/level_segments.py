@@ -254,12 +254,20 @@ def level_segments_pru(
         *[F.col(c).cast("double").alias(c) for c in elevations],
     )
 
+    # With ``level_max_sample_gap_seconds`` the grid covers only the measured
+    # altitudes: from the first report with an altitude to the last one.
+    # Otherwise it covers every report, and the altitudes are held flat
+    # before the first and after the last measured one.
+    max_gap_s = config.level_max_sample_gap_seconds
+    measured_only = max_gap_s is not None
+    span_rows = real.filter(F.col("_alt_ft").isNotNull()) if measured_only else real
+
     # The grid is built from an index rather than from ``sequence`` over the
     # timestamps: ``sequence`` needs an integral step, and a window length is a
     # float in config. ``_t0 + i * window`` also keeps every grid instant an
     # exact multiple of the window away from the track's first sample, which is
     # what makes the geometry in the tests arithmetic.
-    bounds = real.groupBy(*part).agg(F.min("_ts").alias("_t0"), F.max("_ts").alias("_t1"))
+    bounds = span_rows.groupBy(*part).agg(F.min("_ts").alias("_t0"), F.max("_ts").alias("_t1"))
     grid = (
         bounds.withColumn(
             "_i",
@@ -327,6 +335,27 @@ def level_segments_pru(
             .withColumn(f"{c}__nt", F.last(known, True).over(fwd))
             .withColumn(f"{c}__nv", F.last(F.col(c), True).over(fwd))
         )
+    if measured_only:
+        # How long the altitude goes unmeasured from each row on, in seconds:
+        # for a report with an altitude, the time to the next one; for a grid
+        # instant, the time between the measured altitudes either side of it
+        # (from the one at the instant itself, if there is one). A row with
+        # no measured altitude on one side gets a time longer than any limit.
+        known_alt = F.when(F.col("_alt_ft").isNotNull(), F.col("_ts"))
+        strictly_after = order_rev.rowsBetween(Window.unboundedPreceding, -1)
+        next_alt_t = F.last(known_alt, True).over(strictly_after)
+        combined = combined.withColumn(
+            "_measured", ~F.col("_is_grid") & F.col("_alt_ft").isNotNull()
+        ).withColumn(
+            "_unmeasured_s",
+            F.coalesce(
+                F.when(
+                    F.col("_is_grid"),
+                    F.col("_alt_ft__nt") - F.col("_alt_ft__pt"),
+                ).when(F.col("_alt_ft").isNotNull(), next_alt_t - F.col("_ts")),
+                F.when(F.col("_is_grid") | F.col("_alt_ft").isNotNull(), F.lit(1.0e9)),
+            ),
+        )
     for c in value_cols:
         pt, pv = F.col(f"{c}__pt"), F.col(f"{c}__pv")
         nt, nv = F.col(f"{c}__nt"), F.col(f"{c}__nv")
@@ -358,9 +387,12 @@ def level_segments_pru(
         .rangeBetween(0, int(round(window_s * 1000.0)))
     )
     whole = Window.partitionBy(*part)
+    last_sample = ~F.col("_is_grid")
+    if measured_only:
+        last_sample = F.col("_measured")
     combined = combined.withColumn(
         "_span", F.max("_alt_ft").over(span_window) - F.min("_alt_ft").over(span_window)
-    ).withColumn("_t_last", F.max(F.when(~F.col("_is_grid"), F.col("_ts"))).over(whole))
+    ).withColumn("_t_last", F.max(F.when(last_sample, F.col("_ts"))).over(whole))
 
     # A grid point whose window runs past the last sample is not level; it is
     # unmeasured. Without this every track would end in a spurious segment,
@@ -368,6 +400,21 @@ def level_segments_pru(
     level = (F.col("_span") <= F.lit(config.level_window_height_ft())) & (
         F.col("_ts") + F.lit(window_s) <= F.col("_t_last") + F.lit(1e-6)
     )
+    if measured_only:
+        # Nor is a window that lies (in part) between two measured altitudes
+        # more than ``max_gap_s`` apart: its altitude there is a straight
+        # line, not a measurement. The window is the half-open interval from
+        # the grid instant to one window later, so a gap that starts exactly
+        # where the window ends does not count.
+        open_window = (
+            Window.partitionBy(*part)
+            .orderBy(F.round(F.col("_ts") * 1000.0).cast("long"))
+            .rangeBetween(0, int(round(window_s * 1000.0)) - 1)
+        )
+        combined = combined.withColumn(
+            "_unmeasured_max_s", F.max("_unmeasured_s").over(open_window)
+        )
+        level = level & (F.col("_unmeasured_max_s") <= F.lit(float(max_gap_s)))
     points = combined.filter(F.col("_is_grid")).withColumn(
         "_level", F.coalesce(level, F.lit(False))
     )
