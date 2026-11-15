@@ -207,14 +207,10 @@ def spark_lock(what: str, path: Path = LOCK, wait_s: float = LOCK_WAIT_S):
                 flush=True,
             )
             started = time.monotonic()
-            while True:
-                time.sleep(5)
-                try:
-                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() - started > wait_s:
-                        raise SystemExit(f"gave up waiting for {path} after {wait_s:.0f} s")
+            # Wait in the same queue as commands started under ``flock``: a
+            # blocking request. Trying again every few seconds would lose
+            # the lock to every blocking waiter and could wait for hours.
+            fcntl.flock(fh, fcntl.LOCK_EX)
             print(f"got the Spark lock after {time.monotonic() - started:.0f} s", flush=True)
         try:
             yield
