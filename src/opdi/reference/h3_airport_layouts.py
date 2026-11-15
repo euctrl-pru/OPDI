@@ -266,6 +266,18 @@ def clean_str(s) -> str:
         return s
 
 
+def missing_ref_as_none(refs: pd.Series) -> pd.Series:
+    """Element names with a missing name as ``None``.
+
+    A feature without a ``ref`` tag reaches this table as the text
+    ``"None"`` (the PBF path) or ``"nan"`` (the Overpass path), because the
+    column is converted to text. These, and an empty text, become ``None``,
+    which the table stores as no value.
+    """
+    text = refs.astype(str).str.strip().str.lower()
+    return refs.where(~(refs.isna() | text.isin(["none", "nan", ""])), None)
+
+
 def hexagonify_airport(apt_icao: str, resolution: int = 12, source=None) -> pd.DataFrame:
     """Process a single airport: fetch OSM data, create polygons, convert to H3.
 
@@ -495,6 +507,9 @@ class AirportLayoutGenerator:
             # `createDataFrame` warns "columns are not unique, some columns will
             # be omitted" -- it drops them silently. Keep the first of each.
             df = df.loc[:, ~pd.Index(df.columns).duplicated()]
+            # Work package 3 of the 2026-06-14 corrections.
+            if self.config.events.layout_ref_missing_as_null and "hexaero_ref" in df.columns:
+                df["hexaero_ref"] = missing_ref_as_none(df["hexaero_ref"])
             return df
         except Exception as e:
             print(f"Failed to process {apt_icao}. Error: {e}")

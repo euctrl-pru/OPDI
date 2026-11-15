@@ -260,6 +260,12 @@ def calculate_airport_events(
         .withColumnRenamed("hexaero_ref", "osm_ref")
         .withColumnRenamed("hexaero_apt_icao", "osm_airport")
     )
+    # Work package 3 of the 2026-06-14 corrections: a missing element name
+    # ("None", "nan", empty) is written as no value.
+    if config.layout_ref_missing_as_null:
+        from opdi.pipeline.ground import missing_ref_as_null
+
+        result = result.withColumn("osm_ref", missing_ref_as_null(col("osm_ref")))
 
     result = result.withColumn(
         "info",
