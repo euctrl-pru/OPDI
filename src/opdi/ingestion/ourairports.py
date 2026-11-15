@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import Dict, Optional
 
 import pandas as pd
-from pyspark.sql import SparkSession
+from pyspark.sql import Column, DataFrame, SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.types import (
     BooleanType,
     DoubleType,
@@ -152,6 +153,31 @@ SCHEMAS: Dict[str, StructType] = {
 }
 
 
+#: Text in the name of an OurAirports record that repeats another airport
+#: under a second code, such as CA-1291 "(Duplicate)YEG".
+DUPLICATE_MARK = "duplicate"
+
+
+def is_duplicate_airport(name: Column) -> Column:
+    """True where an OurAirports name marks the record as a duplicate.
+
+    The test ignores case. A record without a name is not a duplicate.
+    """
+    return F.coalesce(F.lower(name).contains(DUPLICATE_MARK), F.lit(False))
+
+
+def drop_duplicate_airports(airports: DataFrame) -> DataFrame:
+    """The airports without the records that repeat another airport.
+
+    Args:
+        airports: OurAirports airports, with ``name``.
+
+    Returns:
+        The same rows, less those whose name contains "Duplicate".
+    """
+    return airports.filter(~is_duplicate_airport(F.col("name")))
+
+
 class OurAirportsIngestion:
     """ETL pipeline for OurAirports reference data.
 
@@ -281,6 +307,10 @@ class OurAirportsIngestion:
         df = self.spark.createDataFrame(pdf)
         for field in schema:
             df = df.withColumn(field.name, df[field.name].try_cast(field.dataType))
+        if name == "airports" and getattr(
+            self.config.ingestion, "ourairports_drop_duplicates", False
+        ):
+            df = drop_duplicate_airports(df)
         row_count = df.count()
 
         self.storage.write_table(df, f"oa_{name}", mode="insert_overwrite")
