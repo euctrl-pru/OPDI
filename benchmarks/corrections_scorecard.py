@@ -3187,7 +3187,12 @@ def score(args) -> int:
             import events_gt
 
             events_gt.assert_utc_session(spark)
-            spark.conf.set("spark.sql.shuffle.partitions", "208" if scope == "day" else "104")
+            # More and smaller parts than the pipeline's 104: the pass over the
+            # reports with the events slotted in sorts every track, and with
+            # parts merged by Spark (69 on the sample) its longest task took
+            # 187 s of the 437 s the frames took.
+            spark.conf.set("spark.sql.shuffle.partitions", "416" if scope == "day" else "208")
+            spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "false")
             inp = score_inputs(spark, args.label, scope)
             fr = build_frames(spark, inp)
             print(f"  {time.monotonic() - t0:.0f} s: frames built", flush=True)
