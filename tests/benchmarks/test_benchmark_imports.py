@@ -31,6 +31,7 @@ MODULES = [
     "check_report_numbers",
     "clean_tracks",
     "compare_layout_sources",
+    "corrections_scorecard",
     "debounced_2plus_persist",
     "debounced_vs_recommended_merge",
     "decimation_end_to_end",
