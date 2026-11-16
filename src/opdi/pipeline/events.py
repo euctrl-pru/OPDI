@@ -2326,10 +2326,11 @@ class FlightEventProcessor:
             cached.append(frame)
             return frame
 
-        def add(frame: Optional[DataFrame]) -> None:
+        def add(frame: Optional[DataFrame]) -> Optional[DataFrame]:
+            """Join ``frame`` to the events; returns the frame as it was joined."""
             nonlocal df_events
             if frame is None:
-                return
+                return None
             if self.events.keep_each_family:
                 # Computed now and kept, so the plan of the joined events
                 # starts from the kept rows of each family instead of holding
@@ -2345,6 +2346,7 @@ class FlightEventProcessor:
                 if df_events is None
                 else df_events.unionByName(frame, allowMissingColumns=True)
             )
+            return frame
 
         if calc_horizontal:
             print(f"Calculating horizontal events (phase) for batch: {batch_id}")
@@ -2412,8 +2414,8 @@ class FlightEventProcessor:
                 # go-around may never touch a runway, so it needs only the
                 # destination airport.
                 if "ades_lat" in rwy_sv.columns:
-                    df_go_arounds = go_arounds(rwy_sv, self.events, self._goaround_runways())
-                    add(df_go_arounds)
+                    # The kept rows, which the holding family reads again.
+                    df_go_arounds = add(go_arounds(rwy_sv, self.events, self._goaround_runways()))
 
             if self.events.emit_block_events:
                 if self.events.block_times_on_ground_only:
