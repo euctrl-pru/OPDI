@@ -2157,6 +2157,15 @@ def go_arounds(
         .filter(F.col("_r") == 1)
         .drop("_r")
     )
+    if config.goaround_excludes_landings:
+        # An excursion longer than the limit is dropped below whatever its
+        # reports show, so its reports are not read: the window from the last
+        # descent before a landing to the take-off after a turnaround holds
+        # every report of the stay on the ground.
+        windows = windows.filter(
+            F.col("_to").cast("double") - F.col("_from").cast("double")
+            <= F.lit(float(config.goaround_max_excursion_seconds))
+        )
 
     inside = work.join(
         windows,
