@@ -1182,3 +1182,67 @@ def test_a_call_that_adds_families_does_not_add_a_removed_event_twice(spark, tmp
     )
     assert storage.calls == [(REJECTED_TABLE, "append", None)]
     assert [r["id"] for r in storage.written[REJECTED_TABLE].collect()] == ["b"]
+
+
+# ---------------------------------------------------------------------------
+# Work package 5: the measurements of every event; the circles around the
+# airports the flight list publishes
+# ---------------------------------------------------------------------------
+
+
+def test_every_event_has_both_measurements_and_none_is_empty(spark, stub_storage):
+    _RUN_CACHE.pop(repr(EventConfig()), None)
+    events = _run(spark, stub_storage, EventConfig())
+    measurements = stub_storage.written["opdi_measurements"]
+
+    assert measurements.filter(F.col("value").isNull()).count() == 0
+    kinds = measurements.groupBy("milestone_id").agg(F.collect_set("type").alias("kinds"))
+    joined = events.join(kinds, events["id"] == kinds["milestone_id"], "left")
+    missing = joined.filter(
+        F.col("kinds").isNull()
+        | ~F.array_contains("kinds", "Time Passed (s)")
+        | ~F.array_contains("kinds", "Distance flown (NM)")
+    )
+    # The fixture's first report has a position, so no event is before it.
+    assert missing.select("type").collect() == []
+    level_offs = events.filter(F.col("type").startswith("level-off")).count()
+    blocks = events.filter(F.col("type").isin("AOBT", "AIBT")).count()
+    assert level_offs + blocks > 0, "the fixture has none of the events that had no measurement"
+
+
+def test_the_circles_are_drawn_around_the_airport_the_runway_events_name(spark, stub_storage):
+    """Spot check xing-40nm#46 and xing-100nm#02: step 03 named an airport
+    that step 04b replaces from a runway event, and the circles were drawn
+    around the replaced one. Here step 03 says EHAM, the touchdown is at
+    EDDF (one of the flight's other candidates)."""
+    tables = dict(stub_storage._tables)
+    tables["opdi_flight_list"] = spark.createDataFrame(
+        [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EBBR", "EHAM", None, "EDDF")],
+        "id string, dof timestamp, adep string, ades string, adep_p string, ades_p string",
+    )
+    airports = tables["oa_airports"].unionByName(
+        spark.createDataFrame(
+            [("EHAM", 52.3086, 4.76389, -11.0)],
+            "ident string, latitude_deg double, longitude_deg double, elevation_ft double",
+        )
+    )
+    tables["oa_airports"] = airports
+    storage = _StubStorage(tables, tracks=stub_storage.tracks)
+
+    def rings(events):
+        config = OPDIConfig()
+        config.events = events
+        with tempfile.TemporaryDirectory() as log_dir:
+            proc = FlightEventProcessor(spark, config, log_dir=log_dir)
+            proc.storage = storage
+            proc._etl_flight_events_and_measures(storage.tracks, batch_id="b_", month=MONTH)
+        out = storage.written["opdi_flight_events"].filter(F.col("type").rlike("^xing-[0-9]+nm$"))
+        names = {json.loads(r.info)["apt_icao"] for r in out.collect()}
+        spark.catalog.clearCache()
+        return names
+
+    touchdown_named = rings(EventConfig())
+    step_03_named = rings(EventConfig(rings_around_flight_list_airports=False))
+
+    assert "EHAM" not in touchdown_named and "EDDF" in touchdown_named
+    assert "EHAM" in step_03_named

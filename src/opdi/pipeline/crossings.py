@@ -47,9 +47,11 @@ reported only one level when a single sample interval spanned two.
 
 from typing import TYPE_CHECKING, Optional, Sequence
 
-from pyspark.sql import DataFrame
+from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+
+from opdi.utils.geometry import haversine_nm
 
 if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
@@ -85,6 +87,9 @@ def threshold_crossings(
     all_occurrences: bool = True,
     over_missing_values: bool = True,
     max_bracket_seconds: Optional[float] = None,
+    max_implied_speed_kt: Optional[float] = None,
+    position_cols: Sequence[str] = ("lat", "lon"),
+    jump_allowance_nm: float = 0.0,
 ) -> DataFrame:
     """Detect every hysteresis-confirmed crossing of ``thresholds``.
 
@@ -135,6 +140,18 @@ def threshold_crossings(
         crossings returned can skip a number (1, 3, 4 when the second could
         not be placed): the number says which crossing of the threshold it
         is along the track. None keeps every crossing.
+    max_implied_speed_kt
+        With ``over_missing_values``, a crossing whose two reports imply a
+        ground speed above this many knots (great-circle distance between
+        their positions over the time between them) is not returned, like a
+        crossing over too long a gap: the position jumped. A crossing whose
+        reports lack a position is kept. None tests nothing.
+    jump_allowance_nm
+        NM by which the two positions may be further apart than
+        ``max_implied_speed_kt`` allows (position noise).
+    position_cols
+        The latitude and longitude columns, in degrees, that the speed test
+        reads. They must be among ``interpolate_cols``.
 
     Returns:
     -------
@@ -165,6 +182,9 @@ def threshold_crossings(
             interpolate=interpolate,
             all_occurrences=all_occurrences,
             max_bracket_seconds=max_bracket_seconds,
+            max_implied_speed_kt=max_implied_speed_kt,
+            position_cols=position_cols,
+            jump_allowance_nm=jump_allowance_nm,
         )
 
     ordered = _ordered(partition_cols, time_col)
@@ -292,6 +312,9 @@ def _crossings_over_missing_values(
     interpolate: bool,
     all_occurrences: bool,
     max_bracket_seconds: Optional[float],
+    max_implied_speed_kt: Optional[float] = None,
+    position_cols: Sequence[str] = ("lat", "lon"),
+    jump_allowance_nm: float = 0.0,
 ) -> DataFrame:
     """:func:`threshold_crossings` with reports without a value skipped.
 
@@ -332,6 +355,14 @@ def _crossings_over_missing_values(
     placeable = (
         F.lit(True) if max_bracket_seconds is None else gap <= F.lit(float(max_bracket_seconds))
     )
+    if max_implied_speed_kt is not None:
+        placeable = placeable & _speed_within(
+            position_cols,
+            interpolate_cols,
+            gap,
+            float(max_implied_speed_kt),
+            float(jump_allowance_nm),
+        )
 
     for th in thresholds:
         s = _slug(th)
@@ -419,6 +450,38 @@ def _crossings_over_missing_values(
     return out.filter(F.col(time_col).isNotNull()).drop("_confirmed_t")
 
 
+def _speed_within(
+    position_cols: Sequence[str],
+    interpolate_cols: Sequence[str],
+    gap: Column,
+    max_kt: float,
+    allowance_nm: float = 0.0,
+) -> Column:
+    """True unless the two reports of a crossing imply more than ``max_kt``.
+
+    The positions may be ``allowance_nm`` further apart than ``max_kt`` allows.
+
+    The two reports are the current one and the last earlier one with a
+    value (``_known_prev``, which carries the ``interpolate_cols``). True when
+    either has no position: nothing can be tested.
+    """
+    lat_c, lon_c = position_cols
+    if lat_c not in interpolate_cols or lon_c not in interpolate_cols:
+        raise ValueError(
+            f"the speed test reads {lat_c!r} and {lon_c!r}, which must be among "
+            f"interpolate_cols {tuple(interpolate_cols)}"
+        )
+    dist_nm = haversine_nm(
+        F.col(f"_known_prev.{lat_c}"),
+        F.col(f"_known_prev.{lon_c}"),
+        F.col(lat_c).cast("double"),
+        F.col(lon_c).cast("double"),
+    )
+    reach_nm = F.lit(max_kt) * F.greatest(gap, F.lit(0.0)) / F.lit(3600.0)
+    within = dist_nm <= reach_nm + F.lit(allowance_nm)
+    return F.coalesce(within, F.lit(True))
+
+
 def _empty_result(
     sdf: DataFrame,
     partition_cols: Sequence[str],
@@ -469,8 +532,24 @@ def flight_level_crossings(
         down_label="down",
         interpolate=config.crossing_interpolate,
         all_occurrences=config.crossing_all_occurrences,
+        max_implied_speed_kt=_speed_limit(config, interpolate_cols),
+        jump_allowance_nm=float(getattr(config, "position_jump_allowance_nm", 0.0)),
         **missing_value_options(config),
     )
+
+
+def _speed_limit(config: "EventConfig", interpolate_cols: Sequence[str]) -> Optional[float]:
+    """:attr:`EventConfig.crossing_max_implied_speed_kt`, when it can be tested.
+
+    None when it is unset, when the crossings are not placed over missing
+    values (the release v0.0.2 method), or when the positions are not carried.
+    """
+    limit = getattr(config, "crossing_max_implied_speed_kt", None)
+    if limit is None or not missing_value_options(config)["over_missing_values"]:
+        return None
+    if "lat" not in interpolate_cols or "lon" not in interpolate_cols:
+        return None
+    return float(limit)
 
 
 def missing_value_options(config: "EventConfig") -> dict:
@@ -514,5 +593,7 @@ def ring_crossings(
         down_label="inbound",
         interpolate=config.crossing_interpolate,
         all_occurrences=config.crossing_all_occurrences,
+        max_implied_speed_kt=_speed_limit(config, interpolate_cols),
+        jump_allowance_nm=float(getattr(config, "position_jump_allowance_nm", 0.0)),
         **missing_value_options(config),
     )

@@ -98,7 +98,10 @@ def test_position_is_interpolated_to_the_crossing_too(spark):
             {"t": 10, "baro_altitude": _m(11500), "lat": 53.0, "lon": 10.0},
         ],
     )
-    fl100 = [r for r in _crossings(sdf) if r.threshold == 100.0][0]
+    # The positions are 2 degrees apart in 5 s, far faster than an aircraft,
+    # so the speed limit is off: this checks the interpolation only.
+    config = EventConfig(crossing_max_implied_speed_kt=None)
+    fl100 = [r for r in _crossings(sdf, config=config) if r.threshold == 100.0][0]
 
     # 10000 ft is halfway between the bracketing samples, so the position is
     # halfway along the leg -- not the position of either sample.
@@ -321,3 +324,67 @@ def test_without_interpolation_the_setting_over_missing_values_changes_nothing(s
         return sorted((r.event_time, r.direction, r.crossing_seq) for r in out.collect())
 
     assert run(True) == run(False)
+
+
+# ---------------------------------------------------------------------------
+# A crossing placed between two positions too far apart for the time
+# ---------------------------------------------------------------------------
+
+
+def _alternating_aircraft(spark):
+    """Two aircraft under one placeholder address (icao24 000001, spot check
+    xing-fl70#26): reports alternate between one aircraft at 5,050 ft in
+    India and one at 8,000 ft in Kentucky, 5 s apart. Every pair of
+    consecutive reports straddles FL70, with positions 6,800 NM apart."""
+    india, kentucky = (27.50, 76.08), (36.82, -86.75)
+    samples = []
+    for i in range(8):
+        (lat, lon), alt = (india, 5050) if i % 2 == 0 else (kentucky, 8000)
+        samples.append({"t": i * 5, "lat": lat, "lon": lon, "baro_altitude": _m(alt)})
+    return make_track(spark, samples)
+
+
+def test_a_crossing_between_two_aircraft_far_apart_is_not_given(spark):
+    rows = [r for r in _crossings(_alternating_aircraft(spark)) if r.threshold == 70.0]
+
+    assert rows == []
+
+
+def test_without_the_speed_limit_every_alternation_is_a_crossing(spark):
+    config = EventConfig(crossing_max_implied_speed_kt=None)
+
+    rows = [
+        r for r in _crossings(_alternating_aircraft(spark), config=config) if r.threshold == 70.0
+    ]
+
+    assert len(rows) == 7
+    assert EventConfig.legacy().crossing_max_implied_speed_kt is None
+
+
+def test_a_crossing_after_a_long_oceanic_gap_at_cruise_speed_is_kept(spark):
+    """A descent seen again after 20 minutes without reports, 117 NM further
+    on (350 kt, as EPGD-EPWA in the spot checks): a real gap, still placed."""
+    samples = [
+        {"t": 0, "lat": 54.0, "lon": 18.0, "baro_altitude": _m(26000)},
+        {"t": 5, "lat": 54.0 - 0.49 / 60, "lon": 18.0, "baro_altitude": _m(25900)},
+        {"t": 1205, "lat": 54.0 - 117.0 / 60, "lon": 18.0, "baro_altitude": _m(23000)},
+        {"t": 1210, "lat": 54.0 - 117.5 / 60, "lon": 18.0, "baro_altitude": _m(22900)},
+    ]
+
+    rows = [r for r in _crossings(make_track(spark, samples)) if r.threshold == 245.0]
+
+    assert len(rows) == 1
+    assert rows[0].bracket_seconds == pytest.approx(1200.0)
+
+
+def test_a_crossing_with_a_report_without_position_is_not_tested(spark):
+    """Nothing to test: the speed is unknown, the crossing is kept."""
+    samples = [
+        {"t": 0, "lat": 50.0, "lon": 4.0, "baro_altitude": _m(9500)},
+        {"t": 5, "lat": None, "lon": None, "baro_altitude": _m(10500)},
+        {"t": 10, "lat": 50.0, "lon": 4.0, "baro_altitude": _m(11000)},
+    ]
+
+    rows = [r for r in _crossings(make_track(spark, samples)) if r.threshold == 100.0]
+
+    assert len(rows) == 1

@@ -85,6 +85,7 @@ from opdi.pipeline.detector_altitude import (
     received_altitude,
 )
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
+from opdi.pipeline.flight_list_milestones import correct_aerodromes
 from opdi.pipeline.flights import resolve_flight_id
 from opdi.pipeline.ground import block_events, block_times, movement_window
 from opdi.pipeline.holding import calculate_holding_events
@@ -265,7 +266,16 @@ def calculate_threshold_crossing_events(
         "baro_altitude_c",
         "cumulative_distance_nm",
         "cumulative_time_s",
+        *[c for c in (LAT_BETWEEN_POSITIONS, LON_BETWEEN_POSITIONS) if c in sdf_input.columns],
     )
+    if config.crossing_value_max_gap_seconds is not None and (LAT_BETWEEN_POSITIONS in src.columns):
+        # A report with an altitude but no position takes the position
+        # interpolated between the reports with one around it (at most
+        # ``crossing_value_max_gap_seconds`` away), so the crossing placed
+        # between two reports with an altitude gets a position.
+        src = src.withColumn("lat", F.coalesce(col("lat"), col(LAT_BETWEEN_POSITIONS))).withColumn(
+            "lon", F.coalesce(col("lon"), col(LON_BETWEEN_POSITIONS))
+        )
     # The distance flown and time passed are interpolated to the crossing as
     # well, so the measurements match their event.
     crossings = flight_level_crossings(
@@ -700,6 +710,7 @@ def calculate_ring_crossing_events(
     month: date,
     storage: "StorageManager",
     config: Optional[EventConfig] = None,
+    flight_airports: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
     """Crossings of the distance circles around the flight's own airports.
 
@@ -710,6 +721,12 @@ def calculate_ring_crossing_events(
     compared with at most two airports.
     See https://www.opdi.aero/content/methods/distance-rings.html.
 
+    ``flight_airports`` (``id``, ``adep``, ``ades``) gives the airports to
+    use; without it they are read from the flight list of step 03. With
+    :attr:`~opdi.config.EventConfig.rings_around_flight_list_airports`,
+    :class:`FlightEventProcessor` passes the airports after the runway-event
+    correction of step 04b.
+
     Returns:
         The crossing events, or None when no radius is configured.
     """
@@ -717,17 +734,16 @@ def calculate_ring_crossing_events(
     radii = list(config.ring_radii_nm)
     if not radii:
         return None
-    if not (storage.table_exists("opdi_flight_list") and storage.table_exists("oa_airports")):
+    if not storage.table_exists("oa_airports"):
         return None
-
-    start_ts, end_ts = get_start_end_of_month(month)
-    fl = (
-        storage.read_table("opdi_flight_list")
-        .filter(
+    if flight_airports is None:
+        if not storage.table_exists("opdi_flight_list"):
+            return None
+        start_ts, end_ts = get_start_end_of_month(month)
+        flight_airports = storage.read_table("opdi_flight_list").filter(
             (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
         )
-        .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
-    )
+    fl = flight_airports.select(col("id").alias("_fl_id"), col("adep"), col("ades"))
     ends = (
         fl.select("_fl_id", col("adep").alias("apt_ident"))
         .unionByName(fl.select("_fl_id", col("ades").alias("apt_ident")))
@@ -766,11 +782,22 @@ def calculate_ring_crossing_events(
         .withColumn("cumulative_distance_nm", col("cumulative_distance_nm").cast("double"))
         .withColumn("cumulative_time_s", col("cumulative_time_s").cast("double"))
     )
+    ring_partition = ["track_id", "apt_ident", "apt_lat", "apt_lon"]
+    if config.crossing_value_max_gap_seconds is not None:
+        # A report with a position but no altitude takes its own last known
+        # altitude, at most ``crossing_value_max_gap_seconds`` old. The window
+        # is the one the crossing detector orders by, so it adds no sort.
+        work = _with_last_known(
+            work,
+            "flight_level",
+            ring_partition,
+            float(config.crossing_value_max_gap_seconds),
+        )
 
     crossings = ring_crossings(
         work,
         config,
-        partition_cols=["track_id", "apt_ident", "apt_lat", "apt_lon"],
+        partition_cols=ring_partition,
         interpolate_cols=(
             "lat",
             "lon",
@@ -810,6 +837,24 @@ def calculate_ring_crossing_events(
             )
         ).alias("info"),
     )
+
+
+def _with_last_known(
+    df: DataFrame, value_col: str, partition_cols: List[str], max_age_s: float
+) -> DataFrame:
+    """Fill ``value_col`` where it is NULL with its last known value, at most ``max_age_s`` old."""
+    ordered = Window.partitionBy(*partition_cols).orderBy("event_time")
+    running = ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    t = col("event_time").cast("double")
+    known = F.last(
+        when(col(value_col).isNotNull(), struct(t.alias("t"), col(value_col).alias("v"))),
+        ignorenulls=True,
+    ).over(running)
+    df = df.withColumn("_last_known", known)
+    fresh = (t - col("_last_known.t")) <= lit(max_age_s)
+    return df.withColumn(
+        value_col, F.coalesce(col(value_col), when(fresh, col("_last_known.v")))
+    ).drop("_last_known")
 
 
 def calculate_horizontal_segment_events(
@@ -1431,6 +1476,86 @@ def add_time_measure(sdf_input: DataFrame) -> DataFrame:
     return sdf_input.drop("min_event_time")
 
 
+def measures_from_event_time(
+    df_events: DataFrame,
+    config: EventConfig,
+    first_positions: Optional[DataFrame] = None,
+) -> DataFrame:
+    """Give every event its distance flown and time passed from its own time.
+
+    Runs once on all events of the batch, after the families are joined.
+
+    * With :attr:`~opdi.config.EventConfig.time_passed_from_first_seen`, the
+      time passed (``cumulative_time_s``, seconds) of every event is its time
+      minus the time of the ``first_seen`` event of its track. A track without
+      a ``first_seen`` event in the batch keeps the value its family gave.
+    * With :attr:`~opdi.config.EventConfig.measure_every_event`, an event
+      without a distance (``cumulative_distance_nm``) gets it interpolated in
+      time between the nearest events of its track before and after it that
+      have one, or the value of the last one before it when none follows; an
+      event before the first one stays empty, as the distance is unknown
+      before the first known position. An event without a time passed gets it
+      from the ``first_seen`` event in the same way.
+
+    ``first_positions`` (``track_id``, ``first_position_time``) gives the
+    time of each track's first report with a position, where the distance
+    flown is 0 by definition; it serves as one more known value, so an event
+    between that report and the first event with a distance gets one.
+
+    Events at the same time are treated alike whatever their order, so the
+    result does not depend on how Spark split the data. Costs one shuffle of
+    the events (not of the reports) and two sorts of them.
+    """
+    t = col("event_time").cast("double")
+    track = Window.partitionBy("track_id")
+    first_seen_t = f_min(when(col("type") == "first_seen", t)).over(track)
+    since_first_seen = t - first_seen_t
+    time_col = col("cumulative_time_s").cast("double")
+    if config.time_passed_from_first_seen:
+        time_col = F.coalesce(since_first_seen, time_col)
+    elif config.measure_every_event:
+        time_col = F.coalesce(time_col, since_first_seen)
+    df = df_events.withColumn("cumulative_time_s", time_col)
+    if not config.measure_every_event:
+        return df
+
+    # Range frames take every event at the same time together; the maximum
+    # (and minimum) of (time, distance) is then the same whatever their order.
+    ascending = (
+        Window.partitionBy("track_id")
+        .orderBy(t)
+        .rangeBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    descending = (
+        Window.partitionBy("track_id")
+        .orderBy(t.desc())
+        .rangeBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    d = col("cumulative_distance_nm").cast("double")
+    known = when(d.isNotNull() & t.isNotNull(), struct(t.alias("t"), d.alias("d")))
+    df = df.withColumn("_d_before", F.max(known).over(ascending))
+    df = df.withColumn("_d_after", F.min(known).over(descending))
+    if first_positions is not None:
+        starts = first_positions.select(
+            col("track_id").alias("_fp_track"),
+            col("first_position_time").cast("double").alias("_fp_t"),
+        )
+        df = df.join(starts, df["track_id"] == starts["_fp_track"], "left").drop("_fp_track")
+        start = when(col("_fp_t") <= t, struct(col("_fp_t").alias("t"), lit(0.0).alias("d")))
+        df = df.withColumn(
+            "_d_before",
+            when(col("_d_before").isNull(), start).otherwise(col("_d_before")),
+        ).drop("_fp_t")
+    b, a = col("_d_before"), col("_d_after")
+    interpolated = (
+        when(a.isNull() | (a["t"] <= b["t"]), b["d"])
+        # Between the two values either side, so it keeps their order.
+        .otherwise(b["d"] + (t - b["t"]) / (a["t"] - b["t"]) * (a["d"] - b["d"]))
+    )
+    df = df.withColumn("cumulative_distance_nm", F.coalesce(d, interpolated))
+    return df.drop("_d_before", "_d_after")
+
+
 def distance_version(config: EventConfig) -> str:
     """The ``version`` of the distance measurement under ``config``."""
     if config.distance_from_last_known_position:
@@ -1438,7 +1563,24 @@ def distance_version(config: EventConfig) -> str:
     return LEGACY_DISTANCE_VERSION
 
 
-def add_distance_measure(df: DataFrame, last_known_position: bool = True) -> DataFrame:
+#: Columns :func:`add_distance_measure` adds with ``position_fill_seconds``:
+#: the position of a report without one, interpolated in time between the
+#: nearest reports with a position before and after it. Read only by the
+#: flight-level crossings, to place their position; the ``lat``/``lon`` of the
+#: report stay empty, so no other detector sees an interpolated position.
+LAT_BETWEEN_POSITIONS = "lat_between_positions"
+LON_BETWEEN_POSITIONS = "lon_between_positions"
+
+
+def add_distance_measure(
+    df: DataFrame,
+    last_known_position: bool = True,
+    *,
+    max_implied_speed_kt: Optional[float] = None,
+    between_positions: bool = False,
+    position_fill_seconds: Optional[float] = None,
+    jump_allowance_nm: float = 0.0,
+) -> DataFrame:
     """Add the distance from the previous report and the distance flown, in NM.
 
     Great-circle (haversine) distances. With ``last_known_position`` (the
@@ -1449,9 +1591,35 @@ def add_distance_measure(df: DataFrame, last_known_position: bool = True) -> Dat
     from the previous row, so a missing position loses the distance on both
     sides of it.
 
+    The keyword arguments apply with ``last_known_position`` only:
+
+    * ``max_implied_speed_kt``: a step whose ground speed (its distance over
+      the time since the last known position) is higher adds nothing; the
+      next step is measured from the new position
+      (:attr:`~opdi.config.EventConfig.distance_max_implied_speed_kt`); the
+      step may be ``jump_allowance_nm`` longer than that speed allows.
+    * ``between_positions``: a report without a position gets the distance
+      interpolated in time between the last report with a position before it
+      and the next one after it, when both are in the same piece of track
+      (the ``piece`` column of :func:`opdi.pipeline.holes.add_piece`, when
+      present); before the first position the distance is NULL
+      (:attr:`~opdi.config.EventConfig.distance_between_positions`).
+    * ``position_fill_seconds``: a report without a position gets
+      :data:`LAT_BETWEEN_POSITIONS` and :data:`LON_BETWEEN_POSITIONS`,
+      interpolated in time between the nearest reports with a position, when
+      both are at most this many seconds away
+      (:attr:`~opdi.config.EventConfig.crossing_value_max_gap_seconds`).
+
+    The last two need the next report with a position, which costs one more
+    sort of the reports of each track, in reverse time order (no shuffle).
+
     Args:
         df: Reports with ``lat``, ``lon``, ``track_id`` and ``event_time``.
         last_known_position: Measure from the last known position.
+        max_implied_speed_kt: See above; None adds every step.
+        between_positions: See above.
+        position_fill_seconds: See above; None adds no position.
+        jump_allowance_nm: See above.
 
     Returns:
         The reports with ``segment_distance_nm`` and
@@ -1459,7 +1627,16 @@ def add_distance_measure(df: DataFrame, last_known_position: bool = True) -> Dat
     """
     window_lag = Window.partitionBy("track_id").orderBy("event_time")
     if last_known_position:
-        return _distance_from_last_known_position(df, window_lag)
+        if max_implied_speed_kt is None and not between_positions and not position_fill_seconds:
+            return _distance_from_last_known_position(df, window_lag)
+        return _distance_between_positions(
+            df,
+            window_lag,
+            max_implied_speed_kt=max_implied_speed_kt,
+            between_positions=between_positions,
+            position_fill_seconds=position_fill_seconds,
+            jump_allowance_nm=jump_allowance_nm,
+        )
     window_cumsum = (
         Window.partitionBy("track_id")
         .orderBy("event_time")
@@ -1514,6 +1691,105 @@ def _distance_from_last_known_position(df: DataFrame, ordered) -> DataFrame:
     df = df.withColumn("segment_distance_nm", F.coalesce(distance_km / 1.852, lit(0.0)))
     df = df.withColumn("cumulative_distance_nm", f_sum("segment_distance_nm").over(running))
     return df.drop("_prev_pos")
+
+
+def _distance_between_positions(
+    df: DataFrame,
+    ordered,
+    *,
+    max_implied_speed_kt: Optional[float],
+    between_positions: bool,
+    position_fill_seconds: Optional[float],
+    jump_allowance_nm: float = 0.0,
+) -> DataFrame:
+    """:func:`add_distance_measure` with its keyword arguments; see there."""
+    t = col("event_time").cast("double")
+    has_pos = col("lat").isNotNull() & col("lon").isNotNull()
+    piece = col(PIECE) if PIECE in df.columns else lit(0)
+    known = when(
+        has_pos,
+        struct(
+            t.alias("t"),
+            col("lat").alias("lat"),
+            col("lon").alias("lon"),
+            piece.alias("piece"),
+        ),
+    )
+    before = ordered.rowsBetween(Window.unboundedPreceding, -1)
+    running = ordered.rowsBetween(Window.unboundedPreceding, 0)
+    df = df.withColumn("_prev_pos", F.last(known, ignorenulls=True).over(before))
+    prev = col("_prev_pos")
+
+    # The same formula as the other two measures.
+    lat, lon = F.radians(col("lat")), F.radians(col("lon"))
+    prev_lat = F.radians(prev["lat"])
+    prev_lon = F.radians(prev["lon"])
+    a = (
+        F.sin((lat - prev_lat) / 2) ** 2
+        + F.cos(prev_lat) * F.cos(lat) * F.sin((lon - prev_lon) / 2) ** 2
+    )
+    step_nm = 6371 * 2 * F.atan2(F.sqrt(a), F.sqrt(1 - a)) / 1.852
+    if max_implied_speed_kt is not None:
+        dt_s = t - prev["t"]
+        reach_nm = lit(float(max_implied_speed_kt)) * F.greatest(dt_s, lit(0.0)) / lit(3600.0)
+        plausible = step_nm <= reach_nm + lit(float(jump_allowance_nm))
+        # A jump adds nothing; the next step starts from the new position.
+        step_nm = when(plausible, step_nm).when(step_nm.isNotNull(), lit(0.0))
+    if between_positions:
+        # NULL before the first position, so the sum stays NULL until then.
+        segment = when(has_pos | prev.isNotNull(), F.coalesce(step_nm, lit(0.0)))
+    else:
+        segment = F.coalesce(step_nm, lit(0.0))
+    df = df.withColumn("segment_distance_nm", segment)
+    df = df.withColumn("cumulative_distance_nm", f_sum("segment_distance_nm").over(running))
+    if not between_positions and not position_fill_seconds:
+        return df.drop("_prev_pos")
+
+    # The next report with a position, at or after this one: the rows after
+    # this one are the rows before it in reverse time order. A frame running
+    # to the end of the track would be read again for every row.
+    reverse = (
+        Window.partitionBy("track_id")
+        .orderBy(col("event_time").desc())
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    nxt_known = when(
+        has_pos,
+        struct(
+            t.alias("t"),
+            col("lat").alias("lat"),
+            col("lon").alias("lon"),
+            piece.alias("piece"),
+            col("cumulative_distance_nm").alias("d"),
+        ),
+    )
+    df = df.withColumn("_next_pos", F.last(nxt_known, ignorenulls=True).over(reverse))
+    nxt = col("_next_pos")
+    between = ~has_pos & prev.isNotNull() & nxt.isNotNull() & (nxt["t"] > prev["t"])
+    frac = (t - prev["t"]) / (nxt["t"] - prev["t"])
+    if between_positions:
+        same_piece = prev["piece"] == nxt["piece"]
+        df = df.withColumn(
+            "cumulative_distance_nm",
+            when(
+                between & same_piece,
+                col("cumulative_distance_nm") + frac * (nxt["d"] - col("cumulative_distance_nm")),
+            ).otherwise(col("cumulative_distance_nm")),
+        )
+    if position_fill_seconds:
+        near = (
+            between
+            & (t - prev["t"] <= lit(float(position_fill_seconds)))
+            & (nxt["t"] - t <= lit(float(position_fill_seconds)))
+        )
+        # Longitude along the shorter way round, so a pair either side of
+        # the 180th meridian is not interpolated across the whole globe.
+        dlon = F.pmod(nxt["lon"] - prev["lon"] + lit(540.0), lit(360.0)) - lit(180.0)
+        lon_i = F.pmod(prev["lon"] + frac * dlon + lit(540.0), lit(360.0)) - lit(180.0)
+        df = df.withColumn(
+            LAT_BETWEEN_POSITIONS, when(near, prev["lat"] + frac * (nxt["lat"] - prev["lat"]))
+        ).withColumn(LON_BETWEEN_POSITIONS, when(near, lon_i))
+    return df.drop("_prev_pos", "_next_pos")
 
 
 # ======================================================================
@@ -1688,6 +1964,45 @@ class FlightEventProcessor:
             return None
         return runway_thresholds(self.storage)
 
+    def _rings_around_flight_list_airports(
+        self, sdf_input: DataFrame, df_events: DataFrame, month: date
+    ) -> Optional[DataFrame]:
+        """The distance circle crossings around the airports the flight list publishes.
+
+        Step 04b replaces an airport of the flight list where a runway event
+        names another (:func:`~opdi.pipeline.flight_list_milestones.correct_aerodromes`).
+        The same function is applied here to the flight list of step 03 and
+        to the events of this batch, in the columns of the published events
+        table, as step 04b reads them; the circles are then drawn around the
+        airports it gives. Running step 04 again after step 04b reads the
+        corrected list, which the function leaves as it is, so the circles do
+        not change.
+        """
+        if not self.storage.table_exists("opdi_flight_list"):
+            return None
+        start_ts, end_ts = get_start_end_of_month(month)
+        flight_list = (
+            self.storage.read_table("opdi_flight_list")
+            .filter(
+                (col("dof") >= to_timestamp(lit(start_ts)))
+                & (col("dof") < to_timestamp(lit(end_ts)))
+            )
+            .dropDuplicates(["id"])
+        )
+        published = df_events.select(
+            col("track_id").alias("flight_id"),
+            col("type"),
+            col("event_time"),
+            col("lon").alias("longitude"),
+            col("lat").alias("latitude"),
+            col("altitude_ft").alias("altitude"),
+            col("info"),
+        )
+        airports = correct_aerodromes(flight_list, published).select("id", "adep", "ades")
+        return calculate_ring_crossing_events(
+            sdf_input, month, self.storage, self.events, flight_airports=airports
+        )
+
     def _runway_traversal_family(self, sv: DataFrame, month: date) -> Optional[DataFrame]:
         """The runway milestones derived from runway passages.
 
@@ -1759,12 +2074,23 @@ class FlightEventProcessor:
         every block time), and the removed events of the call are added to
         the day's removed events.
         """
-        sdf_input = add_distance_measure(sdf_input, self.events.distance_from_last_known_position)
-        sdf_input = add_time_measure(sdf_input)
         # The piece of its track each report belongs to (0 for a track without
         # holes), so that no detector pairs or interpolates reports across a
-        # hole.
+        # hole. First, because the distance flown is interpolated per piece.
         sdf_input = add_piece(sdf_input, self.events.track_hole_seconds)
+        ev = self.events
+        sdf_input = add_distance_measure(
+            sdf_input,
+            ev.distance_from_last_known_position,
+            # Work package 5: the distance flown and the crossing positions.
+            max_implied_speed_kt=ev.distance_max_implied_speed_kt,
+            between_positions=ev.distance_between_positions,
+            position_fill_seconds=ev.crossing_value_max_gap_seconds,
+            jump_allowance_nm=ev.position_jump_allowance_nm,
+        )
+        # Last, in time order, so the frame kept below is in the order most
+        # detectors read it in.
+        sdf_input = add_time_measure(sdf_input)
         sdf_input.cache()
 
         # One airport join for the whole step; see _with_aerodrome_geometry.
@@ -1885,7 +2211,10 @@ class FlightEventProcessor:
                     )
                 )
 
-            add(calculate_ring_crossing_events(sdf_input, month, self.storage, self.events))
+            # With rings_around_flight_list_airports the circles are computed
+            # below, once the runway events are known.
+            if not self.events.rings_around_flight_list_airports:
+                add(calculate_ring_crossing_events(sdf_input, month, self.storage, self.events))
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
@@ -2014,6 +2343,36 @@ class FlightEventProcessor:
             )
             df_events, df_rejected = split_labelled(labelled)
 
+        # Work package 5: the distance circles around the airports the flight
+        # list publishes, and both measurements of every event.
+        finished = False
+        if calc_vertical and self.events.rings_around_flight_list_airports:
+            print(f"Calculating distance circle crossings for batch: {batch_id}")
+            rings = self._rings_around_flight_list_airports(sdf_input, df_events, month)
+            if rings is not None:
+                rings = rings.withColumn("source", lit("OSN")).withColumn(
+                    "version", lit(self.events.events_version)
+                )
+                df_events = df_events.unionByName(rings, allowMissingColumns=True)
+                finished = True
+        if self.events.measure_every_event or self.events.time_passed_from_first_seen:
+            first_positions = None
+            if self.events.distance_between_positions:
+                # Where the distance flown is 0: one more value to interpolate
+                # from. A scan of the kept reports, grouped by track as they
+                # are already split.
+                first_positions = sdf_input.groupBy("track_id").agg(
+                    f_min(
+                        when(col("lat").isNotNull() & col("lon").isNotNull(), col("event_time"))
+                    ).alias("first_position_time")
+                )
+            df_events = measures_from_event_time(df_events, self.events, first_positions)
+            finished = True
+        if finished:
+            # Read by the writes of the events and of the measurements.
+            df_events = df_events.cache()
+            cached.append(df_events)
+
         event_columns = [
             col("id_tmp"),
             col("track_id"),
@@ -2135,6 +2494,9 @@ class FlightEventProcessor:
         )
 
         df_measurements = df_dist.unionByName(df_time)
+        if self.events.measure_every_event:
+            # A measurement without a value says nothing; it is not written.
+            df_measurements = df_measurements.filter(col("value").isNotNull())
         extra = extra_measurement_rows(df_events)
         if extra is not None:
             df_measurements = df_measurements.unionByName(extra)
