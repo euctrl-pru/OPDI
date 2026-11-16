@@ -821,11 +821,6 @@ def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft):
     next_ev = F.first(ev_t, ignorenulls=True).over(
         ordered.rowsBetween(Window.currentRow, Window.unboundedFollowing)
     )
-    near = (
-        evidence
-        | F.coalesce(t - prev_ev <= F.lit(GROUND_NEAR_SECONDS), F.lit(False))
-        | F.coalesce(next_ev - t <= F.lit(GROUND_NEAR_SECONDS), F.lit(False))
-    )
     # A report descending or climbing fast is not on the plateau (the flare
     # before a touchdown), unless it is the lowest there is.
     steady = F.coalesce(vr <= F.lit(GROUND_PLATEAU_MAX_FTMIN), F.lit(True))
@@ -843,20 +838,36 @@ def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft):
     # to a report on the ground (the last before a touchdown, the first of the
     # take-off roll), not from the lowest: at rotation the altitude often dips
     # by 25 to 50 ft for a report or two.
+    # Each window result is kept as a column before the next window reads it.
+    work = work.withColumn("_g_prev", prev_ev).withColumn("_g_next", next_ev)
+    has_alt = (
+        evidence
+        | F.coalesce(t - F.col("_g_prev") <= F.lit(GROUND_NEAR_SECONDS), F.lit(False))
+        | F.coalesce(F.col("_g_next") - t <= F.lit(GROUND_NEAR_SECONDS), F.lit(False))
+    ) & alt_ft.isNotNull()
     gap = F.least(
-        F.coalesce(t - prev_ev, F.lit(float("inf"))), F.coalesce(next_ev - t, F.lit(float("inf")))
+        F.coalesce(t - F.col("_g_prev"), F.lit(1.0e9)),
+        F.coalesce(F.col("_g_next") - t, F.lit(1.0e9)),
     )
-    has_alt = near & alt_ft.isNotNull()
-    nearest = F.min_by(F.when(has_alt, alt_ft), F.when(has_alt, gap)).over(by_apt)
+    work = work.withColumn("_g_has", has_alt).withColumn(
+        "_g_near",
+        F.min(F.when(F.col("_g_has"), F.struct(gap.alias("gap"), alt_ft.alias("alt")))).over(
+            by_apt
+        )["alt"],
+    )
     on_step = (
-        has_alt
-        & (F.abs(alt_ft - nearest) <= F.lit(GROUND_PLATEAU_FT))
-        & (steady | (alt_ft == nearest))
+        F.col("_g_has")
+        & (F.abs(alt_ft - F.col("_g_near")) <= F.lit(GROUND_PLATEAU_FT))
+        & (steady | (alt_ft == F.col("_g_near")))
     )
-    top = F.max(F.when(on_step, alt_ft)).over(by_apt)
-    nearby = F.when(F.abs(top - elevation_ft) <= F.lit(GROUND_MAX_OFFSET_FT), top)
+    work = work.withColumn("_g_top", F.max(F.when(on_step, alt_ft)).over(by_apt))
+    nearby = F.when(
+        F.abs(F.col("_g_top") - elevation_ft) <= F.lit(GROUND_MAX_OFFSET_FT), F.col("_g_top")
+    )
+    work = work.withColumn("_g_direct", direct)
+    direct = F.col("_g_direct")
     work = work.withColumn("_g_ref", F.coalesce(direct, nearby))
-    return work
+    return work.drop("_g_prev", "_g_next", "_g_has", "_g_near", "_g_top", "_g_direct")
 
 
 def _corrected_traversals(
