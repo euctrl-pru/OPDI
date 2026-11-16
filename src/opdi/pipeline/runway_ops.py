@@ -1765,12 +1765,23 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
 
     ground_start = config.runway_line_up_needs_ground_report
     on_rwy_only = config.runway_events_on_runway_reports and "rwy_entry_time" in traversals.columns
+    corrected = _traversal_corrections_on(config) or (
+        config.runway_roll_speed_from_positions
+        or ground_start
+        or config.runway_threshold_crossing_last_only
+    )
+    if corrected:
+        # Kept for the step: about ten readings below take these two frames,
+        # and computing them again for each would read the reports again.
+        traversals = traversals.cache()
     samples = _traversal_samples(
         sv,
         traversals,
         lead_seconds=ARRIVAL_LEAD_SECONDS,
         departure_lead_seconds=DEPARTURE_LEAD_SECONDS if ground_start else 0.0,
     )
+    if corrected:
+        samples = samples.cache()
     bounded = samples.filter(F.col("_in_polygon"))
 
     dep = bounded.filter(F.col("traversal_class") == "departure")

@@ -189,7 +189,7 @@ def detect_runway_movements(
         & F.when(F.col("role") == "departure", climbing).otherwise(descending)
     )
     if config.runway_window_times_checked:
-        all_reports = work.withColumn("_qualifies", F.coalesce(qualifies, F.lit(False)))
+        return _checked_movements(work, qualifies, thresholds, gs_kt, dist_nm, config)
     work = work.filter(qualifies)
 
     # traffic takes the median track of the surviving samples. The median, not
@@ -246,10 +246,7 @@ def detect_runway_movements(
         F.col("bearing_error").asc(),
         F.col("rwy_ident").asc(),
     )
-    chosen = cand.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1).drop("_r")
-    if not config.runway_window_times_checked:
-        return chosen
-    return _checked_times(all_reports, chosen, height_ft, gs_kt, dist_nm, config)
+    return cand.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1).drop("_r")
 
 
 #: Speed, in knots, below which a report near the airport shows the aircraft
@@ -265,29 +262,31 @@ WINDOW_TRACK_END_SECONDS = 120.0
 WINDOW_GROUND_MAX_OFFSET_FT = 1000.0
 
 
-def _checked_times(work, chosen, height_ft, gs_kt, dist_nm, config) -> DataFrame:
-    """The times of :func:`detect_runway_movements`, checked.
+def _checked_movements(work, qualifies, thresholds, gs_kt, dist_nm, config) -> DataFrame:
+    """:func:`detect_runway_movements` with the times checked.
 
     See :attr:`~opdi.config.EventConfig.runway_window_times_checked`.
 
-    ``work`` is the reports joined to the flight's two airports, before any
-    filter; ``chosen`` the runway named per ``(track_id, role)``. Of the
-    reports that named the runway, only those at most
-    ``runway_window_max_height_ft`` above the ground and at most
-    ``runway_window_max_cross_track_nm`` from the chosen runway's extended
-    centre line give the time (the first for a take-off, the last for a
-    landing). The ground is the median altitude of the track's reports within
-    ``runway_max_dist_nm`` of the airport that are flagged on the ground or
-    slower than :data:`WINDOW_GROUND_ALTITUDE_MAX_KT`, else the elevation. A
-    landing time needs a report on the ground (flagged, or slower than
-    :data:`WINDOW_GROUND_MAX_KT`) after it, unless the track ends within
-    :data:`WINDOW_TRACK_END_SECONDS` (``last_seen`` of the flight list).
+    One pass over the reports within ``runway_max_dist_nm`` of the airport
+    gives both the runway (from the reports that qualify, as without the
+    check) and the track's ground: the median altitude of its reports that
+    are flagged on the ground or slower than
+    :data:`WINDOW_GROUND_ALTITUDE_MAX_KT`, and the time of its last report on
+    the ground (flagged, or slower than :data:`WINDOW_GROUND_MAX_KT`). The
+    qualifying reports are kept in a list, so they are not read twice.
+
+    Of the qualifying reports, only those at most
+    ``runway_window_max_height_ft`` above the ground (else the elevation) and
+    at most ``runway_window_max_cross_track_nm`` from the chosen runway's
+    extended centre line give the time (the first for a take-off, the last
+    for a landing). A landing time needs a report on the ground after it,
+    unless the track ends within :data:`WINDOW_TRACK_END_SECONDS`
+    (``last_seen`` of the flight list).
 
     Adds, for the report the time comes from: ``at_lat``, ``at_lon``,
     ``at_altitude_ft``, ``at_cum_nm``, ``at_cum_s``, and ``at_track_edge``
     (it is the track's first report for a take-off, its last for a landing).
     """
-    keys = ["track_id", "apt_ident", "role"]
     for name, dtype in (
         ("on_ground", "boolean"),
         ("cumulative_distance_nm", "double"),
@@ -298,34 +297,69 @@ def _checked_times(work, chosen, height_ft, gs_kt, dist_nm, config) -> DataFrame
         if name not in work.columns:
             work = work.withColumn(name, F.lit(None).cast(dtype))
     flagged = F.coalesce(F.col("on_ground"), F.lit(False))
-    near = work.filter(dist_nm < F.lit(config.runway_max_dist_nm))
     on_ground = flagged | F.coalesce(gs_kt < F.lit(WINDOW_GROUND_MAX_KT), F.lit(False))
     alt_ground = flagged | F.coalesce(gs_kt < F.lit(WINDOW_GROUND_ALTITUDE_MAX_KT), F.lit(False))
-    ground = (
-        near.withColumn(
-            "_g_alt_ft",
-            F.when(alt_ground, F.col("baro_altitude_c") * F.lit(FT_PER_M)),
-        )
-        .filter(on_ground)
-        .groupBy(*keys)
-        .agg(
-            F.expr("percentile_approx(_g_alt_ft, 0.5)").alias("_g_alt_ft"),
-            F.max("event_time").alias("_g_last"),
-        )
+    alt_ft = F.col("baro_altitude_c") * F.lit(FT_PER_M)
+    near = work.filter(dist_nm < F.lit(config.runway_max_dist_nm)).withColumn(
+        "_q", F.coalesce(qualifies, F.lit(False))
     )
-    rwy = chosen.select(
-        *keys,
-        F.col("thr_lat").alias("_c_lat"),
-        F.col("thr_lon").alias("_c_lon"),
-        F.col("rwy_bearing").alias("_c_brg"),
+    q = F.col("_q")
+    agg = near.groupBy("track_id", "apt_ident", "role", "apt_lat", "apt_lon").agg(
+        F.percentile_approx(F.when(q, F.col("heading")), 0.5).alias("median_track"),
+        F.percentile_approx(F.when(q, F.col("lat")), 0.5).alias("median_lat"),
+        F.percentile_approx(F.when(q, F.col("lon")), 0.5).alias("median_lon"),
+        F.min(F.when(q, F.col("event_time"))).alias("first_time"),
+        F.max(F.when(q, F.col("event_time"))).alias("last_time"),
+        F.count(F.when(q, F.lit(1))).alias("n_samples"),
+        F.percentile_approx(F.when(alt_ground, alt_ft), 0.5).alias("_g_alt_ft"),
+        F.max(F.when(on_ground, F.col("event_time"))).alias("_g_last"),
+        F.first("apt_elevation_ft", ignorenulls=True).alias("_elev_ft"),
+        F.first("first_seen", ignorenulls=True).alias("_first_seen"),
+        F.first("last_seen", ignorenulls=True).alias("_last_seen"),
+        F.collect_list(
+            F.when(
+                q,
+                F.struct(
+                    F.col("event_time").alias("t"),
+                    F.col("lat").alias("lat"),
+                    F.col("lon").alias("lon"),
+                    alt_ft.alias("alt_ft"),
+                    F.col("cumulative_distance_nm").cast("double").alias("cum_nm"),
+                    F.col("cumulative_time_s").cast("double").alias("cum_s"),
+                ),
+            )
+        ).alias("_reports"),
     )
-    qual = (
-        work.filter(F.col("_qualifies"))
-        .withColumn("_alt_ft", F.col("baro_altitude_c") * F.lit(FT_PER_M))
-        .join(F.broadcast(rwy), keys, "inner")
-        .join(ground, keys, "left")
+    agg = agg.filter((F.col("n_samples") >= F.lit(4)) & F.col("median_track").isNotNull())
+    cand = agg.join(F.broadcast(thresholds), on="apt_ident", how="inner")
+    cand = cand.withColumn(
+        "bearing_error", angle_between(F.col("median_track"), F.col("rwy_bearing"))
+    ).filter(F.col("bearing_error") <= F.lit(config.runway_max_bearing_deg))
+    cand = cand.withColumn(
+        "cross_track_nm",
+        cross_track_nm(
+            F.col("median_lat"),
+            F.col("median_lon"),
+            F.col("thr_lat"),
+            F.col("thr_lon"),
+            F.col("rwy_bearing"),
+        ),
     )
-    elevation = F.coalesce(F.col("apt_elevation_ft"), F.lit(0.0))
+    from pyspark.sql.window import Window
+
+    best = Window.partitionBy("track_id", "role").orderBy(
+        F.col("cross_track_nm").asc(),
+        F.col("bearing_error").asc(),
+        F.col("rwy_ident").asc(),
+    )
+    chosen = cand.withColumn("_r", F.row_number().over(best)).filter(F.col("_r") == 1).drop("_r")
+    return _checked_times(chosen, config)
+
+
+def _checked_times(chosen, config) -> DataFrame:
+    """The time of each chosen runway movement from its checked reports."""
+    keys = ["track_id", "role"]
+    elevation = F.coalesce(F.col("_elev_ft"), F.lit(0.0))
     ref = F.coalesce(
         F.when(
             F.abs(F.col("_g_alt_ft") - elevation) <= F.lit(WINDOW_GROUND_MAX_OFFSET_FT),
@@ -333,49 +367,55 @@ def _checked_times(work, chosen, height_ft, gs_kt, dist_nm, config) -> DataFrame
         ),
         elevation,
     )
-    qual = qual.filter(
-        (F.col("_alt_ft") - ref <= F.lit(config.runway_window_max_height_ft))
+    rep = chosen.select(
+        *keys,
+        ref.alias("_ref"),
+        "thr_lat",
+        "thr_lon",
+        "rwy_bearing",
+        F.explode("_reports").alias("r"),
+    )
+    rep = rep.filter(
+        (F.col("r.alt_ft") - F.col("_ref") <= F.lit(config.runway_window_max_height_ft))
         & (
             cross_track_nm(
-                F.col("lat"), F.col("lon"), F.col("_c_lat"), F.col("_c_lon"), F.col("_c_brg")
+                F.col("r.lat"),
+                F.col("r.lon"),
+                F.col("thr_lat"),
+                F.col("thr_lon"),
+                F.col("rwy_bearing"),
             )
             <= F.lit(config.runway_window_max_cross_track_nm)
         )
     )
     dep = F.col("role") == F.lit("departure")
-    # The report the time comes from: the first for a take-off, the last for
-    # a landing. The sign of the ordering key picks one or the other.
-    order = F.when(dep, F.col("event_time").cast("double")).otherwise(
-        -F.col("event_time").cast("double")
+    # The first report for a take-off, the last for a landing.
+    order = F.when(dep, F.col("r.t").cast("double")).otherwise(-F.col("r.t").cast("double"))
+    picked = rep.groupBy(*keys).agg(
+        F.min_by("r", order).alias("_p"),
     )
-    picked = qual.groupBy(*keys).agg(
-        F.min_by("event_time", order).alias("_t"),
-        F.min_by("lat", order).alias("at_lat"),
-        F.min_by("lon", order).alias("at_lon"),
-        F.min_by("_alt_ft", order).alias("at_altitude_ft"),
-        F.min_by("cumulative_distance_nm", order).alias("at_cum_nm"),
-        F.min_by("cumulative_time_s", order).alias("at_cum_s"),
-        F.first("_g_last", ignorenulls=True).alias("_g_last"),
-        F.first("first_seen", ignorenulls=True).alias("_first_seen"),
-        F.first("last_seen", ignorenulls=True).alias("_last_seen"),
-    )
-    t = F.col("_t").cast("double")
+    out = chosen.drop("_reports").join(picked, keys, "inner")
+    t = F.col("_p.t").cast("double")
     ends_soon = F.coalesce(
         F.col("_last_seen").cast("double") - t <= F.lit(WINDOW_TRACK_END_SECONDS), F.lit(False)
     )
     ground_after = F.coalesce(F.col("_g_last").cast("double") > t, F.lit(False))
-    picked = picked.filter(dep | ground_after | ends_soon | F.col("_last_seen").isNull())
+    out = out.filter(dep | ground_after | ends_soon | F.col("_last_seen").isNull())
     edge = F.when(
         dep,
-        F.coalesce(F.col("at_cum_s") <= F.lit(1.0), F.lit(False))
+        F.coalesce(F.col("_p.cum_s") <= F.lit(1.0), F.lit(False))
         | F.coalesce(F.abs(t - F.col("_first_seen").cast("double")) <= F.lit(1.0), F.lit(False)),
     ).otherwise(
         F.coalesce(F.abs(F.col("_last_seen").cast("double") - t) <= F.lit(1.0), F.lit(False))
     )
-    picked = picked.withColumn("at_track_edge", edge)
-    out = chosen.join(picked, keys, "inner")
     return (
-        out.withColumn("first_time", F.when(dep, F.col("_t")).otherwise(F.col("first_time")))
-        .withColumn("last_time", F.when(dep, F.col("last_time")).otherwise(F.col("_t")))
-        .drop("_t", "_g_last", "_first_seen", "_last_seen")
+        out.withColumn("first_time", F.when(dep, F.col("_p.t")).otherwise(F.col("first_time")))
+        .withColumn("last_time", F.when(dep, F.col("last_time")).otherwise(F.col("_p.t")))
+        .withColumn("at_lat", F.col("_p.lat"))
+        .withColumn("at_lon", F.col("_p.lon"))
+        .withColumn("at_altitude_ft", F.col("_p.alt_ft"))
+        .withColumn("at_cum_nm", F.col("_p.cum_nm"))
+        .withColumn("at_cum_s", F.col("_p.cum_s"))
+        .withColumn("at_track_edge", edge)
+        .drop("_p", "_g_alt_ft", "_g_last", "_elev_ft", "_first_seen", "_last_seen")
     )
