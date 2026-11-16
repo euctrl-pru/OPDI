@@ -52,6 +52,14 @@ class IngestionConfig:
     )
     """OurAirports files to download, by name."""
 
+    ourairports_drop_duplicates: bool = True
+    """Leave out of ``oa_airports`` the records whose name contains
+    "Duplicate" (step 00d). OurAirports keeps some records that repeat an
+    airport under another code, such as CA-1291 "(Duplicate)YEG" at the
+    position of Edmonton (CYEG); the zones built from them let the duplicate
+    code win the choice of the departure or destination airport. Off to
+    reproduce the tables of release v0.0.2."""
+
     # Batch processing
     batch_size: int = 250
     """Number of state-vector files downloaded and written in one batch."""

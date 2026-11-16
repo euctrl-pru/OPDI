@@ -86,7 +86,7 @@ from opdi.pipeline.detector_altitude import (
 )
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
 from opdi.pipeline.flight_list_milestones import correct_aerodromes
-from opdi.pipeline.flights import resolve_flight_id
+from opdi.pipeline.flights import resolve_flight_id, seen_rank, wide_search_roles
 from opdi.pipeline.ground import block_events, block_times, movement_window
 from opdi.pipeline.holding import calculate_holding_events
 from opdi.pipeline.holes import PIECE, add_piece
@@ -1309,15 +1309,29 @@ def calculate_vertical_crossing_events(sdf_input: DataFrame) -> DataFrame:
     return df_events
 
 
-def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
+def calculate_firstseen_lastseen_events(
+    sdf_input: DataFrame, from_measured_reports: bool = False
+) -> DataFrame:
     """The ``first_seen`` and ``last_seen`` events: a track's first and last report.
 
     Args:
         sdf_input: Track reports.
+        from_measured_reports: Take the first and last report with a measured
+            position, or with any measured value when the track has no
+            position (:attr:`EventConfig.seen_from_measured_reports`), rather
+            than the first and last report of any kind.
 
     Returns:
         Two events per track.
     """
+    # Work package 4: one definition of first and last seen (see
+    # opdi.pipeline.flights.seen_rank).
+    order_asc = ["event_time"]
+    order_desc = [col("event_time").desc()]
+    if from_measured_reports:
+        sdf_input = sdf_input.withColumn("_seen_rank", seen_rank(sdf_input))
+        order_asc = ["_seen_rank", "event_time"]
+        order_desc = [col("_seen_rank"), col("event_time").desc()]
     df = sdf_input.select(
         "track_id",
         "lat",
@@ -1328,12 +1342,13 @@ def calculate_firstseen_lastseen_events(sdf_input: DataFrame) -> DataFrame:
         "velocity",
         "cumulative_distance_nm",
         "cumulative_time_s",
+        *(["_seen_rank"] if from_measured_reports else []),
     )
 
     df = df.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
 
-    window_asc = Window.partitionBy("track_id").orderBy("event_time")
-    window_desc = Window.partitionBy("track_id").orderBy(col("event_time").desc())
+    window_asc = Window.partitionBy("track_id").orderBy(*order_asc)
+    window_desc = Window.partitionBy("track_id").orderBy(*order_desc)
 
     df = df.withColumn("row_asc", row_number().over(window_asc))
     df = df.withColumn("row_desc", row_number().over(window_desc))
@@ -2025,7 +2040,9 @@ class FlightEventProcessor:
         if thresholds is None:
             return None
 
-        apt_sets = flight_aerodrome_sets(month, self.storage)
+        apt_sets = flight_aerodrome_sets(
+            month, self.storage, wide_search_roles(getattr(self.config, "detection", None))
+        )
         sv = sv.join(F.broadcast(apt_sets), sv.track_id == apt_sets.id, "inner").drop("id")
         sv.cache()
 
@@ -2218,7 +2235,13 @@ class FlightEventProcessor:
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
-            df_hexaero = calculate_airport_events(ground_input, month, self.storage, self.events)
+            df_hexaero = calculate_airport_events(
+                ground_input,
+                month,
+                self.storage,
+                self.events,
+                endpoint_roles=wide_search_roles(getattr(self.config, "detection", None)),
+            )
             add(df_hexaero)
 
             if self.events.emit_runway_milestones:
@@ -2263,7 +2286,11 @@ class FlightEventProcessor:
 
         if calc_seen:
             print(f"Calculating first_seen/last_seen events for batch: {batch_id}")
-            add(calculate_firstseen_lastseen_events(sdf_input))
+            add(
+                calculate_firstseen_lastseen_events(
+                    sdf_input, from_measured_reports=self.events.seen_from_measured_reports
+                )
+            )
 
         if calc_navigation:
             ev = self.events

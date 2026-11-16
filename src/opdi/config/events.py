@@ -1425,6 +1425,95 @@ class EventConfig:
     (column ``version``). A published version string is never reused for
     different results."""
 
+    # -- flight list and first/last seen (work package 4) ------------------
+    aerodrome_correction_checks_track: bool = True
+    """Let a runway event replace an airport of the flight list (step 04b)
+    only where it fits the track.
+
+    A departure runway event (``ATOT``, ``line-up``, ``take-off-roll``)
+    replaces the departure airport only if it is the first departure event
+    of the track and its airport lies within
+    :attr:`aerodrome_correction_radius_nm` of the track's first report with
+    a position. An arrival runway event (``ALDT``, ``touchdown``,
+    ``runway-vacated``) replaces the destination only if it is the last
+    arrival event, comes after every departure event, and its airport lies
+    within that distance of the track's last report with a position. A
+    take-off or landing time of the fallback method (``info.method`` =
+    ``legacy``) never replaces an airport: that method searches only the
+    airports the flight list already named. Otherwise the airport found
+    from the trajectory stays.
+
+    Without this setting the earliest departure and the latest arrival event
+    anywhere on the track replaced the airports. On a track holding two
+    flights (a stop under one call sign) both became the airport of the stop,
+    and a go-around read as a take-off moved the departure to the
+    destination. Off in release v0.0.2."""
+
+    aerodrome_correction_radius_nm: float = 30.0
+    """Largest distance, in NM, between the airport of a runway event and the
+    track's first (departure) or last (arrival) report with a position, for
+    the event to replace an airport (:attr:`aerodrome_correction_checks_track`).
+    Equal to :attr:`DetectionConfig.endpoint_radius_nm`."""
+
+    movement_flags_need_track_evidence: bool = True
+    """Base ``SUPERSEDED_DEP``/``SUPERSEDED_ARR`` and the movement columns
+    on what the track shows.
+
+    * A superseded flag needs an airport: a row without ADEP (ADES) is not a
+      superseded departure (arrival).
+    * A row whose track flew more than :attr:`movement_airborne_height_ft`
+      above its airport is not a ground fragment, so it is not superseded.
+    * A departure with no take-off time, no destination and no circle
+      crossing still counts as a movement when the track climbed more than
+      :attr:`movement_airborne_height_ft` above the airport, or its last
+      report with a position is more than :attr:`movement_left_distance_nm`
+      from it; the arrival likewise, with the first report.
+
+    The height is the highest altitude among the track's events, above the
+    airport's elevation. Off in release v0.0.2."""
+
+    movement_airborne_height_ft: float = 1000.0
+    """Height above the airport, in feet, above which a track counts as
+    having flown (see :attr:`movement_flags_need_track_evidence`)."""
+
+    movement_left_distance_nm: float = 40.0
+    """Distance from the airport, in NM, beyond which the far end of a track
+    shows that the aircraft left it or came from elsewhere (see
+    :attr:`movement_flags_need_track_evidence`). Equal to the smallest
+    circle radius, 40 NM."""
+
+    milestones_on_own_leg: bool = True
+    """Take the flight list's block times, stands and circle crossings from
+    the departure and the arrival of the row (step 04b).
+
+    ``AOBT`` is the latest off-block at ADEP not after ``ATOT``, ``AIBT``
+    the earliest in-block at ADES not before ``ALDT``, and ``STND_DEP`` /
+    ``STND_ARR`` the stand of that same event, or else the last stand exit
+    at ADEP before ``ATOT`` / the first stand entry at ADES after ``ALDT``.
+    ``C{NM}_DEP`` is the first outbound crossing at ADEP after ``ATOT`` and
+    ``C{NM}_ARR`` the last inbound crossing at ADES before ``ALDT``. Where
+    the take-off or landing time is unknown, the time limit is not applied.
+    An event that names no airport is accepted. Without this setting the
+    block times were taken at any airport, and the first and last events of
+    the track were used whatever the order. Off in release v0.0.2."""
+
+    seen_from_measured_reports: bool = True
+    """Define ``first_seen`` and ``last_seen`` as the first and last report
+    of the track with a measured position, in the flight list (step 03) and
+    in the events (step 04) alike. For a track with no position at all, the
+    first and last report with any measured value (altitude, speed, heading
+    or vertical rate); for a track with none of these either, its first and
+    last report.
+
+    "Measured" means not blanked by the cleaning of step 02a. OpenSky keeps
+    sending an aircraft's last state for about 300 s after it was last
+    heard; cleaning blanks these repeated values, so the last report with a
+    measured position is the last time the aircraft was really heard.
+    Without this setting the events used the first and last report of any
+    kind, which put ``last_seen`` about five minutes late on most flights,
+    and the flight list used other definitions on different rows. Off in
+    release v0.0.2."""
+
     def __post_init__(self) -> None:
         """Resolve :attr:`merge_duplicate_milestones` and check the methods.
 
@@ -1560,5 +1649,10 @@ class EventConfig:
             distance_between_positions=False,
             measure_every_event=False,
             time_passed_from_first_seen=False,
+            # Work package 4, not part of release v0.0.2.
+            aerodrome_correction_checks_track=False,
+            movement_flags_need_track_evidence=False,
+            milestones_on_own_leg=False,
+            seen_from_measured_reports=False,
             events_version=LEGACY_EVENTS_VERSION,
         )
