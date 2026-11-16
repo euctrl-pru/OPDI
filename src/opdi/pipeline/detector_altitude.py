@@ -4,12 +4,16 @@ Every detector of step 04 reads the barometric altitude from the column
 ``baro_altitude_c`` (metres). This module decides what that column holds,
 in two places:
 
-* :func:`altitude_for_detectors`, applied once as step 04 reads the tracks,
-  for every detector. It puts in ``baro_altitude_c`` the altitude that
-  survived the cleaning of step 02a (``EventConfig.altitude_from_cleaning``)
-  and treats an altitude outside a plausible range as missing
-  (``EventConfig.altitude_plausible_min_ft`` and
-  ``altitude_plausible_max_ft``).
+* :func:`altitude_for_detectors`, applied once as step 04 reads the tracks.
+  It puts in ``baro_altitude_c`` the altitude that survived the cleaning of
+  step 02a (``EventConfig.altitude_from_cleaning``) and treats an altitude
+  outside a plausible range as missing (``EventConfig.altitude_plausible_min_ft``
+  and ``altitude_plausible_max_ft``). The flight detectors read it: tops,
+  level-offs, level segments, flight-level, distance-circle and FIR
+  crossings, holding, point merge, first and last seen.
+* :func:`received_altitude` gives the runway, ground and airport detectors
+  and the plausibility checks the altitude of step 02 instead, within the
+  same range (see that function for why).
 * :func:`flight_altitude_only`, applied in the vertical detectors only (the
   tops of climb and descent, the level segments of the level-offs and the
   flight-level crossings). It treats the altitude of a report flagged on the
@@ -44,10 +48,22 @@ from pyspark.sql import functions as F
 if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
-__all__ = ["DETECTOR_ALTITUDE", "altitude_for_detectors", "flight_altitude_only"]
+__all__ = [
+    "DETECTOR_ALTITUDE",
+    "RECEIVED_ALTITUDE",
+    "altitude_for_detectors",
+    "flight_altitude_only",
+    "received_altitude",
+]
 
 #: The altitude column every detector of step 04 reads, in metres.
 DETECTOR_ALTITUDE = "baro_altitude_c"
+
+#: Internal column of step 04: the altitude of step 02 (``baro_altitude_c`` as
+#: stored), within the plausible range, kept beside the cleaned one for the
+#: runway, ground and airport detectors (:func:`received_altitude`). Never
+#: published.
+RECEIVED_ALTITUDE = "_baro_altitude_received"
 
 #: Feet per metre, the factor the events use for altitudes.
 FT_PER_M = 3.28084
@@ -85,10 +101,40 @@ def altitude_for_detectors(
         changed = True
     if not changed:
         return sdf
-    out = sdf.withColumn(DETECTOR_ALTITUDE, altitude.cast("double"))
+    out = sdf
+    if cleaned_tracks and config.altitude_from_cleaning:
+        received = F.col(DETECTOR_ALTITUDE)
+        if low is not None:
+            received = F.when(received * F.lit(FT_PER_M) >= F.lit(float(low)), received)
+        if high is not None:
+            received = F.when(received * F.lit(FT_PER_M) <= F.lit(float(high)), received)
+        out = out.withColumn(RECEIVED_ALTITUDE, received.cast("double"))
+    out = out.withColumn(DETECTOR_ALTITUDE, altitude.cast("double"))
     if cleaned_tracks and config.altitude_from_cleaning:
         out = out.drop("baro_altitude")
     return out
+
+
+def received_altitude(sdf: DataFrame) -> DataFrame:
+    """The reports with the altitude of step 02 in ``baro_altitude_c``.
+
+    For the runway, ground and airport detectors and the plausibility
+    checks. The cleaning of step 02a removes altitudes these need: the
+    altitudes read on the take-off and landing roll, where the altitude
+    changes fast and the cleaning takes the change for a spike, and the
+    altitude of reports that carry no position. Those reports count as
+    "neither on the ground nor in flight" in the ground detectors, while a
+    report without any altitude counts as a surface report. Measured on the
+    verification sample of 2026-06-14: with the cleaned altitude, 1,878 of
+    10,626 in-block times (``AIBT``) were lost, 105 of them confirmed by
+    airport records, and about 100 confirmed runway events.
+
+    Without :data:`RECEIVED_ALTITUDE` on the frame (the cleaned altitude
+    was not used), ``sdf`` itself.
+    """
+    if RECEIVED_ALTITUDE not in sdf.columns:
+        return sdf
+    return sdf.withColumn(DETECTOR_ALTITUDE, F.col(RECEIVED_ALTITUDE))
 
 
 def flight_altitude_only(sdf: DataFrame, config: "EventConfig") -> DataFrame:

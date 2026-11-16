@@ -224,3 +224,17 @@ def test_the_corrections_are_on_by_default_and_off_under_release_v002():
     for name, off in WP1_SETTINGS.items():
         assert getattr(legacy, name) == off, name
         assert getattr(shipped, name) not in (None, False), name
+
+
+#: Shape of the take-off roll of 19661dffc33dd7f6_1781422409 at LFML: the
+#: roll reads -50 ft on reports the cleaning emptied, then the climb.
+def test_the_runway_and_ground_detectors_read_the_received_altitude(spark):
+    from opdi.pipeline.detector_altitude import received_altitude
+
+    rows = [(0, -50, None, False), (5, -50, None, False), (35, 1025, 1025, False)]
+    frame = altitude_for_detectors(_frame(spark, rows), EventConfig(), cleaned_tracks=True)
+    assert _feet(frame) == [None, None, 1025]
+    assert _feet(received_altitude(frame)) == [-50, -50, 1025]
+    # Without the cleaned altitude there is nothing to give back.
+    legacy = altitude_for_detectors(_frame(spark, rows), EventConfig.legacy(), cleaned_tracks=True)
+    assert received_altitude(legacy) is legacy

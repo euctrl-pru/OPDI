@@ -79,7 +79,11 @@ from pyspark.sql.window import Window
 
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
-from opdi.pipeline.detector_altitude import altitude_for_detectors, flight_altitude_only
+from opdi.pipeline.detector_altitude import (
+    altitude_for_detectors,
+    flight_altitude_only,
+    received_altitude,
+)
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
 from opdi.pipeline.flights import resolve_flight_id
 from opdi.pipeline.ground import block_events, block_times, movement_window
@@ -1738,6 +1742,12 @@ class FlightEventProcessor:
         # flight-level crossings) do not read the altitude of reports flagged
         # on the ground; the other detectors do.
         vgeo = flight_altitude_only(geo, self.events)
+        # The runway, ground and airport detectors, and the plausibility
+        # checks, read the altitude as received (step 02): the cleaning
+        # removes altitudes on the take-off and landing roll, and a report
+        # without altitude counts as a surface report there.
+        ground_input = received_altitude(sdf_input)
+        ground_geo = received_altitude(geo)
 
         # The level segments are detected once and shared by the level-offs
         # and the vertical profile tops, which are defined on the same
@@ -1829,7 +1839,7 @@ class FlightEventProcessor:
             if self.events.emit_runway_events:
                 add(
                     keep_runway(
-                        calculate_runway_events(sdf_input, month, self.storage, self.events)
+                        calculate_runway_events(ground_input, month, self.storage, self.events)
                     )
                 )
 
@@ -1837,12 +1847,12 @@ class FlightEventProcessor:
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
-            df_hexaero = calculate_airport_events(sdf_input, month, self.storage, self.events)
+            df_hexaero = calculate_airport_events(ground_input, month, self.storage, self.events)
             add(df_hexaero)
 
             if self.events.emit_runway_milestones:
                 print(f"Calculating runway milestones for batch: {batch_id}")
-                rwy_sv = self._with_flight_id(geo)
+                rwy_sv = self._with_flight_id(ground_geo)
                 add(keep_runway(self._runway_traversal_family(rwy_sv, month)))
                 # Independent of the runway passages and of the layout table: a
                 # go-around may never touch a runway, so it needs only the
@@ -1860,11 +1870,11 @@ class FlightEventProcessor:
                         runway = part if runway is None else runway.unionByName(part)
                     add(
                         calculate_block_events(
-                            geo, df_hexaero, self.events, runway, checkpoints=checkpoints
+                            ground_geo, df_hexaero, self.events, runway, checkpoints=checkpoints
                         )
                     )
                 else:
-                    add(calculate_block_events(sdf_input, df_hexaero, self.events))
+                    add(calculate_block_events(ground_input, df_hexaero, self.events))
 
         if (
             calc_navigation
@@ -1876,7 +1886,7 @@ class FlightEventProcessor:
             # A run that adds only the holding, point merge and FIR families
             # still needs the go-arounds, which the holding family checks
             # against.
-            rwy_sv = self._with_flight_id(geo)
+            rwy_sv = self._with_flight_id(ground_geo)
             if "ades_lat" in rwy_sv.columns:
                 df_go_arounds = go_arounds(rwy_sv, self.events)
 
@@ -1930,7 +1940,7 @@ class FlightEventProcessor:
             checkpoints.append(df_events)
             labelled = label_events(
                 df_events,
-                sdf_input,
+                ground_input,
                 self._airports(),
                 self.events,
                 flights=self._flight_airports(month),

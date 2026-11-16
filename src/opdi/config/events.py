@@ -611,8 +611,8 @@ class EventConfig:
 
     # -- the altitude the detectors read (work package 1) -----------------
     altitude_from_cleaning: bool = True
-    """Give every detector of step 04 the barometric altitude that survived
-    the cleaning of step 02a.
+    """Give the flight detectors of step 04 the barometric altitude that
+    survived the cleaning of step 02a.
 
     The track table holds two barometric altitudes. ``baro_altitude_c`` is
     the altitude after one check of step 02 (a change of more than 200 ft/s
@@ -622,10 +622,16 @@ class EventConfig:
     message arrived, isolated values and spikes. With this setting, when
     step 04 reads the cleaned tracks, the content of ``baro_altitude_c`` is
     replaced by the cleaned ``baro_altitude`` as the reports are read, so
-    every detector reads the cleaned altitude under its usual column name.
-    A value the step 02 check removed but the cleaning kept is used: it is a
-    fresh altitude right after a run of repeated values, which the step 02
-    check compares with the repeated value. Off in release v0.0.2."""
+    the flight detectors (tops, level-offs, level segments, flight-level,
+    distance-circle and FIR crossings, holding, point merge, first and last
+    seen) read the cleaned altitude under their usual column name. A value
+    the step 02 check removed but the cleaning kept is used: it is a fresh
+    altitude right after a run of repeated values, which the step 02 check
+    compares with the repeated value. The runway, ground and airport
+    detectors and the plausibility checks keep the step 02 altitude: the
+    cleaning removes altitudes read on the take-off and landing roll, and
+    there a report without altitude counts as a surface report. Off in
+    release v0.0.2."""
 
     altitude_plausible_min_ft: Optional[float] = -2000.0
     """Lowest barometric altitude, in feet, that step 04 uses. A lower value
