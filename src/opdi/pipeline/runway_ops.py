@@ -774,11 +774,13 @@ def own_field_elevation_ft(sdf: DataFrame, apt_ident):
     )
 
 
-def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft):
+def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft, gap_seconds: float = 300.0):
     """The track's barometric altitude on the ground at the airport, in feet.
 
-    One value per ``(track_id, apt_icao)``, returned as a column of ``work``
-    (window functions over that partition, so no join). Read from the
+    One value per visit of the airport: per ``(track_id, apt_icao)`` and
+    stretch of the pass frame without a gap of more than ``gap_seconds``
+    (a landing and the take-off after a turnaround are two visits). Returned
+    as a column of ``work`` (window functions, so no join). Read from the
     reports of the pass frame (runway and approach area of the airport):
 
     * evidence of the ground: a report flagged on the ground, or slower than
@@ -804,9 +806,20 @@ def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft):
     NULL when the track has no such report at this airport, or when the value
     is more than :data:`GROUND_MAX_OFFSET_FT` from ``elevation_ft``.
     """
-    by_apt = Window.partitionBy("track_id", "apt_icao")
-    ordered = by_apt.orderBy("event_time")
     t = F.col("event_time").cast("double")
+    # One value per visit of the airport: the reports of the pass frame split
+    # where more than ``gap_seconds`` pass between two of them (a landing and
+    # the take-off after a turnaround read the ground apart, and the air
+    # pressure changes in between).
+    visits = Window.partitionBy("track_id", "apt_icao").orderBy("event_time")
+    work = work.withColumn(
+        "_g_visit",
+        F.sum(F.when(t - F.lag(t).over(visits) > F.lit(float(gap_seconds)), 1).otherwise(0)).over(
+            visits.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+        ),
+    )
+    by_apt = Window.partitionBy("track_id", "apt_icao", "_g_visit")
+    ordered = by_apt.orderBy("event_time")
     gs_kt = F.col("velocity") * F.lit(KT_PER_MPS)
     vr = F.abs(_col_or_null(work, "vert_rate", "double") * F.lit(FTMIN_PER_MPS))
     evidence = F.coalesce(F.col("_on_ground"), F.lit(False)) | F.coalesce(
@@ -867,7 +880,7 @@ def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft):
     work = work.withColumn("_g_direct", direct)
     direct = F.col("_g_direct")
     work = work.withColumn("_g_ref", F.coalesce(direct, nearby))
-    return work.drop("_g_prev", "_g_next", "_g_has", "_g_near", "_g_top", "_g_direct")
+    return work.drop("_g_prev", "_g_next", "_g_has", "_g_near", "_g_top", "_g_direct", "_g_visit")
 
 
 def _corrected_traversals(
@@ -918,7 +931,12 @@ def _corrected_traversals(
     if config.runway_height_above_track_ground:
         elevation = own_field_elevation_ft(work, F.col("apt_icao"))
         work = work.withColumn("_elev_ft", elevation)
-        work = _ground_altitude_ft(work, F.col("_alt_ft"), F.col("_elev_ft"))
+        work = _ground_altitude_ft(
+            work,
+            F.col("_alt_ft"),
+            F.col("_elev_ft"),
+            gap_seconds=float(config.airport_trace_gap_seconds),
+        )
         work = work.withColumn("_ref_ft", F.coalesce(F.col("_g_ref"), F.col("_elev_ft")))
         work = work.withColumn(
             "_h_ref",

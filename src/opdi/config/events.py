@@ -971,6 +971,22 @@ class EventConfig:
     The positions may also be :attr:`position_jump_allowance_nm` further
     apart than the speed allows. None in release v0.0.2 (no test)."""
 
+    crossing_skips_position_jumps: bool = True
+    """Leave out of the crossings and of the distance flown a position that
+    jumps away from the track and back.
+
+    A report's position counts as a jump when the step to it from the
+    positioned report before it, and the step from it to the next one, each
+    imply more than :attr:`crossing_max_implied_speed_kt` (plus
+    :attr:`position_jump_allowance_nm`), while the reports either side are
+    consistent with each other; two such reports in a row count too. The
+    flight-level, distance-circle and FIR crossings and the distance flown
+    then read that report as one without a position, so a crossing is
+    placed between the good reports either side instead of being dropped
+    for the jump (40 crossings of the 40 and 100 NM circles that airport
+    records confirm, most near Istanbul where positions are spoofed).
+    Without it the crossing is dropped. Off in release v0.0.2."""
+
     position_jump_allowance_nm: float = 2.0
     """Distance, in NM, by which two positions may be further apart than
     :attr:`crossing_max_implied_speed_kt` and
@@ -1684,6 +1700,7 @@ class EventConfig:
             runway_times_position_between_reports=False,
             # Work package 5: crossings, rings, FIR and the two measurements.
             crossing_max_implied_speed_kt=None,
+            crossing_skips_position_jumps=False,
             crossing_value_max_gap_seconds=None,
             rings_around_flight_list_airports=False,
             fir_needs_position=False,

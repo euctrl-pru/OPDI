@@ -388,3 +388,69 @@ def test_a_crossing_with_a_report_without_position_is_not_tested(spark):
     rows = [r for r in _crossings(make_track(spark, samples)) if r.threshold == 100.0]
 
     assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# A position that jumps away from the track and back
+# ---------------------------------------------------------------------------
+
+
+def _eastbound(spark, jumps=(), step=None):
+    """Eastbound at 450 kt (0.625 NM in 5 s) along 41 N, 120 s; the reports
+    in ``jumps`` are moved 20 NM north (the spoofed positions near LTFM)."""
+    samples = []
+    for i in range(25):
+        lat = 41.0 + (20.0 / 60.0 if i in jumps or (step is not None and i >= step) else 0.0)
+        lon = 28.0 + i * 0.625 / (60.0 * 0.7547)
+        samples.append({"t": i * 5, "lat": lat, "lon": lon, "baro_altitude": _m(20000 + 50 * i)})
+    return make_track(spark, samples)
+
+
+def _jumps(df):
+    from opdi.pipeline.events import POSITION_JUMP, mark_position_jumps
+
+    out = mark_position_jumps(df, 1000.0, 2.0).orderBy("event_time").collect()
+    return [i for i, r in enumerate(out) if r[POSITION_JUMP]]
+
+
+def test_a_position_that_jumps_away_and_back_is_marked(spark):
+    assert _jumps(_eastbound(spark, jumps=(10,))) == [10]
+    assert _jumps(_eastbound(spark, jumps=(10, 11))) == [10, 11]
+    assert _jumps(_eastbound(spark)) == []
+
+
+def test_a_track_that_moves_and_stays_is_not_marked(spark):
+    assert _jumps(_eastbound(spark, step=12)) == []
+
+
+def test_two_aircraft_alternating_under_one_address_are_not_marked(spark):
+    assert _jumps(_alternating_aircraft(spark)) == []
+
+
+def test_a_ring_crossing_next_to_a_jump_is_placed_between_the_good_reports(spark):
+    """40 crossings of the 40 and 100 NM circles that the airport records
+    confirm were dropped because one of the two reports around them had
+    jumped (positions spoofed near Istanbul). The jumped report is read as
+    one without a position, and the crossing is placed between the good
+    reports either side."""
+    from opdi.pipeline.crossings import ring_crossings
+    from opdi.pipeline.events import mark_position_jumps, without_position_jumps
+    from opdi.utils.geometry import haversine_nm
+
+    apt = (41.0, 28.0 - 33.6 / (60.0 * 0.7547))
+    config = EventConfig(ring_radii_nm=[40.0])
+
+    def rings(df):
+        df = df.withColumn("apt_ident", F.lit("LTFM")).withColumn(
+            "distance_nm", haversine_nm(F.col("lat"), F.col("lon"), F.lit(apt[0]), F.lit(apt[1]))
+        )
+        df = df.withColumn("flight_level", F.col("baro_altitude") * 3.28084 / 100)
+        return ring_crossings(df, config).collect()
+
+    track = _eastbound(spark, jumps=(10,))
+    assert rings(track) == []
+    (row,) = rings(without_position_jumps(mark_position_jumps(track, 1000.0, 2.0)))
+    # 40 NM is reached 6.4 NM after the start, 51 s in: between the good
+    # reports at 45 s and 55 s around the jumped one at 50 s.
+    t = (row.event_time - _EPOCH).total_seconds()
+    assert 45.0 < t < 55.0

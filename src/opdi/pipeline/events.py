@@ -1346,7 +1346,14 @@ def calculate_firstseen_lastseen_events(
     order_asc = ["event_time"]
     order_desc = [col("event_time").desc()]
     if from_measured_reports:
-        sdf_input = sdf_input.withColumn("_seen_rank", seen_rank(sdf_input))
+        # The altitude the detectors read is the cleaned one (work package
+        # 1), which the flight list of step 03 reads as ``baro_altitude``:
+        # read under that name, a track with altitudes but no position gets
+        # the same first and last seen in both.
+        ranked = sdf_input
+        if "baro_altitude" not in ranked.columns and "baro_altitude_c" in ranked.columns:
+            ranked = ranked.withColumn("baro_altitude", col("baro_altitude_c"))
+        sdf_input = ranked.withColumn("_seen_rank", seen_rank(ranked))
         order_asc = ["_seen_rank", "event_time"]
         order_desc = [col("_seen_rank"), col("event_time").desc()]
     df = sdf_input.select(
@@ -1609,6 +1616,81 @@ def time_version(config: EventConfig) -> str:
     return LEGACY_TIME_VERSION
 
 
+#: Column of :func:`mark_position_jumps`: the report's position jumps away
+#: from the track and back.
+POSITION_JUMP = "position_jump"
+
+
+def mark_position_jumps(df: DataFrame, max_kt: float, allowance_nm: float = 0.0) -> DataFrame:
+    """Mark the reports whose position jumps away from the track and back.
+
+    Adds the boolean column :data:`POSITION_JUMP`. Two positioned reports are
+    consistent when the distance between them is at most ``max_kt`` times
+    the time between them, plus ``allowance_nm``. A positioned report is a
+    jump when it is consistent with neither the positioned report before it
+    nor the one after it, while those two are consistent with each other
+    and with the reports beyond them; or when it and the next (previous)
+    positioned report are such a pair: together inconsistent with the
+    reports either side of the pair, which are consistent with each other.
+    A step that does not come back (the track moves to a new place and
+    stays) is not marked, nor are reports of two aircraft under one address
+    that alternate (each report's neighbours are themselves inconsistent).
+
+    One sort of the reports of each track in each direction, which the
+    distance flown also uses; no shuffle.
+    """
+    t = col("event_time").cast("double")
+    has_pos = col("lat").isNotNull() & col("lon").isNotNull()
+    known = when(has_pos, struct(t.alias("t"), col("lat").alias("lat"), col("lon").alias("lon")))
+    asc = Window.partitionBy("track_id").orderBy("event_time")
+    desc = Window.partitionBy("track_id").orderBy(col("event_time").desc())
+    before = asc.rowsBetween(Window.unboundedPreceding, -1)
+    after = desc.rowsBetween(Window.unboundedPreceding, -1)
+    df = df.withColumn("_j_p1", F.last(known, ignorenulls=True).over(before))
+    df = df.withColumn("_j_n1", F.last(known, ignorenulls=True).over(after))
+    df = df.withColumn("_j_p2", F.last(when(has_pos, col("_j_p1")), ignorenulls=True).over(before))
+    df = df.withColumn("_j_n2", F.last(when(has_pos, col("_j_n1")), ignorenulls=True).over(after))
+    cur = struct(t.alias("t"), col("lat").alias("lat"), col("lon").alias("lon"))
+
+    def ok(a, b):
+        dist = haversine_nm(a["lat"], a["lon"], b["lat"], b["lon"])
+        reach = lit(float(max_kt)) * F.abs(b["t"] - a["t"]) / lit(3600.0)
+        return dist <= reach + lit(float(allowance_nm))
+
+    p1, p2, n1, n2 = col("_j_p1"), col("_j_p2"), col("_j_n1"), col("_j_n2")
+
+    def steady(a, b):
+        # The track either side is itself consistent (or not known further).
+        return F.coalesce(ok(a, b), lit(True))
+
+    single = ~ok(p1, cur) & ~ok(cur, n1) & ok(p1, n1) & steady(p2, p1) & steady(n1, n2)
+    first_of_two = ~ok(p1, cur) & ok(cur, n1) & ~ok(n1, n2) & ok(p1, n2) & steady(p2, p1)
+    second_of_two = ~ok(cur, n1) & ok(p1, cur) & ~ok(p2, p1) & ok(p2, n1) & steady(n1, n2)
+    # NULL parts make the test unknown: a report is marked only when every
+    # comparison it rests on can be made.
+    jump = has_pos & (
+        F.coalesce(single, lit(False))
+        | F.coalesce(first_of_two, lit(False))
+        | F.coalesce(second_of_two, lit(False))
+    )
+    return df.withColumn(POSITION_JUMP, jump).drop("_j_p1", "_j_n1", "_j_p2", "_j_n2")
+
+
+def without_position_jumps(df: DataFrame) -> DataFrame:
+    """``df`` with the position of the reports marked by :func:`mark_position_jumps` blanked.
+
+    Such a report keeps the position interpolated between its neighbours
+    for the flight-level crossings (:data:`LAT_BETWEEN_POSITIONS`), which
+    :func:`add_distance_measure` gives it as to a report without a position.
+    """
+    if POSITION_JUMP not in df.columns:
+        return df
+    jumped = F.coalesce(col(POSITION_JUMP), lit(False))
+    return df.withColumn("lat", when(~jumped, col("lat"))).withColumn(
+        "lon", when(~jumped, col("lon"))
+    )
+
+
 #: Columns :func:`add_distance_measure` adds with ``position_fill_seconds``:
 #: the position of a report without one, interpolated in time between the
 #: nearest reports with a position before and after it. Read only by the
@@ -1748,9 +1830,15 @@ def _distance_between_positions(
     position_fill_seconds: Optional[float],
     jump_allowance_nm: float = 0.0,
 ) -> DataFrame:
-    """:func:`add_distance_measure` with its keyword arguments; see there."""
+    """:func:`add_distance_measure` with its keyword arguments; see there.
+
+    A report marked by :func:`mark_position_jumps` (column
+    :data:`POSITION_JUMP`) counts as one without a position.
+    """
     t = col("event_time").cast("double")
     has_pos = col("lat").isNotNull() & col("lon").isNotNull()
+    if POSITION_JUMP in df.columns:
+        has_pos = has_pos & ~F.coalesce(col(POSITION_JUMP), lit(False))
     piece = col(PIECE) if PIECE in df.columns else lit(0)
     known = when(
         has_pos,
@@ -1767,7 +1855,7 @@ def _distance_between_positions(
     prev = col("_prev_pos")
 
     # The same formula as the other two measures.
-    lat, lon = F.radians(col("lat")), F.radians(col("lon"))
+    lat, lon = F.radians(when(has_pos, col("lat"))), F.radians(when(has_pos, col("lon")))
     prev_lat = F.radians(prev["lat"])
     prev_lon = F.radians(prev["lon"])
     a = (
@@ -2141,6 +2229,10 @@ class FlightEventProcessor:
         # hole. First, because the distance flown is interpolated per piece.
         sdf_input = add_piece(sdf_input, self.events.track_hole_seconds)
         ev = self.events
+        if ev.crossing_skips_position_jumps and ev.crossing_max_implied_speed_kt is not None:
+            sdf_input = mark_position_jumps(
+                sdf_input, ev.crossing_max_implied_speed_kt, ev.position_jump_allowance_nm
+            )
         sdf_input = add_distance_measure(
             sdf_input,
             ev.distance_from_last_known_position,
@@ -2172,6 +2264,9 @@ class FlightEventProcessor:
         # without altitude counts as a surface report there.
         ground_input = received_altitude(sdf_input)
         ground_geo = received_altitude(geo)
+        # The crossings read a position that jumps away from the track and
+        # back as missing (crossing_skips_position_jumps).
+        crossing_reports = without_position_jumps(sdf_input)
 
         # The level segments are detected once and shared by the level-offs
         # and the vertical profile tops, which are defined on the same
@@ -2249,7 +2344,7 @@ class FlightEventProcessor:
         if calc_vertical:
             print(f"Calculating vertical events (FL crossings) for batch: {batch_id}")
             # The v0.0.2 settings run the release v0.0.2 crossing method.
-            crossing_input = flight_altitude_only(sdf_input, self.events)
+            crossing_input = flight_altitude_only(crossing_reports, self.events)
             if self.events.crossing_all_occurrences:
                 add(calculate_threshold_crossing_events(crossing_input, self.events))
             else:
@@ -2283,7 +2378,11 @@ class FlightEventProcessor:
             # With rings_around_flight_list_airports the circles are computed
             # below, once the runway events are known.
             if not self.events.rings_around_flight_list_airports:
-                add(calculate_ring_crossing_events(sdf_input, month, self.storage, self.events))
+                add(
+                    calculate_ring_crossing_events(
+                        crossing_reports, month, self.storage, self.events
+                    )
+                )
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
@@ -2368,7 +2467,7 @@ class FlightEventProcessor:
                 add(calculate_point_merge_events(geo, pms_ref, ev, runway_events=runway_times))
             if ev.emit_fir_crossings:
                 print(f"Calculating FIR crossings for batch: {batch_id}")
-                add(calculate_fir_events(sdf_input, load_fir_reference(self.storage), ev))
+                add(calculate_fir_events(crossing_reports, load_fir_reference(self.storage), ev))
 
         if df_events is None:
             return
@@ -2433,7 +2532,7 @@ class FlightEventProcessor:
         finished = False
         if calc_vertical and self.events.rings_around_flight_list_airports:
             print(f"Calculating distance circle crossings for batch: {batch_id}")
-            rings = self._rings_around_flight_list_airports(sdf_input, df_events, month)
+            rings = self._rings_around_flight_list_airports(crossing_reports, df_events, month)
             if rings is not None:
                 rings = rings.withColumn("source", lit("OSN")).withColumn(
                     "version", lit(self.events.events_version)

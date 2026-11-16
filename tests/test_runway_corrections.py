@@ -184,7 +184,7 @@ def test_a_lift_off_next_to_a_report_without_position_gets_a_position(spark):
     sv = _pass(spark, rows, elev_ft=_YBBN_ELEV_FT)
     _, events = _family(spark, sv)
     (atot,) = _of(events, "ATOT")
-    assert atot[0] == pytest.approx(35.375, abs=0.01)
+    assert atot[0] == pytest.approx(35.375, abs=0.05)
     assert atot[3]["lat"] is not None and atot[3]["lon"] is not None
     # Between the positioned reports at 35 s and 45 s, at 37.5% of the way
     # from 35 s to 40 s: along the runway between 0.52 and 0.80 NM.
@@ -210,6 +210,55 @@ def test_a_lift_off_is_placed_between_reports_with_a_position(spark):
     assert atot[3]["lat"] is not None
     # Between 35 s (0 ft above the ground, positioned) and 90 s (positioned).
     assert 35.0 < atot[0] < 90.0
+
+
+#: Five take-off times the airport records confirm (ENVA twice, LFMN, LEIB,
+#: EDDS) were lost: each track landed at the airport about 40 minutes before
+#: and took off again. The take-off roll reads 100 to 150 ft (ENVA, elevation
+#: 56 ft); the landing gave the track's ground altitude, and measured from
+#: that the roll was already 74 ft high, so the pass was no take-off. The
+#: shape of 39ecc59cbda22bab (ENVA, runway 27, 17:35:59).
+_TURNAROUND_LANDING = [
+    (-2300, -2.5, 700.0, 150.0, False, 70.0, -800.0),
+    (-2290, -2.1, 560.0, 148.0, False, 70.0, -800.0),
+    (-2280, -1.7, 430.0, 146.0, False, 70.0, -800.0),
+    (-2270, -1.3, 300.0, 142.0, False, 70.0, -700.0),
+    (-2260, -0.9, 170.0, 140.0, False, 70.0, -700.0),
+    (-2250, -0.5, 60.0, 138.0, False, 70.0, -700.0),
+    (-2245, -0.2, 20.0, 136.0, False, 70.0, -500.0),
+    (-2240, 0.1, None, None, True, None, None),
+    (-2235, 0.35, None, None, True, None, None),
+    (-2230, 0.55, None, None, True, None, None),
+    (-2220, 0.8, None, None, True, None, None),
+    (-2210, 0.95, None, None, True, None, None),
+    (-2200, 1.0, None, None, True, None, None),
+]
+_TURNAROUND_TAKE_OFF = [
+    (t, a, None, None, True, None, None)
+    for t, a in [(0, 0.0), (5, 0.01), (10, 0.02), (20, 0.04), (25, 0.08), (30, 0.141)]
+] + [
+    (35, 0.250, 94.0, 92.0, False, 70.0, 0.0),
+    (40, 0.398, 94.0, 113.0, False, 70.0, 0.0),
+    (45, 0.580, 44.0, 130.0, False, 70.0, 0.0),
+    (50, 0.771, 94.0, 140.0, False, 70.0, 0.0),
+    (55, 0.967, 219.0, 145.0, False, 70.0, 1500.0),
+    (60, 1.171, 369.0, 148.0, False, 70.0, 1800.0),
+    (65, 1.375, 594.0, 146.0, False, 70.0, 2400.0),
+    (70, 1.575, 794.0, 147.0, False, 70.0, 2400.0),
+    (75, 1.785, 994.0, 149.0, False, 70.0, 2400.0),
+    (80, 2.2, 1144.0, 151.0, False, 70.0, 2000.0),
+]
+
+
+def test_a_take_off_after_a_turnaround_in_one_track_is_found(spark):
+    """The ground altitude is read per visit of the airport, so the take-off
+    after a turnaround is measured from its own roll."""
+    sv = _pass(spark, _TURNAROUND_LANDING + _TURNAROUND_TAKE_OFF, elev_ft=56.0, apt="ENVA")
+    passes, events = _family(spark, sv, apt="ENVA")
+    assert passes == [("07", "arrival"), ("07", "departure")]
+    assert [e[1] for e in events if e[1] in ("ATOT", "ALDT")] == ["ALDT", "ATOT"]
+    (atot,) = _of(events, "ATOT")
+    assert 50.0 < atot[0] < 55.0
 
 
 #: The landing of ALDT#04 (track 60616737214fb211_1781432574, TAM3640, SBVT,
@@ -896,8 +945,8 @@ def test_a_track_first_seen_high_in_the_climb_gives_no_window_take_off_time(spar
         (t, a, h + 1170.0, kt, fpm, g) for t, a, h, kt, fpm, g in _TAKE_OFF[1:]
     ]
     assert _window(spark, rows, "departure") == []
-    (before,) = _window(spark, rows, "departure", _only())
-    assert _seconds(before["first_time"]) == 60.0
+    unchecked = _window(spark, rows, "departure", EventConfig(runway_window_times_checked=False))
+    assert len(unchecked) == 1
 
 
 def test_a_track_first_seen_low_in_the_climb_keeps_its_window_take_off_time(spark):

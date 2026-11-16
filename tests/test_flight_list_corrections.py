@@ -469,6 +469,27 @@ def test_a_track_without_position_is_seen_on_its_measured_values(spark):
     )
 
 
+def test_a_track_without_position_is_seen_on_the_altitude_the_detectors_read(spark):
+    """Step 04 reads the cleaned altitude in ``baro_altitude_c`` (the reports
+    as :func:`opdi.pipeline.detector_altitude.altitude_for_detectors` leaves
+    them, without ``baro_altitude``). On 531 of 39,133 sample rows, all
+    tracks without a position, the flight list's first and last seen (from
+    the altitudes) and the events (the first and last report) differed."""
+    rows = [
+        _report(0),
+        _report(60, alt_c=1000.0),
+        _report(600, alt_c=2000.0),
+        _report(900),
+    ]
+    df = spark.createDataFrame(rows, SEEN_SCHEMA).drop("baro_altitude")
+    out = calculate_firstseen_lastseen_events(df, from_measured_reports=True).collect()
+    seen = {r["type"]: r for r in out}
+    assert (seen["first_seen"]["event_time"], seen["last_seen"]["event_time"]) == (
+        _t(60),
+        _t(600),
+    )
+
+
 def test_a_track_with_nothing_measured_keeps_its_first_and_last_report(spark):
     rows = [_report(0, alt_c=1000.0), _report(60, alt_c=1000.0)]
     seen = _seen(spark, rows)
