@@ -285,7 +285,31 @@ def calculate_holding_events(
     """
     if not config.emit_holding:
         return None
+    # Only the columns the family reads: every other column of the step's
+    # frame would be carried through each of its windows and sorts.
+    geo = geo.select(*[c for c in HOLDING_INPUT_COLUMNS if c in geo.columns])
     return _pair_rows(_holding_episodes(geo, config, go_arounds, runway_events))
+
+
+#: The columns of the step's frame that the holding family reads.
+HOLDING_INPUT_COLUMNS = (
+    "track_id",
+    PIECE,
+    "event_time",
+    "lat",
+    "lon",
+    "baro_altitude_c",
+    "heading",
+    "velocity",
+    "cumulative_distance_nm",
+    "cumulative_time_s",
+    "elev_ades_ft",
+    "elev_adep_ft",
+    "adep",
+    "ades",
+    "ades_lat",
+    "ades_lon",
+)
 
 
 #: Event types that mark a landing or a take-off, from either detector.

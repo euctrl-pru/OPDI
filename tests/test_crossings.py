@@ -438,14 +438,16 @@ def test_a_ring_crossing_next_to_a_jump_is_placed_between_the_good_reports(spark
     from opdi.utils.geometry import haversine_nm
 
     apt = (41.0, 28.0 - 33.6 / (60.0 * 0.7547))
-    config = EventConfig(ring_radii_nm=[40.0])
+    # The jump carries the track across all three circles at once, so the
+    # crossing is not kept as a step (ring_crossing_keeps_single_steps).
+    config = EventConfig(ring_radii_nm=[40.0, 42.0, 44.0])
 
     def rings(df):
         df = df.withColumn("apt_ident", F.lit("LTFM")).withColumn(
             "distance_nm", haversine_nm(F.col("lat"), F.col("lon"), F.lit(apt[0]), F.lit(apt[1]))
         )
         df = df.withColumn("flight_level", F.col("baro_altitude") * 3.28084 / 100)
-        return ring_crossings(df, config).collect()
+        return [r for r in ring_crossings(df, config).collect() if r.threshold == 40.0]
 
     track = _eastbound(spark, jumps=(10,))
     assert rings(track) == []
