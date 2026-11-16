@@ -545,6 +545,22 @@ def test_an_overflight_is_seen_from_its_measured_reports(spark):
     assert (row["first_seen"], row["last_seen"]) == (_t(0), _t(7350))
 
 
+def test_an_overflight_with_little_position_still_gets_its_row(spark):
+    """The five-minute rule for an overflight row reads all reports: a track
+    seen for 20 minutes with two minutes of positions keeps its row."""
+    rows = [
+        ("t2", "155f01", "AFL1319 ", _t(0), None, None, 11000.0),
+        ("t2", "155f01", "AFL1319 ", _t(600), 30.0, 50.0, 11000.0),
+        ("t2", "155f01", "AFL1319 ", _t(720), 30.1, 50.2, 11000.0),
+        ("t2", "155f01", "AFL1319 ", _t(1200), None, None, 11000.0),
+    ]
+    sv = spark.createDataFrame(rows, _OF_SCHEMA)
+    fl = spark.createDataFrame([], "id string, first_seen timestamp")
+    proc = _overflight_processor({"osn_tracks": sv, "opdi_flight_list": fl})
+    (row,) = proc._fetch_overflights(_T0.date()).collect()
+    assert (row["first_seen"], row["last_seen"]) == (_t(600), _t(720))
+
+
 def test_the_call_sign_loses_its_padding_and_counts_as_one(spark):
     """Every FLT_ID of the day carried trailing spaces ('BKP935  '). Trimmed,
     'BKP935  ' and 'BKP935' are one call sign, and it outnumbers 'XYZ1'."""

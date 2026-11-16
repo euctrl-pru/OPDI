@@ -1776,10 +1776,17 @@ class FlightListProcessor:
             sv = sv.withColumn("first_seen", col("_first.t")).withColumn(
                 "last_seen", col("_last.ts")
             )
-            # Keep only the first row per track.
+            # Keep only the first row per track. The five-minute rule below
+            # reads the time between the first and last report of any kind, as
+            # before, so the same tracks become overflight rows.
+            span_s = unix_timestamp(f_max("event_time").over(window_track)) - unix_timestamp(
+                f_min("event_time").over(window_track)
+            )
+            sv = sv.withColumn("_span_s", span_s)
             sv_f = sv.filter(
                 (col("_seen_rank") == col("_first.r")) & (col("event_time") == col("first_seen"))
             )
+            sv_f = sv_f.filter(col("_span_s") >= 300)
             sv_f = sv_f.withColumn("DOF", to_date("first_seen"))
         else:
             sv = sv.withColumn("first_seen", f_min("event_time").over(window_track))
@@ -1821,8 +1828,10 @@ class FlightListProcessor:
         fl_broadcast = broadcast(fl)
         sv_f = sv_f.join(fl_broadcast, sv_f.id == fl.id, "left_anti")
 
-        # Filter out short ADS-B signals (< 5 min)
-        sv_f = sv_f.filter((unix_timestamp("last_seen") - unix_timestamp("first_seen")) >= 300)
+        # Filter out short ADS-B signals (< 5 min); with measured first and last
+        # seen this was done above, on all reports.
+        if not FlightListProcessor._seen_from_measured_reports(self):
+            sv_f = sv_f.filter((unix_timestamp("last_seen") - unix_timestamp("first_seen")) >= 300)
 
         return sv_f
 
