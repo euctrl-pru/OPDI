@@ -90,6 +90,7 @@ def threshold_crossings(
     max_implied_speed_kt: Optional[float] = None,
     position_cols: Sequence[str] = ("lat", "lon"),
     jump_allowance_nm: float = 0.0,
+    keep_single_threshold_jumps: bool = False,
 ) -> DataFrame:
     """Detect every hysteresis-confirmed crossing of ``thresholds``.
 
@@ -149,6 +150,12 @@ def threshold_crossings(
     jump_allowance_nm
         NM by which the two positions may be further apart than
         ``max_implied_speed_kt`` allows (position noise).
+    keep_single_threshold_jumps
+        With ``max_implied_speed_kt``, a crossing whose two reports imply
+        more than that speed is still placed when no other threshold lies
+        between their two values: the position stepped, but the step does
+        not carry the track across several thresholds at once. Such a
+        crossing has ``position_jump`` true.
     position_cols
         The latitude and longitude columns, in degrees, that the speed test
         reads. They must be among ``interpolate_cols``.
@@ -185,6 +192,7 @@ def threshold_crossings(
             max_implied_speed_kt=max_implied_speed_kt,
             position_cols=position_cols,
             jump_allowance_nm=jump_allowance_nm,
+            keep_single_threshold_jumps=keep_single_threshold_jumps,
         )
 
     ordered = _ordered(partition_cols, time_col)
@@ -315,6 +323,7 @@ def _crossings_over_missing_values(
     max_implied_speed_kt: Optional[float] = None,
     position_cols: Sequence[str] = ("lat", "lon"),
     jump_allowance_nm: float = 0.0,
+    keep_single_threshold_jumps: bool = False,
 ) -> DataFrame:
     """:func:`threshold_crossings` with reports without a value skipped.
 
@@ -355,14 +364,26 @@ def _crossings_over_missing_values(
     placeable = (
         F.lit(True) if max_bracket_seconds is None else gap <= F.lit(float(max_bracket_seconds))
     )
+    jumped = F.lit(False)
     if max_implied_speed_kt is not None:
-        placeable = placeable & _speed_within(
+        speed_ok = _speed_within(
             position_cols,
             interpolate_cols,
             gap,
             float(max_implied_speed_kt),
             float(jump_allowance_nm),
         )
+        if keep_single_threshold_jumps:
+            low, high = F.least(v_prev, v), F.greatest(v_prev, v)
+            between = sum(
+                F.when((low < F.lit(float(th))) & (high > F.lit(float(th))), 1).otherwise(0)
+                for th in thresholds
+            )
+            single = F.coalesce(between <= F.lit(1), F.lit(False))
+            jumped = ~speed_ok
+            placeable = placeable & (speed_ok | single)
+        else:
+            placeable = placeable & speed_ok
 
     for th in thresholds:
         s = _slug(th)
@@ -379,6 +400,7 @@ def _crossings_over_missing_values(
         fields = [
             F.when(placeable, t_prev + frac * gap).alias("xt"),
             gap.alias("gap"),
+            jumped.alias("jumped"),
         ]
         for c in interpolate_cols:
             prev_c = F.col(f"_known_prev.{c}")
@@ -417,6 +439,7 @@ def _crossings_over_missing_values(
             ),
             # The order of the crossings, also for one that cannot be placed.
             F.col("_t").alias("_confirmed_t"),
+            st.getField("jumped").alias("position_jump"),
         ]
         for c in interpolate_cols:
             fields.append((st.getField(c) if interpolate else F.col(c)).alias(c))
@@ -433,6 +456,11 @@ def _crossings_over_missing_values(
         F.col("_x.bracket_seconds").alias("bracket_seconds"),
         F.col("_x._confirmed_t").alias("_confirmed_t"),
         *[F.col(f"_x.{c}").alias(c) for c in interpolate_cols],
+        *(
+            [F.col("_x.position_jump").alias("position_jump")]
+            if keep_single_threshold_jumps
+            else []
+        ),
     )
 
     seq_window = Window.partitionBy(*partition_cols, "threshold").orderBy("_confirmed_t")
@@ -595,5 +623,8 @@ def ring_crossings(
         all_occurrences=config.crossing_all_occurrences,
         max_implied_speed_kt=_speed_limit(config, interpolate_cols),
         jump_allowance_nm=float(getattr(config, "position_jump_allowance_nm", 0.0)),
+        keep_single_threshold_jumps=bool(
+            getattr(config, "ring_crossing_keeps_single_steps", False)
+        ),
         **missing_value_options(config),
     )

@@ -987,6 +987,15 @@ class EventConfig:
     records confirm, most near Istanbul where positions are spoofed).
     Without it the crossing is dropped. Off in release v0.0.2."""
 
+    ring_crossing_keeps_single_steps: bool = True
+    """Keep a distance-circle crossing whose two reports imply more than
+    :attr:`crossing_max_implied_speed_kt` when no other circle radius lies
+    between the two distances: the position stepped (by 5 to 20 NM near
+    Istanbul, where positions are spoofed) and stayed, which does not carry
+    the track across several circles at once as the jumps the speed limit
+    is for do. Such a crossing is placed between the two reports as before
+    and has ``info.position_jump`` = true. Off in release v0.0.2."""
+
     position_jump_allowance_nm: float = 2.0
     """Distance, in NM, by which two positions may be further apart than
     :attr:`crossing_max_implied_speed_kt` and
@@ -1701,6 +1710,7 @@ class EventConfig:
             # Work package 5: crossings, rings, FIR and the two measurements.
             crossing_max_implied_speed_kt=None,
             crossing_skips_position_jumps=False,
+            ring_crossing_keeps_single_steps=False,
             crossing_value_max_gap_seconds=None,
             rings_around_flight_list_airports=False,
             fir_needs_position=False,

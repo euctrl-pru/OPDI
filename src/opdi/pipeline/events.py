@@ -851,6 +851,11 @@ def calculate_ring_crossing_events(
                 col("bearing_deg").alias("bearing"),
                 col("flight_level").alias("flight_level"),
                 col("bracket_seconds").alias("bracket_s"),
+                *(
+                    [when(col("position_jump"), lit(True)).alias("position_jump")]
+                    if "position_jump" in crossings.columns
+                    else []
+                ),
             )
         ).alias("info"),
     )

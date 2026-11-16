@@ -454,3 +454,35 @@ def test_a_ring_crossing_next_to_a_jump_is_placed_between_the_good_reports(spark
     # reports at 45 s and 55 s around the jumped one at 50 s.
     t = (row.event_time - _EPOCH).total_seconds()
     assert 45.0 < t < 55.0
+
+
+def _rings_of(df, radii, config=None):
+    from opdi.pipeline.crossings import ring_crossings
+    from opdi.utils.geometry import haversine_nm
+
+    apt = (41.0, 28.0 - 33.6 / (60.0 * 0.7547))
+    config = config or EventConfig(ring_radii_nm=radii)
+    df = df.withColumn("apt_ident", F.lit("LTFM")).withColumn(
+        "distance_nm", haversine_nm(F.col("lat"), F.col("lon"), F.lit(apt[0]), F.lit(apt[1]))
+    )
+    df = df.withColumn("flight_level", F.col("baro_altitude") * 3.28084 / 100)
+    return ring_crossings(df, config).collect()
+
+
+def test_a_ring_crossing_across_a_step_of_the_position_is_kept(spark):
+    """The track steps 20 NM north at 50 s and stays there (465c0dbb..., near
+    LTFM): no report is out of place, and the step carries the track across
+    the 40 NM circle only. The crossing is placed between the two reports
+    and marked; without the setting it is dropped."""
+    track = _eastbound(spark, step=10)
+    (row,) = _rings_of(track, [40.0, 60.0])
+    assert row.threshold == 40.0 and row.position_jump is True
+    off = EventConfig(ring_radii_nm=[40.0, 60.0], ring_crossing_keeps_single_steps=False)
+    assert _rings_of(track, [40.0, 60.0], off) == []
+
+
+def test_a_step_across_several_circles_is_not_a_crossing(spark):
+    """Spoofed positions that jump across several circles at once fired all
+    six circles within seconds; such a step gives no crossing."""
+    track = _eastbound(spark, step=10)
+    assert [r.threshold for r in _rings_of(track, [40.0, 42.0, 44.0])] == []
