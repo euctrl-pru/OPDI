@@ -229,14 +229,18 @@ def redirect(label: str, builds_tracks: bool) -> None:
 # --------------------------------------------------------------------------
 
 #: Frames of these files are skipped when naming the call site.
-_SKIP_FRAMES = ("/pyspark/", "/py4j/", "day_timing.py")
+_SKIP_FRAMES = ("/pyspark/", "/py4j/", "day_timing.py", "spark_helpers.py")
+#: Functions whose caller names the job instead: step 04 keeps each event
+#: family through one inner function, and the line that calls it says which
+#: family the job computes.
+_SKIP_FUNCTIONS = ("add", "keep_runway")
 
 
 def python_call_site(stack=None) -> str:
     """``file.py:line function`` of the innermost frame of the pipeline's own code."""
     stack = stack if stack is not None else traceback.extract_stack()
     for frame in reversed(stack):
-        if any(s in frame.filename for s in _SKIP_FRAMES):
+        if any(s in frame.filename for s in _SKIP_FRAMES) or frame.name in _SKIP_FUNCTIONS:
             continue
         return f"{Path(frame.filename).name}:{frame.lineno} {frame.name}"
     return "unknown"

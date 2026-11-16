@@ -1636,8 +1636,9 @@ def mark_position_jumps(df: DataFrame, max_kt: float, allowance_nm: float = 0.0)
     stays) is not marked, nor are reports of two aircraft under one address
     that alternate (each report's neighbours are themselves inconsistent).
 
-    One sort of the reports of each track in each direction, which the
-    distance flown also uses; no shuffle.
+    One sort of the reports of each track in each direction, ending in time
+    order as the distance flown reads them; no shuffle beyond the one by
+    track the distance flown makes.
     """
     t = col("event_time").cast("double")
     has_pos = col("lat").isNotNull() & col("lon").isNotNull()
@@ -1646,10 +1647,13 @@ def mark_position_jumps(df: DataFrame, max_kt: float, allowance_nm: float = 0.0)
     desc = Window.partitionBy("track_id").orderBy(col("event_time").desc())
     before = asc.rowsBetween(Window.unboundedPreceding, -1)
     after = desc.rowsBetween(Window.unboundedPreceding, -1)
-    df = df.withColumn("_j_p1", F.last(known, ignorenulls=True).over(before))
+    # The reverse order first and the time order last, so the reports are
+    # sorted twice and leave in time order, as the distance flown that
+    # follows reads them.
     df = df.withColumn("_j_n1", F.last(known, ignorenulls=True).over(after))
-    df = df.withColumn("_j_p2", F.last(when(has_pos, col("_j_p1")), ignorenulls=True).over(before))
     df = df.withColumn("_j_n2", F.last(when(has_pos, col("_j_n1")), ignorenulls=True).over(after))
+    df = df.withColumn("_j_p1", F.last(known, ignorenulls=True).over(before))
+    df = df.withColumn("_j_p2", F.last(when(has_pos, col("_j_p1")), ignorenulls=True).over(before))
     cur = struct(t.alias("t"), col("lat").alias("lat"), col("lon").alias("lon"))
 
     def ok(a, b):

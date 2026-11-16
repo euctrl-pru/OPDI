@@ -14,7 +14,7 @@ per day:
   take-off, top of climb, the start and end of a level segment, the crossing
   of a flight level, entry onto a runway, a holding pattern), with the
   event's time, position and altitude, its measurements (distance flown and
-  time passed since the start of the flight, holding duration, and others)
+  time passed since the flight was first seen, holding duration, and others)
   and the flight's columns.
 
 This repository holds the pipeline that produces the files (the `opdi`
@@ -84,7 +84,7 @@ measurements_v0 = published.as_measurements(events)
 These three tables have the table and column names of release v0.0.2, in
 the same order. The identifiers are text and do not match the identifiers of
 release v0.0.2, which were 64-bit integers. The `version` column holds the
-version of the method that produced each row (for example `events_v0.3.0`),
+version of the method that produced each row (for example `events_v0.4.0`),
 not the release name. As in release v0.0.2, the measurements table has a
 distance flown row and a time passed row for every event, also when the
 value is empty; the newer measurement types have a row only when they have a
