@@ -198,6 +198,134 @@ class EventConfig:
     the reported value is sometimes stale on the ground. 30 kt is the top of
     normal taxi speeds; a push-back moves at 2 to 5 kt."""
 
+    # -- block times and stands (work package 3 of the 2026-06-14 corrections)
+    ground_movement_through_reports_without_speed: bool = True
+    """Read ground movement across reports whose speed is not known.
+
+    On the airport surface about 40% of the reports carry no position and
+    under 1% a reported ground speed, so the speed is mostly derived from
+    two positions. With this setting the speed is derived between a report
+    with a position and the previous report with a position, when the two
+    are at most :attr:`ground_speed_max_position_gap_seconds` apart, and a
+    report whose speed is not known keeps the moving or standing state of
+    the last report whose speed is known. A movement then ends only at a
+    report that shows the aircraft standing (a speed of at most
+    :attr:`ground_speed_threshold_kt`) or after a silence of more than
+    :attr:`airport_trace_gap_seconds` without any known speed. A movement
+    still starts and ends at a report whose speed is known.
+
+    Without it, the speed is derived from the report just before, so it is
+    unknown after every report without a position, and an unknown speed ends
+    the movement: a taxi whose positioned reports alternate with reports
+    without position looks like a standstill, and the take-off or landing
+    roll is taken as the movement. Off in release v0.0.2."""
+
+    ground_speed_max_position_gap_seconds: float = 30.0
+    """Longest time, in seconds, between two reports with a position from
+    which a ground speed is derived, with
+    :attr:`ground_movement_through_reports_without_speed`. Over a longer
+    time the aircraft may have stopped and moved again in between, so the
+    average speed would say little."""
+
+    block_time_off_the_runway: bool = True
+    """Give no block time on the runway or next to the take-off or landing,
+    and judge a standstill on speed.
+
+    With this setting an off-block time is not given when it lies less than
+    :attr:`block_time_min_seconds_from_runway_time` before the take-off of
+    its leg, or between the line-up and that take-off; an in-block time is
+    not given when it lies less than that after the landing of its leg, or
+    between that landing and the ``runway-vacated`` that follows it. A
+    movement starts from (ends in) a standstill when the report where it
+    starts (ends) is at most :attr:`block_time_max_start_speed_kt` fast; the
+    flag "on the ground" counts only where no speed of that report is known,
+    because the take-off and landing rolls are flagged on the ground too.
+    Off in release v0.0.2."""
+
+    block_time_min_seconds_from_runway_time: float = 60.0
+    """Shortest time, in seconds, between a block time and the take-off or
+    landing of its leg, with :attr:`block_time_off_the_runway`. No taxi
+    takes less than a minute; a block time closer than that is the take-off
+    or landing roll."""
+
+    block_time_stand_at_same_airport: bool = True
+    """Name the stand of a block time only from a stand passage in the same
+    ground part (so at the same airport) that lasts at least
+    :attr:`block_time_min_stand_dwell_seconds` or reaches to within a
+    minute of the block time (an aircraft that parks is often in the
+    stand's cells for a few seconds only, because its later reports carry no
+    position).
+
+    The ground part is the part of the track between the track's start, a
+    take-off, a landing and the track's end in which the block time lies;
+    an off-block time names a stand exit in it, an in-block time a stand
+    entry. A block time without such a passage is still given, as before
+    (a stand passage anywhere in the track is needed), and names no stand
+    and no airport: the stand at a leg's own airport is often not received,
+    and requiring it would lose block times that airport records confirm.
+    Without this setting a passage of a few seconds (taxiing past a stand)
+    can be named. Off in release v0.0.2."""
+
+    block_time_min_stand_dwell_seconds: float = 30.0
+    """Shortest stand passage, in seconds (``info.opdi_time_in_use_s`` of the
+    stand events), that counts as a stop at the stand for the block times.
+    Taxiing across the cells of a stand takes 5 to 15 s."""
+
+    block_time_from_last_stand_stop: bool = True
+    """Take the off-block time from the stand stop the aircraft left last
+    before the take-off, and the in-block time from the stand stop it
+    reached first after the landing.
+
+    For an off-block time, the stand stop is the last stand passage of the
+    ground part that lasts at least :attr:`block_time_long_stand_stop_seconds`
+    (a shorter passage after the push-back is often where the engines are
+    started); the off-block time is the start of the first movement that
+    starts at or after the entry of that passage and still goes on 30 s
+    later. Without such a stop the first movement of the part is kept. For
+    an in-block time, the stand stop is the first stand passage after the
+    landing of at least that long, or one that lasts to the end of the
+    track; without one, the last movement of the part is kept. The in-block
+    time is the
+    end of the movement before the longest stop between two movements (or
+    between the last movement and the end of the track) that overlaps that
+    passage. The block time names that stand. Without this setting the
+    off-block time is the first movement of the part and the in-block time
+    the last, so a tow hours before the departure or
+    after the arrival is taken instead. Off in release v0.0.2."""
+
+    block_time_long_stand_stop_seconds: float = 600.0
+    """Stand passage, in seconds, long enough to be a stand stop rather than
+    a short wait, with :attr:`block_time_from_last_stand_stop`: an aircraft
+    that is repositioned stands on each stand for longer than this."""
+
+    block_time_stand_longest_dwell: bool = True
+    """Name the stand of a block time by the longest stand passage of its
+    ground part, rather than by the passage nearest in time.
+
+    The passage nearest in time is often a few seconds of taxiing across the
+    cells of a neighbouring stand. Off in release v0.0.2."""
+
+    block_time_one_part_per_leg: bool = True
+    """Read each block time in one ground part only. A track with a landing
+    but no take-off has one ground part after its landing, and a track with
+    a take-off but no landing one before its take-off. Without this setting
+    such a track also gets a ground part without take-off or landing, and
+    its block time can lose the landing or take-off in ``info``, so the
+    order checks cannot read it. Off in release v0.0.2."""
+
+    block_time_needs_flight: bool = True
+    """Give no block time to a track that never leaves the ground: one with
+    no take-off or landing time and no reports in flight for at least
+    :attr:`ground_move_min_seconds`. Airport vehicles and aircraft under
+    tow have such tracks. Off in release v0.0.2."""
+
+    layout_ref_missing_as_null: bool = True
+    """Write a missing name of an airport layout element (a stand, taxiway
+    or apron without a ``ref`` tag in OpenStreetMap) as no value, not as
+    the text ``"None"``, ``"nan"`` or an empty text. Applies where step 00b
+    builds the layout table and where step 04 reads it (``info.osm_ref``,
+    ``info.stand``). Off in release v0.0.2."""
+
     # -- runway identification for take-off and landing times ------------
     runway_max_dist_nm: float = 5.0
     """Only reports within this distance of the airport, in NM, are used to
@@ -1035,6 +1163,15 @@ class EventConfig:
             emit_level_offs=False,
             ground_speed_derive_from_position=False,
             block_times_on_ground_only=False,
+            # Work package 3 of the 2026-06-14 corrections.
+            ground_movement_through_reports_without_speed=False,
+            block_time_off_the_runway=False,
+            block_time_stand_at_same_airport=False,
+            block_time_from_last_stand_stop=False,
+            block_time_stand_longest_dwell=False,
+            block_time_one_part_per_leg=False,
+            block_time_needs_flight=False,
+            layout_ref_missing_as_null=False,
             phase_require_complete_rules=False,
             crossing_all_occurrences=False,
             crossing_interpolate=False,

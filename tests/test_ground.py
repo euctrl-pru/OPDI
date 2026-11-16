@@ -184,13 +184,39 @@ def _reports(spark, legs, track="trk-1", moving=False):
 
 
 def _stands(spark, rows, track="trk-1"):
-    """``(type, seconds, stand, airport)`` as layout events."""
+    """``(type, seconds, stand, airport)`` as layout events.
+
+    The time in the stand's cells (``opdi_time_in_use_s``) is the time from
+    the entry to the exit of the same stand where one of each is given, else
+    the fifth value of the row, else 60 s.
+    """
     import json
+
+    times = {}
+    for row in rows:
+        times.setdefault((row[2], row[3]), {}).setdefault(row[0], []).append(row[1])
+
+    def dwell(row):
+        if len(row) > 4:
+            return row[4]
+        pair = times[(row[2], row[3])]
+        entries = pair.get("entry-parking_position", [])
+        exits = pair.get("exit-parking_position", [])
+        if len(entries) == 1 and len(exits) == 1:
+            return exits[0] - entries[0]
+        return 60
 
     return spark.createDataFrame(
         [
-            (track, t, _at(s), json.dumps({"osm_ref": ref, "osm_airport": apt}))
-            for t, s, ref, apt in rows
+            (
+                track,
+                row[0],
+                _at(row[1]),
+                json.dumps(
+                    {"osm_ref": row[2], "osm_airport": row[3], "opdi_time_in_use_s": dwell(row)}
+                ),
+            )
+            for row in rows
         ],
         "track_id string, type string, event_time timestamp, info string",
     )
@@ -204,8 +230,8 @@ def _runway(spark, rows, track="trk-1"):
     )
 
 
-def _blocks(spark, reports, stands, runway):
-    rows = block_events(reports, stands, runway, EventConfig()).collect()
+def _blocks(spark, reports, stands, runway, config=None):
+    rows = block_events(reports, stands, runway, config or EventConfig()).collect()
     return sorted(
         [
             (r.block, (r.event_time - _EPOCH).total_seconds(), r.stand, r.stand_airport)
@@ -214,6 +240,10 @@ def _blocks(spark, reports, stands, runway):
         key=lambda x: x[1],
     )
 
+
+#: Settings that give block times to tracks that never leave the ground, for
+#: the tests of the ground parts that use such tracks.
+_GROUND_ONLY = EventConfig(block_time_needs_flight=False)
 
 #: A departure from stand A1 at EBBR: parked, push-back, a stop to start the
 #: engines, taxi, take-off at 600 s, climb away.
@@ -339,15 +369,17 @@ def test_a_touch_and_go_gives_no_block_time(spark):
 
 def test_without_take_off_or_landing_the_ground_part_at_each_end_is_used(spark):
     """A track seen only on the ground, with no take-off or landing time:
-    both times (it cannot be told which of the two it is)."""
+    both times (it cannot be told which of the two it is), when such tracks
+    are given block times (``block_time_needs_flight`` off)."""
     reports = _reports(spark, [_leg(0, 60, 0), _leg(60, 300, 12), _leg(300, 360, 0)])
     stands = [
         ("entry-parking_position", 0, "C3", "LFPG"),
         ("exit-parking_position", 80, "C3", "LFPG"),
+        ("entry-parking_position", 290, "C4", "LFPG", 60),
     ]
-    got = _blocks(spark, reports, _stands(spark, stands), _runway(spark, []))
+    got = _blocks(spark, reports, _stands(spark, stands), _runway(spark, []), _GROUND_ONLY)
 
-    assert got == [("off", 60.0, "C3", "LFPG"), ("on", 290.0, "C3", "LFPG")]
+    assert got == [("off", 60.0, "C3", "LFPG"), ("on", 290.0, "C4", "LFPG")]
 
 
 def test_without_take_off_time_the_flight_does_not_give_an_off_block(spark):
@@ -368,7 +400,9 @@ def test_a_report_without_altitude_counts_as_possibly_on_the_ground(spark):
         ("entry-parking_position", 0, "C3", "LFPG"),
         ("exit-parking_position", 80, "C3", "LFPG"),
     ]
-    got = _blocks(spark, _reports(spark, legs), _stands(spark, stands), _runway(spark, []))
+    got = _blocks(
+        spark, _reports(spark, legs), _stands(spark, stands), _runway(spark, []), _GROUND_ONLY
+    )
 
     assert ("off", 60.0, "C3", "LFPG") in got
 
@@ -376,21 +410,6 @@ def test_a_report_without_altitude_counts_as_possibly_on_the_ground(spark):
 def test_the_v002_settings_use_the_movement_of_the_whole_track(spark):
     assert EventConfig.legacy().block_times_on_ground_only is False
     assert EventConfig().block_times_on_ground_only is True
-
-
-def test_a_departure_whose_stand_was_not_seen_keeps_its_off_block(spark):
-    """Stand to stand, but the departure stand was not received: the only
-    stand passage is at the arrival. The off-block time of the departure is
-    still the start of its first movement before the take-off;
-    it names no stand, since none was seen in that part of the track."""
-    got = _blocks(
-        spark,
-        _reports(spark, DEPARTURE + ARRIVAL),
-        _stands(spark, ARRIVAL_STANDS),
-        _runway(spark, [("ATOT", 600), ("ALDT", 1000)]),
-    )
-
-    assert got == [("off", 60.0, None, None), ("on", 1290.0, "B2", "EDDF")]
 
 
 def test_a_landing_that_was_not_found_after_the_last_take_off_still_gives_the_in_block(
@@ -453,10 +472,13 @@ def test_a_garbled_altitude_on_the_ground_does_not_end_the_ground_part(spark):
     stands = [
         ("entry-parking_position", 0, "C3", "LFPG"),
         ("exit-parking_position", 80, "C3", "LFPG"),
+        ("entry-parking_position", 290, "C4", "LFPG", 60),
     ]
-    got = _blocks(spark, _reports(spark, legs), _stands(spark, stands), _runway(spark, []))
+    got = _blocks(
+        spark, _reports(spark, legs), _stands(spark, stands), _runway(spark, []), _GROUND_ONLY
+    )
 
-    assert got == [("off", 60.0, "C3", "LFPG"), ("on", 290.0, "C3", "LFPG")]
+    assert got == [("off", 60.0, "C3", "LFPG"), ("on", 290.0, "C4", "LFPG")]
 
 
 def test_reports_without_position_do_not_count_as_flight(spark):
@@ -527,9 +549,10 @@ def test_a_block_time_at_the_start_of_a_track_names_no_runway_time(spark):
     stands = [
         ("entry-parking_position", 0, "C3", "LFPG"),
         ("exit-parking_position", 80, "C3", "LFPG"),
+        ("entry-parking_position", 290, "C4", "LFPG", 60),
     ]
     rows = calculate_block_events(
-        reports, _stands(spark, stands), EventConfig(), _runway_with_method(spark, [])
+        reports, _stands(spark, stands), _GROUND_ONLY, _runway_with_method(spark, [])
     ).collect()
 
     assert len(rows) == 2
@@ -752,3 +775,561 @@ def test_without_runway_times_no_block_time_names_one(spark):
         _reports(spark, DEPARTURE), _stands(spark, DEPARTURE_STANDS), None, EventConfig()
     ).collect()
     assert rows and all(r.bound_time is None and r.bound_method is None for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Movement across reports whose speed is not known (work package 3, item 1)
+# ---------------------------------------------------------------------------
+
+
+def _surface(start_s, end_s, kt, step_s=10, positions="all", reported=False, on_ground=True):
+    """Surface reports every ``step_s`` seconds: ``positions`` says which carry
+    a position ("all", "none", or "alternate": every second one, starting
+    with one without), ``reported`` whether they carry the reported speed.
+    No altitude, as on most surface reports."""
+    out = []
+    for i, s in enumerate(range(start_s, end_s, step_s)):
+        has_pos = positions == "all" or (positions == "alternate" and i % 2 == 1)
+        out.append((s, kt, has_pos, reported, on_ground, None))
+    return out
+
+
+def _airborne(start_s, end_s, kt, alt_ft, step_s=10):
+    return [(s, kt, True, True, False, alt_ft / FT_PER_M) for s in range(start_s, end_s, step_s)]
+
+
+def _sparse(spark, legs, track="trk-1"):
+    """Reports advancing north at each report's speed; the position and the
+    reported speed are left out where the leg says so."""
+    rows, lat, last = [], 50.0, None
+    for leg in legs:
+        for s, kt, has_pos, reported, gnd, alt_m in leg:
+            if last is not None:
+                lat += kt * (s - last) / 3600.0 / NM_PER_DEG
+            last = s
+            rows.append(
+                (
+                    track,
+                    _at(s),
+                    lat if has_pos else None,
+                    4.0 if has_pos else None,
+                    _kt(kt) if reported else None,
+                    alt_m,
+                    gnd,
+                )
+            )
+    return spark.createDataFrame(rows, _REPORT_DDL)
+
+
+def _blocks_with(spark, reports, stands, runway, config):
+    rows = block_events(reports, stands, runway, config).collect()
+    return sorted(
+        [(r.block, (r.event_time - _EPOCH).total_seconds()) for r in rows], key=lambda x: x[1]
+    )
+
+
+_NO_BRIDGE = EventConfig(ground_movement_through_reports_without_speed=False)
+
+
+def test_the_setting_of_movement_through_reports_without_speed():
+    assert EventConfig().ground_movement_through_reports_without_speed is True
+    assert EventConfig().ground_speed_max_position_gap_seconds == 30.0
+    assert EventConfig.legacy().ground_movement_through_reports_without_speed is False
+
+
+def test_a_taxi_whose_positions_alternate_with_reports_without_position_is_movement(spark):
+    """AOBT#14 (LEZL) and AIBT#17 (YMML): every second surface report has no
+    position and none has a reported speed. The speed derived from the
+    previous positioned report, 10 s earlier, shows the taxi; the off-block
+    time is the first positioned report of the push, at 65 s."""
+    legs = [
+        _surface(0, 60, 0, step_s=5, positions="alternate"),
+        _surface(60, 400, 15, step_s=5, positions="alternate"),
+        _airborne(400, 600, 160, 3000),
+    ]
+    stands = _stands(spark, DEPARTURE_STANDS)
+    runway = _runway(spark, [("ATOT", 400)])
+
+    assert _blocks_with(spark, _sparse(spark, legs), stands, runway, EventConfig()) == [
+        ("off", 65.0)
+    ]
+    assert _blocks_with(spark, _sparse(spark, legs), stands, runway, _NO_BRIDGE) == []
+
+
+def test_a_silence_of_positions_during_the_taxi_does_not_cut_the_push_back_off(spark):
+    """AOBT#14 (LEZL): a slow push seen on two positioned reports, then 70 s
+    of reports without position, then the taxi. The push is shorter than the
+    30 s a movement must last, so without the bridge the off-block time is
+    the start of the taxi after the silence (150 s); with it, the start of
+    the push (60 s)."""
+    legs = [
+        _surface(0, 60, 0),
+        _surface(60, 80, 4),
+        _surface(80, 150, 4, positions="none"),
+        _surface(150, 400, 15),
+        _airborne(400, 600, 160, 3000),
+    ]
+    stands = _stands(spark, DEPARTURE_STANDS)
+    runway = _runway(spark, [("ATOT", 400)])
+
+    assert _blocks_with(spark, _sparse(spark, legs), stands, runway, EventConfig()) == [
+        ("off", 60.0)
+    ]
+    assert _blocks_with(spark, _sparse(spark, legs), stands, runway, _NO_BRIDGE) == [("off", 150.0)]
+
+
+def test_an_in_block_is_the_end_of_the_taxi_and_not_of_the_landing_roll(spark):
+    """AIBT#16 (EGCC): the landing roll carries reported speeds, the taxi-in
+    only positions every second report. Without the bridge the roll is the
+    last movement and its end the in-block time; with it, the end of the
+    taxi at the stand (the last positioned report before the stand, 1,295 s,
+    is already slow in the median of three)."""
+    legs = [
+        _airborne(700, 1000, 140, 1500),
+        _surface(1000, 1040, 100, step_s=5, reported=True),
+        _surface(1040, 1300, 15, step_s=5, positions="alternate"),
+        _surface(1300, 1420, 0),
+    ]
+    stands = _stands(spark, ARRIVAL_STANDS)
+    runway = _runway(spark, [("ALDT", 1000)])
+
+    # Without the bridge, and without the rule that drops an in-block time
+    # next to the landing.
+    before = EventConfig(
+        ground_movement_through_reports_without_speed=False, block_time_off_the_runway=False
+    )
+    new = _blocks_with(spark, _sparse(spark, legs), stands, runway, EventConfig())
+    old = _blocks_with(spark, _sparse(spark, legs), stands, runway, before)
+
+    assert new == [("on", 1285.0)]
+    assert old == [("on", 1040.0)]
+
+
+def test_a_stop_shown_by_positions_still_ends_the_movement(spark):
+    """A real stop gives positioned reports that do not move: the movement
+    ends there, so the in-block time is the end of the taxi, not the last
+    report at the stand."""
+    legs = [
+        _airborne(700, 1000, 140, 1500),
+        _surface(1000, 1300, 15),
+        _surface(1300, 1420, 0),
+    ]
+    got = _blocks_with(
+        spark,
+        _sparse(spark, legs),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ALDT", 1000)]),
+        EventConfig(),
+    )
+
+    assert got == [("on", 1290.0)]
+
+
+def test_reports_without_position_at_the_stand_do_not_extend_the_movement(spark):
+    """After the taxi-in, 20 minutes of reports without position at the stand
+    (the aircraft is parked; nothing tells its speed): the in-block time is
+    the last report that showed movement, not the last report of the track."""
+    legs = [
+        _airborne(700, 1000, 140, 1500),
+        _surface(1000, 1300, 15),
+        _surface(1300, 2500, 0, positions="none"),
+    ]
+    got = _blocks_with(
+        spark,
+        _sparse(spark, legs),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ALDT", 1000)]),
+        EventConfig(),
+    )
+
+    assert got == [("on", 1290.0)]
+
+
+# ---------------------------------------------------------------------------
+# Block times off the runway, from the stand stop of their own part, naming
+# the stand stood on (work package 3, items 2 to 7)
+# ---------------------------------------------------------------------------
+
+
+def _off(**fields):
+    """The default settings with the named corrections changed."""
+    return EventConfig(**fields)
+
+
+def _named(spark, reports, stands, runway, config=None):
+    rows = block_events(reports, stands, runway, config or EventConfig()).collect()
+    return sorted(
+        [(r.block, (r.event_time - _EPOCH).total_seconds(), r.stand) for r in rows],
+        key=lambda x: x[1],
+    )
+
+
+def test_the_settings_of_the_block_time_corrections():
+    new, old = EventConfig(), EventConfig.legacy()
+    for name in (
+        "block_time_off_the_runway",
+        "block_time_stand_at_same_airport",
+        "block_time_from_last_stand_stop",
+        "block_time_stand_longest_dwell",
+        "block_time_one_part_per_leg",
+        "block_time_needs_flight",
+        "layout_ref_missing_as_null",
+    ):
+        assert getattr(new, name) is True, name
+        assert getattr(old, name) is False, name
+    assert new.block_time_min_seconds_from_runway_time == 60.0
+    assert new.block_time_min_stand_dwell_seconds == 30.0
+    assert new.block_time_long_stand_stop_seconds == 600.0
+
+
+#: AIBT#16 (EGCC): the taxi-in was not seen. The landing roll slows from
+#: 120 kt, flagged on the ground, and the reports stop at 100 kt; the
+#: aircraft reaches stand 51 seven minutes later.
+_ROLL_ONLY = [
+    _leg(700, 1000, 140, alt_ft=1500, on_ground=False),
+    _leg(1000, 1040, 100),
+    _leg(1040, 1400, 0, on_ground=True),
+]
+_ROLL_ONLY_STANDS = [("entry-parking_position", 1300, "51", "EGCC", 100)]
+
+
+def test_a_landing_roll_ending_fast_is_not_an_in_block(spark):
+    """The roll ends at a report flagged on the ground but at 100 kt: on
+    speed, that is no standstill."""
+    reports = _reports(spark, [_ROLL_ONLY[0], _ROLL_ONLY[1], [(1040, 100, None, True)]])
+    stands = _stands(spark, _ROLL_ONLY_STANDS)
+    runway = _runway(spark, [("ALDT", 1000)])
+    old = _off(block_time_off_the_runway=False, block_time_stand_at_same_airport=False)
+
+    assert _named(spark, reports, stands, runway) == []
+    assert [b[0] for b in _named(spark, reports, stands, runway, old)] == ["on"]
+
+
+def test_an_in_block_less_than_60_s_after_the_landing_is_not_given(spark):
+    """The roll slows to a standstill 40 s after the landing (the taxi was
+    not seen): that end is not an in-block time."""
+    legs = [
+        _leg(700, 1000, 140, alt_ft=1500, on_ground=False),
+        _leg(1000, 1040, 60),
+        _leg(1040, 1400, 0),
+    ]
+    reports = _reports(spark, legs)
+    runway = _runway(spark, [("ALDT", 1000)])
+    stands = _stands(spark, [("entry-parking_position", 1040, "51", "EGCC", 360)])
+
+    assert _named(spark, reports, stands, runway) == []
+    assert _named(spark, reports, stands, runway, _off(block_time_off_the_runway=False)) == [
+        ("on", 1030.0, "51")
+    ]
+
+
+def test_an_off_block_after_the_line_up_is_not_given(spark):
+    """AOBT#20 (LFBO): the taxi was not seen; the aircraft lined up at 500 s,
+    waited on the runway and started its roll at 560 s, 80 s before the
+    take-off. The start of the roll is not an off-block time."""
+    legs = [
+        _leg(0, 120, 0),
+        _leg(120, 560, 0, step_s=60),
+        _leg(560, 640, 25),
+        _leg(640, 700, 160, alt_ft=3000, on_ground=False),
+    ]
+    reports = _reports(spark, legs)
+    stands = _stands(spark, [("exit-parking_position", 100, "U40", "LFBO", 100)])
+    runway = _runway(spark, [("line-up", 500), ("ATOT", 640)])
+
+    assert _named(spark, reports, stands, runway) == []
+    assert _named(spark, reports, stands, runway, _off(block_time_off_the_runway=False)) == [
+        ("off", 560.0, "U40")
+    ]
+
+
+def test_an_in_block_before_the_runway_is_vacated_is_not_given(spark):
+    """The aircraft stops on the runway 70 s after landing and vacates it at
+    200 s: a stop there is not the stand."""
+    legs = [
+        _leg(700, 1000, 140, alt_ft=1500, on_ground=False),
+        _leg(1000, 1070, 20),
+        _leg(1070, 1400, 0),
+    ]
+    reports = _reports(spark, legs)
+    stands = _stands(spark, [("entry-parking_position", 1100, "51", "EGCC", 300)])
+    runway = _runway(spark, [("ALDT", 1000), ("runway-vacated", 1200)])
+
+    assert _named(spark, reports, stands, runway) == []
+    assert _named(spark, reports, stands, runway, _off(block_time_off_the_runway=False)) == [
+        ("on", 1060.0, "51")
+    ]
+
+
+def test_a_departure_whose_stand_was_seen_only_at_the_other_airport_names_no_stand(spark):
+    """Stand to stand, the departure stand not received: the off-block time
+    is kept (the stand at a leg's own airport is often not received), but it
+    names no stand, and none of the destination."""
+    reports = _reports(spark, DEPARTURE + ARRIVAL)
+    stands = _stands(spark, ARRIVAL_STANDS)
+    runway = _runway(spark, [("ATOT", 600), ("ALDT", 1000)])
+
+    assert _named(spark, reports, stands, runway) == [("off", 60.0, None), ("on", 1290.0, "B2")]
+
+
+def test_a_stand_passed_for_a_few_seconds_is_not_named(spark):
+    """AOBT#26 (LMML): stand 13 crossed for 5 s on the way out; the off-block
+    time names no stand rather than that one."""
+    reports = _reports(spark, DEPARTURE)
+    stands = _stands(spark, [("exit-parking_position", 300, "13", "LMML", 5)])
+    runway = _runway(spark, [("ATOT", 600)])
+    nearest = _off(block_time_stand_at_same_airport=False)
+
+    assert _named(spark, reports, stands, runway) == [("off", 60.0, None)]
+    assert _named(spark, reports, stands, runway, nearest) == [("off", 60.0, "13")]
+
+
+#: The first (last) movement of the part, naming the stand passage nearest in
+#: time.
+_FIRST_MOVEMENT = EventConfig(
+    block_time_from_last_stand_stop=False, block_time_stand_longest_dwell=False
+)
+
+
+def test_the_off_block_leaves_the_last_stand_stop_before_the_take_off(spark):
+    """AOBT#42 (PANC): first received on stand A1, repositioned at 1,000 s to
+    stand B7, where it stood for an hour; push-back at 5,000 s, take-off at
+    5,400 s. The off-block time is the push from B7, not the reposition."""
+    legs = [
+        _leg(0, 1000, 0, step_s=60),
+        _leg(1000, 1100, 10),
+        _leg(1100, 5000, 0, step_s=60),
+        _leg(5000, 5060, 5),
+        _leg(5060, 5100, 0),
+        _leg(5100, 5400, 15),
+        _leg(5400, 5500, 160, alt_ft=4000, on_ground=False),
+    ]
+    stands = [
+        ("entry-parking_position", 0, "A1", "PANC", 1030),
+        ("exit-parking_position", 1030, "A1", "PANC", 1030),
+        ("entry-parking_position", 1090, "B7", "PANC", 3950),
+        ("exit-parking_position", 5040, "B7", "PANC", 3950),
+    ]
+    reports = _reports(spark, legs)
+    runway = _runway(spark, [("ATOT", 5400)])
+
+    assert _named(spark, reports, _stands(spark, stands), runway) == [("off", 5000.0, "B7")]
+    assert _named(spark, reports, _stands(spark, stands), runway, _FIRST_MOVEMENT) == [
+        ("off", 1000.0, "A1")
+    ]
+
+
+def test_the_in_block_reaches_the_first_stand_stop_after_the_landing(spark):
+    """AIBT#41 (KMSP): landing, taxi to stand G8, parked for hours, towed to
+    G8A the next morning. The in-block time is the arrival at G8."""
+    legs = ARRIVAL[:-1] + [
+        _leg(1300, 9000, 0, step_s=60),
+        _leg(9000, 9200, 8),
+        _leg(9200, 9400, 0),
+    ]
+    stands = [
+        ("entry-parking_position", 1250, "G8", "KMSP", 7800),
+        ("exit-parking_position", 9050, "G8", "KMSP", 7800),
+        ("entry-parking_position", 9150, "G8A", "KMSP", 250),
+    ]
+    reports = _reports(spark, legs)
+    runway = _runway(spark, [("ALDT", 1000)])
+
+    assert _named(spark, reports, _stands(spark, stands), runway) == [("on", 1290.0, "G8")]
+    assert _named(spark, reports, _stands(spark, stands), runway, _FIRST_MOVEMENT) == [
+        ("on", 9190.0, "G8A")
+    ]
+
+
+def test_the_stand_named_is_the_one_stood_on(spark):
+    """AOBT#48 (EDDF): the aircraft stood on V160 for 170 s and passed V155
+    for 55 s on the way out; the off-block time names V160, not the passage
+    nearest in time."""
+    stands = [
+        ("entry-parking_position", 0, "V160", "EDDF", 170),
+        ("exit-parking_position", 170, "V160", "EDDF", 170),
+        ("exit-parking_position", 160, "V155", "EDDF", 55),
+    ]
+    legs = [_leg(0, 150, 0), _leg(150, 600, 15), _leg(600, 700, 160, 4000, False)]
+    reports = _reports(spark, legs)
+    runway = _runway(spark, [("ATOT", 600)])
+    nearest = _off(block_time_from_last_stand_stop=False, block_time_stand_longest_dwell=False)
+
+    assert _named(spark, reports, _stands(spark, stands), runway) == [("off", 150.0, "V160")]
+    assert _named(
+        spark, reports, _stands(spark, stands), runway, _off(block_time_from_last_stand_stop=False)
+    ) == [("off", 150.0, "V160")]
+    assert _named(spark, reports, _stands(spark, stands), runway, nearest) == [
+        ("off", 150.0, "V155")
+    ]
+
+
+def test_an_arrival_only_track_carries_its_landing(spark):
+    """AIBT#02 and 16 others: a track with a landing and no take-off gives
+    one in-block time, which carries that landing."""
+    rows = block_events(
+        _reports(spark, ARRIVAL),
+        _stands(spark, ARRIVAL_STANDS),
+        _runway(spark, [("ALDT", 1000)]),
+        EventConfig(),
+    ).collect()
+
+    assert [(r.block, r.bound_time) for r in rows] == [("on", _at(1000))]
+
+
+def test_a_departure_only_track_carries_its_take_off(spark):
+    rows = block_events(
+        _reports(spark, DEPARTURE),
+        _stands(spark, DEPARTURE_STANDS),
+        _runway(spark, [("ATOT", 600)]),
+        EventConfig(),
+    ).collect()
+
+    assert [(r.block, r.bound_time) for r in rows] == [("off", _at(600))]
+
+
+def test_a_stand_without_a_name_names_none(spark):
+    """23% of the stands in the layout carry the text "None" for a missing
+    name; the block time names no stand instead."""
+    stands = [
+        ("entry-parking_position", 0, "None", "LEZL", 100),
+        ("exit-parking_position", 100, "None", "LEZL", 100),
+    ]
+    got = _named(
+        spark, _reports(spark, DEPARTURE), _stands(spark, stands), _runway(spark, [("ATOT", 600)])
+    )
+    old = _named(
+        spark,
+        _reports(spark, DEPARTURE),
+        _stands(spark, stands),
+        _runway(spark, [("ATOT", 600)]),
+        _off(layout_ref_missing_as_null=False),
+    )
+
+    assert got == [("off", 60.0, None)]
+    assert old == [("off", 60.0, "None")]
+
+
+def test_missing_names_become_null(spark):
+    from opdi.pipeline.ground import missing_ref_as_null
+
+    df = spark.createDataFrame(
+        [("None",), ("nan",), ("",), (" ",), ("A12",), ("0",), (None,)], "ref string"
+    )
+    got = [r.r for r in df.select(missing_ref_as_null(F.col("ref")).alias("r")).collect()]
+    assert got == [None, None, None, None, "A12", "0", None]
+
+
+def test_missing_names_become_none_in_the_layout_table():
+    import pandas as pd
+
+    from opdi.reference.h3_airport_layouts import missing_ref_as_none
+
+    got = missing_ref_as_none(pd.Series(["None", "nan", "", "12", "R226", None, float("nan")]))
+    assert got.tolist()[:5] == [None, None, None, "12", "R226"]
+    assert got.isna().tolist()[5:] == [True, True]
+
+
+def test_a_track_that_never_leaves_the_ground_gets_no_block_time(spark):
+    """AOBT#40 (EGKK, an aircraft towed at night) and vehicles such as TUG15
+    (YPPH): no take-off, no landing, nothing in flight."""
+    reports = _reports(spark, [_leg(0, 60, 0), _leg(60, 300, 12), _leg(300, 360, 0)])
+    stands = _stands(
+        spark,
+        [
+            ("entry-parking_position", 0, "C3", "LFPG", 80),
+            ("exit-parking_position", 80, "C3", "LFPG", 80),
+            ("entry-parking_position", 290, "C4", "LFPG", 60),
+        ],
+    )
+    assert _named(spark, reports, stands, _runway(spark, [])) == []
+    assert _named(
+        spark, reports, stands, _runway(spark, []), _off(block_time_needs_flight=False)
+    ) == [
+        ("off", 60.0, "C3"),
+        ("on", 290.0, "C4"),
+    ]
+
+
+def test_a_slow_light_aircraft_keeps_its_block_times(spark):
+    """A light aircraft taxis at 6 kt for three minutes, takes off, flies a
+    circuit, lands and taxis back to its stand."""
+    legs = [
+        _leg(0, 60, 0),
+        _leg(60, 240, 6),
+        _leg(240, 900, 80, alt_ft=1000, on_ground=False),
+        _leg(900, 1080, 6),
+        _leg(1080, 1200, 0),
+    ]
+    stands = [
+        ("entry-parking_position", 0, "GA1", "EBAW", 70),
+        ("exit-parking_position", 70, "GA1", "EBAW", 70),
+        ("entry-parking_position", 1070, "GA1", "EBAW", 130),
+    ]
+    got = _named(
+        spark,
+        _reports(spark, legs),
+        _stands(spark, stands),
+        _runway(spark, [("ATOT", 240), ("ALDT", 900)]),
+    )
+
+    assert got == [("off", 60.0, "GA1"), ("on", 1070.0, "GA1")]
+
+
+def test_a_short_push_back_seen_on_few_reports_is_the_off_block(spark):
+    """Flight 034f151f92 (sample of 2026-06-14): the push-back moves at 3 kt
+    on six positioned reports over 25 s, then one report shows it standing
+    and nothing is received for two minutes before the taxi. The push
+    lasted until that standing report, 35 s: it is the off-block time, not
+    the start of the taxi."""
+    legs = [
+        _surface(0, 50, 0, step_s=5),
+        _surface(50, 80, 3, step_s=5),
+        _surface(80, 85, 0, step_s=5),
+        _surface(85, 200, 0, step_s=5, positions="none"),
+        _surface(200, 500, 15, step_s=5),
+        _airborne(500, 600, 160, 3000),
+    ]
+    stands = _stands(spark, [("exit-parking_position", 75, "A1", "EBBR", 75)])
+    got = _blocks_with(
+        spark, _sparse(spark, legs), stands, _runway(spark, [("ATOT", 500)]), EventConfig()
+    )
+
+    assert got == [("off", 50.0)]
+
+
+def test_a_single_moving_report_before_a_silence_is_not_a_movement(spark):
+    """One position 20 m off while parked, then two minutes without position:
+    not a push-back."""
+    legs = [
+        _surface(0, 50, 0, step_s=5),
+        _surface(50, 55, 8, step_s=5),
+        _surface(55, 200, 0, step_s=5, positions="none"),
+        _surface(200, 260, 0, step_s=5),
+        _surface(260, 500, 15, step_s=5),
+        _airborne(500, 600, 160, 3000),
+    ]
+    stands = _stands(spark, [("exit-parking_position", 265, "A1", "EBBR", 265)])
+    got = _blocks_with(
+        spark, _sparse(spark, legs), stands, _runway(spark, [("ATOT", 500)]), EventConfig()
+    )
+
+    assert got == [("off", 260.0)]
+
+
+def test_a_long_engine_start_after_the_push_back_does_not_move_the_off_block(spark):
+    """Received 30 s before the push-back; the push lasts 40 s, the engines
+    are started during a 200 s stop still inside the stand's cells, then the
+    taxi. The off-block time is the push-back, although the stop after it is
+    longer than the one before it."""
+    legs = [
+        _leg(0, 30, 0),
+        _leg(30, 70, 4),
+        _leg(70, 270, 0),
+        _leg(270, 600, 15),
+        _leg(600, 700, 160, alt_ft=4000, on_ground=False),
+    ]
+    stands = _stands(spark, [("exit-parking_position", 280, "A1", "EBBR", 280)])
+    got = _named(spark, _reports(spark, legs), stands, _runway(spark, [("ATOT", 600)]))
+
+    assert got == [("off", 30.0, "A1")]

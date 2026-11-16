@@ -283,8 +283,11 @@ NAMES = {
         "trend_prefilter_ceiling_ft",
     ),
     "opdi.pipeline.ground": (
+        "block_events",
         "block_times",
+        "missing_ref_as_null",
         "movement_window",
+        "on_or_near_ground",
     ),
     "opdi.pipeline.holding": (
         "FT_PER_M",
@@ -397,6 +400,7 @@ NAMES = {
         "HEXAERO_SCHEMA",
         "clean_str",
         "hexagonify_airport",
+        "missing_ref_as_none",
         "retrieve_osm_data",
     ),
     "opdi.reference.h3_airport_zones": (
