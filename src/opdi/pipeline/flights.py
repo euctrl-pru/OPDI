@@ -984,7 +984,9 @@ class FlightListProcessor:
         scheduled service. ``waiver``, a pair (radius in NM, height in feet),
         leaves the penalty out where the end report is at that airport: flagged
         on the ground, or within the radius and no higher than the height above
-        it (:attr:`DetectionConfig.sched_penalty_waived_at_field`).
+        it (:attr:`DetectionConfig.sched_penalty_waived_at_field`). The penalty
+        stays when an airport with scheduled service of the same end also lies
+        within the radius: an aircraft on the ground there is at that airport.
         """
         scheduled = "apt_scheduled" if "apt_scheduled" in cand.columns else None
         penalty = (
@@ -998,7 +1000,12 @@ class FlightListProcessor:
                 (col("dist_nm") <= float(radius_nm)) & (col("agl_ft") <= float(height_ft)),
                 lit(False),
             )
-            penalty = when(at_field, lit(0.0)).otherwise(penalty)
+            end = Window.partitionBy("track_id", "role")
+            scheduled_near = F.coalesce(
+                F.max((col(scheduled) == "yes") & (col("dist_nm") <= float(radius_nm))).over(end),
+                lit(False),
+            )
+            penalty = when(at_field & ~scheduled_near, lit(0.0)).otherwise(penalty)
         return cand.withColumn("_eff", col("dist_nm") + penalty)
 
     @staticmethod
@@ -1029,6 +1036,7 @@ class FlightListProcessor:
         ooa: bool = True,
         waiver: Optional[tuple] = None,
         min_climb_ft: Optional[float] = None,
+        min_climb_above_ft: float = 1000.0,
     ) -> DataFrame:
         """Name one airport per track end from the candidate table.
 
@@ -1068,9 +1076,14 @@ class FlightListProcessor:
         if min_climb_ft is not None and "climb_ft" in best.columns:
             # A first report in the air, followed by no climb, is an aircraft
             # passing by or arriving, not a departure.
+            #
+            # Only a report clearly in the air is tested: an aircraft seen first
+            # at the stand, not flagged on the ground, does not climb while it
+            # taxis.
             not_climbing = (
                 (col("role") == "adep")
                 & ~F.coalesce(col("on_ground"), lit(False))
+                & (col("agl_ft") > float(min_climb_above_ft))
                 & (col("climb_ft") < float(min_climb_ft))
             )
             ok = ok & ~F.coalesce(not_climbing, lit(False))
@@ -1414,7 +1427,15 @@ class FlightListProcessor:
                         else lit(False)
                     )
                     at_field = ground | F.coalesce(near, lit(False))
-                    penalty_km = when(at_field, lit(0.0)).otherwise(penalty_km)
+                    # Not where an airport with scheduled service is as near.
+                    scheduled_near = F.coalesce(
+                        F.max(
+                            (col(sched_col) == "yes")
+                            & (col("distance_km") <= lit(float(radius_nm) * 1.852))
+                        ).over(Window.partitionBy(key_columns)),
+                        lit(False),
+                    )
+                    penalty_km = when(at_field & ~scheduled_near, lit(0.0)).otherwise(penalty_km)
                 flight_table = flight_table.withColumn("_eff_km", col("distance_km") + penalty_km)
                 order_col = col("_eff_km")
 
@@ -2070,6 +2091,7 @@ class FlightListProcessor:
                     if getattr(d, "endpoint_airborne_needs_climb", False)
                     else None
                 ),
+                min_climb_above_ft=getattr(d, "endpoint_climb_above_ft", 1000.0),
             )
             tables[m] = self._flight_table_from_endpoints(
                 classified,

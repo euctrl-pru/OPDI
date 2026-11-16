@@ -631,6 +631,23 @@ def test_the_penalty_stays_for_an_aircraft_passing_by(spark):
     assert _classify(spark, rows, waiver=WAIVER)[("t", "ades")] == "BIGG"
 
 
+def test_no_waiver_where_a_scheduled_airport_is_as_near(spark):
+    """THY7JD landed at Tbilisi (UGTB, 31L); the military field Soganlug (UG24)
+    lies 1.5 NM away. On the ground at UGTB the aircraft is at UGTB."""
+    rows = [
+        _cand("t", "ades", "UGTB", 0.9, ground=True),
+        _cand("t", "ades", "UG24", 0.7, ground=True, sched="no"),
+    ]
+    assert _classify(spark, rows, waiver=WAIVER)[("t", "ades")] == "UGTB"
+
+
+def test_a_departure_first_seen_at_the_stand_keeps_its_airport(spark):
+    """ENT6631 at EDDM: first report at the stand 93 minutes before take-off,
+    not flagged on the ground; the altitude does not rise while it waits."""
+    rows = [_cand("t", "adep", "EDDM", 0.4, agl=25.0, climb=0.0)]
+    assert _classify(spark, rows, min_climb_ft=200.0)[("t", "adep")] == "EDDM"
+
+
 def test_an_arrival_fragment_names_no_departure(spark):
     """fl_alternative_airports#44: BE20 first seen 29.6 NM from YPKG at 9,700 ft,
     descending at 1,055 ft/min; it lands at YPKG 10 min later."""

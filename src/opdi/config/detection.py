@@ -165,8 +165,11 @@ class DetectionConfig:
 
     The penalty keeps a small field next to a large airport from winning on
     distance alone. An aircraft standing at Paris-Le Bourget (no scheduled
-    service) is at Le Bourget, not at Charles de Gaulle 5 NM away. Applies
-    to both methods. Off in release v0.0.2."""
+    service) is at Le Bourget, not at Charles de Gaulle 5 NM away. The
+    penalty stays when an airport with scheduled service also lies within
+    :attr:`sched_penalty_waiver_radius_nm`: an aircraft on the ground at
+    Tbilisi is at Tbilisi, not at the military field 1.5 NM away. Applies to
+    both methods. Off in release v0.0.2."""
 
     sched_penalty_waiver_radius_nm: float = 2.0
     """Distance, in NM, within which a report counts as at the airport for
@@ -190,6 +193,13 @@ class DetectionConfig:
     :attr:`endpoint_min_climb_ft` within :attr:`endpoint_climb_window_s`.
     When fewer than two altitudes are known in that time, the first report
     is judged as before. Off in release v0.0.2."""
+
+    endpoint_climb_above_ft: float = 1000.0
+    """Height above the airport, in feet, above which a first report not
+    flagged on the ground counts as in the air for
+    :attr:`endpoint_airborne_needs_climb`. An aircraft first seen at the stand
+    or on the taxiway, whose transponder does not flag it on the ground, does
+    not climb in its first minutes and must keep its departure airport."""
 
     endpoint_climb_window_s: float = 180.0
     """Seconds after the first report over which the climb of
