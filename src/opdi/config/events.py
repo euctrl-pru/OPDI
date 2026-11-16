@@ -249,16 +249,19 @@ class EventConfig:
     or landing roll."""
 
     block_time_stand_at_same_airport: bool = True
-    """Give a block time only when the track was seen at a stand in the same
-    ground part (so at the same airport), for at least
-    :attr:`block_time_min_stand_dwell_seconds`.
+    """Name the stand of a block time only from a stand passage of at least
+    :attr:`block_time_min_stand_dwell_seconds` in the same ground part (so
+    at the same airport).
 
     The ground part is the part of the track between the track's start, a
-    take-off, a landing and the track's end in which the block time lies.
-    An off-block time needs a stand exit in it, an in-block time a stand
-    entry. Without this setting a stand passage anywhere in the track is
-    enough, also a few seconds of taxiing past a stand at the other airport,
-    and the block time then names no stand. Off in release v0.0.2."""
+    take-off, a landing and the track's end in which the block time lies;
+    an off-block time names a stand exit in it, an in-block time a stand
+    entry. A block time without such a passage is still given, as before
+    (a stand passage anywhere in the track is needed), and names no stand
+    and no airport: the stand at a leg's own airport is often not received,
+    and requiring it would lose block times that airport records confirm.
+    Without this setting a passage of a few seconds (taxiing past a stand)
+    can be named. Off in release v0.0.2."""
 
     block_time_min_stand_dwell_seconds: float = 30.0
     """Shortest stand passage, in seconds (``info.opdi_time_in_use_s`` of the
@@ -275,10 +278,11 @@ class EventConfig:
     last one of at least :attr:`block_time_long_stand_stop_seconds` before
     the take-off, else the longest; for an in-block time the first one of at
     least that long after the landing, else the longest. The off-block time
-    is the start of the movement after the longest stop between two
-    movements (or between the start of the track and its first movement)
-    that overlaps that passage; the in-block time is the end of the movement
-    before the longest such stop. The block time names that stand. Without
+    is the start of the first movement that starts at or after the entry of
+    that passage; the in-block time is the end of the movement before the
+    longest stop between two movements (or between the last movement and
+    the end of the track) that overlaps that passage. The block time names
+    that stand. Without
     this setting the off-block time is the first movement of the part and
     the in-block time the last, so a tow hours before the departure or
     after the arrival is taken instead. Off in release v0.0.2."""

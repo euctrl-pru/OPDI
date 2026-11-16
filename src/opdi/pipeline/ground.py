@@ -176,7 +176,7 @@ def _movement_runs(
                 ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)
             ),
         )
-        return _sustained_runs(work, config, partition_cols, time_col)
+        return _sustained_runs_through_unknown(work, config, partition_cols, time_col)
     work = work.withColumn("_prev", F.lag("_moving").over(ordered))
     starts = F.col("_moving") & ~F.coalesce(F.col("_prev"), F.lit(False))
     if break_after_seconds is not None:
@@ -219,6 +219,66 @@ def _sustained_runs(
     return runs.withColumn(
         "_seconds", F.col("_to").cast("double") - F.col("_from").cast("double")
     ).filter(F.col("_seconds") >= F.lit(config.ground_move_min_seconds))
+
+
+def _sustained_runs_through_unknown(
+    work: DataFrame,
+    config: "EventConfig",
+    partition_cols: Sequence[str],
+    time_col: str,
+) -> DataFrame:
+    """The runs of ``ground_movement_through_reports_without_speed``.
+
+    A run starts and ends at a report that shows movement (``_from``,
+    ``_to``). How long it lasted is measured up to the first report after it
+    that shows the aircraft standing, or up to its last report whose speed
+    is not known, but at most ``ground_speed_max_position_gap_seconds``
+    after ``_to``: the aircraft moved until a report showed it standing, and
+    a push-back seen on reports 25 s apart with nothing known after them
+    still lasted longer than that. A run is kept when that time is at least
+    ``ground_move_min_seconds`` and it holds at least two reports that show
+    movement, so a single wrong position followed by reports without one is
+    not a movement.
+    """
+    t = F.col(time_col)
+    moving = F.coalesce(F.col("_moving"), F.lit(False))
+    standing = F.col("_moving") == F.lit(False)
+    at_moving = F.when(moving, F.struct(t.alias("t"), "_slow_kt", "_flagged"))
+    runs = (
+        work.filter(F.col("_run") > 0)
+        .groupBy(*partition_cols, "_run")
+        .agg(
+            F.min(at_moving).alias("_first"),
+            F.max(at_moving).alias("_last"),
+            F.sum(F.when(moving, 1).otherwise(0)).alias("_n_moving"),
+            F.min(F.when(standing, t)).alias("_first_standing"),
+            F.max(t).alias("_last_report"),
+        )
+        .filter(F.col("_n_moving") >= 1)
+    )
+    to_s = F.col("_last.t").cast("double")
+    span_end = F.least(
+        F.coalesce(F.col("_first_standing"), F.col("_last_report")).cast("double"),
+        to_s + F.lit(float(config.ground_speed_max_position_gap_seconds)),
+    )
+    return (
+        runs.select(
+            *partition_cols,
+            "_run",
+            F.col("_first.t").alias("_from"),
+            F.col("_last.t").alias("_to"),
+            F.col("_first._slow_kt").alias("_from_kt"),
+            F.col("_last._slow_kt").alias("_to_kt"),
+            F.col("_first._flagged").alias("_from_flagged"),
+            F.col("_last._flagged").alias("_to_flagged"),
+            (span_end - F.col("_first.t").cast("double")).alias("_seconds"),
+            "_n_moving",
+        )
+        .filter(
+            (F.col("_seconds") >= F.lit(config.ground_move_min_seconds)) & (F.col("_n_moving") >= 2)
+        )
+        .drop("_n_moving")
+    )
 
 
 def movement_window(
@@ -421,14 +481,15 @@ def block_events(
     The settings of work package 3 of the 2026-06-14 corrections change these
     rules where they are on (the default):
 
-    * ``block_time_stand_at_same_airport``: the stand passage must lie in
-      the same part and last at least ``block_time_min_stand_dwell_seconds``
-      (30 s); a passage elsewhere in the track licenses nothing.
+    * ``block_time_stand_at_same_airport``: the stand named is a passage
+      in the same part of at least ``block_time_min_stand_dwell_seconds``
+      (30 s); without one, the time is still given but names no stand.
     * ``block_time_from_last_stand_stop``: in a part with such a passage, the
       stand stop is the last passage of at least 10 minutes before the
       take-off (the first after the landing), else the longest; the time is
-      the start (end) of the movement after (before) the longest stop that
-      overlaps it, and names that stand (see :func:`_from_stand_stop`).
+      the start of the first movement after its entry (the end of the
+      movement before the longest stop that overlaps it), and names that
+      stand (see :func:`_from_stand_stop`).
     * ``block_time_stand_longest_dwell``: elsewhere, the stand named is the
       longest passage of the part.
     * ``block_time_off_the_runway``: a standstill is judged on speed, the
@@ -900,25 +961,25 @@ def block_events(
         & (F.col("stand_time") <= F.col("_s_hi"))
     )
     if config.block_time_stand_at_same_airport:
-        # A stand passage of at least block_time_min_stand_dwell_seconds in
-        # the same part licenses the time.
+        # Only a stand passage of at least block_time_min_stand_dwell_seconds
+        # in the same part is named; a time without one names no stand.
         long_enough = stands.filter(
             F.col("stand_dwell") >= F.lit(float(config.block_time_min_stand_dwell_seconds))
         )
-        matched = candidates.join(long_enough, stand_window, "inner")
+        matched = candidates.join(long_enough, stand_window, "left")
     else:
         matched = candidates.join(stands, stand_window, "left")
-        # A part with no stand passage of its own still gives its time when
-        # the track passed a stand elsewhere (the stand at the start of a
-        # departure is often not received); the time then names no stand.
-        anywhere = stands.select(
-            F.col("_s_track").alias("_a_track"), F.col("_s_block").alias("_a_block")
-        ).distinct()
-        matched = matched.join(
-            anywhere,
-            (F.col("track_id") == F.col("_a_track")) & (F.col("block") == F.col("_a_block")),
-            "inner",
-        ).drop("_a_track", "_a_block")
+    # A part with no stand passage of its own still gives its time when
+    # the track passed a stand elsewhere (the stand at the start of a
+    # departure is often not received); the time then names no stand.
+    anywhere = stands.select(
+        F.col("_s_track").alias("_a_track"), F.col("_s_block").alias("_a_block")
+    ).distinct()
+    matched = matched.join(
+        anywhere,
+        (F.col("track_id") == F.col("_a_track")) & (F.col("block") == F.col("_a_block")),
+        "inner",
+    ).drop("_a_track", "_a_block")
     st = F.col("stand_time").cast("double")
     ev = F.col("event_time").cast("double")
     off_side = F.col("block") == "off"
@@ -990,13 +1051,13 @@ def _from_stand_stop(
     was not received. The passage covers the times from its entry to its
     exit (``opdi_time_in_use_s``).
 
-    The stops of the part are the times between two movements; with
-    ``at_edge``, also the time between the start of the part and its first
-    movement (off-block: the track starts at the stand) or between its last
-    movement and its end (in-block: the track ends at the stand). The
-    longest stop that overlaps the passage is the stand stop. The off-block
-    time is the start of the movement after it, the in-block time the end of
-    the movement before it, each only from (to) a standstill.
+    The off-block time is the start of the first movement that starts at or
+    after the entry of that passage, from a standstill. For the in-block
+    time, the stops of the part are the times between two movements and,
+    with ``at_edge``, between its last movement and its end (the track ends
+    at the stand); the longest stop that overlaps the passage is the stand
+    stop, and the in-block time is the end of the movement before it, to a
+    standstill.
 
     Returns the block times, and the parts that have a stand stop
     (``_h_track``, ``_h_block``, ``_h_lo``: the track, the side and the
@@ -1047,35 +1108,37 @@ def _from_stand_stop(
     r = a.join(runs, "track_id", "inner").filter(
         (F.col("_to") >= F.col("_lo")) & (F.col("_from") <= F.col("_hi"))
     )
-    by_start = Window.partitionBy("track_id", "_lo").orderBy("_from")
     if off:
-        stop_from = F.lag("_to").over(by_start)
-        if at_edge:
-            stop_from = F.coalesce(stop_from, F.col("_lo"))
-        r = r.withColumn("_stop_from", stop_from.cast("double")).withColumn(
-            "_stop_to", F.col("_from").cast("double")
+        # The first movement that starts at or after the aircraft was first
+        # seen in the stand's cells. Not the movement after the longest stop:
+        # after the push-back the aircraft often stands longer for the engine
+        # start than it was received before the push-back.
+        r = r.filter(
+            (F.col("_from") >= F.col("_lo"))
+            & (F.col("_from") <= F.col("_hi"))
+            & (F.col("_from").cast("double") >= F.col("_p_in"))
         )
-        keep = (F.col("_from") >= F.col("_lo")) & (F.col("_from") <= F.col("_hi"))
+        longest = Window.partitionBy("track_id", "_lo").orderBy("_from")
         time_col, still = "_from", "_starts_still"
     else:
+        by_start = Window.partitionBy("track_id", "_lo").orderBy("_from")
         stop_to = F.lead("_from").over(by_start)
         if at_edge:
             stop_to = F.coalesce(stop_to, F.col("_hi"))
         r = r.withColumn("_stop_from", F.col("_to").cast("double")).withColumn(
             "_stop_to", stop_to.cast("double")
         )
-        keep = (F.col("_to") >= F.col("_lo")) & (F.col("_to") <= F.col("_hi"))
+        r = r.filter(
+            (F.col("_to") >= F.col("_lo"))
+            & (F.col("_to") <= F.col("_hi"))
+            & F.col("_stop_to").isNotNull()
+            & (F.col("_stop_from") <= F.col("_p_out"))
+            & (F.col("_stop_to") >= F.col("_p_in"))
+        )
+        longest = Window.partitionBy("track_id", "_lo").orderBy(
+            (F.col("_stop_to") - F.col("_stop_from")).desc(), "_from"
+        )
         time_col, still = "_to", "_ends_still"
-    r = r.filter(
-        keep
-        & F.col("_stop_from").isNotNull()
-        & F.col("_stop_to").isNotNull()
-        & (F.col("_stop_from") <= F.col("_p_out"))
-        & (F.col("_stop_to") >= F.col("_p_in"))
-    )
-    longest = Window.partitionBy("track_id", "_lo").orderBy(
-        (F.col("_stop_to") - F.col("_stop_from")).desc(), "_from"
-    )
     times = (
         r.withColumn("_rank", F.row_number().over(longest))
         .filter((F.col("_rank") == 1) & F.col(still))

@@ -1061,27 +1061,27 @@ def test_an_in_block_before_the_runway_is_vacated_is_not_given(spark):
     ]
 
 
-def test_a_departure_whose_stand_was_seen_only_at_the_other_airport_gives_no_off_block(spark):
-    """AOBT#18 (PACV): the only stand passages are at the destination; they
-    do not license an off-block time at the departure airport."""
+def test_a_departure_whose_stand_was_seen_only_at_the_other_airport_names_no_stand(spark):
+    """Stand to stand, the departure stand not received: the off-block time
+    is kept (the stand at a leg's own airport is often not received), but it
+    names no stand, and none of the destination."""
     reports = _reports(spark, DEPARTURE + ARRIVAL)
     stands = _stands(spark, ARRIVAL_STANDS)
     runway = _runway(spark, [("ATOT", 600), ("ALDT", 1000)])
 
-    assert _named(spark, reports, stands, runway) == [("on", 1290.0, "B2")]
-    assert _named(spark, reports, stands, runway, _off(block_time_stand_at_same_airport=False)) == [
-        ("off", 60.0, None),
-        ("on", 1290.0, "B2"),
-    ]
+    assert _named(spark, reports, stands, runway) == [("off", 60.0, None), ("on", 1290.0, "B2")]
 
 
-def test_taxiing_past_a_stand_does_not_license_a_block_time(spark):
-    """The aircraft crossed the cells of a stand in 10 s: no stop there."""
+def test_a_stand_passed_for_a_few_seconds_is_not_named(spark):
+    """AOBT#26 (LMML): stand 13 crossed for 5 s on the way out; the off-block
+    time names no stand rather than that one."""
     reports = _reports(spark, DEPARTURE)
-    stands = _stands(spark, [("exit-parking_position", 300, "A9", "EBBR", 10)])
+    stands = _stands(spark, [("exit-parking_position", 300, "13", "LMML", 5)])
     runway = _runway(spark, [("ATOT", 600)])
+    nearest = _off(block_time_stand_at_same_airport=False)
 
-    assert _named(spark, reports, stands, runway) == []
+    assert _named(spark, reports, stands, runway) == [("off", 60.0, None)]
+    assert _named(spark, reports, stands, runway, nearest) == [("off", 60.0, "13")]
 
 
 #: The first (last) movement of the part, naming the stand passage nearest in
@@ -1274,3 +1274,62 @@ def test_a_slow_light_aircraft_keeps_its_block_times(spark):
     )
 
     assert got == [("off", 60.0, "GA1"), ("on", 1070.0, "GA1")]
+
+
+def test_a_short_push_back_seen_on_few_reports_is_the_off_block(spark):
+    """Flight 034f151f92 (sample of 2026-06-14): the push-back moves at 3 kt
+    on six positioned reports over 25 s, then one report shows it standing
+    and nothing is received for two minutes before the taxi. The push
+    lasted until that standing report, 35 s: it is the off-block time, not
+    the start of the taxi."""
+    legs = [
+        _surface(0, 50, 0, step_s=5),
+        _surface(50, 80, 3, step_s=5),
+        _surface(80, 85, 0, step_s=5),
+        _surface(85, 200, 0, step_s=5, positions="none"),
+        _surface(200, 500, 15, step_s=5),
+        _airborne(500, 600, 160, 3000),
+    ]
+    stands = _stands(spark, [("exit-parking_position", 75, "A1", "EBBR", 75)])
+    got = _blocks_with(
+        spark, _sparse(spark, legs), stands, _runway(spark, [("ATOT", 500)]), EventConfig()
+    )
+
+    assert got == [("off", 50.0)]
+
+
+def test_a_single_moving_report_before_a_silence_is_not_a_movement(spark):
+    """One position 20 m off while parked, then two minutes without position:
+    not a push-back."""
+    legs = [
+        _surface(0, 50, 0, step_s=5),
+        _surface(50, 55, 8, step_s=5),
+        _surface(55, 200, 0, step_s=5, positions="none"),
+        _surface(200, 260, 0, step_s=5),
+        _surface(260, 500, 15, step_s=5),
+        _airborne(500, 600, 160, 3000),
+    ]
+    stands = _stands(spark, [("exit-parking_position", 265, "A1", "EBBR", 265)])
+    got = _blocks_with(
+        spark, _sparse(spark, legs), stands, _runway(spark, [("ATOT", 500)]), EventConfig()
+    )
+
+    assert got == [("off", 260.0)]
+
+
+def test_a_long_engine_start_after_the_push_back_does_not_move_the_off_block(spark):
+    """Received 30 s before the push-back; the push lasts 40 s, the engines
+    are started during a 200 s stop still inside the stand's cells, then the
+    taxi. The off-block time is the push-back, although the stop after it is
+    longer than the one before it."""
+    legs = [
+        _leg(0, 30, 0),
+        _leg(30, 70, 4),
+        _leg(70, 270, 0),
+        _leg(270, 600, 15),
+        _leg(600, 700, 160, alt_ft=4000, on_ground=False),
+    ]
+    stands = _stands(spark, [("exit-parking_position", 280, "A1", "EBBR", 280)])
+    got = _named(spark, _reports(spark, legs), stands, _runway(spark, [("ATOT", 600)]))
+
+    assert got == [("off", 30.0, "A1")]
