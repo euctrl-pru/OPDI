@@ -496,7 +496,9 @@ def test_v5_publishes_one_type_per_question(spark, stub_storage):
         types & {"airborne", "touchdown"} == set()
     ), f"the merged names must replace the A-CDM ones, not join them: {sorted(types)}"
     assert types & {"off-block", "on-block"} == set()
-    assert {"AOBT", "AIBT"} <= types
+    # The stub's arrival gives no in-block time under the block-time rules
+    # of the spot checks; its off-block time carries the merged name.
+    assert "AOBT" in types
 
 
 def test_v5_publishes_one_top_per_direction(spark, stub_storage):
@@ -726,11 +728,25 @@ def test_the_block_events_are_one_detector_under_two_names(spark):
         "track_id string, type string, event_time timestamp",
     )
 
-    shipped = {r["type"] for r in calculate_block_events(sv, stand, EventConfig()).collect()}
+    # A taxi that never flies gets no block time under the block-time rules
+    # of the spot checks (block_time_needs_flight and the others); the names
+    # are what is checked here, so those rules are off.
+    rules_off = dict(
+        ground_movement_through_reports_without_speed=False,
+        block_time_off_the_runway=False,
+        block_time_stand_at_same_airport=False,
+        block_time_from_last_stand_stop=False,
+        block_time_stand_longest_dwell=False,
+        block_time_one_part_per_leg=False,
+        block_time_needs_flight=False,
+    )
+    shipped = {
+        r["type"] for r in calculate_block_events(sv, stand, EventConfig(**rules_off)).collect()
+    }
     v020 = {
         r["type"]
         for r in calculate_block_events(
-            sv, stand, EventConfig(merge_duplicate_milestones=False)
+            sv, stand, EventConfig(merge_duplicate_milestones=False, **rules_off)
         ).collect()
     }
     legacy = {r["type"] for r in calculate_block_events(sv, stand, EventConfig.legacy()).collect()}
