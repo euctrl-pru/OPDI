@@ -855,7 +855,7 @@ class FlightListProcessor:
         """
         sv = self._get_data_within_timeframe(self.tracks_table, month)
 
-        measured = self._seen_from_measured_reports()
+        measured = FlightListProcessor._seen_from_measured_reports(self)
         if measured:
             # First and last seen over the reports with a position, before the
             # reports without an altitude are left out
@@ -1755,7 +1755,7 @@ class FlightListProcessor:
 
         window_track = Window.partitionBy("track_id")
         sv = sv.withColumn("event_time", F.to_timestamp(col("event_time")))
-        if self._seen_from_measured_reports():
+        if FlightListProcessor._seen_from_measured_reports(self):
             # The first and last report with a measured position, or with any
             # measured value when the track has no position
             # (EventConfig.seen_from_measured_reports). The smallest

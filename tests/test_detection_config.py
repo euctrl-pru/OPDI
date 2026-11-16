@@ -108,7 +108,8 @@ def test_every_measurement_carries_its_unit(field_name, field):
     # The two numeric exceptions: a count of samples and a flight level, both
     # of which carry their unit in the name already ("fl", "window", "margin").
     counts = {"trend_max_fl", "trend_smooth_half_window", "trend_vote_margin"}
-    assert field_name in counts or field_name.endswith(("_nm", "_ft"))
+    # Durations carry seconds ("_s").
+    assert field_name in counts or field_name.endswith(("_nm", "_ft", "_s"))
 
 
 def test_shipped_defaults_are_the_values_the_study_supports():
