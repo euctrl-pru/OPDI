@@ -56,7 +56,7 @@ def test_a_config_without_events_still_builds(processor, spark, tmp_path):
 
 
 def test_the_version_stamped_is_the_configured_one(processor):
-    assert processor(EventConfig()).events.events_version == "events_v0.3.0"
+    assert processor(EventConfig()).events.events_version == "events_v0.4.0"
     assert processor(EventConfig.legacy()).events.events_version == "events_v0.0.2"
 
 
@@ -929,7 +929,7 @@ def test_a_family_s_own_version_survives_stamping(spark, stub_storage):
     types keep ``events_version``."""
     out = _run(spark, stub_storage, EventConfig())
     versions = {r["type"]: r["version"] for r in out.collect()}
-    assert versions["xing-fir"] == "fir_v0.1.0"
+    assert versions["xing-fir"] == "fir_v0.2.0"
     assert versions["level-start"] == EventConfig().events_version
 
 

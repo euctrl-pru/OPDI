@@ -106,7 +106,7 @@ def test_an_arc_followed_by_a_direct_gives_a_leg_pair_and_a_merge_point(spark):
     rows = calculate_point_merge_events(sdf, _ref(spark), EventConfig()).collect()
     types = sorted(r.type for r in rows)
     assert types == ["pms-leg-entry", "pms-leg-exit", "pms-merge-point"]
-    assert all(r.version == PMS_VERSION == "pms_v0.1.0" for r in rows)
+    assert all(r.version == PMS_VERSION == "pms_v0.2.0" for r in rows)
     by = {r.type: r for r in rows}
     info = json.loads(by["pms-leg-exit"].info)
     assert info == json.loads(by["pms-leg-entry"].info)

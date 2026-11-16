@@ -299,7 +299,9 @@ def calculate_airport_events(
         # by track serves them all.
         result = result.repartition("track_id")
     if config.layout_element_per_passage:
-        result = _one_element_per_shared_report(result)
+        result = _one_element_per_shared_report(
+            result, keep_nested_stands=config.layout_nested_stands_both_published
+        )
     if config.layout_merge_parked_passages:
         result = _merge_parked_passages(result, config)
         result = result.withColumn(
@@ -316,6 +318,8 @@ def calculate_airport_events(
         col("icao24").alias("osn_icao24"),
         col("flight_id").alias("osn_flight_id"),
     ]
+    if ENCLOSES_STAND in result.columns:
+        info_fields.append(F.when(col(ENCLOSES_STAND), lit(True)).alias("encloses_stand"))
     result = result.withColumn("info", to_json(struct(*info_fields)))
     # The facts that differ between the entry and the exit of one passage
     # (``at_track_start``, ``at_track_end``) give each its own ``info``. A
@@ -421,7 +425,15 @@ def _keep_slow_reports(labelled: DataFrame, window_spec, config: EventConfig) ->
     return labelled.withColumn("_slow", on_ground | slow).filter(col("_slow")).drop("_slow")
 
 
-def _one_element_per_shared_report(passages: DataFrame) -> DataFrame:
+#: Column of a stand passage that contains in time the passage of a smaller
+#: stand drawn inside it (``info.encloses_stand``), see
+#: :attr:`~opdi.config.EventConfig.layout_nested_stands_both_published`.
+ENCLOSES_STAND = "_encloses_stand"
+
+
+def _one_element_per_shared_report(
+    passages: DataFrame, keep_nested_stands: bool = False
+) -> DataFrame:
     """Of the passages of one kind that share a report, keep one.
 
     See :attr:`~opdi.config.EventConfig.layout_element_per_passage`. First,
@@ -435,9 +447,37 @@ def _one_element_per_shared_report(passages: DataFrame) -> DataFrame:
     equal length the element with the smallest identifier is kept, then the
     first in the order of the reference, so the choice is the same on every
     run.
+
+    With ``keep_nested_stands``, the stand passages that would be left out
+    are kept and marked in the column :data:`ENCLOSES_STAND`; the choice
+    among the others is the same.
     """
     by_track = Window.partitionBy("track_id")
     tie = [col("osm_id").asc_nulls_last(), col("osm_ref").asc_nulls_last()]
+    stand = col("osm_aeroway") == "parking_position"
+    exit_s, entry_s = col("exit_time").cast("double"), col("entry_time").cast("double")
+    if keep_nested_stands:
+        # The passages marked are left out of the comparisons that follow,
+        # so the stands kept unmarked are those the choice keeps without
+        # the setting.
+        def mark_or_drop(df, group_col, order):
+            w = Window.partitionBy("track_id", ENCLOSES_STAND).orderBy(
+                col("osm_aeroway"), col(group_col), *order, *tie
+            )
+            same = (lag("osm_aeroway", 1).over(w) == col("osm_aeroway")) & (
+                lag(group_col, 1).over(w) == col(group_col)
+            )
+            same = F.coalesce(same, lit(False)) & ~col(ENCLOSES_STAND)
+            return (
+                df.withColumn("_same", same)
+                .filter(~col("_same") | stand)
+                .withColumn(ENCLOSES_STAND, col(ENCLOSES_STAND) | col("_same"))
+                .drop("_same")
+            )
+
+        passages = passages.withColumn(ENCLOSES_STAND, lit(False))
+        passages = mark_or_drop(passages, "entry_time", [F.when(stand, exit_s).otherwise(-exit_s)])
+        return mark_or_drop(passages, "exit_time", [F.when(stand, -entry_s).otherwise(entry_s)])
 
     def first_of_group(df, group_col, order):
         w = by_track.orderBy(col("osm_aeroway"), col(group_col), *order, *tie)
@@ -448,8 +488,6 @@ def _one_element_per_shared_report(passages: DataFrame) -> DataFrame:
             df.withColumn("_same", F.coalesce(same, lit(False))).filter(~col("_same")).drop("_same")
         )
 
-    stand = col("osm_aeroway") == "parking_position"
-    exit_s, entry_s = col("exit_time").cast("double"), col("entry_time").cast("double")
     passages = first_of_group(passages, "entry_time", [F.when(stand, exit_s).otherwise(-exit_s)])
     return first_of_group(passages, "exit_time", [F.when(stand, -entry_s).otherwise(entry_s)])
 
@@ -509,6 +547,8 @@ def _merge_parked_passages(passages: DataFrame, config: EventConfig) -> DataFram
         "osm_ref",
         "_stay",
     ]
+    if ENCLOSES_STAND in passages.columns:
+        keys.append(ENCLOSES_STAND)
     entry_cols = [c for c in passages.columns if c.startswith("entry_")]
     exit_cols = [c for c in passages.columns if c.startswith("exit_")]
     return (

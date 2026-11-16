@@ -27,7 +27,7 @@ def test_two_racetrack_circuits_give_one_holding_pair(spark):
     assert 1.5 <= info["circuits"] <= 2.5
     assert 600 <= info["duration_s"] <= 900
     assert info["holding_seq"] == 1
-    assert all(r.version == HOLDING_VERSION == "holding_v0.1.0" for r in rows)
+    assert all(r.version == HOLDING_VERSION == "holding_v0.2.0" for r in rows)
     span = by["holding-end"].cumulative_time_s - by["holding-start"].cumulative_time_s
     assert 600 <= span <= 900
     assert by["holding-start"].lat is not None and by["holding-end"].lon is not None

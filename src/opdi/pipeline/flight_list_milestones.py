@@ -608,6 +608,46 @@ def _flight_key(events: DataFrame) -> str:
     )
 
 
+def _with_track_evidence(
+    flight_list: DataFrame, events: DataFrame, config: EventConfig
+) -> DataFrame:
+    """The flight list with the columns of :func:`_track_evidence` joined on.
+
+    Only when a check of work package 4 reads them
+    (:attr:`EventConfig.aerodrome_correction_checks_track`,
+    :attr:`EventConfig.movement_flags_need_track_evidence`); otherwise the
+    flight list is returned as it is. One aggregation of the events, joined
+    once.
+    """
+    if not (config.aerodrome_correction_checks_track or config.movement_flags_need_track_evidence):
+        return flight_list
+    evidence = _track_evidence(events)
+    return flight_list.join(evidence, flight_list["id"] == evidence[f"{_EV}id"], "left").drop(
+        f"{_EV}id"
+    )
+
+
+def corrected_aerodromes(
+    flight_list: DataFrame,
+    events: DataFrame,
+    config: Optional[EventConfig] = None,
+    airports: Optional[DataFrame] = None,
+) -> DataFrame:
+    """The flight list's ``id``, ``adep`` and ``ades`` after the runway-event correction.
+
+    The same correction step 04b applies (:func:`enrich_flight_list` calls
+    :func:`correct_aerodromes` with the same arguments), for a reader that
+    needs the airports the flight list will publish before step 04b runs:
+    the distance circles of step 04 are drawn around them
+    (:attr:`EventConfig.rings_around_flight_list_airports`).
+    """
+    config = config or EventConfig()
+    out = correct_aerodromes(
+        _with_track_evidence(flight_list, events, config), events, config, airports
+    )
+    return out.select("id", "adep", "ades")
+
+
 def enrich_flight_list(
     flight_list: DataFrame,
     events: DataFrame,
@@ -647,19 +687,12 @@ def enrich_flight_list(
     """
     config = config or EventConfig()
 
-    # Work package 4: what the track shows, for the checks of the airport
-    # correction and of the movement flags. One aggregation of the events,
-    # joined once; its columns (_ev_*) are dropped before the return.
-    if config.aerodrome_correction_checks_track or config.movement_flags_need_track_evidence:
-        evidence = _track_evidence(events)
-        flight_list = flight_list.join(
-            evidence, flight_list["id"] == evidence[f"{_EV}id"], "left"
-        ).drop(f"{_EV}id")
-
     # Before anything else reads adep/ades. The ring columns filter on them, the
     # movement rules test them, and the milestone columns are chosen relative to
     # them -- correcting afterwards would leave every one of those computed
-    # against the aerodrome the evidence disagrees with.
+    # against the aerodrome the evidence disagrees with. The columns of the
+    # track evidence (_ev_*) are dropped before the return.
+    flight_list = _with_track_evidence(flight_list, events, config)
     flight_list = correct_aerodromes(flight_list, events, config, airports)
 
     # Enriching a flight list that was enriched before is normal: step 04b runs
@@ -702,6 +735,10 @@ def enrich_flight_list(
         .filter(F.col("type").isin(wanted))
         .join(keys, F.col("_event_key") == F.col("_track_id"), "inner")
     )
+    if config.layout_nested_stands_both_published:
+        # The stand columns name the inner one of two nested stands, as the
+        # block times do.
+        narrowed = narrowed.filter(_info("encloses_stand").isNull())
 
     apt = _info("apt_icao")
     direction = _info("direction")

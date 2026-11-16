@@ -112,7 +112,7 @@ def test_version_string_is_new_and_the_published_one_is_untouched():
     ``events_v0.0.2`` must remain reachable, because a legacy run has to stamp
     it for a re-processed month to match the release it reproduces.
     """
-    assert EventConfig().events_version == "events_v0.3.0"
+    assert EventConfig().events_version == "events_v0.4.0"
     assert EventConfig.legacy().events_version == "events_v0.0.2"
 
 
@@ -188,7 +188,7 @@ def test_cruise_speed_membership_is_left_at_openaps_values():
 
 def test_v4_defaults_are_the_shipped_configuration():
     c = EventConfig()
-    assert c.events_version == "events_v0.3.0"
+    assert c.events_version == "events_v0.4.0"
     assert c.emit_runway_milestones is True
     assert c.emit_pru_tops is True
     assert c.level_method == "pru"

@@ -238,6 +238,24 @@ def test_the_time_passed_counts_from_the_first_seen_event(spark):
     assert got["xing-fl100"].cumulative_time_s == pytest.approx(600.0)
 
 
+def test_an_event_before_first_seen_has_no_time_passed(spark):
+    """An event on a report before the first one with a position (a block
+    time or a top on reports without a position) would get a negative time
+    passed; it gets none instead, and no time-passed measurement."""
+    got = _measured(
+        spark,
+        [
+            ("AOBT", 100, None, 100.0),
+            ("first_seen", 300, 0.0, 300.0),
+            ("xing-fl100", 900, 50.0, 900.0),
+        ],
+    )
+
+    assert got["AOBT"].cumulative_time_s is None
+    assert got["first_seen"].cumulative_time_s == 0.0
+    assert got["xing-fl100"].cumulative_time_s == pytest.approx(600.0)
+
+
 def test_with_both_settings_off_nothing_changes(spark):
     config = EventConfig(measure_every_event=False, time_passed_from_first_seen=False)
 

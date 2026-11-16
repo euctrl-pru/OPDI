@@ -1048,9 +1048,10 @@ class FlightListProcessor:
 
         ``waiver`` is passed to :meth:`_ranked_distance`. With
         ``min_climb_ft``, a first report in the air names the departure
-        airport only when the altitude rose by at least that many feet after
-        it (column ``climb_ft`` of the candidate table); an unknown climb
-        (NULL, or a table without the column) leaves the test as before.
+        airport only when the altitude changed by at least that many feet
+        after it (column ``climb_ft`` of the candidate table; a negative
+        value allows that much descent); an unknown change (NULL, or a table
+        without the column) leaves the test as before.
 
         The airport test comes before the edge test: an airport close to the
         edge of the box (Ponta Delgada, about 8 NM inside it) must still be
@@ -1074,8 +1075,8 @@ class FlightListProcessor:
             col("on_ground") | (col("elev_known") & (col("agl_ft") <= float(abstention_height_ft)))
         )
         if min_climb_ft is not None and "climb_ft" in best.columns:
-            # A first report in the air, followed by no climb, is an aircraft
-            # passing by or arriving, not a departure.
+            # A first report in the air, followed by a descent, is an aircraft
+            # arriving, not a departure.
             #
             # Only a report clearly in the air is tested: an aircraft seen first
             # at the stand, not flagged on the ground, does not climb while it
@@ -2087,7 +2088,7 @@ class FlightListProcessor:
                 sched_penalty_nm=sched_penalty_nm,
                 waiver=waiver,
                 min_climb_ft=(
-                    d.endpoint_min_climb_ft
+                    d.endpoint_min_altitude_change_ft
                     if getattr(d, "endpoint_airborne_needs_climb", False)
                     else None
                 ),

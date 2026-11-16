@@ -37,7 +37,7 @@ SELECT
     event_id,
     'Distance flown (NM)' AS type,
     CAST(distance_flown_nm AS DOUBLE) AS value,
-    'distance_v0.0.3' AS version
+    'distance_v0.0.4' AS version
 FROM flight_events
 UNION ALL
 SELECT
@@ -45,7 +45,7 @@ SELECT
     event_id,
     'Time Passed (s)' AS type,
     CAST(time_passed_s AS DOUBLE) AS value,
-    'time_v0.0.1' AS version
+    'time_v0.0.2' AS version
 FROM flight_events
 UNION ALL
 SELECT
@@ -53,7 +53,7 @@ SELECT
     event_id,
     'Holding duration (s)' AS type,
     CAST(holding_duration_s AS DOUBLE) AS value,
-    'holding_v0.1.0' AS version
+    'holding_v0.2.0' AS version
 FROM flight_events
 WHERE holding_duration_s IS NOT NULL
 UNION ALL
@@ -62,7 +62,7 @@ SELECT
     event_id,
     'Holding distance (NM)' AS type,
     CAST(holding_distance_nm AS DOUBLE) AS value,
-    'holding_v0.1.0' AS version
+    'holding_v0.2.0' AS version
 FROM flight_events
 WHERE holding_distance_nm IS NOT NULL
 UNION ALL
@@ -71,7 +71,7 @@ SELECT
     event_id,
     'Holding circuits' AS type,
     CAST(holding_circuits AS DOUBLE) AS value,
-    'holding_v0.1.0' AS version
+    'holding_v0.2.0' AS version
 FROM flight_events
 WHERE holding_circuits IS NOT NULL
 UNION ALL
@@ -80,7 +80,7 @@ SELECT
     event_id,
     'Point merge leg time (s)' AS type,
     CAST(pms_leg_time_s AS DOUBLE) AS value,
-    'pms_v0.1.0' AS version
+    'pms_v0.2.0' AS version
 FROM flight_events
 WHERE pms_leg_time_s IS NOT NULL
 UNION ALL
@@ -89,7 +89,7 @@ SELECT
     event_id,
     'Point merge leg distance (NM)' AS type,
     CAST(pms_leg_distance_nm AS DOUBLE) AS value,
-    'pms_v0.1.0' AS version
+    'pms_v0.2.0' AS version
 FROM flight_events
 WHERE pms_leg_distance_nm IS NOT NULL
 UNION ALL
@@ -98,7 +98,7 @@ SELECT
     event_id,
     'Point merge direct-to distance (NM)' AS type,
     CAST(pms_direct_to_distance_nm AS DOUBLE) AS value,
-    'pms_v0.1.0' AS version
+    'pms_v0.2.0' AS version
 FROM flight_events
 WHERE pms_direct_to_distance_nm IS NOT NULL;
 

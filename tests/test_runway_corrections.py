@@ -173,6 +173,29 @@ def test_a_take_off_on_a_day_of_high_pressure_lifts_off_above_the_roll_not_the_e
     assert "height_reference" not in atot_before[2]
 
 
+def test_a_lift_off_next_to_a_report_without_position_gets_a_position(spark):
+    """The crossing of 15 ft is often bracketed by a report that has an
+    altitude but no position. The crossing then takes the position the
+    report would have between the positioned reports either side (within
+    30 s), so the lift-off is not published without a position."""
+    rows = list(_HIGH_PRESSURE_TAKE_OFF)
+    t, _, h, kt, g, hdg, fpm = rows[6]
+    rows[6] = (t, None, h, kt, g, hdg, fpm)
+    sv = _pass(spark, rows, elev_ft=_YBBN_ELEV_FT)
+    _, events = _family(spark, sv)
+    (atot,) = _of(events, "ATOT")
+    assert atot[0] == pytest.approx(35.375, abs=0.01)
+    assert atot[3]["lat"] is not None and atot[3]["lon"] is not None
+    # Between the positioned reports at 35 s and 45 s, at 37.5% of the way
+    # from 35 s to 40 s: along the runway between 0.52 and 0.80 NM.
+    lat35, lat45 = _dest(50.0, 4.0, 70.0, 0.52)[0], _dest(50.0, 4.0, 70.0, 0.80)[0]
+    assert lat35 < atot[3]["lat"] < lat45
+
+    _, before = _family(spark, sv, EventConfig(runway_times_position_between_reports=False))
+    (atot_before,) = _of(before, "ATOT")
+    assert atot_before[3]["lat"] is None
+
+
 #: The landing of ALDT#04 (track 60616737214fb211_1781432574, TAM3640, SBVT,
 #: elevation 34 ft): the final approach reads 209 ft below the elevation on
 #: the runway, then reports flagged on the ground without altitude. From the
@@ -850,12 +873,28 @@ def test_a_window_take_off_time_carries_its_report(spark):
 
 
 def test_a_track_first_seen_high_in_the_climb_gives_no_window_take_off_time(spark):
-    """ATOT#04 and others: the time was the track's first report, 345 to
-    730 ft above the airport."""
-    rows = [(t, a, h + 600.0, kt, fpm, g) for t, a, h, kt, fpm, g in _TAKE_OFF[1:]]
+    """The first report in the air more than 1,500 ft above the track's own
+    ground (here 1,200 ft above the published elevation, on a day the ground
+    reads 400 ft below it) is not a take-off time."""
+    rows = [(0, 0.0, -400.0, 10.0, 0.0, True)] + [
+        (t, a, h + 1170.0, kt, fpm, g) for t, a, h, kt, fpm, g in _TAKE_OFF[1:]
+    ]
     assert _window(spark, rows, "departure") == []
     (before,) = _window(spark, rows, "departure", _only())
     assert _seconds(before["first_time"]) == 60.0
+
+
+def test_a_track_first_seen_low_in_the_climb_keeps_its_window_take_off_time(spark):
+    """ATOT#04 and others: the time is the track's first report, 345 to 730 ft
+    above the airport. Within 1,500 ft it is kept, with its position, its
+    altitude and the mark that it is the first report of the track (about
+    1,000 such times on the day were within 60 s of the airport record)."""
+    rows = [(t, a, h + 600.0, kt, fpm, g) for t, a, h, kt, fpm, g in _TAKE_OFF[1:]]
+    (row,) = _window(spark, rows, "departure")
+    assert _seconds(row["first_time"]) == 60.0
+    assert row["at_lat"] is not None
+    assert row["at_altitude_ft"] == pytest.approx(_EBBR_FT + 630.0, abs=0.01)
+    assert row["at_track_edge"] is True
 
 
 def test_a_take_off_at_the_first_report_is_marked_at_the_track_edge(spark):

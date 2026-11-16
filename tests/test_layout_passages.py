@@ -166,10 +166,20 @@ def test_of_two_stands_starting_together_the_one_left_first_is_kept(spark):
         report(_t(10, 0, 30), "s2"),
         report(_t(10, 0, 50), "s2"),
     ]
-    events = run(spark, rows, layouts)
+    inner_only = EventConfig(layout_nested_stands_both_published=False)
+    events = run(spark, rows, layouts, inner_only)
     assert [(e[0], e[1], e[2]) for e in events] == [
         ("entry-parking_position", _t(10, 0, 0), 10),
         ("exit-parking_position", _t(10, 0, 10), 10),
+    ]
+
+    # Both stands are published; the larger one is marked.
+    events = run(spark, rows, layouts)
+    assert [(e[0], e[1], e[2], e[3].get("encloses_stand")) for e in events] == [
+        ("entry-parking_position", _t(10, 0, 0), 10, None),
+        ("entry-parking_position", _t(10, 0, 0), 20, True),
+        ("exit-parking_position", _t(10, 0, 10), 10, None),
+        ("exit-parking_position", _t(10, 0, 50), 20, True),
     ]
 
 
@@ -406,10 +416,21 @@ def test_of_two_stands_ending_together_the_inner_one_is_kept(spark):
     rows = [report(_t(21, 38, 29), "o"), report(_t(21, 39, 4), "i")]
     rows += [report(_t(21, 40 + i, 4), "i") for i in range(9)]
     rows += [report(_t(21, 49, 24), "i")]
-    events = run(spark, rows, layouts)
+    inner_only = EventConfig(layout_nested_stands_both_published=False)
+    events = run(spark, rows, layouts, inner_only)
     assert [(e[0], e[1], e[2]) for e in events] == [
         ("entry-parking_position", _t(21, 39, 4), 4076567490),
         ("exit-parking_position", _t(21, 49, 24), 4076567490),
+    ]
+
+    # 74 stand events the airport records confirm were lost this way: both
+    # stands are published, the outer one marked.
+    events = run(spark, rows, layouts)
+    assert [(e[0], e[1], e[2], e[3].get("encloses_stand")) for e in events] == [
+        ("entry-parking_position", _t(21, 38, 29), 405457947, True),
+        ("entry-parking_position", _t(21, 39, 4), 4076567490, None),
+        ("exit-parking_position", _t(21, 49, 24), 405457947, True),
+        ("exit-parking_position", _t(21, 49, 24), 4076567490, None),
     ]
 
 
@@ -423,3 +444,32 @@ def test_two_passages_of_one_stand_are_not_joined(spark):
     events = run(spark, rows, layouts)
     assert ("exit-parking_position", _t(7, 9, 39)) in [(e[0], e[1]) for e in events]
     assert len(events) == 4
+
+
+def test_layout_events_at_one_report_get_their_own_identifiers(spark):
+    """The identifier of a layout event includes its element; that of any
+    other event is the same with the setting on or off."""
+    from types import SimpleNamespace
+
+    from opdi.pipeline.events import FlightEventProcessor
+
+    at = _t(10, 0, 0)
+    df = spark.createDataFrame(
+        [
+            ("trk-1", "entry-parking_position", at, "v", '{"osm_id":10}'),
+            ("trk-1", "entry-parking_position", at, "v", '{"osm_id":20}'),
+            ("trk-1", "take-off", at, "v", '{"osm_id":10}'),
+        ],
+        "track_id string, type string, event_time timestamp, version string, info string",
+    )
+
+    def ids(config):
+        holder = SimpleNamespace(events=config)
+        ids_col = FlightEventProcessor._event_id(holder, "b", df.columns).alias("id")
+        return [r.id for r in df.select(ids_col).collect()]
+
+    on = ids(EventConfig())
+    off = ids(EventConfig(layout_nested_stands_both_published=False))
+    assert on[0] != on[1]
+    assert off[0] == off[1]
+    assert on[2] == off[2]

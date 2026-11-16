@@ -181,18 +181,20 @@ class DetectionConfig:
     :attr:`sched_penalty_waived_at_field`."""
 
     endpoint_airborne_needs_climb: bool = True
-    """Name a departure airport from a first report in the air only when the
-    track climbs after it.
+    """Name no departure airport from a first report in the air when the
+    track is clearly descending at its start.
 
     The ``endpoint`` method accepts a first report up to
     :attr:`endpoint_radius_nm` from the airport and
     :attr:`endpoint_height_ft` above it. A track first seen while descending
     towards an airport is an arrival, not a departure: without this setting
     that airport became its departure airport too. With it, a first report
-    not flagged on the ground needs the altitude to rise by at least
-    :attr:`endpoint_min_climb_ft` within :attr:`endpoint_climb_window_s`.
-    When fewer than two altitudes are known in that time, the first report
-    is judged as before. Off in release v0.0.2."""
+    more than :attr:`endpoint_climb_above_ft` above the airport and not
+    flagged on the ground names no departure airport when the altitude
+    changes by less than :attr:`endpoint_min_altitude_change_ft` (a descent)
+    within :attr:`endpoint_climb_window_s`. A level or climbing start keeps
+    its airport. When fewer than two altitudes are known in that time, the
+    first report is judged as before. Off in release v0.0.2."""
 
     endpoint_climb_above_ft: float = 1000.0
     """Height above the airport, in feet, above which a first report not
@@ -202,15 +204,17 @@ class DetectionConfig:
     not climb in its first minutes and must keep its departure airport."""
 
     endpoint_climb_window_s: float = 180.0
-    """Seconds after the first report over which the climb of
+    """Seconds after the first report over which the change of altitude of
     :attr:`endpoint_airborne_needs_climb` is measured."""
 
-    endpoint_min_climb_ft: float = 200.0
-    """Smallest rise of the barometric altitude, in feet, over
+    endpoint_min_altitude_change_ft: float = -200.0
+    """Smallest change of the barometric altitude, in feet, over
     :attr:`endpoint_climb_window_s` for a first report in the air to name a
-    departure airport. A level or descending start does not rise this
-    much; a departure climbing at 500 ft/min rises 1,500 ft in three
-    minutes."""
+    departure airport; a negative value is a descent. Arrival fragments
+    first seen in the air descend at 440 to 1,055 ft/min, so lose 1,300 ft
+    or more in three minutes; a departure first seen level (a level-off in
+    the climb, or a repeated altitude) changes by about 0 ft and keeps its
+    airport."""
 
     skip_duplicate_airports: bool = True
     """Leave out the airports whose OurAirports name contains "Duplicate"

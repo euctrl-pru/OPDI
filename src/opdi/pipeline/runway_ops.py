@@ -1548,6 +1548,62 @@ def _roll_start(sdf: DataFrame, config: "EventConfig", speed_col: str = "gs_kt")
     )
 
 
+def _position_between_reports(sdf: DataFrame, config: "EventConfig") -> DataFrame:
+    """Give a report without a position the one interpolated between its neighbours.
+
+    Within each runway pass, a report with no ``lat``/``lon`` takes the
+    position interpolated in time between the last report with a position
+    before it and the first one after it, when both are at most
+    :attr:`~opdi.config.EventConfig.crossing_value_max_gap_seconds` (30 s
+    when that is not set) away. Read by the lift-off and touchdown only
+    (:attr:`~opdi.config.EventConfig.runway_times_position_between_reports`).
+    """
+    gap = float(config.crossing_value_max_gap_seconds or 30.0)
+    t = F.col("event_time").cast("double")
+    order = Window.partitionBy(*TRAVERSAL_KEY).orderBy(t)
+    positioned = F.when(
+        F.col("lat").isNotNull() & F.col("lon").isNotNull(),
+        F.struct(t.alias("t"), F.col("lat").alias("lat"), F.col("lon").alias("lon")),
+    )
+    prev = F.last(positioned, ignorenulls=True).over(
+        order.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    nxt = F.first(positioned, ignorenulls=True).over(
+        order.rowsBetween(Window.currentRow, Window.unboundedFollowing)
+    )
+    out = sdf.withColumn("_pp", prev).withColumn("_pn", nxt)
+    p, n = F.col("_pp"), F.col("_pn")
+    near = (
+        F.col("lat").isNull()
+        & p.isNotNull()
+        & n.isNotNull()
+        & (n["t"] > p["t"])
+        & (t - p["t"] <= F.lit(gap))
+        & (n["t"] - t <= F.lit(gap))
+    )
+    frac = (t - p["t"]) / (n["t"] - p["t"])
+    return (
+        out.withColumn(
+            "lat", F.when(near, p["lat"] + frac * (n["lat"] - p["lat"])).otherwise(F.col("lat"))
+        )
+        .withColumn(
+            "lon",
+            # Along the shorter way round the 180th meridian.
+            F.when(
+                near,
+                F.pmod(
+                    p["lon"]
+                    + frac * (F.pmod(n["lon"] - p["lon"] + F.lit(540.0), F.lit(360.0)) - 180.0)
+                    + F.lit(540.0),
+                    F.lit(360.0),
+                )
+                - F.lit(180.0),
+            ).otherwise(F.col("lon")),
+        )
+        .drop("_pp", "_pn")
+    )
+
+
 def _height_crossing(sdf: DataFrame, config: "EventConfig", direction: str) -> DataFrame:
     """The interpolated crossing of ``runway_airborne_height_ft``.
 
@@ -1565,6 +1621,8 @@ def _height_crossing(sdf: DataFrame, config: "EventConfig", direction: str) -> D
     options = missing_value_options(config)
     if options["over_missing_values"]:
         options["max_bracket_seconds"] = float(config.runway_airborne_max_bracket_seconds)
+    if config.runway_times_position_between_reports:
+        sdf = _position_between_reports(sdf, config)
     return threshold_crossings(
         sdf,
         value_col="height_ft",

@@ -260,8 +260,12 @@ def test_distance_is_unchanged_where_every_position_is_known(spark):
 
 
 def test_distance_version_follows_the_method():
-    assert DISTANCE_VERSION == "distance_v0.0.3"
-    assert distance_version(EventConfig()) == "distance_v0.0.3"
+    assert DISTANCE_VERSION == "distance_v0.0.4"
+    assert distance_version(EventConfig()) == "distance_v0.0.4"
+    # From the last known position, without the speed limit and the
+    # distance between positions.
+    without = EventConfig(distance_max_implied_speed_kt=None, distance_between_positions=False)
+    assert distance_version(without) == "distance_v0.0.3"
     # Reprocessing a released month reproduces its measurement, defect and all.
     assert LEGACY_DISTANCE_VERSION == "distance_v0.0.2"
     assert distance_version(EventConfig.legacy()) == "distance_v0.0.2"

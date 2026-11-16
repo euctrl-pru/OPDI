@@ -645,15 +645,30 @@ def test_a_departure_first_seen_at_the_stand_keeps_its_airport(spark):
     """ENT6631 at EDDM: first report at the stand 93 minutes before take-off,
     not flagged on the ground; the altitude does not rise while it waits."""
     rows = [_cand("t", "adep", "EDDM", 0.4, agl=25.0, climb=0.0)]
-    assert _classify(spark, rows, min_climb_ft=200.0)[("t", "adep")] == "EDDM"
+    assert _classify(spark, rows, min_climb_ft=-200.0)[("t", "adep")] == "EDDM"
 
 
 def test_an_arrival_fragment_names_no_departure(spark):
     """fl_alternative_airports#44: BE20 first seen 29.6 NM from YPKG at 9,700 ft,
     descending at 1,055 ft/min; it lands at YPKG 10 min later."""
     rows = [_cand("t", "adep", "YPKG", 29.6, agl=9700.0, climb=-3100.0)]
-    assert _classify(spark, rows, min_climb_ft=200.0)[("t", "adep")] is None
+    assert _classify(spark, rows, min_climb_ft=-200.0)[("t", "adep")] is None
     assert _classify(spark, rows)[("t", "adep")] == "YPKG"
+
+
+def test_a_departure_first_seen_level_keeps_its_airport(spark):
+    """44 flights lost a departure airport that Network Manager confirms when
+    a level start counted as no climb: departures first received level-off
+    in the early climb, or with a stale altitude. Only a start clearly
+    descending (more than 200 ft in 3 minutes) names no departure airport."""
+    rows = [
+        _cand("lvl", "adep", "AAAA", 12.0, agl=4000.0, climb=0.0),
+        _cand("slow", "adep", "AAAA", 12.0, agl=4000.0, climb=-150.0),
+        _cand("down", "adep", "AAAA", 12.0, agl=4000.0, climb=-450.0),
+    ]
+    got = _classify(spark, rows, min_climb_ft=-200.0)
+    assert got == {("lvl", "adep"): "AAAA", ("slow", "adep"): "AAAA", ("down", "adep"): None}
+    assert DetectionConfig().endpoint_min_altitude_change_ft == -200.0
 
 
 def test_a_departure_first_seen_climbing_is_still_named(spark):
@@ -666,7 +681,7 @@ def test_a_departure_first_seen_climbing_is_still_named(spark):
         _cand("u", "adep", "AAAA", 8.0, agl=2000.0, climb=None),
         _cand("l", "ades", "AAAA", 8.0, agl=2000.0, climb=None),
     ]
-    got = _classify(spark, rows, min_climb_ft=200.0)
+    got = _classify(spark, rows, min_climb_ft=-200.0)
     assert got == {
         ("c", "adep"): "AAAA",
         ("g", "adep"): "AAAA",

@@ -42,7 +42,7 @@ with the reason, and get no measurements.
 
 import os
 from datetime import date, datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
@@ -85,7 +85,8 @@ from opdi.pipeline.detector_altitude import (
     received_altitude,
 )
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
-from opdi.pipeline.flight_list_milestones import correct_aerodromes
+from opdi.pipeline.flight_list_milestones import corrected_aerodromes
+from opdi.pipeline.flight_list_step import airports_for_checks
 from opdi.pipeline.flights import resolve_flight_id, seen_rank, wide_search_roles
 from opdi.pipeline.ground import block_events, block_times, movement_window
 from opdi.pipeline.holding import calculate_holding_events
@@ -117,7 +118,13 @@ from opdi.utils.datetime_helpers import generate_months, get_start_end_of_month
 from opdi.utils.geometry import bearing_deg, haversine_nm
 from opdi.utils.spark_helpers import keep_frame, release_local_checkpoint
 from opdi.utils.storage import StorageManager
-from opdi.versions import DISTANCE_VERSION, LEGACY_DISTANCE_VERSION, TIME_VERSION
+from opdi.versions import (
+    DISTANCE_VERSION,
+    LAST_KNOWN_DISTANCE_VERSION,
+    LEGACY_DISTANCE_VERSION,
+    LEGACY_TIME_VERSION,
+    TIME_VERSION,
+)
 
 #: Columns step 04 reads from the track table.
 #:
@@ -434,6 +441,11 @@ REJECTED_SCHEMA = (
 BOUND_TIME_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX"
 
 
+#: The types of the airport layout events: ``entry-<element>`` and
+#: ``exit-<element>`` (a regular expression).
+LAYOUT_EVENT_TYPES = "^(entry|exit)-"
+
+
 def calculate_block_events(
     sdf_input: DataFrame,
     airport_events: DataFrame,
@@ -465,6 +477,11 @@ def calculate_block_events(
     ``checkpoints``: see :func:`opdi.pipeline.ground.block_events`.
     """
     config = config or EventConfig()
+    if config.layout_nested_stands_both_published and "info" in airport_events.columns:
+        # The block times read the inner one of two nested stands.
+        airport_events = airport_events.filter(
+            F.get_json_object(col("info"), "$.encloses_stand").isNull()
+        )
     common = [
         lit(None).cast("double").alias("lon"),
         lit(None).cast("double").alias("lat"),
@@ -1502,8 +1519,9 @@ def measures_from_event_time(
 
     * With :attr:`~opdi.config.EventConfig.time_passed_from_first_seen`, the
       time passed (``cumulative_time_s``, seconds) of every event is its time
-      minus the time of the ``first_seen`` event of its track. A track without
-      a ``first_seen`` event in the batch keeps the value its family gave.
+      minus the time of the ``first_seen`` event of its track; an event
+      earlier than ``first_seen`` gets none. A track without a ``first_seen``
+      event in the batch keeps the value its family gave.
     * With :attr:`~opdi.config.EventConfig.measure_every_event`, an event
       without a distance (``cumulative_distance_nm``) gets it interpolated in
       time between the nearest events of its track before and after it that
@@ -1527,7 +1545,11 @@ def measures_from_event_time(
     since_first_seen = t - first_seen_t
     time_col = col("cumulative_time_s").cast("double")
     if config.time_passed_from_first_seen:
-        time_col = F.coalesce(since_first_seen, time_col)
+        # An event earlier than first_seen gets no time passed, not a
+        # negative one.
+        time_col = when(first_seen_t.isNull(), time_col).when(
+            since_first_seen >= 0, since_first_seen
+        )
     elif config.measure_every_event:
         time_col = F.coalesce(time_col, since_first_seen)
     df = df_events.withColumn("cumulative_time_s", time_col)
@@ -1574,8 +1596,17 @@ def measures_from_event_time(
 def distance_version(config: EventConfig) -> str:
     """The ``version`` of the distance measurement under ``config``."""
     if config.distance_from_last_known_position:
-        return DISTANCE_VERSION
+        if config.distance_between_positions or config.distance_max_implied_speed_kt is not None:
+            return DISTANCE_VERSION
+        return LAST_KNOWN_DISTANCE_VERSION
     return LEGACY_DISTANCE_VERSION
+
+
+def time_version(config: EventConfig) -> str:
+    """The ``version`` of the time-passed measurement under ``config``."""
+    if config.time_passed_from_first_seen:
+        return TIME_VERSION
+    return LEGACY_TIME_VERSION
 
 
 #: Columns :func:`add_distance_measure` adds with ``position_fill_seconds``:
@@ -1887,7 +1918,7 @@ class FlightEventProcessor:
             return filter_batch(df, day=day)
         return filter_batch(df, month=month, time_col=time_col)
 
-    def _event_id(self, batch_id: str):
+    def _event_id(self, batch_id: str, columns: Sequence[str] = ()):
         """Identifier of an event row.
 
         With ``deterministic_event_ids`` (the default) the id is built from
@@ -1895,19 +1926,31 @@ class FlightEventProcessor:
         again gives the same ids. Otherwise (release v0.0.2) it is the batch
         id followed by ``monotonically_increasing_id()``, which depends on how
         Spark split the data.
+
+        ``columns`` are the columns of the frame the id is added to; with
+        :attr:`~opdi.config.EventConfig.layout_nested_stands_both_published`
+        the id of a layout event also includes its element, read from
+        ``info`` when the frame has it.
         """
         if not self.events.deterministic_event_ids:
             return concat(lit(batch_id), monotonically_increasing_id().cast("string"))
-        return F.sha2(
-            concat_ws(
-                "|",
-                col("track_id"),
-                col("type"),
-                col("event_time").cast("string"),
-                col("version"),
-            ),
-            256,
-        ).substr(1, 32)
+        parts = [
+            col("track_id"),
+            col("type"),
+            col("event_time").cast("string"),
+            col("version"),
+        ]
+        if self.events.layout_nested_stands_both_published and "info" in columns:
+            # A layout event names its element, so two stands passed at one
+            # report get two identifiers (``concat_ws`` skips the NULL of
+            # every other event, whose identifier stays as it was).
+            parts.append(
+                when(
+                    col("type").rlike(LAYOUT_EVENT_TYPES),
+                    F.get_json_object(col("info"), "$.osm_id"),
+                )
+            )
+        return F.sha2(concat_ws("|", *parts), 256).substr(1, 32)
 
     def _measurement_id(self, batch_id: str, kind: str):
         """Identifier of a measurement row: its event's id plus ``kind``."""
@@ -2013,7 +2056,9 @@ class FlightEventProcessor:
             col("altitude_ft").alias("altitude"),
             col("info"),
         )
-        airports = correct_aerodromes(flight_list, published).select("id", "adep", "ades")
+        airports = corrected_aerodromes(
+            flight_list, published, self.events, airports_for_checks(self.storage, self.events)
+        )
         return calculate_ring_crossing_events(
             sdf_input, month, self.storage, self.events, flight_airports=airports
         )
@@ -2330,7 +2375,7 @@ class FlightEventProcessor:
         df_events = merge_milestone_duplicates(df_events, self.events)
         df_events = df_events.withColumn("source", lit("OSN"))
         # Versions: a family that writes its own ``version`` keeps it; all other
-        # events get the shared events version (``events_v0.3.0`` by default).
+        # events get the shared events version (``events_v0.4.0`` by default).
         if "version" not in df_events.columns:
             df_events = df_events.withColumn("version", lit(None).cast("string"))
         df_events = df_events.withColumn(
@@ -2414,7 +2459,9 @@ class FlightEventProcessor:
             col("cumulative_distance_nm"),
             col("cumulative_time_s"),
         ]
-        df_events = df_events.withColumn("id_tmp", self._event_id(batch_id)).select(*event_columns)
+        df_events = df_events.withColumn(
+            "id_tmp", self._event_id(batch_id, df_events.columns)
+        ).select(*event_columns)
 
         # The day each track starts, from the tracks themselves.
         #
@@ -2470,7 +2517,7 @@ class FlightEventProcessor:
         # published, and replaced with the day like the events.
         if df_rejected is not None:
             df_rejected = (
-                df_rejected.withColumn("id_tmp", self._event_id(batch_id))
+                df_rejected.withColumn("id_tmp", self._event_id(batch_id, df_rejected.columns))
                 .select(*event_columns, col("reject_rule"), col("reject_detail"))
                 .join(track_day, on="track_id", how="left")
                 .select(
@@ -2508,7 +2555,7 @@ class FlightEventProcessor:
 
         df_time = (
             df_events.withColumn("type", lit("Time Passed (s)"))
-            .withColumn("version", lit(TIME_VERSION))
+            .withColumn("version", lit(time_version(self.events)))
             .withColumn("id", self._measurement_id(batch_id, "_t_"))
             .select(
                 col("id"),

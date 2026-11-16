@@ -50,6 +50,23 @@ def _days_between(start_date: date, end_date: date) -> list:
     return days
 
 
+def airports_for_checks(storage: StorageManager, config: EventConfig):
+    """The airports' positions and elevations, for the checks of work package 4.
+
+    Read by the checks of the airport correction and of the movement flags
+    (:attr:`EventConfig.aerodrome_correction_checks_track`,
+    :attr:`EventConfig.movement_flags_need_track_evidence`). ``None`` when
+    neither check is on or the ``oa_airports`` table does not exist.
+    """
+    if not (
+        config.aerodrome_correction_checks_track or config.movement_flags_need_track_evidence
+    ) or not storage.table_exists("oa_airports"):
+        return None
+    return storage.read_table("oa_airports").select(
+        "ident", "latitude_deg", "longitude_deg", "elevation_ft"
+    )
+
+
 def enrich_day(
     storage: StorageManager,
     config: EventConfig,
@@ -98,16 +115,7 @@ def enrich_day(
     if removed:
         print(f"  removed {removed:,} repeated ID(s): the flight list holds one row per flight")
 
-    # The airports' positions and elevations, for the checks of the airport
-    # correction and of the movement flags (work package 4).
-    airports = None
-    if (
-        config.aerodrome_correction_checks_track or config.movement_flags_need_track_evidence
-    ) and storage.table_exists("oa_airports"):
-        airports = storage.read_table("oa_airports").select(
-            "ident", "latitude_deg", "longitude_deg", "elevation_ft"
-        )
-
+    airports = airports_for_checks(storage, config)
     enriched = enrich_flight_list(flight_list, events, config, airports)
 
     # The day folders are named, so a day without flights also replaces what

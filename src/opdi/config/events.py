@@ -594,14 +594,27 @@ class EventConfig:
     the first (take-off) or last (landing) of the track. Off in release
     v0.0.2."""
 
-    runway_window_max_height_ft: float = 500.0
+    runway_window_max_height_ft: float = 1500.0
     """Highest height above the ground, in feet, of a report that gives a
-    take-off or landing time of the runway window method."""
+    take-off or landing time of the runway window method. A time from a
+    report close to the ground is kept, one from a report higher up is not;
+    1,500 ft keeps the tracks first or last received in the early climb or
+    on short final, whose time is still within a minute of the airport
+    record."""
 
     runway_window_max_cross_track_nm: float = 0.5
     """Largest distance, in NM, from the runway's extended centre line of a
     report that gives a take-off or landing time of the runway window
     method."""
+
+    runway_times_position_between_reports: bool = True
+    """Give the lift-off and touchdown a position when one of the two reports
+    around the crossing of :attr:`runway_airborne_height_ft` has an altitude
+    but no position. That report takes the position interpolated in time
+    between the positioned reports before and after it, when both are at
+    most :attr:`crossing_value_max_gap_seconds` away (30 s when that is not
+    set); the crossing is then placed between the two reports as before.
+    Without it the crossing is published without a position."""
 
     # -- counting movements ------------------------------------------------
     supersede_window_seconds: float = 10800.0
@@ -624,7 +637,7 @@ class EventConfig:
     # -- holding -----------------------------------------------------------
     emit_holding: bool = True
     """Publish ``holding-start`` and ``holding-end`` (version
-    ``holding_v0.1.0``).
+    ``holding_v0.2.0``).
 
     A hold is a period in which the aircraft turns through at least one
     nearly complete circle in one direction while staying in a small area at
@@ -773,7 +786,7 @@ class EventConfig:
     # -- point merge -------------------------------------------------------
     emit_point_merge: bool = True
     """Publish ``pms-leg-entry``, ``pms-leg-exit`` and ``pms-merge-point``
-    (version ``pms_v0.1.0``) for arrivals at airports with a point merge
+    (version ``pms_v0.2.0``) for arrivals at airports with a point merge
     system listed in ``reference/data/point_merge_systems.csv``.
 
     In a point merge system, arrivals fly an arc (a sequencing leg) at a
@@ -912,7 +925,7 @@ class EventConfig:
 
     # -- FIR crossings -----------------------------------------------------
     emit_fir_crossings: bool = True
-    """Publish ``xing-fir`` (version ``fir_v0.1.0``): one event at each
+    """Publish ``xing-fir`` (version ``fir_v0.2.0``): one event at each
     change of flight information region (FIR) along a track, from the
     airspace table step 00c builds (``opdi_h3_airspace_ref``). The regions
     are those of the Network Manager airspace model, with lower FIRs and
@@ -929,7 +942,9 @@ class EventConfig:
     """Compute the distance flown from the last known position.
 
     Cleaning sets untrusted positions to NULL. With this setting (version
-    ``distance_v0.0.3``), each step of the distance flown is measured from the
+    ``distance_v0.0.3``, or ``distance_v0.0.4`` with
+    :attr:`distance_max_implied_speed_kt` or
+    :attr:`distance_between_positions`), each step of the distance flown is measured from the
     last report that has a position, so a missing position no longer drops
     the distance before and after it; across a gap the straight line between
     its two sides is added, which is the least the aircraft can have flown.
@@ -1029,9 +1044,10 @@ class EventConfig:
 
     time_passed_from_first_seen: bool = True
     """Count the time passed of every event from the ``first_seen`` event of
-    its track, by reading that event's time, so the two always agree. Without
-    it the time passed counts from the track's first report, which can
-    differ from ``first_seen``."""
+    its track, by reading that event's time, so the two always agree; an
+    event earlier than ``first_seen`` gets no time passed (version
+    ``time_v0.0.2``). Without it (``time_v0.0.1``) the time passed counts
+    from the track's first report, which can differ from ``first_seen``."""
 
     # -- one event type per question -----------------------------------
     merge_duplicate_milestones: Optional[bool] = None
@@ -1261,6 +1277,20 @@ class EventConfig:
     (:attr:`layout_deterministic_element`), and about one taxiway entry in
     eight had no exit on the same element. Off in release
     v0.0.2."""
+
+    layout_nested_stands_both_published: bool = True
+    """Publish both passages when a stand is drawn inside a larger stand.
+
+    With :attr:`layout_element_per_passage`, of overlapping stand passages
+    that start (or end) at the same report only the shortest was kept,
+    because two layout events at one report of one type got the same event
+    identifier. With this setting, the identifier of a layout event
+    (``entry-*`` / ``exit-*``) also includes the element (``info.osm_id``),
+    so both passages are published; the longer one, which contains the
+    other in time, carries ``info.encloses_stand`` = true. The block times
+    and the flight list's stand columns read the inner stand only, as
+    before. The identifiers of all layout events change with it; those of
+    other events do not. Off in release v0.0.2."""
 
     layout_air_report_must_be_slow: bool = True
     """Admit a report that is not flagged on the ground to the layout
@@ -1586,6 +1616,7 @@ class EventConfig:
             layout_deterministic_element=False,
             # Work package 6 (surface events, holding, point merge).
             layout_element_per_passage=False,
+            layout_nested_stands_both_published=False,
             layout_air_report_must_be_slow=False,
             layout_merge_parked_passages=False,
             layout_mark_track_edges=False,
@@ -1639,6 +1670,7 @@ class EventConfig:
             goaround_in_approach_corridor=False,
             runway_crossing_ground_without_altitude=False,
             runway_window_times_checked=False,
+            runway_times_position_between_reports=False,
             # Work package 5: crossings, rings, FIR and the two measurements.
             crossing_max_implied_speed_kt=None,
             crossing_value_max_gap_seconds=None,

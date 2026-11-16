@@ -27,7 +27,7 @@ RELEASE = "v2.0.0"
 #: the airport's elevation and can give the out-of-area code; the flight list
 #: is built from the cleaned tracks; and ``FLT_ID`` is the call sign the track
 #: broadcast most often.
-FLIGHT_LIST_VERSION = "v5.0.0"
+FLIGHT_LIST_VERSION = "v6.0.0"
 #: The flight list built with the v0.0.2 settings (the ``trend`` method).
 LEGACY_TREND_VERSION = "v2.0.0"
 #: The ``endpoint`` method run with the v0.0.2 settings.
@@ -35,24 +35,35 @@ LEGACY_ENDPOINT_VERSION = "v3.0.0"
 
 # --- events (step 04, column ``version``) ------------------------------------
 
-#: The events of release v2.0.0 (the default of ``EventConfig.events_version``).
-EVENTS_VERSION = "events_v0.3.0"
+#: The events of release v2.0.0 (the default of ``EventConfig.events_version``),
+#: with the corrections of the spot checks of 2026-06-14.
+EVENTS_VERSION = "events_v0.4.0"
 #: The events of release v0.0.2 (``EventConfig.legacy()``).
 LEGACY_EVENTS_VERSION = "events_v0.0.2"
 #: Holding patterns: ``holding-start``, ``holding-end`` and their measurements.
-HOLDING_VERSION = "holding_v0.1.0"
+HOLDING_VERSION = "holding_v0.2.0"
 #: Point merge: ``pms-leg-entry``, ``pms-leg-exit``, ``pms-merge-point`` and
 #: their measurements.
-PMS_VERSION = "pms_v0.1.0"
+PMS_VERSION = "pms_v0.2.0"
 #: FIR crossings: ``xing-fir``.
-FIR_VERSION = "fir_v0.1.0"
+FIR_VERSION = "fir_v0.2.0"
 
 # --- measurements (step 04, column ``version`` of the measurements) ---------
 
-#: Distance flown, measured from the last known position.
-DISTANCE_VERSION = "distance_v0.0.3"
+#: Distance flown, measured from the last known position; a step that implies
+#: more than a speed limit is skipped, and a report without a position gets
+#: the distance between its positioned neighbours
+#: (``EventConfig.distance_max_implied_speed_kt``,
+#: ``EventConfig.distance_between_positions``).
+DISTANCE_VERSION = "distance_v0.0.4"
+#: Distance flown, measured from the last known position, without those two
+#: settings.
+LAST_KNOWN_DISTANCE_VERSION = "distance_v0.0.3"
 #: Distance flown as in release v0.0.2, where a missing position adds no
 #: distance on either side of it.
 LEGACY_DISTANCE_VERSION = "distance_v0.0.2"
+#: Time passed since the track's ``first_seen`` event
+#: (``EventConfig.time_passed_from_first_seen``).
+TIME_VERSION = "time_v0.0.2"
 #: Time passed since the start of the track.
-TIME_VERSION = "time_v0.0.1"
+LEGACY_TIME_VERSION = "time_v0.0.1"

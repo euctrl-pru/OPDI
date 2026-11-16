@@ -78,7 +78,7 @@ def test_a_straight_flight_across_the_boundary_gives_one_crossing(spark):
     rows = calculate_fir_events(sdf, _ref(spark, TWO), EventConfig()).collect()
     assert len(rows) == 1
     row = rows[0]
-    assert row.type == "xing-fir" and row.version == FIR_VERSION == "fir_v0.1.0"
+    assert row.type == "xing-fir" and row.version == FIR_VERSION == "fir_v0.2.0"
     info = json.loads(row.info)
     assert info["fir_from"] == "AAAA" and info["fir_to"] == "BBBB"
     assert info["crossing_seq"] == 1
