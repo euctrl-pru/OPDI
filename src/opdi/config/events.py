@@ -346,6 +346,135 @@ class EventConfig:
     """Largest distance from the airport, in NM, at which a go-around is
     looked for."""
 
+    # -- runway events: corrections of work package 2 (spot checks of one day)
+    runway_height_above_track_ground: bool = True
+    """Measure the height of the runway events above the track's own
+    barometric altitude on the ground at that airport, rather than above the
+    airport's published elevation.
+
+    Barometric altitude is measured from standard pressure, so an aircraft
+    standing on the runway reads several hundred feet above or below the
+    elevation on a day of low or high pressure (from -571 to +232 ft on one
+    measured day). The track's ground altitude is read from its reports at the
+    runways of that airport that are flagged on the ground or slower than
+    30 kt, and from the reports within 30 s of one (airliners send no
+    altitude on the ground): the highest of their altitudes at most 30 ft
+    above the lowest (altitudes come in steps of 25 ft). Without such
+    reports, or when their altitude is more than 1,000 ft from the elevation,
+    the published elevation of the pass's own airport is used.
+    ``info.height_reference`` says which (``track`` or ``elevation``). Off in
+    release v0.0.2."""
+
+    runway_direction_by_motion: bool = True
+    """Name the runway direction of a take-off or landing by the direction
+    the aircraft moves, and give one runway per pass.
+
+    The two directions of a runway share one centre line. A take-off's
+    climb-out lies short of the opposite threshold, so a pass read in the
+    opposite direction also looks like a take-off. With this setting, the
+    passes over one runway are numbered together for both directions, the
+    direction is the one within 90 degrees of the median track of the reports
+    faster than :attr:`runway_roll_speed_kt`, one pass per runway, class and
+    pass number is kept, and of passes of one class on parallel runways at
+    overlapping times, the one with reports on its runway and the smallest
+    median distance from its centre line. Off in release v0.0.2."""
+
+    runway_events_on_runway_reports: bool = True
+    """Take ``line-up``, ``runway-vacated`` and the runway crossings from the
+    reports on the runway itself (between the two thresholds and within half
+    its width), not from the approach area before the threshold, and give
+    none of them when the pass holds no report on the runway. A crossing is
+    also classified from those reports only. Off in release v0.0.2."""
+
+    runway_roll_speed_from_positions: bool = True
+    """Find ``take-off-roll`` from the ground speed worked out from
+    consecutive positions (at most 30 s apart) where a report carries no
+    speed (almost every report on the ground), skip reports with no speed
+    instead of letting them end the roll, and use only reports with a
+    position. Off in release v0.0.2."""
+
+    runway_line_up_needs_ground_report: bool = True
+    """Give ``line-up`` and ``take-off-roll`` only for a take-off that starts
+    on the ground: a report flagged on the ground, or slower than
+    :attr:`runway_roll_speed_kt`, before the first fast report of the pass
+    (looking up to 60 s before it starts), or, when reception starts during
+    the roll, a first fast report flagged on the ground. A touch-and-go, a low
+    approach or a track that reappears in the air keeps its take-off time but
+    gets no ``line-up`` or ``take-off-roll``. Off in release v0.0.2."""
+
+    runway_threshold_crossing_last_only: bool = True
+    """Give one ``xing-runway-threshold`` per landing: the last crossing of
+    the threshold towards the runway in the pass, and only when it is at most
+    :attr:`runway_threshold_crossing_max_height_ft` above the ground. A low
+    pass, an overflight or a circuit over the runway gives none. Off in
+    release v0.0.2."""
+
+    runway_threshold_crossing_max_height_ft: float = 300.0
+    """Highest height above the ground, in feet, of a threshold crossing.
+    On a 3 degree approach an aircraft crosses the threshold about 50 ft
+    above it."""
+
+    goaround_excludes_landings: bool = True
+    """Do not give a go-around when the aircraft was on the ground in between
+    (a report flagged on the ground, or slower than 50 kt with no altitude),
+    when the low part lasts more than :attr:`goaround_max_excursion_seconds`,
+    or when it holds a gap of more than :attr:`goaround_max_gap_seconds`
+    between two reports. A landing followed by a take-off, or a data hole,
+    is then not read as an abandoned approach. Off in release v0.0.2."""
+
+    goaround_max_excursion_seconds: float = 600.0
+    """Longest time, in seconds, from the descent below
+    :attr:`goaround_trigger_height_ft` to the climb back above
+    :attr:`goaround_recovery_height_ft`. The go-arounds read as correct on
+    one measured day took 42 to 547 s."""
+
+    goaround_max_gap_seconds: float = 60.0
+    """Longest time, in seconds, between two consecutive reports in a
+    go-around."""
+
+    goaround_in_approach_corridor: bool = True
+    """Give a go-around only when its lowest point lies on the extended centre
+    line of a runway of the destination airport: at most
+    :attr:`goaround_corridor_length_nm` before a threshold or over the runway,
+    and at most :attr:`goaround_corridor_half_width_nm` from the centre line.
+    A low point at another airfield, a heliport or a glider site near the
+    destination is then not a go-around. When the destination's runways are
+    not known, the go-around is kept. Off in release v0.0.2."""
+
+    goaround_corridor_length_nm: float = 5.0
+    """Distance before the threshold, in NM, of the approach corridor a
+    go-around's lowest point must lie in."""
+
+    goaround_corridor_half_width_nm: float = 0.5
+    """Half the width, in NM, of that corridor."""
+
+    runway_crossing_ground_without_altitude: bool = True
+    """Read a report flagged on the ground that carries no altitude as on the
+    ground when classifying a runway crossing (airliners send no altitude on
+    the ground), and do not give a crossing of a runway in a pass that is a
+    take-off or landing on that same runway. Off in release v0.0.2."""
+
+    runway_window_times_checked: bool = True
+    """Check the take-off and landing times of the runway window method
+    (``info.method = "legacy"``): use only reports at most
+    :attr:`runway_window_max_height_ft` above the track's ground altitude (or
+    the elevation) and at most :attr:`runway_window_max_cross_track_nm` from
+    the runway's extended centre line; for a landing, require a report on the
+    ground (flagged, or slower than 50 kt) after it when the track goes on for
+    more than 120 s; publish the position and altitude of the report the time
+    is taken from; and say in ``info.at_track_edge`` whether that report is
+    the first (take-off) or last (landing) of the track. Off in release
+    v0.0.2."""
+
+    runway_window_max_height_ft: float = 500.0
+    """Highest height above the ground, in feet, of a report that gives a
+    take-off or landing time of the runway window method."""
+
+    runway_window_max_cross_track_nm: float = 0.5
+    """Largest distance, in NM, from the runway's extended centre line of a
+    report that gives a take-off or landing time of the runway window
+    method."""
+
     # -- counting movements ------------------------------------------------
     supersede_window_seconds: float = 10800.0
     """Two departures (or two arrivals) of one aircraft at one airport closer
@@ -942,5 +1071,16 @@ class EventConfig:
             tops_position_from_nearest_report=False,
             tops_observed_min_change_ft=None,
             level_offs_get_position=False,
+            # Work package 2 (runway events).
+            runway_height_above_track_ground=False,
+            runway_direction_by_motion=False,
+            runway_events_on_runway_reports=False,
+            runway_roll_speed_from_positions=False,
+            runway_line_up_needs_ground_report=False,
+            runway_threshold_crossing_last_only=False,
+            goaround_excludes_landings=False,
+            goaround_in_approach_corridor=False,
+            runway_crossing_ground_without_altitude=False,
+            runway_window_times_checked=False,
             events_version=LEGACY_EVENTS_VERSION,
         )

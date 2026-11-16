@@ -562,10 +562,28 @@ def calculate_runway_events(
         )
         .select(col("id").alias("track_id"), col("adep"), col("ades"))
     )
+    # Work package 2: the track's first and last report, to say whether a
+    # time is at the edge of the track (runway_window_times_checked).
+    seen = []
+    if config.runway_window_times_checked:
+        fl_all = storage.read_table("opdi_flight_list")
+        seen = [c for c in ("first_seen", "last_seen") if c in fl_all.columns]
+        if seen:
+            fl = fl_all.filter(
+                (col("dof") >= to_timestamp(lit(start_ts)))
+                & (col("dof") < to_timestamp(lit(end_ts)))
+            ).select(
+                col("id").alias("track_id"),
+                col("adep"),
+                col("ades"),
+                *[col(c).cast("timestamp").alias(c) for c in seen],
+            )
     ends = (
-        fl.select("track_id", col("adep").alias("apt_ident"), lit("departure").alias("role"))
+        fl.select("track_id", col("adep").alias("apt_ident"), lit("departure").alias("role"), *seen)
         .unionByName(
-            fl.select("track_id", col("ades").alias("apt_ident"), lit("arrival").alias("role"))
+            fl.select(
+                "track_id", col("ades").alias("apt_ident"), lit("arrival").alias("role"), *seen
+            )
         )
         .filter(col("apt_ident").isNotNull() & (col("apt_ident") != ""))
     )
@@ -585,15 +603,22 @@ def calculate_runway_events(
     event_time = F.when(col("role") == "departure", col("first_time")).otherwise(col("last_time"))
     type_ = F.when(col("role") == "departure", lit("ATOT")).otherwise(lit("ALDT"))
 
+    # Work package 2: the position and altitude of the report the time comes
+    # from (runway_window_times_checked); NULL otherwise.
+    checked = config.runway_window_times_checked
+
+    def at(name, dtype):
+        return col(name).cast(dtype) if checked else lit(None).cast(dtype)
+
     return moves.select(
         col("track_id"),
         type_.alias("type"),
         event_time.alias("event_time"),
-        lit(None).cast("double").alias("lon"),
-        lit(None).cast("double").alias("lat"),
-        lit(None).cast("double").alias("altitude_ft"),
-        lit(None).cast("double").alias("cumulative_distance_nm"),
-        lit(None).cast("long").alias("cumulative_time_s"),
+        at("at_lon", "double").alias("lon"),
+        at("at_lat", "double").alias("lat"),
+        at("at_altitude_ft", "double").alias("altitude_ft"),
+        at("at_cum_nm", "double").alias("cumulative_distance_nm"),
+        at("at_cum_s", "long").alias("cumulative_time_s"),
         to_json(
             struct(
                 col("rwy_ident").alias("runway"),
@@ -610,6 +635,7 @@ def calculate_runway_events(
                 (
                     lit("legacy") if config.merge_duplicate_milestones else lit(None).cast("string")
                 ).alias("method"),
+                at("at_track_edge", "boolean").alias("at_track_edge"),
             )
         ).alias("info"),
     )
@@ -1652,6 +1678,16 @@ class FlightEventProcessor:
             sv = sv.withColumnRenamed("callsign", "flight_id")
         return resolve_flight_id(sv.fillna({"flight_id": ""}))
 
+    def _goaround_runways(self) -> Optional[DataFrame]:
+        """The runway thresholds for the go-around corridor (work package 2).
+
+        None without :attr:`~opdi.config.EventConfig.goaround_in_approach_corridor`
+        or without the runway table.
+        """
+        if not self.events.goaround_in_approach_corridor:
+            return None
+        return runway_thresholds(self.storage)
+
     def _runway_traversal_family(self, sv: DataFrame, month: date) -> Optional[DataFrame]:
         """The runway milestones derived from runway passages.
 
@@ -1858,7 +1894,7 @@ class FlightEventProcessor:
                 # go-around may never touch a runway, so it needs only the
                 # destination airport.
                 if "ades_lat" in rwy_sv.columns:
-                    df_go_arounds = go_arounds(rwy_sv, self.events)
+                    df_go_arounds = go_arounds(rwy_sv, self.events, self._goaround_runways())
                     add(df_go_arounds)
 
             if self.events.emit_block_events:
@@ -1888,7 +1924,7 @@ class FlightEventProcessor:
             # against.
             rwy_sv = self._with_flight_id(ground_geo)
             if "ades_lat" in rwy_sv.columns:
-                df_go_arounds = go_arounds(rwy_sv, self.events)
+                df_go_arounds = go_arounds(rwy_sv, self.events, self._goaround_runways())
 
         if calc_seen:
             print(f"Calculating first_seen/last_seen events for batch: {batch_id}")

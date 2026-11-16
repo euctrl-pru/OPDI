@@ -1455,8 +1455,24 @@ def test_a_landing_roll_that_ends_on_reports_on_the_ground_is_not_a_take_off(spa
     assert ("07", "departure") not in passes
     for kind in ("line-up", "take-off-roll", "ATOT"):
         assert kind not in _types(events)
-    _, before = _runway_family(spark, sv, EventConfig(runway_take_off_needs_air_report=False))
+    _, before = _runway_family(
+        spark, sv, EventConfig(runway_take_off_needs_air_report=False, **_RUNWAY_CORRECTIONS_OFF)
+    )
     assert "ATOT" in _types(before)
+
+
+#: The corrections of work package 2 off: three tests here show what the
+#: earlier reading gave, and those corrections (the height above the track's
+#: own ground, the direction by the motion) change that reading too.
+_RUNWAY_CORRECTIONS_OFF = dict(
+    runway_height_above_track_ground=False,
+    runway_direction_by_motion=False,
+    runway_events_on_runway_reports=False,
+    runway_roll_speed_from_positions=False,
+    runway_line_up_needs_ground_report=False,
+    runway_threshold_crossing_last_only=False,
+    runway_crossing_ground_without_altitude=False,
+)
 
 
 def test_without_the_setting_the_landing_roll_reads_as_a_take_off(spark):
@@ -1465,7 +1481,10 @@ def test_without_the_setting_the_landing_roll_reads_as_a_take_off(spark):
     height passes 15 ft between 9 ft (t = 30 s) and 34 ft (t = 40 s)."""
     sv = _strip_pass(spark, _LANDING_ROLL_25, elev_ft=_EPKK_FT, apt="EPKK")
     passes, events = _runway_family(
-        spark, sv, EventConfig(runway_take_off_needs_air_report=False), apt="EPKK"
+        spark,
+        sv,
+        EventConfig(runway_take_off_needs_air_report=False, **_RUNWAY_CORRECTIONS_OFF),
+        apt="EPKK",
     )
 
     assert passes == [("07", "departure")]
@@ -1501,7 +1520,10 @@ def test_a_rejected_take_off_gives_no_take_off_and_no_landing(spark):
     for kind in ("ATOT", "ALDT", "line-up", "take-off-roll", "runway-vacated"):
         assert kind not in _types(events)
     _, before = _runway_family(
-        spark, sv, EventConfig(runway_take_off_needs_air_report=False), apt="EPKK"
+        spark,
+        sv,
+        EventConfig(runway_take_off_needs_air_report=False, **_RUNWAY_CORRECTIONS_OFF),
+        apt="EPKK",
     )
     assert "ATOT" in _types(before)
 
