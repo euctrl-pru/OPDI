@@ -2226,6 +2226,13 @@ class FlightEventProcessor:
             nonlocal df_events
             if frame is None:
                 return
+            if self.events.keep_each_family:
+                # Computed now and kept, so the plan of the joined events
+                # starts from the kept rows of each family instead of holding
+                # every family's whole plan, which the driver could not
+                # analyse in its memory.
+                frame = keep_frame(frame)
+                checkpoints.append(frame)
             # Some families carry their own ``version`` column (holding, point
             # merge, FIR); for the others it is added as NULL, and the shared
             # version is filled in below.

@@ -1450,6 +1450,13 @@ class EventConfig:
     ids are row numbers counted over the day and change when the data
     change."""
 
+    keep_each_family: bool = True
+    """Compute the events of each family on its own and keep them before the
+    families are joined (``localCheckpoint``). The joined events then have a
+    small plan: with all corrections on, the plan of the joined families was
+    too large for the driver's memory to analyse. The events are the same
+    either way. Off in the v0.0.2 settings, which run as before."""
+
     events_version: str = EVENTS_VERSION
     """Version string written on the events this configuration produces
     (column ``version``). A published version string is never reused for
@@ -1686,5 +1693,6 @@ class EventConfig:
             movement_flags_need_track_evidence=False,
             milestones_on_own_leg=False,
             seen_from_measured_reports=False,
+            keep_each_family=False,
             events_version=LEGACY_EVENTS_VERSION,
         )
