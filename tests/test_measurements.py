@@ -31,6 +31,7 @@ def _distance(spark, samples, config=DEFAULT):
         max_implied_speed_kt=config.distance_max_implied_speed_kt,
         between_positions=config.distance_between_positions,
         position_fill_seconds=config.crossing_value_max_gap_seconds,
+        jump_allowance_nm=config.position_jump_allowance_nm,
     )
     return out.orderBy("event_time").collect()
 
@@ -268,3 +269,26 @@ def test_events_at_the_same_time_get_the_same_distance(spark):
 
     at_500 = {r.cumulative_distance_nm for r in got if _seconds(r) == 500.0}
     assert at_500 == {40.0}
+
+
+def test_an_event_after_the_first_position_but_before_any_known_distance_gets_one(spark):
+    """A take-off time of the runway window at the track's first report with a
+    position, while ``first_seen`` sits on an earlier report without one: the
+    distance at the first position is 0, which is known without an event."""
+    events = _events(
+        spark,
+        [
+            ("first_seen", 0, None, 0.0),
+            ("ATOT", 60, None, None),
+            ("xing-fl50", 260, 10.0, 260.0),
+        ],
+    )
+    starts = spark.createDataFrame(
+        [("trk-1", _EPOCH + dt.timedelta(seconds=60))],
+        "track_id string, first_position_time timestamp",
+    )
+
+    got = {r.type: r for r in measures_from_event_time(events, DEFAULT, starts).collect()}
+
+    assert got["ATOT"].cumulative_distance_nm == 0.0
+    assert got["first_seen"].cumulative_distance_nm is None

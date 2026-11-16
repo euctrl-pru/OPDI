@@ -89,6 +89,7 @@ def threshold_crossings(
     max_bracket_seconds: Optional[float] = None,
     max_implied_speed_kt: Optional[float] = None,
     position_cols: Sequence[str] = ("lat", "lon"),
+    jump_allowance_nm: float = 0.0,
 ) -> DataFrame:
     """Detect every hysteresis-confirmed crossing of ``thresholds``.
 
@@ -145,6 +146,9 @@ def threshold_crossings(
         their positions over the time between them) is not returned, like a
         crossing over too long a gap: the position jumped. A crossing whose
         reports lack a position is kept. None tests nothing.
+    jump_allowance_nm
+        NM by which the two positions may be further apart than
+        ``max_implied_speed_kt`` allows (position noise).
     position_cols
         The latitude and longitude columns, in degrees, that the speed test
         reads. They must be among ``interpolate_cols``.
@@ -180,6 +184,7 @@ def threshold_crossings(
             max_bracket_seconds=max_bracket_seconds,
             max_implied_speed_kt=max_implied_speed_kt,
             position_cols=position_cols,
+            jump_allowance_nm=jump_allowance_nm,
         )
 
     ordered = _ordered(partition_cols, time_col)
@@ -309,6 +314,7 @@ def _crossings_over_missing_values(
     max_bracket_seconds: Optional[float],
     max_implied_speed_kt: Optional[float] = None,
     position_cols: Sequence[str] = ("lat", "lon"),
+    jump_allowance_nm: float = 0.0,
 ) -> DataFrame:
     """:func:`threshold_crossings` with reports without a value skipped.
 
@@ -351,7 +357,11 @@ def _crossings_over_missing_values(
     )
     if max_implied_speed_kt is not None:
         placeable = placeable & _speed_within(
-            position_cols, interpolate_cols, gap, float(max_implied_speed_kt)
+            position_cols,
+            interpolate_cols,
+            gap,
+            float(max_implied_speed_kt),
+            float(jump_allowance_nm),
         )
 
     for th in thresholds:
@@ -445,8 +455,11 @@ def _speed_within(
     interpolate_cols: Sequence[str],
     gap: Column,
     max_kt: float,
+    allowance_nm: float = 0.0,
 ) -> Column:
     """True unless the two reports of a crossing imply more than ``max_kt``.
+
+    The positions may be ``allowance_nm`` further apart than ``max_kt`` allows.
 
     The two reports are the current one and the last earlier one with a
     value (``_known_prev``, which carries the ``interpolate_cols``). True when
@@ -464,10 +477,8 @@ def _speed_within(
         F.col(lat_c).cast("double"),
         F.col(lon_c).cast("double"),
     )
-    # Two reports at one instant cannot be apart at all.
-    within = F.when(gap > 0, dist_nm / gap * F.lit(3600.0) <= F.lit(max_kt)).otherwise(
-        dist_nm <= F.lit(0.0)
-    )
+    reach_nm = F.lit(max_kt) * F.greatest(gap, F.lit(0.0)) / F.lit(3600.0)
+    within = dist_nm <= reach_nm + F.lit(allowance_nm)
     return F.coalesce(within, F.lit(True))
 
 
@@ -522,6 +533,7 @@ def flight_level_crossings(
         interpolate=config.crossing_interpolate,
         all_occurrences=config.crossing_all_occurrences,
         max_implied_speed_kt=_speed_limit(config, interpolate_cols),
+        jump_allowance_nm=float(getattr(config, "position_jump_allowance_nm", 0.0)),
         **missing_value_options(config),
     )
 
@@ -582,5 +594,6 @@ def ring_crossings(
         interpolate=config.crossing_interpolate,
         all_occurrences=config.crossing_all_occurrences,
         max_implied_speed_kt=_speed_limit(config, interpolate_cols),
+        jump_allowance_nm=float(getattr(config, "position_jump_allowance_nm", 0.0)),
         **missing_value_options(config),
     )

@@ -559,7 +559,18 @@ class EventConfig:
     seconds. A crossing whose reports lack a position is not tested. Like a
     crossing that cannot be placed, it still counts in ``crossing_seq``.
     Real reception gaps over the ocean imply 390 to 560 kt and are kept.
-    None in release v0.0.2 (no test)."""
+    The positions may also be :attr:`position_jump_allowance_nm` further
+    apart than the speed allows. None in release v0.0.2 (no test)."""
+
+    position_jump_allowance_nm: float = 2.0
+    """Distance, in NM, by which two positions may be further apart than
+    :attr:`crossing_max_implied_speed_kt` and
+    :attr:`distance_max_implied_speed_kt` allow before the step counts as a
+    jump. Over 5 s an aircraft at 500 kt moves 0.7 NM, and a position that
+    lags and then catches up can make two reports 5 s apart look faster than
+    1,000 kt while the aircraft flew normally; the jumps the limit is for
+    move 4 to 400 NM at once (a glitch, a spoofed position, two aircraft
+    under one address)."""
 
     crossing_value_max_gap_seconds: Optional[float] = 30.0
     """Seconds within which a crossing takes the values its own two reports
@@ -603,8 +614,9 @@ class EventConfig:
     added: the position jumped (two aircraft under one transponder address, a
     shifted or spoofed position). The next step is measured from the new
     position. Real reception gaps over the ocean imply 390 to 560 kt and are
-    still bridged by the straight line. None in release v0.0.2 and in
-    ``distance_v0.0.3`` (no test)."""
+    still bridged by the straight line. The positions may also be
+    :attr:`position_jump_allowance_nm` further apart. None in release v0.0.2
+    and in ``distance_v0.0.3`` (no test)."""
 
     distance_between_positions: bool = True
     """Give a report without a position the distance flown interpolated in

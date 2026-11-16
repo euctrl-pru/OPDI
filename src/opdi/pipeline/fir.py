@@ -290,9 +290,8 @@ def calculate_fir_events(
         prev = col("_prev_pos")
         dist_nm = haversine_nm(prev["lat"], prev["lon"], col("lat"), col("lon"))
         dt_s = col("_ts") - prev["t"]
-        too_fast = F.when(dt_s > 0, dist_nm / dt_s * lit(3600.0) > lit(float(max_kt))).otherwise(
-            dist_nm > 0
-        )
+        reach_nm = lit(float(max_kt)) * F.greatest(dt_s, lit(0.0)) / lit(3600.0)
+        too_fast = dist_nm > reach_nm + lit(float(config.position_jump_allowance_nm))
         # Unknown (no position on one side) keeps the crossing. It still
         # counts in ``crossing_seq``, as a crossing that cannot be placed does
         # in the other crossing families.

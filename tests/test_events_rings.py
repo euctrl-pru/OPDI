@@ -347,3 +347,29 @@ def test_the_airports_given_replace_those_of_the_flight_list(spark, storage):
     ).collect()
 
     assert {json.loads(r.info)["apt_icao"] for r in rows} == {"EBBR"}
+
+
+def test_a_lagging_position_that_catches_up_is_not_a_jump(spark, storage):
+    """Confirmed by the airport record within 2 s (track 30819732, the 100 NM
+    circle of EDDM): the position lags one report and then catches up, 1.45 NM
+    in 5 s, which is just over 1,000 kt. It is within the allowance for
+    position noise, so the crossing is kept."""
+    distances = [102.0, 101.33, 100.67, 100.62, 99.17, 98.5, 97.83, 97.17]
+    rows = [(5 * k, EBBR_LAT + d / 60, EBBR_LON, 9441.0) for k, d in enumerate(distances)]
+
+    got = _at(
+        calculate_ring_crossing_events(
+            _rows_to_track(spark, rows), MONTH, storage, EventConfig()
+        ).collect(),
+        "EBBR",
+        "xing-100nm",
+    )
+    strict = _at(
+        calculate_ring_crossing_events(
+            _rows_to_track(spark, rows), MONTH, storage, EventConfig(position_jump_allowance_nm=0.0)
+        ).collect(),
+        "EBBR",
+        "xing-100nm",
+    )
+
+    assert len(got) == 1 and strict == []

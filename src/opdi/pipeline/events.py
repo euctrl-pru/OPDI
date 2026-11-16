@@ -1383,7 +1383,11 @@ def add_time_measure(sdf_input: DataFrame) -> DataFrame:
     return sdf_input.drop("min_event_time")
 
 
-def measures_from_event_time(df_events: DataFrame, config: EventConfig) -> DataFrame:
+def measures_from_event_time(
+    df_events: DataFrame,
+    config: EventConfig,
+    first_positions: Optional[DataFrame] = None,
+) -> DataFrame:
     """Give every event its distance flown and time passed from its own time.
 
     Runs once on all events of the batch, after the families are joined.
@@ -1399,6 +1403,11 @@ def measures_from_event_time(df_events: DataFrame, config: EventConfig) -> DataF
       event before the first one stays empty, as the distance is unknown
       before the first known position. An event without a time passed gets it
       from the ``first_seen`` event in the same way.
+
+    ``first_positions`` (``track_id``, ``first_position_time``) gives the
+    time of each track's first report with a position, where the distance
+    flown is 0 by definition; it serves as one more known value, so an event
+    between that report and the first event with a distance gets one.
 
     Events at the same time are treated alike whatever their order, so the
     result does not depend on how Spark split the data. Costs one shuffle of
@@ -1433,6 +1442,17 @@ def measures_from_event_time(df_events: DataFrame, config: EventConfig) -> DataF
     known = when(d.isNotNull() & t.isNotNull(), struct(t.alias("t"), d.alias("d")))
     df = df.withColumn("_d_before", F.max(known).over(ascending))
     df = df.withColumn("_d_after", F.min(known).over(descending))
+    if first_positions is not None:
+        starts = first_positions.select(
+            col("track_id").alias("_fp_track"),
+            col("first_position_time").cast("double").alias("_fp_t"),
+        )
+        df = df.join(starts, df["track_id"] == starts["_fp_track"], "left").drop("_fp_track")
+        start = when(col("_fp_t") <= t, struct(col("_fp_t").alias("t"), lit(0.0).alias("d")))
+        df = df.withColumn(
+            "_d_before",
+            when(col("_d_before").isNull(), start).otherwise(col("_d_before")),
+        ).drop("_fp_t")
     b, a = col("_d_before"), col("_d_after")
     interpolated = (
         when(a.isNull() | (a["t"] <= b["t"]), b["d"])
@@ -1466,6 +1486,7 @@ def add_distance_measure(
     max_implied_speed_kt: Optional[float] = None,
     between_positions: bool = False,
     position_fill_seconds: Optional[float] = None,
+    jump_allowance_nm: float = 0.0,
 ) -> DataFrame:
     """Add the distance from the previous report and the distance flown, in NM.
 
@@ -1477,12 +1498,13 @@ def add_distance_measure(
     from the previous row, so a missing position loses the distance on both
     sides of it.
 
-    The three keyword arguments apply with ``last_known_position`` only:
+    The keyword arguments apply with ``last_known_position`` only:
 
     * ``max_implied_speed_kt``: a step whose ground speed (its distance over
       the time since the last known position) is higher adds nothing; the
       next step is measured from the new position
-      (:attr:`~opdi.config.EventConfig.distance_max_implied_speed_kt`).
+      (:attr:`~opdi.config.EventConfig.distance_max_implied_speed_kt`); the
+      step may be ``jump_allowance_nm`` longer than that speed allows.
     * ``between_positions``: a report without a position gets the distance
       interpolated in time between the last report with a position before it
       and the next one after it, when both are in the same piece of track
@@ -1504,6 +1526,7 @@ def add_distance_measure(
         max_implied_speed_kt: See above; None adds every step.
         between_positions: See above.
         position_fill_seconds: See above; None adds no position.
+        jump_allowance_nm: See above.
 
     Returns:
         The reports with ``segment_distance_nm`` and
@@ -1519,6 +1542,7 @@ def add_distance_measure(
             max_implied_speed_kt=max_implied_speed_kt,
             between_positions=between_positions,
             position_fill_seconds=position_fill_seconds,
+            jump_allowance_nm=jump_allowance_nm,
         )
     window_cumsum = (
         Window.partitionBy("track_id")
@@ -1583,6 +1607,7 @@ def _distance_between_positions(
     max_implied_speed_kt: Optional[float],
     between_positions: bool,
     position_fill_seconds: Optional[float],
+    jump_allowance_nm: float = 0.0,
 ) -> DataFrame:
     """:func:`add_distance_measure` with its keyword arguments; see there."""
     t = col("event_time").cast("double")
@@ -1613,9 +1638,8 @@ def _distance_between_positions(
     step_nm = 6371 * 2 * F.atan2(F.sqrt(a), F.sqrt(1 - a)) / 1.852
     if max_implied_speed_kt is not None:
         dt_s = t - prev["t"]
-        plausible = when(
-            dt_s > 0, step_nm / dt_s * lit(3600.0) <= lit(float(max_implied_speed_kt))
-        ).otherwise(step_nm <= 0)
+        reach_nm = lit(float(max_implied_speed_kt)) * F.greatest(dt_s, lit(0.0)) / lit(3600.0)
+        plausible = step_nm <= reach_nm + lit(float(jump_allowance_nm))
         # A jump adds nothing; the next step starts from the new position.
         step_nm = when(plausible, step_nm).when(step_nm.isNotNull(), lit(0.0))
     if between_positions:
@@ -1959,6 +1983,7 @@ class FlightEventProcessor:
             max_implied_speed_kt=ev.distance_max_implied_speed_kt,
             between_positions=ev.distance_between_positions,
             position_fill_seconds=ev.crossing_value_max_gap_seconds,
+            jump_allowance_nm=ev.position_jump_allowance_nm,
         )
         # Last, in time order, so the frame kept below is in the order most
         # detectors read it in.
@@ -2198,7 +2223,17 @@ class FlightEventProcessor:
                 df_events = df_events.unionByName(rings, allowMissingColumns=True)
                 finished = True
         if self.events.measure_every_event or self.events.time_passed_from_first_seen:
-            df_events = measures_from_event_time(df_events, self.events)
+            first_positions = None
+            if self.events.distance_between_positions:
+                # Where the distance flown is 0: one more value to interpolate
+                # from. A scan of the kept reports, grouped by track as they
+                # are already split.
+                first_positions = sdf_input.groupBy("track_id").agg(
+                    f_min(
+                        when(col("lat").isNotNull() & col("lon").isNotNull(), col("event_time"))
+                    ).alias("first_position_time")
+                )
+            df_events = measures_from_event_time(df_events, self.events, first_positions)
             finished = True
         if finished:
             # Read by the writes of the events and of the measurements.
