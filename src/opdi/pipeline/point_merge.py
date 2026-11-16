@@ -314,13 +314,19 @@ def _merge_point_conditions(
                 F.min_by(col("_r_rwy"), F.when(landing_here, col("_r_ts"))).alias("_land_rwy"),
             )
         )
-        # The runway a system serves, from its name (``RJTT-34L`` serves 34;
-        # ``LIME-ALL`` names none), against the number of the runway landed.
+        # The runway direction a system serves, from its name (``RJTT-34L``
+        # serves 340 degrees; ``LIME-ALL`` names none), against the runway
+        # landed. A system serves the parallel and near-parallel runways of
+        # the same flow (LTFM-16NW serves 16L, 17R and 18).
         served = F.regexp_extract(col("pms_id"), r"-(\d{2})", 1)
         landed = F.regexp_extract(F.coalesce(col("_land_rwy"), lit("")), r"^(\d{2})", 1)
+        apart_deg = F.abs(
+            F.pmod(served.cast("int") * 10 - landed.cast("int") * 10 + 180, lit(360)) - 180
+        )
+        same_flow = apart_deg <= config.pms_runway_direction_tolerance_deg
         closest = closest.filter(
             (col("_last_take_off").isNull() | (col("mp_ts") > col("_last_take_off")))
-            & ((served == "") | (landed == "") | (served == landed))
+            & ((served == "") | (landed == "") | F.coalesce(same_flow, lit(True)))
         )
         approach = col("_next_landing")
     one = Window.partitionBy("track_id", F.coalesce(approach, lit(-1.0))).orderBy(

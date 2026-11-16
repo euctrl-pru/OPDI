@@ -236,6 +236,10 @@ def test_a_system_for_another_runway_is_not_one(spark):
     land_34 = _runway(spark, [("ALDT", 1200, "XXXX", "34R")])
     assert not _events(spark, _direct(spark), ref=ref, runway=land_16)
     assert len(_events(spark, _direct(spark), ref=ref, runway=land_34)) == 1
+    # A system serves the near-parallel runways of its flow (LTFM-16NW: 18).
+    ltfm = _ref(spark, systems=(("XXXX-16NW", "MERGE", MP),))
+    land_18 = _runway(spark, [("ALDT", 1200, "XXXX", "18")])
+    assert len(_events(spark, _direct(spark), ref=ltfm, runway=land_18)) == 1
     # A system named for no runway serves them all.
     assert len(_events(spark, _direct(spark), runway=land_16)) == 1
 
