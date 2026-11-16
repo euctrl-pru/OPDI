@@ -796,14 +796,15 @@ class EventConfig:
     so that every entry has its exit on the same element.
 
     Elements of one kind often overlap (a named taxiway drawn as several
-    ways, stands drawn over a taxilane). Of two passages of one kind that
-    start at the same report one is kept, then of two that end at the same
-    report: of stands the shorter one (the stand itself rather than a larger
-    area drawn around it), of other parts the longer one, which covers the
-    time of the ones dropped. Between passages of equal length, the element
-    with the smallest identifier is kept. Without it, entries and exits choose their
-    element separately (:attr:`layout_deterministic_element`), and about one
-    taxiway entry in eight had no exit on the same element. Off in release
+    ways, stands drawn over a taxilane). Of passages of one kind that start
+    at the same report one is kept, then of passages that end at the same
+    report: the longest, which covers the time of the others, but of stands
+    the shortest (the stand itself rather than a larger area drawn around
+    it, which the aircraft enters earlier and leaves later). Between passages of equal
+    length, the element with the smallest identifier is kept. Without it,
+    entries and exits choose their element separately
+    (:attr:`layout_deterministic_element`), and about one taxiway entry in
+    eight had no exit on the same element. Off in release
     v0.0.2."""
 
     layout_air_report_must_be_slow: bool = True
@@ -845,7 +846,10 @@ class EventConfig:
     a few metres, or whose positions arrive only every few minutes inside a
     hangar, otherwise gives a new entry and exit after every absence of more
     than :attr:`airport_trace_gap_seconds` (42 entry/exit pairs for one
-    aircraft parked at a hangar for 19 hours). Off in release v0.0.2."""
+    aircraft parked at a hangar for 19 hours). Stand passages are not
+    joined: an aircraft pushing back often sends no position until it is
+    clear of the stand, and the exit before that gap is the off-block time.
+    Off in release v0.0.2."""
 
     layout_merge_max_move_ft: float = 165.0
     """Largest distance, in feet (165 ft is about 50 m), between the exit of a passage and the

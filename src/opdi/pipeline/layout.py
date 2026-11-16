@@ -410,14 +410,14 @@ def _one_element_per_shared_report(passages: DataFrame) -> DataFrame:
     See :attr:`~opdi.config.EventConfig.layout_element_per_passage`. First,
     of the passages of one track and one kind (``osm_aeroway``) that start at
     the same report, one is kept; then, of those left that end at the same
-    report, one is kept. Of stands, the shortest passage is kept: overlapping
-    stand polygons nest a stand inside a larger area drawn as a stand, and
-    the aircraft leaves the smaller one when it pushes back, which is the
-    exit that marks the off-block time. Of other parts (taxiways drawn as
-    several ways, aprons), the longest is kept, which contains the dropped
-    ones. Between passages of equal length the element with the smallest
-    identifier is kept, then the first in the order of the reference, so the
-    choice is the same on every run.
+    report, one is kept: the longest, which contains the others, except
+    for stands, where the shortest is kept. Overlapping stand polygons nest
+    a stand inside a larger area drawn as a stand; the aircraft enters the
+    smaller one when it stops and leaves it when it pushes back, which are
+    the moments of the in-block and off-block times. Between passages of
+    equal length the element with the smallest identifier is kept, then the
+    first in the order of the reference, so the choice is the same on every
+    run.
     """
     by_track = Window.partitionBy("track_id")
     tie = [col("osm_id").asc_nulls_last(), col("osm_ref").asc_nulls_last()]
@@ -444,7 +444,8 @@ def _merge_parked_passages(passages: DataFrame, config: EventConfig) -> DataFram
     passage is joined to the previous passage of the same element when the
     distance between that one's exit and this one's entry is under
     :attr:`~opdi.config.EventConfig.layout_merge_max_move_ft` and no passage
-    of another element of the track started in between.
+    of another element of the track started in between. Stand passages are
+    not joined.
     """
     by_element = Window.partitionBy("track_id", "osm_id").orderBy("entry_time")
     by_entry = Window.partitionBy("track_id").orderBy("entry_time", "osm_id")
@@ -465,8 +466,14 @@ def _merge_parked_passages(passages: DataFrame, config: EventConfig) -> DataFram
     # ``_last_entry_before`` is the latest entry of any passage before this
     # one; the previous passage of this element started before its own exit,
     # so a later entry is that of another element.
-    joined = (moved_ft < F.lit(config.layout_merge_max_move_ft)) & (
-        col("_last_entry_before") <= prev_exit
+    # Stands are not joined: an aircraft pushing back often sends no
+    # position until it is clear of the stand, so the exit before such a gap
+    # is the off-block time even when the next position is again at the
+    # stand's edge (the airport records confirm it).
+    joined = (
+        (moved_ft < F.lit(config.layout_merge_max_move_ft))
+        & (col("_last_entry_before") <= prev_exit)
+        & (col("osm_aeroway") != "parking_position")
     )
     passages = passages.withColumn("_new_stay", ~F.coalesce(joined, lit(False)))
     passages = passages.withColumn(

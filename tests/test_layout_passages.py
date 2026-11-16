@@ -391,3 +391,35 @@ def test_reports_not_flagged_on_the_ground_without_altitude_do_not_count_as_flyi
     rows = _ground_track() + [report(_t(8, 0, 5), "ap", lat=None, lon=None, on_ground=False)]
     events = run(spark, rows, AP_LAYOUT, typecode="SERV")
     assert all(e[3].get("ground_only") is True for e in events)
+
+
+def test_of_two_stands_ending_together_the_inner_one_is_kept(spark):
+    """04afa15fe6916be6 (shape): the aircraft enters a large stand polygon,
+    then the stand drawn inside it 35 s later, where it stops (the in-block
+    record is at that entry); it leaves both at one report. The inner
+    stand is kept."""
+    layouts = [
+        ("o", APT, 405457947, "parking_position", "A1"),
+        ("i", APT, 405457947, "parking_position", "A1"),
+        ("i", APT, 4076567490, "parking_position", "A1a"),
+    ]
+    rows = [report(_t(21, 38, 29), "o"), report(_t(21, 39, 4), "i")]
+    rows += [report(_t(21, 40 + i, 4), "i") for i in range(9)]
+    rows += [report(_t(21, 49, 24), "i")]
+    events = run(spark, rows, layouts)
+    assert [(e[0], e[1], e[2]) for e in events] == [
+        ("entry-parking_position", _t(21, 39, 4), 4076567490),
+        ("exit-parking_position", _t(21, 49, 24), 4076567490),
+    ]
+
+
+def test_two_passages_of_one_stand_are_not_joined(spark):
+    """e94ad338ee75ccf9: exit of stand 1452016753 at 07:09:39 (off-block
+    record 07:10:00), no position during the push-back, then a position at
+    the stand's edge again at 07:15:39. The exit at 07:09:39 stays."""
+    layouts = [("s", APT, 1452016753, "parking_position", "12")]
+    rows = [report(_t(7, 2 + i, 39), "s") for i in range(8)]
+    rows += [report(_t(7, 15, 39), "s", lat=54.60005), report(_t(7, 16, 24), "s", lat=54.60005)]
+    events = run(spark, rows, layouts)
+    assert ("exit-parking_position", _t(7, 9, 39)) in [(e[0], e[1]) for e in events]
+    assert len(events) == 4
