@@ -150,10 +150,11 @@ def test_one_element_per_passage_every_entry_has_its_exit(spark):
     assert _pairs(events)
 
 
-def test_the_longer_of_two_stands_starting_together_is_kept(spark):
-    """Two stands drawn over each other, entered at the same report: the
-    aircraft stays on one 40 s longer. The stay is kept whole, so the block
-    times that read the stands lose nothing."""
+def test_of_two_stands_starting_together_the_one_left_first_is_kept(spark):
+    """A stand drawn inside a larger stand polygon, entered at the same
+    report: the aircraft leaves the stand itself at push-back and the larger
+    area 40 s later. The exit of the stand is the one that marks the
+    off-block time (the airport records confirmed it)."""
     layouts = [
         ("s1", APT, 10, "parking_position", "11"),
         ("s1", APT, 20, "parking_position", "12"),
@@ -167,8 +168,8 @@ def test_the_longer_of_two_stands_starting_together_is_kept(spark):
     ]
     events = run(spark, rows, layouts)
     assert [(e[0], e[1], e[2]) for e in events] == [
-        ("entry-parking_position", _t(10, 0, 0), 20),
-        ("exit-parking_position", _t(10, 0, 50), 20),
+        ("entry-parking_position", _t(10, 0, 0), 10),
+        ("exit-parking_position", _t(10, 0, 10), 10),
     ]
 
 

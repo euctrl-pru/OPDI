@@ -634,11 +634,18 @@ class EventConfig:
     level (at most :attr:`pms_merge_point_max_climb_ftmin`), at
     :attr:`pms_merge_point_min_speed_kt` or more, for a system that serves
     the runway landed on where the system's name and the landing say which
-    (``RJTT-34L`` serves runway 34, ``LIME-ALL`` any runway), and one per
+    (``RJTT-34L`` serves runways 31 to 01, within
+    :attr:`pms_runway_direction_tolerance_deg`; ``LIME-ALL`` any runway), and one per
     approach (the passage that follows a leg, else the closest to its merge
     point). Without it every passage within :attr:`pms_merge_point_radius_nm`
     of a listed merge point counts, departures and light aircraft included.
     Off in release v0.0.2."""
+
+    pms_runway_direction_tolerance_deg: float = 30.0
+    """Largest difference, in degrees, between the runway direction in a
+    system's name and the runway landed for the system to serve it, so that
+    one system serves the parallel runways of a flow (LTFM-16NW: 16L, 16R,
+    17L, 17R and 18)."""
 
     pms_merge_point_min_speed_kt: float = 150.0
     """Lowest ground speed, in knots, of a merge-point passage."""
@@ -789,11 +796,12 @@ class EventConfig:
     so that every entry has its exit on the same element.
 
     Elements of one kind often overlap (a named taxiway drawn as several
-    ways, stands drawn over a taxilane). Two passages of one kind that start
-    at the same report keep only the longer one; then two that end at the
-    same report keep only the longer one. Between passages of equal length,
-    the element with the smallest identifier is kept. The passage kept covers
-    the time of the ones dropped. Without it, entries and exits choose their
+    ways, stands drawn over a taxilane). Of two passages of one kind that
+    start at the same report one is kept, then of two that end at the same
+    report: of stands the shorter one (the stand itself rather than a larger
+    area drawn around it), of other parts the longer one, which covers the
+    time of the ones dropped. Between passages of equal length, the element
+    with the smallest identifier is kept. Without it, entries and exits choose their
     element separately (:attr:`layout_deterministic_element`), and about one
     taxiway entry in eight had no exit on the same element. Off in release
     v0.0.2."""

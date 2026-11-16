@@ -405,15 +405,19 @@ def _keep_slow_reports(labelled: DataFrame, window_spec, config: EventConfig) ->
 
 
 def _one_element_per_shared_report(passages: DataFrame) -> DataFrame:
-    """Of the passages of one kind that share a report, keep the longest.
+    """Of the passages of one kind that share a report, keep one.
 
     See :attr:`~opdi.config.EventConfig.layout_element_per_passage`. First,
     of the passages of one track and one kind (``osm_aeroway``) that start at
-    the same report, the one that ends last is kept; then, of those left that
-    end at the same report, the one that starts first. The kept passage
-    contains the dropped ones. Between passages of equal length the element
-    with the smallest identifier is kept, then the first in the order of the
-    reference, so the choice is the same on every run.
+    the same report, one is kept; then, of those left that end at the same
+    report, one is kept. Of stands, the shortest passage is kept: overlapping
+    stand polygons nest a stand inside a larger area drawn as a stand, and
+    the aircraft leaves the smaller one when it pushes back, which is the
+    exit that marks the off-block time. Of other parts (taxiways drawn as
+    several ways, aprons), the longest is kept, which contains the dropped
+    ones. Between passages of equal length the element with the smallest
+    identifier is kept, then the first in the order of the reference, so the
+    choice is the same on every run.
     """
     by_track = Window.partitionBy("track_id")
     tie = [col("osm_id").asc_nulls_last(), col("osm_ref").asc_nulls_last()]
@@ -427,8 +431,10 @@ def _one_element_per_shared_report(passages: DataFrame) -> DataFrame:
             df.withColumn("_same", F.coalesce(same, lit(False))).filter(~col("_same")).drop("_same")
         )
 
-    passages = first_of_group(passages, "entry_time", [col("exit_time").desc()])
-    return first_of_group(passages, "exit_time", [col("entry_time").asc()])
+    stand = col("osm_aeroway") == "parking_position"
+    exit_s, entry_s = col("exit_time").cast("double"), col("entry_time").cast("double")
+    passages = first_of_group(passages, "entry_time", [F.when(stand, exit_s).otherwise(-exit_s)])
+    return first_of_group(passages, "exit_time", [F.when(stand, -entry_s).otherwise(entry_s)])
 
 
 def _merge_parked_passages(passages: DataFrame, config: EventConfig) -> DataFrame:
