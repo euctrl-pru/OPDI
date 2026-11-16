@@ -249,9 +249,12 @@ class EventConfig:
     or landing roll."""
 
     block_time_stand_at_same_airport: bool = True
-    """Name the stand of a block time only from a stand passage of at least
-    :attr:`block_time_min_stand_dwell_seconds` in the same ground part (so
-    at the same airport).
+    """Name the stand of a block time only from a stand passage in the same
+    ground part (so at the same airport) that lasts at least
+    :attr:`block_time_min_stand_dwell_seconds` or reaches to within a
+    minute of the block time (an aircraft that parks is often in the
+    stand's cells for a few seconds only, because its later reports carry no
+    position).
 
     The ground part is the part of the track between the track's start, a
     take-off, a landing and the track's end in which the block time lies;
@@ -273,18 +276,21 @@ class EventConfig:
     before the take-off, and the in-block time from the stand stop it
     reached first after the landing.
 
-    The stand stop of a ground part is one of its stand passages of at least
-    :attr:`block_time_min_stand_dwell_seconds`: for an off-block time the
-    last one of at least :attr:`block_time_long_stand_stop_seconds` before
-    the take-off, else the longest; for an in-block time the first one of at
-    least that long after the landing, else the longest. The off-block time
-    is the start of the first movement that starts at or after the entry of
-    that passage; the in-block time is the end of the movement before the
-    longest stop between two movements (or between the last movement and
-    the end of the track) that overlaps that passage. The block time names
-    that stand. Without
-    this setting the off-block time is the first movement of the part and
-    the in-block time the last, so a tow hours before the departure or
+    For an off-block time, the stand stop is the last stand passage of the
+    ground part that lasts at least :attr:`block_time_long_stand_stop_seconds`
+    (a shorter passage after the push-back is often where the engines are
+    started); the off-block time is the start of the first movement that
+    starts at or after the entry of that passage and still goes on 30 s
+    later. Without such a stop the first movement of the part is kept. For
+    an in-block time, the stand stop is the first stand passage after the
+    landing of at least that long, or one that lasts to the end of the
+    track; without one, the last movement of the part is kept. The in-block
+    time is the
+    end of the movement before the longest stop between two movements (or
+    between the last movement and the end of the track) that overlaps that
+    passage. The block time names that stand. Without this setting the
+    off-block time is the first movement of the part and the in-block time
+    the last, so a tow hours before the departure or
     after the arrival is taken instead. Off in release v0.0.2."""
 
     block_time_long_stand_stop_seconds: float = 600.0

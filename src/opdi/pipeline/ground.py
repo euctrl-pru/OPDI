@@ -340,6 +340,9 @@ _STAND_EXIT, _STAND_ENTRY = "exit-parking_position", "entry-parking_position"
 #: Seconds within which a stand passage counts as starting at the track's
 #: first report (ending at its last), for ``block_time_from_last_stand_stop``.
 _EDGE_SECONDS = 5.0
+#: Seconds within which a short stand passage counts as reached or left at
+#: the block time, for naming the stand (``block_time_stand_at_same_airport``).
+_NEAR_SECONDS = 60.0
 
 
 def _report_on_ground(sdf: DataFrame, config: "EventConfig") -> Column:
@@ -484,12 +487,11 @@ def block_events(
     * ``block_time_stand_at_same_airport``: the stand named is a passage
       in the same part of at least ``block_time_min_stand_dwell_seconds``
       (30 s); without one, the time is still given but names no stand.
-    * ``block_time_from_last_stand_stop``: in a part with such a passage, the
-      stand stop is the last passage of at least 10 minutes before the
-      take-off (the first after the landing), else the longest; the time is
-      the start of the first movement after its entry (the end of the
-      movement before the longest stop that overlaps it), and names that
-      stand (see :func:`_from_stand_stop`).
+    * ``block_time_from_last_stand_stop``: an off-block time leaves the last
+      stand stop of at least 10 minutes before the take-off (else the first
+      movement of the part is kept); an in-block time reaches the first
+      such stop after the landing, or the stand where the track ends (else
+      the last movement of the part is kept; see :func:`_from_stand_stop`).
     * ``block_time_stand_longest_dwell``: elsewhere, the stand named is the
       longest passage of the part.
     * ``block_time_off_the_runway``: a standstill is judged on speed, the
@@ -961,12 +963,19 @@ def block_events(
         & (F.col("stand_time") <= F.col("_s_hi"))
     )
     if config.block_time_stand_at_same_airport:
-        # Only a stand passage of at least block_time_min_stand_dwell_seconds
-        # in the same part is named; a time without one names no stand.
-        long_enough = stands.filter(
-            F.col("stand_dwell") >= F.lit(float(config.block_time_min_stand_dwell_seconds))
+        # Only a stand passage in the same part is named, and only one of at
+        # least block_time_min_stand_dwell_seconds or one that reaches to
+        # within a minute of the block time: an aircraft that parks is often
+        # in the stand's cells for a few seconds only, because its later
+        # reports carry no position. A time without one names no stand.
+        p_dwell = F.coalesce(F.col("stand_dwell"), F.lit(0.0))
+        p_time = F.col("stand_time").cast("double")
+        b_time = F.col("event_time").cast("double")
+        named = (p_dwell >= F.lit(float(config.block_time_min_stand_dwell_seconds))) | (
+            (b_time >= p_time - p_dwell - F.lit(_NEAR_SECONDS))
+            & (b_time <= p_time + p_dwell + F.lit(_NEAR_SECONDS))
         )
-        matched = candidates.join(long_enough, stand_window, "left")
+        matched = candidates.join(stands, stand_window & named, "left")
     else:
         matched = candidates.join(stands, stand_window, "left")
     # A part with no stand passage of its own still gives its time when
@@ -986,7 +995,12 @@ def block_events(
     preferred = F.when(off_side, st >= ev).otherwise(st <= ev)
     order = [preferred.desc_nulls_last(), F.abs(st - ev).asc_nulls_last(), "stand_time"]
     if config.block_time_stand_longest_dwell:
-        order = [F.col("stand_dwell").desc_nulls_last()] + order
+        # The passage the block time lies in (the aircraft left or reached
+        # that stand), then the longest.
+        within = (ev >= st - F.coalesce(F.col("stand_dwell"), F.lit(0.0))) & (
+            ev <= st + F.coalesce(F.col("stand_dwell"), F.lit(0.0))
+        )
+        order = [within.desc_nulls_last(), F.col("stand_dwell").desc_nulls_last()] + order
     pick = Window.partitionBy("track_id", "block", "event_time").orderBy(*order)
     picked = (
         matched.withColumn("_rank", F.row_number().over(pick))
@@ -1040,24 +1054,17 @@ def _from_stand_stop(
 ) -> DataFrame:
     """Block times of ``side`` (``"off"`` or ``"on"``) read from the stand stop of each part.
 
-    The rule of ``block_time_from_last_stand_stop``. The stand stop of a part
-    is a stand passage of its own (an exit for ``"off"``, an entry for
-    ``"on"``) of at least ``block_time_min_stand_dwell_seconds``: for an
-    off-block time the last one of at least
-    ``block_time_long_stand_stop_seconds``, else the longest; for an in-block
-    time the first such one, else the longest. With ``at_edge``, a passage
-    that starts at the first report of the part (off-block) or ends at its
-    last (in-block) counts as long too: the aircraft stood there while it
-    was not received. The passage covers the times from its entry to its
-    exit (``opdi_time_in_use_s``).
-
-    The off-block time is the start of the first movement that starts at or
-    after the entry of that passage, from a standstill. For the in-block
-    time, the stops of the part are the times between two movements and,
-    with ``at_edge``, between its last movement and its end (the track ends
-    at the stand); the longest stop that overlaps the passage is the stand
-    stop, and the in-block time is the end of the movement before it, to a
-    standstill.
+    The rule of ``block_time_from_last_stand_stop``. For ``"off"``, the
+    stand stop of a part is its last stand exit whose passage lasts at least
+    ``block_time_long_stand_stop_seconds``; the off-block time is the start
+    of the first movement that starts at or after the entry of that passage
+    and still goes on ``block_time_min_stand_dwell_seconds`` after it, from a
+    standstill. For ``"on"``, it is the first stand entry of at least that
+    long, or (with ``at_edge``) one that lasts to the last report of the
+    part; the stops of the part are the
+    times between two movements and, with ``at_edge``, between its last
+    movement and its end; the in-block time is the end of the movement
+    before the longest stop that overlaps the passage, to a standstill.
 
     Returns the block times, and the parts that have a stand stop
     (``_h_track``, ``_h_block``, ``_h_lo``: the track, the side and the
@@ -1066,6 +1073,11 @@ def _from_stand_stop(
     off = side == "off"
     dwell = F.col("stand_dwell")
     st = F.col("stand_time").cast("double")
+    # A block time is read from a long stand stop only (a repositioned or
+    # towed aircraft): a shorter passage is often the place where the
+    # engines are started after the push-back, or where the aircraft waited
+    # before reaching its stand, and the first (last) movement of the part
+    # is kept for it.
     passages = stands.filter(
         (F.col("_s_block") == side)
         & (dwell >= F.lit(float(config.block_time_min_stand_dwell_seconds)))
@@ -1078,13 +1090,14 @@ def _from_stand_stop(
         "inner",
     )
     is_long = dwell >= F.lit(float(config.block_time_long_stand_stop_seconds))
-    if at_edge:
-        # A passage cut by the start (end) of reception: the aircraft stood
-        # there before it was first received (after it was last received),
-        # so the passage counts as a long stop whatever its length.
-        edge = F.col("_lo").cast("double") if off else F.col("_hi").cast("double")
-        p_edge = st - dwell if off else st + dwell
-        is_long = is_long | (F.abs(p_edge - edge) <= F.lit(_EDGE_SECONDS))
+    if at_edge and not off:
+        # A passage cut by the end of reception: the aircraft stood there
+        # after it was last received, so the passage counts as a long stop
+        # whatever its length.
+        is_long = is_long | (
+            F.abs(st + dwell - F.col("_hi").cast("double")) <= F.lit(_EDGE_SECONDS)
+        )
+    a = a.filter(is_long)
     long_time = F.when(is_long, st)
     choice = Window.partitionBy("track_id", "_lo").orderBy(
         is_long.desc(),
@@ -1110,13 +1123,18 @@ def _from_stand_stop(
     )
     if off:
         # The first movement that starts at or after the aircraft was first
-        # seen in the stand's cells. Not the movement after the longest stop:
-        # after the push-back the aircraft often stands longer for the engine
-        # start than it was received before the push-back.
+        # seen in the stand's cells, and still goes on 30 s later (the
+        # movement into the stand ends there). Not the movement after the
+        # longest stop: after the push-back the aircraft often stands longer
+        # for the engine start than it was received before the push-back.
         r = r.filter(
             (F.col("_from") >= F.col("_lo"))
             & (F.col("_from") <= F.col("_hi"))
             & (F.col("_from").cast("double") >= F.col("_p_in"))
+            & (
+                F.col("_to").cast("double")
+                >= F.col("_p_in") + F.lit(float(config.block_time_min_stand_dwell_seconds))
+            )
         )
         longest = Window.partitionBy("track_id", "_lo").orderBy("_from")
         time_col, still = "_from", "_starts_still"
@@ -1132,8 +1150,10 @@ def _from_stand_stop(
             (F.col("_to") >= F.col("_lo"))
             & (F.col("_to") <= F.col("_hi"))
             & F.col("_stop_to").isNotNull()
-            & (F.col("_stop_from") <= F.col("_p_out"))
-            & (F.col("_stop_to") >= F.col("_p_in"))
+            # The aircraft often stops just beyond the stand's cells, or its
+            # last positions in them are a few seconds before it stops.
+            & (F.col("_stop_from") <= F.col("_p_out") + F.lit(_NEAR_SECONDS))
+            & (F.col("_stop_to") >= F.col("_p_in") - F.lit(_NEAR_SECONDS))
         )
         longest = Window.partitionBy("track_id", "_lo").orderBy(
             (F.col("_stop_to") - F.col("_stop_from")).desc(), "_from"
