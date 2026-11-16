@@ -218,6 +218,35 @@ def test_a_landing_on_a_day_of_high_pressure_touches_down_on_the_runway(spark):
     assert not _of(before, "xing-runway-threshold")
 
 
+#: The take-off of SAS4704 (track 00233761c240f13a_1781423769, LFMN 04R,
+#: elevation 13 ft): flagged on the ground without altitude while lining up
+#: and rolling, then -25 ft twice on the roll, a dip to -75 ft at rotation,
+#: and the climb. Measured from the dip, the roll read 50 ft and the pass was
+#: no take-off at all: line-up, take-off-roll and the take-off time were lost.
+_DIP_AT_ROTATION = [
+    (0, 0.02, None, None, True, None),
+    (10, 0.05, None, None, True, None),
+    (20, 0.15, None, None, True, None),
+    (30, 0.35, None, None, True, None),
+    (35, 0.60, -25.0, 119.0, False, 70.0, 64.0),
+    (40, 0.85, -25.0, 141.0, False, 70.0, 64.0),
+    (45, 1.10, -75.0, 160.0, False, 70.0, 448.0),
+    (50, 1.40, 100.0, 166.0, False, 70.0, 2496.0),
+    (55, 1.70, 325.0, 165.0, False, 70.0, 2944.0),
+]
+
+
+def test_a_dip_of_the_altitude_at_rotation_is_not_the_ground(spark):
+    sv = _pass(spark, _DIP_AT_ROTATION, elev_ft=13.0)
+    passes, events = _family(spark, sv)
+    assert passes == [("07", "departure")]
+    assert {"line-up", "take-off-roll", "ATOT"} <= set(_types(events))
+    (atot,) = _of(events, "ATOT")
+    # The ground reads -25 ft: 15 ft above it between -75 ft (45 s) and
+    # 100 ft (50 s).
+    assert atot[0] == pytest.approx(45.0 + 5.0 * 65.0 / 175.0, abs=0.01)
+
+
 def test_without_a_report_on_the_ground_the_height_is_above_the_elevation(spark):
     """Reception ends on final, before the runway (runway-vacated#03, EGLL):
     no report shows the ground, so the elevation is the reference."""

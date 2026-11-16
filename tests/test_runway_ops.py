@@ -1455,11 +1455,13 @@ def test_a_landing_roll_that_ends_on_reports_on_the_ground_is_not_a_take_off(spa
     assert ("07", "departure") not in passes
     for kind in ("line-up", "take-off-roll", "ATOT"):
         assert kind not in _types(events)
-    _, before = _runway_family(spark, sv, EventConfig(runway_take_off_needs_air_report=False))
+    _, before = _runway_family(
+        spark, sv, EventConfig(runway_take_off_needs_air_report=False, **_RUNWAY_CORRECTIONS_OFF)
+    )
     assert "ATOT" in _types(before)
 
 
-#: The corrections of work package 2 off: the two tests below show what the
+#: The corrections of work package 2 off: three tests here show what the
 #: earlier reading gave, and those corrections (the height above the track's
 #: own ground, the direction by the motion) change that reading too.
 _RUNWAY_CORRECTIONS_OFF = dict(

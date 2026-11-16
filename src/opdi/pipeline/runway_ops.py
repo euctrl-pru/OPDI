@@ -788,13 +788,18 @@ def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft):
       :data:`GROUND_NEAR_SECONDS` of one (airliners send no altitude on the
       ground, so the last report before touchdown and the first reports of
       the take-off roll stand for it);
-    * the value: the highest of the altitudes at most :data:`GROUND_PLATEAU_FT`
-      above the lowest of them (and not climbing or descending faster than
-      :data:`GROUND_PLATEAU_MAX_FTMIN`, except the lowest). Altitudes come in
-      steps of 25 ft, so a take-off roll reads two values, and the higher is
-      taken: measured from the lower, the roll itself would read 25 ft, above
-      ``runway_airborne_height_ft``. The reports that show the ground are
-      used when they carry altitudes; the reports near them otherwise.
+    * the value, from the reports that show the ground when they carry
+      altitudes: the highest of their altitudes at most
+      :data:`GROUND_PLATEAU_FT` above the lowest; otherwise, from the reports
+      near them: the highest altitude at most :data:`GROUND_PLATEAU_FT` from
+      the altitude nearest in time to a report on the ground. Reports
+      climbing or descending faster than :data:`GROUND_PLATEAU_MAX_FTMIN` are
+      left out, except that first one. Altitudes come in steps of 25 ft, so a
+      take-off roll reads two values, and the higher is taken: measured from
+      the lower, the roll itself would read 25 ft, above
+      ``runway_airborne_height_ft``. The lowest altitude is not the start for
+      the reports near the ground: at rotation the altitude often dips by
+      25 to 50 ft for a report or two.
 
     NULL when the track has no such report at this airport, or when the value
     is more than :data:`GROUND_MAX_OFFSET_FT` from ``elevation_ft``.
@@ -831,10 +836,25 @@ def _ground_altitude_ft(work: DataFrame, alt_ft, elevation_ft):
         top = F.max(F.when(on_plateau, values)).over(by_apt)
         return F.when(F.abs(top - elevation_ft) <= F.lit(GROUND_MAX_OFFSET_FT), top)
 
-    # The reports that show the ground, where they carry an altitude; else
-    # the reports near them.
+    # The reports that show the ground, where they carry an altitude.
     direct = plateau_top(F.when(evidence, alt_ft))
-    nearby = plateau_top(F.when(near, alt_ft))
+
+    # Else the reports near them, starting from the altitude nearest in time
+    # to a report on the ground (the last before a touchdown, the first of the
+    # take-off roll), not from the lowest: at rotation the altitude often dips
+    # by 25 to 50 ft for a report or two.
+    gap = F.least(
+        F.coalesce(t - prev_ev, F.lit(float("inf"))), F.coalesce(next_ev - t, F.lit(float("inf")))
+    )
+    has_alt = near & alt_ft.isNotNull()
+    nearest = F.min_by(F.when(has_alt, alt_ft), F.when(has_alt, gap)).over(by_apt)
+    on_step = (
+        has_alt
+        & (F.abs(alt_ft - nearest) <= F.lit(GROUND_PLATEAU_FT))
+        & (steady | (alt_ft == nearest))
+    )
+    top = F.max(F.when(on_step, alt_ft)).over(by_apt)
+    nearby = F.when(F.abs(top - elevation_ft) <= F.lit(GROUND_MAX_OFFSET_FT), top)
     work = work.withColumn("_g_ref", F.coalesce(direct, nearby))
     return work
 
