@@ -712,6 +712,64 @@ class EventConfig:
     ``go-around`` of the same track is left out: repeated approaches are not
     holds."""
 
+    # Work package 6: which label and context a hold gets, where it starts
+    # and ends.
+    holding_pattern_by_straight_share: bool = True
+    """Decide ``info.pattern`` on the share of straight reports alone: an
+    ``orbit`` below :attr:`holding_orbit_max_straight_pct`, else a
+    ``racetrack``. Without it (:attr:`holding_orbit_max_turn_deg`) a
+    continuous circle of more than one and a quarter turns was a
+    ``racetrack``. Off in release v0.0.2."""
+
+    holding_trim_to_main_direction: bool = True
+    """Start and end a hold at its first and last report turning in its main
+    direction (the direction of its net turn). Without it, a turn the other
+    way just before or after the hold (a lead-in turn, the turn back after
+    leaving the stack) is counted in the hold. The straight legs of a
+    racetrack lie between turning reports and stay inside. Off in release
+    v0.0.2."""
+
+    holding_altitude_from_known_reports: bool = True
+    """Take the altitude of ``holding-start`` and ``holding-end`` from the
+    first and last report of the hold that has one, rather than from its
+    first and last report, which can have none. The time and position stay
+    those of the first and last report. Off in release v0.0.2."""
+
+    holding_context: bool = True
+    """Write ``info.context`` on each hold:
+
+    * ``arrival``: the flight lands at its destination at most
+      :attr:`holding_arrival_max_seconds` after the end of the hold, which
+      ends at most :attr:`holding_arrival_max_distance_nm` from that airport;
+    * ``en-route``: the flight lands, but later or further away;
+    * ``other``: a local flight (departure equal to destination, or no
+      destination), no landing after the hold, a track with
+      :attr:`holding_other_min_episodes` holds or more, or holds making up
+      more than :attr:`holding_other_max_share_pct` of the flight's time in
+      the air. Aerial work, survey, firefighting and training flights that
+      circle meet the holding definition; they fall here.
+
+    The landings are the take-off and landing times (``ATOT``, ``ALDT``) of
+    the same step. Delay statistics should use ``arrival``. Off in release
+    v0.0.2."""
+
+    holding_arrival_max_seconds: float = 3600.0
+    """Longest time, in seconds, from the end of a hold to the landing at
+    the destination for the hold to be an ``arrival`` hold."""
+
+    holding_arrival_max_distance_nm: float = 150.0
+    """Largest distance, in NM, from the end of a hold to the destination
+    for the hold to be an ``arrival`` hold."""
+
+    holding_other_min_episodes: int = 3
+    """A track with this many holds or more is circling for another purpose
+    than waiting to land: its holds are ``other``."""
+
+    holding_other_max_share_pct: float = 50.0
+    """Share, in percent, of the time in the air (from the take-off to the
+    landing) above which the holds of a track are ``other``. Not applied to a
+    track whose take-off was not seen."""
+
     # -- point merge -------------------------------------------------------
     emit_point_merge: bool = True
     """Publish ``pms-leg-entry``, ``pms-leg-exit`` and ``pms-merge-point``
@@ -776,6 +834,81 @@ class EventConfig:
     """The track must come this close to the merge point, in NM, from a leg
     at least twice as far out, for the leg to count. ``pms-merge-point`` is
     set at the closest approach."""
+
+    # Work package 6: where a leg ends, split legs, straight or climbing
+    # legs, and which passages of a merge point count.
+    pms_extend_leg_exit: bool = True
+    """Move the exit of a leg past the last report the window test accepts,
+    report by report, while the aircraft is still moving along the arc
+    (track 60 to 120 degrees off the bearing to the merge point) and within
+    :attr:`pms_leg_exit_tolerance_nm` of the distance of the last accepted
+    report. The window test looks 45 s ahead and fails as soon as the
+    turn towards the merge point enters the window, so without this the exit
+    is about 25 s before the aircraft leaves the arc and leg times are about
+    15 % short. The entry is not moved. Off in release v0.0.2."""
+
+    pms_leg_exit_tolerance_nm: float = 0.5
+    """Largest change, in NM, of the distance to the merge point over which
+    the exit of a leg is moved (see :attr:`pms_extend_leg_exit`)."""
+
+    pms_join_split_legs: bool = True
+    """Count two stretches on the arc of one merge point as one leg when the
+    second starts at most :attr:`pms_join_max_gap_seconds` after the first
+    ends and both turn the same way about the merge point. A gap of a minute
+    in the positions otherwise splits one leg into two, each with a shorter
+    time and distance. Off in release v0.0.2."""
+
+    pms_join_max_gap_seconds: float = 120.0
+    """Longest time, in seconds, between two stretches joined into one leg."""
+
+    pms_leg_must_turn: bool = True
+    """Keep a leg only if it turns with the arc and does not climb.
+
+    On an arc the heading turns with the bearing from the merge point; on a
+    straight line that only grazes the circle at the leg distance it does
+    not. A leg shorter than :attr:`pms_leg_turn_test_max_seconds` must turn
+    by at least :attr:`pms_leg_min_turn_share_pct` of its bearing sweep. A leg
+    whose altitude rises by more than :attr:`pms_leg_max_climb_ft` from
+    entry to exit is a missed approach or a climbing turn near the airport,
+    not a sequencing leg. Off in release v0.0.2."""
+
+    pms_leg_min_turn_share_pct: float = 30.0
+    """Smallest heading change of a short leg, in percent of its bearing
+    sweep (real arcs measure 60 to 80 %, straight segments 0 to 3 %)."""
+
+    pms_leg_turn_test_max_seconds: float = 180.0
+    """Legs shorter than this, in seconds, must turn with the arc (see
+    :attr:`pms_leg_must_turn`). Published legs are chains of straight
+    segments, so a longer leg may be straight for a while."""
+
+    pms_leg_max_climb_ft: float = 500.0
+    """Largest rise in altitude, in feet, from the entry to the exit of a
+    leg."""
+
+    pms_merge_point_conditions: bool = True
+    """Publish ``pms-merge-point`` only for a passage that can be an arrival
+    through the system: after every take-off of the track, descending or
+    level (at most :attr:`pms_merge_point_max_climb_ftmin`), at
+    :attr:`pms_merge_point_min_speed_kt` or more, for a system that serves
+    the runway landed on where the system's name and the landing say which
+    (``RJTT-34L`` serves runways 31 to 01, within
+    :attr:`pms_runway_direction_tolerance_deg`; ``LIME-ALL`` any runway), and one per
+    approach (the passage that follows a leg, else the closest to its merge
+    point). Without it every passage within :attr:`pms_merge_point_radius_nm`
+    of a listed merge point counts, departures and light aircraft included.
+    Off in release v0.0.2."""
+
+    pms_runway_direction_tolerance_deg: float = 30.0
+    """Largest difference, in degrees, between the runway direction in a
+    system's name and the runway landed for the system to serve it, so that
+    one system serves the parallel runways of a flow (LTFM-16NW: 16L, 16R,
+    17L, 17R and 18)."""
+
+    pms_merge_point_min_speed_kt: float = 150.0
+    """Lowest ground speed, in knots, of a merge-point passage."""
+
+    pms_merge_point_max_climb_ftmin: float = 500.0
+    """Highest vertical rate, in feet per minute, of a merge-point passage."""
 
     # -- FIR crossings -----------------------------------------------------
     emit_fir_crossings: bool = True
@@ -1016,6 +1149,95 @@ class EventConfig:
     v0.0.2) the event names whichever of them Spark keeps, which can differ
     between two runs of the same day."""
 
+    # -- surface events: passages, air reports, parked aircraft, vehicles --
+    # (work package 6 of the corrections after the spot checks of one day)
+    layout_element_per_passage: bool = True
+    """Choose the element of overlapping layout elements once per passage,
+    so that every entry has its exit on the same element.
+
+    Elements of one kind often overlap (a named taxiway drawn as several
+    ways, stands drawn over a taxilane). Of passages of one kind that start
+    at the same report one is kept, then of passages that end at the same
+    report: the longest, which covers the time of the others, but of stands
+    the shortest (the stand itself rather than a larger area drawn around
+    it, which the aircraft enters earlier and leaves later). Between passages of equal
+    length, the element with the smallest identifier is kept. Without it,
+    entries and exits choose their element separately
+    (:attr:`layout_deterministic_element`), and about one taxiway entry in
+    eight had no exit on the same element. Off in release
+    v0.0.2."""
+
+    layout_air_report_must_be_slow: bool = True
+    """Admit a report that is not flagged on the ground to the layout
+    matching only if it is slow and close to the ground: at most
+    :attr:`layout_air_report_max_speed_kt` and at most
+    :attr:`layout_air_report_max_height_ft` above the airport.
+
+    The speed is the largest of the reported ground speed and the speeds
+    between this report and the reports just before and after it in the same
+    element (from their positions, when they are at most
+    :attr:`layout_position_speed_max_gap_seconds` apart). A report with no
+    known speed is admitted. Reports flagged on the ground are always
+    admitted. This keeps aircraft on approach, climbing out, passing low
+    over the airport or helicopters hovering over an apron out of the
+    surface events, and keeps transponders that never set the ground flag
+    while taxiing (at 2 to 8 kt). Off in release v0.0.2."""
+
+    layout_air_report_max_speed_kt: float = 50.0
+    """Highest ground speed, in knots, of a report not flagged on the ground
+    that is still matched to the layout (taxiing is 5 to 30 kt)."""
+
+    layout_air_report_max_height_ft: float = 300.0
+    """Highest height above the airport, in feet, of a report not flagged on
+    the ground that is still matched to the layout. Barometric altitude on
+    the ground reads up to about 250 ft from the airport's elevation on days
+    of high or low pressure."""
+
+    layout_position_speed_max_gap_seconds: float = 30.0
+    """Longest time, in seconds, between two reports whose positions give a
+    ground speed for :attr:`layout_air_report_must_be_slow`."""
+
+    layout_merge_parked_passages: bool = True
+    """Join two consecutive passages of one element when the aircraft moved
+    less than :attr:`layout_merge_max_move_ft` between them and entered no
+    other element in between.
+
+    A parked aircraft whose position jitters across the edge of an element by
+    a few metres, or whose positions arrive only every few minutes inside a
+    hangar, otherwise gives a new entry and exit after every absence of more
+    than :attr:`airport_trace_gap_seconds` (42 entry/exit pairs for one
+    aircraft parked at a hangar for 19 hours). Stand passages are not
+    joined: an aircraft pushing back often sends no position until it is
+    clear of the stand, and the exit before that gap is the off-block time.
+    Off in release v0.0.2."""
+
+    layout_merge_max_move_ft: float = 165.0
+    """Largest distance, in feet (165 ft is about 50 m), between the exit of a passage and the
+    entry of the next passage of the same element for the two to be joined."""
+
+    layout_mark_track_edges: bool = True
+    """Set ``info.at_track_start`` on an entry made at the first report with
+    a position of its track, and ``info.at_track_end`` on an exit made at the
+    last one. Such an entry or exit is when reception started or stopped
+    (for example a transponder switched on at the stand), not a movement.
+    Off in release v0.0.2."""
+
+    layout_mark_ground_only: bool = True
+    """Set ``info.ground_only`` on the layout events of a track that never
+    leaves the ground and whose aircraft type is unknown or a vehicle type
+    (:attr:`layout_vehicle_typecodes`): in practice airport vehicles with
+    transponders. A track never leaves the ground when it has no report that
+    is not flagged on the ground and has an altitude. Towed aircraft with a
+    known type are not marked. The events are kept. Off in release
+    v0.0.2."""
+
+    layout_vehicle_typecodes: tuple = ("SERV", "GRND", "GND", "TWR")
+    """Aircraft type codes of the aircraft database that are not aircraft,
+    for :attr:`layout_mark_ground_only`: service vehicles (``SERV``), ground
+    vehicles and marshallers (``GRND``, ``GND``) and fixed transmitters
+    (``TWR``). On 14 June 2026 the flight list held 561 rows with these
+    codes, all without a destination."""
+
     # -- plausibility checks ----------------------------------------------
     #
     # Events that the aircraft's own track clearly contradicts are removed
@@ -1178,6 +1400,20 @@ class EventConfig:
             interpolate_crossings_over_missing_values=False,
             airport_events_ordered=False,
             layout_deterministic_element=False,
+            # Work package 6 (surface events, holding, point merge).
+            layout_element_per_passage=False,
+            layout_air_report_must_be_slow=False,
+            layout_merge_parked_passages=False,
+            layout_mark_track_edges=False,
+            layout_mark_ground_only=False,
+            holding_pattern_by_straight_share=False,
+            holding_trim_to_main_direction=False,
+            holding_altitude_from_known_reports=False,
+            holding_context=False,
+            pms_extend_leg_exit=False,
+            pms_join_split_legs=False,
+            pms_leg_must_turn=False,
+            pms_merge_point_conditions=False,
             feeds_from_clean_tracks=False,
             deterministic_event_ids=False,
             # No distance circles in release v0.0.2.

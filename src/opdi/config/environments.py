@@ -39,6 +39,10 @@ OPENSKY_CLUSTER_SETTINGS = {
     # of step 04b fail. 8 gives room for losses that do not repeat.
     "spark.task.maxFailures": "8",
     "spark.stage.maxConsecutiveAttempts": "8",
+    # A failed task is retried on another executor: the events step failed
+    # twice when all eight attempts of one task went to the same dying executor.
+    "spark.excludeOnFailure.enabled": "true",
+    "spark.excludeOnFailure.task.maxTaskAttemptsPerExecutor": "1",
     # Storage. Hadoop's defaults retry a request 5 times and give up on one
     # after 60 s; the study settings used earlier (10 retries, 600 s) left a
     # stalled request hanging for ten minutes. Here: 10 retries, a request

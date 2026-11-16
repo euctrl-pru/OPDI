@@ -66,6 +66,12 @@ def _candidates(geo: DataFrame, pms_ref: DataFrame, config: EventConfig) -> Data
         .rowsBetween(Window.unboundedPreceding, 0)
     )
     df = df.withColumn("heading", F.last("heading", ignorenulls=True).over(known))
+    if config.pms_merge_point_conditions:
+        # The speed and vertical rate at a merge-point passage, read the same
+        # way: the last value the track had.
+        for c in ("velocity", "vert_rate"):
+            if c in df.columns:
+                df = df.withColumn(f"_{c}_known", F.last(c, ignorenulls=True).over(known))
     return df.filter(
         (col("d_nm") <= config.pms_candidate_radius_nm)
         & (col("_alt_ft") <= config.pms_candidate_max_altitude_ft)
@@ -92,6 +98,12 @@ def _leg_and_direct_flags(df: DataFrame, config: EventConfig) -> DataFrame:
         & (tang_pct >= config.pms_leg_tangential_min_pct)
     )
     df = df.withColumn("_on_leg", F.coalesce(on_leg, lit(False))).withColumn("_sweep", sweep)
+    if config.pms_extend_leg_exit:
+        df = df.withColumn("_tangential", F.coalesce(tangential, lit(False)))
+    if config.pms_leg_must_turn:
+        df = df.withColumn("_from_mp", from_mp).withColumn(
+            "_d_hdg", _wrap_deg(col("heading") - F.lag("heading").over(base))
+        )
 
     # The direct: track within pms_direct_align_deg of the bearing to the merge
     # point and the distance falling. A row is "long aligned" once its run has
@@ -112,14 +124,62 @@ def _leg_and_direct_flags(df: DataFrame, config: EventConfig) -> DataFrame:
     return df
 
 
+def _in_leg(df: DataFrame, config: EventConfig) -> DataFrame:
+    """``_in_leg``: the reports of a leg, with its exit moved to the end of the arc.
+
+    See :attr:`~opdi.config.EventConfig.pms_extend_leg_exit`. A report after
+    a run of accepted reports continues the run while it moves along the arc
+    and stays within ``pms_leg_exit_tolerance_nm`` of the distance of the
+    last accepted report; the first report that does not ends it. All of it
+    is running windows over the order the leg test already uses.
+    """
+    base = Window.partitionBy(*_KEY).orderBy("_ts")
+    running = base.rowsBetween(Window.unboundedPreceding, 0)
+    if not config.pms_extend_leg_exit:
+        return df.withColumn("_in_leg", col("_on_leg"))
+    last_leg_d = F.last(F.when(col("_on_leg"), col("d_nm")), ignorenulls=True).over(running)
+    continues = col("_tangential") & (
+        F.abs(col("d_nm") - last_leg_d) <= config.pms_leg_exit_tolerance_nm
+    )
+    df = df.withColumn("_ok", col("_on_leg") | F.coalesce(continues, lit(False)))
+    last_on = F.max(F.when(col("_on_leg"), col("_ts"))).over(running)
+    last_break = F.max(F.when(~col("_ok"), col("_ts"))).over(running)
+    chained = col("_ok") & last_on.isNotNull() & (last_break.isNull() | (last_on > last_break))
+    return df.withColumn("_in_leg", col("_on_leg") | F.coalesce(chained, lit(False))).drop("_ok")
+
+
 def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
     base = Window.partitionBy(*_KEY).orderBy("_ts")
-    starts = col("_on_leg") & ~F.coalesce(F.lag("_on_leg").over(base), lit(False))
+    df = _in_leg(df, config)
+    prev_in = F.coalesce(F.lag("_in_leg").over(base), lit(False))
+    starts = col("_in_leg") & ~prev_in
+    if config.pms_join_split_legs:
+        # A new stretch continues the leg before it when it starts soon after
+        # and turns the same way about the merge point.
+        before = base.rowsBetween(Window.unboundedPreceding, -1)
+        last_in_ts = F.max(F.when(col("_in_leg"), col("_ts"))).over(before)
+        last_sense = F.last(F.when(col("_in_leg"), F.signum(col("_sweep"))), ignorenulls=True).over(
+            before
+        )
+        joined = ((col("_ts") - last_in_ts) <= config.pms_join_max_gap_seconds) & (
+            F.signum(col("_sweep")) == last_sense
+        )
+        starts = starts & ~F.coalesce(joined, lit(False))
     df = df.withColumn(
         "_run", F.sum(starts.cast("int")).over(base.rowsBetween(Window.unboundedPreceding, 0))
     )
+    turn_aggs = []
+    if config.pms_leg_must_turn:
+        # The heading change inside the leg: the step from a report of the
+        # leg to the next one (not the step into the leg).
+        df = df.withColumn("_prev_in", prev_in)
+        turn_aggs = [
+            F.sum(F.when(col("_prev_in"), col("_d_hdg"))).alias("_turn_deg"),
+            F.min_by("_from_mp", "_ts").alias("_from_mp_start"),
+            F.max_by("_from_mp", "_ts").alias("_from_mp_end"),
+        ]
     legs = (
-        df.filter(col("_on_leg"))
+        df.filter(col("_in_leg"))
         .groupBy(*_KEY, "_run", "apt_icao")
         .agg(
             F.min("_ts").alias("start_ts"),
@@ -142,9 +202,23 @@ def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
             F.max_by("d_nm", "_ts").alias("direct_to_distance_nm"),
             F.max_by("_direct_ok", "_ts").alias("direct_ok"),
             F.max_by("_min_d_ahead", "_ts").alias("min_d_ahead"),
+            *turn_aggs,
         )
     )
     legs = legs.withColumn("duration_s", col("end_ts") - col("start_ts"))
+    if config.pms_leg_must_turn:
+        # On an arc the heading turns with the bearing from the merge point;
+        # a straight segment that grazes the circle does not. A leg that
+        # climbs is a missed approach or a climbing turn near the airport.
+        leg_sweep = F.abs(_wrap_deg(col("_from_mp_end") - col("_from_mp_start")))
+        turns = (col("duration_s") >= config.pms_leg_turn_test_max_seconds) | (
+            F.abs(F.coalesce(col("_turn_deg"), lit(0.0)))
+            >= config.pms_leg_min_turn_share_pct / 100.0 * leg_sweep
+        )
+        climbs = (col("end_alt_ft") - col("start_alt_ft")) > config.pms_leg_max_climb_ft
+        legs = legs.filter(F.coalesce(turns, lit(True)) & ~F.coalesce(climbs, lit(False))).drop(
+            "_turn_deg", "_from_mp_start", "_from_mp_end"
+        )
     # A leg counts when the track then went to the merge point: within the
     # lookahead it came inside pms_merge_point_radius_nm, from a leg flown at
     # least twice that far out. Whether it flew a straight, aligned direct is
@@ -198,8 +272,78 @@ def _event(df: DataFrame, kind: str, type_name: str) -> DataFrame:
     )
 
 
+#: Event types that mark a landing or a take-off, from either detector.
+_LANDING_TYPES = ("ALDT", "touchdown")
+_TAKE_OFF_TYPES = ("ATOT", "airborne")
+
+
+def _merge_point_conditions(
+    closest: DataFrame, runway_events: Optional[DataFrame], config: EventConfig
+) -> DataFrame:
+    """The merge-point passages that can be arrivals through the system.
+
+    See :attr:`~opdi.config.EventConfig.pms_merge_point_conditions`. The
+    passages are few (thousands a day); they are joined with the take-off
+    and landing times of their tracks when those are known.
+    """
+    kt = col("_mp_velocity") * 1.94384
+    ftmin = col("_mp_vert_rate") * 196.850394
+    closest = closest.filter(
+        (kt.isNull() | (kt >= config.pms_merge_point_min_speed_kt))
+        & (ftmin.isNull() | (ftmin <= config.pms_merge_point_max_climb_ftmin))
+    )
+    approach = lit(None).cast("double")
+    if runway_events is not None:
+        rwy = runway_events.filter(col("type").isin(*_LANDING_TYPES, *_TAKE_OFF_TYPES)).select(
+            col("track_id").alias("_r_track"),
+            col("type").isin(*_LANDING_TYPES).alias("_r_landing"),
+            col("event_time").cast("double").alias("_r_ts"),
+            F.get_json_object(col("info"), "$.apt_icao").alias("_r_apt"),
+            F.get_json_object(col("info"), "$.runway").alias("_r_rwy"),
+        )
+        landing_here = (
+            col("_r_landing") & (col("_r_ts") > col("mp_ts")) & (col("_r_apt") == col("apt_icao"))
+        )
+        keys = closest.columns
+        closest = (
+            closest.join(rwy, closest.track_id == rwy._r_track, "left")
+            .groupBy(*keys)
+            .agg(
+                F.max(F.when(~col("_r_landing"), col("_r_ts"))).alias("_last_take_off"),
+                F.min(F.when(landing_here, col("_r_ts"))).alias("_next_landing"),
+                F.min_by(col("_r_rwy"), F.when(landing_here, col("_r_ts"))).alias("_land_rwy"),
+            )
+        )
+        # The runway direction a system serves, from its name (``RJTT-34L``
+        # serves 340 degrees; ``LIME-ALL`` names none), against the runway
+        # landed. A system serves the parallel and near-parallel runways of
+        # the same flow (LTFM-16NW serves 16L, 17R and 18).
+        served = F.regexp_extract(col("pms_id"), r"-(\d{2})", 1)
+        landed = F.regexp_extract(F.coalesce(col("_land_rwy"), lit("")), r"^(\d{2})", 1)
+        apart_deg = F.abs(
+            F.pmod(served.cast("int") * 10 - landed.cast("int") * 10 + 180, lit(360)) - 180
+        )
+        same_flow = apart_deg <= config.pms_runway_direction_tolerance_deg
+        closest = closest.filter(
+            (col("_last_take_off").isNull() | (col("mp_ts") > col("_last_take_off")))
+            & ((served == "") | (landed == "") | F.coalesce(same_flow, lit(True)))
+        )
+        approach = col("_next_landing")
+    one = Window.partitionBy("track_id", F.coalesce(approach, lit(-1.0))).orderBy(
+        col("via_leg").desc(), col("closest_nm").asc(), col("merge_point").asc()
+    )
+    return (
+        closest.withColumn("_rank", F.row_number().over(one))
+        .filter(col("_rank") == 1)
+        .drop("_rank")
+    )
+
+
 def calculate_point_merge_events(
-    geo: DataFrame, pms_ref: Optional[DataFrame], config: EventConfig
+    geo: DataFrame,
+    pms_ref: Optional[DataFrame],
+    config: EventConfig,
+    runway_events: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
     """Leg pairs and merge-point overflights for the arrivals in ``geo``.
 
@@ -207,6 +351,10 @@ def calculate_point_merge_events(
     geometry join); ``pms_ref`` is the table from
     ``reference.point_merge.point_merge_systems_for_day``. None when the family
     is off, the table is absent, or the frame has no ``ades``.
+    ``runway_events`` (``track_id, type, event_time, info``), the take-off
+    and landing times of the step, are read by
+    :attr:`~opdi.config.EventConfig.pms_merge_point_conditions`; without them
+    the conditions on take-off, runway and approach are not applied.
     """
     if not config.emit_point_merge or pms_ref is None or "ades" not in geo.columns:
         return None
@@ -249,6 +397,11 @@ def calculate_point_merge_events(
             F.min_by("_alt_ft", "d_nm").alias("mp_alt_ft"),
             F.min_by("cumulative_distance_nm", "d_nm").alias("mp_dist_nm"),
             F.min_by("cumulative_time_s", "d_nm").alias("mp_cum_s"),
+            *[
+                F.min_by(f"_{c}_known", "d_nm").alias(f"_mp_{c}")
+                for c in ("velocity", "vert_rate")
+                if config.pms_merge_point_conditions and f"_{c}_known" in df.columns
+            ],
         )
         .filter(col("closest_nm") <= config.pms_merge_point_radius_nm)
     )
@@ -270,6 +423,11 @@ def calculate_point_merge_events(
     )
     closest = closest.join(via, cond, "left").withColumn("via_leg", col("_l_end").isNotNull())
     closest = closest.dropDuplicates(_KEY)
+    if config.pms_merge_point_conditions:
+        for c in ("velocity", "vert_rate"):
+            if f"_mp_{c}" not in closest.columns:
+                closest = closest.withColumn(f"_mp_{c}", lit(None).cast("double"))
+        closest = _merge_point_conditions(closest, runway_events, config)
     mp_info = F.to_json(
         F.struct(
             col("apt_icao"),

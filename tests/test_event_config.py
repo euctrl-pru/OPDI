@@ -44,6 +44,8 @@ def test_every_measurement_carries_its_unit(field_name, field):
     # Two numeric exceptions, both carrying their unit in the name already:
     # a set of flight levels and a flight level ceiling.
     counts = {"crossing_levels_fl", "airport_max_fl"}
+    # A number of holds (a count) and a list of aircraft type codes.
+    counts |= {"holding_other_min_episodes", "layout_vehicle_typecodes"}
     assert field_name in counts or field_name.endswith(
         ("_nm", "_ft", "_kt", "_ftmin", "_seconds", "_s", "_pct", "_deg")
     )

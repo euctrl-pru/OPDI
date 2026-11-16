@@ -208,8 +208,14 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
     )
     flagged = df.filter(col("_hold"))
     we = Window.partitionBy("track_id", PIECE, "_ep")
-    core_start = F.min(F.when(col("turning"), col("_ts"))).over(we)
-    core_end = F.max(F.when(col("turning"), col("_ts"))).over(we)
+    turning = col("turning")
+    if config.holding_trim_to_main_direction:
+        # Only reports turning the way the episode turns overall bound it, so
+        # a turn the other way before or after the hold is left out.
+        net = F.sum(F.coalesce(col("d_hdg"), lit(0.0))).over(we)
+        turning = turning & (F.signum(col("d_hdg")) == F.signum(net))
+    core_start = F.min(F.when(turning, col("_ts"))).over(we)
+    core_end = F.max(F.when(turning, col("_ts"))).over(we)
     core = (
         flagged.withColumn("_core_start", core_start)
         .withColumn("_core_end", core_end)
@@ -218,7 +224,22 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
             & col("_ts").between(col("_core_start"), col("_core_end"))
         )
     )
+    # The altitude of the first and last report that has one: ``min_by``
+    # skips the rows whose ordering value is NULL.
+    alt_order = (
+        F.when(col("_alt_ft").isNotNull(), col("_ts"))
+        if config.holding_altitude_from_known_reports
+        else col("_ts")
+    )
+    # The flight's airports, the same on every report of a track, for the
+    # context of the hold (``holding_context``).
+    airport_cols = [
+        F.first(c, ignorenulls=True).alias(c)
+        for c in ("adep", "ades", "ades_lat", "ades_lon")
+        if config.holding_context and c in core.columns
+    ]
     agg = core.groupBy("track_id", PIECE, "_ep").agg(
+        *airport_cols,
         F.min("_ts").alias("start_ts"),
         F.max("_ts").alias("end_ts"),
         F.min_by("event_time", "_ts").alias("start_time"),
@@ -227,8 +248,8 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
         F.min_by("lon", "_ts").alias("start_lon"),
         F.max_by("lat", "_ts").alias("end_lat"),
         F.max_by("lon", "_ts").alias("end_lon"),
-        F.min_by("_alt_ft", "_ts").alias("start_alt_ft"),
-        F.max_by("_alt_ft", "_ts").alias("end_alt_ft"),
+        F.min_by("_alt_ft", alt_order).alias("start_alt_ft"),
+        F.max_by("_alt_ft", alt_order).alias("end_alt_ft"),
         F.min_by("cumulative_distance_nm", "_ts").alias("start_dist_nm"),
         F.max_by("cumulative_distance_nm", "_ts").alias("end_dist_nm"),
         F.min_by("cumulative_time_s", "_ts").alias("start_cum_s"),
@@ -245,7 +266,10 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
 
 
 def calculate_holding_events(
-    geo: DataFrame, config: EventConfig, go_arounds: Optional[DataFrame] = None
+    geo: DataFrame,
+    config: EventConfig,
+    go_arounds: Optional[DataFrame] = None,
+    runway_events: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
     """``holding-start``/``holding-end`` pairs for every track in ``geo``.
 
@@ -254,15 +278,87 @@ def calculate_holding_events(
     the nine milestone columns plus ``version``, or None when the family is
     off. ``go_arounds`` (``track_id, type, event_time``) drops episodes that
     start or end within ``holding_goaround_exclusion_seconds`` of a
-    ``go-around`` on the same track.
+    ``go-around`` on the same track. ``runway_events`` (``track_id, type,
+    event_time, info``), the take-off and landing times of the step, give
+    ``info.context`` (:attr:`~opdi.config.EventConfig.holding_context`);
+    without them the context is not written.
     """
     if not config.emit_holding:
         return None
-    return _pair_rows(_holding_episodes(geo, config, go_arounds))
+    return _pair_rows(_holding_episodes(geo, config, go_arounds, runway_events))
+
+
+#: Event types that mark a landing or a take-off, from either detector.
+LANDING_TYPES = ("ALDT", "touchdown")
+TAKE_OFF_TYPES = ("ATOT", "airborne")
+
+
+def _context(episodes: DataFrame, runway_events: DataFrame, config: EventConfig) -> DataFrame:
+    """``_context`` of each episode: ``arrival``, ``en-route`` or ``other``.
+
+    See :attr:`~opdi.config.EventConfig.holding_context`. The episodes are
+    few (hundreds a day), so they are joined with the take-off and landing
+    times of their tracks, and the rules read off the result.
+    """
+    rwy = runway_events.filter(col("type").isin(*LANDING_TYPES, *TAKE_OFF_TYPES)).select(
+        col("track_id").alias("_r_track"),
+        col("type").isin(*LANDING_TYPES).alias("_r_landing"),
+        col("event_time").cast("double").alias("_r_ts"),
+        F.get_json_object(col("info"), "$.apt_icao").alias("_r_apt"),
+    )
+    tracks = Window.partitionBy("track_id")
+    eps = (
+        episodes.withColumn("_n_ep", F.count(lit(1)).over(tracks))
+        .withColumn("_hold_s", F.sum("duration_s").over(tracks))
+        .withColumn("_first_start", F.min("start_ts").over(tracks))
+        .withColumn("_last_end", F.max("end_ts").over(tracks))
+    )
+    keys = [c for c in eps.columns]
+    landing_after = lambda ref: col("_r_landing") & (col("_r_ts") > ref)  # noqa: E731
+    take_off_before = ~col("_r_landing") & (col("_r_ts") < col("_first_start"))
+    joined = (
+        eps.join(rwy, eps.track_id == rwy._r_track, "left")
+        .groupBy(*keys)
+        .agg(
+            F.min(F.when(landing_after(col("end_ts")), col("_r_ts"))).alias("_land_ts"),
+            F.min_by(col("_r_apt"), F.when(landing_after(col("end_ts")), col("_r_ts"))).alias(
+                "_land_apt"
+            ),
+            F.min(F.when(landing_after(col("_last_end")), col("_r_ts"))).alias("_air_end"),
+            F.max(F.when(take_off_before, col("_r_ts"))).alias("_take_off_ts"),
+        )
+    )
+    ades = col("ades") if "ades" in joined.columns else lit(None).cast("string")
+    adep = col("adep") if "adep" in joined.columns else lit(None).cast("string")
+    if "ades_lat" in joined.columns:
+        to_ades_nm = _haversine_nm(col("end_lat"), col("end_lon"), col("ades_lat"), col("ades_lon"))
+    else:
+        to_ades_nm = lit(None).cast("double")
+    # The time in the air runs from the take-off: a track that starts in the
+    # air (reception gained on the way) says nothing of the flight's length.
+    air_s = col("_air_end") - col("_take_off_ts")
+    local = ades.isNull() | (ades == "") | (adep == ades)
+    busy = (col("_n_ep") >= config.holding_other_min_episodes) | (
+        col("_hold_s") > air_s * (config.holding_other_max_share_pct / 100.0)
+    )
+    arrival = (
+        (col("_land_apt") == ades)
+        & ((col("_land_ts") - col("end_ts")) <= config.holding_arrival_max_seconds)
+        & (to_ades_nm <= config.holding_arrival_max_distance_nm)
+    )
+    context = (
+        F.when(local | col("_land_ts").isNull() | F.coalesce(busy, lit(False)), lit("other"))
+        .when(F.coalesce(arrival, lit(False)), lit("arrival"))
+        .otherwise(lit("en-route"))
+    )
+    return joined.withColumn("_context", context)
 
 
 def _holding_episodes(
-    geo: DataFrame, config: EventConfig, go_arounds: Optional[DataFrame] = None
+    geo: DataFrame,
+    config: EventConfig,
+    go_arounds: Optional[DataFrame] = None,
+    runway_events: Optional[DataFrame] = None,
 ) -> DataFrame:
     """One row per kept episode, with its ``info``; see :func:`calculate_holding_events`."""
     elev_cols = [c for c in ("elev_ades_ft", "elev_adep_ft") if c in geo.columns]
@@ -311,11 +407,14 @@ def _holding_episodes(
     seq = Window.partitionBy("track_id").orderBy("start_ts")
     episodes = episodes.withColumn("holding_seq", F.row_number().over(seq))
     straight_pct = F.round(100.0 * (1.0 - col("n_turning") / col("n_rows")), 1)
-    pattern = F.when(
-        (straight_pct < config.holding_orbit_max_straight_pct)
-        & (F.abs(col("turn_deg")) < config.holding_orbit_max_turn_deg),
-        lit("orbit"),
-    ).otherwise(lit("racetrack"))
+    is_orbit = straight_pct < config.holding_orbit_max_straight_pct
+    if not config.holding_pattern_by_straight_share:
+        is_orbit = is_orbit & (F.abs(col("turn_deg")) < config.holding_orbit_max_turn_deg)
+    pattern = F.when(is_orbit, lit("orbit")).otherwise(lit("racetrack"))
+    context = []
+    if config.holding_context and runway_events is not None:
+        episodes = _context(episodes, runway_events, config)
+        context = [col("_context").alias("context")]
     info = F.to_json(
         F.struct(
             col("holding_seq"),
@@ -327,6 +426,7 @@ def _holding_episodes(
             F.round(col("start_alt_ft"), 0).alias("altitude_start_ft"),
             F.round(col("end_alt_ft"), 0).alias("altitude_end_ft"),
             straight_pct.alias("straight_pct"),
+            *context,
         )
     )
     return episodes.withColumn("info", info)
