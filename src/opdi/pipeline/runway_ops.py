@@ -1623,6 +1623,12 @@ def _height_crossing(sdf: DataFrame, config: "EventConfig", direction: str) -> D
         options["max_bracket_seconds"] = float(config.runway_airborne_max_bracket_seconds)
     if config.runway_times_position_between_reports:
         sdf = _position_between_reports(sdf, config)
+        # A report still without a position takes no part in the crossing,
+        # which is then placed between reports that have both.
+        sdf = sdf.withColumn(
+            "height_ft",
+            F.when(F.col("lat").isNotNull() & F.col("lon").isNotNull(), F.col("height_ft")),
+        )
     return threshold_crossings(
         sdf,
         value_col="height_ft",

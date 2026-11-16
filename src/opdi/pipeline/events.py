@@ -2373,6 +2373,12 @@ class FlightEventProcessor:
         if df_events is None:
             return
 
+        if self.events.keep_each_family:
+            # The kept families hold some 2,500 small parts together; the
+            # steps that follow read them in as many parts as a shuffle
+            # makes, not one task per small part.
+            parts = int(self.spark.conf.get("spark.sql.shuffle.partitions", "200"))
+            df_events = df_events.coalesce(parts)
         df_events.cache()
         cached.append(df_events)
 

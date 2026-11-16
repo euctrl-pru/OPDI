@@ -196,6 +196,22 @@ def test_a_lift_off_next_to_a_report_without_position_gets_a_position(spark):
     assert atot_before[3]["lat"] is None
 
 
+def test_a_lift_off_is_placed_between_reports_with_a_position(spark):
+    """When the report without a position has no positioned neighbour within
+    30 s, the crossing is placed between the reports that have both."""
+    rows = list(_HIGH_PRESSURE_TAKE_OFF)
+    for i in (6, 7):
+        t, _, h, kt, g, hdg, fpm = rows[i]
+        rows[i] = (t, None, h, kt, g, hdg, fpm)
+    rows = rows[:8] + [(t + 40, *rest) for t, *rest in rows[8:]]
+    sv = _pass(spark, rows, elev_ft=_YBBN_ELEV_FT)
+    _, events = _family(spark, sv)
+    (atot,) = _of(events, "ATOT")
+    assert atot[3]["lat"] is not None
+    # Between 35 s (0 ft above the ground, positioned) and 90 s (positioned).
+    assert 35.0 < atot[0] < 90.0
+
+
 #: The landing of ALDT#04 (track 60616737214fb211_1781432574, TAM3640, SBVT,
 #: elevation 34 ft): the final approach reads 209 ft below the elevation on
 #: the runway, then reports flagged on the ground without altitude. From the

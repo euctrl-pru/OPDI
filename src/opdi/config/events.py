@@ -613,8 +613,12 @@ class EventConfig:
     but no position. That report takes the position interpolated in time
     between the positioned reports before and after it, when both are at
     most :attr:`crossing_value_max_gap_seconds` away (30 s when that is not
-    set); the crossing is then placed between the two reports as before.
-    Without it the crossing is published without a position."""
+    set); a report that still has no position takes no part in the
+    crossing, which is then placed between the nearest reports that have
+    both an altitude and a position (within
+    :attr:`runway_airborne_max_bracket_seconds`). Without it the crossing
+    can be placed against a report without a position, and is then
+    published without one."""
 
     # -- counting movements ------------------------------------------------
     supersede_window_seconds: float = 10800.0
