@@ -127,7 +127,10 @@ def test_a_complete_rule_still_wins(spark):
     ]
     sdf = _measured(make_track(spark, samples))
 
-    types = {r.type for r in calculate_horizontal_segment_events(sdf, EventConfig()).collect()}
+    # Four reports over 15 s: shorter than the minimum level segment, which
+    # is not what this test is about.
+    config = EventConfig(level_segment_min_duration_applied=False)
+    types = {r.type for r in calculate_horizontal_segment_events(sdf, config).collect()}
 
     assert "level-start" in types
     assert "top-of-climb" not in types, (
@@ -348,7 +351,9 @@ def test_a_one_sample_cruise_emits_both_a_start_and_an_end(spark):
     flights, and only 22% of them fell near ``last_seen`` -- the rest were
     mid-flight, which is where one-sample segments live.
     """
-    got = _counts(spark, _cruise_traj(1), EventConfig())
+    # A segment one report long is shorter than the minimum level segment,
+    # so the minimum is off here: the test is about the precedence.
+    got = _counts(spark, _cruise_traj(1), EventConfig(level_segment_min_duration_applied=False))
 
     assert got["level-start"] == got["level-end"] == 1
 
@@ -360,7 +365,11 @@ def test_the_published_chain_loses_that_end_and_its_top_of_descent(spark):
     is lost: the precedence cost the ``level-end`` *and* the ``top-of-descent``
     together, because both lived in the same unreachable branch.
     """
-    got = _counts(spark, _cruise_traj(1), EventConfig(emit_runway_milestones=False))
+    got = _counts(
+        spark,
+        _cruise_traj(1),
+        EventConfig(emit_runway_milestones=False, level_segment_min_duration_applied=False),
+    )
 
     assert got["level-start"] == 1
     assert got["level-end"] == 0
@@ -502,3 +511,66 @@ def test_scattered_abstentions_do_not_shatter_one_level_segment(spark):
         f"one interrupted level segment is one segment, got "
         f"{got['level-start']} -- abstentions are splitting it"
     )
+
+
+# ---------------------------------------------------------------------------
+# Work package 1 -- level segments: minimum duration, not on the ground
+# ---------------------------------------------------------------------------
+
+
+def _phase_track(spark, samples):
+    """``samples``: (seconds, altitude ft, vertical rate ft/min, speed kt, on_ground)."""
+    return _measured(
+        make_track(
+            spark,
+            [
+                {
+                    "t": t,
+                    "baro_altitude": _m(a),
+                    "vert_rate": r / FTMIN_PER_MPS,
+                    "velocity": v / KT_PER_MPS,
+                    "on_ground": g,
+                }
+                for t, a, r, v, g in samples
+            ],
+        )
+    )
+
+
+def _level_types(spark, samples, config):
+    out = calculate_horizontal_segment_events(_phase_track(spark, samples), config)
+    return sorted(
+        (r.event_time, r.type) for r in out.collect() if r.type in ("level-start", "level-end")
+    )
+
+
+def test_a_level_segment_shorter_than_the_minimum_is_not_published(spark):
+    """Shape of level-start#16 and its kind (segments of 0 to 10 s): a cruise
+    one report long gives a level-start and a level-end at the same instant.
+    Two reports 60 s apart make a segment of 60 s, which stays."""
+    off = EventConfig(level_segment_min_duration_applied=False)
+    assert _counts(spark, _cruise_traj(1), off)["level-start"] == 1
+    assert _counts(spark, _cruise_traj(1), EventConfig())["level-start"] == 0
+    assert _counts(spark, _cruise_traj(2), EventConfig())["level-start"] == 1
+
+
+#: Shape of level-start#38 (363138d93cba9426_1781457709): on the take-off
+#: roll at BIKF, airborne-format reports at -100 ft, 104 to 127 kt, level.
+_ROLL = [(5 * i, -100, 0, 104 + 2 * i, False) for i in range(12)] + [
+    (60 + 5 * i, 100 + 150 * i, 1800, 135 + i, False) for i in range(20)
+]
+
+
+def test_no_level_segment_on_the_take_off_roll(spark):
+    old = _level_types(spark, _ROLL, EventConfig(level_segment_not_on_ground=False))
+    assert old, "the roll was a level segment before the correction"
+    assert _level_types(spark, _ROLL, EventConfig()) == []
+
+
+def test_no_level_segment_on_a_report_flagged_on_the_ground(spark):
+    """Shape of level-end#41: every report flagged on the ground, at 100 kt,
+    1,000 ft above the field reference (no elevation known here)."""
+    ground = [(5 * i, 1000, 0, 100, True) for i in range(12)]
+    old = _level_types(spark, ground, EventConfig(level_segment_not_on_ground=False))
+    assert old
+    assert _level_types(spark, ground, EventConfig()) == []

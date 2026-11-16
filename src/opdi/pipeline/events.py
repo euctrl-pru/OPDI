@@ -79,6 +79,11 @@ from pyspark.sql.window import Window
 
 from opdi.config import EventConfig, OPDIConfig
 from opdi.pipeline.crossings import flight_level_crossings, ring_crossings
+from opdi.pipeline.detector_altitude import (
+    altitude_for_detectors,
+    flight_altitude_only,
+    received_altitude,
+)
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
 from opdi.pipeline.flights import resolve_flight_id
 from opdi.pipeline.ground import block_events, block_times, movement_window
@@ -102,6 +107,7 @@ from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
 from opdi.pipeline.vertical_pru import (
     aerodrome_distances,
     attach_aerodrome_geometry,
+    attach_nearest_position,
     pru_top_events,
     pru_tops,
 )
@@ -396,7 +402,13 @@ def calculate_level_off_events(
         col("end_time").alias("event_time"),
         *common,
     )
-    return starts.unionByName(ends)
+    level_offs = starts.unionByName(ends)
+    # Work package 1: a position, distance and time like other events.
+    if config.level_offs_get_position:
+        level_offs = attach_nearest_position(
+            level_offs, sdf_input, config.vertical_position_window_s
+        )
+    return level_offs
 
 
 #: The columns of :data:`REJECTED_TABLE`: those of ``opdi_flight_events``,
@@ -817,7 +829,13 @@ def calculate_horizontal_segment_events(
     # ``pipeline/holes.py``): a level segment then ends at the hole it meets.
     # Without it the results are those of a track without holes.
     pieces = [PIECE] if PIECE in sdf_input.columns else []
-    df = sdf_input.select(*wanted, *elevations, *pieces)
+    # Work package 1: the ground flag tells the level segments from the ground.
+    ground_flag = (
+        ["on_ground"]
+        if config.level_segment_not_on_ground and "on_ground" in sdf_input.columns
+        else []
+    )
+    df = sdf_input.select(*wanted, *elevations, *pieces, *ground_flag)
     use_agl = config.phase_ground_above_field and len(elevations) == 2
 
     # Convert units: meters -> feet, m/s -> ft/min, m/s -> knots
@@ -899,6 +917,30 @@ def calculate_horizontal_segment_events(
     )
 
     df = _smooth_phase(df, config.phase_twindow_seconds)
+
+    if config.level_segment_not_on_ground:
+        # Work package 1: a report flagged on the ground, or lower than the
+        # ground ceiling above the departure or destination airport, is not
+        # level flight, even at the speed of a take-off or landing roll (where
+        # the speed rules of OpenAP favour "level" over "ground").
+        if use_agl:
+            low = (
+                col("alt") - F.coalesce(col("elev_adep_ft"), lit(0.0))
+                < lit(config.phase_ground_ceiling_ft)
+            ) | (
+                col("alt") - F.coalesce(col("elev_ades_ft"), lit(0.0))
+                < lit(config.phase_ground_ceiling_ft)
+            )
+        else:
+            low = col("alt") < lit(config.phase_ground_ceiling_ft)
+        if ground_flag:
+            low = low | F.coalesce(col("on_ground"), lit(False))
+        df = df.withColumn(
+            "flight_phase",
+            F.when(
+                col("flight_phase").isin("CR", "LVL") & F.coalesce(low, lit(False)), lit("GND")
+            ).otherwise(col("flight_phase")),
+        )
 
     df = (
         df.withColumnRenamed("alt", "altitude_ft")
@@ -1042,9 +1084,34 @@ def calculate_horizontal_segment_events(
         milestone_types = milestone_types.otherwise(F.array())
     df = df.withColumn("milestone_types", milestone_types)
 
+    if config.level_segment_min_duration_applied:
+        # Work package 1: the duration of each level segment, from its first
+        # to its last level report; a segment shorter than
+        # ``level_min_duration_seconds`` gives no level-start/level-end.
+        # Within one number of ``_level_seg`` the level reports are those of
+        # one segment: a new level phase after any other phase starts a new
+        # number.
+        df = df.withColumn(
+            "_level_seg",
+            f_sum(when(col("start_of_segment"), 1).otherwise(0)).over(
+                window_phase.rowsBetween(Window.unboundedPreceding, Window.currentRow)
+            ),
+        )
+        segment = Window.partitionBy("track_id", *pieces, "_level_seg")
+        level_time = when(col("flight_phase").isin("CR", "LVL"), col("event_time").cast("double"))
+        df = df.withColumn(
+            "_level_seg_s",
+            f_max(level_time).over(segment) - f_min(level_time).over(segment),
+        )
+
     # Explode to one row per event
     df_exploded = df.select("*", explode(col("milestone_types")).alias("type"))
     df_exploded = df_exploded.filter("type IS NOT NULL")
+    if config.level_segment_min_duration_applied:
+        df_exploded = df_exploded.filter(
+            ~col("type").isin("level-start", "level-end")
+            | (col("_level_seg_s") >= lit(float(config.level_min_duration_seconds)))
+        )
 
     df_events = df_exploded.select(
         col("track_id"),
@@ -1671,6 +1738,16 @@ class FlightEventProcessor:
         # and two distances); ``_runway_traversal_family`` caches its own
         # smaller copy for the time it uses it.
         geo = self._with_aerodrome_geometry(sdf_input, month)
+        # Work package 1: the vertical detectors (tops, level-offs and
+        # flight-level crossings) do not read the altitude of reports flagged
+        # on the ground; the other detectors do.
+        vgeo = flight_altitude_only(geo, self.events)
+        # The runway, ground and airport detectors, and the plausibility
+        # checks, read the altitude as received (step 02): the cleaning
+        # removes altitudes on the take-off and landing roll, and a report
+        # without altitude counts as a surface report there.
+        ground_input = received_altitude(sdf_input)
+        ground_geo = received_altitude(geo)
 
         # The level segments are detected once and shared by the level-offs
         # and the vertical profile tops, which are defined on the same
@@ -1682,13 +1759,13 @@ class FlightEventProcessor:
             # column is dropped afterwards because tops and level-offs join on
             # the track.
             segments = LEVEL_ARMS[self.events.level_method](
-                geo, self.events, partition_cols=("track_id", PIECE)
+                vgeo, self.events, partition_cols=("track_id", PIECE)
             ).drop(PIECE)
             segments.cache()
             if self.events.emit_pru_tops or (
                 self.events.emit_level_offs and self.events.level_anchor == "pru"
             ):
-                tops = pru_tops(geo, segments, self.events)
+                tops = pru_tops(vgeo, segments, self.events)
                 tops.cache()
 
         df_events = None
@@ -1735,20 +1812,21 @@ class FlightEventProcessor:
         if calc_vertical:
             print(f"Calculating vertical events (FL crossings) for batch: {batch_id}")
             # The v0.0.2 settings run the release v0.0.2 crossing method.
+            crossing_input = flight_altitude_only(sdf_input, self.events)
             if self.events.crossing_all_occurrences:
-                add(calculate_threshold_crossing_events(sdf_input, self.events))
+                add(calculate_threshold_crossing_events(crossing_input, self.events))
             else:
-                add(calculate_vertical_crossing_events(sdf_input))
+                add(calculate_vertical_crossing_events(crossing_input))
 
             if df_events is not None and self.events.emit_level_offs:
                 add(
                     calculate_level_off_events(
-                        geo, df_events, self.events, segments=segments, tops=tops
+                        vgeo, df_events, self.events, segments=segments, tops=tops
                     )
                 )
 
             if self.events.emit_pru_tops:
-                add(pru_top_events(geo, segments, self.events, tops=tops))
+                add(pru_top_events(vgeo, segments, self.events, tops=tops))
 
             # ATOT/ALDT from the runway window and the runway milestones
             # airborne/touchdown give the same two moments by different means.
@@ -1761,7 +1839,7 @@ class FlightEventProcessor:
             if self.events.emit_runway_events:
                 add(
                     keep_runway(
-                        calculate_runway_events(sdf_input, month, self.storage, self.events)
+                        calculate_runway_events(ground_input, month, self.storage, self.events)
                     )
                 )
 
@@ -1769,12 +1847,12 @@ class FlightEventProcessor:
 
         if calc_hexaero:
             print(f"Calculating airport events for batch: {batch_id}")
-            df_hexaero = calculate_airport_events(sdf_input, month, self.storage, self.events)
+            df_hexaero = calculate_airport_events(ground_input, month, self.storage, self.events)
             add(df_hexaero)
 
             if self.events.emit_runway_milestones:
                 print(f"Calculating runway milestones for batch: {batch_id}")
-                rwy_sv = self._with_flight_id(geo)
+                rwy_sv = self._with_flight_id(ground_geo)
                 add(keep_runway(self._runway_traversal_family(rwy_sv, month)))
                 # Independent of the runway passages and of the layout table: a
                 # go-around may never touch a runway, so it needs only the
@@ -1792,11 +1870,11 @@ class FlightEventProcessor:
                         runway = part if runway is None else runway.unionByName(part)
                     add(
                         calculate_block_events(
-                            geo, df_hexaero, self.events, runway, checkpoints=checkpoints
+                            ground_geo, df_hexaero, self.events, runway, checkpoints=checkpoints
                         )
                     )
                 else:
-                    add(calculate_block_events(sdf_input, df_hexaero, self.events))
+                    add(calculate_block_events(ground_input, df_hexaero, self.events))
 
         if (
             calc_navigation
@@ -1808,7 +1886,7 @@ class FlightEventProcessor:
             # A run that adds only the holding, point merge and FIR families
             # still needs the go-arounds, which the holding family checks
             # against.
-            rwy_sv = self._with_flight_id(geo)
+            rwy_sv = self._with_flight_id(ground_geo)
             if "ades_lat" in rwy_sv.columns:
                 df_go_arounds = go_arounds(rwy_sv, self.events)
 
@@ -1862,7 +1940,7 @@ class FlightEventProcessor:
             checkpoints.append(df_events)
             labelled = label_events(
                 df_events,
-                sdf_input,
+                ground_input,
                 self._airports(),
                 self.events,
                 flights=self._flight_airports(month),
@@ -2133,9 +2211,17 @@ class FlightEventProcessor:
             print("osn_tracks_clean not found; falling back to raw osn_tracks.")
         print(f"Reading tracks from: {source}")
 
-        sdf_input = (
-            self._get_data_within_timeframe(source, month, day=day).select(*TRACK_COLUMNS).cache()
-        )
+        # Work package 1: the altitude every detector reads (see
+        # ``pipeline/detector_altitude.py``), set as the reports are read.
+        cleaned = source == "osn_tracks_clean"
+        read_columns = list(TRACK_COLUMNS)
+        if cleaned and self.events.altitude_from_cleaning:
+            read_columns.append("baro_altitude")
+        sdf_input = altitude_for_detectors(
+            self._get_data_within_timeframe(source, month, day=day).select(*read_columns),
+            self.events,
+            cleaned_tracks=cleaned,
+        ).cache()
 
         batch_id = month.strftime("%Y%m%d") + "_"
 

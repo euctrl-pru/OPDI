@@ -35,6 +35,7 @@ MODULES = (
     "opdi.periodrun",
     "opdi.pipeline",
     "opdi.pipeline.crossings",
+    "opdi.pipeline.detector_altitude",
     "opdi.pipeline.elevation",
     "opdi.pipeline.events",
     "opdi.pipeline.fir",
@@ -224,6 +225,11 @@ NAMES = {
         "height_above_elevation_ft",
         "height_above_field_ft",
     ),
+    "opdi.pipeline.detector_altitude": (
+        "altitude_for_detectors",
+        "flight_altitude_only",
+        "received_altitude",
+    ),
     "opdi.pipeline.events": (
         "DISTANCE_VERSION",
         "EXTRA_MEASURES",
@@ -372,6 +378,7 @@ NAMES = {
     "opdi.pipeline.vertical_pru": (
         "aerodrome_distances",
         "attach_aerodrome_geometry",
+        "attach_nearest_position",
         "pru_top_events",
         "pru_tops",
     ),

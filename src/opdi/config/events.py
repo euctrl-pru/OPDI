@@ -609,6 +609,109 @@ class EventConfig:
     the departure airport (climb) and the destination airport (descent).
     ``False`` looks at every level segment, whatever its distance."""
 
+    # -- the altitude the detectors read (work package 1) -----------------
+    altitude_from_cleaning: bool = True
+    """Give the flight detectors of step 04 the barometric altitude that
+    survived the cleaning of step 02a.
+
+    The track table holds two barometric altitudes. ``baro_altitude_c`` is
+    the altitude after one check of step 02 (a change of more than 200 ft/s
+    from the previous report); ``baro_altitude`` in the cleaned tracks
+    (``osn_tracks_clean``) is the altitude after the cleaning of step 02a,
+    which also removes the values OpenSky repeats when no new altitude
+    message arrived, isolated values and spikes. With this setting, when
+    step 04 reads the cleaned tracks, the content of ``baro_altitude_c`` is
+    replaced by the cleaned ``baro_altitude`` as the reports are read, so
+    the flight detectors (tops, level-offs, level segments, flight-level,
+    distance-circle and FIR crossings, holding, point merge, first and last
+    seen) read the cleaned altitude under their usual column name. A value
+    the step 02 check removed but the cleaning kept is used: it is a fresh
+    altitude right after a run of repeated values, which the step 02 check
+    compares with the repeated value. The runway, ground and airport
+    detectors and the plausibility checks keep the step 02 altitude: the
+    cleaning removes altitudes read on the take-off and landing roll, and
+    there a report without altitude counts as a surface report. Off in
+    release v0.0.2."""
+
+    altitude_plausible_min_ft: Optional[float] = -2000.0
+    """Lowest barometric altitude, in feet, that step 04 uses. A lower value
+    is treated as missing (set to NULL as the reports are read), for every
+    detector. ``None`` sets no lower limit (release v0.0.2)."""
+
+    altitude_plausible_max_ft: Optional[float] = 60000.0
+    """Highest barometric altitude, in feet, that step 04 uses; above it the
+    value is treated as missing, for every detector. Airliners fly below
+    45,000 ft and business jets below 51,000 ft. ``None`` sets no upper
+    limit (release v0.0.2)."""
+
+    vertical_ignores_ground_altitude: bool = True
+    """Do not use the altitude of a report flagged on the ground as a flight
+    altitude in the vertical detectors: the tops of climb and descent, the
+    level segments of the level-offs and the flight-level crossings.
+
+    Transponders on the ground sometimes send altitudes of 9,800 to
+    126,000 ft at the stand, which would become a top of climb or a
+    crossing of every flight level. The runway, ground and airport
+    detectors still read these reports' altitude, as the altitude an
+    aircraft reads on the ground is their reference. Off in release
+    v0.0.2."""
+
+    level_max_sample_gap_seconds: Optional[float] = 60.0
+    """Longest time, in seconds, between two measured altitudes across which
+    the ``"pru"`` level method interpolates.
+
+    The method interpolates the altitude onto a regular time grid. With
+    this setting the grid covers only the time from the first to the last
+    measured altitude of each piece of track, and a grid window that lies
+    between two measured altitudes more than this far apart is not level:
+    the altitude there was not measured. Without it (``None``, release
+    v0.0.2) the first and last altitudes are held flat to the ends of the
+    piece and any gap is bridged by a straight line, which turns a parked
+    aircraft or a lost reception into a long level-off."""
+
+    level_segment_min_duration_applied: bool = True
+    """Apply :attr:`level_min_duration_seconds` to the level segments of the
+    phase method (``level-start``/``level-end``) as well: a segment shorter
+    than that, a single report for instance, is not published. Off in
+    release v0.0.2."""
+
+    level_segment_not_on_ground: bool = True
+    """Publish no ``level-start``/``level-end`` on the ground or on the
+    take-off or landing roll: a report flagged on the ground, or less than
+    :attr:`phase_ground_ceiling_ft` above the departure or destination
+    airport, is not level flight, whatever its speed. Off in release
+    v0.0.2."""
+
+    tops_position_from_nearest_report: bool = True
+    """Place the top of climb and top of descent of the vertical profile
+    method at the report with a position nearest in time to the top, within
+    :attr:`vertical_position_window_s`; no position when there is none. The
+    time passed is counted to the top's own time. Without this setting
+    (release v0.0.2), the top takes the position of the last report at or
+    before it, which has no position when that report carried only an
+    altitude."""
+
+    tops_observed_min_change_ft: Optional[float] = 3000.0
+    """Change of altitude, in feet, that makes a top observed:
+    ``info.observed`` is true on a top of climb when the track has an
+    altitude at least this much below the top before it, and on a top of
+    descent when it has one this much below the top after it. Otherwise the
+    top sits at the edge of reception (a track that starts or ends in
+    cruise) and ``info.observed`` is false. ``None`` writes no
+    ``info.observed`` (release v0.0.2)."""
+
+    level_offs_get_position: bool = True
+    """Give the level-off events a position, a distance flown and a time
+    passed, like other events: from the report with a position nearest in
+    time to the start (end) of the level-off, within
+    :attr:`vertical_position_window_s`. Without this setting (release
+    v0.0.2) these are empty on every level-off."""
+
+    vertical_position_window_s: float = 60.0
+    """Seconds around a top or a level-off within which the report giving
+    its position is searched, with :attr:`tops_position_from_nearest_report`
+    and :attr:`level_offs_get_position`."""
+
     # -- airport layout events -------------------------------------------
     #
     # Entry and exit events of runways, taxiways, aprons, stands and other
@@ -828,5 +931,16 @@ class EventConfig:
             emit_fir_crossings=False,
             plausibility_checks=False,
             runway_take_off_needs_air_report=False,
+            # Work package 1: the altitude the detectors read.
+            altitude_from_cleaning=False,
+            altitude_plausible_min_ft=None,
+            altitude_plausible_max_ft=None,
+            vertical_ignores_ground_altitude=False,
+            level_max_sample_gap_seconds=None,
+            level_segment_min_duration_applied=False,
+            level_segment_not_on_ground=False,
+            tops_position_from_nearest_report=False,
+            tops_observed_min_change_ft=None,
+            level_offs_get_position=False,
             events_version=LEGACY_EVENTS_VERSION,
         )

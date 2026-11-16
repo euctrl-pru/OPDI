@@ -237,18 +237,36 @@ def pru_tops(
         "_toc_alt", F.max(F.when(in_climb, F.col("_alt_ft"))).over(whole)
     ).withColumn("_tod_alt", F.max(F.when(in_descent, F.col("_alt_ft"))).over(whole))
 
+    at_toc = in_climb & (F.col("_alt_ft") == F.col("_toc_alt"))
+    at_tod = in_descent & (F.col("_alt_ft") == F.col("_tod_alt"))
     # First and last: a plateau at the top of the climb is entered once and
     # left once, and PRU names the entry in climb and the exit in descent.
-    tops = work.groupBy("track_id").agg(
+    aggregations = [
         F.first("_toc_alt").alias("toc_d200_alt_ft"),
         F.first("_tod_alt").alias("tod_a200_alt_ft"),
-        F.min(F.when(in_climb & (F.col("_alt_ft") == F.col("_toc_alt")), F.col("_t"))).alias(
-            "toc_d200_time"
-        ),
-        F.max(F.when(in_descent & (F.col("_alt_ft") == F.col("_tod_alt")), F.col("_t"))).alias(
-            "tod_a200_time"
-        ),
-    )
+        F.min(F.when(at_toc, F.col("_t"))).alias("toc_d200_time"),
+        F.max(F.when(at_tod, F.col("_t"))).alias("tod_a200_time"),
+    ]
+    if config.tops_observed_min_change_ft is not None:
+        # The lowest altitude of the track up to each report, and from each
+        # report to the end, read at the top: they say whether a climb (a
+        # descent) was received before (after) it. The reversed order gives a
+        # frame that grows rather than one that shrinks.
+        ordered = Window.partitionBy("track_id").orderBy("_t")
+        reverse = Window.partitionBy("track_id").orderBy(F.col("_t").desc())
+        so_far = Window.unboundedPreceding, Window.currentRow
+        work = work.withColumn(
+            "_min_before", F.min("_alt_ft").over(ordered.rowsBetween(*so_far))
+        ).withColumn("_min_after", F.min("_alt_ft").over(reverse.rowsBetween(*so_far)))
+        aggregations += [
+            F.min(F.when(at_toc, F.struct("_t", "_min_before")))["_min_before"].alias(
+                "toc_lowest_before_ft"
+            ),
+            F.max(F.when(at_tod, F.struct("_t", "_min_after")))["_min_after"].alias(
+                "tod_lowest_after_ft"
+            ),
+        ]
+    tops = work.groupBy("track_id").agg(*aggregations)
 
     return _relocate(tops, segments, config)
 
@@ -276,6 +294,8 @@ def _relocate(tops: DataFrame, segments: DataFrame, config: "EventConfig") -> Da
         "tod_a200_time",
         "tod_a200_alt_ft",
     ]
+    lowest = [c for c in ("toc_lowest_before_ft", "tod_lowest_after_ft") if c in tops.columns]
+    keys += lowest
     seg = segments.select("track_id", "start_time", "end_time", "duration_seconds", "level_ft")
     joined = tops.join(seg, "track_id", "left")
 
@@ -310,6 +330,7 @@ def _relocate(tops: DataFrame, segments: DataFrame, config: "EventConfig") -> Da
         F.coalesce(F.col("_cdo.end_time"), F.col("tod_a200_time")).alias("tod_cdo_time"),
         F.coalesce(F.col("_cdo.level_ft"), F.col("tod_a200_alt_ft")).alias("tod_cdo_alt_ft"),
         F.col("_cdo").isNotNull().alias("tod_relocated"),
+        *lowest,
     )
 
 
@@ -354,6 +375,23 @@ def pru_top_events(
     toc_type = "top-of-climb" if _merged else "top-of-climb-cco"
     tod_type = "top-of-descent" if _merged else "top-of-descent-cdo"
 
+    # Whether a climb (descent) of at least ``tops_observed_min_change_ft``
+    # was received before (after) the top; see that setting.
+    change_ft = config.tops_observed_min_change_ft
+    observed = []
+    if change_ft is not None and "toc_lowest_before_ft" in tops.columns:
+        observed = [
+            (
+                F.coalesce(
+                    col("toc_cco_alt_ft") - col("toc_lowest_before_ft") >= lit(float(change_ft)),
+                    lit(False),
+                ),
+                F.coalesce(
+                    col("tod_cdo_alt_ft") - col("tod_lowest_after_ft") >= lit(float(change_ft)),
+                    lit(False),
+                ),
+            )
+        ]
     climb = tops.select(
         "track_id",
         lit(toc_type).alias("type"),
@@ -362,6 +400,7 @@ def pru_top_events(
         col("toc_d200_time").alias("_d200_time"),
         col("toc_d200_alt_ft").alias("_d200_alt"),
         col("toc_relocated").alias("_relocated"),
+        *[pair[0].alias("_observed") for pair in observed],
     )
     descent = tops.select(
         "track_id",
@@ -371,10 +410,14 @@ def pru_top_events(
         col("tod_a200_time").alias("_d200_time"),
         col("tod_a200_alt_ft").alias("_d200_alt"),
         col("tod_relocated").alias("_relocated"),
+        *[pair[1].alias("_observed") for pair in observed],
     )
     events = climb.unionByName(descent).filter(col("event_time").isNotNull())
 
-    events = _attach_position(events, sdf, time_col)
+    if config.tops_position_from_nearest_report:
+        events = attach_nearest_position(events, sdf, config.vertical_position_window_s, time_col)
+    else:
+        events = _attach_position(events, sdf, time_col)
     return events.select(
         col("track_id"),
         col("type"),
@@ -391,6 +434,7 @@ def pru_top_events(
                 col("_relocated").alias("relocated"),
                 lit(config.level_analysis_radius_nm).alias("analysis_radius_nm"),
                 lit("pru").alias("method"),
+                *([col("_observed").alias("observed")] if observed else []),
             )
         ).alias("info"),
     )
@@ -438,4 +482,105 @@ def _attach_position(events: DataFrame, sdf: DataFrame, time_col: str) -> DataFr
         col("_s.lat").alias("lat"),
         col("_s.cumulative_distance_nm").alias("cumulative_distance_nm"),
         col("_s.cumulative_time_s").alias("cumulative_time_s"),
+    )
+
+
+def attach_nearest_position(
+    events: DataFrame, sdf: DataFrame, window_s: float, time_col: str = "event_time"
+) -> DataFrame:
+    """Place each event at the report with a position nearest in time to it.
+
+    For events that need not fall on a report: the tops of climb and descent
+    and the level-offs, whose times are those of a level segment's boundary
+    on a regular time grid, or of a report that carried only an altitude.
+
+    * ``lon`` and ``lat``: those of the report with a position nearest in
+      time to the event, within ``window_s`` seconds before or after it (the
+      earlier one on a tie); NULL when there is none.
+    * ``cumulative_distance_nm``: the distance flown at that report; with no
+      such report, at the report of any kind nearest in time.
+    * ``cumulative_time_s``: counted to the event's own time, from the report
+      nearest in time.
+
+    The reports are looked up in time buckets of ``window_s`` seconds, so each
+    event meets only the reports of its own minute and the two beside it,
+    not every report of its track.
+
+    Args:
+        events: Rows with ``track_id``, ``type`` and ``event_time``; one row
+            per ``(track_id, type, event_time)``.
+        sdf: The track reports, with ``lon``, ``lat`` and, if present,
+            ``cumulative_distance_nm`` and ``cumulative_time_s``.
+        window_s: Seconds within which a report is searched.
+        time_col: The reports' time column.
+
+    Returns:
+        ``events`` with ``lon``, ``lat``, ``cumulative_distance_nm`` and
+        ``cumulative_time_s`` (any existing columns of those names replaced).
+    """
+    w = float(window_s)
+    carried = [c for c in ("cumulative_distance_nm", "cumulative_time_s") if c in sdf.columns]
+    samples = sdf.select(
+        col("track_id").alias("_sid"),
+        col(time_col).cast("double").alias("_st"),
+        col("lon").cast("double").alias("_lon"),
+        col("lat").cast("double").alias("_lat"),
+        *[col(c).cast("double").alias(f"_{c}") for c in carried],
+    ).withColumn("_bucket", F.floor(col("_st") / lit(w)))
+    for missing in ("cumulative_distance_nm", "cumulative_time_s"):
+        if missing not in carried:
+            samples = samples.withColumn(f"_{missing}", lit(None).cast("double"))
+
+    keys = (
+        events.select("track_id", "type", "event_time")
+        .distinct()
+        .withColumn("_et", col("event_time").cast("double"))
+    )
+    keys = keys.withColumn(
+        "_bucket",
+        F.explode(
+            F.array(*[F.floor(col("_et") / lit(w)) + lit(k) for k in (-1, 0, 1)]),
+        ),
+    )
+    joined = keys.join(
+        samples,
+        (keys.track_id == samples._sid) & (keys._bucket == samples._bucket),
+        "inner",
+    ).filter(F.abs(col("_st") - col("_et")) <= lit(w))
+
+    dt_s = F.abs(col("_st") - col("_et"))
+    positioned = col("_lat").isNotNull() & col("_lon").isNotNull()
+    picked = joined.groupBy("track_id", "type", "event_time").agg(
+        F.min(
+            F.when(
+                positioned,
+                F.struct(
+                    dt_s.alias("dt"),
+                    col("_st").alias("st"),
+                    col("_lon").alias("lon"),
+                    col("_lat").alias("lat"),
+                    col("_cumulative_distance_nm").alias("dist"),
+                ),
+            )
+        ).alias("_p"),
+        F.min(
+            F.struct(
+                dt_s.alias("dt"),
+                col("_st").alias("st"),
+                col("_cumulative_distance_nm").alias("dist"),
+                col("_cumulative_time_s").alias("time"),
+            )
+        ).alias("_a"),
+    )
+    replaced = ("lon", "lat", "cumulative_distance_nm", "cumulative_time_s")
+    out = events.drop(*[c for c in replaced if c in events.columns]).join(
+        picked, ["track_id", "type", "event_time"], "left"
+    )
+    own_time = col("_a.time") + (col("event_time").cast("double") - col("_a.st"))
+    return out.select(
+        *[col(c) for c in events.columns if c not in replaced],
+        col("_p.lon").alias("lon"),
+        col("_p.lat").alias("lat"),
+        F.coalesce(col("_p.dist"), col("_a.dist")).alias("cumulative_distance_nm"),
+        own_time.alias("cumulative_time_s"),
     )
