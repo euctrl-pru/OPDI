@@ -547,7 +547,7 @@ def read_tables(items, default_label) -> dict:
 def apply_setting(cfg, item: str) -> None:
     """Set one field of the configuration from ``group.field=value``.
 
-    ``value`` is read as ``true``/``false``, a whole number, a decimal number
+    ``value`` is read as ``true``/``false``, ``none``, a whole number, a decimal number
     or else text; the field must exist, so a typing error stops the run.
     """
     key, sep, text = item.partition("=")
@@ -560,6 +560,8 @@ def apply_setting(cfg, item: str) -> None:
     low = text.lower()
     if low in ("true", "false"):
         value = low == "true"
+    elif low == "none":
+        value = None
     else:
         try:
             value = int(text)
