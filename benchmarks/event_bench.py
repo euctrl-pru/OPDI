@@ -273,6 +273,7 @@ LADDER = [
             "pms_merge_point_conditions": True,
             "crossing_max_implied_speed_kt": 1000.0,
             "crossing_skips_position_jumps": True,
+            "ring_crossing_keeps_single_steps": True,
             "crossing_value_max_gap_seconds": 30.0,
             "rings_around_flight_list_airports": True,
             "fir_needs_position": True,
@@ -401,6 +402,18 @@ LADDER_V4 = [
     ("V14_block_times_on_ground", {"block_times_on_ground_only": True}),
     ("V15_plausibility_checks", {"plausibility_checks": True}),
     ("V16_take_off_needs_air_report", {"runway_take_off_needs_air_report": True}),
+    # The corrections decided after the spot checks of 2026-06-14, in six
+    # work packages, measured together on the sample and the whole day
+    # (benchmarks/CORRECTIONS.md): the altitude the detectors read, runway
+    # events, block times and stands, the flight list, crossings and the
+    # two measurements, surface events, holding and point merge; and the
+    # events version they are published under (as L22 of the v3 table).
+    (
+        "V17_spot_check_corrections",
+        {
+            "events_version": "events_v0.4.0",
+        },
+    ),
 ]
 
 #: Rungs that are allowed to be config-identical to the rung before them,
