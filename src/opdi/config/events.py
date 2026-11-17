@@ -586,8 +586,9 @@ class EventConfig:
     """Check the take-off and landing times of the runway window method
     (``info.method = "legacy"``): use only reports at most
     :attr:`runway_window_max_height_ft` above the track's ground altitude (or
-    the elevation) and at most :attr:`runway_window_max_cross_track_nm` from
-    the runway's extended centre line; for a landing, require a report on the
+    the elevation; see that setting for when it acts) and at most
+    :attr:`runway_window_max_cross_track_nm` from the runway's extended
+    centre line; for a landing, require a report on the
     ground (flagged, or slower than 50 kt) after it when the track goes on for
     more than 120 s; publish the position and altitude of the report the time
     is taken from; and say in ``info.at_track_edge`` whether that report is
@@ -595,12 +596,21 @@ class EventConfig:
     v0.0.2."""
 
     runway_window_max_height_ft: float = 1500.0
-    """Highest height above the ground, in feet, of a report that gives a
-    take-off or landing time of the runway window method. A time from a
-    report close to the ground is kept, one from a report higher up is not;
-    1,500 ft keeps the tracks first or last received in the early climb or
-    on short final, whose time is still within a minute of the airport
-    record."""
+    """Highest height, in feet, above the track's ground altitude at the
+    airport, of a report that gives a take-off or landing time of the runway
+    window method. The ground altitude is the median altitude of the track's
+    reports near the airport, on the same visit of the airport, that are
+    flagged on the ground or slower than 30 kt, when it is within 1,000 ft
+    of the published elevation; otherwise the published elevation is used.
+
+    The reports that can give these times are already at most
+    :attr:`runway_max_height_ft` (1,500 ft) above the published elevation.
+    So with both limits at 1,500 ft, this one removes a time only when the
+    ground altitude reads below the elevation (a day of high pressure, with
+    the altimeter set to standard pressure): a report 1,400 ft above the
+    elevation is then more than 1,500 ft above the ground. Where the ground
+    reads at or above the elevation, or no ground report is known, it
+    removes nothing."""
 
     runway_window_max_cross_track_nm: float = 0.5
     """Largest distance, in NM, from the runway's extended centre line of a
@@ -751,6 +761,16 @@ class EventConfig:
     first and last report of the hold that has one, rather than from its
     first and last report, which can have none. The time and position stay
     those of the first and last report. Off in release v0.0.2."""
+
+    holding_and_go_arounds_at_corrected_airports: bool = True
+    """Find the go-arounds, and give each hold its context, at the airports
+    the flight list publishes: those of step 03 after the correction by the
+    runway events of step 04b
+    (:func:`opdi.pipeline.flight_list_milestones.correct_aerodromes`),
+    computed in step 04 from the events found before these two families.
+    A flight whose destination step 04b replaces then has its go-arounds
+    looked for, and its holds read as an arrival, at the airport it landed
+    at. Without it (release v0.0.2) both use the airports of step 03."""
 
     holding_context: bool = True
     """Write ``info.context`` on each hold:
@@ -904,7 +924,9 @@ class EventConfig:
 
     pms_merge_point_conditions: bool = True
     """Publish ``pms-merge-point`` only for a passage that can be an arrival
-    through the system: after every take-off of the track, descending or
+    through the system: with no take-off of the track between the passage
+    and the landing at the airport that follows it (with no such landing, no
+    take-off after the passage), descending or
     level (at most :attr:`pms_merge_point_max_climb_ftmin`), at
     :attr:`pms_merge_point_min_speed_kt` or more, for a system that serves
     the runway landed on where the system's name and the landing say which
@@ -1209,8 +1231,20 @@ class EventConfig:
     """Publish no ``level-start``/``level-end`` on the ground or on the
     take-off or landing roll: a report flagged on the ground, or less than
     :attr:`phase_ground_ceiling_ft` above the departure or destination
-    airport, is not level flight, whatever its speed. Off in release
+    airport, is not level flight, whatever its speed. The height is
+    measured above the airport the report is near: above the departure
+    airport within :attr:`level_segment_ground_radius_nm` of it, above the
+    destination within that distance of the destination, and above the
+    lower of the two airports for a report without a position. A level-off
+    at 2,000 ft near a destination at sea level is therefore level flight
+    even after a departure from a field at 2,000 ft. Off in release
     v0.0.2."""
+
+    level_segment_ground_radius_nm: float = 10.0
+    """Distance, in nautical miles, from an airport within which a report's
+    height above that airport is measured for
+    :attr:`level_segment_not_on_ground`. Farther from both airports, only a
+    report flagged on the ground is taken as ground."""
 
     tops_position_from_nearest_report: bool = True
     """Place the top of climb and top of descent of the vertical profile
@@ -1618,6 +1652,16 @@ class EventConfig:
         """
         return self.level_vertical_speed_limit_ftmin * self.level_window_seconds / 60.0
 
+    def differs_from_release(self, names) -> bool:
+        """Whether one of the settings ``names`` differs from release v0.0.2.
+
+        The values of release v0.0.2 are those of :meth:`legacy`. A method
+        whose result these settings change writes its new version then, and
+        the version of release v0.0.2 only when none differs.
+        """
+        legacy = type(self).legacy()
+        return any(getattr(self, name) != getattr(legacy, name) for name in names)
+
     @classmethod
     def legacy(cls) -> "EventConfig":
         """The settings of release v0.0.2.
@@ -1661,6 +1705,7 @@ class EventConfig:
             holding_trim_to_main_direction=False,
             holding_altitude_from_known_reports=False,
             holding_context=False,
+            holding_and_go_arounds_at_corrected_airports=False,
             pms_extend_leg_exit=False,
             pms_join_split_legs=False,
             pms_leg_must_turn=False,

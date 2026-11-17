@@ -269,9 +269,10 @@ def _checked_movements(work, qualifies, thresholds, gs_kt, dist_nm, config) -> D
 
     One pass over the reports within ``runway_max_dist_nm`` of the airport
     gives both the runway (from the reports that qualify, as without the
-    check) and the track's ground: the median altitude of its reports that
-    are flagged on the ground or slower than
-    :data:`WINDOW_GROUND_ALTITUDE_MAX_KT`, and the time of its last report on
+    check) and the track's ground: per visit of the airport (the reports
+    near it split where more than ``airport_trace_gap_seconds`` pass between
+    two), the median altitude of its reports that are flagged on the ground
+    or slower than :data:`WINDOW_GROUND_ALTITUDE_MAX_KT`, and the time of its last report on
     the ground (flagged, or slower than :data:`WINDOW_GROUND_MAX_KT`). The
     qualifying reports are kept in a list, so they are not read twice.
 
@@ -303,6 +304,28 @@ def _checked_movements(work, qualifies, thresholds, gs_kt, dist_nm, config) -> D
     near = work.filter(dist_nm < F.lit(config.runway_max_dist_nm)).withColumn(
         "_q", F.coalesce(qualifies, F.lit(False))
     )
+    # The ground altitude of each visit of the airport: the reports near it
+    # split where more than ``airport_trace_gap_seconds`` pass between two of
+    # them (a landing and the take-off after a turnaround read the ground
+    # apart, and the air pressure changes in between).
+    from pyspark.sql.window import Window
+
+    t = F.col("event_time").cast("double")
+    visits = Window.partitionBy("track_id", "apt_ident", "role").orderBy("event_time")
+    near = near.withColumn(
+        "_visit",
+        F.sum(
+            F.when(
+                t - F.lag(t).over(visits) > F.lit(float(config.airport_trace_gap_seconds)), 1
+            ).otherwise(0)
+        ).over(visits.rowsBetween(Window.unboundedPreceding, Window.currentRow)),
+    )
+    near = near.withColumn(
+        "_g_visit_ft",
+        F.percentile_approx(F.when(alt_ground, alt_ft), 0.5).over(
+            Window.partitionBy("track_id", "apt_ident", "role", "_visit")
+        ),
+    )
     q = F.col("_q")
     agg = near.groupBy("track_id", "apt_ident", "role", "apt_lat", "apt_lon").agg(
         F.percentile_approx(F.when(q, F.col("heading")), 0.5).alias("median_track"),
@@ -311,7 +334,6 @@ def _checked_movements(work, qualifies, thresholds, gs_kt, dist_nm, config) -> D
         F.min(F.when(q, F.col("event_time"))).alias("first_time"),
         F.max(F.when(q, F.col("event_time"))).alias("last_time"),
         F.count(F.when(q, F.lit(1))).alias("n_samples"),
-        F.percentile_approx(F.when(alt_ground, alt_ft), 0.5).alias("_g_alt_ft"),
         F.max(F.when(on_ground, F.col("event_time"))).alias("_g_last"),
         F.first("apt_elevation_ft", ignorenulls=True).alias("_elev_ft"),
         F.first("first_seen", ignorenulls=True).alias("_first_seen"),
@@ -326,6 +348,7 @@ def _checked_movements(work, qualifies, thresholds, gs_kt, dist_nm, config) -> D
                     alt_ft.alias("alt_ft"),
                     F.col("cumulative_distance_nm").cast("double").alias("cum_nm"),
                     F.col("cumulative_time_s").cast("double").alias("cum_s"),
+                    F.col("_g_visit_ft").alias("g_alt_ft"),
                 ),
             )
         ).alias("_reports"),
@@ -360,21 +383,19 @@ def _checked_times(chosen, config) -> DataFrame:
     """The time of each chosen runway movement from its checked reports."""
     keys = ["track_id", "role"]
     elevation = F.coalesce(F.col("_elev_ft"), F.lit(0.0))
+    ground = F.col("r.g_alt_ft")
     ref = F.coalesce(
-        F.when(
-            F.abs(F.col("_g_alt_ft") - elevation) <= F.lit(WINDOW_GROUND_MAX_OFFSET_FT),
-            F.col("_g_alt_ft"),
-        ),
+        F.when(F.abs(ground - elevation) <= F.lit(WINDOW_GROUND_MAX_OFFSET_FT), ground),
         elevation,
     )
     rep = chosen.select(
         *keys,
-        ref.alias("_ref"),
+        "_elev_ft",
         "thr_lat",
         "thr_lon",
         "rwy_bearing",
         F.explode("_reports").alias("r"),
-    )
+    ).withColumn("_ref", ref)
     rep = rep.filter(
         (F.col("r.alt_ft") - F.col("_ref") <= F.lit(config.runway_window_max_height_ft))
         & (
@@ -417,5 +438,5 @@ def _checked_times(chosen, config) -> DataFrame:
         .withColumn("at_cum_nm", F.col("_p.cum_nm"))
         .withColumn("at_cum_s", F.col("_p.cum_s"))
         .withColumn("at_track_edge", edge)
-        .drop("_p", "_g_alt_ft", "_g_last", "_elev_ft", "_first_seen", "_last_seen")
+        .drop("_p", "_g_last", "_elev_ft", "_first_seen", "_last_seen")
     )

@@ -74,7 +74,7 @@ flight list therefore happens once for every detector that needs it rather
 than once per family, and every function here is testable on a laptop with no storage layer at all.
 """
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -1120,15 +1120,8 @@ def _corrected_traversals(
     cand2 = cand2.filter(F.col("class").isNotNull())
     move = F.col("class").isin("departure", "arrival")
 
-    if ground_x:
-        # A take-off, a landing or the turn-off after it is not a crossing of
-        # the same runway: drop a crossing reading of a pass that also reads
-        # as a movement on this runway.
-        same_pass = Window.partitionBy("track_id", "apt_icao", "strip_id", "trace_id")
-        cand2 = cand2.withColumn(
-            "_pass_moves", F.max(F.when(move, 1).otherwise(0)).over(same_pass)
-        ).filter(move | (F.col("_pass_moves") == 0))
-        cand2 = cand2.drop("_pass_moves")
+    if ground_x and not by_motion:
+        cand2 = _without_crossings_of_moving_passes(cand2, move)
 
     if not by_motion:
         best = Window.partitionBy("track_id", "strip_id", "trace_id").orderBy(
@@ -1142,7 +1135,7 @@ def _corrected_traversals(
             .drop("_r", "_xt")
         )
     else:
-        out = _by_motion(cand2.drop("_xt"), thresholds, move)
+        out = _by_motion(cand2.drop("_xt"), thresholds, move, drop_same_runway_crossings=ground_x)
 
     return out.select(
         F.col("track_id"),
@@ -1193,7 +1186,60 @@ def _corrected_traversals(
     )
 
 
-def _by_motion(cand2: DataFrame, thresholds: DataFrame, move) -> DataFrame:
+def _without_crossings_of_moving_passes(cand2: DataFrame, move) -> DataFrame:
+    """Drop the crossing readings of a pass that is also a movement.
+
+    A take-off, a landing or the turn-off after it is not a crossing of the
+    same runway: a crossing reading is dropped when a reading of the same
+    pass (track, airport, runway strip, pass number) is a take-off or a
+    landing.
+    """
+    same_pass = Window.partitionBy("track_id", "apt_icao", "strip_id", "trace_id")
+    return (
+        cand2.withColumn("_pass_moves", F.max(F.when(move, 1).otherwise(0)).over(same_pass))
+        .filter(move | (F.col("_pass_moves") == 0))
+        .drop("_pass_moves")
+    )
+
+
+def _one_per_overlap(cand2: DataFrame) -> DataFrame:
+    """One pass of each class among passes whose times overlap.
+
+    Of the passes of one class at one airport whose times overlap (parallel
+    runways), the one with reports on its runway and the smallest median
+    distance from its centre line is kept.
+    """
+    by_time = Window.partitionBy("track_id", "apt_icao", "class").orderBy(
+        "entry_time", "exit_time", "strip_id"
+    )
+    cand2 = cand2.withColumn(
+        "_prev_exit",
+        F.max("exit_time").over(by_time.rowsBetween(Window.unboundedPreceding, -1)),
+    )
+    cand2 = cand2.withColumn(
+        "_group",
+        F.sum(
+            F.when(
+                F.col("_prev_exit").isNull() | (F.col("entry_time") > F.col("_prev_exit")), 1
+            ).otherwise(0)
+        ).over(by_time.rowsBetween(Window.unboundedPreceding, Window.currentRow)),
+    )
+    one = Window.partitionBy("track_id", "apt_icao", "class", "_group").orderBy(
+        (F.col("n_rwy") > 0).desc(),
+        F.col("median_cross_nm").asc_nulls_last(),
+        F.col("strip_id").asc(),
+        F.col("rwy_ident").asc(),
+    )
+    return (
+        cand2.withColumn("_r", F.row_number().over(one))
+        .filter(F.col("_r") == 1)
+        .drop("_r", "_prev_exit", "_group")
+    )
+
+
+def _by_motion(
+    cand2: DataFrame, thresholds: DataFrame, move, drop_same_runway_crossings: bool = False
+) -> DataFrame:
     """Name each movement by its direction of motion and keep one per pass.
 
     1. The motion is the median track of the fast reports (``fast_track_deg``),
@@ -1207,6 +1253,11 @@ def _by_motion(cand2: DataFrame, thresholds: DataFrame, move) -> DataFrame:
     3. Of passes of one class at one airport whose times overlap (parallel
        runways), the one with reports on its runway and the smallest median
        distance from its centre line.
+    4. With ``drop_same_runway_crossings``, a crossing reading of a pass
+       whose take-off or landing was kept in step 3 is dropped, and step 3
+       is then applied to the crossings that remain. A movement reading
+       dropped in step 3 (at parallel runways, the reading of the runway the
+       aircraft was beside) does not remove a crossing of that runway.
     """
     motion = F.coalesce(F.col("fast_track_deg"), F.col("median_track_deg"))
     cand2 = cand2.withColumn(
@@ -1252,32 +1303,16 @@ def _by_motion(cand2: DataFrame, thresholds: DataFrame, move) -> DataFrame:
 
     # Parallel runways: passes of one class at one airport whose times
     # overlap are one movement.
-    by_time = Window.partitionBy("track_id", "apt_icao", "class").orderBy(
-        "entry_time", "exit_time", "strip_id"
-    )
-    cand2 = cand2.withColumn(
-        "_prev_exit",
-        F.max("exit_time").over(by_time.rowsBetween(Window.unboundedPreceding, -1)),
-    )
-    cand2 = cand2.withColumn(
-        "_group",
-        F.sum(
-            F.when(
-                F.col("_prev_exit").isNull() | (F.col("entry_time") > F.col("_prev_exit")), 1
-            ).otherwise(0)
-        ).over(by_time.rowsBetween(Window.unboundedPreceding, Window.currentRow)),
-    )
-    one = Window.partitionBy("track_id", "apt_icao", "class", "_group").orderBy(
-        (F.col("n_rwy") > 0).desc(),
-        F.col("median_cross_nm").asc_nulls_last(),
-        F.col("strip_id").asc(),
-        F.col("rwy_ident").asc(),
-    )
-    return (
-        cand2.withColumn("_r", F.row_number().over(one))
-        .filter(F.col("_r") == 1)
-        .drop("_r", "_renamed", "_prev_exit", "_group")
-    )
+    if not drop_same_runway_crossings:
+        return _one_per_overlap(cand2.drop("_r")).drop("_renamed")
+    # The movements kept, then the crossings of the passes they do not
+    # cover. The groups of a class are recomputed on the rows that remain;
+    # removing rows only splits groups, so the movements kept stay kept.
+    kept = _one_per_overlap(cand2.filter(move).drop("_r"))
+    others = cand2.filter(~move).drop("_r")
+    return _one_per_overlap(
+        _without_crossings_of_moving_passes(kept.unionByName(others), move)
+    ).drop("_renamed")
 
 
 # ---------------------------------------------------------------------------
@@ -1848,7 +1883,12 @@ def _one_row_per_instant(events: DataFrame) -> DataFrame:
     return events.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1).drop("_r")
 
 
-def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig") -> DataFrame:
+def runway_milestones(
+    sv: DataFrame,
+    traversals: DataFrame,
+    config: "EventConfig",
+    kept: Optional[List[DataFrame]] = None,
+) -> DataFrame:
     """The eight traversal-derived A-CDM milestones, as standard events.
 
     ``sv`` is the state vector frame carrying ``baro_altitude_c``, the two
@@ -1860,6 +1900,11 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
     ``go-around`` is not here: it is emitted by :func:`go_arounds`, because a
     go-around may never touch a runway polygon and so has no traversal to hang
     from.
+
+    With the corrections of the runway passages on, the passages and their
+    reports are cached while the milestones are read from them; they are
+    appended to ``kept``, when given, for the caller to release once the
+    milestones are computed.
     """
     if not config.emit_runway_milestones:
         return _empty_milestones(sv)
@@ -1887,6 +1932,8 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
         # Kept for the step: about ten readings below take these two frames,
         # and computing them again for each would read the reports again.
         traversals = traversals.cache()
+        if kept is not None:
+            kept.append(traversals)
     samples = _traversal_samples(
         sv,
         traversals,
@@ -1895,6 +1942,8 @@ def runway_milestones(sv: DataFrame, traversals: DataFrame, config: "EventConfig
     )
     if corrected:
         samples = samples.cache()
+        if kept is not None:
+            kept.append(samples)
     bounded = samples.filter(F.col("_in_polygon"))
 
     dep = bounded.filter(F.col("traversal_class") == "departure")

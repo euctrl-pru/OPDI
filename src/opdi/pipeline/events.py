@@ -107,6 +107,7 @@ from opdi.pipeline.point_merge import calculate_point_merge_events
 from opdi.pipeline.runway_ops import go_arounds, runway_milestones, runway_traversals
 from opdi.pipeline.runways import detect_runway_movements, runway_thresholds
 from opdi.pipeline.vertical_pru import (
+    ATTACHED_GEOMETRY_COLS,
     aerodrome_distances,
     attach_aerodrome_geometry,
     attach_nearest_position,
@@ -861,6 +862,28 @@ def calculate_ring_crossing_events(
     )
 
 
+def at_corrected_airports(frame: DataFrame, changed: Optional[DataFrame]) -> DataFrame:
+    """``frame`` with the airports of the tracks in ``changed`` replaced.
+
+    ``changed`` holds ``id`` and the columns of
+    :data:`~opdi.pipeline.vertical_pru.ATTACHED_GEOMETRY_COLS` (the two
+    airports, their positions and elevations) for the tracks whose airports
+    step 04b corrects; every other track keeps its own. ``frame`` is
+    returned as it is when ``changed`` is None. A broadcast join: ``changed``
+    holds a few thousand rows a day.
+    """
+    if changed is None:
+        return frame
+    names = [c for c in ATTACHED_GEOMETRY_COLS if c in frame.columns]
+    if not names:
+        return frame
+    c = changed.select(col("id").alias("_c_id"), *[col(n).alias(f"_c_{n}") for n in names])
+    out = frame.join(F.broadcast(c), frame["track_id"] == col("_c_id"), "left")
+    for n in names:
+        out = out.withColumn(n, when(col("_c_id").isNotNull(), col(f"_c_{n}")).otherwise(col(n)))
+    return out.drop("_c_id", *[f"_c_{n}" for n in names])
+
+
 def _with_last_known(
     df: DataFrame, value_col: str, partition_cols: List[str], max_age_s: float
 ) -> DataFrame:
@@ -918,6 +941,14 @@ def calculate_horizontal_segment_events(
     # Carried only when the caller attached them, so the detector stays a pure
     # column-in/column-out function and can be tested without storage.
     elevations = [c for c in ("elev_adep_ft", "elev_ades_ft") if c in sdf_input.columns]
+    # The distance of each report to the two airports, where the caller added
+    # them: the ground test of level_segment_not_on_ground measures the height
+    # above the airport the report is near.
+    distances = (
+        [c for c in ("dist_adep_nm", "dist_ades_nm") if c in sdf_input.columns]
+        if config.level_segment_not_on_ground
+        else []
+    )
     # The piece of the track, where the caller added one (see
     # ``pipeline/holes.py``): a level segment then ends at the hole it meets.
     # Without it the results are those of a track without holes.
@@ -928,7 +959,7 @@ def calculate_horizontal_segment_events(
         if config.level_segment_not_on_ground and "on_ground" in sdf_input.columns
         else []
     )
-    df = sdf_input.select(*wanted, *elevations, *pieces, *ground_flag)
+    df = sdf_input.select(*wanted, *elevations, *distances, *pieces, *ground_flag)
     use_agl = config.phase_ground_above_field and len(elevations) == 2
 
     # Convert units: meters -> feet, m/s -> ft/min, m/s -> knots
@@ -1012,11 +1043,32 @@ def calculate_horizontal_segment_events(
     df = _smooth_phase(df, config.phase_twindow_seconds)
 
     if config.level_segment_not_on_ground:
-        # Work package 1: a report flagged on the ground, or lower than the
-        # ground ceiling above the departure or destination airport, is not
-        # level flight, even at the speed of a take-off or landing roll (where
-        # the speed rules of OpenAP favour "level" over "ground").
-        if use_agl:
+        # A report flagged on the ground, or lower than the ground ceiling
+        # above the airport it is near, is not level flight, even at the
+        # speed of a take-off or landing roll (where the speed rules of
+        # OpenAP favour "level" over "ground").
+        if use_agl and len(distances) == 2:
+            # The height above the airport the report is near: the departure
+            # airport within the radius of it, the destination within the
+            # radius of the destination, the lower of the two airports when
+            # the report has no position. Farther from both, no height is
+            # low, so a level-off near a sea-level destination after a
+            # departure from a high field stays level flight.
+            ceiling = lit(config.phase_ground_ceiling_ft)
+            radius = lit(float(config.level_segment_ground_radius_nm))
+            elev_dep = F.coalesce(col("elev_adep_ft"), lit(0.0))
+            elev_arr = F.coalesce(col("elev_ades_ft"), lit(0.0))
+            d_dep, d_arr = col("dist_adep_nm"), col("dist_ades_nm")
+            low = (
+                ((d_dep <= radius) & (col("alt") - elev_dep < ceiling))
+                | ((d_arr <= radius) & (col("alt") - elev_arr < ceiling))
+                | (
+                    d_dep.isNull()
+                    & d_arr.isNull()
+                    & (col("alt") - F.least(elev_dep, elev_arr) < ceiling)
+                )
+            )
+        elif use_agl:
             low = (
                 col("alt") - F.coalesce(col("elev_adep_ft"), lit(0.0))
                 < lit(config.phase_ground_ceiling_ft)
@@ -1494,17 +1546,20 @@ def extra_measurement_rows(df_events: DataFrame) -> Optional[DataFrame]:
         ]
     )
     types = F.array(*[lit(m) for _, _, m, _ in EXTRA_MEASURES])
+    # The version of a family's measurement is that of its event (holding,
+    # point merge), which follows the family's settings.
     versions = F.array(*[lit(v) for _, _, _, v in EXTRA_MEASURES])
+    own = col("version") if "version" in df_events.columns else lit(None).cast("string")
     suffixes = F.array(*[lit(measurement_suffix(m)) for _, _, m, _ in EXTRA_MEASURES])
     exploded = df_events.select(
-        col("id_tmp"), col("dof"), F.posexplode(values).alias("_pos", "value")
+        col("id_tmp"), col("dof"), own.alias("_own"), F.posexplode(values).alias("_pos", "value")
     ).filter(col("value").isNotNull())
     return exploded.select(
         F.concat(col("id_tmp"), F.element_at(suffixes, col("_pos") + 1)).alias("id"),
         col("id_tmp").alias("milestone_id"),
         F.element_at(types, col("_pos") + 1).alias("type"),
         col("value"),
-        F.element_at(versions, col("_pos") + 1).alias("version"),
+        F.coalesce(col("_own"), F.element_at(versions, col("_pos") + 1)).alias("version"),
         col("dof"),
     )
 
@@ -1606,17 +1661,36 @@ def measures_from_event_time(
 
 
 def distance_version(config: EventConfig) -> str:
-    """The ``version`` of the distance measurement under ``config``."""
+    """The ``version`` of the distance measurement under ``config``.
+
+    ``distance_v0.0.2`` with none of the settings that change the distance
+    on; ``distance_v0.0.3`` with only
+    :attr:`~opdi.config.EventConfig.distance_from_last_known_position`;
+    ``distance_v0.0.4`` with any other of them: the speed limit of a step
+    (``distance_max_implied_speed_kt``), the distance between positions
+    (``distance_between_positions``), or a distance for every event
+    (``measure_every_event``).
+    """
+    others = (
+        config.distance_between_positions
+        or config.distance_max_implied_speed_kt is not None
+        or config.measure_every_event
+    )
+    if others:
+        return DISTANCE_VERSION
     if config.distance_from_last_known_position:
-        if config.distance_between_positions or config.distance_max_implied_speed_kt is not None:
-            return DISTANCE_VERSION
         return LAST_KNOWN_DISTANCE_VERSION
     return LEGACY_DISTANCE_VERSION
 
 
 def time_version(config: EventConfig) -> str:
-    """The ``version`` of the time-passed measurement under ``config``."""
-    if config.time_passed_from_first_seen:
+    """The ``version`` of the time-passed measurement under ``config``.
+
+    ``time_v0.0.2`` when the time passed is counted from ``first_seen``
+    (``time_passed_from_first_seen``) or given to every event
+    (``measure_every_event``); ``time_v0.0.1`` otherwise.
+    """
+    if config.time_passed_from_first_seen or config.measure_every_event:
         return TIME_VERSION
     return LEGACY_TIME_VERSION
 
@@ -2133,10 +2207,19 @@ class FlightEventProcessor:
         corrected list, which the function leaves as it is, so the circles do
         not change.
         """
+        airports = self._corrected_airports(df_events, month)
+        if airports is None:
+            return None
+        return calculate_ring_crossing_events(
+            sdf_input, month, self.storage, self.events, flight_airports=airports
+        )
+
+    def _month_flight_list(self, month: date) -> Optional[DataFrame]:
+        """The flight list of ``month``, one row per ``id``; None when missing."""
         if not self.storage.table_exists("opdi_flight_list"):
             return None
         start_ts, end_ts = get_start_end_of_month(month)
-        flight_list = (
+        return (
             self.storage.read_table("opdi_flight_list")
             .filter(
                 (col("dof") >= to_timestamp(lit(start_ts)))
@@ -2144,6 +2227,18 @@ class FlightEventProcessor:
             )
             .dropDuplicates(["id"])
         )
+
+    def _corrected_airports(self, df_events: DataFrame, month: date) -> Optional[DataFrame]:
+        """``id``, ``adep``, ``ades`` of the flight list as step 04b corrects them.
+
+        :func:`~opdi.pipeline.flight_list_milestones.corrected_aerodromes`
+        applied to the flight list of step 03 and to ``df_events`` (events in
+        the columns of step 04's families), in the columns of the published
+        events table, as step 04b reads them. None without a flight list.
+        """
+        flight_list = self._month_flight_list(month)
+        if flight_list is None:
+            return None
         published = df_events.select(
             col("track_id").alias("flight_id"),
             col("type"),
@@ -2153,20 +2248,55 @@ class FlightEventProcessor:
             col("altitude_ft").alias("altitude"),
             col("info"),
         )
-        airports = corrected_aerodromes(
+        return corrected_aerodromes(
             flight_list, published, self.events, airports_for_checks(self.storage, self.events)
         )
-        return calculate_ring_crossing_events(
-            sdf_input, month, self.storage, self.events, flight_airports=airports
-        )
 
-    def _runway_traversal_family(self, sv: DataFrame, month: date) -> Optional[DataFrame]:
+    def _changed_airports(self, df_events: DataFrame, month: date) -> Optional[DataFrame]:
+        """The tracks whose airports step 04b corrects, with the new airports.
+
+        One row per such track: ``id`` and the columns of
+        :data:`~opdi.pipeline.vertical_pru.ATTACHED_GEOMETRY_COLS`, the
+        positions and elevations from ``oa_airports``. Read by
+        :func:`at_corrected_airports`. None without a flight list or without
+        ``oa_airports``.
+        """
+        corrected = self._corrected_airports(df_events, month)
+        if corrected is None or not self.storage.table_exists("oa_airports"):
+            return None
+        before = self._month_flight_list(month).select(
+            col("id").alias("_o_id"), col("adep").alias("_o_adep"), col("ades").alias("_o_ades")
+        )
+        changed = corrected.join(before, corrected["id"] == col("_o_id"), "inner").filter(
+            ~col("adep").eqNullSafe(col("_o_adep")) | ~col("ades").eqNullSafe(col("_o_ades"))
+        )
+        apt = self.storage.read_table("oa_airports").select(
+            col("ident").alias("_ident"),
+            col("latitude_deg").cast("double").alias("_lat"),
+            col("longitude_deg").cast("double").alias("_lon"),
+            col("elevation_ft").cast("double").alias("_elev"),
+        )
+        out = changed.select("id", "adep", "ades")
+        for end in ("adep", "ades"):
+            out = (
+                out.join(F.broadcast(apt), out[end] == col("_ident"), "left")
+                .withColumnRenamed("_lat", f"{end}_lat")
+                .withColumnRenamed("_lon", f"{end}_lon")
+                .withColumnRenamed("_elev", f"elev_{end}_ft")
+                .drop("_ident")
+            )
+        return out.select("id", *ATTACHED_GEOMETRY_COLS)
+
+    def _runway_traversal_family(
+        self, sv: DataFrame, month: date, kept: Optional[List[DataFrame]] = None
+    ) -> Optional[DataFrame]:
         """The runway milestones derived from runway passages.
 
         ``sv`` holds the reports with the airport geometry and the call sign.
         The flight list's airports are added here, built by
         :func:`~opdi.pipeline.layout.flight_aerodrome_sets` as for the layout
-        events.
+        events. The frames cached while the milestones are computed are
+        appended to ``kept``, for the caller to release.
 
         Returns ``None`` when a reference table it needs is missing, and the
         caller skips the family. The go-arounds are not part of it: they need
@@ -2186,7 +2316,9 @@ class FlightEventProcessor:
             month, self.storage, wide_search_roles(getattr(self.config, "detection", None))
         )
         sv = sv.join(F.broadcast(apt_sets), sv.track_id == apt_sets.id, "inner").drop("id")
-        sv.cache()
+        sv = sv.cache()
+        if kept is not None:
+            kept.append(sv)
 
         grid = self.storage.read_table("h3_runway_zones")
         # ``h3_runway_zones`` covers every large and medium airport. Only the
@@ -2195,7 +2327,7 @@ class FlightEventProcessor:
         apt_present = sv.select(F.explode("apt").alias("_apt")).distinct()
         grid = grid.join(F.broadcast(apt_present), grid.apt_icao == apt_present._apt, "left_semi")
         traversals = runway_traversals(sv, grid, thresholds, self.events)
-        return runway_milestones(sv, traversals, self.events)
+        return runway_milestones(sv, traversals, self.events, kept=kept)
 
     def _etl_flight_events_and_measures(
         self,
@@ -2300,6 +2432,9 @@ class FlightEventProcessor:
         #: The go-around rows, if the runway family computed them: the holding
         #: family drops an episode next to one.
         df_go_arounds = None
+        #: The reports the go-arounds are found in, when they are found at
+        #: the corrected airports (holding_and_go_arounds_at_corrected_airports).
+        go_around_reports = None
         #: The take-off and landing times found so far, which bound the ground
         #: parts the block times are read from.
         runway_frames: List[DataFrame] = []
@@ -2310,20 +2445,28 @@ class FlightEventProcessor:
         cached: List[DataFrame] = []
         checkpoints: List[DataFrame] = []
 
-        def keep_runway(frame: Optional[DataFrame]) -> Optional[DataFrame]:
-            # Cached because the block family reads these rows and the write
-            # reads them again; both read the same rows.
-            # Work package 6: the holding and point-merge families read them
-            # too (holding_context, pms_merge_point_conditions).
-            if frame is None or not (
+        def add_runway(frame: Optional[DataFrame]) -> Optional[DataFrame]:
+            """:func:`add` for a family of runway times, which later families read.
+
+            The block family reads these rows, and the holding and point-merge
+            families too (holding_context, pms_merge_point_conditions), and the
+            write reads them again; all read one copy. With
+            ``keep_each_family`` that copy is the one :func:`add` keeps;
+            otherwise the frame is cached here.
+            """
+            if frame is None:
+                return None
+            needed = (
                 self.events.block_times_on_ground_only
                 or (self.events.emit_holding and self.events.holding_context)
                 or (self.events.emit_point_merge and self.events.pms_merge_point_conditions)
-            ):
-                return frame
-            frame = frame.cache()
-            runway_frames.append(frame)
-            cached.append(frame)
+            )
+            if needed and not self.events.keep_each_family:
+                frame = frame.cache()
+                cached.append(frame)
+            frame = add(frame)
+            if needed:
+                runway_frames.append(frame)
             return frame
 
         def add(frame: Optional[DataFrame]) -> Optional[DataFrame]:
@@ -2380,11 +2523,7 @@ class FlightEventProcessor:
             # runway milestone where there is one. Off with the v0.0.2
             # settings (emit_runway_events).
             if self.events.emit_runway_events:
-                add(
-                    keep_runway(
-                        calculate_runway_events(ground_input, month, self.storage, self.events)
-                    )
-                )
+                add_runway(calculate_runway_events(ground_input, month, self.storage, self.events))
 
             # With rings_around_flight_list_airports the circles are computed
             # below, once the runway events are known.
@@ -2409,13 +2548,28 @@ class FlightEventProcessor:
             if self.events.emit_runway_milestones:
                 print(f"Calculating runway milestones for batch: {batch_id}")
                 rwy_sv = self._with_flight_id(ground_geo)
-                add(keep_runway(self._runway_traversal_family(rwy_sv, month)))
+                # The frames the family keeps while it is computed (the
+                # reports and the passes) are released once its rows are
+                # kept, or with the step's other frames at the end.
+                runway_kept: List[DataFrame] = []
+                add_runway(self._runway_traversal_family(rwy_sv, month, kept=runway_kept))
+                if self.events.keep_each_family:
+                    for frame in runway_kept:
+                        frame.unpersist()
+                else:
+                    cached.extend(runway_kept)
                 # Independent of the runway passages and of the layout table: a
                 # go-around may never touch a runway, so it needs only the
                 # destination airport.
                 if "ades_lat" in rwy_sv.columns:
-                    # The kept rows, which the holding family reads again.
-                    df_go_arounds = add(go_arounds(rwy_sv, self.events, self._goaround_runways()))
+                    if self.events.holding_and_go_arounds_at_corrected_airports:
+                        # Found below, once the airports of step 04b are known.
+                        go_around_reports = rwy_sv
+                    else:
+                        # The kept rows, which the holding family reads again.
+                        df_go_arounds = add(
+                            go_arounds(rwy_sv, self.events, self._goaround_runways())
+                        )
 
             if self.events.emit_block_events:
                 if self.events.block_times_on_ground_only:
@@ -2454,6 +2608,26 @@ class FlightEventProcessor:
                 )
             )
 
+        # The go-arounds and the holds at the airports step 04b will publish:
+        # the correction reads the runway events, first and last seen and the
+        # heights found above (holding_and_go_arounds_at_corrected_airports).
+        changed_airports = None
+        if self.events.holding_and_go_arounds_at_corrected_airports and df_events is not None:
+            needs_holding = calc_navigation and self.events.emit_holding
+            if go_around_reports is not None or needs_holding:
+                changed_airports = self._changed_airports(df_events, month)
+                if changed_airports is not None:
+                    changed_airports = keep_frame(changed_airports)
+                    checkpoints.append(changed_airports)
+            if go_around_reports is not None:
+                df_go_arounds = add(
+                    go_arounds(
+                        at_corrected_airports(go_around_reports, changed_airports),
+                        self.events,
+                        self._goaround_runways(),
+                    )
+                )
+
         if calc_navigation:
             ev = self.events
             # Work package 6: the take-off and landing times of this call give
@@ -2466,7 +2640,7 @@ class FlightEventProcessor:
                 print(f"Calculating holding events for batch: {batch_id}")
                 add(
                     calculate_holding_events(
-                        geo,
+                        at_corrected_airports(geo, changed_airports),
                         ev,
                         go_arounds=df_go_arounds,
                         runway_events=runway_times if ev.holding_context else None,

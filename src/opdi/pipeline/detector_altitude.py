@@ -45,6 +45,8 @@ from typing import TYPE_CHECKING
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
+from opdi.pipeline.runways import FT_PER_M
+
 if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
@@ -64,9 +66,6 @@ DETECTOR_ALTITUDE = "baro_altitude_c"
 #: runway, ground and airport detectors (:func:`received_altitude`). Never
 #: published.
 RECEIVED_ALTITUDE = "_baro_altitude_received"
-
-#: Feet per metre, the factor the events use for altitudes.
-FT_PER_M = 3.28084
 
 
 def altitude_for_detectors(

@@ -24,8 +24,32 @@ from pyspark.sql.functions import col, lit
 from opdi.config import EventConfig
 from opdi.pipeline.holding import FT_PER_M, _haversine_nm, _wrap_deg
 from opdi.pipeline.holes import PIECE
+from opdi.pipeline.runways import FTMIN_PER_MPS, KT_PER_MPS
 from opdi.utils.geometry import bearing_deg as _bearing_deg
-from opdi.versions import PMS_VERSION  # stamped on the events and measurements
+from opdi.versions import (  # stamped on the events and measurements
+    LEGACY_PMS_VERSION,
+    PMS_VERSION,
+)
+
+#: The settings that change the point merge events: with all of them at
+#: their values of release v0.0.2 the events carry :data:`LEGACY_PMS_VERSION`.
+PMS_SETTINGS = (
+    "pms_extend_leg_exit",
+    "pms_join_split_legs",
+    "pms_leg_must_turn",
+    "pms_merge_point_conditions",
+    "altitude_from_cleaning",
+    "altitude_plausible_min_ft",
+    "altitude_plausible_max_ft",
+)
+
+
+def pms_version(config: EventConfig) -> str:
+    """The ``version`` of the point merge events and measurements under ``config``."""
+    if config.differs_from_release(PMS_SETTINGS):
+        return PMS_VERSION
+    return LEGACY_PMS_VERSION
+
 
 #: The measurements read off ``pms-leg-exit``'s info (see ``events.EXTRA_MEASURES``).
 PMS_MEASURES = [
@@ -257,7 +281,7 @@ def _legs(df: DataFrame, config: EventConfig) -> DataFrame:
     return legs.withColumn("leg_seq", F.row_number().over(seq))
 
 
-def _event(df: DataFrame, kind: str, type_name: str) -> DataFrame:
+def _event(df: DataFrame, kind: str, type_name: str, version: str = PMS_VERSION) -> DataFrame:
     return df.select(
         col("track_id"),
         lit(type_name).alias("type"),
@@ -268,7 +292,7 @@ def _event(df: DataFrame, kind: str, type_name: str) -> DataFrame:
         col(f"{kind}_dist_nm").alias("cumulative_distance_nm"),
         col(f"{kind}_cum_s").cast("long").alias("cumulative_time_s"),
         col("info"),
-        lit(PMS_VERSION).alias("version"),
+        lit(version).alias("version"),
     )
 
 
@@ -286,8 +310,8 @@ def _merge_point_conditions(
     passages are few (thousands a day); they are joined with the take-off
     and landing times of their tracks when those are known.
     """
-    kt = col("_mp_velocity") * 1.94384
-    ftmin = col("_mp_vert_rate") * 196.850394
+    kt = col("_mp_velocity") * KT_PER_MPS
+    ftmin = col("_mp_vert_rate") * FTMIN_PER_MPS
     closest = closest.filter(
         (kt.isNull() | (kt >= config.pms_merge_point_min_speed_kt))
         & (ftmin.isNull() | (ftmin <= config.pms_merge_point_max_climb_ftmin))
@@ -309,7 +333,9 @@ def _merge_point_conditions(
             closest.join(rwy, closest.track_id == rwy._r_track, "left")
             .groupBy(*keys)
             .agg(
-                F.max(F.when(~col("_r_landing"), col("_r_ts"))).alias("_last_take_off"),
+                F.min(
+                    F.when(~col("_r_landing") & (col("_r_ts") > col("mp_ts")), col("_r_ts"))
+                ).alias("_next_take_off"),
                 F.min(F.when(landing_here, col("_r_ts"))).alias("_next_landing"),
                 F.min_by(col("_r_rwy"), F.when(landing_here, col("_r_ts"))).alias("_land_rwy"),
             )
@@ -324,8 +350,14 @@ def _merge_point_conditions(
             F.pmod(served.cast("int") * 10 - landed.cast("int") * 10 + 180, lit(360)) - 180
         )
         same_flow = apart_deg <= config.pms_runway_direction_tolerance_deg
+        # No take-off between the passage and the landing that follows it
+        # (with no landing after it, no take-off after it): on a track that
+        # holds two flights, the first one's passages stay.
+        no_take_off_between = col("_next_take_off").isNull() | (
+            col("_next_landing").isNotNull() & (col("_next_take_off") > col("_next_landing"))
+        )
         closest = closest.filter(
-            (col("_last_take_off").isNull() | (col("mp_ts") > col("_last_take_off")))
+            no_take_off_between
             & ((served == "") | (landed == "") | F.coalesce(same_flow, lit(True)))
         )
         approach = col("_next_landing")
@@ -380,7 +412,10 @@ def calculate_point_merge_events(
         )
     )
     legs = legs.withColumn("info", leg_info)
-    out = _event(legs, "start", "pms-leg-entry").unionByName(_event(legs, "end", "pms-leg-exit"))
+    version = pms_version(config)
+    out = _event(legs, "start", "pms-leg-entry", version).unionByName(
+        _event(legs, "end", "pms-leg-exit", version)
+    )
 
     # Closest approach to a system's merge points, when inside the radius:
     # one event per (track, piece, pms_id), for the point come closest to,
@@ -438,5 +473,5 @@ def calculate_point_merge_events(
         )
     )
     closest = closest.withColumn("info", mp_info)
-    out = out.unionByName(_event(closest, "mp", "pms-merge-point"))
+    out = out.unionByName(_event(closest, "mp", "pms-merge-point", version))
     return out

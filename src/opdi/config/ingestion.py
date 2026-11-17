@@ -77,3 +77,14 @@ class IngestionConfig:
     """Altitude below which the shorter gap applies, in metres (1524 m is
     5000 ft). Kept in metres because it is compared with the stored
     barometric altitude and the published tracks depend on it."""
+
+    @classmethod
+    def legacy(cls) -> "IngestionConfig":
+        """The settings of release v0.0.2.
+
+        Reports are thinned by the ``"modulo"`` rule, and the OurAirports
+        records marked "Duplicate" are kept in ``oa_airports``, so a
+        reproduction that rebuilds the reference tables of step 00d gets the
+        tables of that release.
+        """
+        return cls(decimation="modulo", ourairports_drop_duplicates=False)

@@ -42,11 +42,20 @@ EVENTS_VERSION = "events_v0.4.0"
 LEGACY_EVENTS_VERSION = "events_v0.0.2"
 #: Holding patterns: ``holding-start``, ``holding-end`` and their measurements.
 HOLDING_VERSION = "holding_v0.2.0"
+#: Holding patterns without the settings that change them
+#: (:data:`opdi.pipeline.holding.HOLDING_SETTINGS`).
+LEGACY_HOLDING_VERSION = "holding_v0.1.0"
 #: Point merge: ``pms-leg-entry``, ``pms-leg-exit``, ``pms-merge-point`` and
 #: their measurements.
 PMS_VERSION = "pms_v0.2.0"
+#: Point merge without the settings that change it
+#: (:data:`opdi.pipeline.point_merge.PMS_SETTINGS`).
+LEGACY_PMS_VERSION = "pms_v0.1.0"
 #: FIR crossings: ``xing-fir``.
 FIR_VERSION = "fir_v0.2.0"
+#: FIR crossings without the settings that change them
+#: (:data:`opdi.pipeline.fir.FIR_SETTINGS`).
+LEGACY_FIR_VERSION = "fir_v0.1.0"
 
 # --- measurements (step 04, column ``version`` of the measurements) ---------
 

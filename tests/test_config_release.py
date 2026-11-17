@@ -144,3 +144,15 @@ def test_a_day_step_keeps_its_progress_log_in_the_warehouse(spark, tmp_path, mon
     StorageManager(spark, _opensky(tmp_path)).pull_logs(str(worker_b))
     assert (worker_b / "02_osn-tracks-etl-log.parquet").read_text() == "2026-06-14"
     assert os.path.isdir(tmp_path / "wh" / "v2.0.0" / "_state" / "logs")
+
+
+def test_the_release_settings_of_the_ingestion():
+    """A v0.0.2 reproduction keeps the duplicate OurAirports records and thins
+    the reports by the v0.0.2 rule; the defaults do neither."""
+    from opdi.config import IngestionConfig
+
+    legacy = IngestionConfig.legacy()
+    assert legacy.ourairports_drop_duplicates is False
+    assert legacy.decimation == "modulo"
+    assert IngestionConfig().ourairports_drop_duplicates is True
+    assert IngestionConfig().decimation == "bucket"

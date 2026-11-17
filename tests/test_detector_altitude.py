@@ -238,3 +238,14 @@ def test_the_runway_and_ground_detectors_read_the_received_altitude(spark):
     # Without the cleaned altitude there is nothing to give back.
     legacy = altitude_for_detectors(_frame(spark, rows), EventConfig.legacy(), cleaned_tracks=True)
     assert received_altitude(legacy) is legacy
+
+
+def test_the_unit_factors_are_the_shared_ones():
+    """The detectors read one set of unit factors, so two can never drift."""
+    from opdi.pipeline import detector_altitude, layout, point_merge, runways
+
+    assert detector_altitude.FT_PER_M is runways.FT_PER_M
+    assert layout.KT_PER_MPS is runways.KT_PER_MPS
+    assert layout.FT_PER_NM is runways.FT_PER_NM
+    assert point_merge.KT_PER_MPS is runways.KT_PER_MPS
+    assert point_merge.FTMIN_PER_MPS is runways.FTMIN_PER_MPS

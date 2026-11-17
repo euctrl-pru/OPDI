@@ -24,7 +24,10 @@ from pyspark.sql.functions import col, lit
 
 from opdi.config import EventConfig
 from opdi.pipeline.holes import PIECE
-from opdi.versions import HOLDING_VERSION  # stamped on the events and measurements
+from opdi.versions import (  # stamped on the events and measurements
+    HOLDING_VERSION,
+    LEGACY_HOLDING_VERSION,
+)
 
 #: The measurements read off ``holding-end``'s info (see ``events.EXTRA_MEASURES``).
 HOLDING_MEASURES = [
@@ -32,6 +35,26 @@ HOLDING_MEASURES = [
     ("holding-end", "distance_nm", "Holding distance (NM)", HOLDING_VERSION),
     ("holding-end", "circuits", "Holding circuits", HOLDING_VERSION),
 ]
+
+#: The settings that change the holding patterns: with all of them at their
+#: values of release v0.0.2 the events carry :data:`LEGACY_HOLDING_VERSION`.
+HOLDING_SETTINGS = (
+    "holding_pattern_by_straight_share",
+    "holding_trim_to_main_direction",
+    "holding_altitude_from_known_reports",
+    "holding_context",
+    "altitude_from_cleaning",
+    "altitude_plausible_min_ft",
+    "altitude_plausible_max_ft",
+)
+
+
+def holding_version(config: EventConfig) -> str:
+    """The ``version`` of the holding events and measurements under ``config``."""
+    if config.differs_from_release(HOLDING_SETTINGS):
+        return HOLDING_VERSION
+    return LEGACY_HOLDING_VERSION
+
 
 FT_PER_M = 3.28084
 KT_PER_MS = 1.94384
@@ -288,7 +311,9 @@ def calculate_holding_events(
     # Only the columns the family reads: every other column of the step's
     # frame would be carried through each of its windows and sorts.
     geo = geo.select(*[c for c in HOLDING_INPUT_COLUMNS if c in geo.columns])
-    return _pair_rows(_holding_episodes(geo, config, go_arounds, runway_events))
+    return _pair_rows(
+        _holding_episodes(geo, config, go_arounds, runway_events), holding_version(config)
+    )
 
 
 #: The columns of the step's frame that the holding family reads.
@@ -456,7 +481,7 @@ def _holding_episodes(
     return episodes.withColumn("info", info)
 
 
-def _pair_rows(episodes: DataFrame) -> DataFrame:
+def _pair_rows(episodes: DataFrame, version: str = HOLDING_VERSION) -> DataFrame:
     """The ``holding-start`` and ``holding-end`` events of each episode."""
 
     def _row(kind: str):
@@ -486,5 +511,5 @@ def _pair_rows(episodes: DataFrame) -> DataFrame:
         col("_e.cumulative_distance_nm").alias("cumulative_distance_nm"),
         col("_e.cumulative_time_s").alias("cumulative_time_s"),
         col("info"),
-        lit(HOLDING_VERSION).alias("version"),
+        lit(version).alias("version"),
     )

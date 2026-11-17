@@ -229,6 +229,15 @@ def test_a_merge_point_before_a_take_off_of_the_track_is_not_one(spark):
     assert not _events(spark, _direct(spark), runway=runway)
 
 
+def test_a_merge_point_of_the_first_of_two_flights_in_one_track_is_kept(spark):
+    """One track holds two flights: the first passes the merge point, lands
+    at the airport (1,200 s) and the aircraft takes off again (3,000 s). No
+    take-off lies between the merge point and the landing that follows it,
+    so the passage is the first flight's arrival through the system."""
+    runway = _runway(spark, [("ALDT", 1200, "XXXX", "34R"), ("ATOT", 3000, "XXXX", "16L")])
+    assert [r.type for r in _events(spark, _direct(spark), runway=runway)] == ["pms-merge-point"]
+
+
 def test_a_system_for_another_runway_is_not_one(spark):
     """RJTT: WEDGE (34L system) passed, landing on 16L."""
     ref = _ref(spark, systems=(("XXXX-34L", "MERGE", MP),))
