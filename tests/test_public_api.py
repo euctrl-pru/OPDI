@@ -232,6 +232,9 @@ NAMES = {
     ),
     "opdi.pipeline.events": (
         "DISTANCE_VERSION",
+        "POSITION_JUMP",
+        "mark_position_jumps",
+        "without_position_jumps",
         "EXTRA_MEASURES",
         "FlightEventProcessor",
         "LEGACY_DISTANCE_VERSION",
@@ -259,11 +262,12 @@ NAMES = {
     ),
     "opdi.pipeline.flight_list_milestones": (
         "ADDED_COLUMNS",
+        "corrected_aerodromes",
         "FLIGHT_LIST_RING_RADII_NM",
         "MOVEMENT_COLUMNS",
         "enrich_flight_list",
     ),
-    "opdi.pipeline.flight_list_step": ("enrich_day",),
+    "opdi.pipeline.flight_list_step": ("airports_for_checks", "enrich_day"),
     "opdi.pipeline.flights": (
         "EARTH_R_NM",
         "FLIGHT_LIST_VERSION",
