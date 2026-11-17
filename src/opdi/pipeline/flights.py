@@ -856,36 +856,17 @@ class FlightListProcessor:
         sv = self._get_data_within_timeframe(self.tracks_table, month)
 
         measured = FlightListProcessor._seen_from_measured_reports(self)
+        seen = None
         if measured:
             # First and last seen over the reports with a position, before the
             # reports without an altitude are left out
-            # (EventConfig.seen_from_measured_reports).
-            sv = sv.dropna(subset=["lat", "lon", "track_id"])
-            # Only the columns read below, so the reports shuffled for the
-            # window are narrow.
-            sv = sv.select(
-                *[
-                    c
-                    for c in (
-                        "track_id",
-                        "icao24",
-                        "flight_id",
-                        "event_time",
-                        "lat",
-                        "lon",
-                        "baro_altitude",
-                        "heading",
-                        "vert_rate",
-                        "on_ground",
-                        "h3_res_7",
-                    )
-                    if c in sv.columns
-                ]
-            )
-            w_seen = Window.partitionBy("track_id")
+            # (EventConfig.seen_from_measured_reports). One small aggregation
+            # by track, joined to the reports kept below.
             t = F.to_timestamp(col("event_time"))
-            sv = sv.withColumn("first_seen", f_min(t).over(w_seen)).withColumn(
-                "last_seen", f_max(t).over(w_seen)
+            seen = (
+                sv.dropna(subset=["lat", "lon", "track_id"])
+                .groupBy("track_id")
+                .agg(f_min(t).alias("first_seen"), f_max(t).alias("last_seen"))
             )
 
         sv_f = sv.dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
@@ -909,9 +890,11 @@ class FlightListProcessor:
             "on_ground",
             "h3_res_7",
         ]
-        if measured:
-            columns_of_interest += ["first_seen", "last_seen"]
         sv_f = sv_f.select(columns_of_interest)
+        if measured:
+            # Broadcast for one day only, as the candidates are.
+            seen = broadcast(seen) if getattr(self, "_batch_day", None) is not None else seen
+            sv_f = sv_f.join(seen, "track_id", "inner")
 
         # Per-track first/last seen and DOF
         if not measured:
@@ -1806,20 +1789,19 @@ class FlightListProcessor:
             # aggregation by track, which sends one row per track and part
             # across the cluster rather than every report.
             sv = sv.withColumn("_seen_rank", seen_rank(sv))
-            first = F.struct(
-                col("_seen_rank").alias("r"),
-                col("event_time").alias("t"),
-                col("icao24").alias("icao24"),
-                col("flight_id").alias("flight_id"),
-            )
-            last = F.struct(
-                col("_seen_rank").alias("r"),
-                (-col("event_time").cast("double")).alias("t"),
-                col("event_time").alias("ts"),
-            )
+            t = col("event_time").cast("double")
+            first_key = F.struct(col("_seen_rank").alias("r"), t.alias("t"))
+            last_key = F.struct(col("_seen_rank").alias("r"), (-t).alias("t"))
             per_track = sv.groupBy("track_id").agg(
-                f_min(first).alias("_first"),
-                f_min(last).alias("_last"),
+                F.min_by(
+                    F.struct(
+                        col("event_time").alias("t"),
+                        col("icao24").alias("icao24"),
+                        col("flight_id").alias("flight_id"),
+                    ),
+                    first_key,
+                ).alias("_first"),
+                F.min_by(col("event_time"), last_key).alias("_last_ts"),
                 f_min("event_time").alias("_t0"),
                 f_max("event_time").alias("_t1"),
             )
@@ -1833,7 +1815,7 @@ class FlightListProcessor:
                     col("_first.icao24").alias("icao24"),
                     col("_first.flight_id").alias("flight_id"),
                     col("_first.t").alias("first_seen"),
-                    col("_last.ts").alias("last_seen"),
+                    col("_last_ts").alias("last_seen"),
                 )
                 .withColumn("DOF", to_date("first_seen"))
             )
