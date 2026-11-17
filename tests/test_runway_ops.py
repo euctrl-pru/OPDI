@@ -1056,6 +1056,33 @@ def test_a_go_around_at_a_destination_below_the_origin_still_fires(spark):
     assert (out[0]["event_time"] - _EPOCH).total_seconds() == pytest.approx(40.0)
 
 
+def test_a_go_around_is_found_at_the_destination_step_04b_corrects_to(spark):
+    """Step 03 named a destination 200 NM away; the runway events correct it
+    to the airport the approach is flown to. Found at the corrected airport,
+    the go-around is there; at the airport of step 03 it is not."""
+    from opdi.pipeline.events import at_corrected_airports
+
+    wrong = (
+        _approach_track(spark, 200.0)
+        .withColumn("ades", F.lit("EDDF"))
+        .withColumn("ades_lat", F.lit(50.03))
+        .withColumn("ades_lon", F.lit(8.57))
+        .withColumn("adep_lat", F.lit(47.46))
+        .withColumn("adep_lon", F.lit(8.55))
+    )
+    assert go_arounds(wrong, EventConfig()).count() == 0
+    changed = spark.createDataFrame(
+        [("trk-1", "LSZH", "EBBR", 47.46, 8.55, 0.0, 50.0, 4.0, 0.0)],
+        "id string, adep string, ades string, adep_lat double, adep_lon double, "
+        "elev_adep_ft double, ades_lat double, ades_lon double, elev_ades_ft double",
+    )
+    moved = at_corrected_airports(wrong, changed)
+    assert [r["ades"] for r in moved.select("ades").distinct().collect()] == ["EBBR"]
+    assert go_arounds(moved, EventConfig()).count() == 1
+    other = changed.withColumn("id", F.lit("trk-2"))
+    assert go_arounds(at_corrected_airports(wrong, other), EventConfig()).count() == 0
+
+
 def test_no_go_around_is_emitted_under_the_legacy_configuration(spark):
     out = go_arounds(_approach_track(spark, 200.0), EventConfig.legacy())
     assert out.count() == 0

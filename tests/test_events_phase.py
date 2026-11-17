@@ -574,3 +574,70 @@ def test_no_level_segment_on_a_report_flagged_on_the_ground(spark):
     old = _level_types(spark, ground, EventConfig(level_segment_not_on_ground=False))
     assert old
     assert _level_types(spark, ground, EventConfig()) == []
+
+
+def _phase_track_between(spark, samples, elev_adep_ft, elev_ades_ft):
+    """``samples``: (seconds, altitude ft, rate ft/min, speed kt, on_ground,
+    distance to the departure airport NM, unused). The departure airport is
+    at 40 N 4 E, the destination 700 NM north of it; each report lies on the
+    meridian between them at its distance from the departure airport."""
+    rows = [
+        {
+            "t": t,
+            "baro_altitude": _m(a),
+            "vert_rate": r / FTMIN_PER_MPS,
+            "velocity": v / KT_PER_MPS,
+            "on_ground": g,
+            "lat": 40.0 + d_dep / 60.0,
+            "lon": 4.0,
+        }
+        for t, a, r, v, g, d_dep, _ in samples
+    ]
+    return (
+        _measured(make_track(spark, rows))
+        .withColumn("elev_adep_ft", F.lit(float(elev_adep_ft)))
+        .withColumn("elev_ades_ft", F.lit(float(elev_ades_ft)))
+        .withColumn("adep_lat", F.lit(40.0))
+        .withColumn("adep_lon", F.lit(4.0))
+        .withColumn("ades_lat", F.lit(40.0 + 700.0 / 60.0))
+        .withColumn("ades_lon", F.lit(4.0))
+    )
+
+
+def _level_types_between(spark, samples, config, elev_adep_ft, elev_ades_ft):
+    sdf = _phase_track_between(spark, samples, elev_adep_ft, elev_ades_ft)
+    out = calculate_horizontal_segment_events(sdf, config)
+    return sorted(
+        (r.event_time, r.type) for r in out.collect() if r.type in ("level-start", "level-end")
+    )
+
+
+def test_a_level_off_near_a_sea_level_destination_after_a_high_departure_stays_level(spark):
+    """Madrid (2,000 ft) to Amsterdam (sea level): the level at 2,000 ft,
+    8 NM from Amsterdam and 700 NM from Madrid, is 2,000 ft above the airport
+    the aircraft is near. It is level flight, not ground, although it is less
+    than 200 ft above the departure airport's elevation."""
+    descent = [(10 * i, 5000 - 300 * i, -1800, 220, False, 690.0, 18.0 - i) for i in range(10)]
+    level = [(100 + 10 * i, 2000, 0, 180, False, 695.0, 8.0 - 0.05 * i) for i in range(18)]
+    final = [
+        (280 + 10 * i, 1800 - 160 * i, -900, 150, False, 700.0, 7.0 - 0.6 * i) for i in range(10)
+    ]
+    got = _level_types_between(spark, descent + level + final, EventConfig(), 2000.0, 0.0)
+    assert [t for _, t in got] == ["level-start", "level-end"]
+
+
+def test_a_roll_and_a_taxi_at_a_high_field_stay_ground(spark):
+    """The departure field is at 2,000 ft and the destination at sea level:
+    the roll (104 to 126 kt, level, not flagged) and the taxi before it are
+    on the ground of the departure airport the aircraft is at."""
+    taxi = [(5 * i, 2000, 0, 15, False, 0.8, 700.0) for i in range(12)]
+    roll = [(60 + 5 * i, 1900, 0, 104 + 2 * i, False, 0.5 + 0.03 * i, 700.0) for i in range(12)]
+    climb = [
+        (120 + 5 * i, 2100 + 150 * i, 1800, 135 + i, False, 1.0 + 0.2 * i, 699.0) for i in range(20)
+    ]
+    samples = taxi + roll + climb
+    old = _level_types_between(
+        spark, samples, EventConfig(level_segment_not_on_ground=False), 2000.0, 0.0
+    )
+    assert old, "the roll is a level segment without the setting"
+    assert _level_types_between(spark, samples, EventConfig(), 2000.0, 0.0) == []

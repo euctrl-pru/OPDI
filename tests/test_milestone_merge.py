@@ -196,3 +196,38 @@ def test_an_event_without_a_time_never_replaces_one_with_a_time(spark):
 
     assert out[("trk-1", "ATOT")]["event_time"] == T0
     assert out[("trk-2", "ALDT")]["event_time"] == T0
+
+
+def _at(spark, rows):
+    """``(track_id, type, seconds_after_T0, method, airport)`` onto the event frame."""
+    return spark.createDataFrame(
+        [
+            (t, ty, T0 + dt.timedelta(seconds=s), json.dumps({"method": m, "apt_icao": a}))
+            for t, ty, s, m, a in rows
+        ],
+        "track_id string, type string, event_time timestamp, info string",
+    )
+
+
+def test_landings_at_two_airports_of_one_track_are_both_kept(spark):
+    """Shape of 3010698897972a8d (sample of 2026-06-14): one track flies LFMD
+    to ESSB and on to EDDF. The runway milestones give the landing at ESSB,
+    only the runway window gives the one at EDDF (within 6 s of the airport
+    record). They are two landings, not two readings of one, so both stay;
+    two readings at one airport still give one."""
+    df = _at(
+        spark,
+        [
+            ("trk-1", "ALDT", 0, "acdm", "ESSB"),
+            ("trk-1", "ALDT", 8000, "legacy", "EDDF"),
+            ("trk-1", "ALDT", 8010, "acdm", "EDDF"),
+            ("trk-1", "ALDT", 8030, "legacy", "EDDF"),
+        ],
+    )
+    out = sorted(
+        (json.loads(r["info"])["apt_icao"], json.loads(r["info"])["method"])
+        for r in merge_milestone_duplicates(df, EventConfig()).collect()
+    )
+    assert out == [("EDDF", "acdm"), ("ESSB", "acdm")]
+    one = EventConfig(merge_milestones_per_airport=False)
+    assert merge_milestone_duplicates(df, one).count() == 1

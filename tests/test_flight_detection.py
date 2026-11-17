@@ -459,6 +459,26 @@ def test_the_datum_alone_makes_a_run_non_legacy():
     assert Stub(on_field, "osn_tracks")._version_for("trend") == "v6.0.0"
 
 
+def test_first_and_last_seen_from_measured_reports_make_a_run_non_legacy():
+    """The legacy detection settings with the default event settings change
+    first and last seen (``seen_from_measured_reports``), so the rows cannot
+    carry the version of release v0.0.2."""
+    from opdi.config import DetectionConfig, EventConfig, OPDIConfig  # noqa: PLC0415
+
+    class Stub:
+        _version_for = FlightListProcessor._version_for
+
+        def __init__(self, detection, tracks, events):
+            self.detection = detection
+            self.tracks_table = tracks
+            self.config = OPDIConfig(events=events)
+
+    legacy = DetectionConfig.legacy()
+    assert Stub(legacy, "osn_tracks", EventConfig.legacy())._version_for("trend") == "v2.0.0"
+    assert Stub(legacy, "osn_tracks", EventConfig())._version_for("trend") == "v6.0.0"
+    assert Stub(legacy, "osn_tracks", EventConfig())._version_for("endpoint") == "v6.0.0"
+
+
 def test_ooa_marker_is_what_the_endpoint_path_already_uses():
     """One marker, defined once. Two spellings of "outside the area" in one
     flight list would be indistinguishable from a bug to any consumer."""

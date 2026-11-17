@@ -267,6 +267,8 @@ LADDER = [
             "holding_trim_to_main_direction": True,
             "holding_altitude_from_known_reports": True,
             "holding_context": True,
+            "holding_and_go_arounds_at_corrected_airports": True,
+            "merge_milestones_per_airport": True,
             "pms_extend_leg_exit": True,
             "pms_join_split_legs": True,
             "pms_leg_must_turn": True,

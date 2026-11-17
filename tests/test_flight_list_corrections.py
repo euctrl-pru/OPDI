@@ -138,6 +138,29 @@ def _two_leg_kcos():
     return f, e
 
 
+def test_a_block_time_read_at_a_stand_stays_on_a_row_without_its_airport(spark):
+    """A row without a departure airport (and one without a destination):
+    the off-block (in-block) time read at a named stand stays on it, with
+    its stand, as it did before the milestones were checked against their
+    own leg. A block time that names no stand is still left out, as nothing
+    shows it belongs to this flight."""
+    f = [_flight("tb1", None, "KDFW"), _flight("tb2", "KCLT", None)]
+    e = [
+        _ev("tb1", "AOBT", 100, apt_icao="KCLT", stand="B12"),
+        _ev("tb1", "ALDT", 7000, apt_icao="KDFW", method="acdm"),
+        _ev("tb1", "AIBT", 7400, apt_icao="KDFW", stand="C3"),
+        _ev("tb2", "AOBT", 100, apt_icao="KCLT", stand="A1"),
+        _ev("tb2", "ATOT", 600, apt_icao="KCLT", method="acdm"),
+        _ev("tb2", "AIBT", 7400, apt_icao="KDFW"),
+        _ev("tb2", "AIBT", 7500, apt_icao="KDFW", stand="D4"),
+    ]
+    rows = _enrich(spark, f, e)
+    assert (rows["tb1"]["AOBT"], rows["tb1"]["STND_DEP"]) == (_t(100), "B12")
+    assert (rows["tb1"]["AIBT"], rows["tb1"]["STND_ARR"]) == (_t(7400), "C3")
+    assert (rows["tb2"]["AIBT"], rows["tb2"]["STND_ARR"]) == (_t(7500), "D4")
+    assert (rows["tb2"]["AOBT"], rows["tb2"]["STND_DEP"]) == (_t(100), "A1")
+
+
 def test_a_stop_in_the_middle_of_a_track_does_not_replace_both_airports(spark):
     f, e = _two_leg_kcos()
     row = _enrich(spark, f, e)["t39"]
@@ -564,6 +587,45 @@ def test_an_overflight_is_seen_from_its_measured_reports(spark):
     off = _overflight_processor({"osn_tracks": sv, "opdi_flight_list": fl}, measured=False)
     (row,) = off._fetch_overflights(_T0.date()).collect()
     assert (row["first_seen"], row["last_seen"]) == (_t(0), _t(7350))
+
+
+def test_steps_03_and_04_see_a_track_without_position_alike(spark):
+    """A track without a position: a first report with only a GPS altitude
+    and a last one with a barometric altitude of 98,000 ft, outside the
+    range step 04 uses (``altitude_plausible_max_ft``). Step 04 reads
+    neither as measured; the flight list of step 03 gives the same first
+    and last seen."""
+    from pyspark.sql import functions as F
+
+    from opdi.pipeline.detector_altitude import altitude_for_detectors
+
+    schema = _OF_SCHEMA + ", geo_altitude double"
+    rows = [
+        ("t3", "155f02", "AFL1320 ", _t(0), None, None, None, 3000.0),
+        ("t3", "155f02", "AFL1320 ", _t(60), None, None, 3000.0, None),
+        ("t3", "155f02", "AFL1320 ", _t(600), None, None, 3100.0, None),
+        ("t3", "155f02", "AFL1320 ", _t(900), None, None, 30000.0, None),
+    ]
+    sv = spark.createDataFrame(rows, schema)
+    fl = spark.createDataFrame([], "id string, first_seen timestamp")
+    proc = _overflight_processor({"osn_tracks": sv, "opdi_flight_list": fl})
+    (row,) = proc._fetch_overflights(_T0.date()).collect()
+
+    reports = (
+        sv.drop("geo_altitude")
+        .withColumn("baro_altitude_c", F.col("baro_altitude"))
+        .drop("baro_altitude")
+        .withColumn("vert_rate", F.lit(None).cast("double"))
+        .withColumn("velocity", F.lit(None).cast("double"))
+        .withColumn("heading", F.lit(None).cast("double"))
+        .withColumn("cumulative_distance_nm", F.lit(0.0))
+        .withColumn("cumulative_time_s", F.lit(0.0))
+    )
+    reports = altitude_for_detectors(reports, EventConfig(), cleaned_tracks=False)
+    out = calculate_firstseen_lastseen_events(reports, from_measured_reports=True).collect()
+    seen = {r["type"]: r["event_time"] for r in out}
+    assert (seen["first_seen"], seen["last_seen"]) == (_t(60), _t(600))
+    assert (row["first_seen"], row["last_seen"]) == (_t(60), _t(600))
 
 
 def test_an_overflight_with_little_position_still_gets_its_row(spark):

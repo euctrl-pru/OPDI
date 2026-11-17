@@ -533,6 +533,38 @@ def test_a_landing_beside_a_parallel_runway_names_one_runway(spark):
     assert passes_before == [("07", "arrival"), ("07R", "arrival")]
 
 
+#: The landing above on 07, then two minutes later a taxi across the close
+#: parallel 07R (0.10 to 0.20 NM north of 07's centre line). Read over 07R,
+#: the landing's final lies in 07R's approach area, so 07R's pass holds an
+#: arrival reading (discarded: the landing is on 07) and the crossing.
+_LANDING_THEN_CROSSING_THE_PARALLEL = _LANDING_BESIDE_A_PARALLEL + [
+    (140, 1.2, 0.0, 15.0, True, 340.0, 0.0, 0.10),
+    (145, 1.2, 0.0, 15.0, True, 340.0, 0.0, 0.15),
+    (150, 1.2, 0.0, 15.0, True, 340.0, 0.0, 0.20),
+]
+
+
+def test_a_crossing_of_a_parallel_runway_after_landing_on_the_other_is_kept(spark):
+    grid, thresholds = _parallels(spark)
+    sv = _pass(spark, _LANDING_THEN_CROSSING_THE_PARALLEL)
+    passes, events = _family(spark, sv, grid=grid, thresholds=thresholds)
+    assert ("07", "arrival") in passes
+    assert [p for p in passes if p[1] == "arrival"] == [("07", "arrival")]
+    crossings = [p for p in passes if p[1] == "crossing"]
+    assert len(crossings) == 1 and crossings[0][0] in ("07R", "25L"), passes
+    assert "runway-crossing-entry" in _types(events)
+
+
+def test_a_crossing_reading_of_the_landing_runway_is_still_dropped(spark):
+    """The landing's own runway: a pass that reads as an arrival on 07 gives
+    no crossing of 07, even where the other direction's reading of the pass
+    looks like one."""
+    grid, thresholds = _parallels(spark)
+    sv = _pass(spark, _LANDING_BESIDE_A_PARALLEL)
+    passes, _ = _family(spark, sv, grid=grid, thresholds=thresholds)
+    assert passes == [("07", "arrival")]
+
+
 # ---------------------------------------------------------------------------
 # 3. runway-vacated and the crossings from the reports on the runway.
 # ---------------------------------------------------------------------------
@@ -938,13 +970,41 @@ def test_a_window_take_off_time_carries_its_report(spark):
 
 
 def test_a_track_first_seen_high_in_the_climb_gives_no_window_take_off_time(spark):
-    """The first report in the air more than 1,500 ft above the track's own
-    ground (here 1,200 ft above the published elevation, on a day the ground
-    reads 400 ft below it) is not a take-off time."""
-    rows = [(0, 0.0, -400.0, 10.0, 0.0, True)] + [
-        (t, a, h + 1170.0, kt, fpm, g) for t, a, h, kt, fpm, g in _TAKE_OFF[1:]
+    """The first reports in the air more than 1,500 ft above the track's own
+    ground give no take-off time. Here the ground reads 400 ft below the
+    published elevation (a day of high pressure), and five reports of the
+    climb qualify (1,110 to 1,490 ft above the elevation, so below the
+    1,500 ft of ``runway_max_height_ft``) while all are 1,510 to 1,890 ft
+    above the ground. Without the check they give a time; with a limit of
+    2,000 ft they give one too: the limit above the ground is what removes
+    it."""
+    climb = [
+        (60 + 5 * i, 0.5 + 0.25 * i, h, 150.0, 1800.0, False)
+        for i, h in enumerate((1110.0, 1200.0, 1300.0, 1400.0, 1490.0))
     ]
+    rows = [(0, 0.0, -400.0, 10.0, 0.0, True)] + climb
     assert _window(spark, rows, "departure") == []
+    assert len(_window(spark, rows, "departure", _only())) == 1
+    wider = _only(runway_window_times_checked=True, runway_window_max_height_ft=2000.0)
+    (row,) = _window(spark, rows, "departure", wider)
+    assert _seconds(row["first_time"]) == 60.0
+
+
+def test_the_window_ground_altitude_is_that_of_the_visit(spark):
+    """A turnaround in one track: parked after a landing, the ground reads
+    400 ft below the elevation; two hours later, at the take-off, it reads
+    the elevation. The climb (1,110 to 1,490 ft above the elevation) is
+    measured from the ground of the take-off's own visit, so it gives a
+    time; measured from the ground of both visits together (400 ft below)
+    it would be more than 1,500 ft above the ground."""
+    parked = [(10 * i, 0.0, -400.0, 0.0, 0.0, True) for i in range(6)]
+    climb = [
+        (7260 + 5 * i, 0.5 + 0.25 * i, h, 150.0, 1800.0, False)
+        for i, h in enumerate((1110.0, 1200.0, 1300.0, 1400.0, 1490.0))
+    ]
+    rows = parked + [(7200, 0.0, 0.0, 10.0, 0.0, True)] + climb
+    (row,) = _window(spark, rows, "departure")
+    assert _seconds(row["first_time"]) == 7260.0
 
 
 def test_a_track_first_seen_low_in_the_climb_keeps_its_window_take_off_time(spark):

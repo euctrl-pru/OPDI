@@ -813,6 +813,10 @@ def enrich_flight_list(
     # the first stand exit at ADEP and the last stand entry at ADES.
     def _own_stand(stand: str, airport: str, leg: str, layout: str) -> Column:
         at_leg = F.col(airport).isNull() | (F.col(airport) == F.col(leg))
+        if config.milestones_on_own_leg:
+            # The block time of a row without that airport (see
+            # _aggregate_on_own_leg) keeps the stand it was read at.
+            at_leg = at_leg | F.col(leg).isNull()
         return F.when(F.col(stand).isNotNull() & at_leg, F.col(stand)).otherwise(F.col(layout))
 
     agg = agg.withColumn(
@@ -902,7 +906,14 @@ def _aggregate_on_own_leg(narrowed: DataFrame, is_dep, is_arr, ring_types) -> Da
         )
         return _first(cond, t)
 
-    aobt, aibt = is_dep(_AOBT), is_arr(_AIBT)
+    # A block time read at a named stand stays on a row whose airport at that
+    # end is unknown: the stand passage it was read from is its evidence, and
+    # the row has no airport to contradict it. Taken on the side of the
+    # take-off or landing as above, so it is of the row's own leg when the
+    # track holds several.
+    stand = _info("stand").isNotNull()
+    aobt = is_dep(_AOBT) | ((F.col("type") == F.lit(_AOBT)) & F.col("_adep").isNull() & stand)
+    aibt = is_arr(_AIBT) | ((F.col("type") == F.lit(_AIBT)) & F.col("_ades").isNull() & stand)
     return narrowed.groupBy("_track_id").agg(
         _first(is_dep(_ATOT), t).alias("ATOT"),
         _last(is_arr(_ALDT), t).alias("ALDT"),

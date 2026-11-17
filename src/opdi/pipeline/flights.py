@@ -229,10 +229,14 @@ def resolve_flight_id(sv: DataFrame, track_col: str = "track_id", trim: bool = F
 #: Columns of a report that carry a measured value besides the position. The
 #: cleaning of step 02a blanks a value that was repeated rather than measured
 #: again, so a report with none of them left carries nothing new.
-MEASURED_VALUE_COLUMNS = ("baro_altitude", "geo_altitude", "velocity", "heading", "vert_rate")
+MEASURED_VALUE_COLUMNS = ("baro_altitude", "velocity", "heading", "vert_rate")
 
 
-def seen_rank(df: DataFrame) -> Column:
+def seen_rank(
+    df: DataFrame,
+    altitude_min_ft: Optional[float] = None,
+    altitude_max_ft: Optional[float] = None,
+) -> Column:
     """How a report counts for ``first_seen`` and ``last_seen``.
 
     0 for a report with a measured position (``lat`` and ``lon`` not blank),
@@ -240,8 +244,25 @@ def seen_rank(df: DataFrame) -> Column:
     :data:`MEASURED_VALUE_COLUMNS` present in ``df``), 2 for a report with
     neither. The first (last) report of the lowest rank a track has is its
     first (last) seen (:attr:`EventConfig.seen_from_measured_reports`).
+
+    The values are those the events of step 04 read, so that the flight
+    list and the events give a track the same first and last seen: the
+    barometric altitude counts only between ``altitude_min_ft`` and
+    ``altitude_max_ft`` (:attr:`EventConfig.altitude_plausible_min_ft` and
+    :attr:`EventConfig.altitude_plausible_max_ft`; no limit when None), and
+    the GPS altitude, which step 04 does not read, does not count.
     """
-    others = [col(c).isNotNull() for c in MEASURED_VALUE_COLUMNS if c in df.columns]
+
+    def measured(c):
+        present = col(c).isNotNull()
+        if c == "baro_altitude":
+            if altitude_min_ft is not None:
+                present = present & (col(c) * lit(FT_PER_M) >= lit(float(altitude_min_ft)))
+            if altitude_max_ft is not None:
+                present = present & (col(c) * lit(FT_PER_M) <= lit(float(altitude_max_ft)))
+        return present
+
+    others = [measured(c) for c in MEASURED_VALUE_COLUMNS if c in df.columns]
     any_other = functools.reduce(lambda a, b: a | b, others) if others else lit(False)
     return (
         when(col("lat").isNotNull() & col("lon").isNotNull(), lit(0))
@@ -435,13 +456,18 @@ class FlightListProcessor:
         """The ``version`` written on a row produced by method ``path``.
 
         A run with the settings of release v0.0.2 (thresholds, ranking,
-        uncleaned tracks) writes the version that release wrote, so a day
-        processed again reproduces its version column as well. Any other run
-        writes :data:`FLIGHT_LIST_VERSION`.
+        uncleaned tracks, first and last seen at the first and last report)
+        writes the version that release wrote, so a day processed again
+        reproduces its version column as well. Any other run writes
+        :data:`FLIGHT_LIST_VERSION`.
         """
         from opdi.config import DetectionConfig
 
-        if self.detection == DetectionConfig.legacy() and self.tracks_table == "osn_tracks":
+        if (
+            self.detection == DetectionConfig.legacy()
+            and self.tracks_table == "osn_tracks"
+            and not FlightListProcessor._seen_from_measured_reports(self)
+        ):
             return LEGACY_TREND_VERSION if path == "trend" else LEGACY_ENDPOINT_VERSION
         return FLIGHT_LIST_VERSION
 
@@ -1776,8 +1802,12 @@ class FlightListProcessor:
             # The rank of each report for first and last seen, computed before
             # the reports are shuffled, so only it travels, not the measured
             # values it is read from.
+            events = getattr(getattr(self, "config", None), "events", None)
+            low = getattr(events, "altitude_plausible_min_ft", None)
+            high = getattr(events, "altitude_plausible_max_ft", None)
+
             def prepare(df):
-                return df.withColumn("_seen_rank", seen_rank(df)).select(
+                return df.withColumn("_seen_rank", seen_rank(df, low, high)).select(
                     "track_id", "event_time", "icao24", "callsign", "_seen_rank"
                 )
 

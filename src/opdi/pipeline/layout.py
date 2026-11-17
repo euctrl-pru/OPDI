@@ -40,6 +40,7 @@ from pyspark.sql.window import Window
 from opdi.config import EventConfig
 from opdi.pipeline.elevation import attach_field_elevation, height_above_field_ft
 from opdi.pipeline.flights import resolve_flight_id, with_endpoint_candidates
+from opdi.pipeline.runways import FT_PER_NM, KT_PER_MPS
 from opdi.utils.datetime_helpers import get_start_end_of_month
 from opdi.utils.geometry import haversine_nm
 from opdi.utils.storage import StorageManager
@@ -392,11 +393,6 @@ def calculate_airport_events(
     return one_element_per_passage(apt_events, config)
 
 
-#: Knots per metre per second, and feet per nautical mile.
-KT_PER_MS = 1.94384
-FT_PER_NM = 6076.12
-
-
 def _keep_slow_reports(labelled: DataFrame, window_spec, config: EventConfig) -> DataFrame:
     """Drop the reports not flagged on the ground that move faster than taxiing.
 
@@ -417,7 +413,7 @@ def _keep_slow_reports(labelled: DataFrame, window_spec, config: EventConfig) ->
     prev_kt = speed_to(lambda c: lag(c, 1).over(window_spec))
     next_kt = speed_to(lambda c: F.lead(c, 1).over(window_spec))
     reported_kt = (
-        col("velocity") * KT_PER_MS if "velocity" in labelled.columns else lit(None).cast("double")
+        col("velocity") * KT_PER_MPS if "velocity" in labelled.columns else lit(None).cast("double")
     )
     speed_kt = F.greatest(prev_kt, next_kt, reported_kt)
     slow = speed_kt.isNull() | (speed_kt <= F.lit(config.layout_air_report_max_speed_kt))

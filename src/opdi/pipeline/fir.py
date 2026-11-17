@@ -31,7 +31,27 @@ from opdi.utils.geometry import haversine_nm
 
 # FIR_VERSION is stamped on the event; its two standard measurements carry the
 # measurement versions every event's do.
-from opdi.versions import FIR_VERSION
+from opdi.versions import FIR_VERSION, LEGACY_FIR_VERSION
+
+#: The settings that change the FIR crossings: with all of them at their
+#: values of release v0.0.2 the events carry :data:`LEGACY_FIR_VERSION`.
+FIR_SETTINGS = (
+    "fir_needs_position",
+    "fir_flag_vertical",
+    "crossing_skips_position_jumps",
+    "crossing_max_implied_speed_kt",
+    "altitude_from_cleaning",
+    "altitude_plausible_min_ft",
+    "altitude_plausible_max_ft",
+)
+
+
+def fir_version(config: EventConfig) -> str:
+    """The ``version`` of the FIR crossings under ``config``."""
+    if config.differs_from_release(FIR_SETTINGS):
+        return FIR_VERSION
+    return LEGACY_FIR_VERSION
+
 
 AIRSPACE_TABLE = "opdi_h3_airspace_ref"
 
@@ -324,5 +344,5 @@ def calculate_fir_events(
         col("cumulative_distance_nm"),
         col("cumulative_time_s").cast("long"),
         info.alias("info"),
-        lit(FIR_VERSION).alias("version"),
+        lit(fir_version(config)).alias("version"),
     )

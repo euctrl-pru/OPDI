@@ -10,6 +10,7 @@ The other half of the contract is what keeps released data reproducible: a
 track without a hole gives exactly the events it gave before.
 """
 
+import dataclasses
 import datetime as dt
 
 import pytest
@@ -264,12 +265,63 @@ def test_distance_version_follows_the_method():
     assert distance_version(EventConfig()) == "distance_v0.0.4"
     # From the last known position, without the speed limit and the
     # distance between positions.
-    without = EventConfig(distance_max_implied_speed_kt=None, distance_between_positions=False)
+    without = EventConfig(
+        distance_max_implied_speed_kt=None,
+        distance_between_positions=False,
+        measure_every_event=False,
+    )
     assert distance_version(without) == "distance_v0.0.3"
     # Reprocessing a released month reproduces its measurement, defect and all.
     assert LEGACY_DISTANCE_VERSION == "distance_v0.0.2"
     assert distance_version(EventConfig.legacy()) == "distance_v0.0.2"
     assert EventConfig.legacy().distance_from_last_known_position is False
+
+
+def test_each_measurement_version_is_old_only_when_its_settings_are_off():
+    """A measurement carries its new version when a setting that changes it
+    is on, and the old one only when all are off."""
+    from opdi.pipeline.events import time_version
+
+    legacy = EventConfig.legacy()
+    # Measuring every event changes both measurements of the events that
+    # had none (interpolated distance, time from first_seen).
+    every = dataclasses.replace(legacy, measure_every_event=True)
+    assert distance_version(every) == "distance_v0.0.4"
+    assert time_version(every) == "time_v0.0.2"
+    assert time_version(legacy) == "time_v0.0.1"
+    assert time_version(EventConfig()) == "time_v0.0.2"
+    last_known = dataclasses.replace(legacy, distance_from_last_known_position=True)
+    assert distance_version(last_known) == "distance_v0.0.3"
+    assert distance_version(dataclasses.replace(last_known, measure_every_event=True)) == (
+        "distance_v0.0.4"
+    )
+
+
+def test_each_family_version_is_old_only_when_its_settings_are_off():
+    """Holding, point merge and FIR crossings: the new version when one of
+    the settings that change the family is on, the old one when all are
+    off."""
+    from opdi.pipeline.fir import FIR_SETTINGS, fir_version
+    from opdi.pipeline.holding import HOLDING_SETTINGS, holding_version
+    from opdi.pipeline.point_merge import PMS_SETTINGS, pms_version
+
+    default, legacy = EventConfig(), EventConfig.legacy()
+    for version, settings, new, old in (
+        (holding_version, HOLDING_SETTINGS, "holding_v0.2.0", "holding_v0.1.0"),
+        (pms_version, PMS_SETTINGS, "pms_v0.2.0", "pms_v0.1.0"),
+        (fir_version, FIR_SETTINGS, "fir_v0.2.0", "fir_v0.1.0"),
+    ):
+        assert version(default) == new
+        assert version(legacy) == old
+        off = dataclasses.replace(default, **{name: legacy_value(name) for name in settings})
+        assert version(off) == old, settings
+        for name in settings:
+            one_on = dataclasses.replace(off, **{name: getattr(default, name)})
+            assert version(one_on) == new, name
+
+
+def legacy_value(name):
+    return getattr(EventConfig.legacy(), name)
 
 
 def test_level_segment_distance_follows_the_distance_version(spark):
