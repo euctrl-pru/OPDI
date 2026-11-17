@@ -964,6 +964,25 @@ def calculate_horizontal_segment_events(
 
     # Convert units: meters -> feet, m/s -> ft/min, m/s -> knots
     df = df.withColumn("alt", col("baro_altitude_c") * 3.28084)
+    if distances and len(distances) == 2 and use_agl:
+        # The ground test of level_segment_not_on_ground (below), computed
+        # here so that the two distances are not carried through the phase
+        # computation.
+        ceiling = lit(config.phase_ground_ceiling_ft)
+        radius = lit(float(config.level_segment_ground_radius_nm))
+        elev_dep = F.coalesce(col("elev_adep_ft"), lit(0.0))
+        elev_arr = F.coalesce(col("elev_ades_ft"), lit(0.0))
+        d_dep, d_arr = col("dist_adep_nm"), col("dist_ades_nm")
+        df = df.withColumn(
+            "_low_near",
+            ((d_dep <= radius) & (col("alt") - elev_dep < ceiling))
+            | ((d_arr <= radius) & (col("alt") - elev_arr < ceiling))
+            | (
+                d_dep.isNull()
+                & d_arr.isNull()
+                & (col("alt") - F.least(elev_dep, elev_arr) < ceiling)
+            ),
+        ).drop(*distances)
     df = df.withColumn("roc", col("vert_rate") * 196.850394)
     df = df.withColumn("spd", col("velocity") * 1.94384)
 
@@ -1058,16 +1077,7 @@ def calculate_horizontal_segment_events(
             radius = lit(float(config.level_segment_ground_radius_nm))
             elev_dep = F.coalesce(col("elev_adep_ft"), lit(0.0))
             elev_arr = F.coalesce(col("elev_ades_ft"), lit(0.0))
-            d_dep, d_arr = col("dist_adep_nm"), col("dist_ades_nm")
-            low = (
-                ((d_dep <= radius) & (col("alt") - elev_dep < ceiling))
-                | ((d_arr <= radius) & (col("alt") - elev_arr < ceiling))
-                | (
-                    d_dep.isNull()
-                    & d_arr.isNull()
-                    & (col("alt") - F.least(elev_dep, elev_arr) < ceiling)
-                )
-            )
+            low = col("_low_near")
         elif use_agl:
             low = (
                 col("alt") - F.coalesce(col("elev_adep_ft"), lit(0.0))

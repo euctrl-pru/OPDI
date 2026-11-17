@@ -1202,12 +1202,14 @@ def _without_crossings_of_moving_passes(cand2: DataFrame, move) -> DataFrame:
     )
 
 
-def _one_per_overlap(cand2: DataFrame) -> DataFrame:
+def _one_per_overlap(cand2: DataFrame, keep=None) -> DataFrame:
     """One pass of each class among passes whose times overlap.
 
     Of the passes of one class at one airport whose times overlap (parallel
     runways), the one with reports on its runway and the smallest median
-    distance from its centre line is kept.
+    distance from its centre line is kept. With ``keep`` (a condition on
+    the rows), only the rows it selects are chosen this way; the others are
+    all kept.
     """
     by_time = Window.partitionBy("track_id", "apt_icao", "class").orderBy(
         "entry_time", "exit_time", "strip_id"
@@ -1230,11 +1232,10 @@ def _one_per_overlap(cand2: DataFrame) -> DataFrame:
         F.col("strip_id").asc(),
         F.col("rwy_ident").asc(),
     )
-    return (
-        cand2.withColumn("_r", F.row_number().over(one))
-        .filter(F.col("_r") == 1)
-        .drop("_r", "_prev_exit", "_group")
-    )
+    ranked = cand2.withColumn("_r", F.row_number().over(one)).drop("_prev_exit", "_group")
+    if keep is None:
+        return ranked.filter(F.col("_r") == 1).drop("_r")
+    return ranked.filter(~keep | (F.col("_r") == 1)).drop("_r")
 
 
 def _by_motion(
@@ -1308,11 +1309,10 @@ def _by_motion(
     # The movements kept, then the crossings of the passes they do not
     # cover. The groups of a class are recomputed on the rows that remain;
     # removing rows only splits groups, so the movements kept stay kept.
-    kept = _one_per_overlap(cand2.filter(move).drop("_r"))
-    others = cand2.filter(~move).drop("_r")
-    return _one_per_overlap(
-        _without_crossings_of_moving_passes(kept.unionByName(others), move)
-    ).drop("_renamed")
+    # One frame throughout (no union of two filtered copies, which Spark
+    # would compute twice).
+    kept = _one_per_overlap(cand2.drop("_r"), keep=move)
+    return _one_per_overlap(_without_crossings_of_moving_passes(kept, move)).drop("_renamed")
 
 
 # ---------------------------------------------------------------------------
