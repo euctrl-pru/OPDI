@@ -245,7 +245,7 @@ def storage_eham(spark):
     return StubStorage({"opdi_flight_list": flight_list, "oa_airports": airports})
 
 
-def test_a_position_glitch_does_not_give_a_third_crossing(spark, storage_eham):
+def test_a_position_glitch_gives_a_third_crossing_marked_as_a_jump(spark, storage_eham):
     sdf = _rows_to_track(spark, TRA5T)
 
     rows = _at(
@@ -254,11 +254,24 @@ def test_a_position_glitch_does_not_give_a_third_crossing(spark, storage_eham):
         "xing-120nm",
     )
 
-    # The jump back at 75 s (4,100 kt) gives no crossing; it still counts in
-    # crossing_seq. The step back at 70 s is 3.5 NM in 15 s (850 kt), within
-    # the limit, so the outbound crossing before it stays.
-    got = [(json.loads(r.info)["direction"], json.loads(r.info)["crossing_seq"]) for r in rows]
-    assert got == [("inbound", 1), ("outbound", 2)]
+    # The step back at 70 s is 3.5 NM in 15 s (850 kt), within the limit, so
+    # the outbound crossing it gives stays. The jump back at 75 s (4,100 kt)
+    # crosses the 120 NM circle only, so it is kept as a step and marked
+    # (ring_crossing_keeps_single_steps); without that setting it is not
+    # given.
+    got = [
+        (json.loads(r.info)["direction"], json.loads(r.info).get("position_jump"))
+        for r in sorted(rows, key=lambda r: r.event_time)
+    ]
+    assert got == [("inbound", None), ("outbound", None), ("inbound", True)]
+    off = _at(
+        calculate_ring_crossing_events(
+            sdf, MONTH, storage_eham, EventConfig(ring_crossing_keeps_single_steps=False)
+        ).collect(),
+        "EHAM",
+        "xing-120nm",
+    )
+    assert [json.loads(r.info)["direction"] for r in off] == ["inbound", "outbound"]
 
 
 def test_without_the_speed_limit_the_glitch_gives_three_crossings(spark, storage_eham):
@@ -366,7 +379,10 @@ def test_a_lagging_position_that_catches_up_is_not_a_jump(spark, storage):
     )
     strict = _at(
         calculate_ring_crossing_events(
-            _rows_to_track(spark, rows), MONTH, storage, EventConfig(position_jump_allowance_nm=0.0)
+            _rows_to_track(spark, rows),
+            MONTH,
+            storage,
+            EventConfig(position_jump_allowance_nm=0.0, ring_crossing_keeps_single_steps=False),
         ).collect(),
         "EBBR",
         "xing-100nm",

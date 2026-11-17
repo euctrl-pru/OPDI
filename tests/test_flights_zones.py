@@ -60,7 +60,11 @@ def _processor(spark, warehouse, tmp_path):
 def _rows(spark, proc):
     df = proc.storage.read_table(CANDIDATES)
     cols = sorted(df.columns)
-    return sorted(tuple(r) for r in df.select(*cols).collect())
+    # Sorted on the text of each value: columns such as the climb after the
+    # first report are empty on some rows, and None does not sort with numbers.
+    return sorted(
+        (tuple(r) for r in df.select(*cols).collect()), key=lambda t: [repr(v) for v in t]
+    )
 
 
 def _broadcast_hints(df) -> int:

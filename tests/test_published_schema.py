@@ -116,7 +116,8 @@ def test_measurement_suffixes_match_the_event_step():
 def test_measurement_versions_match_the_event_step():
     assert MEASUREMENT_VERSION["Distance flown (NM)"] == events.DISTANCE_VERSION
     assert MEASUREMENT_VERSION["Time Passed (s)"] == events.TIME_VERSION
-    assert "lit(TIME_VERSION)" in inspect.getsource(events)
+    assert "lit(time_version(self.events))" in inspect.getsource(events)
+    assert events.time_version(events.EventConfig()) == events.TIME_VERSION
     for _, _, m, v in events.EXTRA_MEASURES:
         assert MEASUREMENT_VERSION[m] == v
 

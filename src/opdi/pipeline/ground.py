@@ -496,7 +496,7 @@ def block_events(
       longest passage of the part.
     * ``block_time_off_the_runway``: a standstill is judged on speed, the
       ground flag only where no speed is known; no time within
-      ``block_time_min_seconds_from_runway_time`` (60 s) of its take-off or
+      ``block_time_min_gap_to_runway_time_seconds`` (60 s) of its take-off or
       landing, after the line-up or before the runway is vacated.
     * ``block_time_one_part_per_leg``: a track with only a take-off (only a
       landing) has one ground part before (after) it, so each time carries
@@ -1184,12 +1184,12 @@ def _off_the_runway(
     """``blocks`` without the times on the runway or next to the take-off or landing.
 
     The rule of ``block_time_off_the_runway``. An off-block time is dropped
-    when it lies less than ``block_time_min_seconds_from_runway_time`` before
+    when it lies less than ``block_time_min_gap_to_runway_time_seconds`` before
     the take-off of its leg (``_bound``), or after the last ``line-up`` before
     that take-off; an in-block time when it lies less than that after the
     landing of its leg, or before the first ``runway-vacated`` after it.
     """
-    gap = F.lit(float(config.block_time_min_seconds_from_runway_time))
+    gap = F.lit(float(config.block_time_min_gap_to_runway_time_seconds))
     ev = F.col("event_time").cast("double")
     bound = F.col("_bound").cast("double")
     near = F.when(F.col("block") == "off", bound - ev).otherwise(ev - bound) < gap

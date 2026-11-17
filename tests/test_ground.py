@@ -977,7 +977,7 @@ def test_the_settings_of_the_block_time_corrections():
     ):
         assert getattr(new, name) is True, name
         assert getattr(old, name) is False, name
-    assert new.block_time_min_seconds_from_runway_time == 60.0
+    assert new.block_time_min_gap_to_runway_time_seconds == 60.0
     assert new.block_time_min_stand_dwell_seconds == 30.0
     assert new.block_time_long_stand_stop_seconds == 600.0
 

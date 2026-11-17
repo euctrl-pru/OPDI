@@ -232,7 +232,7 @@ class EventConfig:
     and judge a standstill on speed.
 
     With this setting an off-block time is not given when it lies less than
-    :attr:`block_time_min_seconds_from_runway_time` before the take-off of
+    :attr:`block_time_min_gap_to_runway_time_seconds` before the take-off of
     its leg, or between the line-up and that take-off; an in-block time is
     not given when it lies less than that after the landing of its leg, or
     between that landing and the ``runway-vacated`` that follows it. A
@@ -242,7 +242,7 @@ class EventConfig:
     because the take-off and landing rolls are flagged on the ground too.
     Off in release v0.0.2."""
 
-    block_time_min_seconds_from_runway_time: float = 60.0
+    block_time_min_gap_to_runway_time_seconds: float = 60.0
     """Shortest time, in seconds, between a block time and the take-off or
     landing of its leg, with :attr:`block_time_off_the_runway`. No taxi
     takes less than a minute; a block time closer than that is the take-off

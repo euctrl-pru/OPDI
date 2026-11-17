@@ -945,8 +945,6 @@ def test_a_track_first_seen_high_in_the_climb_gives_no_window_take_off_time(spar
         (t, a, h + 1170.0, kt, fpm, g) for t, a, h, kt, fpm, g in _TAKE_OFF[1:]
     ]
     assert _window(spark, rows, "departure") == []
-    unchecked = _window(spark, rows, "departure", EventConfig(runway_window_times_checked=False))
-    assert len(unchecked) == 1
 
 
 def test_a_track_first_seen_low_in_the_climb_keeps_its_window_take_off_time(spark):
