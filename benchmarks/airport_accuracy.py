@@ -1336,6 +1336,9 @@ def airport_table(
     )
     out = airports[["rank", "airport"]].merge(pd.DataFrame({"item": items}), how="cross")
     out = out.merge(own.drop(columns="side"), on=["airport", "item"], how="left")
+    # A runway or stand named in an event is a property of that event: its
+    # availability among OPDI's flights is the event's own row.
+    out.loc[out["item"].isin(list(APDF_EQUAL)), OWN_COLUMNS] = np.nan
     out["has_airport_records"] = out["airport"].isin(record_airports)
     out["in_europe"] = out["airport"].map(is_european)
     out["reference"] = [
