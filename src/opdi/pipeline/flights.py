@@ -472,8 +472,13 @@ class FlightListProcessor:
         month: date,
         time_col: str = "event_time",
         day: date = None,
+        prepare=None,
     ) -> DataFrame:
         """Rows of ``table_name`` within the batch's time window.
+
+        ``prepare``, a function of a frame, is applied to the rows of the
+        track table before the call sign is resolved, so that a reader that
+        needs few columns can narrow them before the reports are shuffled.
 
         The window is the month of ``month``, or the day being processed when
         :meth:`process_day` is running.
@@ -505,6 +510,8 @@ class FlightListProcessor:
         if table_name != self.tracks_table:
             return df
 
+        if prepare is not None:
+            df = prepare(df)
         df = df.withColumnRenamed("callsign", "flight_id")
         if self._version_for("trend") != FLIGHT_LIST_VERSION:
             return df
@@ -1764,7 +1771,17 @@ class FlightListProcessor:
             One row per overflight, without airports, and with both source
             columns ``undetermined``.
         """
-        sv = self._get_data_within_timeframe(self.tracks_table, month)
+        prepare = None
+        if FlightListProcessor._seen_from_measured_reports(self):
+            # The rank of each report for first and last seen, computed before
+            # the reports are shuffled, so only it travels, not the measured
+            # values it is read from.
+            def prepare(df):
+                return df.withColumn("_seen_rank", seen_rank(df)).select(
+                    "track_id", "event_time", "icao24", "callsign", "_seen_rank"
+                )
+
+        sv = self._get_data_within_timeframe(self.tracks_table, month, prepare=prepare)
         fl = self._get_data_within_timeframe(
             "opdi_flight_list",
             month,
@@ -1788,7 +1805,6 @@ class FlightListProcessor:
             # (rank, time) and (rank, minus time) of the track. One
             # aggregation by track, which sends one row per track and part
             # across the cluster rather than every report.
-            sv = sv.withColumn("_seen_rank", seen_rank(sv))
             t = col("event_time").cast("double")
             first_key = F.struct(col("_seen_rank").alias("r"), t.alias("t"))
             last_key = F.struct(col("_seen_rank").alias("r"), (-t).alias("t"))
