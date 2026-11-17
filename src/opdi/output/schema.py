@@ -532,7 +532,7 @@ EVENT_COLUMNS: Tuple[Column, ...] = (
         "string",
         "",
         "Version of the method that produced this event type, for example "
-        "events_v0.4.0. Different event types can have different versions.",
+        "events_v0.5.0. Different event types can have different versions.",
         "version",
         "event",
     ),

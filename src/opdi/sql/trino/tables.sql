@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS minio.opdi.flight_events (
     altitude_ft               double COMMENT 'Altitude of the aircraft at the event, in feet, from the barometric altitude the aircraft reports. For a flight-level crossing it is the flight level times 100. NULL for events that have no altitude.',
     h3_res_5                  varchar COMMENT 'Cell of the H3 hexagonal grid at resolution 5 that contains the event position. Cells cover about 250 km2 each, so the column can be used to select events in a region quickly.',
     source                    varchar COMMENT 'Source of the position reports, OSN for the OpenSky Network.',
-    version                   varchar COMMENT 'Version of the method that produced this event type, for example events_v0.4.0. Different event types can have different versions.',
+    version                   varchar COMMENT 'Version of the method that produced this event type, for example events_v0.5.0. Different event types can have different versions.',
     info                      varchar COMMENT 'Extra details about the event, as JSON text, for example the runway or the airport. The keys depend on the event type and are listed in the data dictionary.',
     distance_flown_nm         double COMMENT 'Distance flown from the start of the track to this event, along the received positions, in nautical miles (NM, 1 NM = 1,852 m). On a track that holds several flights it counts from the start of the track, not of the flight.',
     time_passed_s             double COMMENT 'Time from the first position of the track to this event, in seconds. On a track that holds several flights it counts from the start of the track, not of the flight.',

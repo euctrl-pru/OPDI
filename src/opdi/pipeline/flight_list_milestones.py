@@ -746,6 +746,15 @@ def _enrich(
     # against the aerodrome the evidence disagrees with. The columns of the
     # track evidence (_ev_*) are dropped before the return.
     flight_list = _with_track_evidence(flight_list, events, config)
+    if with_legs:
+        # The airports before the correction, for a first flight without a
+        # take-off and a last flight without a landing: the correction takes
+        # the track's earliest take-off and latest landing, which then lie at
+        # a stop (dropped with the other _ev_ columns).
+        for name in _END_COLUMNS:
+            actual = _named(flight_list, name)
+            if actual is not None:
+                flight_list = flight_list.withColumn(f"{_EV}o_{name}", F.col(actual))
     flight_list = correct_aerodromes(flight_list, events, config, airports)
 
     # Enriching a flight list that was enriched before is normal: step 04b runs
@@ -964,6 +973,10 @@ def _with_legs_version(frame: DataFrame) -> DataFrame:
     )
 
 
+#: The airport columns of each end of a flight-list row.
+_END_COLUMNS = ("ADEP", "ADEP_P", "ADEP_SOURCE", "ADES", "ADES_P", "ADES_SOURCE")
+
+
 def _leg_rows(flight_list: DataFrame, legs: DataFrame) -> DataFrame:
     """One row per flight of the tracks in ``legs``, built from the track's row.
 
@@ -989,6 +1002,8 @@ def _leg_rows(flight_list: DataFrame, legs: DataFrame) -> DataFrame:
         "LEG_END",
         "leg_adep",
         "leg_ades",
+        "leg_takes_off",
+        "leg_lands",
     )
     j = flight_list.join(leg, F.col("id") == F.col("_l_track"), "inner")
     first = F.col("LEG") == F.lit(1)
@@ -1014,7 +1029,15 @@ def _leg_rows(flight_list: DataFrame, legs: DataFrame) -> DataFrame:
             cols.append(leg_id(F.col(name), F.col("LEG")).alias(name))
         elif upper in at_stops:
             own_end, value = at_stops[upper]
-            cols.append(F.when(own_end, F.col(name)).otherwise(value).cast(types[name]).alias(name))
+            own = F.col(name)
+            before = f"{_EV}o_{upper}"
+            if before in flight_list.columns:
+                # The first flight's departure is the corrected one only when
+                # it took off within the track; the last flight's destination
+                # only when it landed within it.
+                seen = F.col("leg_takes_off") if upper.startswith("ADEP") else F.col("leg_lands")
+                own = F.when(seen, own).otherwise(F.col(before))
+            cols.append(F.when(own_end, own).otherwise(value).cast(types[name]).alias(name))
         else:
             cols.append(F.col(name))
     return j.select(

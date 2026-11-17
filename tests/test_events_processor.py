@@ -56,7 +56,7 @@ def test_a_config_without_events_still_builds(processor, spark, tmp_path):
 
 
 def test_the_version_stamped_is_the_configured_one(processor):
-    assert processor(EventConfig()).events.events_version == "events_v0.4.0"
+    assert processor(EventConfig()).events.events_version == "events_v0.5.0"
     assert processor(EventConfig.legacy()).events.events_version == "events_v0.0.2"
 
 

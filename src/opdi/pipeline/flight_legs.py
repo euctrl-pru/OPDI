@@ -126,8 +126,9 @@ def flight_stops(events: DataFrame, config: EventConfig) -> DataFrame:
         One row per stop: ``track_id``, ``stop`` (its number in the track,
         from 1), ``landing_time`` and ``landing_airport`` (of the ``ALDT``),
         ``take_off_time`` and ``take_off_airport`` (of the next ``ATOT``),
-        and ``division_time`` (see the module's description). Tracks without
-        a stop have no row.
+        ``division_time`` (see the module's description), and the track's
+        ``first_take_off_time`` and ``last_landing_time``. Tracks without a
+        stop have no row.
     """
     key = _key(events)
     t = F.col("event_time")
@@ -138,10 +139,18 @@ def flight_stops(events: DataFrame, config: EventConfig) -> DataFrame:
         _info("apt_icao").alias("apt"),
     )
     # In time order; at the same instant the landing ("ALDT") sorts first.
-    order = Window.partitionBy("track_id").orderBy("t", "type")
+    per_track = Window.partitionBy("track_id")
+    order = per_track.orderBy("t", "type")
     minimum = float(config.flight_stop_min_ground_s)
     stops = (
-        runway.withColumn("_prev_type", F.lag("type").over(order))
+        runway.withColumn(
+            "first_take_off_time",
+            F.min(F.when(F.col("type") == "ATOT", F.col("t"))).over(per_track),
+        )
+        .withColumn(
+            "last_landing_time", F.max(F.when(F.col("type") == "ALDT", F.col("t"))).over(per_track)
+        )
+        .withColumn("_prev_type", F.lag("type").over(order))
         .withColumn("_prev_t", F.lag("t").over(order))
         .withColumn("_prev_apt", F.lag("apt").over(order))
         .filter(
@@ -155,6 +164,8 @@ def flight_stops(events: DataFrame, config: EventConfig) -> DataFrame:
             F.col("_prev_apt").alias("landing_airport"),
             F.col("t").alias("take_off_time"),
             F.col("apt").alias("take_off_airport"),
+            "first_take_off_time",
+            "last_landing_time",
         )
     )
 
@@ -173,7 +184,15 @@ def flight_stops(events: DataFrame, config: EventConfig) -> DataFrame:
             & (F.col("_b_t") < F.col("take_off_time")),
             "left",
         )
-        .groupBy("track_id", "landing_time", "landing_airport", "take_off_time", "take_off_airport")
+        .groupBy(
+            "track_id",
+            "landing_time",
+            "landing_airport",
+            "take_off_time",
+            "take_off_airport",
+            "first_take_off_time",
+            "last_landing_time",
+        )
         .agg(
             F.min(F.when(F.col("_b_type") == "AIBT", F.col("_b_t"))).alias("_in_block"),
             F.max(F.when(F.col("_b_type") == "AOBT", F.col("_b_t"))).alias("_off_block"),
@@ -197,6 +216,8 @@ def flight_stops(events: DataFrame, config: EventConfig) -> DataFrame:
         "take_off_time",
         "take_off_airport",
         F.timestamp_seconds(division_s).alias("division_time"),
+        "first_take_off_time",
+        "last_landing_time",
     )
 
 
@@ -211,9 +232,11 @@ def flight_legs(stops: DataFrame) -> DataFrame:
         ``LEG`` (from 1), ``LEGS`` (the number of flights of the track),
         ``LEG_START`` and ``LEG_END`` (the division times before and after
         the flight; NULL for the first and the last), ``leg_adep`` (the
-        take-off airport of the stop before; NULL for the first flight) and
+        take-off airport of the stop before; NULL for the first flight),
         ``leg_ades`` (the landing airport of the stop after; NULL for the
-        last flight).
+        last flight), ``leg_takes_off`` (False for a first flight of a
+        track that starts in the air) and ``leg_lands`` (False for a last
+        flight of a track that ends in the air).
     """
     per_track = Window.partitionBy("track_id")
     order = per_track.orderBy("stop")
@@ -226,6 +249,12 @@ def flight_legs(stops: DataFrame) -> DataFrame:
         F.col("division_time").alias("LEG_END"),
         F.lit(None).cast("string").alias("leg_adep"),
         F.col("landing_airport").alias("leg_ades"),
+        # Whether the first flight took off within the track (else the
+        # track starts in the air).
+        F.coalesce(F.col("first_take_off_time") < F.col("landing_time"), F.lit(False)).alias(
+            "leg_takes_off"
+        ),
+        F.lit(True).alias("leg_lands"),
     )
     later = s.select(
         "track_id",
@@ -235,6 +264,12 @@ def flight_legs(stops: DataFrame) -> DataFrame:
         F.lead("division_time").over(order).alias("LEG_END"),
         F.col("take_off_airport").alias("leg_adep"),
         F.lead("landing_airport").over(order).alias("leg_ades"),
+        F.lit(True).alias("leg_takes_off"),
+        # Whether the last flight landed within the track (else the track
+        # ends in the air).
+        F.when(F.col("stop") < F.col("_n"), F.lit(True))
+        .otherwise(F.coalesce(F.col("last_landing_time") > F.col("take_off_time"), F.lit(False)))
+        .alias("leg_lands"),
     )
     return first.unionByName(later)
 
@@ -258,6 +293,10 @@ def with_flight_rows(flight_list: DataFrame, legs: Optional[DataFrame]) -> DataF
         flight_list: Rows of ``opdi_flight_list`` (one per track).
         legs: Rows of :data:`LEGS_TABLE` for the same days, or None.
 
+    A flight row is used only when its version equals that of its track's
+    row, which step 04b writes with it; rows a run with other settings left
+    behind are ignored.
+
     Returns:
         The rows of ``flight_list`` whose track has no flight rows, and the
         flight rows, with the columns of ``flight_list`` and
@@ -274,6 +313,16 @@ def with_flight_rows(flight_list: DataFrame, legs: Optional[DataFrame]) -> DataF
     )
     if legs is None:
         return single
+    # Only flight rows written with the track's row: step 04b gives both the
+    # same version, so rows left from a run with other settings are not used.
+    current = flight_list.select(
+        F.col("ID").alias("_l_track"), F.col("VERSION").alias("_l_version")
+    )
+    legs = legs.join(
+        current,
+        (F.col("TRACK_ID") == F.col("_l_track")) & (F.col("VERSION") == F.col("_l_version")),
+        "left_semi",
+    )
     tracks = legs.select(F.col("TRACK_ID").alias("_l_track")).distinct()
     single = single.join(tracks, F.col("ID") == F.col("_l_track"), "left_anti")
     return single.unionByName(legs.select(*single.columns))

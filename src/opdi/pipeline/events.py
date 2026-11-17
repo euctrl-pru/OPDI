@@ -2707,7 +2707,7 @@ class FlightEventProcessor:
         df_events = merge_milestone_duplicates(df_events, self.events)
         df_events = df_events.withColumn("source", lit("OSN"))
         # Versions: a family that writes its own ``version`` keeps it; all other
-        # events get the shared events version (``events_v0.4.0`` by default).
+        # events get the shared events version (``events_v0.5.0`` by default).
         if "version" not in df_events.columns:
             df_events = df_events.withColumn("version", lit(None).cast("string"))
         df_events = df_events.withColumn(

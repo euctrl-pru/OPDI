@@ -41,8 +41,10 @@ LEGACY_ENDPOINT_VERSION = "v3.0.0"
 # --- events (step 04, column ``version``) ------------------------------------
 
 #: The events of release v2.0.0 (the default of ``EventConfig.events_version``),
-#: with the corrections of the spot checks of 2026-06-14.
-EVENTS_VERSION = "events_v0.4.0"
+#: with the corrections of the spot checks of 2026-06-14, and with the distance
+#: circles also drawn around the airports where a track that holds several
+#: flights stopped (``EventConfig.flight_list_one_row_per_flight``).
+EVENTS_VERSION = "events_v0.5.0"
 #: The events of release v0.0.2 (``EventConfig.legacy()``).
 LEGACY_EVENTS_VERSION = "events_v0.0.2"
 #: Holding patterns: ``holding-start``, ``holding-end`` and their measurements.
