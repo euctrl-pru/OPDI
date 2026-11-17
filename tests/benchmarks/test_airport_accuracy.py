@@ -469,3 +469,46 @@ def test_build_tables_airports():
     assert ap.set_index("airport").loc["EDDF", "departures_with_take_off_pct"] == pytest.approx(
         40.0
     )
+
+
+# ---------------------------------------------------------------- record runways
+
+
+def _runways():
+    """Runway rows in the shape of ``oa_runways`` (OurAirports)."""
+    return pd.DataFrame(
+        {
+            "airport_ident": ["ENBR", "UGTB", "UGTB", "EGLL", "EGLL"],
+            "le_ident": ["17", "13L", "13R", "09L", "09R"],
+            "he_ident": ["35", "31R", "31L", "27R", "27L"],
+            "closed": [False, True, False, False, False],
+        }
+    )
+
+
+def test_record_runways_keeps_a_runway_of_the_airport():
+    values = pd.DataFrame({"rec_apt": ["EGLL", "ENBR"], "rec_rwy": ["27L", "035"]})
+    out = aa.record_runways(values, _runways())
+    assert out["rwy_key"].tolist() == ["27L", "35"]
+
+
+def test_record_runways_drops_a_value_that_is_no_runway_of_the_airport():
+    # Every Bergen record names runway "01"; Bergen has one runway, 17/35.
+    values = pd.DataFrame({"rec_apt": ["ENBR"], "rec_rwy": ["01"]})
+    assert aa.record_runways(values, _runways())["rwy_key"].tolist() == [None]
+
+
+def test_record_runways_gives_the_side_of_the_only_open_runway_of_that_number():
+    # Tbilisi: 13L/31R is closed, so a record "31" can only be 31L.
+    values = pd.DataFrame({"rec_apt": ["UGTB", "UGTB"], "rec_rwy": ["31", "13"]})
+    assert aa.record_runways(values, _runways())["rwy_key"].tolist() == ["31L", "13R"]
+
+
+def test_record_runways_leaves_a_number_without_side_unknown_when_two_runways_carry_it():
+    values = pd.DataFrame({"rec_apt": ["EGLL"], "rec_rwy": ["27"]})
+    assert aa.record_runways(values, _runways())["rwy_key"].tolist() == [None]
+
+
+def test_record_runways_keeps_the_value_of_an_airport_with_no_runway_in_the_table():
+    values = pd.DataFrame({"rec_apt": ["LXXX", "LXXX"], "rec_rwy": ["01", None]})
+    assert aa.record_runways(values, _runways())["rwy_key"].tolist() == ["01", None]

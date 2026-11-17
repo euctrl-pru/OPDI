@@ -35,6 +35,13 @@ sign and the airport, the nearest within 6 h, as in
 ``benchmarks/corrections_scorecard.py``, whose functions this script uses for
 the event times so that the two give the same figures for the same day.
 
+**Record runways.** A record's runway is compared only when it names a
+runway of its airport in OurAirports (``oa_runways``, open or closed); a
+number without a side letter (``31``) stands for the one open runway end of
+that number with a side letter (``31L``) when there is exactly one. Any
+other value counts as no runway named: Bergen, Stavanger and Trondheim send ``01`` in
+every record, whatever runway was used.
+
 **What is never published.** The tables hold counts and shares per item and
 airport: no flight, track id or call sign.
 
@@ -63,7 +70,8 @@ if str(BENCH) not in sys.path:
 if str(REPO / "src") not in sys.path:
     sys.path.insert(0, str(REPO / "src"))
 
-SPOT = "s3a://eurocontrol/opdi-world/research/spot"
+WAREHOUSE = "s3a://eurocontrol/opdi-world"
+SPOT = f"{WAREHOUSE}/research/spot"
 #: Day -> the folder holding its flight list, events and measurements.
 DAYS = {
     "2026-06-10": f"{SPOT}/d0610",
@@ -288,6 +296,60 @@ def _plain_key(x):
 
 
 _KEYS = {"runway": _runway_key, "stand": _stand_key, "airport": _plain_key, "type": _plain_key}
+
+
+def record_runways(values: pd.DataFrame, runways: pd.DataFrame) -> pd.DataFrame:
+    """The runway each record names, checked against the runways of its airport.
+
+    ``values`` holds ``rec_apt`` (the airport) and ``rec_rwy`` (the runway
+    designator the record gives); ``runways`` the runway table of OurAirports
+    (``oa_runways``: ``airport_ident``, ``le_ident``, ``he_ident``,
+    ``closed``). Returned: ``values`` with ``rwy_key``, the designator to
+    compare with OPDI's, or None when the record names no runway of the
+    airport. Three cases:
+
+    - the record names one end of one of the airport's runways (open or
+      closed): that designator, written as two digits and a side letter;
+    - the record gives a number without a side letter (``31``) and exactly
+      one open runway of the airport has an end with that number and a side
+      letter (``31L``): that end;
+    - otherwise the record value is not a runway of the airport (for example
+      ``01`` in every record of an airport whose only runway is 17/35): None,
+      and the record counts as naming no runway.
+
+    An airport with no runway in the table keeps its record values as they
+    are, since there is nothing to check them against.
+    """
+    rw = runways.copy()
+    ends = pd.concat(
+        [
+            rw[["airport_ident", "le_ident", "closed"]].rename(columns={"le_ident": "end"}),
+            rw[["airport_ident", "he_ident", "closed"]].rename(columns={"he_ident": "end"}),
+        ],
+        ignore_index=True,
+    )
+    ends["key"] = ends["end"].map(_runway_key)
+    ends = ends[ends["key"].notna()]
+    known = {a: set(g["key"]) for a, g in ends.groupby("airport_ident")}
+    open_ends = ends[~ends["closed"].fillna(False).astype(bool)]
+    by_number = {}
+    for a, g in open_ends.groupby("airport_ident"):
+        for k in sorted(set(g["key"])):
+            if len(k) == 3:
+                by_number.setdefault((a, k[:2]), []).append(k)
+
+    def one(apt, value):
+        key = _runway_key(value)
+        if key is None or apt not in known:
+            return key
+        if key in known[apt]:
+            return key
+        sided = by_number.get((apt, key), []) if len(key) == 2 else []
+        return sided[0] if len(sided) == 1 else None
+
+    out = values.copy()
+    out["rwy_key"] = [one(a, v) for a, v in zip(out["rec_apt"], out["rec_rwy"])]
+    return out
 
 
 def agreement(named, recorded, kind: str) -> str:
@@ -550,6 +612,39 @@ def _records(spark, day: str):
     cs.DAY = day
     cs.MONTH = MONTH
     return cs.airport_records(spark)
+
+
+def _oa_runways(spark) -> pd.DataFrame:
+    """The runway table of OurAirports (``oa_runways``) of the warehouse, the columns
+    :func:`record_runways` reads."""
+    return (
+        spark.read.parquet(f"{WAREHOUSE}/oa_runways")
+        .select("airport_ident", "le_ident", "he_ident", "closed")
+        .toPandas()
+    )
+
+
+def _checked_records(spark, recs, runways: pd.DataFrame):
+    """``recs`` with ``rec_rwy`` replaced by the checked designator of :func:`record_runways`.
+
+    Also returned: the record values that name no runway of their airport,
+    with their number of records, so that the extract says what it set aside.
+    """
+    from pyspark.sql import functions as F
+
+    values = recs.groupBy("rec_apt", "rec_rwy").count().toPandas()
+    checked = record_runways(values, runways)
+    rows = checked[["rec_apt", "rec_rwy", "rwy_key"]].astype(object)
+    lookup = spark.createDataFrame(
+        rows.where(rows.notna(), None), "rec_apt string, rec_rwy string, rwy_key string"
+    )
+    out = (
+        recs.join(F.broadcast(lookup), ["rec_apt", "rec_rwy"], "left")
+        .withColumn("rec_rwy", F.col("rwy_key"))
+        .drop("rwy_key")
+    )
+    dropped = checked[checked["rwy_key"].isna() & checked["rec_rwy"].map(_runway_key).notna()]
+    return out, dropped[["rec_apt", "rec_rwy", "count"]].sort_values(["rec_apt", "rec_rwy"])
 
 
 def _record_counts(spark, recs, FLX, day: str) -> pd.DataFrame:
@@ -882,7 +977,8 @@ def extract(args) -> int:
 
     day = args.day
     root = args.root or DAYS[day]
-    out = EXTRACT / day
+    folder = Path(args.extract) if args.extract else EXTRACT
+    out = folder / day
     out.mkdir(parents=True, exist_ok=True)
     started = time.time()
     with cs.spark_lock(f"airport_accuracy extract {day}"):
@@ -902,18 +998,22 @@ def extract(args) -> int:
         meta = {"day": day, "root": root, "events": E.count(), "flights": FLX.count()}
         print(f"  {day}: {meta['events']:,} events, {meta['flights']:,} flights", flush=True)
         matched, check = _apdf_matched(spark, E, FLX, day)
+        runways = _oa_runways(spark)
+        matched["rec_rwy"] = record_runways(matched[["rec_apt", "rec_rwy"]], runways)["rwy_key"]
         matched.to_parquet(out / "apdf_events.parquet", index=False)
         meta["scorecard_check"] = check
-        recs = _records(spark, day).persist(keep)
+        recs, dropped = _checked_records(spark, _records(spark, day), runways)
+        recs = recs.persist(keep)
+        meta["record_runways_not_at_airport"] = dropped.to_dict("records")
         _record_counts(spark, recs, FLX, day).to_parquet(out / "apdf_records.parquet", index=False)
         _flight_list_vs_records(recs, FLX).to_parquet(out / "apdf_flight_list.parquet", index=False)
         recs.unpersist()
         nm, nm_counts = _nm(spark, E, FLX, M, day)
         nm.to_parquet(out / "nm.parquet", index=False)
         nm_counts.to_parquet(out / "nm_counts.parquet", index=False)
-        apt_file = EXTRACT / "airports.parquet"
+        apt_file = folder / "airports.parquet"
         if not apt_file.exists():
-            spark.read.parquet("s3a://eurocontrol/opdi-world/oa_airports").select(
+            spark.read.parquet(f"{WAREHOUSE}/oa_airports").select(
                 F.col("ident").alias("airport"), "name", "iso_country"
             ).dropDuplicates(["airport"]).toPandas().to_parquet(apt_file, index=False)
         bases, carriers, pooled = _own(spark, E, FLX, M)
@@ -1576,7 +1676,7 @@ def tables(args) -> int:
     import provenance
 
     days = args.days or sorted(DAYS)
-    x = load_extracts(days)
+    x = load_extracts(days, Path(args.extract) if args.extract else EXTRACT)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     built = build_tables(x)
@@ -1622,11 +1722,13 @@ def main(argv=None) -> int:
     e.add_argument("--day", required=True, choices=sorted(DAYS))
     e.add_argument("--root", default=None, help="folder of the day's tables (default: DAYS)")
     e.add_argument("--executors", type=int, default=13)
+    e.add_argument("--extract", default=None, help=f"folder of the extracts (default: {EXTRACT})")
     t = sub.add_parser("tables")
     t.add_argument("--out", required=True)
     t.add_argument("--days", nargs="+", default=None)
     t.add_argument("--scorecard", default=None, help="a scorecard CSV to check one day against")
     t.add_argument("--check-day", default="2026-06-14")
+    t.add_argument("--extract", default=None, help=f"folder of the extracts (default: {EXTRACT})")
     args = ap.parse_args(argv)
     if args.command == "extract":
         return extract(args)
