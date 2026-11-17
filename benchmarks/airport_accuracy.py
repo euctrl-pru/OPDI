@@ -1447,7 +1447,8 @@ def build_tables(x: dict) -> dict:
     cmp = comparisons(x)
     rc = x["apdf_records"]
     record_airports = set(rc.loc[rc["reference_movements"] > 0, "rec_apt"])
-    items = [item_table(x, cmp, days, "all three days", record_airports)]
+    together = "all three days" if len(days) == 3 else f"all {len(days)} days"
+    items = [item_table(x, cmp, days, together, record_airports)]
     items += [item_table(x, cmp, [d], d, record_airports) for d in days]
     item_acc = pd.concat(items, ignore_index=True)
 
@@ -1472,7 +1473,7 @@ def build_tables(x: dict) -> dict:
     ]
     w_tab = w_tab[WORLD_COLUMNS].sort_values(["rank", "kind", "item"]).reset_index(drop=True)
 
-    per_day = item_acc[item_acc["days"] != "all three days"].rename(columns={"days": "day"})
+    per_day = item_acc[item_acc["days"] != together].rename(columns={"days": "day"})
     spread = day_spread(
         per_day,
         ["item", "reference"],

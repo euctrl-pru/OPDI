@@ -421,7 +421,7 @@ def _extracts():
 
 def test_build_tables_item_rows():
     t = aa.build_tables(_extracts())["item_accuracy.csv"]
-    allx = t[t["days"] == "all three days"]
+    allx = t[t["days"] == "all 2 days"]
     atot = allx[(allx["item"] == "ATOT") & (allx["reference"] == "airport records")].iloc[0]
     assert atot["reference_movements"] == 4
     assert atot["found"] == 2
