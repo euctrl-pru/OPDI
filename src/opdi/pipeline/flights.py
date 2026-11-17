@@ -861,6 +861,27 @@ class FlightListProcessor:
             # reports without an altitude are left out
             # (EventConfig.seen_from_measured_reports).
             sv = sv.dropna(subset=["lat", "lon", "track_id"])
+            # Only the columns read below, so the reports shuffled for the
+            # window are narrow.
+            sv = sv.select(
+                *[
+                    c
+                    for c in (
+                        "track_id",
+                        "icao24",
+                        "flight_id",
+                        "event_time",
+                        "lat",
+                        "lon",
+                        "baro_altitude",
+                        "heading",
+                        "vert_rate",
+                        "on_ground",
+                        "h3_res_7",
+                    )
+                    if c in sv.columns
+                ]
+            )
             w_seen = Window.partitionBy("track_id")
             t = F.to_timestamp(col("event_time"))
             sv = sv.withColumn("first_seen", f_min(t).over(w_seen)).withColumn(
