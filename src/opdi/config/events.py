@@ -1101,6 +1101,15 @@ class EventConfig:
     from the track's first report, which can differ from ``first_seen``."""
 
     # -- one event type per question -----------------------------------
+    merge_milestones_per_airport: bool = True
+    """With :attr:`merge_duplicate_milestones`, keep one ``ATOT`` and one
+    ``ALDT`` per track and airport (``info.apt_icao``) rather than per track.
+    A track that holds several flights lands at several airports; the
+    runway milestones may give the landing at a stop on the way and only
+    the runway window the one at the destination, and both are landings.
+    Two readings of one movement are at one airport and still give one
+    event. Off in release v0.0.2."""
+
     merge_duplicate_milestones: Optional[bool] = None
     """Publish one event type per milestone, where two detectors give the
     same one.
@@ -1716,6 +1725,7 @@ class EventConfig:
             ring_radii_nm=(),
             emit_runway_milestones=False,
             merge_duplicate_milestones=False,
+            merge_milestones_per_airport=False,
             emit_pru_tops=False,
             level_method="icao",
             level_floors_above_field=False,

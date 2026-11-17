@@ -682,10 +682,11 @@ _METHOD_RANK = {"acdm": 0, "legacy": 1}
 def merge_milestone_duplicates(
     df_events: DataFrame, config: Optional[EventConfig] = None
 ) -> DataFrame:
-    """Keep one ``ATOT`` and one ``ALDT`` per flight.
+    """Keep one ``ATOT`` and one ``ALDT`` per flight (per airport of the flight).
 
     With :attr:`merge_duplicate_milestones`, both detectors write the same
-    type, and this keeps one row per ``(track_id, type)``::
+    type, and this keeps one row per ``(track_id, type)``, and per airport
+    (``info.apt_icao``) with :attr:`merge_milestones_per_airport`::
 
         ATOT = runway milestone airborne if found, else runway window time
         ALDT = runway milestone touchdown if found, else runway window time
@@ -711,7 +712,12 @@ def merge_milestone_duplicates(
     # A row without a time is never kept where a row with one exists, whatever
     # its method. ``event_time`` then breaks a tie between two rows of one
     # method, so the choice does not depend on how Spark split the data.
-    best = Window.partitionBy("track_id", "type").orderBy(
+    # With merge_milestones_per_airport, one per track, type and airport: the
+    # landings of a track that holds several flights are separate events.
+    keys = [col("track_id"), col("type")]
+    if config.merge_milestones_per_airport:
+        keys.append(F.get_json_object(col("info"), "$.apt_icao"))
+    best = Window.partitionBy(*keys).orderBy(
         col("event_time").isNull().asc(), rank.asc(), col("event_time").asc()
     )
     kept = (
