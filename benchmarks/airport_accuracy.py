@@ -1338,7 +1338,8 @@ def airport_table(
     out = out.merge(own.drop(columns="side"), on=["airport", "item"], how="left")
     # A runway or stand named in an event is a property of that event: its
     # availability among OPDI's flights is the event's own row.
-    out.loc[out["item"].isin(list(APDF_EQUAL)), OWN_COLUMNS] = np.nan
+    named_in_event = [i for i in APDF_EQUAL if not i.startswith(FL_PREFIX)]
+    out.loc[out["item"].isin(named_in_event), OWN_COLUMNS] = np.nan
     out["has_airport_records"] = out["airport"].isin(record_airports)
     out["in_europe"] = out["airport"].map(is_european)
     out["reference"] = [

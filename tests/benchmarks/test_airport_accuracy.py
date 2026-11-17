@@ -458,6 +458,8 @@ def test_build_tables_airports():
     assert eddf_aobt["availability_own_pct"] == pytest.approx(10.0)
     named = eu[(eu["airport"] == "EDDF") & (eu["item"] == "ATOT runway (info.runway)")].iloc[0]
     assert pd.isna(named["flights_with_item"])
+    rwy = eu[(eu["airport"] == "EDDF") & (eu["item"] == "flight list: RWY_DEP")].iloc[0]
+    assert rwy["flights_eligible"] == 20
     w = b["airport_accuracy_world.csv"]
     assert w["airport"].iloc[0] == "KJFK"
     jfk = w[(w["airport"] == "KJFK") & (w["item"] == "AOBT")].iloc[0]
