@@ -21,13 +21,15 @@ The step reads and writes nothing itself: it takes two DataFrames and returns
 one. The caller wires storage.
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
 from ..config import EventConfig
 from ..utils.geometry import haversine_nm
+from ..versions import FLIGHT_LIST_LEGS_VERSION, FLIGHT_LIST_VERSION
+from .flight_legs import LEG_COLUMNS, event_in_leg, flight_legs, flight_stops, leg_id
 
 #: The radii the flight list publishes, as ``C{NM}_ARR`` / ``C{NM}_DEP``.
 #:
@@ -656,6 +658,54 @@ def enrich_flight_list(
 ) -> DataFrame:
     """Add the milestone, runway, stand and ring columns to a flight list.
 
+    The track rows of :func:`enrich_flight_list_and_flights`, which documents
+    the arguments; the flight rows of tracks that hold several flights are
+    not computed.
+    """
+    return _enrich(flight_list, events, config or EventConfig(), airports, with_legs=False)[0]
+
+
+def enrich_flight_list_and_flights(
+    flight_list: DataFrame,
+    events: DataFrame,
+    config: Optional[EventConfig] = None,
+    airports: Optional[DataFrame] = None,
+) -> Tuple[DataFrame, Optional[DataFrame]]:
+    """The enriched flight list, and the rows of the flights of tracks that hold several.
+
+    The first frame is the flight list with one row per track, as
+    :func:`enrich_flight_list` returns it. The second, with
+    :attr:`EventConfig.flight_list_one_row_per_flight`, holds one row per
+    flight of each track that holds more than one (see
+    :mod:`opdi.pipeline.flight_legs`), each with its own airports, first
+    and last report times, and the milestone, runway, stand, ring and
+    movement columns computed from that flight's events only; ``None``
+    without that setting. Both carry the version of the flight list with
+    one row per flight, :data:`FLIGHT_LIST_LEGS_VERSION`, when the setting
+    is on.
+    """
+    config = config or EventConfig()
+    return _enrich(
+        flight_list,
+        events,
+        config,
+        airports,
+        with_legs=bool(getattr(config, "flight_list_one_row_per_flight", False)),
+    )
+
+
+def _enrich(
+    flight_list: DataFrame,
+    events: DataFrame,
+    config: Optional[EventConfig] = None,
+    airports: Optional[DataFrame] = None,
+    with_legs: bool = False,
+) -> Tuple[DataFrame, Optional[DataFrame]]:
+    """Add the milestone, runway, stand and ring columns to a flight list.
+
+    With ``with_legs``, also the rows of the flights of tracks that hold
+    several (see :func:`enrich_flight_list_and_flights`).
+
     Args:
         flight_list: the flight list, keyed on ``id`` (the ``track_id``) and
             carrying ``adep``/``ades``. Returned unchanged but for the added
@@ -676,9 +726,12 @@ def enrich_flight_list(
             :attr:`EventConfig.aerodrome_correction_checks_track` and
             :attr:`EventConfig.movement_flags_need_track_evidence`. Without
             it those checks treat every distance and height as unknown.
+        with_legs: also compute the rows of the flights of tracks that hold
+            several flights.
 
     Returns:
-        The flight list plus :data:`ADDED_COLUMNS`.
+        The flight list plus :data:`ADDED_COLUMNS`, and the flight rows (or
+        ``None`` without ``with_legs``).
 
     Raises:
         ValueError: if the flight list already carries one of the added names,
@@ -720,8 +773,23 @@ def enrich_flight_list(
     # flight list, so a narrow three-column projection of it joins the events
     # before the pivot. It is projected rather than joined in place so that the
     # wide flight list is touched exactly once, by the LEFT join at the end.
-    keys = flight_list.select(
+    # ``_track_id`` names the row the milestones are for and ``_trk`` the
+    # track whose events it reads. They are the same on a track's own row; a
+    # flight row of a track that holds several flights reads its track's
+    # events between its two division times ``_lo`` and ``_hi``
+    # (opdi.pipeline.flight_legs).
+    tracks = flight_list.withColumn("_trk", F.col("id"))
+    tracks = tracks.withColumn("_lo", _null_ts()).withColumn("_hi", _null_ts())
+    rows = tracks
+    leg_rows = None
+    if with_legs:
+        leg_rows = _leg_rows(flight_list, flight_legs(flight_stops(events, config)))
+        rows = tracks.unionByName(leg_rows.drop(*LEG_COLUMNS))
+    keys = rows.select(
         F.col("id").alias("_track_id"),
+        "_trk",
+        "_lo",
+        "_hi",
         F.col("adep").alias("_adep"),
         F.col("ades").alias("_ades"),
     )
@@ -733,7 +801,12 @@ def enrich_flight_list(
             "info",
         )
         .filter(F.col("type").isin(wanted))
-        .join(keys, F.col("_event_key") == F.col("_track_id"), "inner")
+        .join(
+            keys,
+            (F.col("_event_key") == F.col("_trk"))
+            & event_in_leg(F.col("event_time"), F.col("_lo"), F.col("_hi")),
+            "inner",
+        )
     )
     if config.layout_nested_stands_both_published:
         # The stand columns name the inner one of two nested stands, as the
@@ -833,6 +906,9 @@ def enrich_flight_list(
     # in this order reproduces ADDED_COLUMNS exactly, which is the published
     # column order.
     milestones = [c for c in ADDED_COLUMNS if c not in MOVEMENT_COLUMNS]
+    if with_legs:
+        # Read twice below, by the track rows and by the flight rows.
+        agg = agg.cache()
     out = add_movement_columns(
         flight_list.join(agg, flight_list["id"] == agg["_track_id"], "left")
         .drop("_track_id")
@@ -840,10 +916,118 @@ def enrich_flight_list(
         config,
         airports,
     )
-    internal = [c for c in out.columns if c.startswith(_EV)]
-    if internal:
-        out = out.drop(*internal)
-    return out
+    out = _without_internal(out)
+    if not with_legs:
+        return out, None
+    # The movement flags of a flight row compare it with the other rows of
+    # its aircraft as the published flight list holds them: the flight rows
+    # and the rows of tracks with one flight.
+    single = tracks.join(
+        leg_rows.select(F.col("TRACK_ID").alias("_l_track")).distinct(),
+        F.col("id") == F.col("_l_track"),
+        "left_anti",
+    ).withColumn("_is_leg", F.lit(False))
+    for name, dtype in zip(LEG_COLUMNS, ("string", "int", "int", "timestamp", "timestamp")):
+        single = single.withColumn(name, F.lit(None).cast(dtype))
+    flights = single.unionByName(
+        leg_rows.withColumn("_is_leg", F.lit(True)), allowMissingColumns=False
+    )
+    flights = add_movement_columns(
+        flights.join(agg, flights["id"] == agg["_track_id"], "left")
+        .drop("_track_id")
+        .select(*flight_list.columns, *milestones, *LEG_COLUMNS, "_is_leg"),
+        config,
+        airports,
+    )
+    flights = _without_internal(flights.filter(F.col("_is_leg")).drop("_is_leg"))
+    return _with_legs_version(out), _with_legs_version(flights)
+
+
+def _without_internal(frame: DataFrame) -> DataFrame:
+    """``frame`` without the columns of the track evidence (``_ev_*``)."""
+    internal = [c for c in frame.columns if c.startswith(_EV)]
+    return frame.drop(*internal) if internal else frame
+
+
+def _with_legs_version(frame: DataFrame) -> DataFrame:
+    """The flight-list version of a list with one row per flight.
+
+    A row of the flight list of release v2.0.0 (:data:`FLIGHT_LIST_VERSION`)
+    gets :data:`FLIGHT_LIST_LEGS_VERSION`; any other version is kept.
+    """
+    name = _named(frame, "VERSION")
+    if name is None:
+        return frame
+    current = F.col(name) == F.lit(FLIGHT_LIST_VERSION)
+    return frame.withColumn(
+        name, F.when(current, F.lit(FLIGHT_LIST_LEGS_VERSION)).otherwise(F.col(name))
+    )
+
+
+def _leg_rows(flight_list: DataFrame, legs: DataFrame) -> DataFrame:
+    """One row per flight of the tracks in ``legs``, built from the track's row.
+
+    The rules are those of :mod:`opdi.pipeline.flight_legs`: the identifier
+    is ``<track_id>-L<k>``; the first flight keeps the track's departure
+    airport (with its alternatives and source) and first report time, the
+    last flight its destination airport and last report time; an airport at
+    a stop is the airport of the landing or the take-off there, with the
+    source ``runway_event`` and no alternatives, and the first and last
+    report times at a stop are the division time. Every other column is the
+    track's.
+
+    Returns:
+        The columns of ``flight_list``, then ``_trk``, ``_lo``, ``_hi`` (the
+        track and the division times the flight's events are read between)
+        and :data:`~opdi.pipeline.flight_legs.LEG_COLUMNS`.
+    """
+    leg = legs.select(
+        F.col("track_id").alias("_l_track"),
+        "LEG",
+        "LEGS",
+        "LEG_START",
+        "LEG_END",
+        "leg_adep",
+        "leg_ades",
+    )
+    j = flight_list.join(leg, F.col("id") == F.col("_l_track"), "inner")
+    first = F.col("LEG") == F.lit(1)
+    last = F.col("LEG") == F.col("LEGS")
+    from_stop = F.lit("runway_event")
+    # Per column: the end of the track it describes (first or last flight)
+    # and the value a flight takes at a stop.
+    at_stops = {
+        "ADEP": (first, F.col("leg_adep")),
+        "ADEP_P": (first, F.lit(None)),
+        "ADEP_SOURCE": (first, F.when(F.col("leg_adep").isNotNull(), from_stop)),
+        "FIRST_SEEN": (first, F.col("LEG_START")),
+        "ADES": (last, F.col("leg_ades")),
+        "ADES_P": (last, F.lit(None)),
+        "ADES_SOURCE": (last, F.when(F.col("leg_ades").isNotNull(), from_stop)),
+        "LAST_SEEN": (last, F.col("LEG_END")),
+    }
+    types = dict(flight_list.dtypes)
+    cols = []
+    for name in flight_list.columns:
+        upper = name.upper()
+        if upper == "ID":
+            cols.append(leg_id(F.col(name), F.col("LEG")).alias(name))
+        elif upper in at_stops:
+            own_end, value = at_stops[upper]
+            cols.append(F.when(own_end, F.col(name)).otherwise(value).cast(types[name]).alias(name))
+        else:
+            cols.append(F.col(name))
+    return j.select(
+        *cols,
+        F.col("id").alias("_trk"),
+        F.col("LEG_START").alias("_lo"),
+        F.col("LEG_END").alias("_hi"),
+        F.col("id").alias("TRACK_ID"),
+        F.col("LEG").cast("int").alias("LEG"),
+        F.col("LEGS").cast("int").alias("LEGS"),
+        "LEG_START",
+        "LEG_END",
+    )
 
 
 def _aggregate_on_own_leg(narrowed: DataFrame, is_dep, is_arr, ring_types) -> DataFrame:

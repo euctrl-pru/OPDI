@@ -28,6 +28,11 @@ RELEASE = "v2.0.0"
 #: is built from the cleaned tracks; and ``FLT_ID`` is the call sign the track
 #: broadcast most often.
 FLIGHT_LIST_VERSION = "v6.0.0"
+#: The flight list of :data:`FLIGHT_LIST_VERSION` with one row per flight:
+#: a track that holds several flights (a landing, a stop on the ground and a
+#: new take-off) has one row for each, named ``<track_id>-L<k>``
+#: (``EventConfig.flight_list_one_row_per_flight``, step 04b).
+FLIGHT_LIST_LEGS_VERSION = "v6.1.0"
 #: The flight list built with the v0.0.2 settings (the ``trend`` method).
 LEGACY_TREND_VERSION = "v2.0.0"
 #: The ``endpoint`` method run with the v0.0.2 settings.

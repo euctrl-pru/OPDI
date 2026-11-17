@@ -85,6 +85,7 @@ from opdi.pipeline.detector_altitude import (
     received_altitude,
 )
 from opdi.pipeline.fir import calculate_fir_events, load_fir_reference
+from opdi.pipeline.flight_legs import flight_stops
 from opdi.pipeline.flight_list_milestones import corrected_aerodromes
 from opdi.pipeline.flight_list_step import airports_for_checks
 from opdi.pipeline.flights import resolve_flight_id, seen_rank, wide_search_roles
@@ -2234,6 +2235,16 @@ class FlightEventProcessor:
         airports = self._corrected_airports(df_events, month)
         if airports is None:
             return None
+        if self.events.flight_list_one_row_per_flight:
+            # One row per flight (flight legs): the circles are also drawn
+            # around the airports where a track that holds several flights
+            # landed and took off again, so each flight gets its own.
+            stops = flight_stops(df_events, self.events).select(
+                col("track_id").alias("id"),
+                col("landing_airport").alias("adep"),
+                col("take_off_airport").alias("ades"),
+            )
+            airports = airports.select("id", "adep", "ades").unionByName(stops)
         return calculate_ring_crossing_events(
             sdf_input, month, self.storage, self.events, flight_airports=airports
         )

@@ -798,6 +798,13 @@ def score_inputs(spark, label: str, scope: str) -> dict:
         else (f"{PREFIX}/{SAMPLE if scope == 'sample' else DAY_STEP03}/opdi_endpoint_candidates")
     )
     fl_all = spark.read.parquet(f"{root}/opdi_flight_list")
+    # One row per flight: the rows of the flights of tracks that hold several
+    # (opdi_flight_legs, written by step 04b) in place of their track's row.
+    from opdi.pipeline.flight_legs import with_flight_rows
+
+    n_legs, _ = s3_size(f"{root}/opdi_flight_legs")
+    legs = spark.read.parquet(f"{root}/opdi_flight_legs") if n_legs else None
+    fl_all = with_flight_rows(fl_all, legs)
     return {
         "events": spark.read.parquet(f"{root}/opdi_flight_events").filter(F.col("dof") == day),
         "measurements": spark.read.parquet(f"{root}/opdi_measurements").filter(F.col("dof") == day),
@@ -1022,6 +1029,11 @@ def build_frames(spark, inp: dict) -> dict:
     fl = inp["flight_list"]
     FLX = fl.select(
         F.col("ID").alias("flight_id"),
+        # The track the row's events are stored under, and the division
+        # times between which they lie (NULL: no limit), in seconds.
+        F.col("TRACK_ID").alias("track_id"),
+        _secs("LEG_START").alias("_lo"),
+        _secs("LEG_END").alias("_hi"),
         F.lower("ICAO24").alias("icao24"),
         F.col("FLT_ID").alias("flt_id"),
         F.trim("FLT_ID").alias("cs"),
@@ -1160,7 +1172,9 @@ def build_frames(spark, inp: dict) -> dict:
         .join(TE, "flight_id", "left")
         .join(
             FLX.select(
-                "flight_id",
+                F.col("track_id").alias("_fl_track"),
+                "_lo",
+                "_hi",
                 "adep",
                 "ades",
                 "adep_source",
@@ -1173,9 +1187,10 @@ def build_frames(spark, inp: dict) -> dict:
                 "ades_lat",
                 "ades_lon",
             ),
-            "flight_id",
+            _on_row("flight_id", "ts"),
             "left",
         )
+        .drop("_fl_track", "_lo", "_hi")
         .join(MA, "id", "left")
         .join(
             F.broadcast(
@@ -1201,6 +1216,23 @@ def build_frames(spark, inp: dict) -> dict:
     return {"T": T, "S": S, "E": E, "TE": TE, "FLX": FLX, "X": X, "apt": apt, "M": M, "win": win}
 
 
+def _on_row(event_key: str, ts: str):
+    """Join condition of an event with the flight-list row it belongs to.
+
+    The row's track (``_fl_track``) is the event's, and the event time
+    (``ts``, seconds) lies after ``_lo`` and up to ``_hi`` (NULL: no limit);
+    see ``opdi.pipeline.flight_legs.event_in_leg``.
+    """
+    from pyspark.sql import functions as F
+
+    t = F.col(ts)
+    return (
+        (F.col(event_key) == F.col("_fl_track"))
+        & (F.col("_lo").isNull() | (t > F.col("_lo")))
+        & (F.col("_hi").isNull() | t.isNull() | (t <= F.col("_hi")))
+    )
+
+
 def window_context(E, T, FLX):
     """The reports around runway milestones, point-merge leg exits and the flight list's runways.
 
@@ -1220,14 +1252,14 @@ def window_context(E, T, FLX):
     fl = FLX.select(
         F.lit(None).cast("long").alias("_eid"),
         F.concat(F.col("flight_id"), F.lit("|dep")).alias("_fl"),
-        "flight_id",
+        F.col("track_id").alias("flight_id"),
         F.col("fl_atot").alias("ts"),
         F.lit("flight list RWY_DEP").alias("type"),
     ).unionByName(
         FLX.select(
             F.lit(None).cast("long").alias("_eid"),
             F.concat(F.col("flight_id"), F.lit("|arr")).alias("_fl"),
-            "flight_id",
+            F.col("track_id").alias("flight_id"),
             F.col("fl_aldt").alias("ts"),
             F.lit("flight list RWY_ARR").alias("type"),
         )
@@ -2315,8 +2347,8 @@ def count_flight_list(fr: dict, inp: dict) -> list[tuple]:
     FLX, S, TE, apt = fr["FLX"], fr["S"], fr["TE"], fr["apt"]
     dup = apt.filter(F.lower(c("name")).contains("duplicate")).select(c("ident").alias("_dup"))
     dup_ids = [r["_dup"] for r in dup.collect()]
-    f = FLX.join(S.withColumnRenamed("track_id", "flight_id"), "flight_id", "left").join(
-        TE, "flight_id", "left"
+    f = FLX.join(S, "track_id", "left").join(
+        TE.withColumnRenamed("flight_id", "track_id"), "track_id", "left"
     )
     win = (
         fr["win"]
@@ -2627,7 +2659,11 @@ def count_flight_list(fr: dict, inp: dict) -> list[tuple]:
     # Tracks with events but no flight-list row.
     ev_ids = fr["E"].select("flight_id").distinct()
     r = (
-        ev_ids.join(FLX.select("flight_id", F.lit(1).alias("_in")), "flight_id", "left")
+        ev_ids.join(
+            FLX.select(c("track_id").alias("flight_id"), F.lit(1).alias("_in")).distinct(),
+            "flight_id",
+            "left",
+        )
         .agg(F.count("*").alias("b"), F.sum(c("_in").isNull().cast("int")).alias("n"))
         .first()
     )
@@ -2643,7 +2679,9 @@ def count_flight_list(fr: dict, inp: dict) -> list[tuple]:
             (c("apt_scheduled") == "no")
             & (F.coalesce(c("on_ground"), F.lit(False)) | (c("dist_nm") <= 2))
         )
-        near = near.join(FLX.select(c("flight_id").alias("track_id"), "adep", "ades"), "track_id")
+        near = near.join(
+            FLX.filter(c("_lo").isNull()).select("track_id", "adep", "ades"), "track_id"
+        )
         for role, side in (("adep", "adep"), ("ades", "ades")):
             nr = near.filter(F.lower(c("role")).contains(role))
             r = nr.agg(
@@ -2864,10 +2902,18 @@ def match_records(spark, fr: dict):
         ev = ev.unionByName(p)
     n_ev = {r["item"]: r["count"] for r in ev.groupBy("item").count().collect()}
     ev = ev.join(
-        FLX.select("flight_id", c("icao24").alias("_a"), c("cs").alias("_c"), "adep", "ades"),
-        "flight_id",
+        FLX.select(
+            c("track_id").alias("_fl_track"),
+            "_lo",
+            "_hi",
+            c("icao24").alias("_a"),
+            c("cs").alias("_c"),
+            "adep",
+            "ades",
+        ),
+        _on_row("flight_id", "ts"),
         "left",
-    )
+    ).drop("_fl_track", "_lo", "_hi")
     ev = ev.withColumn(
         "_apt", F.coalesce(c("apt"), F.when(c("side") == "dep", c("adep")).otherwise(c("ades")))
     )
@@ -3053,6 +3099,7 @@ def nm_frame(spark, fr: dict):
     )
     f = FLX.select(
         "flight_id",
+        "track_id",
         c("icao24").alias("_a"),
         c("cs").alias("_c"),
         "adep",
@@ -3067,7 +3114,7 @@ def nm_frame(spark, fr: dict):
     j = (
         j.withColumn("_r", F.row_number().over(w))
         .filter(c("_r") == 1)
-        .join(last_d, "flight_id", "left")
+        .join(last_d.withColumnRenamed("flight_id", "track_id"), "track_id", "left")
     )
     return j.select(
         "flight_id",

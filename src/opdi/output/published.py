@@ -67,6 +67,10 @@ from opdi.output.schema import (
 FLIGHT_LIST_TABLE = "opdi_flight_list"
 EVENTS_TABLE = "opdi_flight_events"
 MEASUREMENTS_TABLE = "opdi_measurements"
+#: The rows of the flights of tracks that hold several (step 04b,
+#: :mod:`opdi.pipeline.flight_legs`). Absent when that step ran without
+#: ``EventConfig.flight_list_one_row_per_flight``.
+LEGS_TABLE = "opdi_flight_legs"
 
 #: Number of rows in one row group of a published file.
 ROW_GROUP_ROWS = 100_000
@@ -222,6 +226,23 @@ def build_flight_events(
         .withColumnRenamed("flight_id", "_flight_id")
         .dropDuplicates(["_flight_id"])
     )
+    # An event is stored under its track. A track that holds several flights
+    # has a row per flight (opdi.pipeline.flight_legs), and the event goes to
+    # the flight whose division times enclose it; every other flight is its
+    # track, without limits.
+    has_legs = "TRACK_ID" in [c.upper() for c in flight_list.columns]
+    if has_legs:
+        from opdi.pipeline.flight_legs import event_in_leg
+
+        limits = flight_list.select(
+            F.col("ID").alias("_l_id"),
+            F.coalesce(F.col("TRACK_ID"), F.col("ID")).alias("_track"),
+            F.col("LEG_START").alias("_lo"),
+            F.col("LEG_END").alias("_hi"),
+        ).dropDuplicates(["_l_id"])
+        flights = flights.join(limits, F.col("_flight_id") == F.col("_l_id"), "inner").drop("_l_id")
+    else:
+        flights = flights.withColumn("_track", F.col("_flight_id"))
 
     renamed = {"event_id": "id", "altitude_ft": "altitude"}
     event_part = events.select(
@@ -233,9 +254,13 @@ def build_flight_events(
         F.col("dof").alias("_event_dof"),
     ).withColumn("h3_res_5", _h3_res_5())
 
+    on_flight = F.col("flight_id") == F.col("_track")
+    if has_legs:
+        on_flight = on_flight & event_in_leg(F.col("event_time"), F.col("_lo"), F.col("_hi"))
     joined = (
         event_part.join(measured, F.col("event_id") == F.col("_milestone_id"), "left")
-        .join(flights, F.col("flight_id") == F.col("_flight_id"), "left")
+        .join(flights, on_flight, "left")
+        .withColumn("flight_id", F.coalesce(F.col("_flight_id"), F.col("flight_id")))
         .withColumn("dof", F.coalesce(F.col("_flight_dof"), F.col("_event_dof")))
         .withColumn("release", F.lit(RELEASE))
     )
@@ -666,6 +691,20 @@ def _day_rows(storage, table: str, column: str, first: dt.date, last: dt.date) -
     return df.filter(F.col(column).between(F.lit(first), F.lit(last)))
 
 
+def _with_flight_rows(storage, flight_list: DataFrame, first: dt.date, last: dt.date):
+    """``flight_list`` with the flight rows of :data:`LEGS_TABLE` in place of their track's row.
+
+    See :func:`opdi.pipeline.flight_legs.with_flight_rows`. Without that
+    table the rows are returned with the columns it adds.
+    """
+    from opdi.pipeline.flight_legs import with_flight_rows
+
+    legs = None
+    if storage.table_exists(LEGS_TABLE):
+        legs = _day_rows(storage, LEGS_TABLE, "DOF", first, last)
+    return with_flight_rows(flight_list, legs)
+
+
 def _day_events(storage, day: dt.date):
     """The working events and measurements published in ``day``'s file.
 
@@ -682,12 +721,15 @@ def _day_events(storage, day: dt.date):
     """
     one_day = dt.timedelta(days=1)
     first, last = day - one_day, day + one_day
-    nearby_flights = _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", first, last)
+    nearby_flights = _with_flight_rows(
+        storage, _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", first, last), first, last
+    )
     events = _day_rows(storage, EVENTS_TABLE, "dof", first, last)
     measurements = _day_rows(storage, MEASUREMENTS_TABLE, "dof", first, last)
 
+    # The day of a track: the flights of a track that holds several share it.
     flight_days = nearby_flights.select(
-        F.col("ID").alias("_flight_id"), F.col("DOF").alias("_flight_dof")
+        F.col("TRACK_ID").alias("_flight_id"), F.col("DOF").alias("_flight_dof")
     ).dropDuplicates(["_flight_id"])
     chosen = (
         events.join(flight_days, F.col("flight_id") == F.col("_flight_id"), "left")
@@ -768,7 +810,9 @@ def publish_day(
 
 def _publish_day(spark, storage, day, layout, commit, row_group_rows, allow_empty) -> Dict:
     files = _Files(spark)
-    flight_rows = _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", day, day)
+    flight_rows = _with_flight_rows(
+        storage, _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", day, day), day, day
+    )
     event_rows, measurement_rows, nearby_flights = _day_events(storage, day)
 
     flights_count = flight_rows.count()

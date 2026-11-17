@@ -5,7 +5,7 @@
 -- Location of the published files: s3a://eurocontrol/opdi/v2.0.0/published
 
 CREATE TABLE IF NOT EXISTS minio.opdi.flight_list (
-    flight_id           varchar COMMENT 'Unique identifier of the flight. A flight is one track: the sequence of position reports of one aircraft that belong together.',
+    flight_id           varchar COMMENT 'Unique identifier of the flight. A track is the sequence of position reports of one aircraft under one call sign that belong together; most tracks hold one flight, whose identifier is the track''s.',
     icao24              varchar COMMENT 'ICAO 24-bit address of the aircraft''s transponder, written as six hexadecimal characters. It normally stays with one aircraft.',
     flt_id              varchar COMMENT 'Call sign broadcast by the aircraft, for example DLH123.',
     dof                 date COMMENT 'Date of the flight: the day on which it was first seen. A day''s files hold the flights of that date.',
@@ -20,8 +20,8 @@ CREATE TABLE IF NOT EXISTS minio.opdi.flight_list (
     typecode            varchar COMMENT 'ICAO aircraft type designator, for example A320, from the OpenSky aircraft database.',
     icao_aircraft_class varchar COMMENT 'ICAO aircraft description, for example L2J for a landplane with two jet engines, from the OpenSky aircraft database.',
     icao_operator       varchar COMMENT 'Three-letter ICAO code of the aircraft operator, from the OpenSky aircraft database.',
-    first_seen          timestamp COMMENT 'Time of the first position report of the flight received by the OpenSky Network.',
-    last_seen           timestamp COMMENT 'Time of the last position report of the flight received by the OpenSky Network.',
+    first_seen          timestamp COMMENT 'Time of the first position report of the flight received by the OpenSky Network. For a flight that is not the first of its track, the time at which the track was divided: the in-block time after the previous landing, else the midpoint of the stop.',
+    last_seen           timestamp COMMENT 'Time of the last position report of the flight received by the OpenSky Network. For a flight that is not the last of its track, the time at which the track was divided (see first_seen).',
     atot                timestamp COMMENT 'Actual take-off time: when the aircraft left the runway at the departure airport. Taken from the flight''s earliest ATOT event at that airport. NULL when no take-off was detected.',
     aldt                timestamp COMMENT 'Actual landing time: when the aircraft touched down at the destination airport. Taken from the flight''s latest ALDT event at that airport. NULL when no landing was detected.',
     aobt                timestamp COMMENT 'Actual off-block time: when the aircraft started to move away from its parking position. Taken from the flight''s earliest AOBT event. NULL when it was not detected, which is common because it needs reception on the ground.',
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS minio.opdi.flight_list (
     c100_dep            timestamp COMMENT 'Time when the departing flight first crossed, outbound, a circle of 100 nautical miles (NM) radius around the departure airport. NULL when no such crossing was detected.',
     c110_dep            timestamp COMMENT 'Time when the departing flight first crossed, outbound, a circle of 110 nautical miles (NM) radius around the departure airport. NULL when no such crossing was detected.',
     c120_dep            timestamp COMMENT 'Time when the departing flight first crossed, outbound, a circle of 120 nautical miles (NM) radius around the departure airport. NULL when no such crossing was detected.',
-    track_duration_min  double COMMENT 'Time between first_seen and last_seen, in minutes. Very short tracks are often pieces of a flight seen on the ground rather than whole flights. No row is removed on this value, so users can choose their own limit.',
+    track_duration_min  double COMMENT 'Time between first_seen and last_seen, in minutes (of the flight, on a track that holds several). Very short tracks are often pieces of a flight seen on the ground rather than whole flights.',
     superseded_dep      boolean COMMENT 'True when this row is a piece of a departure that is already counted on another row: it has no take-off, and the same aircraft departs again from the same airport within 3 hours (10,800 s). False otherwise.',
     superseded_arr      boolean COMMENT 'True when this row is a piece of an arrival that is already counted on another row: it has no landing, and the same aircraft arrived at the same airport within the 3 hours (10,800 s) before. False otherwise.',
     movement_dep        boolean COMMENT 'True when this row counts as a departure: the row names an airport, it is not a fragment counted on another row, and there is evidence that the aircraft flew (a detected runway time, an airport at the other end, or a crossing of one of the distance...',
@@ -70,8 +70,8 @@ CREATE TABLE IF NOT EXISTS minio.opdi.flight_events (
     source                    varchar COMMENT 'Source of the position reports, OSN for the OpenSky Network.',
     version                   varchar COMMENT 'Version of the method that produced this event type, for example events_v0.4.0. Different event types can have different versions.',
     info                      varchar COMMENT 'Extra details about the event, as JSON text, for example the runway or the airport. The keys depend on the event type and are listed in the data dictionary.',
-    distance_flown_nm         double COMMENT 'Distance flown from the start of the track to this event, along the received positions, in nautical miles (NM, 1 NM = 1,852 m).',
-    time_passed_s             double COMMENT 'Time from the first position of the track to this event, in seconds.',
+    distance_flown_nm         double COMMENT 'Distance flown from the start of the track to this event, along the received positions, in nautical miles (NM, 1 NM = 1,852 m). On a track that holds several flights it counts from the start of the track, not of the flight.',
+    time_passed_s             double COMMENT 'Time from the first position of the track to this event, in seconds. On a track that holds several flights it counts from the start of the track, not of the flight.',
     holding_duration_s        double COMMENT 'Time spent in a holding pattern, in seconds. A holding pattern is a loop flown while the aircraft waits for permission to continue. It is set only on holding-end events and is NULL on every other event.',
     holding_distance_nm       double COMMENT 'Distance flown in the holding pattern, in nautical miles (NM). It is set only on holding-end events and is NULL on every other event.',
     holding_circuits          double COMMENT 'Number of loops flown in the holding pattern: the total turn divided by 360 degrees, to one decimal. It is set only on holding-end events and is NULL on every other event.',
@@ -92,8 +92,8 @@ CREATE TABLE IF NOT EXISTS minio.opdi.flight_events (
     typecode                  varchar COMMENT 'ICAO aircraft type designator, for example A320, from the OpenSky aircraft database.',
     icao_aircraft_class       varchar COMMENT 'ICAO aircraft description, for example L2J for a landplane with two jet engines, from the OpenSky aircraft database.',
     icao_operator             varchar COMMENT 'Three-letter ICAO code of the aircraft operator, from the OpenSky aircraft database.',
-    first_seen                timestamp COMMENT 'Time of the first position report of the flight received by the OpenSky Network.',
-    last_seen                 timestamp COMMENT 'Time of the last position report of the flight received by the OpenSky Network.',
+    first_seen                timestamp COMMENT 'Time of the first position report of the flight received by the OpenSky Network. For a flight that is not the first of its track, the time at which the track was divided: the in-block time after the previous landing, else the midpoint of the stop.',
+    last_seen                 timestamp COMMENT 'Time of the last position report of the flight received by the OpenSky Network. For a flight that is not the last of its track, the time at which the track was divided (see first_seen).',
     atot                      timestamp COMMENT 'Actual take-off time: when the aircraft left the runway at the departure airport. Taken from the flight''s earliest ATOT event at that airport. NULL when no take-off was detected.',
     aldt                      timestamp COMMENT 'Actual landing time: when the aircraft touched down at the destination airport. Taken from the flight''s latest ALDT event at that airport. NULL when no landing was detected.',
     aobt                      timestamp COMMENT 'Actual off-block time: when the aircraft started to move away from its parking position. Taken from the flight''s earliest AOBT event. NULL when it was not detected, which is common because it needs reception on the ground.',
@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS minio.opdi.flight_events (
     c100_dep                  timestamp COMMENT 'Time when the departing flight first crossed, outbound, a circle of 100 nautical miles (NM) radius around the departure airport. NULL when no such crossing was detected.',
     c110_dep                  timestamp COMMENT 'Time when the departing flight first crossed, outbound, a circle of 110 nautical miles (NM) radius around the departure airport. NULL when no such crossing was detected.',
     c120_dep                  timestamp COMMENT 'Time when the departing flight first crossed, outbound, a circle of 120 nautical miles (NM) radius around the departure airport. NULL when no such crossing was detected.',
-    track_duration_min        double COMMENT 'Time between first_seen and last_seen, in minutes. Very short tracks are often pieces of a flight seen on the ground rather than whole flights. No row is removed on this value, so users can choose their own limit.',
+    track_duration_min        double COMMENT 'Time between first_seen and last_seen, in minutes (of the flight, on a track that holds several). Very short tracks are often pieces of a flight seen on the ground rather than whole flights.',
     superseded_dep            boolean COMMENT 'True when this row is a piece of a departure that is already counted on another row: it has no take-off, and the same aircraft departs again from the same airport within 3 hours (10,800 s). False otherwise.',
     superseded_arr            boolean COMMENT 'True when this row is a piece of an arrival that is already counted on another row: it has no landing, and the same aircraft arrived at the same airport within the 3 hours (10,800 s) before. False otherwise.',
     movement_dep              boolean COMMENT 'True when this row counts as a departure: the row names an airport, it is not a fragment counted on another row, and there is evidence that the aircraft flew (a detected runway time, an airport at the other end, or a crossing of one of the distance...',
@@ -131,13 +131,13 @@ WITH (
 );
 
 CREATE TABLE IF NOT EXISTS minio.opdi.flight_index (
-    flight_id  varchar COMMENT 'Unique identifier of the flight. A flight is one track: the sequence of position reports of one aircraft that belong together.',
+    flight_id  varchar COMMENT 'Unique identifier of the flight. A track is the sequence of position reports of one aircraft under one call sign that belong together; most tracks hold one flight, whose identifier is the track''s.',
     icao24     varchar COMMENT 'ICAO 24-bit address of the aircraft''s transponder, written as six hexadecimal characters. It normally stays with one aircraft.',
     flt_id     varchar COMMENT 'Call sign broadcast by the aircraft, for example DLH123.',
     adep       varchar COMMENT 'Departure airport, as its four-letter ICAO code. ''OOA'' (out of area) when the track began at the edge of the covered area, so the flight departed from somewhere outside it. This occurs only in data built with European coverage.',
     ades       varchar COMMENT 'Destination airport, as its four-letter ICAO code. ''OOA'' (out of area) when the track ended at the edge of the covered area, so the flight continued to somewhere outside it. This occurs only in data built with European coverage.',
-    first_seen timestamp COMMENT 'Time of the first position report of the flight received by the OpenSky Network.',
-    last_seen  timestamp COMMENT 'Time of the last position report of the flight received by the OpenSky Network.',
+    first_seen timestamp COMMENT 'Time of the first position report of the flight received by the OpenSky Network. For a flight that is not the first of its track, the time at which the track was divided: the in-block time after the previous landing, else the midpoint of the stop.',
+    last_seen  timestamp COMMENT 'Time of the last position report of the flight received by the OpenSky Network. For a flight that is not the last of its track, the time at which the track was divided (see first_seen).',
     dof        date COMMENT 'Date of the flight: the day on which it was first seen. A day''s files hold the flights of that date.',
     file       varchar COMMENT 'Path of the flight list file that holds the flight, relative to the published folder, for example flight_list/flight_list_20260614.parquet.'
 )

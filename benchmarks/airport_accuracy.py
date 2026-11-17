@@ -506,11 +506,20 @@ def _flight_list(spark, root: str, day: str):
     from pyspark.sql import functions as F
 
     s = cs._secs
-    fl = spark.read.parquet(f"{root}/opdi_flight_list").filter(
-        F.col("DOF") == F.lit(day).cast("date")
-    )
+    from opdi.pipeline.flight_legs import with_flight_rows
+
+    on_day = F.col("DOF") == F.lit(day).cast("date")
+    fl = spark.read.parquet(f"{root}/opdi_flight_list").filter(on_day)
+    # One row per flight: the rows of the flights of tracks that hold several
+    # (opdi_flight_legs, step 04b) in place of their track's row.
+    n_legs, _ = cs.s3_size(f"{root}/opdi_flight_legs")
+    legs = spark.read.parquet(f"{root}/opdi_flight_legs").filter(on_day) if n_legs else None
+    fl = with_flight_rows(fl, legs)
     cols = [
         F.col("ID").alias("flight_id"),
+        F.col("TRACK_ID").alias("track_id"),
+        s("LEG_START").alias("_lo"),
+        s("LEG_END").alias("_hi"),
         F.lower("ICAO24").alias("icao24"),
         F.trim("FLT_ID").alias("cs"),
         F.col("ADEP").alias("adep"),
