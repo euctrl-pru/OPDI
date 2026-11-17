@@ -578,7 +578,9 @@ def test_no_level_segment_on_a_report_flagged_on_the_ground(spark):
 
 def _phase_track_between(spark, samples, elev_adep_ft, elev_ades_ft):
     """``samples``: (seconds, altitude ft, rate ft/min, speed kt, on_ground,
-    distance to the departure airport NM, distance to the destination NM)."""
+    distance to the departure airport NM, unused). The departure airport is
+    at 40 N 4 E, the destination 700 NM north of it; each report lies on the
+    meridian between them at its distance from the departure airport."""
     rows = [
         {
             "t": t,
@@ -586,27 +588,19 @@ def _phase_track_between(spark, samples, elev_adep_ft, elev_ades_ft):
             "vert_rate": r / FTMIN_PER_MPS,
             "velocity": v / KT_PER_MPS,
             "on_ground": g,
-            "dist_adep": d_dep,
-            "dist_ades": d_arr,
+            "lat": 40.0 + d_dep / 60.0,
+            "lon": 4.0,
         }
-        for t, a, r, v, g, d_dep, d_arr in samples
+        for t, a, r, v, g, d_dep, _ in samples
     ]
-    sdf = _measured(
-        make_track(spark, [{k: x for k, x in r.items() if "dist" not in k} for r in rows])
-    )
-    order = Window.partitionBy("track_id").orderBy("event_time")
-    idx = F.row_number().over(order).cast("int")
     return (
-        sdf.withColumn("elev_adep_ft", F.lit(float(elev_adep_ft)))
+        _measured(make_track(spark, rows))
+        .withColumn("elev_adep_ft", F.lit(float(elev_adep_ft)))
         .withColumn("elev_ades_ft", F.lit(float(elev_ades_ft)))
-        .withColumn(
-            "dist_adep_nm",
-            F.element_at(F.array(*[F.lit(float(r["dist_adep"])) for r in rows]), idx),
-        )
-        .withColumn(
-            "dist_ades_nm",
-            F.element_at(F.array(*[F.lit(float(r["dist_ades"])) for r in rows]), idx),
-        )
+        .withColumn("adep_lat", F.lit(40.0))
+        .withColumn("adep_lon", F.lit(4.0))
+        .withColumn("ades_lat", F.lit(40.0 + 700.0 / 60.0))
+        .withColumn("ades_lon", F.lit(4.0))
     )
 
 
