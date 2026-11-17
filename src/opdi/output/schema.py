@@ -117,7 +117,7 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "string",
         "",
         "Unique identifier of the flight. A track is the sequence of position reports "
-        "of one aircraft under one call sign that belong together; most tracks hold one "
+        "of one aircraft under one call sign that belong together. Most tracks hold one "
         "flight, whose identifier is the track's. A track that lands and, after a stop "
         "on the ground, takes off again holds several flights, named <track>-L1, "
         "<track>-L2, ... in time order.",
@@ -461,7 +461,7 @@ EVENT_COLUMNS: Tuple[Column, ...] = (
         "",
         "Identifier of the flight the event belongs to. It matches flight_id in the "
         "flight list. On a track that holds several flights, an event belongs to the "
-        "flight during which it happened; the taxi-in after a landing belongs to the "
+        "flight during which it happened. The taxi-in after a landing belongs to the "
         "arriving flight up to the in-block time.",
         "flight_id",
         "event",

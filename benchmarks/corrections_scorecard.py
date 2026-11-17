@@ -3477,6 +3477,19 @@ def content_comparison(before: str, after: str) -> list[dict]:
             for x in (before, after)
         )
         rows += day_compare.compare_content(fb, fa, ["ID"], "flight list")
+        # The published rows: one per flight (opdi_flight_legs in place of
+        # the rows of tracks that hold several flights).
+        from opdi.pipeline.flight_legs import LEG_COLUMNS, with_flight_rows
+
+        def per_flight(label, frame):
+            path = f"{run_root(label)}/opdi_flight_legs"
+            n, _ = s3_size(path)
+            legs = spark.read.parquet(path).filter(F.col("DOF") == day) if n else None
+            return with_flight_rows(frame, legs).drop(*LEG_COLUMNS)
+
+        rows += day_compare.compare_content(
+            per_flight(before, fb), per_flight(after, fa), ["ID"], "flight list, one row per flight"
+        )
     finally:
         spark.stop()
     return rows

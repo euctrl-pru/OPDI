@@ -5,7 +5,7 @@
 -- Location of the published files: s3a://eurocontrol/opdi/v2.0.0/published
 
 CREATE TABLE IF NOT EXISTS minio.opdi.flight_list (
-    flight_id           varchar COMMENT 'Unique identifier of the flight. A track is the sequence of position reports of one aircraft under one call sign that belong together; most tracks hold one flight, whose identifier is the track''s.',
+    flight_id           varchar COMMENT 'Unique identifier of the flight. A track is the sequence of position reports of one aircraft under one call sign that belong together. Most tracks hold one flight, whose identifier is the track''s.',
     icao24              varchar COMMENT 'ICAO 24-bit address of the aircraft''s transponder, written as six hexadecimal characters. It normally stays with one aircraft.',
     flt_id              varchar COMMENT 'Call sign broadcast by the aircraft, for example DLH123.',
     dof                 date COMMENT 'Date of the flight: the day on which it was first seen. A day''s files hold the flights of that date.',
@@ -60,7 +60,7 @@ WITH (
 
 CREATE TABLE IF NOT EXISTS minio.opdi.flight_events (
     event_id                  varchar COMMENT 'Unique identifier of the event.',
-    flight_id                 varchar COMMENT 'Identifier of the flight the event belongs to. It matches flight_id in the flight list.',
+    flight_id                 varchar COMMENT 'Identifier of the flight the event belongs to. It matches flight_id in the flight list. On a track that holds several flights, an event belongs to the flight during which it happened.',
     type                      varchar COMMENT 'Event type, for example ATOT, level-start or xing-40nm. The data dictionary lists every type.',
     event_time                timestamp COMMENT 'Time at which the event happened.',
     longitude                 double COMMENT 'Longitude of the aircraft at the event, in degrees (WGS 84, positive east).',
@@ -131,7 +131,7 @@ WITH (
 );
 
 CREATE TABLE IF NOT EXISTS minio.opdi.flight_index (
-    flight_id  varchar COMMENT 'Unique identifier of the flight. A track is the sequence of position reports of one aircraft under one call sign that belong together; most tracks hold one flight, whose identifier is the track''s.',
+    flight_id  varchar COMMENT 'Unique identifier of the flight. A track is the sequence of position reports of one aircraft under one call sign that belong together. Most tracks hold one flight, whose identifier is the track''s.',
     icao24     varchar COMMENT 'ICAO 24-bit address of the aircraft''s transponder, written as six hexadecimal characters. It normally stays with one aircraft.',
     flt_id     varchar COMMENT 'Call sign broadcast by the aircraft, for example DLH123.',
     adep       varchar COMMENT 'Departure airport, as its four-letter ICAO code. ''OOA'' (out of area) when the track began at the edge of the covered area, so the flight departed from somewhere outside it. This occurs only in data built with European coverage.',
