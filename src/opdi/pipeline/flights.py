@@ -1801,36 +1801,42 @@ class FlightListProcessor:
         if FlightListProcessor._seen_from_measured_reports(self):
             # The first and last report with a measured position, or with any
             # measured value when the track has no position
-            # (EventConfig.seen_from_measured_reports). The smallest
-            # (rank, time) and (rank, minus time) over the track give both
-            # without sorting its reports.
+            # (EventConfig.seen_from_measured_reports): the smallest
+            # (rank, time) and (rank, minus time) of the track. One
+            # aggregation by track, which sends one row per track and part
+            # across the cluster rather than every report.
             sv = sv.withColumn("_seen_rank", seen_rank(sv))
-            first = f_min(F.struct(col("_seen_rank").alias("r"), col("event_time").alias("t")))
-            last = f_min(
-                F.struct(
-                    col("_seen_rank").alias("r"),
-                    (-col("event_time").cast("double")).alias("t"),
-                    col("event_time").alias("ts"),
+            first = F.struct(
+                col("_seen_rank").alias("r"),
+                col("event_time").alias("t"),
+                col("icao24").alias("icao24"),
+                col("flight_id").alias("flight_id"),
+            )
+            last = F.struct(
+                col("_seen_rank").alias("r"),
+                (-col("event_time").cast("double")).alias("t"),
+                col("event_time").alias("ts"),
+            )
+            per_track = sv.groupBy("track_id").agg(
+                f_min(first).alias("_first"),
+                f_min(last).alias("_last"),
+                f_min("event_time").alias("_t0"),
+                f_max("event_time").alias("_t1"),
+            )
+            # The five-minute rule reads the time between the first and last
+            # report of any kind, as without the setting, so the same tracks
+            # become overflight rows.
+            sv_f = (
+                per_track.filter(unix_timestamp("_t1") - unix_timestamp("_t0") >= 300)
+                .select(
+                    col("track_id"),
+                    col("_first.icao24").alias("icao24"),
+                    col("_first.flight_id").alias("flight_id"),
+                    col("_first.t").alias("first_seen"),
+                    col("_last.ts").alias("last_seen"),
                 )
+                .withColumn("DOF", to_date("first_seen"))
             )
-            sv = sv.withColumn("_first", first.over(window_track)).withColumn(
-                "_last", last.over(window_track)
-            )
-            sv = sv.withColumn("first_seen", col("_first.t")).withColumn(
-                "last_seen", col("_last.ts")
-            )
-            # Keep only the first row per track. The five-minute rule below
-            # reads the time between the first and last report of any kind, as
-            # before, so the same tracks become overflight rows.
-            span_s = unix_timestamp(f_max("event_time").over(window_track)) - unix_timestamp(
-                f_min("event_time").over(window_track)
-            )
-            sv = sv.withColumn("_span_s", span_s)
-            sv_f = sv.filter(
-                (col("_seen_rank") == col("_first.r")) & (col("event_time") == col("first_seen"))
-            )
-            sv_f = sv_f.filter(col("_span_s") >= 300)
-            sv_f = sv_f.withColumn("DOF", to_date("first_seen"))
         else:
             sv = sv.withColumn("first_seen", f_min("event_time").over(window_track))
             sv = sv.withColumn("last_seen", f_max("event_time").over(window_track))
