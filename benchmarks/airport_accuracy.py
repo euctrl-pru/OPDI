@@ -38,10 +38,9 @@ the event times so that the two give the same figures for the same day.
 **What is never published.** The tables hold counts and shares per item and
 airport: no flight, track id or call sign.
 
-**Days.** :data:`DAYS` names the processed days and where their tables are:
-14 June 2026 is the final run of the corrections of the spot checks; 10 and 17
-June 2026 were processed from the raw archive with the same code (see
-``benchmarks/spot_checks.py run-day``).
+**Days.** :data:`DAYS` names the processed days and where their tables are.
+Each day was processed from the raw archive with one version of the code
+(``benchmarks/spot_checks.py run-day``, steps 01 to 04b).
 """
 
 from __future__ import annotations
@@ -68,7 +67,7 @@ SPOT = "s3a://eurocontrol/opdi-world/research/spot"
 #: Day -> the folder holding its flight list, events and measurements.
 DAYS = {
     "2026-06-10": f"{SPOT}/d0610",
-    "2026-06-14": f"{SPOT}/runs/all_day",
+    "2026-06-14": f"{SPOT}/d0614b",
     "2026-06-17": f"{SPOT}/d0617",
 }
 MONTH = "202606"
