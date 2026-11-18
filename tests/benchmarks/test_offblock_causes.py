@@ -82,3 +82,58 @@ def test_the_reports_of_a_record_are_those_of_its_flight(spark):
     }
 
     assert span == {"r1": (0.0, 4000.0), "r2": (4500.0, 9000.0), "r3": (0.0, 4000.0)}
+
+
+# ---------------------------------------------------------------------------
+# The off-block accuracy by where the aircraft was first received
+# ---------------------------------------------------------------------------
+
+
+def _classified():
+    import pandas as pd
+
+    rows = [
+        # kind, record s, OPDI s, info of the OPDI event, first report s
+        ("AOBT", 1000.0, 1020.0, '{"first_seen_on": "stand"}', 400.0),
+        ("AOBT", 2000.0, 2200.0, '{"first_seen_on": "stand"}', 1500.0),
+        ("AOBT", 3000.0, 3400.0, '{"first_seen_on": "taxiway"}', 3350.0),
+        ("AOBT", 4000.0, 4030.0, '{"stand": "A1"}', 3000.0),
+        ("AOBT", 5000.0, None, None, 5200.0),
+        ("AIBT", 6000.0, 6010.0, "{}", 100.0),
+    ]
+    d = pd.DataFrame(rows, columns=["kind", "rec_s", "opdi_s", "opdi_info", "fs"])
+    d["flight_id"] = "f"
+    d["diff_s"] = d["opdi_s"] - d["rec_s"]
+    d["lead_s"] = d["rec_s"] - d["fs"]
+    return d
+
+
+def test_the_off_block_accuracy_by_where_the_aircraft_was_first_received():
+    """One row per value of ``info.first_seen_on`` of the off-block times that
+    have a record (``not given`` when the event has no value), and one for all
+    of them. In-block times and records without an OPDI time are not counted."""
+    out = oc.first_seen_table({"2026-06-14": _classified()}).set_index("first_seen_on")
+
+    assert out["off_block_times"].to_dict() == {"all": 4, "stand": 2, "taxiway": 1, "not given": 1}
+    assert out.loc["stand", "pct_within_60s"] == 50.0
+    assert out.loc["taxiway", "pct_within_60s"] == 0.0
+    assert out.loc["all", "pct_within_60s"] == 50.0
+    assert out.loc["all", "median_abs_diff_s"] == 115.0
+    # Received at the stand: a report before the recorded off-block time.
+    assert out.loc["all", "n_received_at_stand"] == 3
+    assert out.loc["all", "pct_within_60s_when_received_at_stand"] == 66.7
+    assert out.loc["taxiway", "n_received_at_stand"] == 0
+    assert set(out["day"]) == {"2026-06-14"}
+
+
+def test_the_tracks_divided_into_flights_are_counted(spark):
+    _, FLX, _ = _frames(spark)
+    one = spark.createDataFrame(
+        [("u", "u", None, None, "4b0000", "SWR9", "LSZH", "LSGG", 0.0, 100.0)], _FLX_DDL
+    )
+    assert oc._flight_counts(FLX.unionByName(one)) == {
+        "tracks": 2,
+        "tracks_divided": 1,
+        "flights_of_divided_tracks": 2,
+        "flight_rows": 3,
+    }

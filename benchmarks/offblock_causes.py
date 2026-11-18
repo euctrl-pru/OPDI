@@ -15,9 +15,14 @@
 
 ``extract`` writes to ``benchmarks/out/offblock/<day>/`` (or to the folder
 named in the environment variable ``OPDI_OFFBLOCK_EXTRACT``) and ``tables``
-reads from there. ``tables --changed <folder>`` adds the rows of a second
-extract of the same day, made from a run with the off-block time at the
-start of the push-back (``method`` = ``push-back start``).
+reads from there. ``tables --before <folder>`` adds the rows of a second
+extract of the same day, made from a run without the off-block time at the
+start of the push-back (``method`` = ``without push-back start``).
+
+``tables`` also writes ``offblock_first_seen_on.csv``, the accuracy of the
+off-block times by where the aircraft was first received on the ground
+(``info.first_seen_on``), and ``tracks_divided.csv``, the number of tracks
+of each day that hold several flights.
 
 **The question.** Airport records give an off-block time for many more
 departures than OPDI does, while the in-block time is found more often. Is
@@ -417,8 +422,9 @@ def extract(args) -> int:
             meta = {
                 "day": day,
                 "root": args.root,
-                "tracks": args.tracks,
+                "tracks_root": args.tracks,
                 "records": recs.count(),
+                **_flight_counts(FLX),
             }
             if args.tracks:
                 facts = _track_facts(spark, args.tracks, day, recs)
@@ -533,10 +539,10 @@ COLUMNS = {
     "f": "opdi_time_within_60s",
 }
 ITEM = {"AOBT": "off-block", "AIBT": "in-block"}
-#: Values of ``method``: the default settings of the branch ``industrialisation``,
-#: and the same with the off-block time at the start of the push-back.
+#: Values of ``method``: the default settings (the off-block time at the start
+#: of the push-back), and the same without that setting.
 METHOD_NOW = "current"
-METHOD_CHANGED = "push-back start"
+METHOD_BEFORE = "without push-back start"
 #: Share of arrivals still received after the recorded in-block time from
 #: which the stands of an airport count as received, and under which as not.
 STANDS_RECEIVED_PCT = 50.0
@@ -585,6 +591,120 @@ def _shares(g: pd.DataFrame) -> dict:
         round(float(sub.loc[sub_has, "diff_s"].abs().median()), 0) if sub_has.sum() else np.nan
     )
     return out
+
+
+#: Value of ``first_seen_on`` in the table for an off-block time without one.
+NOT_GIVEN = "not given"
+
+
+def first_seen_table(by_day: dict) -> pd.DataFrame:
+    """The accuracy of the off-block times by ``info.first_seen_on``.
+
+    ``by_day`` maps a day to its classified records (:func:`classify`). One
+    row per day and value of ``first_seen_on`` (``stand``, ``apron``,
+    ``taxiway``, ``other``; :data:`NOT_GIVEN` when the event has none: the
+    track holds the landing before the departure, or passes no part of an
+    airport layout), one row ``all`` per day, and the same for the days
+    together. Counted are the off-block times that have an airport record:
+    their number, the share within 60 s of the record and the median
+    difference, and the same for those received at the stand (a report
+    before the recorded off-block time).
+    """
+
+    def value(info):
+        if not isinstance(info, str):
+            return NOT_GIVEN
+        return json.loads(info).get("first_seen_on") or NOT_GIVEN
+
+    def row(day, name, g):
+        close = g["diff_s"].abs() <= 60
+        at_stand = g["lead_s"] > 0
+        sub = g[at_stand]
+        return {
+            "day": day,
+            "first_seen_on": name,
+            "off_block_times": len(g),
+            "pct_within_60s": round(100.0 * close.mean(), 1) if len(g) else np.nan,
+            "median_abs_diff_s": round(float(g["diff_s"].abs().median()), 0) if len(g) else np.nan,
+            "n_received_at_stand": int(at_stand.sum()),
+            "pct_within_60s_when_received_at_stand": (
+                round(100.0 * (sub["diff_s"].abs() <= 60).mean(), 1) if len(sub) else np.nan
+            ),
+            "median_abs_diff_s_when_received_at_stand": (
+                round(float(sub["diff_s"].abs().median()), 0) if len(sub) else np.nan
+            ),
+        }
+
+    frames = {
+        day: d[(d["kind"] == "AOBT") & d["opdi_s"].notna()].assign(
+            _where=lambda x: x["opdi_info"].map(value)
+        )
+        for day, d in by_day.items()
+    }
+    if len(frames) > 1:
+        frames[f"{len(frames)} days"] = pd.concat(frames.values(), ignore_index=True)
+    order = ["stand", "apron", "taxiway", "other", NOT_GIVEN]
+    rows = []
+    for day, g in frames.items():
+        rows.append(row(day, "all", g))
+        for name in order:
+            if (g["_where"] == name).any():
+                rows.append(row(day, name, g[g["_where"] == name]))
+    return pd.DataFrame(rows)
+
+
+def tracks_divided(days, folder: Path = None) -> pd.DataFrame:
+    """Per day: the tracks, those divided into several flights, and the flight rows.
+
+    Read from the ``meta.json`` of each day's extract (``extract`` counts
+    them in the flight list with one row per flight).
+    """
+    rows = []
+    for day in days:
+        p = (folder or EXTRACT) / day / "meta.json"
+        if not p.exists():
+            continue
+        m = json.loads(p.read_text())
+        if "tracks_divided" not in m:
+            continue
+        rows.append(
+            {
+                "day": day,
+                "tracks": m["tracks"],
+                "tracks_divided_into_flights": m["tracks_divided"],
+                "flights_of_divided_tracks": m["flights_of_divided_tracks"],
+                "flight_rows": m["flight_rows"],
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "day",
+            "tracks",
+            "tracks_divided_into_flights",
+            "flights_of_divided_tracks",
+            "flight_rows",
+        ],
+    )
+
+
+def _flight_counts(FLX) -> dict:
+    """Tracks, tracks divided into several flights, and flight rows of ``FLX``."""
+    from pyspark.sql import functions as F
+
+    per_track = FLX.groupBy("track_id").agg(F.count(F.lit(1)).alias("n"))
+    r = per_track.agg(
+        F.count(F.lit(1)).alias("tracks"),
+        F.count(F.when(F.col("n") > 1, 1)).alias("tracks_divided"),
+        F.coalesce(F.sum(F.when(F.col("n") > 1, F.col("n"))), F.lit(0)).alias("of_divided"),
+        F.coalesce(F.sum("n"), F.lit(0)).alias("rows"),
+    ).collect()[0]
+    return {
+        "tracks": int(r["tracks"]),
+        "tracks_divided": int(r["tracks_divided"]),
+        "flights_of_divided_tracks": int(r["of_divided"]),
+        "flight_rows": int(r["rows"]),
+    }
 
 
 def load(days, folder: Path = None) -> tuple[dict, dict]:
@@ -646,13 +766,13 @@ def _rows(scope_day: str, detail: str, d: pd.DataFrame, busiest, stands) -> list
     return rows
 
 
-def build(days, changed: Path = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def build(days, before: Path = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """The table of causes, the detail of cause ``b``, and the record counts per day.
 
-    ``changed`` is the extract folder of the same days processed with the
-    settings ``off_block_at_start_of_push_back`` and
-    ``off_block_names_where_first_seen`` on; its rows carry
-    :data:`METHOD_CHANGED` in ``method``, the others :data:`METHOD_NOW`.
+    ``before`` is the extract folder of the same days processed with the
+    setting ``off_block_at_start_of_push_back`` off; its rows (the days read
+    from the reports) carry :data:`METHOD_BEFORE` in ``method``, the others
+    :data:`METHOD_NOW`.
     """
     full, coarse = load(days)
     busiest = pd.read_csv(AIRPORTS_CSV, usecols=["rank", "airport", "name"]).drop_duplicates(
@@ -676,13 +796,13 @@ def build(days, changed: Path = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]
         rows += _rows(f"{len(coarse)} days", "flight list", pooled, apts, stands)
     for row in rows:
         row["method"] = METHOD_NOW
-    if changed is not None:
-        for day, d in load(days, changed)[0].items():
-            after = _rows(day, "reports", d, apts, stands)
-            for row in after:
-                row["method"] = METHOD_CHANGED
-            rows += after
-            inputs[f"{day} records ({METHOD_CHANGED})"] = len(d)
+    if before is not None:
+        for day, d in load(days, before)[0].items():
+            earlier = _rows(day, "reports", d, apts, stands)
+            for row in earlier:
+                row["method"] = METHOD_BEFORE
+            rows += earlier
+            inputs[f"{day} records ({METHOD_BEFORE})"] = len(d)
     res = pd.DataFrame(rows).merge(
         busiest.rename(columns={"rank": "airport_rank"}), on="airport", how="left"
     )
@@ -724,10 +844,15 @@ def build(days, changed: Path = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]
 def tables(args) -> int:
     import provenance
 
-    res, det, inputs = build(args.days, Path(args.changed) if args.changed else None)
+    res, det, inputs = build(args.days, Path(args.before) if args.before else None)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    built = {"offblock_causes.csv": res}
+    full, coarse = load(args.days)
+    built = {
+        "offblock_causes.csv": res,
+        "offblock_first_seen_on.csv": first_seen_table(full or coarse),
+        "tracks_divided.csv": tracks_divided(args.days),
+    }
     if args.detail:
         built["offblock_causes_b_detail.csv"] = det
     for name, frame in built.items():
@@ -767,9 +892,9 @@ def main(argv=None) -> int:
     t.add_argument("--days", nargs="+", default=["2026-06-10", "2026-06-14", "2026-06-17"])
     t.add_argument("--detail", action="store_true", help="also write the detail of cause b")
     t.add_argument(
-        "--changed",
+        "--before",
         default=None,
-        help="extract folder of the same days with the push-back start on (a second method)",
+        help="extract folder of the same days without the push-back start (a second method)",
     )
     t.add_argument("--notes", default="", help="text for the manifest entry")
     args = p.parse_args(argv)

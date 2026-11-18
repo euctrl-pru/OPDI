@@ -88,7 +88,7 @@ measurements_v0 = published.as_measurements(events)
 These three tables have the table and column names of release v0.0.2, in
 the same order. The identifiers are text and do not match the identifiers of
 release v0.0.2, which were 64-bit integers. The `version` column holds the
-version of the method that produced each row (for example `events_v0.4.0`),
+version of the method that produced each row (for example `events_v0.5.0`),
 not the release name. As in release v0.0.2, the measurements table has a
 distance flown row and a time passed row for every event, also when the
 value is empty; the newer measurement types have a row only when they have a
@@ -284,6 +284,22 @@ Thresholds are in aviation units with the unit in the field name (`_ft`,
 (metres, metres per second), as OpenSky delivers them; where a threshold meets
 such a column, the column is scaled to the threshold's unit for the
 comparison only.
+
+Each method that changed after release v0.0.2 has its own on/off field in
+`EventConfig` or `DetectionConfig`, on by default and off in the v0.0.2
+settings (`EventConfig.legacy()`). The four most recent, all in
+`src/opdi/config/events.py` and published as `events_v0.5.0` (flight list
+`v6.1.0`):
+
+| Field | What it does |
+|-------|--------------|
+| `flight_list_one_row_per_flight` | A track that lands, stays at least `flight_stop_min_ground_s` (300 s) on the ground and takes off again gets one flight-list row per flight (`<track_id>-L<n>`, table `opdi_flight_legs`), and step 04 also draws the distance circles around the airports of the stops. |
+| `off_block_at_start_of_push_back` | The off-block time is the start of a slow push-back (1 to 3 kt, read from the displacement of the positions) when one lies at most `push_back_max_stop_seconds` (600 s) before the first movement found by speed. On a track that holds several flights the search starts after the aircraft reached its stand, so the last metres of the taxi-in are not taken for the push-back of the next flight. |
+| `off_block_names_where_first_seen` | An off-block time says in `info.first_seen_on` where the aircraft was first received on the ground: `stand`, `apron`, `taxiway` or `other`. First received on a taxiway, the off-block time is usually minutes late. The field is absent on the off-block time of a later flight of a track, which was followed from its landing. |
+| `runway_window_by_median_distance` | The runway window method (`info.method = "legacy"`, used where no report on the runway was received) names the runway whose centre line the reports of the initial climb or final descent are nearest to, report by report (the smallest median distance). Of two parallel runways a few hundred metres apart, the middle position of the reports could be nearer the wrong one after a turn. |
+
+How each was measured, and how to measure a change of your own, is in
+`benchmarks/CORRECTIONS.md`.
 
 ## Reproducing release v0.0.2
 

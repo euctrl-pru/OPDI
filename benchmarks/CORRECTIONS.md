@@ -143,8 +143,9 @@ measurements and all 44 flight-list columns were equal).
   That is 55.3 of 157.8 million reports (35%), 3.6 of 9.2 GB, and 39,144
   flight-list rows. The tracks are long airline flights mostly, so the
   sample holds a third of the reports for a quarter of the tracks.
-- The whole day: cleaned tracks in `research/spot/d0614/`, the flight list
-  and candidates of step 03 in `research/spot/d0614_03/`.
+- The whole day: cleaned tracks, and the flight list and candidates of
+  step 03, in `research/spot/d0614c/` (the day processed again from
+  ingestion with the corrected code).
 - Each run: `research/spot/runs/<label>/` on the bucket (events,
   measurements, removed events, flight list); locally in
   `/home/jupyter/.claude/jobs/616d5918/tmp/score/runs/<label>/`:
@@ -240,3 +241,35 @@ sense there:
 The line-by-line agreement of the baseline is in
 `/home/jupyter/.claude/jobs/616d5918/tmp/score/compare/base_vs_base_day_agreement.md`
 (`agree base base_day` writes it again).
+
+## The settings added after the corrections
+
+Four settings were added on top of the six work packages and measured the
+same way, on the sample of the day processed again (`d0614c`), against the
+run `cur` of the code before them (commit `4b59a63`), with
+`run --scope sample --steps 03 04 04b`. The run of all four together is
+`next_1`.
+
+| setting (`EventConfig`) | what it changes | measured on the sample |
+|---|---|---|
+| `flight_list_one_row_per_flight` | one flight-list row per flight of a track that lands and takes off again (`opdi_flight_legs`, `<track_id>-L<n>`); distance circles also around the airports of the stops | 175 tracks give 352 flight rows; 1,597 more circle crossings; flight-list values within 60 s of an airport record 106,360 to 106,695 (none lost); Network Manager flights with both airports right 22,220 to 22,333 |
+| `off_block_at_start_of_push_back` | the off-block time at the start of a slow push-back | off-block within 60 s of the record 39.8% to 48.4% (2,704 to 3,289 times), median difference 104 s to 64 s |
+| `off_block_names_where_first_seen` | `info.first_seen_on` on off-block times | no time changes |
+| `runway_window_by_median_distance` | the runway of the runway window method by the median distance of the reports from each centre line | runway equal to the record, window method: take-offs 97.0% to 97.4%, landings 95.0% to 95.2%; at Marseille (LFML) take-offs 31 to 42 of 45, landings 13 to 17 of 18; no airport lower; 1 take-off and 2 landing times move, none of them confirmed |
+
+Confirmed events (within 60 s of their airport record): 13 off-block times
+are lost and 411 move but stay within 60 s; no event of another type is
+lost or moved. The 13 were read in the reports: in 8 the aircraft began to
+move slowly 61 to 131 s before a record given to the whole minute, in 4 a
+separate movement of 30 m to 1.7 km came 5 to 7 minutes before the recorded
+one, and in 1 the positions at the stand stepped by 20 m. They are the
+accepted cost of 598 off-block times gained (`compare cur next_1 --allow 13`).
+
+Cost in executor-seconds, `cur` against `next_1`: step 04 15,355 to 15,545
+(+1.2%); step 04b 190 to 249 (the second table); step 03 5,443 (the run
+`cur` took 28,397 for step 03, an outlier of that one run: two other runs of
+the same step took 5,193 and 5,266).
+
+Each setting can be switched off for one run with `--set`, for example
+`--set events.off_block_at_start_of_push_back=false`.
+
