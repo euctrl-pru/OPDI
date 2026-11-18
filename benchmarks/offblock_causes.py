@@ -43,7 +43,14 @@ recorded in-block time (how early, and the state of the last report).
 
 A day processed without its cleaned tracks (``--tracks`` not given) only
 has the flight list: ``b`` is then read from the flight's first (last) seen
-time, its state is unknown, and c and d are given together (``cd``).
+time, which is its first (last) position, its state is unknown, and c and d
+are given together (``cd``).
+
+**Received, not repeated.** OpenSky's state vectors repeat the last state of
+an aircraft, without position, for about 300 s after its last message. A
+report counts as received only when a message came at most 15 s before it
+(``last_contact``); the first and last report of a track above are the first
+and last received ones.
 
 **Matching.** As in ``benchmarks/corrections_scorecard.py``: an OPDI event is
 matched to the nearest record of the same aircraft address, call sign and
@@ -101,6 +108,8 @@ OTHER_TRACK_S = 20 * 60
 OTHER_TRACK_NM = 3.0
 OTHER_TRACK_MAX_FT = 1500.0
 MOVING_KT = 2.0
+#: A report counts as received when a message came at most this many seconds before it.
+FRESH_S = 15.0
 FT_PER_M = 3.28084
 KT_PER_MPS = 1.94384
 
@@ -234,6 +243,7 @@ def _track_facts(spark, tracks_root: str, day: str, recs):
         "on_ground",
         (c("baro_altitude_c") * FT_PER_M).alias("alt_ft"),
         "h3_res_12",
+        c("last_contact").cast("double").alias("last_contact"),
     )
     own = recs.filter(c("flight_id").isNotNull()).select(
         "rec_key", "kind", "rec_s", "rec_apt", c("flight_id").alias("track_id")
@@ -243,6 +253,10 @@ def _track_facts(spark, tracks_root: str, day: str, recs):
     t, T = c("t"), c("rec_s")
     pos = c("lat").isNotNull() & c("lon").isNotNull()
     near = F.abs(t - T) <= AROUND_S
+    # A report is received when a message came within FRESH_S of it: the
+    # state vectors repeat the last state for up to 300 s after the last
+    # message, without position.
+    rx = c("last_contact").isNotNull() & (t - c("last_contact") <= FRESH_S)
     state = F.struct("kt", "on_ground", "alt_ft", "h3_res_12", "lat", "lon")
     facts = rep.groupBy("rec_key").agg(
         F.min("t").alias("t_first"),
@@ -251,6 +265,11 @@ def _track_facts(spark, tracks_root: str, day: str, recs):
         F.max(F.when(pos, t)).alias("t_last_pos"),
         F.min_by(F.when(pos, state), F.when(pos, t)).alias("first_pos"),
         F.max_by(F.when(pos, state), F.when(pos, t)).alias("last_pos"),
+        F.min(F.when(rx, t)).alias("t_first_rx"),
+        F.max(F.when(rx, t)).alias("t_last_rx"),
+        F.count(F.when(near & rx, 1)).alias("n_rx_around"),
+        F.count(F.when((t < T) & rx, 1)).alias("n_rx_before"),
+        F.count(F.when((t > T) & rx, 1)).alias("n_rx_after"),
         F.count(F.when(near, 1)).alias("n_rep_around"),
         F.count(F.when(near & pos, 1)).alias("n_pos_around"),
         F.count(F.when(t < T, 1)).alias("n_rep_before"),
@@ -400,8 +419,9 @@ def classify(df: pd.DataFrame, with_tracks: bool) -> pd.DataFrame:
     d = df.copy()
     dep = d["kind"] == "AOBT"
     diff = d["opdi_s"] - d["rec_s"]
-    first = d["t_first"] if with_tracks else d["fs"]
-    last = d["t_last"] if with_tracks else d["ls"]
+    # The first (last) report received; from the flight list, the first (last) position.
+    first = d["t_first_rx"].fillna(d["fs"]) if with_tracks else d["fs"]
+    last = d["t_last_rx"].fillna(d["ls"]) if with_tracks else d["ls"]
     d["lead_s"] = np.where(dep, d["rec_s"] - first, last - d["rec_s"])
     no_flight = d["flight_id"].isna()
     rwy = d["rwy_s"]
@@ -472,7 +492,7 @@ def load(days) -> tuple[dict, dict]:
         if p.exists():
             df = pd.read_parquet(p)
             coarse[day] = classify(df, False)
-            if "t_first" in df.columns:
+            if "t_first_rx" in df.columns:
                 full[day] = classify(df, True)
     return full, coarse
 
