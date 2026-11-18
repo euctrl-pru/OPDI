@@ -316,6 +316,15 @@ LADDER = [
         "L23_one_row_per_flight",
         {"flight_list_one_row_per_flight": True, "events_version": "events_v0.5.0"},
     ),
+    # The off-block time at the start of a slow push-back, and where the
+    # aircraft was first received on the ground (benchmarks/offblock_causes.py).
+    (
+        "L24_off_block_at_push_back",
+        {
+            "off_block_at_start_of_push_back": True,
+            "off_block_names_where_first_seen": True,
+        },
+    ),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
