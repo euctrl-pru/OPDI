@@ -828,7 +828,11 @@ def _blocks_with(spark, reports, stands, runway, config):
     )
 
 
-_NO_BRIDGE = EventConfig(ground_movement_through_reports_without_speed=False)
+#: Without the bridge over reports without speed; the push-back start by
+#: displacement is off too, so that the movement by speed alone is tested.
+_NO_BRIDGE = EventConfig(
+    ground_movement_through_reports_without_speed=False, off_block_at_start_of_push_back=False
+)
 
 
 def test_the_setting_of_movement_through_reports_without_speed():
@@ -1333,3 +1337,214 @@ def test_a_long_engine_start_after_the_push_back_does_not_move_the_off_block(spa
     got = _named(spark, _reports(spark, legs), stands, _runway(spark, [("ATOT", 600)]))
 
     assert got == [("off", 30.0, "A1")]
+
+
+# ---------------------------------------------------------------------------
+# The off-block time at the start of a slow push-back
+# ---------------------------------------------------------------------------
+
+M_PER_DEG_LAT = 111195.0
+
+
+def _path(spark, legs, track="trk-1", start_s=0, step_s=10):
+    """Reports on the ground without a reported speed, as the cleaned tracks
+    have them at an airport. ``legs`` is a list of ``(seconds, metres per
+    second)``; the aircraft moves north at that speed for that long. A leg
+    may also be ``("jump", metres)``: the next position is that far north of
+    the last one at once (a wrong position)."""
+    rows, north_m, s = [], 0.0, start_s
+    rows.append((track, _at(s), 50.0, 4.0, None, None, True))
+    for leg in legs:
+        if leg[0] == "jump":
+            north_m += leg[1]
+            continue
+        seconds, mps = leg
+        for _ in range(int(seconds // step_s)):
+            s += step_s
+            north_m += mps * step_s
+            rows.append((track, _at(s), 50.0 + north_m / M_PER_DEG_LAT, 4.0, None, None, True))
+    return spark.createDataFrame(rows, _REPORT_DDL)
+
+
+def _climb(spark, start_s, track="trk-1"):
+    """Reports in flight after the take-off, far above the airport."""
+    rows = [
+        (track, _at(s), 50.2, 4.0, _kt(200), 4000 / FT_PER_M, False)
+        for s in range(start_s, start_s + 100, 10)
+    ]
+    return spark.createDataFrame(rows, _REPORT_DDL)
+
+
+#: AOBT#02 (LFPO) and most late off-block times: parked for 2 minutes, pushed
+#: back for 2 minutes at 1.5 kt (0.77 m/s, 93 m), stopped for 4 minutes to
+#: start the engines, then taxi at 15 kt (7.7 m/s) and take-off at 900 s.
+_SLOW_PUSH_BACK = [(120, 0.0), (120, 0.77), (240, 0.0), (420, 7.7)]
+_PUSH_BACK_STANDS = [
+    ("entry-parking_position", 0, "A1", "LFPO"),
+    ("exit-parking_position", 200, "A1", "LFPO"),
+]
+
+
+def _off_block(spark, legs, config=None, stands=_PUSH_BACK_STANDS, take_off_s=900):
+    reports = _path(spark, legs).unionByName(_climb(spark, take_off_s))
+    got = _named(
+        spark, reports, _stands(spark, stands), _runway(spark, [("ATOT", take_off_s)]), config
+    )
+    return [time for block, time, _ in got if block == "off"]
+
+
+def test_the_off_block_time_is_the_start_of_a_slow_push_back(spark):
+    """The push-back is slower than ``ground_speed_threshold_kt``, so the first
+    movement by speed is the taxi after the engine start, 6 minutes late. The
+    aircraft is 35 ft (10.7 m) from where it was 30 s earlier at 140 s."""
+    assert _off_block(spark, _SLOW_PUSH_BACK) == [140.0]
+    assert _off_block(spark, _SLOW_PUSH_BACK, _off(off_block_at_start_of_push_back=False)) == [
+        490.0
+    ]
+
+
+def test_position_noise_at_the_stand_is_not_a_push_back(spark):
+    """Positions of a parked aircraft that step 6 m to and fro, and one wrong
+    position 40 m away, leave the off-block time at the start of the taxi."""
+    wobble = []
+    for _ in range(6):
+        wobble += [("jump", 6.0), (10, 0.0), ("jump", -6.0), (10, 0.0)]
+    legs = wobble + [("jump", 40.0), (10, 0.0), ("jump", -40.0), (110, 0.0), (420, 7.7)]
+    assert _off_block(spark, legs, take_off_s=700) == [250.0]
+
+
+def test_a_movement_long_before_the_taxi_is_not_the_push_back(spark):
+    """An aircraft towed 90 m onto its stand 15 minutes before it leaves: the
+    slow movement lies more than ``push_back_max_stop_seconds`` before the
+    taxi."""
+    legs = [(60, 0.0), (120, 0.77), (900, 0.0), (420, 7.7)]
+    stands = [
+        ("entry-parking_position", 0, "A1", "LFPO", 200),
+        ("exit-parking_position", 200, "A1", "LFPO", 200),
+    ]
+    assert _off_block(spark, legs, stands=stands, take_off_s=1500) == [1090.0]
+
+
+def test_a_push_back_faster_than_the_speed_threshold_keeps_its_time(spark):
+    """A push-back at 5 kt (2.6 m/s) is found by its speed; the time stays at
+    the first report that moved."""
+    legs = [(120, 0.0), (60, 2.6), (240, 0.0), (420, 7.7)]
+    on = _off_block(spark, legs, take_off_s=840)
+    assert on == _off_block(
+        spark, legs, _off(off_block_at_start_of_push_back=False), take_off_s=840
+    )
+    assert on == [130.0]
+
+
+def test_a_slow_roll_into_the_stand_does_not_move_the_in_block_time(spark):
+    """An arrival taxis in, and rolls the last 40 m to its stand at 1.5 kt. The
+    in-block time is the same with and without the setting, and the
+    departure 25 minutes later does not take that roll as its push-back."""
+    air = [
+        ("trk-1", _at(s), 50.0, 4.0, _kt(200), 4000 / FT_PER_M, False) for s in range(0, 100, 10)
+    ]
+    arrival = spark.createDataFrame(air, _REPORT_DDL)
+    ground = _path(
+        spark, [(300, 7.7), (60, 0.77), (1500, 0.0), (60, 2.6), (120, 0.0), (300, 7.7)], start_s=100
+    )
+    reports = arrival.unionByName(ground).unionByName(_climb(spark, 2450))
+    stands = _stands(
+        spark,
+        [
+            ("entry-parking_position", 440, "B2", "EDDF", 1580),
+            ("exit-parking_position", 2020, "B2", "EDDF", 1580),
+        ],
+    )
+    runway = _runway(spark, [("ALDT", 100), ("ATOT", 2450)])
+    on = _named(spark, reports, stands, runway)
+    off = _named(spark, reports, stands, runway, _off(off_block_at_start_of_push_back=False))
+    assert on == off
+    assert [block for block, _, _ in on] == ["on", "off"]
+
+
+def test_the_settings_of_the_push_back_start():
+    new, old = EventConfig(), EventConfig.legacy()
+    assert new.off_block_at_start_of_push_back is True
+    assert old.off_block_at_start_of_push_back is False
+    assert new.push_back_displacement_baseline_seconds == 30.0
+    assert new.push_back_min_displacement_ft == 35.0
+    assert new.push_back_min_distance_ft == 100.0
+    assert new.push_back_max_stop_seconds == 600.0
+
+
+# ---------------------------------------------------------------------------
+# Where the aircraft was first received on the ground (info.first_seen_on)
+# ---------------------------------------------------------------------------
+
+
+def _first_seen_on(spark, layout_rows, config=None):
+    """``first_seen_on`` of the off-block times of :data:`DEPARTURE` with these
+    layout events (``(type, seconds)``; the stand passage A1 is added)."""
+    import json
+
+    stand = json.dumps({"osm_ref": "A1", "osm_airport": "EBBR", "opdi_time_in_use_s": 100})
+    rows = [
+        ("trk-1", kind, _at(s), stand if "parking" in kind else "{}") for kind, s in layout_rows
+    ]
+    layout = spark.createDataFrame(
+        rows, "track_id string, type string, event_time timestamp, info string"
+    )
+    got = block_events(
+        _reports(spark, DEPARTURE), layout, _runway(spark, [("ATOT", 600)]), config or EventConfig()
+    )
+    if "first_seen_on" not in got.columns:
+        return None
+    return [r.first_seen_on for r in got.filter(F.col("block") == "off").collect()]
+
+
+def test_an_aircraft_first_received_on_its_stand(spark):
+    layout = [
+        ("entry-parking_position", 0),
+        ("entry-apron", 0),
+        ("exit-parking_position", 100),
+        ("entry-taxiway", 110),
+    ]
+    assert _first_seen_on(spark, layout) == ["stand"]
+
+
+def test_an_aircraft_first_received_on_a_taxiway(spark):
+    """AOBT of a track that starts after the push-back: the first position
+    is on a taxiway (a stand shares its place), so the movement that follows
+    is the taxi."""
+    layout = [
+        ("entry-taxiway", 0),
+        ("entry-parking_position", 3),
+        ("exit-parking_position", 100),
+    ]
+    assert _first_seen_on(spark, layout) == ["taxiway"]
+
+
+def test_an_aircraft_first_received_on_an_apron(spark):
+    layout = [("entry-apron", 0), ("entry-parking_position", 40), ("exit-parking_position", 100)]
+    assert _first_seen_on(spark, layout) == ["apron"]
+
+
+def test_first_seen_on_is_not_given_after_a_landing_or_without_the_setting(spark):
+    layout = [("entry-parking_position", 0), ("exit-parking_position", 100)]
+    assert _first_seen_on(spark, layout, _off(off_block_names_where_first_seen=False)) is None
+    assert EventConfig.legacy().off_block_names_where_first_seen is False
+    # A track that lands and leaves again: the off-block time follows the
+    # landing, so the aircraft was not first received on the ground.
+    legs = [
+        _leg(0, 100, 250, alt_ft=6000, on_ground=False),
+        _leg(100, 300, 15),
+        _leg(300, 700, 0),
+        _leg(700, 900, 15),
+        _leg(900, 1000, 160, alt_ft=4000, on_ground=False),
+    ]
+    stands = _stands(
+        spark,
+        [
+            ("entry-parking_position", 290, "B2", "EDDF", 420),
+            ("exit-parking_position", 710, "B2", "EDDF", 420),
+        ],
+    )
+    rows = block_events(
+        _reports(spark, legs), stands, _runway(spark, [("ALDT", 100), ("ATOT", 900)]), EventConfig()
+    ).collect()
+    assert {r.block: r.first_seen_on for r in rows} == {"on": None, "off": None}

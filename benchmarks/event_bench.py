@@ -308,6 +308,15 @@ LADDER = [
             "seen_from_measured_reports": True,
         },
     ),
+    # The off-block time at the start of a slow push-back, and where the
+    # aircraft was first received on the ground (benchmarks/offblock_causes.py).
+    (
+        "L23_off_block_at_push_back",
+        {
+            "off_block_at_start_of_push_back": True,
+            "off_block_names_where_first_seen": True,
+        },
+    ),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to

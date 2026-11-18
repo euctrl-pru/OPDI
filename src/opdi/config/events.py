@@ -319,6 +319,71 @@ class EventConfig:
     :attr:`ground_move_min_seconds`. Airport vehicles and aircraft under
     tow have such tracks. Off in release v0.0.2."""
 
+    # -- the off-block time at the start of a slow push-back ---------------
+    off_block_at_start_of_push_back: bool = True
+    """Move an off-block time back to the start of a slow push-back before it.
+
+    A tug pushes an aircraft back at 1 to 3 kt, often below
+    :attr:`ground_speed_threshold_kt`, and the aircraft then stands for 2 to
+    7 minutes while the engines are started. The movement found by speed is
+    then the taxi after that stop, minutes after the aircraft left its
+    stand. With this setting the positions before the off-block time are
+    read for displacement: a report is displaced when it lies at least
+    :attr:`push_back_min_displacement_ft` from the position
+    :attr:`push_back_displacement_baseline_seconds` earlier. A slow movement
+    is two or more displaced reports in a row that carry the aircraft at
+    least :attr:`push_back_min_distance_ft` in all. The off-block time
+    becomes the first displaced report of the earliest slow movement that
+    starts at most :attr:`push_back_max_stop_seconds` before it, in the same
+    ground part and, where the time was read from a stand stop, after the
+    aircraft reached that stand. Without such a movement the time is kept.
+    The in-block time is not changed. Off in release v0.0.2, which
+    publishes no block times. See
+    https://www.opdi.aero/content/methods/block-times.html."""
+
+    push_back_displacement_baseline_seconds: float = 30.0
+    """Time, in seconds, over which the displacement of a report is measured,
+    with :attr:`off_block_at_start_of_push_back`: each position is compared
+    with the earliest position of the same track in the seconds before it.
+    Over 30 s a push-back at 1 kt covers 50 ft (15 m), three times the 15 ft
+    (5 m) by which reported positions of a parked aircraft step."""
+
+    push_back_min_displacement_ft: float = 35.0
+    """Distance, in feet, between a position and the one
+    :attr:`push_back_displacement_baseline_seconds` earlier from which the
+    report counts as displaced. Positions of a parked aircraft step by about
+    15 ft (5 m); 35 ft (10.7 m) is twice that."""
+
+    push_back_min_distance_ft: float = 100.0
+    """Distance, in feet, a slow movement must cover in all to count as a
+    push-back: from the position its first displaced report was compared
+    with to the position of its last one. An aircraft that is moved a few
+    metres on its stand covers less; a push-back covers 200 to 450 ft (60 to
+    140 m)."""
+
+    push_back_max_stop_seconds: float = 600.0
+    """Longest time, in seconds, between the start of a slow movement and
+    the off-block time found by speed for the two to belong to one
+    departure: the push-back and the engine start take up to 10 minutes. An
+    earlier movement is a tow or a change of stand."""
+
+    off_block_names_where_first_seen: bool = True
+    """Say in ``info.first_seen_on`` of an off-block time where the aircraft
+    was when it was first received on the ground: ``stand``, ``apron`` or
+    ``taxiway``.
+
+    It is the kind of airport layout element of the first position of the
+    track on an airport: ``taxiway`` when that position lies on a taxiway or
+    runway (also when a stand shares the place), else ``stand``, else
+    ``apron``, else ``other``. An aircraft whose transponder is switched on
+    after the push-back is first received on a taxiway; the movement that
+    follows is its taxi, not its departure from the stand, and the off-block
+    time is then minutes late. On 14 June 2026, 9% of the off-block times
+    first seen on a taxiway were within 60 s of the airport's record, against
+    67% of the others. The field is absent when the track holds the landing
+    before this departure, or passes no layout element. Off in release
+    v0.0.2."""
+
     layout_ref_missing_as_null: bool = True
     """Write a missing name of an airport layout element (a stand, taxiway
     or apron without a ``ref`` tag in OpenStreetMap) as no value, not as
@@ -1696,6 +1761,8 @@ class EventConfig:
             block_time_stand_longest_dwell=False,
             block_time_one_part_per_leg=False,
             block_time_needs_flight=False,
+            off_block_at_start_of_push_back=False,
+            off_block_names_where_first_seen=False,
             layout_ref_missing_as_null=False,
             phase_require_complete_rules=False,
             crossing_all_occurrences=False,

@@ -33,6 +33,8 @@ if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
 
 KT_PER_MPS = 1.94384
+#: Feet in a nautical mile (1,852 m at 3.28084 ft per metre).
+FT_PER_NM = 1852.0 * 3.28084
 
 
 def _derived_groundspeed_kt(ordered: Window, time_col: str) -> Column:
@@ -1007,8 +1009,20 @@ def block_events(
         .filter(F.col("_rank") == 1)
         .select(*out_cols)
     )
+    if config.off_block_at_start_of_push_back:
+        # A slow movement is read from the start of the part, or from the
+        # end of the movement before the stop of a landing followed by a
+        # take-off (``_s_lo``); for a time read from a stand stop, from the
+        # moment the aircraft reached that stand (``_move_lo``).
+        picked = picked.withColumn("_move_lo", F.col("_s_lo").cast("double"))
     if anchored is not None:
         picked = picked.unionByName(anchored)
+    if config.off_block_at_start_of_push_back:
+        if "lat" in sdf.columns and "lon" in sdf.columns:
+            picked = _at_push_back_start(_kept(picked, checkpoints), reports, config)
+        else:
+            # Without positions there is no displacement to read.
+            picked = picked.drop("_move_lo")
 
     if config.block_time_off_the_runway:
         picked = _off_the_runway(picked, runway_events, config)
@@ -1022,6 +1036,10 @@ def block_events(
         ).select(F.col("track_id").alias("_f_track"))
         picked = picked.join(flying, F.col("track_id") == F.col("_f_track"), "left_semi")
 
+    first_seen = []
+    if config.off_block_names_where_first_seen:
+        picked = _with_first_seen_on(picked, airport_events, first_last)
+        first_seen = ["first_seen_on"]
     return picked.select(
         "track_id",
         "block",
@@ -1031,6 +1049,59 @@ def block_events(
         "stand_airport",
         F.col("_bound").alias("bound_time"),
         F.col("_bound_method").alias("bound_method"),
+        *first_seen,
+    )
+
+
+def _with_first_seen_on(
+    blocks: DataFrame, airport_events: DataFrame, first_last: DataFrame
+) -> DataFrame:
+    """``blocks`` with ``first_seen_on``: where the aircraft was first received on the ground.
+
+    The rule of ``off_block_names_where_first_seen``. The layout elements
+    the track enters within :data:`_EDGE_SECONDS` of its first entry of any
+    element give the value: ``taxiway`` when one of them is a taxiway or a
+    runway, else ``stand`` when one is a stand, else ``apron``, else
+    ``other``. Only an off-block time whose ground part starts at the
+    track's first report (``_s_lo``) gets a value; an in-block time, an
+    off-block time after a landing in the same track, and a track that
+    enters no layout element get NULL.
+    """
+    t = F.col("event_time")
+    entries = (
+        airport_events.filter(F.col("type").startswith("entry-"))
+        .groupBy(F.col("track_id").alias("_e_track"))
+        .agg(
+            F.min(t).alias("_e_first"),
+            F.min(F.when(F.col("type").isin("entry-taxiway", "entry-runway"), t)).alias("_e_taxi"),
+            F.min(F.when(F.col("type") == _STAND_ENTRY, t)).alias("_e_stand"),
+            F.min(F.when(F.col("type") == "entry-apron", t)).alias("_e_apron"),
+        )
+    )
+    edge = F.col("_e_first").cast("double") + F.lit(_EDGE_SECONDS)
+
+    def at_first(c):
+        return F.coalesce(F.col(c).cast("double") <= edge, F.lit(False))
+
+    where = (
+        F.when(at_first("_e_taxi"), F.lit("taxiway"))
+        .when(at_first("_e_stand"), F.lit("stand"))
+        .when(at_first("_e_apron"), F.lit("apron"))
+        .when(F.col("_e_first").isNotNull(), F.lit("other"))
+    )
+    out = blocks.join(entries, F.col("track_id") == F.col("_e_track"), "left").join(
+        first_last, F.col("track_id") == F.col("_fl_track"), "left"
+    )
+    from_start = (F.col("block") == "off") & (F.col("_s_lo") == F.col("_t_first"))
+    return out.withColumn("first_seen_on", F.when(from_start, where)).drop(
+        "_e_track",
+        "_e_first",
+        "_e_taxi",
+        "_e_stand",
+        "_e_apron",
+        "_fl_track",
+        "_t_first",
+        "_t_last",
     )
 
 
@@ -1173,9 +1244,128 @@ def _from_stand_stop(
             F.col("_hi").alias("_s_hi"),
             "_bound",
             "_bound_method",
+            *([F.col("_p_in").alias("_move_lo")] if config.off_block_at_start_of_push_back else []),
         )
     )
     return times, had_stop
+
+
+def _feet(lat1: Column, lon1: Column, lat2: Column, lon2: Column) -> Column:
+    """Distance in feet between two positions."""
+    return haversine_nm(lat1, lon1, lat2, lon2) * F.lit(FT_PER_NM)
+
+
+def _at_push_back_start(blocks: DataFrame, reports: DataFrame, config: "EventConfig") -> DataFrame:
+    """``blocks`` with each off-block time moved back to the start of a slow push-back.
+
+    The rule of ``off_block_at_start_of_push_back``. For each off-block time,
+    the reports on the ground with a position are read from
+    ``push_back_max_stop_seconds`` before it (not from before ``_move_lo``)
+    to ``push_back_displacement_baseline_seconds`` after it. A report is
+    displaced when it lies at least ``push_back_min_displacement_ft`` from the
+    earliest of these reports in the ``push_back_displacement_baseline_seconds``
+    before it. Displaced reports that follow each other, no more than
+    ``ground_speed_max_position_gap_seconds`` apart, are one slow movement;
+    it counts when it holds two reports or more (one wrong position is not
+    a movement) and its last position lies at least
+    ``push_back_min_distance_ft`` from the position its first report was
+    compared with. The off-block time becomes the first report of the
+    earliest such movement that starts before it. In-block times, and
+    off-block times without such a movement, are returned as they are.
+
+    ``blocks`` carries ``_move_lo`` (seconds since 1970), which is dropped.
+    ``reports`` carries ``_ground`` (:func:`_report_on_ground`).
+    """
+    baseline = float(config.push_back_displacement_baseline_seconds)
+    times = F.broadcast(
+        blocks.filter(F.col("block") == "off").select(
+            F.col("track_id").alias("_b_track"),
+            F.col("event_time").alias("_b_time"),
+            F.col("event_time").cast("double").alias("_b_s"),
+            F.col("_move_lo").alias("_b_lo"),
+        )
+    )
+    t = F.col("event_time").cast("double")
+    near = (
+        reports.filter(
+            F.coalesce(F.col("_ground"), F.lit(False))
+            & F.col("lat").isNotNull()
+            & F.col("lon").isNotNull()
+        )
+        .select(F.col("track_id").alias("_r_track"), "event_time", t.alias("_t"), "lat", "lon")
+        .join(
+            times,
+            (F.col("_r_track") == F.col("_b_track"))
+            & (F.col("_t") <= F.col("_b_s") + F.lit(baseline))
+            & (
+                F.col("_t")
+                >= F.greatest(
+                    F.coalesce(F.col("_b_lo"), F.col("_b_s") - F.lit(1e12)),
+                    F.col("_b_s") - F.lit(float(config.push_back_max_stop_seconds)),
+                )
+            ),
+            "inner",
+        )
+    )
+    ordered = Window.partitionBy("_b_track", "_b_time").orderBy("_t")
+    seconds = int(round(baseline))
+    here = F.struct(F.col("_t").alias("t"), "lat", "lon")
+    # Where the aircraft was up to ``baseline`` seconds before this report
+    # (the earliest report of that time).
+    near = near.withColumn("_base", F.first(here).over(ordered.rangeBetween(-seconds, 0)))
+    near = near.withColumn(
+        "_displaced",
+        (F.col("_base.t") < F.col("_t"))
+        & (
+            _feet(F.col("_base.lat"), F.col("_base.lon"), F.col("lat"), F.col("lon"))
+            >= F.lit(float(config.push_back_min_displacement_ft))
+        ),
+    )
+    gap = F.lit(float(config.ground_speed_max_position_gap_seconds))
+    starts = F.col("_displaced") & (
+        ~F.coalesce(F.lag("_displaced").over(ordered), F.lit(False))
+        | (F.col("_t") - F.lag("_t").over(ordered) > gap)
+    )
+    near = near.withColumn("_new", F.when(starts, 1).otherwise(0)).withColumn(
+        "_movement",
+        F.sum("_new").over(ordered.rowsBetween(Window.unboundedPreceding, Window.currentRow)),
+    )
+    movements = (
+        near.filter(F.col("_displaced"))
+        .groupBy("_b_track", "_b_time", "_b_s", "_movement")
+        .agg(
+            F.min(
+                F.struct(F.col("_t").alias("t"), F.col("event_time").alias("time"), "_base")
+            ).alias("_first"),
+            F.max(here).alias("_last"),
+            F.count("*").alias("_n"),
+        )
+        .filter(
+            (F.col("_n") >= 2)
+            & (F.col("_first.t") < F.col("_b_s"))
+            & (
+                _feet(
+                    F.col("_first._base.lat"),
+                    F.col("_first._base.lon"),
+                    F.col("_last.lat"),
+                    F.col("_last.lon"),
+                )
+                >= F.lit(float(config.push_back_min_distance_ft))
+            )
+        )
+        .groupBy("_b_track", "_b_time")
+        .agg(F.min("_first.time").alias("_push_back"))
+    )
+    moved = blocks.join(
+        movements,
+        (F.col("block") == "off")
+        & (F.col("track_id") == F.col("_b_track"))
+        & (F.col("event_time") == F.col("_b_time")),
+        "left",
+    )
+    return moved.withColumn(
+        "event_time", F.coalesce(F.col("_push_back"), F.col("event_time"))
+    ).drop("_b_track", "_b_time", "_push_back", "_move_lo")
 
 
 def _off_the_runway(

@@ -515,6 +515,7 @@ def calculate_block_events(
                     *stand,
                     bound.alias("take_off"),
                     col("bound_method").alias("take_off_method"),
+                    *([col("first_seen_on")] if config.off_block_names_where_first_seen else []),
                 )
             ).alias("info"),
         )
