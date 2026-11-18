@@ -122,7 +122,10 @@ def enrich_day(
         print(f"  removed {removed:,} repeated ID(s): the flight list holds one row per flight")
 
     airports = airports_for_checks(storage, config)
-    enriched, flights = enrich_flight_list_and_flights(flight_list, events, config, airports)
+    kept: list = []
+    enriched, flights = enrich_flight_list_and_flights(
+        flight_list, events, config, airports, kept=kept
+    )
 
     # The day folders are named, so a day without flights also replaces what
     # an earlier run left in the staging table.
@@ -145,6 +148,9 @@ def enrich_day(
         partition_by=["DOF"],
         partition_values=day_folders,
     )
+    # Both tables are written: release what was kept in memory for them.
+    for frame in kept:
+        frame.unpersist()
     staged = storage.read_table(STAGING_TABLE).filter(
         F.col("DOF").between(F.lit(start_date), F.lit(end_date))
     )

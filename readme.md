@@ -6,7 +6,9 @@ reports that aircraft broadcast (ADS-B), as collected by the
 [OpenSky Network](https://opensky-network.org/), and published as two files
 per day:
 
-- **the flight list**: one row per flight, with its aircraft, its departure
+- **the flight list**: one row per flight (a track that lands and, after a
+  stop on the ground, takes off again gives one row for each of its
+  flights), with its aircraft, its departure
   and destination airports, the first and last time it was seen, and its main
   times (off-block, take-off, landing, in-block), runways, stands and the
   times it crossed distance circles around its airports;
@@ -59,7 +61,9 @@ The files are Parquet files, one per table and day:
 <release>/catalogue.parquet                   # one row per published day
 ```
 
-A day's files hold the flights that were first seen on that day (UTC). Any
+A day's files hold the flights whose track was first seen on that day (UTC);
+the flights of a track that holds several are all in the file of the track's
+day, also a flight that started after midnight. Any
 Parquet reader works (pandas, R `arrow`, DuckDB, Spark). The package includes
 a small reader that never starts Spark or Java:
 
@@ -150,11 +154,11 @@ before it and writes its own:
 |------|--------------|--------|--------|
 | 00 | Reference tables, built once: airport detection zones (00a), airport layouts from OpenStreetMap (00b), airspaces (00c), OurAirports airports and runways (00d), the OpenSky aircraft database (00e), runway and approach grid (00f) | `h3_airport_detection_zones`, `hexaero_airport_layouts`, `opdi_h3_airspace_ref`, `oa_airports`, `oa_runways`, `osn_aircraft_db`, `h3_runway_zones` | `opdi.reference`, `opdi.ingestion` |
 | 01 | Fetch the position reports (state vectors) of the day before, the day and the day after, thinned to one report per aircraft every 5 seconds | `osn_statevectors_v2` | `opdi.ingestion.osn_statevectors` |
-| 02 | Split the reports into tracks, one per flight (`track_id`) | `osn_tracks` | `opdi.pipeline.tracks` |
+| 02 | Split the reports into tracks (`track_id`): the reports of one aircraft under one call sign that belong together | `osn_tracks` | `opdi.pipeline.tracks` |
 | 02a | Clean the tracks: set values that cannot be trusted to NULL | `osn_tracks_clean` | `opdi.cleaning` |
 | 03 | Flight list: departure and destination airports, aircraft data | `opdi_flight_list` | `opdi.pipeline.flights` |
 | 04 | Flight events and their measurements; events the track contradicts are removed and kept apart | `opdi_flight_events`, `opdi_measurements`, `opdi_flight_events_rejected` | `opdi.pipeline.events`, `opdi.pipeline.plausibility` |
-| 04b | Copy the main milestones onto the flight list | `opdi_flight_list` | `opdi.pipeline.flight_list_step` |
+| 04b | Copy the main milestones onto the flight list, and give each flight of a track that holds several its own row | `opdi_flight_list`, `opdi_flight_legs` | `opdi.pipeline.flight_list_step` |
 | 09 | Publish the day's flight list and flight events files, the monthly index and the catalogue | `published/` | `opdi.output.published` |
 
 Step 01b, off by default, adds ADS-C reports (satellite position reports,
@@ -305,6 +309,13 @@ files, so a change that alters either is noticed.
 The `track_id` values of release v0.0.2 and of release v2.0.0 differ for the
 same flight, because the track rules differ, and nothing in the tables says
 which rule produced an id; ids of the two releases do not join.
+
+In the published files, `flight_id` is the `track_id` for a track that holds
+one flight. A track that holds several flights (a landing, at least five
+minutes on the ground and a new take-off) has the rows `<track_id>-L1`,
+`<track_id>-L2`, ... and no row under the bare `track_id`: to join published
+flights with tracks, remove the ending `-L<number>` from `flight_id`. Flight
+lists with one row per flight have the version `v6.1.0`.
 
 ## Studies and their variants
 

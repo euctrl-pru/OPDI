@@ -2,8 +2,11 @@
 
 For each day, this step writes two files into the published folder:
 
-* ``flight_list/flight_list_YYYYMMDD.parquet``: one row per flight that started
-  that day.
+* ``flight_list/flight_list_YYYYMMDD.parquet``: one row per flight whose track
+  started that day. A track that lands and, after a stop on the ground, takes
+  off again holds several flights (:mod:`opdi.pipeline.flight_legs`). They
+  all have the day of their track, also a flight that started after
+  midnight, so the flights of one track are always in one file.
 * ``flight_events/flight_events_YYYYMMDD.parquet``: one row per event of those
   flights. Each row carries the event's measurements as columns and the columns
   of its flight. A flight keeps all its events in the file of the day it
@@ -755,7 +758,10 @@ def publish_day(
     row_group_rows: int = ROW_GROUP_ROWS,
     allow_empty: bool = False,
 ) -> Dict:
-    """Publish the flights that started on ``day``.
+    """Publish the flights of the tracks that started on ``day``.
+
+    A flight of a track that holds several has the day of its track, also
+    when it started on the next day (:mod:`opdi.pipeline.flight_legs`).
 
     Reads the day's rows of the working tables and writes the day's flight
     list and flight events files (the events of exactly the flights in the

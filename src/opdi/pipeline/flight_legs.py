@@ -48,9 +48,16 @@ last flight without a landing. A track with no stop (and so every track
 without both a landing and a later take-off, such as a track seen only on
 the ground) keeps its single row as it is.
 
+**The day of a flight.** Every flight of a track has the day (``DOF``) of
+its track, which is the day of the track's first report, also a flight that
+starts after midnight. The published files of a day hold the flights with
+that day, so the flights of one track, and all their events, are in the
+files of one day, and the monthly index names that day's file for each.
+
 **Identifiers.** The flights of a track with stops are named
 ``<track_id>-L<k>`` (``...-L1``, ``...-L2``, ...). A track with one flight
-keeps ``track_id`` as its flight identifier. The flight rows are written to
+keeps ``track_id`` as its flight identifier. The identifiers follow from the
+events alone, so running the steps again gives the same ones. The flight rows are written to
 the working table :data:`LEGS_TABLE` beside the track's own row in
 ``opdi_flight_list``, which stays as it is so that the steps that read the
 flight list by track are not changed; the published flight list takes the
@@ -138,9 +145,11 @@ def flight_stops(events: DataFrame, config: EventConfig) -> DataFrame:
         t.alias("t"),
         _info("apt_icao").alias("apt"),
     )
-    # In time order; at the same instant the landing ("ALDT") sorts first.
+    # In time order; at the same instant the landing ("ALDT") sorts first,
+    # and two events of one type by airport code, so that the result does
+    # not depend on the order in which Spark reads the rows.
     per_track = Window.partitionBy("track_id")
-    order = per_track.orderBy("t", "type")
+    order = per_track.orderBy("t", "type", "apt")
     minimum = float(config.flight_stop_min_ground_s)
     stops = (
         runway.withColumn(

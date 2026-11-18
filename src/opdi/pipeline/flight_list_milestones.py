@@ -21,7 +21,7 @@ The step reads and writes nothing itself: it takes two DataFrames and returns
 one. The caller wires storage.
 """
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
@@ -670,6 +670,7 @@ def enrich_flight_list_and_flights(
     events: DataFrame,
     config: Optional[EventConfig] = None,
     airports: Optional[DataFrame] = None,
+    kept: Optional[List[DataFrame]] = None,
 ) -> Tuple[DataFrame, Optional[DataFrame]]:
     """The enriched flight list, and the rows of the flights of tracks that hold several.
 
@@ -682,7 +683,13 @@ def enrich_flight_list_and_flights(
     movement columns computed from that flight's events only; ``None``
     without that setting. Both carry the version of the flight list with
     one row per flight, :data:`FLIGHT_LIST_LEGS_VERSION`, when the setting
-    is on.
+    is on. Without it, a row that an earlier run wrote with that version
+    gets :data:`FLIGHT_LIST_VERSION` again, so the version always says
+    whether the list holds one row per flight or one per track.
+
+    The two frames read the same intermediate results, which are kept in
+    memory while both are written. Give a list as ``kept`` to receive those
+    frames, and call ``unpersist()`` on each after writing.
     """
     config = config or EventConfig()
     return _enrich(
@@ -691,6 +698,7 @@ def enrich_flight_list_and_flights(
         config,
         airports,
         with_legs=bool(getattr(config, "flight_list_one_row_per_flight", False)),
+        kept=kept,
     )
 
 
@@ -700,6 +708,7 @@ def _enrich(
     config: Optional[EventConfig] = None,
     airports: Optional[DataFrame] = None,
     with_legs: bool = False,
+    kept: Optional[List[DataFrame]] = None,
 ) -> Tuple[DataFrame, Optional[DataFrame]]:
     """Add the milestone, runway, stand and ring columns to a flight list.
 
@@ -728,6 +737,8 @@ def _enrich(
             it those checks treat every distance and height as unknown.
         with_legs: also compute the rows of the flights of tracks that hold
             several flights.
+        kept: with ``with_legs``, the frames kept in memory are appended to
+            this list, for the caller to release.
 
     Returns:
         The flight list plus :data:`ADDED_COLUMNS`, and the flight rows (or
@@ -795,10 +806,12 @@ def _enrich(
         # The corrected flight list and the flight rows are read by both
         # outputs; kept so that the events are not read again for each.
         flight_list = flight_list.cache()
+        held = [flight_list]
         tracks = flight_list.withColumn("_trk", F.col("id"))
         tracks = tracks.withColumn("_lo", _null_ts()).withColumn("_hi", _null_ts())
         rows = tracks
         leg_rows = _leg_rows(flight_list, flight_legs(flight_stops(events, config))).cache()
+        held.append(leg_rows)
         rows = tracks.unionByName(leg_rows.drop(*LEG_COLUMNS))
     keys = rows.select(
         F.col("id").alias("_track_id"),
@@ -924,6 +937,9 @@ def _enrich(
     if with_legs:
         # Read twice below, by the track rows and by the flight rows.
         agg = agg.cache()
+        held.append(agg)
+        if kept is not None:
+            kept.extend(held)
     out = add_movement_columns(
         flight_list.join(agg, flight_list["id"] == agg["_track_id"], "left")
         .drop("_track_id")
@@ -933,7 +949,7 @@ def _enrich(
     )
     out = _without_internal(out)
     if not with_legs:
-        return out, None
+        return _with_list_version(out, per_flight=False), None
     # The movement flags of a flight row compare it with the other rows of
     # its aircraft as the published flight list holds them: the flight rows
     # and the rows of tracks with one flight.
@@ -955,7 +971,7 @@ def _enrich(
         airports,
     )
     flights = _without_internal(flights.filter(F.col("_is_leg")).drop("_is_leg"))
-    return _with_legs_version(out), _with_legs_version(flights)
+    return _with_list_version(out, per_flight=True), _with_list_version(flights, per_flight=True)
 
 
 def _without_internal(frame: DataFrame) -> DataFrame:
@@ -964,18 +980,22 @@ def _without_internal(frame: DataFrame) -> DataFrame:
     return frame.drop(*internal) if internal else frame
 
 
-def _with_legs_version(frame: DataFrame) -> DataFrame:
-    """The flight-list version of a list with one row per flight.
+def _with_list_version(frame: DataFrame, per_flight: bool) -> DataFrame:
+    """The flight-list version that says whether the list has one row per flight.
 
-    A row of the flight list of release v2.0.0 (:data:`FLIGHT_LIST_VERSION`)
-    gets :data:`FLIGHT_LIST_LEGS_VERSION`; any other version is kept.
+    The flight list of release v2.0.0 has two versions:
+    :data:`FLIGHT_LIST_LEGS_VERSION` with one row per flight and
+    :data:`FLIGHT_LIST_VERSION` with one row per track. A row with either
+    gets the one that ``per_flight`` names; any other version is kept.
     """
     name = _named(frame, "VERSION")
     if name is None:
         return frame
-    current = F.col(name) == F.lit(FLIGHT_LIST_VERSION)
+    wanted, other = FLIGHT_LIST_LEGS_VERSION, FLIGHT_LIST_VERSION
+    if not per_flight:
+        wanted, other = other, wanted
     return frame.withColumn(
-        name, F.when(current, F.lit(FLIGHT_LIST_LEGS_VERSION)).otherwise(F.col(name))
+        name, F.when(F.col(name) == F.lit(other), F.lit(wanted)).otherwise(F.col(name))
     )
 
 

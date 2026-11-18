@@ -116,11 +116,11 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "flight_id",
         "string",
         "",
-        "Unique identifier of the flight. A track is the sequence of position reports "
-        "of one aircraft under one call sign that belong together. Most tracks hold one "
-        "flight, whose identifier is the track's. A track that lands and, after a stop "
-        "on the ground, takes off again holds several flights, named <track>-L1, "
-        "<track>-L2, ... in time order.",
+        "Unique identifier of the flight. Usually it is the identifier of its track "
+        "(the position reports of one aircraft under one call sign). A track that "
+        "lands, stops and takes off again holds several flights: <track>-L1, "
+        "<track>-L2 and so on, in time order. Removing that ending gives the "
+        "identifier of the track.",
         "ID",
         "identity",
     ),
@@ -145,8 +145,9 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "dof",
         "date",
         "UTC",
-        "Date of the flight: the day on which it was first seen. A day's files hold "
-        "the flights of that date.",
+        "Date of the flight: the day on which its track was first seen. A day's files "
+        "hold the flights of that date. The flights of a track that holds several "
+        "share the date of the track, also a flight that started after midnight.",
         "DOF",
         "identity",
     ),

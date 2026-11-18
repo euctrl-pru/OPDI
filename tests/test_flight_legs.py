@@ -14,7 +14,7 @@ from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.output.published import build_flight_events, build_flight_list
-from opdi.pipeline.flight_legs import flight_legs, flight_stops, with_flight_rows
+from opdi.pipeline.flight_legs import event_in_leg, flight_legs, flight_stops, with_flight_rows
 from opdi.pipeline.flight_list_milestones import (
     enrich_flight_list,
     enrich_flight_list_and_flights,
@@ -351,3 +351,105 @@ def test_a_track_ending_in_the_air_does_not_send_its_last_flight_back_to_the_sto
     last = rows[f"{trk}-L2"]
     assert (last["ADEP"], last["ADES"], last["ADES_SOURCE"]) == ("EFHK", None, "undetermined")
     assert rows[f"{trk}-L1"]["ADES"] == "EFHK"
+
+
+def test_switching_the_setting_off_gives_the_track_rows_their_own_version_again(spark):
+    # Step 04b run again without the setting, on rows it wrote with it: the
+    # list then holds one row per track, and the flight rows the earlier run
+    # left in the working table are not used.
+    tracks, flights = _enrich(spark, [_flight("trk-ab", "LSZH", "LSZH", 12400)], _out_and_back())
+    stale = spark.createDataFrame(flights.collect(), flights.schema)
+    off, none = enrich_flight_list_and_flights(
+        spark.createDataFrame(tracks.collect(), tracks.schema),
+        spark.createDataFrame(_out_and_back(), EVENT_SCHEMA),
+        EventConfig(flight_list_one_row_per_flight=False),
+    )
+    assert none is None
+    assert off.collect()[0]["VERSION"] == FLIGHT_LIST_VERSION
+    assert [r["ID"] for r in with_flight_rows(off, stale).collect()] == ["trk-ab"]
+
+
+def test_a_go_around_and_a_rejected_take_off_do_not_divide_the_track(spark):
+    # A go-around has no landing; a rejected take-off has a take-off roll but
+    # no take-off. Neither gives a landing followed by a take-off.
+    trk = "trk-ga"
+    events = [
+        _atot(trk, 600, "EHAM"),
+        _ev(trk, "go-around", 4000, apt_icao="EGLL"),
+        _aldt(trk, 5200, "EGLL"),
+        _ev(trk, "AIBT", 5500, stand="B3", apt_icao="EGLL"),
+        _ev(trk, "AOBT", 9000, stand="B3", apt_icao="EGLL"),
+        _ev(trk, "take-off-roll", 9600, apt_icao="EGLL"),
+        _ev(trk, "AIBT", 10500, stand="B3", apt_icao="EGLL"),
+    ]
+    tracks, flights = _enrich(spark, [_flight(trk, "EHAM", "EGLL", 10600)], events)
+    assert flights.count() == 0
+    assert [r["ID"] for r in with_flight_rows(tracks, flights).collect()] == [trk]
+
+
+def test_two_landings_at_one_instant_give_the_same_stop_in_any_row_order(spark):
+    trk = "trk-tie"
+    events = [_aldt(trk, 3600, "EDDM"), _aldt(trk, 3600, "EDMO"), _atot(trk, 6000, "EDMO")]
+    got = set()
+    for rows in (events, events[::-1]):
+        frame = spark.createDataFrame(rows, EVENT_SCHEMA).repartition(1)
+        got.add(tuple(s["landing_airport"] for s in flight_stops(frame, EventConfig()).collect()))
+    assert got == {("EDMO",)}
+
+
+def test_every_event_of_a_track_belongs_to_exactly_one_flight(spark):
+    # Also an event at a division time, and one without a time.
+    trk = "trk-rot"
+    events = [
+        _atot(trk, 600, "EGLL"),
+        _aldt(trk, 4200, "LFPG"),
+        _ev(trk, "AIBT", 4500, stand="K1", apt_icao="LFPG"),
+        _ev(trk, "entry-parking_position", 4500, apt_icao="LFPG"),
+        _ev(trk, "exit-parking_position", 4501, apt_icao="LFPG"),
+        _atot(trk, 6600, "LFPG"),
+        _aldt(trk, 9600, "EDDF"),
+        _atot(trk, 12000, "EDDF"),
+        (trk, "level-start", None, "{}", "events_v0.4.0"),
+    ]
+    _, flights = _enrich(spark, [_flight(trk, "EGLL", None, 12600)], events)
+    limits = flights.select("ID", "TRACK_ID", "LEG_START", "LEG_END")
+    ev = spark.createDataFrame(events, EVENT_SCHEMA)
+    joined = ev.join(
+        limits,
+        (F.col("flight_id") == F.col("TRACK_ID"))
+        & event_in_leg(F.col("event_time"), F.col("LEG_START"), F.col("LEG_END")),
+        "left",
+    )
+    got = sorted((r["type"], r["event_time"], r["ID"]) for r in joined.collect())
+    assert len(got) == len(events)
+    by = {(t, e): i for t, e, i in got}
+    assert by[("AIBT", _t(4500))] == f"{trk}-L1"
+    assert by[("entry-parking_position", _t(4500))] == f"{trk}-L1"
+    assert by[("exit-parking_position", _t(4501))] == f"{trk}-L2"
+    assert by[("level-start", None)] == f"{trk}-L1"
+    assert by[("ATOT", _t(12000))] == f"{trk}-L3"
+
+
+def test_step_04b_writes_the_flight_rows_and_keeps_nothing_in_memory(spark, tmp_path):
+    from opdi.config import OPDIConfig
+    from opdi.pipeline.flight_legs import LEGS_TABLE
+    from opdi.pipeline.flight_list_step import enrich_day
+    from opdi.utils.storage import StorageManager
+
+    config = OPDIConfig.for_environment("opensky", warehouse=str(tmp_path / "wh"))
+    storage = StorageManager(spark, config)
+    day = _T0.date()
+    flights = spark.createDataFrame([_flight("trk-ab", "LSZH", "LSZH", 12400)], FLIGHT_SCHEMA)
+    events = spark.createDataFrame(_out_and_back(), EVENT_SCHEMA).withColumn("dof", F.lit(day))
+    storage.write_table(flights, "opdi_flight_list", mode="overwrite", partition_by=["DOF"])
+    storage.write_table(events, "opdi_flight_events", mode="overwrite", partition_by=["dof"])
+
+    spark.catalog.clearCache()
+    assert enrich_day(storage, config.events, day, day) == 1
+    assert spark._jsparkSession.sharedState().cacheManager().isEmpty()
+
+    rows = {r["ID"]: r for r in storage.read_table(LEGS_TABLE).collect()}
+    assert sorted(rows) == ["trk-ab-L1", "trk-ab-L2"]
+    assert {r["DOF"] for r in rows.values()} == {day}
+    track = storage.read_table("opdi_flight_list").collect()
+    assert [(r["ID"], r["VERSION"]) for r in track] == [("trk-ab", FLIGHT_LIST_LEGS_VERSION)]
