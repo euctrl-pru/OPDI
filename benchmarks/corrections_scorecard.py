@@ -24,7 +24,7 @@ readers' example files, so the odd cases they found stay reproducible, and
 same tracks). The processed day keeps only the flight list after step 04b,
 whose airports step 04b has already overruled; step 04 run on that list
 would give other events than the day's own run. So ``subset`` first runs
-step 03 again on the day's cleaned tracks, into ``research/spot/d0614_03/``,
+step 03 again on the day's cleaned tracks, into ``research/spot/d0614c/``,
 and cuts the sample from that.
 
 **run** runs steps 04 and 04b (and 03 when asked) on the sample or on the
@@ -82,10 +82,11 @@ DAY = "2026-06-14"
 MONTH = "202606"
 WORLD = "s3a://eurocontrol/opdi-world"
 PREFIX = f"{WORLD}/research/spot"
-#: The processed day (spot checks): cleaned tracks, step-04b flight list, events.
-DAY_RUN = "d0614"
-#: Step 03 made again on the day's cleaned tracks (see the module text).
-DAY_STEP03 = "d0614_03"
+#: The processed day: its cleaned tracks (steps 01 to 02a of the current code).
+DAY_RUN = "d0614c"
+#: Step 03 of the day on those cleaned tracks (see the module text). The same
+#: folder: the day was processed up to step 03 only.
+DAY_STEP03 = "d0614c"
 #: The verification sample.
 SAMPLE = "dsub"
 RUNS = "runs"
@@ -128,7 +129,7 @@ STEP_TABLES = {"03": "opdi_flight_list", "04": "opdi_flight_events", "04b": "opd
 
 
 def check_write_path(path: str) -> None:
-    """Refuse a write outside ``runs/<label>/``, ``dsub/`` and ``d0614_03/``. Raises."""
+    """Refuse a write outside ``runs/<label>/``, ``dsub/`` and ``d0614c/``. Raises."""
     if not any(r.match(path) for r in WRITE_ROOTS):
         raise AssertionError(f"refusing to write {path!r}: not a folder of this scorecard")
 
