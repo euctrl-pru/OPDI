@@ -792,7 +792,13 @@ def _enrich(
     rows = tracks
     leg_rows = None
     if with_legs:
-        leg_rows = _leg_rows(flight_list, flight_legs(flight_stops(events, config)))
+        # The corrected flight list and the flight rows are read by both
+        # outputs; kept so that the events are not read again for each.
+        flight_list = flight_list.cache()
+        tracks = flight_list.withColumn("_trk", F.col("id"))
+        tracks = tracks.withColumn("_lo", _null_ts()).withColumn("_hi", _null_ts())
+        rows = tracks
+        leg_rows = _leg_rows(flight_list, flight_legs(flight_stops(events, config))).cache()
         rows = tracks.unionByName(leg_rows.drop(*LEG_COLUMNS))
     keys = rows.select(
         F.col("id").alias("_track_id"),
