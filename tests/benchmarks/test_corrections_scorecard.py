@@ -408,7 +408,7 @@ def test_agreement_rows():
 def test_write_paths():
     cs.check_write_path(f"{cs.PREFIX}/runs/base/opdi_flight_events")
     cs.check_write_path(f"{cs.PREFIX}/dsub/osn_tracks_clean")
-    cs.check_write_path(f"{cs.PREFIX}/d0614_03/opdi_flight_list")
+    cs.check_write_path(f"{cs.PREFIX}/{cs.DAY_STEP03}/opdi_flight_list")
     for bad in (
         f"{cs.PREFIX}/d0614/opdi_flight_events",
         f"{cs.PREFIX}/runs/",
@@ -428,8 +428,8 @@ def test_scope_sources():
         "opdi_flight_list": "dsub",
     }
     d = cs.scope_sources("day", ["04", "04b"])
-    assert d["osn_tracks_clean"] == "d0614" and d["opdi_flight_list"] == "d0614_03"
-    assert cs.scope_sources("day", ["03", "04", "04b"]) == {"osn_tracks_clean": "d0614"}
+    assert d["osn_tracks_clean"] == cs.DAY_RUN and d["opdi_flight_list"] == cs.DAY_STEP03
+    assert cs.scope_sources("day", ["03", "04", "04b"]) == {"osn_tracks_clean": cs.DAY_RUN}
 
 
 def test_step_rows(tmp_path):

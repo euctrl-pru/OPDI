@@ -28,6 +28,11 @@ RELEASE = "v2.0.0"
 #: is built from the cleaned tracks; and ``FLT_ID`` is the call sign the track
 #: broadcast most often.
 FLIGHT_LIST_VERSION = "v6.0.0"
+#: The flight list of :data:`FLIGHT_LIST_VERSION` with one row per flight:
+#: a track that holds several flights (a landing, a stop on the ground and a
+#: new take-off) has one row for each, named ``<track_id>-L<k>``
+#: (``EventConfig.flight_list_one_row_per_flight``, step 04b).
+FLIGHT_LIST_LEGS_VERSION = "v6.1.0"
 #: The flight list built with the v0.0.2 settings (the ``trend`` method).
 LEGACY_TREND_VERSION = "v2.0.0"
 #: The ``endpoint`` method run with the v0.0.2 settings.
@@ -36,8 +41,10 @@ LEGACY_ENDPOINT_VERSION = "v3.0.0"
 # --- events (step 04, column ``version``) ------------------------------------
 
 #: The events of release v2.0.0 (the default of ``EventConfig.events_version``),
-#: with the corrections of the spot checks of 2026-06-14.
-EVENTS_VERSION = "events_v0.4.0"
+#: with the corrections of the spot checks of 2026-06-14, and with the distance
+#: circles also drawn around the airports where a track that holds several
+#: flights stopped (``EventConfig.flight_list_one_row_per_flight``).
+EVENTS_VERSION = "events_v0.5.0"
 #: The events of release v0.0.2 (``EventConfig.legacy()``).
 LEGACY_EVENTS_VERSION = "events_v0.0.2"
 #: Holding patterns: ``holding-start``, ``holding-end`` and their measurements.

@@ -308,6 +308,14 @@ LADDER = [
             "seen_from_measured_reports": True,
         },
     ),
+    # One flight-list row per flight: a track that lands, stops on the ground
+    # and takes off again gets a row for each of its flights (step 04b), and
+    # step 04 also draws the distance circles around the airports of the
+    # stops, which adds crossing events and is why the events version changes.
+    (
+        "L23_one_row_per_flight",
+        {"flight_list_one_row_per_flight": True, "events_version": "events_v0.5.0"},
+    ),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
@@ -414,6 +422,16 @@ LADDER_V4 = [
         "V17_spot_check_corrections",
         {
             "events_version": "events_v0.4.0",
+        },
+    ),
+    # One flight-list row per flight, with the distance circles also drawn
+    # around the airports where a track that holds several flights stopped;
+    # and the events version they are published under (as L23 of the v3
+    # table).
+    (
+        "V18_one_row_per_flight",
+        {
+            "events_version": "events_v0.5.0",
         },
     ),
 ]

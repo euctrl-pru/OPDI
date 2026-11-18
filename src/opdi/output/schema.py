@@ -116,8 +116,11 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "flight_id",
         "string",
         "",
-        "Unique identifier of the flight. A flight is one track: the sequence of "
-        "position reports of one aircraft that belong together.",
+        "Unique identifier of the flight. Usually it is the identifier of its track "
+        "(the position reports of one aircraft under one call sign). A track that "
+        "lands, stops and takes off again holds several flights: <track>-L1, "
+        "<track>-L2 and so on, in time order. Removing that ending gives the "
+        "identifier of the track.",
         "ID",
         "identity",
     ),
@@ -142,8 +145,9 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "dof",
         "date",
         "UTC",
-        "Date of the flight: the day on which it was first seen. A day's files hold "
-        "the flights of that date.",
+        "Date of the flight: the day on which its track was first seen. A day's files "
+        "hold the flights of that date. The flights of a track that holds several "
+        "share the date of the track, also a flight that started after midnight.",
         "DOF",
         "identity",
     ),
@@ -210,7 +214,9 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "How the destination airport was decided, with the same four values as "
         "adep_source: 'aerodrome' (found from the last reports of the track), "
         "'runway_event' (taken from a landing detected on one of the airport's "
-        "runways), 'out_of_area' (ades is 'OOA') and 'undetermined' (ades is NULL).",
+        "runways), 'out_of_area' (ades is 'OOA') and 'undetermined' (ades is NULL). "
+        "The airports where a track that holds several flights stopped are always "
+        "'runway_event'.",
         "ADES_SOURCE",
         "airports",
     ),
@@ -262,7 +268,10 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "first_seen",
         "timestamp",
         "UTC",
-        "Time of the first position report of the flight received by the OpenSky " "Network.",
+        "Time of the first position report of the flight received by the OpenSky "
+        "Network. For a flight that is not the first of its track, the time at which "
+        "the track was divided: the in-block time after the previous landing, else the "
+        "midpoint of the stop.",
         "FIRST_SEEN",
         "times",
     ),
@@ -270,7 +279,9 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "last_seen",
         "timestamp",
         "UTC",
-        "Time of the last position report of the flight received by the OpenSky " "Network.",
+        "Time of the last position report of the flight received by the OpenSky "
+        "Network. For a flight that is not the last of its track, the time at which the "
+        "track was divided (see first_seen).",
         "LAST_SEEN",
         "times",
     ),
@@ -376,7 +387,8 @@ FLIGHT_LIST: Tuple[Column, ...] = (
         "track_duration_min",
         "double",
         "min",
-        "Time between first_seen and last_seen, in minutes. Very short tracks are often "
+        "Time between first_seen and last_seen, in minutes (of the flight, on a track "
+        "that holds several). Very short tracks are often "
         "pieces of a flight seen on the ground rather than whole flights. No row is "
         "removed on this value, so users can choose their own limit.",
         "TRACK_DURATION_MIN",
@@ -449,7 +461,9 @@ EVENT_COLUMNS: Tuple[Column, ...] = (
         "string",
         "",
         "Identifier of the flight the event belongs to. It matches flight_id in the "
-        "flight list.",
+        "flight list. On a track that holds several flights, an event belongs to the "
+        "flight during which it happened. The taxi-in after a landing belongs to the "
+        "arriving flight up to the in-block time.",
         "flight_id",
         "event",
     ),
@@ -519,7 +533,7 @@ EVENT_COLUMNS: Tuple[Column, ...] = (
         "string",
         "",
         "Version of the method that produced this event type, for example "
-        "events_v0.4.0. Different event types can have different versions.",
+        "events_v0.5.0. Different event types can have different versions.",
         "version",
         "event",
     ),
@@ -549,7 +563,8 @@ MEASUREMENT_COLUMNS: Tuple[Column, ...] = (
         "double",
         "NM",
         "Distance flown from the start of the track to this event, along the received "
-        "positions, in nautical miles (NM, 1 NM = 1,852 m).",
+        "positions, in nautical miles (NM, 1 NM = 1,852 m). On a track that holds "
+        "several flights it counts from the start of the track, not of the flight.",
         "Distance flown (NM)",
         "measurement",
     ),
@@ -557,7 +572,9 @@ MEASUREMENT_COLUMNS: Tuple[Column, ...] = (
         "time_passed_s",
         "double",
         "s",
-        "Time from the first position of the track to this event, in seconds.",
+        "Time from the first position of the track to this event, in seconds. On a "
+        "track that holds several flights it counts from the start of the track, not of "
+        "the flight.",
         "Time Passed (s)",
         "measurement",
     ),

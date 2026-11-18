@@ -8,6 +8,11 @@ them into that day's folder of ``opdi_flight_list`` as additional columns.
 It detects nothing new: every value already exists in the events table, and
 a column is empty (NULL) exactly when the event behind it is missing.
 
+With ``EventConfig.flight_list_one_row_per_flight``, the rows of the flights
+of tracks that hold several (:mod:`opdi.pipeline.flight_legs`) are written to
+the working table ``opdi_flight_legs`` for the same days; the published flight
+list takes them in place of their track's row.
+
 Only the day folders of the days given are rewritten. The flight lists of
 other days are never read or changed, so a day keeps its milestones after
 its working events have been removed.
@@ -28,7 +33,8 @@ from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
 
-from opdi.pipeline.flight_list_milestones import enrich_flight_list
+from opdi.pipeline.flight_legs import LEGS_TABLE
+from opdi.pipeline.flight_list_milestones import enrich_flight_list_and_flights
 
 if TYPE_CHECKING:  # pragma: no cover
     from opdi.config import EventConfig
@@ -116,11 +122,25 @@ def enrich_day(
         print(f"  removed {removed:,} repeated ID(s): the flight list holds one row per flight")
 
     airports = airports_for_checks(storage, config)
-    enriched = enrich_flight_list(flight_list, events, config, airports)
+    kept: list = []
+    enriched, flights = enrich_flight_list_and_flights(
+        flight_list, events, config, airports, kept=kept
+    )
 
     # The day folders are named, so a day without flights also replaces what
     # an earlier run left in the staging table.
     day_folders = [{"DOF": d.isoformat()} for d in days]
+    if flights is not None:
+        # The rows of the flights of tracks that hold several
+        # (EventConfig.flight_list_one_row_per_flight). Written before the
+        # flight list is replaced below, as they are computed from it.
+        storage.write_table(
+            flights.repartition("DOF"),
+            LEGS_TABLE,
+            mode="overwrite",
+            partition_by=["DOF"],
+            partition_values=day_folders,
+        )
     storage.write_table(
         enriched.repartition("DOF"),
         STAGING_TABLE,
@@ -128,6 +148,9 @@ def enrich_day(
         partition_by=["DOF"],
         partition_values=day_folders,
     )
+    # Both tables are written: release what was kept in memory for them.
+    for frame in kept:
+        frame.unpersist()
     staged = storage.read_table(STAGING_TABLE).filter(
         F.col("DOF").between(F.lit(start_date), F.lit(end_date))
     )

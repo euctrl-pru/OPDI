@@ -420,3 +420,90 @@ def test_identifiers_get_bloom_filters_and_other_columns_keep_a_dictionary(spark
         chunk = group.column(names.index(col))
         assert chunk.bloom_filter_offset is None, col
         assert chunk.has_dictionary_page, col
+
+
+# --- a track that holds several flights ----------------------------------------
+
+
+def test_the_flights_of_a_track_are_published_in_the_day_of_their_track(spark, tmp_path):
+    """trk_a lands at 23:40 on DAY and takes off again at 00:40 on NEXT.
+
+    Its second flight starts on NEXT, but both flights, and all events of the
+    track, are in the files of DAY, the day of the track; the files of NEXT
+    hold none of them.
+    """
+    flight_cols = [c for c in FLIGHT_LIST if c.name != "release"]
+    ddl = ", ".join(f"`{c.source}` {c.dtype}" for c in flight_cols)
+    leg_ddl = ddl + ", TRACK_ID string, LEG int, LEGS int, LEG_START timestamp, LEG_END timestamp"
+    divided = _ts(NEXT, 0, 10)
+    track = _flight("trk_a", DAY, _ts(DAY, 23, 10), "LFPG")
+    other = _flight("trk_b", NEXT, _ts(NEXT, 0, 5), "EDDF")
+    one = dict(track, ID="trk_a-L1", ADES="EDDF", LAST_SEEN=divided)
+    two = dict(track, ID="trk_a-L2", ADEP="EDDF", FIRST_SEEN=divided)
+    legs = [
+        tuple(one[c.source] for c in flight_cols) + ("trk_a", 1, 2, None, divided),
+        tuple(two[c.source] for c in flight_cols) + ("trk_a", 2, 2, divided, None),
+    ]
+    events = spark.createDataFrame(
+        [
+            ("a1", "trk_a", "ATOT", _ts(DAY, 23, 15), 2.5, 49.0, 0.0, DAY),
+            ("a2", "trk_a", "ALDT", _ts(DAY, 23, 40), 8.5, 50.0, 0.0, DAY),
+            ("a3", "trk_a", "ATOT", _ts(NEXT, 0, 40), 8.5, 50.0, 0.0, NEXT),
+            ("a4", "trk_a", "ALDT", _ts(NEXT, 1, 30), 4.7, 52.3, 0.0, NEXT),
+            ("b1", "trk_b", "ATOT", _ts(NEXT, 0, 15), 8.5, 50.0, 0.0, NEXT),
+        ],
+        "id string, flight_id string, type string, event_time timestamp, "
+        "longitude double, latitude double, altitude double, dof date",
+    ).selectExpr(
+        "id",
+        "flight_id",
+        "type",
+        "event_time",
+        "longitude",
+        "latitude",
+        "altitude",
+        "'OSN' as source",
+        "'events_v0.5.0' as version",
+        "'{}' as info",
+        "dof",
+    )
+    measurements = spark.createDataFrame(
+        [("a3_d", "a3", "Distance flown (NM)", 250.0, "distance_v0.0.3", NEXT)],
+        "id string, milestone_id string, type string, value double, version string, dof date",
+    )
+    storage = _Storage(
+        {
+            "opdi_flight_list": spark.createDataFrame(
+                [tuple(r[c.source] for c in flight_cols) for r in (track, other)], ddl
+            ),
+            "opdi_flight_legs": spark.createDataFrame(legs, leg_ddl),
+            "opdi_flight_events": events,
+            "opdi_measurements": measurements,
+        }
+    )
+    layout = PublishedLayout(str(tmp_path / "published"))
+    publish_day(spark, storage, DAY, layout, commit="abc")
+    publish_day(spark, storage, NEXT, layout, commit="abc")
+
+    flights = {r["flight_id"]: r for r in pq.read_table(layout.flight_list(DAY)).to_pylist()}
+    assert sorted(flights) == ["trk_a-L1", "trk_a-L2"]
+    assert {r["dof"] for r in flights.values()} == {DAY}
+    assert flights["trk_a-L2"]["first_seen"] == divided
+    day = {r["event_id"]: r for r in pq.read_table(layout.flight_events(DAY)).to_pylist()}
+    assert {k: v["flight_id"] for k, v in day.items()} == {
+        "a1": "trk_a-L1",
+        "a2": "trk_a-L1",
+        "a3": "trk_a-L2",
+        "a4": "trk_a-L2",
+    }
+    assert {r["dof"] for r in day.values()} == {DAY}
+    assert (day["a3"]["adep"], day["a3"]["distance_flown_nm"]) == ("EDDF", 250.0)
+
+    nxt_flights = pq.read_table(layout.flight_list(NEXT)).column("flight_id").to_pylist()
+    nxt_events = pq.read_table(layout.flight_events(NEXT)).column("event_id").to_pylist()
+    assert (nxt_flights, nxt_events) == (["trk_b"], ["b1"])
+
+    index = {r["flight_id"]: r for r in pq.read_table(layout.flight_index(DAY)).to_pylist()}
+    assert sorted(index) == ["trk_a-L1", "trk_a-L2", "trk_b"]
+    assert index["trk_a-L2"]["dof"] == DAY
+    assert index["trk_a-L2"]["file"] == f"flight_list/flight_list_{DAY:%Y%m%d}.parquet"

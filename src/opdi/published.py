@@ -3,8 +3,12 @@
 OPDI publishes two Parquet files per day (see :mod:`opdi.output.schema` for
 every column):
 
-* ``flight_list/flight_list_YYYYMMDD.parquet``: one row per flight that
-  started that day.
+* ``flight_list/flight_list_YYYYMMDD.parquet``: one row per flight whose
+  track started that day. A track is the series of position reports of one
+  aircraft under one call sign; one that lands and, after a stop on the
+  ground, takes off again holds several flights, named ``<track>-L1``,
+  ``<track>-L2``, ... They all have the day of their track, also a flight
+  that started after midnight.
 * ``flight_events/flight_events_YYYYMMDD.parquet``: one row per event of those
   flights, with the event's measurements and its flight's columns.
 

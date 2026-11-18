@@ -1606,6 +1606,28 @@ class EventConfig:
     block times were taken at any airport, and the first and last events of
     the track were used whatever the order. Off in release v0.0.2."""
 
+    # One flight-list row per flight (flight legs). ---------------------
+    flight_list_one_row_per_flight: bool = True
+    """Give every flight of a track its own row in the published flight list
+    (step 04b, :mod:`opdi.pipeline.flight_legs`).
+
+    A track that lands and, after at least :attr:`flight_stop_min_ground_s`
+    on the ground, takes off again holds two flights; one with ``n`` such
+    stops holds ``n + 1``. Each gets a row named ``<track_id>-L<k>`` with
+    its own departure and destination airports, first and last report
+    times, and milestone, runway, stand and circle columns, and each event
+    of the track is published under the flight it belongs to. The track's
+    own row in the working flight list is kept as it is. Step 04 also draws
+    the distance circles around the airports of the stops. Tracks without a
+    stop are not changed. Off in release v0.0.2."""
+
+    flight_stop_min_ground_s: float = 300.0
+    """Shortest time, in seconds, from a landing (``ALDT``) to the next
+    take-off (``ATOT``) of the same track for the two to belong to two
+    flights (see :attr:`flight_list_one_row_per_flight`). A touch-and-go or
+    a go-around climbs away within well under a minute; a turnaround or a
+    full-stop circuit that taxis back takes several minutes."""
+
     seen_from_measured_reports: bool = True
     """Define ``first_seen`` and ``last_seen`` as the first and last report
     of the track with a measured position, in the flight list (step 03) and
@@ -1779,6 +1801,7 @@ class EventConfig:
             movement_flags_need_track_evidence=False,
             milestones_on_own_leg=False,
             seen_from_measured_reports=False,
+            flight_list_one_row_per_flight=False,
             keep_each_family=False,
             events_version=LEGACY_EVENTS_VERSION,
         )
