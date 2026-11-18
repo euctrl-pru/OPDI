@@ -1040,9 +1040,22 @@ def _leg_rows(flight_list: DataFrame, legs: DataFrame) -> DataFrame:
             if before in flight_list.columns:
                 # The first flight's departure is the corrected one only when
                 # it took off within the track; the last flight's destination
-                # only when it landed within it.
-                seen = F.col("leg_takes_off") if upper.startswith("ADEP") else F.col("leg_lands")
-                own = F.when(seen, own).otherwise(F.col(before))
+                # only when it landed within it. Otherwise it is the airport
+                # found from the reports, unless that is the airport of the
+                # stop itself: a flight that arrives at an airport did not
+                # come from it, and one that leaves it did not go to it.
+                side = upper[:4]
+                seen = F.col("leg_takes_off") if side == "ADEP" else F.col("leg_lands")
+                stop = F.col("leg_ades") if side == "ADEP" else F.col("leg_adep")
+                at_stop = F.col(f"{_EV}o_{side}").eqNullSafe(stop)
+                if upper.endswith("_SOURCE"):
+                    unknown = F.lit("undetermined")
+                elif upper.endswith("_P"):
+                    unknown = F.col(before)
+                else:
+                    unknown = F.lit(None)
+                found = F.when(at_stop, unknown).otherwise(F.col(before))
+                own = F.when(seen, own).otherwise(found)
             cols.append(F.when(own_end, own).otherwise(value).cast(types[name]).alias(name))
         else:
             cols.append(F.col(name))

@@ -2373,6 +2373,11 @@ def count_flight_list(fr: dict, inp: dict) -> list[tuple]:
     from_rwy = (c("adep_source") == "runway_event") | (c("ades_source") == "runway_event")
     d_first = _hav_nm(c("p0_lat"), c("p0_lon"), c("adep_lat"), c("adep_lon"))
     d_last = _hav_nm(c("p1_lat"), c("p1_lon"), c("ades_lat"), c("ades_lon"))
+    # Rows that begin (end) where their track begins (ends): the first and
+    # last report of the track and its first_seen / last_seen events say
+    # nothing about a flight that starts or ends at a stop.
+    _starts_track = c("_lo").isNull()
+    _ends_track = c("_hi").isNull()
     lit = F.lit(True)
     specs = [
         ("fl_same", "f1.1 f2.F", "departure equal to destination", both, same),
@@ -2481,21 +2486,21 @@ def count_flight_list(fr: dict, inp: dict) -> list[tuple]:
             "fl_first_seen",
             "d2.C8 f2.A WP4.10",
             "first_seen differs from the first_seen event (more than 1 s)",
-            c("fs").isNotNull() & c("fs_ev").isNotNull(),
+            c("fs").isNotNull() & c("fs_ev").isNotNull() & _starts_track,
             F.abs(c("fs") - c("fs_ev")) > 1,
         ),
         (
             "fl_last_seen",
             "d2.C8 f2.A WP4.10",
             "last_seen differs from the last_seen event (more than 1 s)",
-            c("ls").isNotNull() & c("ls_ev").isNotNull(),
+            c("ls").isNotNull() & c("ls_ev").isNotNull() & _ends_track,
             F.abs(c("ls") - c("ls_ev")) > 1,
         ),
         (
             "fl_last_seen_60",
             "d2.C8 f2.A WP4.10",
             "last_seen differs from the last_seen event by more than 60 s",
-            c("ls").isNotNull() & c("ls_ev").isNotNull(),
+            c("ls").isNotNull() & c("ls_ev").isNotNull() & _ends_track,
             F.abs(c("ls") - c("ls_ev")) > 60,
         ),
         (
@@ -2504,7 +2509,8 @@ def count_flight_list(fr: dict, inp: dict) -> list[tuple]:
             "ADEP from a runway event more than 30 NM from the first positioned report",
             (c("adep_source") == "runway_event")
             & c("p0_lat").isNotNull()
-            & c("adep_lat").isNotNull(),
+            & c("adep_lat").isNotNull()
+            & _starts_track,
             d_first > 30,
         ),
         (
@@ -2513,21 +2519,28 @@ def count_flight_list(fr: dict, inp: dict) -> list[tuple]:
             "ADES from a runway event more than 30 NM from the last positioned report",
             (c("ades_source") == "runway_event")
             & c("p1_lat").isNotNull()
-            & c("ades_lat").isNotNull(),
+            & c("ades_lat").isNotNull()
+            & _ends_track,
             d_last > 30,
         ),
         (
             "fl_ades_far",
             "f1.2 WP4.2",
             "ADES more than 30 NM from the last positioned report",
-            c("ades").isNotNull() & c("p1_lat").isNotNull() & c("ades_lat").isNotNull(),
+            c("ades").isNotNull()
+            & c("p1_lat").isNotNull()
+            & c("ades_lat").isNotNull()
+            & _ends_track,
             d_last > 30,
         ),
         (
             "fl_adep_far",
             "f1.2",
             "ADEP more than 30 NM from the first positioned report",
-            c("adep").isNotNull() & c("p0_lat").isNotNull() & c("adep_lat").isNotNull(),
+            c("adep").isNotNull()
+            & c("p0_lat").isNotNull()
+            & c("adep_lat").isNotNull()
+            & _starts_track,
             d_first > 30,
         ),
         (

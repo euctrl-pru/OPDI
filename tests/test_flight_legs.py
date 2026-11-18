@@ -339,3 +339,15 @@ def test_the_published_events_go_to_their_flight(spark):
     assert got[("first_seen", _t(0))] == ("trk-ab-L1", "LSZH", "EDDH")
     assert got[("ATOT", _t(0))] == ("trk-one", "EBBR", "EHAM")
     assert out.count() == len(_out_and_back()) + 1
+
+
+def test_a_track_ending_in_the_air_does_not_send_its_last_flight_back_to_the_stop(spark):
+    # FIN8NP: lands at Helsinki, takes off again, coverage ends in the climb;
+    # the reports near the end named Helsinki as the destination.
+    trk = "trk-end-air"
+    events = [_atot(trk, 0, "EFOU"), _aldt(trk, 3600, "EFHK"), _atot(trk, 6000, "EFHK")]
+    _, flights = _enrich(spark, [_flight(trk, "EFOU", "EFHK", 6600)], events)
+    rows = _by_id(flights)
+    last = rows[f"{trk}-L2"]
+    assert (last["ADEP"], last["ADES"], last["ADES_SOURCE"]) == ("EFHK", None, "undetermined")
+    assert rows[f"{trk}-L1"]["ADES"] == "EFHK"
