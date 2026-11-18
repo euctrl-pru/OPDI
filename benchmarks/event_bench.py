@@ -700,7 +700,7 @@ def verify_plan_v4(plan: dict) -> None:
         if cfg.emit_runway_milestones:
             assert "landing" not in milestone_map(cfg), (
                 f"{name} emits the A-CDM runway family, whose stored tables "
-                f"name the ICAO T16 threshold-plane crossing `landing` -- an "
+                f"name the threshold-plane crossing (T16 in the PRU flight diagram) `landing` -- an "
                 f"event APDF does not record. Scoring it against ALDT would "
                 f"report a touchdown error for a thing that is not a touchdown."
             )
@@ -747,7 +747,7 @@ def milestone_map(config) -> dict:
 
     * **off** (v0.1.0 and earlier) -- the fuzzy phase transition into GND, i.e.
       ground contact. That is what ALDT is, so it is scored.
-    * **on** (v0.2.0) -- ICAO T16, the instant the aircraft crosses the runway
+    * **on** (v0.2.0) -- T16 in the PRU flight diagram, the instant the aircraft crosses the runway
       threshold plane, tens of seconds and roughly a kilometre before the
       wheels touch. ``touchdown`` is the ALDT of that vocabulary. APDF records
       no threshold crossing at all, so a ``landing`` scored against ALDT would

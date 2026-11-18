@@ -586,10 +586,10 @@ def test_legacy_tops_carry_the_empty_info_of_their_release(spark, stub_storage):
 
 
 def test_the_threshold_crossing_carries_its_milestone_number(spark, stub_storage):
-    """Under the default settings ``xing-runway-threshold`` is ICAO milestone
-    T16, the crossing of the threshold plane. The ``landing`` of the v0.0.2
+    """Under the default settings ``xing-runway-threshold`` has the label T16
+    of the PRU flight diagram, the crossing of the threshold plane. The ``landing`` of the v0.0.2
     settings is a different event (the phase change at ground contact) and
-    carries no milestone number at all."""
+    carries no label at all."""
     xing = _run(spark, stub_storage, EventConfig()).filter(
         F.col("type") == RUNWAY_THRESHOLD_CROSSING
     )

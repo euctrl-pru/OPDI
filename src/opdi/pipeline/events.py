@@ -565,8 +565,8 @@ def calculate_runway_events(
 ) -> Optional[DataFrame]:
     """Take-off and landing times (``ATOT``, ``ALDT``) and their runway.
 
-    These are the A-CDM milestones T08 and T17. They are separate from the
-    ``take-off`` and ``landing`` events of the phase method: those say where
+    Their labels in the PRU flight diagram are T08 and T17. They are separate
+    from the ``take-off`` and ``landing`` events of the phase method: those say where
     the flight phase changed, these which runway was used and when the aircraft
     left or met it.
 
@@ -1239,8 +1239,9 @@ def calculate_horizontal_segment_events(
     # ``take-off`` and ``landing`` here are the reports at which the phase
     # changed to or from ground. The runway milestones give the same moments
     # as ``airborne``/``touchdown``, interpolated at a set height, and add
-    # the threshold crossing ``xing-runway-threshold`` (A-CDM T16). So this
-    # pair is published only when the runway milestones are off.
+    # the threshold crossing ``xing-runway-threshold`` (label T16 in the PRU
+    # flight diagram). So this pair is published only when the runway
+    # milestones are off.
     if not config.emit_runway_milestones:
         # Only with the runway milestones off, which also means no merge.
         milestone_types = milestone_types.when(

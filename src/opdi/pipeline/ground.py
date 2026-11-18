@@ -1030,7 +1030,7 @@ def block_events(
         picked = picked.unionByName(anchored)
     if push_back:
         # Kept: the off-block and the in-block times are each read from it.
-        picked = _kept(_at_push_back_start(picked, on_ground, config), checkpoints)
+        picked = _kept(_at_push_back_start(picked, on_ground, config, first_last), checkpoints)
     elif config.off_block_at_start_of_push_back:
         # Without positions there is no displacement to read.
         picked = picked.drop("_move_lo")
@@ -1266,7 +1266,9 @@ def _feet(lat1: Column, lon1: Column, lat2: Column, lon2: Column) -> Column:
     return haversine_nm(lat1, lon1, lat2, lon2) * F.lit(FT_PER_NM)
 
 
-def _at_push_back_start(blocks: DataFrame, reports: DataFrame, config: "EventConfig") -> DataFrame:
+def _at_push_back_start(
+    blocks: DataFrame, reports: DataFrame, config: "EventConfig", first_last: DataFrame
+) -> DataFrame:
     """``blocks`` with each off-block time moved back to the start of a slow push-back.
 
     The rule of ``off_block_at_start_of_push_back``. For each off-block time,
@@ -1284,17 +1286,34 @@ def _at_push_back_start(blocks: DataFrame, reports: DataFrame, config: "EventCon
     earliest such movement that starts before it. In-block times, and
     off-block times without such a movement, are returned as they are.
 
+    A track that lands and takes off again holds two flights. Its reports
+    are then read from ``_move_lo`` onwards, where the aircraft had already
+    been received: a slow movement whose first displaced report lies within
+    ``push_back_displacement_baseline_seconds`` of ``_move_lo`` is the end
+    of the taxi-in of the arriving flight (the last metres into the stand),
+    and is not taken as the push-back of the next flight.
+
     ``blocks`` carries ``_move_lo`` (seconds since 1970), which is dropped.
     ``reports`` holds the reports that may be on the ground
-    (:func:`_report_on_ground`).
+    (:func:`_report_on_ground`). ``first_last`` gives the time of the first
+    report of each track (``_fl_track``, ``_t_first``).
     """
     baseline = float(config.push_back_displacement_baseline_seconds)
     times = F.broadcast(
-        blocks.filter(F.col("block") == "off").select(
+        blocks.filter(F.col("block") == "off")
+        .join(first_last, F.col("track_id") == F.col("_fl_track"), "left")
+        .select(
             F.col("track_id").alias("_b_track"),
             F.col("event_time").alias("_b_time"),
             F.col("event_time").cast("double").alias("_b_s"),
             F.col("_move_lo").alias("_b_lo"),
+            # The first moment a slow movement may start: later than
+            # ``_move_lo`` by the baseline when the aircraft was received
+            # before ``_move_lo`` (a later flight of the track).
+            F.when(
+                F.col("_move_lo") > F.col("_t_first").cast("double"),
+                F.col("_move_lo") + F.lit(baseline),
+            ).alias("_b_after"),
         )
     )
     t = F.col("event_time").cast("double")
@@ -1340,7 +1359,7 @@ def _at_push_back_start(blocks: DataFrame, reports: DataFrame, config: "EventCon
     )
     movements = (
         near.filter(F.col("_displaced"))
-        .groupBy("_b_track", "_b_time", "_b_s", "_movement")
+        .groupBy("_b_track", "_b_time", "_b_s", "_b_after", "_movement")
         .agg(
             F.min(
                 F.struct(F.col("_t").alias("t"), F.col("event_time").alias("time"), "_base")
@@ -1351,6 +1370,7 @@ def _at_push_back_start(blocks: DataFrame, reports: DataFrame, config: "EventCon
         .filter(
             (F.col("_n") >= 2)
             & (F.col("_first.t") < F.col("_b_s"))
+            & F.coalesce(F.col("_first.t") > F.col("_b_after"), F.lit(True))
             & (
                 _feet(
                     F.col("_first._base.lat"),

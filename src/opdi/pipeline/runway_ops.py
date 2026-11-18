@@ -1,4 +1,4 @@
-"""Runway milestones of Airport Collaborative Decision Making (A-CDM).
+"""Runway milestones: the moments of a flight on and around the runway.
 
 Part of step 04. Finds, for every flight, the runway it used and the times
 of ``line-up``, ``take-off-roll``, ``airborne``, ``xing-runway-threshold``
@@ -7,7 +7,7 @@ taxiing aircraft, and ``go-around``. All are read from passages over a
 runway, built from the H3 cells of the runway zones (``h3_runway_zones``).
 See https://www.opdi.aero/content/methods/runway-milestones.html.
 
-Nine of the eleven A-CDM milestones come out of one pass over the same object:
+Nine of the eleven runway milestones come out of one pass over the same object:
 a *traversal*, a maximal run of consecutive samples whose H3 res-12 cell falls
 inside a runway polygon of an aerodrome the flight list names for that flight.
 A gap longer than ``airport_trace_gap_seconds`` starts a new one, so an
@@ -270,13 +270,15 @@ MILESTONE_SCHEMA = StructType(
 )
 
 #: Event type of the moment an arriving aircraft crosses the runway threshold
-#: (ICAO milestone T16), a few seconds before the wheels touch the runway.
+#: (label T16 of the moment in the PRU flight diagram), a few seconds before the wheels touch the runway.
 #: The ``landing`` of release v0.0.2 is a different event: the report at which
 #: the flight phase changes from descent to ground.
 RUNWAY_THRESHOLD_CROSSING = "xing-runway-threshold"
 
-#: ICAO milestone numbers. ``go-around`` and the two runway crossings have
-#: none, and are absent rather than invented.
+#: Label of the moment in the PRU flight diagram, a numbering the Performance
+#: Review Unit made for its own diagram of a flight; it has no official
+#: status. ``go-around`` and the two runway crossings have none, and are
+#: absent rather than invented.
 MILESTONE_NUMBERS = {
     "line-up": "T06",
     "take-off-roll": "T07",
@@ -1338,7 +1340,8 @@ def _empty_milestones(sdf: DataFrame) -> DataFrame:
 def _info(milestone: Optional[str], method: Optional[str] = None, bracket: bool = False):
     """The ``info`` JSON every runway milestone carries.
 
-    ``milestone`` is the ICAO number (``T16`` for ``xing-runway-threshold``).
+    ``milestone`` is the label of the moment in the PRU flight diagram (``T16``
+    for ``xing-runway-threshold``).
     The classification, the runway and the alignment travel with it so the
     decision that produced the row is auditable from the row.
 
@@ -1889,7 +1892,7 @@ def runway_milestones(
     config: "EventConfig",
     kept: Optional[List[DataFrame]] = None,
 ) -> DataFrame:
-    """The eight traversal-derived A-CDM milestones, as standard events.
+    """The eight runway milestones read from traversals, as standard events.
 
     ``sv`` is the state vector frame carrying ``baro_altitude_c``, the two
     aerodrome idents, the two field elevations, ``velocity`` and the cumulative

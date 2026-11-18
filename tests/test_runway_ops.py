@@ -715,8 +715,8 @@ def test_the_threshold_crossing_is_interpolated_to_the_threshold_plane(spark):
 
 
 def test_every_milestone_carries_its_icao_number(spark):
-    """Every runway milestone carries its ICAO milestone number in `info`, so
-    a consumer can match it to the A-CDM definitions."""
+    """Every runway milestone carries in `info` the label of the moment in the
+    PRU flight diagram, so a consumer can find it in that diagram."""
     out = runway_milestones(_arrival_track(spark), _arrival_traversal(spark), EventConfig())
     numbers = {r["type"]: json.loads(r["info"]).get("milestone") for r in out.collect()}
     assert numbers[RUNWAY_THRESHOLD_CROSSING] == "T16"

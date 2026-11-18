@@ -1548,3 +1548,110 @@ def test_first_seen_on_is_not_given_after_a_landing_or_without_the_setting(spark
         _reports(spark, legs), stands, _runway(spark, [("ALDT", 100), ("ATOT", 900)]), EventConfig()
     ).collect()
     assert {r.block: r.first_seen_on for r in rows} == {"on": None, "off": None}
+
+
+# ---------------------------------------------------------------------------
+# A track that holds several flights: the off-block time of the later flight
+# ---------------------------------------------------------------------------
+
+
+def _turnaround(spark, ground_legs, take_off_s, stands, landing_s=100):
+    """An arrival that lands at ``landing_s``, moves on the ground as
+    ``ground_legs`` say (see :func:`_path`) and takes off again at
+    ``take_off_s``. Returns the block rows of the default settings and of the
+    settings without the push-back start, as ``{block: seconds}``, and the
+    rows themselves."""
+    air = [
+        ("trk-1", _at(s), 50.0, 4.0, _kt(200), 4000 / FT_PER_M, False)
+        for s in range(0, landing_s, 10)
+    ]
+    reports = (
+        spark.createDataFrame(air, _REPORT_DDL)
+        .unionByName(_path(spark, ground_legs, start_s=landing_s))
+        .unionByName(_climb(spark, take_off_s))
+    )
+    runway = _runway(spark, [("ALDT", landing_s), ("ATOT", take_off_s)])
+    layout = _stands(spark, stands)
+    out = []
+    for config in (EventConfig(), _off(off_block_at_start_of_push_back=False)):
+        rows = block_events(reports, layout, runway, config).collect()
+        out.append(({r.block: (r.event_time - _EPOCH).total_seconds() for r in rows}, rows))
+    return out
+
+
+#: A turnaround of 9 minutes at the stand: taxi-in at 15 kt, the last 46 m
+#: into the stand at 1.5 kt (below ``ground_speed_threshold_kt``), 3 minutes
+#: at the stand, a push-back of 2 minutes at 1.5 kt, 3 minutes for the engine
+#: start, taxi-out. The stand's cells are reached where the slow roll starts.
+_SHORT_TURNAROUND = [(300, 7.7), (60, 0.77), (180, 0.0), (120, 0.77), (180, 0.0), (300, 7.7)]
+_SHORT_TURNAROUND_STANDS = [
+    ("entry-parking_position", 400, "B2", "EDDF", 300),
+    ("exit-parking_position", 700, "B2", "EDDF", 300),
+]
+
+
+def test_the_slow_roll_into_the_stand_is_not_the_push_back_of_the_next_flight(spark):
+    """The aircraft rolls into its stand slowly less than 10 minutes before it
+    taxis out again. The slow movement that ends the taxi-in belongs to the
+    arriving flight; the off-block time of the next flight is the start of
+    the push-back, 3 minutes later (the first report 35 ft from where the
+    aircraft stood: 660 s)."""
+    (on, _), (off, _) = _turnaround(spark, _SHORT_TURNAROUND, 1240, _SHORT_TURNAROUND_STANDS)
+
+    assert off["off"] == 950.0
+    assert on["on"] == off["on"]
+    assert on["off"] == 660.0
+    assert on["off"] > on["on"]
+
+
+def test_first_seen_on_is_not_given_to_the_later_flight_of_a_track(spark):
+    """The value describes where the aircraft was first received on the ground
+    before its departure. The later flight of a track was followed from its
+    landing, so its off-block time has no value, also when the track itself
+    began on a taxiway before its first flight."""
+    (on, rows), _ = _turnaround(spark, _SHORT_TURNAROUND, 1240, _SHORT_TURNAROUND_STANDS)
+
+    assert {r.block: r.first_seen_on for r in rows} == {"on": None, "off": None}
+
+
+def test_the_division_of_a_track_follows_the_off_block_at_the_push_back_start(spark):
+    """Without an in-block time a track is divided one second before the
+    off-block time when that is earlier than the midpoint between the landing
+    and the take-off. With the push-back start the off-block time is almost 6
+    minutes earlier; the division moves with it, and the off-block still
+    belongs to the flight it starts."""
+    import json
+
+    from opdi.pipeline.flight_legs import event_in_leg, flight_stops
+
+    # A fast taxi to the stand without a slow end, so that no in-block time
+    # is found; 5 minutes at the stand; a slow push-back; the engine start;
+    # a taxi-out of 25 minutes.
+    legs = [(300, 40.0), (300, 0.0), (120, 0.77), (240, 0.0), (1500, 7.7)]
+    stands = [
+        ("entry-parking_position", 400, "B2", "EDDF", 360),
+        ("exit-parking_position", 760, "B2", "EDDF", 360),
+    ]
+    found = _turnaround(spark, legs, 2560, stands)
+    divisions = []
+    for blocks, _ in found:
+        blocks = {k: v for k, v in blocks.items() if k == "off"}
+        events = [
+            ("trk-1", "ALDT", _at(100), json.dumps({"apt_icao": "EDDF"})),
+            ("trk-1", "ATOT", _at(2560), json.dumps({"apt_icao": "EDDF"})),
+            ("trk-1", "AOBT", _at(blocks["off"]), "{}"),
+        ]
+        frame = spark.createDataFrame(
+            events, "track_id string, type string, event_time timestamp, info string"
+        )
+        stop = flight_stops(frame, EventConfig()).collect()[0]
+        divisions.append((stop["division_time"] - _EPOCH).total_seconds())
+        second = frame.filter(F.col("type") == "AOBT").filter(
+            event_in_leg(F.col("event_time"), F.lit(stop["division_time"]), F.lit(None))
+        )
+        assert second.count() == 1
+
+    assert "on" not in found[0][0]
+    assert found[0][0]["off"] == 720.0
+    assert found[1][0]["off"] == 1070.0
+    assert divisions == [719.0, 1069.0]
