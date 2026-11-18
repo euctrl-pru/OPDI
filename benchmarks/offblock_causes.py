@@ -481,6 +481,10 @@ COLUMNS = {
     "f": "opdi_time_within_60s",
 }
 ITEM = {"AOBT": "off-block", "AIBT": "in-block"}
+#: Values of ``method``: the default settings of the branch ``industrialisation``,
+#: and the same with the off-block time at the start of the push-back.
+METHOD_NOW = "current"
+METHOD_CHANGED = "push-back start"
 #: Share of arrivals still received after the recorded in-block time from
 #: which the stands of an airport count as received, and under which as not.
 STANDS_RECEIVED_PCT = 50.0
@@ -531,11 +535,11 @@ def _shares(g: pd.DataFrame) -> dict:
     return out
 
 
-def load(days) -> tuple[dict, dict]:
+def load(days, folder: Path = None) -> tuple[dict, dict]:
     """Per day: the records classified from the reports (with tracks) and from the flight list."""
     full, coarse = {}, {}
     for day in days:
-        p = EXTRACT / day / "records.parquet"
+        p = (folder or EXTRACT) / day / "records.parquet"
         if p.exists():
             df = pd.read_parquet(p)
             coarse[day] = classify(df, False)
@@ -590,8 +594,14 @@ def _rows(scope_day: str, detail: str, d: pd.DataFrame, busiest, stands) -> list
     return rows
 
 
-def build(days) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """The table of causes, the detail of cause ``b``, and the record counts per day."""
+def build(days, changed: Path = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """The table of causes, the detail of cause ``b``, and the record counts per day.
+
+    ``changed`` is the extract folder of the same days processed with the
+    settings ``off_block_at_start_of_push_back`` and
+    ``off_block_names_where_first_seen`` on; its rows carry
+    :data:`METHOD_CHANGED` in ``method``, the others :data:`METHOD_NOW`.
+    """
     full, coarse = load(days)
     busiest = pd.read_csv(AIRPORTS_CSV, usecols=["rank", "airport", "name"]).drop_duplicates(
         "airport"
@@ -612,10 +622,29 @@ def build(days) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     if len(coarse) > 1:
         pooled = pd.concat(coarse.values(), ignore_index=True)
         rows += _rows(f"{len(coarse)} days", "flight list", pooled, apts, stands)
+    for row in rows:
+        row["method"] = METHOD_NOW
+    if changed is not None:
+        for day, d in load(days, changed)[0].items():
+            after = _rows(day, "reports", d, apts, stands)
+            for row in after:
+                row["method"] = METHOD_CHANGED
+            rows += after
+            inputs[f"{day} records ({METHOD_CHANGED})"] = len(d)
     res = pd.DataFrame(rows).merge(
         busiest.rename(columns={"rank": "airport_rank"}), on="airport", how="left"
     )
-    front = ["day", "read_from", "item", "scope", "airport", "airport_rank", "name", "stands"]
+    front = [
+        "day",
+        "read_from",
+        "method",
+        "item",
+        "scope",
+        "airport",
+        "airport_rank",
+        "name",
+        "stands",
+    ]
     res = res[front + [c for c in res.columns if c not in front]]
     cause_cols = [f"pct_{COLUMNS[k]}" for k in CAUSES]
     off = (res[cause_cols].sum(axis=1) - 100.0).abs().max()
@@ -643,7 +672,7 @@ def build(days) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
 def tables(args) -> int:
     import provenance
 
-    res, det, inputs = build(args.days)
+    res, det, inputs = build(args.days, Path(args.changed) if args.changed else None)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     built = {"offblock_causes.csv": res}
@@ -664,7 +693,7 @@ def tables(args) -> int:
             inputs=dict(inputs, rows=len(frame)),
             notes=args.notes,
         )
-    show = res[res["scope"] != "airport"].set_index(["day", "read_from", "item", "scope"])
+    show = res[res["scope"] != "airport"].set_index(["day", "read_from", "method", "item", "scope"])
     print(show.drop(columns=["airport", "airport_rank", "name", "stands"]).T.to_string())
     return 0
 
@@ -685,6 +714,11 @@ def main(argv=None) -> int:
     t.add_argument("--out", required=True)
     t.add_argument("--days", nargs="+", default=["2026-06-10", "2026-06-14", "2026-06-17"])
     t.add_argument("--detail", action="store_true", help="also write the detail of cause b")
+    t.add_argument(
+        "--changed",
+        default=None,
+        help="extract folder of the same days with the push-back start on (a second method)",
+    )
     t.add_argument("--notes", default="", help="text for the manifest entry")
     args = p.parse_args(argv)
     return {"extract": extract, "tables": tables}[args.cmd](args)

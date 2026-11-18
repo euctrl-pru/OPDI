@@ -544,8 +544,19 @@ def block_events(
     # 16,000 ft between two surface reports) does not cut a push-back in two.
     # A real flight leaves a silence longer than airport_trace_gap_seconds,
     # which ends the movement.
+    on_ground = reports.filter(F.coalesce(F.col("_ground"), F.lit(False)))
+    push_back = (
+        config.off_block_at_start_of_push_back and "lat" in sdf.columns and "lon" in sdf.columns
+    )
+    if push_back:
+        # The reports on the ground are read twice, for the movements by
+        # speed here and for the slow movements before each off-block time:
+        # they are taken from the reports once and kept, with the columns
+        # the two need.
+        columns = ("track_id", "event_time", "lat", "lon", "velocity", "on_ground")
+        on_ground = _kept(on_ground.select(*[c for c in columns if c in sdf.columns]), checkpoints)
     runs = _movement_runs(
-        reports.filter(F.coalesce(F.col("_ground"), F.lit(False))),
+        on_ground,
         config,
         break_after_seconds=float(config.airport_trace_gap_seconds),
     ).select("track_id", "_from", "_to", "_from_kt", "_to_kt", "_from_flagged", "_to_flagged")
@@ -1017,12 +1028,12 @@ def block_events(
         picked = picked.withColumn("_move_lo", F.col("_s_lo").cast("double"))
     if anchored is not None:
         picked = picked.unionByName(anchored)
-    if config.off_block_at_start_of_push_back:
-        if "lat" in sdf.columns and "lon" in sdf.columns:
-            picked = _at_push_back_start(_kept(picked, checkpoints), reports, config)
-        else:
-            # Without positions there is no displacement to read.
-            picked = picked.drop("_move_lo")
+    if push_back:
+        # Kept: the off-block and the in-block times are each read from it.
+        picked = _kept(_at_push_back_start(picked, on_ground, config), checkpoints)
+    elif config.off_block_at_start_of_push_back:
+        # Without positions there is no displacement to read.
+        picked = picked.drop("_move_lo")
 
     if config.block_time_off_the_runway:
         picked = _off_the_runway(picked, runway_events, config)
@@ -1274,7 +1285,8 @@ def _at_push_back_start(blocks: DataFrame, reports: DataFrame, config: "EventCon
     off-block times without such a movement, are returned as they are.
 
     ``blocks`` carries ``_move_lo`` (seconds since 1970), which is dropped.
-    ``reports`` carries ``_ground`` (:func:`_report_on_ground`).
+    ``reports`` holds the reports that may be on the ground
+    (:func:`_report_on_ground`).
     """
     baseline = float(config.push_back_displacement_baseline_seconds)
     times = F.broadcast(
@@ -1287,11 +1299,7 @@ def _at_push_back_start(blocks: DataFrame, reports: DataFrame, config: "EventCon
     )
     t = F.col("event_time").cast("double")
     near = (
-        reports.filter(
-            F.coalesce(F.col("_ground"), F.lit(False))
-            & F.col("lat").isNotNull()
-            & F.col("lon").isNotNull()
-        )
+        reports.filter(F.col("lat").isNotNull() & F.col("lon").isNotNull())
         .select(F.col("track_id").alias("_r_track"), "event_time", t.alias("_t"), "lat", "lon")
         .join(
             times,
