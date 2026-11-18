@@ -74,9 +74,9 @@ WAREHOUSE = "s3a://eurocontrol/opdi-world"
 SPOT = f"{WAREHOUSE}/research/spot"
 #: Day -> the folder holding its flight list, events and measurements.
 DAYS = {
-    "2026-06-10": f"{SPOT}/d0610",
-    "2026-06-14": f"{SPOT}/d0614b",
-    "2026-06-17": f"{SPOT}/d0617",
+    "2026-06-10": f"{SPOT}/d0610n",
+    "2026-06-14": f"{SPOT}/runs/next_day",
+    "2026-06-17": f"{SPOT}/d0617n",
 }
 MONTH = "202606"
 JOB = Path("/home/jupyter/.claude/jobs/616d5918/tmp/acc")
