@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -89,8 +90,8 @@ if str(REPO / "src") not in sys.path:
 
 MONTH = "202606"
 WORLD = "s3a://eurocontrol/opdi-world"
-JOB = Path("/home/jupyter/.claude/jobs/616d5918/tmp/next/offblock")
-EXTRACT = JOB / "extract"
+#: Where ``extract`` writes and ``tables`` reads (not published: it holds flights).
+EXTRACT = Path(os.environ.get("OPDI_OFFBLOCK_EXTRACT", REPO / "benchmarks" / "out" / "offblock"))
 #: The 100 busiest European airports, by Network Manager movements.
 AIRPORTS_CSV = Path(
     "/home/jupyter/work/opdi-workspace/opdi-portal/.claude/worktrees/publication/"
@@ -404,8 +405,8 @@ CAUSE_TEXT = {
 }
 #: Groups of causes: data that does not exist, and what a rule could improve.
 GROUPS = {
-    "no data (a+b+c)": ["a1", "a2", "b", "c_none", "c_sparse"],
-    "rule (d+e)": ["d", "e_early", "e_late"],
+    "data_missing": ["a1", "a2", "b", "c_none", "c_sparse"],
+    "rule_could_reach": ["d", "e_early", "e_late"],
 }
 
 
@@ -466,21 +467,67 @@ def classify(df: pd.DataFrame, with_tracks: bool) -> pd.DataFrame:
     return d
 
 
+#: Column of the published table for each cause.
+COLUMNS = {
+    "a1": "no_track",
+    "a2": "track_beyond_runway_time",
+    "b": "not_received_at_the_time",
+    "c_none": "no_position_around_the_time",
+    "c_sparse": "few_positions_around_the_time",
+    "cd": "received_but_no_opdi_time",
+    "d": "positions_but_no_opdi_time",
+    "e_early": "opdi_time_early",
+    "e_late": "opdi_time_late",
+    "f": "opdi_time_within_60s",
+}
+ITEM = {"AOBT": "off-block", "AIBT": "in-block"}
+#: Share of arrivals still received after the recorded in-block time from
+#: which the stands of an airport count as received, and under which as not.
+STANDS_RECEIVED_PCT = 50.0
+STANDS_NOT_RECEIVED_PCT = 10.0
+
+
 def _shares(g: pd.DataFrame) -> dict:
+    """Counts and shares of one group of records; the shares of the causes add up to 100."""
     n = len(g)
     out = {"records": n}
     counts = g["cause"].value_counts()
     for k in CAUSES:
-        out[f"n_{k}"] = int(counts.get(k, 0))
-        out[f"pct_{k}"] = round(100.0 * counts.get(k, 0) / n, 1) if n else np.nan
+        out[f"n_{COLUMNS[k]}"] = int(counts.get(k, 0))
+        out[f"pct_{COLUMNS[k]}"] = round(100.0 * counts.get(k, 0) / n, 1) if n else np.nan
     for name, ks in GROUPS.items():
         out[f"pct_{name}"] = (
             round(100.0 * sum(counts.get(k, 0) for k in ks) / n, 1) if n else np.nan
         )
-    lead = g.loc[g["flight_id"].notna(), "lead_s"].dropna()
-    for q, lab in ((0.25, "q1"), (0.5, "median"), (0.75, "q3")):
-        out[f"lead_{lab}_s"] = round(float(lead.quantile(q)), 0) if len(lead) else np.nan
-    out["pct_received_before"] = round(100.0 * (lead > 0).mean(), 1) if len(lead) else np.nan
+    has = g["opdi_s"].notna()
+    close = g["diff_s"].abs() <= 60
+    out["n_opdi_time"] = int(has.sum())
+    out["pct_opdi_time"] = round(100.0 * has.mean(), 1) if n else np.nan
+    out["pct_of_opdi_times_within_60s"] = (
+        round(100.0 * close.sum() / has.sum(), 1) if has.sum() else np.nan
+    )
+    out["median_abs_diff_s"] = (
+        round(float(g.loc[has, "diff_s"].abs().median()), 0) if has.sum() else np.nan
+    )
+    # Received at the stand: a report before the recorded off-block time
+    # (after the recorded in-block time).
+    lead = g["lead_s"]
+    at_stand = g["flight_id"].notna() & (lead > 0)
+    out["n_received_at_stand"] = int(at_stand.sum())
+    out["pct_received_at_stand"] = round(100.0 * at_stand.mean(), 1) if n else np.nan
+    sub = g[at_stand]
+    sub_has = sub["opdi_s"].notna()
+    out["pct_opdi_time_when_received_at_stand"] = (
+        round(100.0 * sub_has.mean(), 1) if len(sub) else np.nan
+    )
+    out["pct_within_60s_when_received_at_stand"] = (
+        round(100.0 * (sub["diff_s"].abs() <= 60).sum() / sub_has.sum(), 1)
+        if sub_has.sum()
+        else np.nan
+    )
+    out["median_abs_diff_s_when_received_at_stand"] = (
+        round(float(sub.loc[sub_has, "diff_s"].abs().median()), 0) if sub_has.sum() else np.nan
+    )
     return out
 
 
@@ -497,54 +544,83 @@ def load(days) -> tuple[dict, dict]:
     return full, coarse
 
 
-def _rows(scope: str, day: str, detail: str, d: pd.DataFrame, airports) -> list[dict]:
+def stand_reception(d: pd.DataFrame) -> pd.Series:
+    """Per airport: whether its stands are received, from the arrivals.
+
+    The share of the recorded in-block times after which the aircraft was
+    still received. An arriving aircraft keeps its transponder on until it
+    is parked, so this share says what the receivers see of the stands,
+    whatever the crews do before departure: ``received`` from
+    :data:`STANDS_RECEIVED_PCT`, ``not received`` under
+    :data:`STANDS_NOT_RECEIVED_PCT`, ``partly`` between, and ``too few
+    records`` under 30 in-block records.
+    """
+    arr = d[d["kind"] == "AIBT"]
+    seen = arr["flight_id"].notna() & (arr["lead_s"] > 0)
+    by = seen.groupby(arr["rec_apt"]).agg(["mean", "size"])
+    pct = 100.0 * by["mean"]
+    label = np.select(
+        [by["size"] < 30, pct >= STANDS_RECEIVED_PCT, pct < STANDS_NOT_RECEIVED_PCT],
+        ["too few records", "received", "not received"],
+        "partly",
+    )
+    return pd.Series(label, index=by.index, name="stands")
+
+
+def _rows(scope_day: str, detail: str, d: pd.DataFrame, busiest, stands) -> list[dict]:
+    """The rows of one day (or of the days together): all airports, each
+    class of stand reception, and each of the busiest airports."""
     rows = []
+    d = d.assign(stands=d["rec_apt"].map(stands).fillna("too few records"))
     for kind, g in d.groupby("kind"):
-        rows.append(
-            {
-                "scope": scope,
-                "day": day,
-                "airport": "all",
-                "kind": kind,
-                "detail": detail,
-                **_shares(g),
-            }
-        )
-        for apt, ga in g[g["rec_apt"].isin(airports)].groupby("rec_apt"):
+        head = {"day": scope_day, "read_from": detail, "item": ITEM[kind]}
+        rows.append({**head, "scope": "all airports", "airport": "", **_shares(g)})
+        for label, gs in g.groupby("stands"):
+            rows.append({**head, "scope": f"airports whose stands are {label}", **_shares(gs)})
+        for apt, ga in g[g["rec_apt"].isin(busiest)].groupby("rec_apt"):
             rows.append(
                 {
-                    "scope": scope,
-                    "day": day,
+                    **head,
+                    "scope": "airport",
                     "airport": apt,
-                    "kind": kind,
-                    "detail": detail,
+                    "stands": stands.get(apt, "too few records"),
                     **_shares(ga),
                 }
             )
     return rows
 
 
-def tables(args) -> int:
-    full, coarse = load(args.days)
+def build(days) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """The table of causes, the detail of cause ``b``, and the record counts per day."""
+    full, coarse = load(days)
     busiest = pd.read_csv(AIRPORTS_CSV, usecols=["rank", "airport", "name"]).drop_duplicates(
         "airport"
     )
     busiest = busiest[busiest["rank"] <= 100]
     apts = set(busiest["airport"])
-    rows = []
+    rows, inputs = [], {}
+    # Stand reception is read from the days with reports where there is one,
+    # else from the flight list of all days together.
+    basis = pd.concat((full or coarse).values(), ignore_index=True)
+    stands = stand_reception(basis).to_dict()
     for day, d in full.items():
-        rows += _rows("day", day, "reports", d, apts)
+        rows += _rows(day, "reports", d, apts, stands)
+        inputs[f"{day} records (reports)"] = len(d)
     for day, d in coarse.items():
-        rows += _rows("day", day, "flight list", d, apts)
-    if coarse:
+        rows += _rows(day, "flight list", d, apts, stands)
+        inputs[f"{day} records"] = len(d)
+    if len(coarse) > 1:
         pooled = pd.concat(coarse.values(), ignore_index=True)
-        rows += _rows("days pooled", "+".join(coarse), "flight list", pooled, apts)
+        rows += _rows(f"{len(coarse)} days", "flight list", pooled, apts, stands)
     res = pd.DataFrame(rows).merge(
         busiest.rename(columns={"rank": "airport_rank"}), on="airport", how="left"
     )
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    res.to_csv(out / "offblock_causes.csv", index=False)
+    front = ["day", "read_from", "item", "scope", "airport", "airport_rank", "name", "stands"]
+    res = res[front + [c for c in res.columns if c not in front]]
+    cause_cols = [f"pct_{COLUMNS[k]}" for k in CAUSES]
+    off = (res[cause_cols].sum(axis=1) - 100.0).abs().max()
+    if off > 0.35:
+        raise SystemExit(f"the shares of the causes do not add up to 100 (off by {off:.2f})")
     # Cause b on the days with reports: how late, and the state of the first (last) position.
     det = []
     for day, d in full.items():
@@ -554,16 +630,42 @@ def tables(args) -> int:
                 det.append(
                     {
                         "day": day,
-                        "kind": kind,
+                        "item": ITEM[kind],
                         "late": lm,
                         "state": st,
                         "n": len(gg),
                         "pct_of_records": round(100 * len(gg) / tot, 2),
                     }
                 )
-    pd.DataFrame(det).to_csv(out / "offblock_causes_b_detail.csv", index=False)
-    show = res[res["airport"] == "all"].set_index(["scope", "day", "detail", "kind"])
-    print(show.T.to_string())
+    return res, pd.DataFrame(det), inputs
+
+
+def tables(args) -> int:
+    import provenance
+
+    res, det, inputs = build(args.days)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    built = {"offblock_causes.csv": res}
+    if args.detail:
+        built["offblock_causes_b_detail.csv"] = det
+    for name, frame in built.items():
+        frame.to_csv(out / name, index=False)
+        provenance.record(
+            out,
+            name,
+            script="benchmarks/offblock_causes.py",
+            argv=sys.argv[1:],
+            code_paths=[
+                BENCH / "offblock_causes.py",
+                BENCH / "airport_accuracy.py",
+                BENCH / "corrections_scorecard.py",
+            ],
+            inputs=dict(inputs, rows=len(frame)),
+            notes=args.notes,
+        )
+    show = res[res["scope"] != "airport"].set_index(["day", "read_from", "item", "scope"])
+    print(show.drop(columns=["airport", "airport_rank", "name", "stands"]).T.to_string())
     return 0
 
 
@@ -582,6 +684,8 @@ def main(argv=None) -> int:
     t = sub.add_parser("tables")
     t.add_argument("--out", required=True)
     t.add_argument("--days", nargs="+", default=["2026-06-10", "2026-06-14", "2026-06-17"])
+    t.add_argument("--detail", action="store_true", help="also write the detail of cause b")
+    t.add_argument("--notes", default="", help="text for the manifest entry")
     args = p.parse_args(argv)
     return {"extract": extract, "tables": tables}[args.cmd](args)
 
