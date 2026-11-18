@@ -245,3 +245,19 @@ def test_merging_without_the_acdm_family_is_refused():
     take-off/landing pair beside a vocabulary that has no place for it."""
     with pytest.raises(ValueError, match="merge_duplicate_milestones"):
         EventConfig(merge_duplicate_milestones=True, emit_runway_milestones=False)
+
+
+def test_the_events_version_of_the_study_tables_follows_the_two_new_settings():
+    """One version, ``events_v0.5.0``, covers the flight list with one row per
+    flight (circles around the airports of stops) and the off-block time at
+    the push-back start. Every entry of the study table with either setting
+    on carries it; an entry with both off carries an earlier version."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
+    import event_bench
+
+    for name, config in event_bench.build_plan().items():
+        either = config.flight_list_one_row_per_flight or config.off_block_at_start_of_push_back
+        assert (config.events_version == "events_v0.5.0") == either, name

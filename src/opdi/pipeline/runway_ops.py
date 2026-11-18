@@ -270,7 +270,8 @@ MILESTONE_SCHEMA = StructType(
 )
 
 #: Event type of the moment an arriving aircraft crosses the runway threshold
-#: (label T16 of the moment in the PRU flight diagram), a few seconds before the wheels touch the runway.
+#: (label T16 of the moment in the PRU flight diagram), a few seconds before
+#: the wheels touch the runway.
 #: The ``landing`` of release v0.0.2 is a different event: the report at which
 #: the flight phase changes from descent to ground.
 RUNWAY_THRESHOLD_CROSSING = "xing-runway-threshold"

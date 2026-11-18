@@ -682,6 +682,23 @@ class EventConfig:
     report that gives a take-off or landing time of the runway window
     method."""
 
+    runway_window_by_median_distance: bool = True
+    """Choose the runway of the runway window method (``info.method =
+    "legacy"``) by the distance of each report from the runway's extended
+    centre line: of the runways within :attr:`runway_max_bearing_deg` of the
+    aircraft's track, the one with the smallest median distance over the
+    reports of the initial climb or final descent. This is the choice the
+    runway pass method makes among the runways an aircraft passed over.
+
+    Without the setting, the distance is measured once, from the middle
+    position of those reports (the median latitude and the median longitude,
+    each taken on its own). When the aircraft turns soon after lift-off that
+    position lies off its path, and of two parallel runways a few hundred
+    metres apart the wrong one can be the nearer: at Marseille (LFML, 31L and
+    31R about 300 m apart) the take-offs without reports on the ground were
+    given the wrong runway more often than the right one. The setting needs
+    :attr:`runway_window_times_checked`. Off in release v0.0.2."""
+
     runway_times_position_between_reports: bool = True
     """Give the lift-off and touchdown a position when one of the two reports
     around the crossing of :attr:`runway_airborne_height_ft` has an altitude
@@ -1850,6 +1867,7 @@ class EventConfig:
             goaround_in_approach_corridor=False,
             runway_crossing_ground_without_altitude=False,
             runway_window_times_checked=False,
+            runway_window_by_median_distance=False,
             runway_times_position_between_reports=False,
             # Work package 5: crossings, rings, FIR and the two measurements.
             crossing_max_implied_speed_kt=None,

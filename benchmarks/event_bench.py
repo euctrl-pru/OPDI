@@ -325,6 +325,9 @@ LADDER = [
             "off_block_names_where_first_seen": True,
         },
     ),
+    # The runway of the runway window method by the median distance of the
+    # reports from each centre line (two parallel runways close together).
+    ("L25_runway_by_median_distance", {"runway_window_by_median_distance": True}),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
@@ -700,7 +703,8 @@ def verify_plan_v4(plan: dict) -> None:
         if cfg.emit_runway_milestones:
             assert "landing" not in milestone_map(cfg), (
                 f"{name} emits the A-CDM runway family, whose stored tables "
-                f"name the threshold-plane crossing (T16 in the PRU flight diagram) `landing` -- an "
+                f"name the threshold-plane crossing (T16 in the PRU flight diagram) "
+                f"`landing` -- an "
                 f"event APDF does not record. Scoring it against ALDT would "
                 f"report a touchdown error for a thing that is not a touchdown."
             )

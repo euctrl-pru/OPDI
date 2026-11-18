@@ -264,3 +264,74 @@ def test_parallel_runways_are_separated_by_where_the_aircraft_actually_was(spark
     row = spark.range(1).select(west.alias("w"), east.alias("e")).collect()[0]
     assert row["e"] == pytest.approx(0.0, abs=1e-6)
     assert row["w"] > 0.5
+
+
+# ---------------------------------------------------------------------------
+# Two parallel runways close together, and a departure that turns after lift-off
+# ---------------------------------------------------------------------------
+
+
+def _close_parallels(spark):
+    """Two runways pointing due north, 0.005 deg of longitude apart (about
+    360 m at this latitude): 36L/18R to the west and 36R/18L to the east."""
+    rows = [
+        (1, 1, "LFML", False, "36L", 50.00, 4.000, "18R", 50.03, 4.000),
+        (2, 1, "LFML", False, "36R", 50.00, 4.005, "18L", 50.03, 4.005),
+    ]
+    rwy = spark.createDataFrame(
+        rows,
+        "id int, airport_ref int, airport_ident string, closed boolean, "
+        "le_ident string, le_latitude_deg double, le_longitude_deg double, "
+        "he_ident string, he_latitude_deg double, he_longitude_deg double",
+    )
+    return runway_thresholds(StubStorage({"oa_runways": rwy}))
+
+
+def _turning_departure(spark):
+    """Lift-off from the western runway: four reports over its centre line,
+    then a right turn that carries five reports across the centre line of
+    the eastern runway and beyond it."""
+    lons = [4.000, 4.000, 4.000, 4.000, 4.0035, 4.005, 4.0065, 4.015, 4.025]
+    headings = [0, 0, 0, 0, 2, 4, 6, 8, 9]
+    return make_track(
+        spark,
+        [
+            {
+                "t": i * 5,
+                "lat": 50.031 + i * 0.002,
+                "lon": lon,
+                "baro_altitude": (300 + i * 100) / FT_PER_M,
+                "vert_rate": 2000 / FTMIN_PER_MPS,
+                "velocity": 160 / KT_PER_MPS,
+                "heading": heading,
+            }
+            for i, (lon, heading) in enumerate(zip(lons, headings))
+        ],
+    ).withColumn("baro_altitude_c", F.col("baro_altitude"))
+
+
+def _named_runway(spark, config):
+    ends = spark.createDataFrame(
+        [("trk-1", "LFML", "departure", 50.015, 4.0025, 0.0)],
+        "track_id string, apt_ident string, role string, "
+        "apt_lat double, apt_lon double, apt_elevation_ft double",
+    )
+    got = detect_runway_movements(
+        _turning_departure(spark), ends, _close_parallels(spark), config
+    ).collect()
+    return [r.rwy_ident for r in got]
+
+
+def test_a_departure_that_turns_towards_the_parallel_runway_keeps_its_own(spark):
+    """Marseille (LFML), 31L and 31R about 300 m apart: most reports of the
+    initial climb lie after a turn, so the middle position of the reports is
+    nearer the other runway's centre line. The runway is the one whose centre
+    line the reports are nearest to, report by report (the median of their
+    distances), as for a runway pass."""
+    assert _named_runway(spark, EventConfig()) == ["36L"]
+
+
+def test_without_the_setting_the_middle_position_of_the_reports_names_the_runway(spark):
+    assert _named_runway(spark, EventConfig(runway_window_by_median_distance=False)) == ["36R"]
+    assert EventConfig().runway_window_by_median_distance is True
+    assert EventConfig.legacy().runway_window_by_median_distance is False

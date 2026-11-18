@@ -358,16 +358,32 @@ def _checked_movements(work, qualifies, thresholds, gs_kt, dist_nm, config) -> D
     cand = cand.withColumn(
         "bearing_error", angle_between(F.col("median_track"), F.col("rwy_bearing"))
     ).filter(F.col("bearing_error") <= F.lit(config.runway_max_bearing_deg))
-    cand = cand.withColumn(
-        "cross_track_nm",
-        cross_track_nm(
-            F.col("median_lat"),
-            F.col("median_lon"),
-            F.col("thr_lat"),
-            F.col("thr_lon"),
-            F.col("rwy_bearing"),
-        ),
-    )
+    if config.runway_window_by_median_distance:
+        # The distance of each report from this runway's extended centre
+        # line, and the median of those distances (the lower of the two
+        # middle values of an even number). The reports are those already
+        # collected for the times, so nothing is read again.
+        distances = F.array_sort(
+            F.transform(
+                F.col("_reports"),
+                lambda r: cross_track_nm(
+                    r["lat"], r["lon"], F.col("thr_lat"), F.col("thr_lon"), F.col("rwy_bearing")
+                ),
+            )
+        )
+        middle = F.floor((F.size(distances) + F.lit(1)) / F.lit(2)).cast("int")
+        cand = cand.withColumn("cross_track_nm", F.element_at(distances, middle))
+    else:
+        cand = cand.withColumn(
+            "cross_track_nm",
+            cross_track_nm(
+                F.col("median_lat"),
+                F.col("median_lon"),
+                F.col("thr_lat"),
+                F.col("thr_lon"),
+                F.col("rwy_bearing"),
+            ),
+        )
     from pyspark.sql.window import Window
 
     best = Window.partitionBy("track_id", "role").orderBy(
