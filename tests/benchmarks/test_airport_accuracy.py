@@ -1,4 +1,5 @@
-"""The arithmetic and the labels of ``benchmarks/airport_accuracy.py`` (pandas only, no Spark)."""
+"""The arithmetic and the labels of ``benchmarks/airport_accuracy.py`` (pandas), and the
+matching of flight rows with records (Spark)."""
 
 import math
 import sys
@@ -512,3 +513,51 @@ def test_record_runways_leaves_a_number_without_side_unknown_when_two_runways_ca
 def test_record_runways_keeps_the_value_of_an_airport_with_no_runway_in_the_table():
     values = pd.DataFrame({"rec_apt": ["LXXX", "LXXX"], "rec_rwy": ["01", None]})
     assert aa.record_runways(values, _runways())["rwy_key"].tolist() == ["01", None]
+
+
+# ---------------------------------------------------------------------------
+# Flight rows (one row per flight) against the records
+# ---------------------------------------------------------------------------
+
+_FLX_DDL = (
+    "flight_id string, track_id string, _lo double, _hi double, icao24 string, cs string, "
+    "adep string, ades string, fs double, ls double, fl_atot double, fl_aldt double, "
+    "fl_aobt double, fl_aibt double, rwy_dep string, rwy_arr string, stnd_dep string, "
+    "stnd_arr string, c40_dep double, c100_dep double, c40_arr double, c100_arr double"
+)
+_REC_DDL = (
+    "kind string, _a string, _c string, rec_apt string, rec_s double, subminute boolean, "
+    "rec_rwy string, rec_stand string"
+)
+
+
+def _flight_row(flight, track, lo, hi, adep, ades, atot, aldt):
+    return (
+        flight, track, lo, hi, "4b1234", "SWR12", adep, ades, atot, aldt, atot, aldt,
+        None, None, "16", "34", None, None, None, None, None, None,
+    )  # fmt: skip
+
+
+def test_each_record_is_compared_with_one_flight_row(spark):
+    """A track that flies LSZH - LSGG three times under one call sign has three
+    flight rows. The airport recorded two of the take-offs. Each record is
+    compared with the flight row nearest to it in time; the third row, whose
+    own record is missing, is not compared with the record of another flight."""
+    rows = [
+        _flight_row("t-L1", "t", None, 4000.0, "LSZH", "LSGG", 1000.0, 3000.0),
+        _flight_row("t-L2", "t", 4000.0, 9000.0, "LSGG", "LSZH", 5000.0, 7000.0),
+        _flight_row("t-L3", "t", 9000.0, 14000.0, "LSZH", "LSGG", 10000.0, 12000.0),
+        _flight_row("t-L4", "t", 14000.0, 19000.0, "LSGG", "LSZH", 15000.0, 17000.0),
+        _flight_row("t-L5", "t", 19000.0, None, "LSZH", "LSGG", 20000.0, 22000.0),
+    ]
+    recs = [
+        ("ATOT", "4b1234", "SWR12", "LSZH", 1030.0, True, "16", None),
+        ("ATOT", "4b1234", "SWR12", "LSZH", 10020.0, True, "16", None),
+    ]
+    out = aa._flight_list_vs_records(
+        spark.createDataFrame(recs, _REC_DDL), spark.createDataFrame(rows, _FLX_DDL)
+    )
+    atot = out[out["column"] == "ATOT"].sort_values("diff_s")
+
+    assert atot["diff_s"].tolist() == [-30.0, -20.0]
+    assert atot["rec_key"].nunique() == 2

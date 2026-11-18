@@ -169,16 +169,30 @@ def _records(spark, day: str):
 
 def _matched_events(E, FLX, blk):
     """Per record: the nearest OPDI block event of the same aircraft, call sign and airport."""
+    import corrections_scorecard as cs
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
     c = F.col
+    # The events are stored under their track. The flight row of an event is
+    # the row of that track whose division times lie around the event.
     ev = (
         E.filter(c("type").isin(*BLOCK_KINDS))
+        .withColumnRenamed("flight_id", "_ev_track")
         .join(
-            FLX.select("flight_id", c("icao24").alias("_a"), c("cs").alias("_c"), "adep", "ades"),
-            "flight_id",
+            FLX.select(
+                c("flight_id"),
+                c("track_id").alias("_fl_track"),
+                "_lo",
+                "_hi",
+                c("icao24").alias("_a"),
+                c("cs").alias("_c"),
+                "adep",
+                "ades",
+            ),
+            cs._on_row("_ev_track", "ts"),
         )
+        .drop("_fl_track", "_lo", "_hi")
         .withColumn(
             "_apt",
             F.coalesce(c("apt"), F.when(c("type") == "AOBT", c("adep")).otherwise(c("ades"))),
@@ -201,14 +215,29 @@ def _matched_events(E, FLX, blk):
 
 
 def _flights(FLX, blk, ev):
-    """Per record: its OPDI flight (or none) and the number of candidate flights."""
+    """Per record: its OPDI flight (or none) and the number of candidate flights.
+
+    A flight is one row of the flight list with one row per flight. The
+    record keeps the row's ``flight_id``, the ``track_id`` its reports are
+    stored under, and the division times ``_lo`` and ``_hi`` (seconds; NULL:
+    no limit) between which the flight lies in that track.
+    """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
     c = F.col
     f = blk.join(ev, "rec_key", "left").join(
         FLX.select(
-            c("icao24").alias("_a"), c("cs").alias("_c"), "flight_id", "adep", "ades", "fs", "ls"
+            c("icao24").alias("_a"),
+            c("cs").alias("_c"),
+            "flight_id",
+            "track_id",
+            "_lo",
+            "_hi",
+            "adep",
+            "ades",
+            "fs",
+            "ls",
         ),
         ["_a", "_c"],
         "left",
@@ -232,8 +261,29 @@ def _flights(FLX, blk, ev):
     return f.withColumn("airport_matches", side_apt == c("rec_apt"))
 
 
+def _reports_of_flights(reports, recs):
+    """The reports of each record's own flight: one row per record and report.
+
+    ``reports`` holds ``track_id`` and ``t`` (seconds); ``recs`` the rows of
+    :func:`_flights`. A report belongs to the flight when it is of the
+    flight's track and lies after ``_lo`` and up to ``_hi`` (as the events
+    do, ``opdi.pipeline.flight_legs.event_in_leg``).
+    """
+    from pyspark.sql import functions as F
+
+    c = F.col
+    own = recs.filter(c("flight_id").isNotNull()).select(
+        "rec_key", "kind", "rec_s", "rec_apt", "track_id", "_lo", "_hi"
+    )
+    ids = F.broadcast(own.select("track_id").distinct())
+    rep = reports.join(ids, "track_id", "left_semi").join(own, "track_id")
+    return rep.filter(
+        (c("_lo").isNull() | (c("t") > c("_lo"))) & (c("_hi").isNull() | (c("t") <= c("_hi")))
+    ).drop("_lo", "_hi")
+
+
 def _track_facts(spark, tracks_root: str, day: str, recs):
-    """Per record: the reports of its own track and of the aircraft's other tracks."""
+    """Per record: the reports of its own flight and of the aircraft's other tracks."""
     from pyspark.sql import functions as F
 
     c = F.col
@@ -252,11 +302,7 @@ def _track_facts(spark, tracks_root: str, day: str, recs):
         "h3_res_12",
         c("last_contact").cast("double").alias("last_contact"),
     )
-    own = recs.filter(c("flight_id").isNotNull()).select(
-        "rec_key", "kind", "rec_s", "rec_apt", c("flight_id").alias("track_id")
-    )
-    ids = F.broadcast(own.select("track_id").distinct())
-    rep = tr.join(ids, "track_id", "left_semi").join(own, "track_id")
+    rep = _reports_of_flights(tr, recs)
     t, T = c("t"), c("rec_s")
     pos = c("lat").isNotNull() & c("lon").isNotNull()
     near = F.abs(t - T) <= AROUND_S
@@ -318,7 +364,7 @@ def _track_facts(spark, tracks_root: str, day: str, recs):
         )
         .dropDuplicates(["rec_apt"])
     )
-    rk = recs.select("rec_key", "kind", "rec_s", "rec_apt", "_a", c("flight_id").alias("own")).join(
+    rk = recs.select("rec_key", "kind", "rec_s", "rec_apt", "_a", c("track_id").alias("own")).join(
         apts, "rec_apt", "left"
     )
     who = F.broadcast(rk.select("_a").distinct())

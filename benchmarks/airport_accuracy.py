@@ -694,7 +694,12 @@ def _record_counts(spark, recs, FLX, day: str) -> pd.DataFrame:
 
 
 def _flight_list_vs_records(recs, FLX) -> pd.DataFrame:
-    """Flight-list times, runways and stands against the records of the row's own airports."""
+    """Flight-list times, runways and stands against the records of the row's own airports.
+
+    ``FLX`` holds one row per flight (:func:`_flight_list`). Each row is
+    compared with the nearest record of its aircraft, call sign and airport,
+    and each record with one row only.
+    """
     from pyspark.sql import Window
     from pyspark.sql import functions as F
 
@@ -722,6 +727,14 @@ def _flight_list_vs_records(recs, FLX) -> pd.DataFrame:
         )
         w = Window.partitionBy("flight_id").orderBy(F.abs(c("_t") - c("rec_s")))
         j = j.withColumn("_r", F.row_number().over(w)).filter(c("_r") == 1)
+        # One flight row per record: a track that flies the same pair of
+        # airports several times has a row for each flight, and a row whose
+        # own record is missing must not be compared with the record of
+        # another flight. The record keeps the row nearest to it in time.
+        wr = Window.partitionBy("_a", "_c", "rec_apt", "rec_s").orderBy(
+            F.abs(c("_t") - c("rec_s")), "flight_id"
+        )
+        j = j.withColumn("_rr", F.row_number().over(wr)).filter(c("_rr") == 1)
         parts.append(
             j.select(
                 F.lit(col).alias("column"),
