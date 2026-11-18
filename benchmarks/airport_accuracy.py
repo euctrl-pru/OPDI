@@ -614,6 +614,28 @@ def _flight_list(spark, root: str, day: str):
     return fl.select(*cols, F.array(*present).alias("_present"))
 
 
+def _events_by_flight(E, FLX):
+    """``E`` with ``flight_id`` naming the flight row each event belongs to.
+
+    The events are stored under their track. A track that holds several
+    flights has one flight-list row per flight; an event belongs to the row
+    of its track whose division times lie around it
+    (``corrections_scorecard._on_row``). Events of tracks without a
+    flight-list row are left out.
+    """
+    import corrections_scorecard as cs
+    from pyspark.sql import functions as F
+
+    rows = FLX.select(
+        F.col("flight_id").alias("_row"), F.col("track_id").alias("_fl_track"), "_lo", "_hi"
+    )
+    return (
+        E.join(rows, cs._on_row("flight_id", "ts"))
+        .drop("flight_id", "_fl_track", "_lo", "_hi")
+        .withColumnRenamed("_row", "flight_id")
+    )
+
+
 def _records(spark, day: str):
     """The airport records of the day (long form), the scorecard's own function."""
     import corrections_scorecard as cs
@@ -1030,7 +1052,10 @@ def extract(args) -> int:
         _record_counts(spark, recs, FLX, day).to_parquet(out / "apdf_records.parquet", index=False)
         _flight_list_vs_records(recs, FLX).to_parquet(out / "apdf_flight_list.parquet", index=False)
         recs.unpersist()
-        nm, nm_counts = _nm(spark, E, FLX, M, day)
+        # For the counts per flight and the Network Manager comparison, each
+        # event under the flight row it belongs to.
+        EF = _events_by_flight(E, FLX).persist(keep)
+        nm, nm_counts = _nm(spark, EF, FLX, M, day)
         nm.to_parquet(out / "nm.parquet", index=False)
         nm_counts.to_parquet(out / "nm_counts.parquet", index=False)
         apt_file = folder / "airports.parquet"
@@ -1038,7 +1063,7 @@ def extract(args) -> int:
             spark.read.parquet(f"{WAREHOUSE}/oa_airports").select(
                 F.col("ident").alias("airport"), "name", "iso_country"
             ).dropDuplicates(["airport"]).toPandas().to_parquet(apt_file, index=False)
-        bases, carriers, pooled = _own(spark, E, FLX, M)
+        bases, carriers, pooled = _own(spark, EF, FLX, M)
         bases.to_parquet(out / "own_bases.parquet", index=False)
         carriers.to_parquet(out / "own_carriers.parquet", index=False)
         pooled.to_parquet(out / "own_pooled.parquet", index=False)

@@ -561,3 +561,24 @@ def test_each_record_is_compared_with_one_flight_row(spark):
 
     assert atot["diff_s"].tolist() == [-30.0, -20.0]
     assert atot["rec_key"].nunique() == 2
+
+
+def test_events_are_counted_under_the_flight_row_they_belong_to(spark):
+    """The events are stored under their track. For the counts per flight each
+    event takes the identifier of the flight row whose division times lie
+    around it; an event of a track with one flight keeps the track's."""
+    rows = [
+        _flight_row("t-L1", "t", None, 4000.0, "LSZH", "LSGG", 1000.0, 3000.0),
+        _flight_row("t-L2", "t", 4000.0, None, "LSGG", "LSZH", 5000.0, 7000.0),
+        _flight_row("u", "u", None, None, "LSZH", "EDDH", 100.0, 900.0),
+    ]
+    events = [("e1", "t", 3000.0), ("e2", "t", 5000.0), ("e3", "u", 100.0), ("e4", "x", 5.0)]
+    out = aa._events_by_flight(
+        spark.createDataFrame(events, "id string, flight_id string, ts double"),
+        spark.createDataFrame(rows, _FLX_DDL),
+    )
+    assert {r["id"]: r["flight_id"] for r in out.collect()} == {
+        "e1": "t-L1",
+        "e2": "t-L2",
+        "e3": "u",
+    }
