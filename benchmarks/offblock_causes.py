@@ -10,8 +10,14 @@
         --tracks s3a://eurocontrol/opdi-world/research/spot/d0614c
     .venv310/bin/python -u benchmarks/offblock_causes.py extract --day 2026-06-10 \\
         --root s3a://eurocontrol/opdi-world/research/spot/d0610
-    # 2. The tables (pandas only).
+    # 2. The tables (pandas only), with a manifest entry beside them.
     .venv310/bin/python -u benchmarks/offblock_causes.py tables --out <folder>
+
+``extract`` writes to ``benchmarks/out/offblock/<day>/`` (or to the folder
+named in the environment variable ``OPDI_OFFBLOCK_EXTRACT``) and ``tables``
+reads from there. ``tables --changed <folder>`` adds the rows of a second
+extract of the same day, made from a run with the off-block time at the
+start of the push-back (``method`` = ``push-back start``).
 
 **The question.** Airport records give an off-block time for many more
 departures than OPDI does, while the in-block time is found more often. Is
