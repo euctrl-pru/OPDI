@@ -34,6 +34,36 @@ DEFAULT_URLS: Dict[str, str] = {
     "regions": "https://ourairports.com/data/regions.csv",
 }
 
+#: The same files on the mirror that OurAirports publishes every night. Read
+#: when the site itself cannot be reached.
+MIRROR_URLS: Dict[str, str] = {
+    name: "https://davidmegginson.github.io/ourairports-data/" + url.rsplit("/", 1)[1]
+    for name, url in DEFAULT_URLS.items()
+}
+
+
+def read_dataset_csv(name: str, url: Optional[str] = None) -> pd.DataFrame:
+    """Download one OurAirports file as a pandas DataFrame.
+
+    Args:
+        name: Dataset name, a key of :data:`DEFAULT_URLS`.
+        url: Address to read instead. It is read as given, with no fallback.
+
+    Returns:
+        The file's rows. Without ``url`` the site is read first and, when it
+        cannot be reached (for example an expired certificate), the mirror.
+    """
+    if url is not None:
+        print(f"Reading {name} from {url}...")
+        return pd.read_csv(url)
+    print(f"Reading {name} from {DEFAULT_URLS[name]}...")
+    try:
+        return pd.read_csv(DEFAULT_URLS[name])
+    except OSError as error:  # URLError, SSL and connection errors
+        print(f"  not reachable ({error}); reading the mirror {MIRROR_URLS[name]}")
+        return pd.read_csv(MIRROR_URLS[name])
+
+
 # Spark schemas for each dataset
 SCHEMA_AIRPORTS = StructType(
     [
@@ -299,11 +329,9 @@ class OurAirportsIngestion:
         Returns:
             Number of rows ingested.
         """
-        url = url or DEFAULT_URLS[name]
         schema = SCHEMAS[name]
 
-        print(f"Reading {name} from {url}...")
-        pdf = pd.read_csv(url)
+        pdf = read_dataset_csv(name, url)
         df = self.spark.createDataFrame(pdf)
         for field in schema:
             df = df.withColumn(field.name, df[field.name].try_cast(field.dataType))
