@@ -462,6 +462,12 @@ tracks still open from one day to the next, would remove most of that work.
 
 ### Space
 
+The sizes below were measured with 32-character hash event ids, unrounded
+values, zstd at its default level and Bloom filters sized for 100,000 values
+per row group. Files published with the current settings (flight-based event
+ids, rounded values, zstd level 9, Bloom filters sized for a tenth of the rows
+of a row group) are smaller; the table has not been measured again.
+
 Measured by publishing one worldwide day (14 June 2026) from existing working
 tables on the OpenSky cluster with six executors:
 

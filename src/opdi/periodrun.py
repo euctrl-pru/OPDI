@@ -687,6 +687,8 @@ def _run_day_step(spark, config, step: str, day: date, kwargs: dict) -> None:
             PublishedLayout.for_storage(storage),
             pipeline_commit(),
             allow_empty=bool(kwargs.get("allow_empty")),
+            event_id_by_flight=config.events.published_event_id_by_flight,
+            values_rounded=config.events.published_values_rounded,
         )
         print(f"  published: {counts['flights']:,} flights, {counts['events']:,} events")
     else:

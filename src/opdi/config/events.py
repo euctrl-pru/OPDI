@@ -1604,6 +1604,19 @@ class EventConfig:
     ids are row numbers counted over the day and change when the data
     change."""
 
+    published_event_id_by_flight: bool = True
+    """Publish each event under the id ``<flight_id>-E<n>``, where ``n``
+    counts the events of the flight in time order (step 09). The id then
+    repeats the flight id, which a column already holds, and compresses well.
+    Off (release v0.0.2), the published id is the working id, a random-looking
+    hash. The working tables keep their own ids in both cases."""
+
+    published_values_rounded: bool = True
+    """Round the published values: longitude and latitude to 5 decimals
+    (about 1 m), columns in nautical miles and degrees to 3, altitude to whole
+    feet, and the numbers in ``info`` to 3 decimals (step 09). Off (release
+    v0.0.2), the values are published as computed."""
+
     keep_each_family: bool = True
     """Compute the events of each family on its own and keep them before the
     families are joined (``localCheckpoint``). The joined events then have a
@@ -1895,5 +1908,7 @@ class EventConfig:
             flight_list_one_row_per_flight=False,
             overflight_min_duration_s=300.0,
             keep_each_family=False,
+            published_event_id_by_flight=False,
+            published_values_rounded=False,
             events_version=LEGACY_EVENTS_VERSION,
         )

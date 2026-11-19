@@ -61,6 +61,14 @@ The files are Parquet files, one per table and day:
 <release>/catalogue.parquet                   # one row per published day
 ```
 
+Event ids have the form `<flight_id>-E<n>`, where `n` counts the events of the
+flight in time order, so an id identifies an event within one release. Positions
+have 5 decimals (about 1 m), altitudes are whole feet, columns in nautical
+miles or degrees have 3 decimals, and the numbers inside `info` have at most 3
+decimals. The files are compressed with zstd (level 9). The settings
+`published_event_id_by_flight` and `published_values_rounded` of `EventConfig`
+turn the ids and the rounding off.
+
 A day's files hold the flights whose track was first seen on that day (UTC);
 the flights of a track that holds several are all in the file of the track's
 day, also a flight that started after midnight. Any

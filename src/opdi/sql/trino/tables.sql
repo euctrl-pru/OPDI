@@ -59,7 +59,7 @@ WITH (
 );
 
 CREATE TABLE IF NOT EXISTS minio.opdi.flight_events (
-    event_id                  varchar COMMENT 'Unique identifier of the event.',
+    event_id                  varchar COMMENT 'Identifier of the event, written <flight_id>-E<n>: n counts the events of the flight in time order. It identifies the event within one release.',
     flight_id                 varchar COMMENT 'Identifier of the flight the event belongs to. It matches flight_id in the flight list. On a track that holds several flights, an event belongs to the flight during which it happened.',
     type                      varchar COMMENT 'Event type, for example ATOT, level-start or xing-40nm. The data dictionary lists every type.',
     event_time                timestamp COMMENT 'Time at which the event happened.',

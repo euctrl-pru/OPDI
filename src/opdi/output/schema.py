@@ -453,9 +453,43 @@ FLIGHT_LIST: Tuple[Column, ...] = (
     ),
 )
 
+def published_decimals(name: str):
+    """How many decimals the published column ``name`` is rounded to.
+
+    This is the one place that holds the rule. ``None`` means the column keeps
+    its value as computed.
+
+    * ``longitude`` and ``latitude``: 5 decimals (about 1 m).
+    * columns ending ``_nm`` and ``_deg``: 3 decimals.
+    * ``altitude_ft``: whole feet.
+    """
+    if name in ("longitude", "latitude"):
+        return 5
+    if name.endswith(("_nm", "_deg")):
+        return 3
+    if name == "altitude_ft":
+        return 0
+    return None
+
+
+#: Matches a JSON number with more than 3 decimals inside ``info``, after the
+#: separator that precedes a value (``:``, ``[`` or ``,``) and before the one
+#: that follows it (``,``, ``}``, ``]`` or an exponent). Text values, whose
+#: digits are inside quotes and end in other characters, do not match. Used
+#: with the replacement ``$1``, which keeps the first 3 decimals.
+INFO_LONG_NUMBER = r"(?<=[:\[,])(-?\d+\.\d{3})\d+(?=[,}\]Ee])"
+
 #: The columns describing the event itself, first in the flight events file.
 EVENT_COLUMNS: Tuple[Column, ...] = (
-    Column("event_id", "string", "", "Unique identifier of the event.", "id", "event"),
+    Column(
+        "event_id",
+        "string",
+        "",
+        "Identifier of the event, written <flight_id>-E<n>: n counts the events of the "
+        "flight in time order. It identifies the event within one release.",
+        "id",
+        "event",
+    ),
     Column(
         "flight_id",
         "string",

@@ -57,9 +57,9 @@ def test_flight_list_round_trip(base):
 def test_flight_events_round_trip(base):
     ev = published.read_flight_events(DAY, base=base)
     assert list(ev.columns) == [c.name for c in FLIGHT_EVENTS]
-    assert sorted(ev["event_id"]) == ["e1", "e2", "e3", "e4", "e5"]
+    assert sorted(ev["event_id"]) == ["trk_1-E1", "trk_1-E2", "trk_1-E3", "trk_2-E1", "trk_2-E2"]
     atot = published.read_flight_events(DAY, NEXT, base=base, types=["ATOT"])
-    assert sorted(atot["event_id"]) == ["e1", "e4", "e6"]
+    assert sorted(atot["event_id"]) == ["trk_1-E1", "trk_2-E1", "trk_3-E1"]
 
 
 def test_a_missing_day_names_the_file(base):
@@ -96,9 +96,9 @@ def test_as_measurements_keeps_the_distance_and_time_rows_of_every_event(base):
     for row in m.itertuples():
         assert row.id == row.event_id + MEASUREMENT_SUFFIX[row.type]
         assert row.version == MEASUREMENT_VERSION[row.type]
-    assert set(m.loc[m.event_id == "e2", "type"]) == always | {"Holding duration (s)"}
-    # e5 has no measurement at all: two rows, both empty.
-    e5 = m[m.event_id == "e5"]
+    assert set(m.loc[m.event_id == "trk_1-E2", "type"]) == always | {"Holding duration (s)"}
+    # trk_2-E2 has no measurement at all: two rows, both empty.
+    e5 = m[m.event_id == "trk_2-E2"]
     assert set(e5["type"]) == always and e5["value"].isna().all()
     assert not m.loc[~m.type.isin(always), "value"].isna().any()
 
