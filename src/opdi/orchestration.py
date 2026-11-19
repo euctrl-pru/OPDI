@@ -1198,6 +1198,14 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one command; see the module description. Returns the exit code."""
     args = _parser().parse_args(argv)
+    # Written line by line, so that a log file shows each message when it is
+    # printed. Python otherwise holds output back when it does not go to a
+    # terminal, and a long step looks silent until it ends.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
     if getattr(args, "adsc", False):
         os.environ[ADSC_VARIABLE] = "1"
     try:

@@ -166,3 +166,14 @@ def test_a_session_on_one_machine_keeps_its_executor_size():
     usual = (spark.executor_memory, spark.executor_memory_overhead)
     spark.size_executors_for_step("00")
     assert (spark.executor_memory, spark.executor_memory_overhead) == usual
+
+
+def test_a_day_step_after_the_reference_step_gets_the_usual_size_back():
+    """One configuration serves all steps of a period run, each in its own session."""
+    spark = OPDIConfig.for_environment("opensky").spark
+    usual = (spark.executor_memory, spark.executor_memory_overhead)
+    spark.size_executors_for_step("00")
+    spark.size_executors_for_step("01")
+    assert (spark.executor_memory, spark.executor_memory_overhead) == usual
+    spark.size_executors_for_step("00")
+    assert (spark.executor_memory, spark.executor_memory_overhead) == ("6g", "7680m")

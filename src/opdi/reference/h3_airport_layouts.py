@@ -33,6 +33,7 @@ from shapely.geometry import LineString, Polygon
 from shapely.ops import transform
 
 from opdi.config import OPDIConfig
+from opdi.reference.staged import StagedTable
 from opdi.utils.storage import StorageManager
 
 # Default buffer widths (meters) by aeroway type
@@ -536,7 +537,27 @@ class AirportLayoutGenerator:
             troublesome_airports = ["SPLO"]
 
         airports_df = self.fetch_airport_list(airports_url, airport_types)
-        processed_success = self._load_processed_airports()
+        # With Parquet folders (the `opensky` environment) the rows are written
+        # in batches to a building table and moved to the final table at the
+        # end (see `StagedTable`): the layouts of the whole world do not fit in
+        # the driver's memory together. The airports already in the building
+        # table are the ones an earlier, unfinished build completed; the local
+        # progress log is not used there, because it can name airports whose
+        # rows were never written.
+        staged = None
+        if getattr(self.storage, "use_s3", False):
+            staged = StagedTable(
+                self.spark,
+                self.storage,
+                "hexaero_airport_layouts",
+                HEXAERO_SCHEMA,
+                key="hexaero_apt_icao",
+            )
+            processed_success = staged.done_keys()
+            if processed_success:
+                print(f"  Continuing a build: {len(processed_success)} airports already written.")
+        else:
+            processed_success = self._load_processed_airports()
         processed_failed = []
         processed_errors = []
         frames = []
@@ -558,8 +579,12 @@ class AirportLayoutGenerator:
 
             result = self.process_airport(apt_icao)
             if result is not None and len(result):
-                frames.append(result)
-                self._mark_success(apt_icao, processed_success)
+                if staged is not None:
+                    staged.add(result)
+                    processed_success.append(apt_icao)
+                else:
+                    frames.append(result)
+                    self._mark_success(apt_icao, processed_success)
             else:
                 self._mark_failed(apt_icao, "See logs", processed_failed, processed_errors)
 
@@ -573,7 +598,9 @@ class AirportLayoutGenerator:
         # `overwrite` only on a fresh run: a resumed one appends to the table
         # the earlier airports are already in, which is what the success log
         # means.
-        if frames:
+        if staged is not None:
+            staged.finish()
+        elif frames:
             big = pd.concat(frames, ignore_index=True)
             sdf = self.spark.createDataFrame(big, HEXAERO_SCHEMA)
             sdf = sdf.repartition("hexaero_apt_icao").orderBy("hexaero_apt_icao")

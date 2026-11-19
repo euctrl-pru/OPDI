@@ -956,6 +956,7 @@ def run_period(
         step_start = time.time()
         # A new Spark session per step keeps the driver's growing history
         # within one step.
+        config.spark.size_executors_for_step(step)
         spark = SparkSessionManager.create_session(
             app_name=f"OPDI period {start_date}..{end_date} step {step}",
             config=config,

@@ -128,11 +128,14 @@ class SparkConfig:
         """
         if not self.k8s_master:
             return
-        size = self.step_executor_sizes.get(step, {})
-        self.executor_memory = size.get("executor_memory", self.executor_memory)
-        self.executor_memory_overhead = size.get(
-            "executor_memory_overhead", self.executor_memory_overhead
+        # The usual size is kept on the first call, so a step with no entry
+        # gets it back when one configuration serves several steps in turn.
+        usual = self.__dict__.setdefault(
+            "_usual_executor_size", (self.executor_memory, self.executor_memory_overhead)
         )
+        size = self.step_executor_sizes.get(step, {})
+        self.executor_memory = size.get("executor_memory", usual[0])
+        self.executor_memory_overhead = size.get("executor_memory_overhead", usual[1])
 
     def settings_for_step(self, step: str) -> Dict[str, str]:
         """The settings of :attr:`step_settings` for ``step``.
