@@ -418,10 +418,40 @@ def steps_run_with(step: str, config) -> tuple[str, ...]:
     return (step,)
 
 
+def forget_dead_java_process() -> bool:
+    """Drop PySpark's link to its Java process when that process has ended.
+
+    PySpark keeps one Java process for the life of the Python process and
+    connects every new session to it. When it has died (killed for memory, for
+    example), the next session fails at once with "Connection refused", so a
+    second attempt in the same command could never work. With the link
+    dropped, the next session starts a new Java process.
+
+    Returns:
+        True when a dead process was forgotten.
+    """
+    from pyspark import SparkContext
+    from pyspark.sql import SparkSession
+
+    gateway = getattr(SparkContext, "_gateway", None)
+    process = getattr(gateway, "proc", None)
+    if process is None or process.poll() is None:
+        return False
+    SparkContext._gateway = None
+    SparkContext._jvm = None
+    SparkContext._active_spark_context = None
+    SparkSession._instantiatedSession = None
+    SparkSession._activeSession = None
+    return True
+
+
 def _session(config, name: str, distributed: bool | None = None):
     """A Spark session for one unit, with a driver heap that fits the machine."""
     from opdi import periodrun
     from opdi.utils.spark_helpers import SparkSessionManager
+
+    if forget_dead_java_process():
+        print("  the Java process of the last session has ended; starting a new one")
 
     mem = periodrun._cgroup_v2_limit()
     limit_bytes, used_bytes = mem if mem else (None, 0)

@@ -273,3 +273,49 @@ def test_an_empty_table_folder_is_reported_not_guessed(spark, tmp_path):
         storage.read_table("osn_tracks")
     except EmptyTableError as exc:
         assert o.classify_failure(exc) == "permanent"
+
+
+# --- a Java process that died between two attempts ----------------------------
+
+
+class _Proc:
+    def __init__(self, code):
+        self.code = code
+
+    def poll(self):
+        return self.code
+
+
+class _Gateway:
+    def __init__(self, code):
+        self.proc = _Proc(code)
+
+
+def test_a_dead_java_process_is_forgotten_before_the_next_attempt(monkeypatch):
+    """Otherwise the next session connects to a process that is gone and fails at once."""
+    from pyspark import SparkContext
+    from pyspark.sql import SparkSession
+
+    from opdi import orchestration
+
+    monkeypatch.setattr(SparkContext, "_gateway", _Gateway(137), raising=False)
+    monkeypatch.setattr(SparkContext, "_jvm", object(), raising=False)
+    monkeypatch.setattr(SparkContext, "_active_spark_context", object(), raising=False)
+    monkeypatch.setattr(SparkSession, "_instantiatedSession", object(), raising=False)
+    monkeypatch.setattr(SparkSession, "_activeSession", object(), raising=False)
+
+    assert orchestration.forget_dead_java_process() is True
+    assert SparkContext._gateway is None and SparkContext._jvm is None
+    assert SparkContext._active_spark_context is None
+    assert SparkSession._instantiatedSession is None and SparkSession._activeSession is None
+
+
+def test_a_running_java_process_is_kept(monkeypatch):
+    from pyspark import SparkContext
+
+    from opdi import orchestration
+
+    gateway = _Gateway(None)
+    monkeypatch.setattr(SparkContext, "_gateway", gateway, raising=False)
+    assert orchestration.forget_dead_java_process() is False
+    assert SparkContext._gateway is gateway
