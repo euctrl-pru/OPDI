@@ -1,4 +1,5 @@
 """The coverage switch: one box, two modes, worldwide unless asked otherwise."""
+
 import pytest
 from pyspark.sql import functions as F
 
@@ -16,14 +17,14 @@ def test_the_european_box_is_the_published_one():
 
 
 def test_every_environment_defaults_to_worldwide():
-    """A coverage that varied by environment would let dev publish rows local
-    runs cannot reproduce, with nothing in the data saying why."""
-    for env in ("opensky", "local", "dev", "live"):
+    """A coverage that varied by environment would let one environment publish
+    rows another cannot reproduce, with nothing in the data saying why."""
+    for env in ("opensky", "local"):
         assert OPDIConfig.for_environment(env).coverage.bbox is None
 
 
 def test_every_environment_can_still_ask_for_europe():
-    for env in ("opensky", "local", "dev", "live"):
+    for env in ("opensky", "local"):
         c = OPDIConfig.for_environment(env, worldwide=False).coverage
         assert c.bbox == PUBLISHED
 
@@ -47,29 +48,27 @@ def test_a_custom_box_is_neither():
     assert CoverageConfig(bbox=(0.0, 40.0, 10.0, 50.0)).label == "custom"
 
 
-def test_worldwide_writes_to_its_own_warehouse():
-    """The decision that keeps the published European tables safe. If these two
-    are ever equal, a worldwide run appends planet-wide rows to the table the
-    European track_id contract lives in."""
+def test_both_coverages_share_the_opensky_warehouse(monkeypatch):
+    """In the opensky environment the coverage does not change the warehouse.
+    The coverage marker, not the path, keeps the two coverages apart."""
+    monkeypatch.delenv("OPDI_WAREHOUSE", raising=False)
     eu = OPDIConfig.for_environment("opensky", worldwide=False)
     world = OPDIConfig.for_environment("opensky", worldwide=True)
-    assert world.project.warehouse_path != eu.project.warehouse_path
-    assert world.project.warehouse_path.endswith("opdi-world")
+    assert world.project.release_root == eu.project.release_root
+    assert world.project.release_root == "s3a://eurocontrol/opdi/v2.0.0"
 
 
-def test_opdi_warehouse_does_not_leak_into_a_worldwide_run(monkeypatch):
-    """OPDI_WAREHOUSE is how production points at the European prefix. If it
-    also steered worldwide runs, an operator with it exported -- which is the
-    normal state -- would silently write planet-wide rows into opdi-prod."""
-    monkeypatch.setenv("OPDI_WAREHOUSE", "s3a://eurocontrol/opdi-prod")
+def test_opdi_warehouse_applies_to_a_worldwide_run(monkeypatch):
+    monkeypatch.setenv("OPDI_WAREHOUSE", "s3a://eurocontrol/scratch")
     world = OPDIConfig.for_environment("opensky", worldwide=True)
-    assert "opdi-prod" not in world.project.warehouse_path
+    assert world.project.release_root == "s3a://eurocontrol/scratch/v2.0.0"
 
 
-def test_the_worldwide_warehouse_is_overridable(monkeypatch):
+def test_the_worldwide_variable_is_not_read(monkeypatch):
+    monkeypatch.delenv("OPDI_WAREHOUSE", raising=False)
     monkeypatch.setenv("OPDI_WAREHOUSE_WORLD", "s3a://eurocontrol/scratch-world")
     world = OPDIConfig.for_environment("opensky", worldwide=True)
-    assert world.project.warehouse_path == "s3a://eurocontrol/scratch-world"
+    assert "scratch-world" not in world.project.release_root
 
 
 def test_the_spark_filter_is_a_no_op_worldwide(spark):
@@ -88,8 +87,10 @@ def test_the_spark_filter_keeps_europe_and_drops_the_rest(spark):
         [("EBBR", 50.9, 4.48), ("KJFK", 40.6, -73.8), ("NZAA", -37.0, 174.8)],
         "ident string, lat double, lon double",
     )
-    kept = {r.ident for r in
-            df.filter(c.spark_filter(F.col("lat"), F.col("lon"), offset=False)).collect()}
+    kept = {
+        r.ident
+        for r in df.filter(c.spark_filter(F.col("lat"), F.col("lon"), offset=False)).collect()
+    }
     assert kept == {"EBBR"}
 
 
@@ -99,10 +100,10 @@ def test_the_offset_widens_by_exactly_three_degrees(spark):
     c = CoverageConfig()
     assert c.bbox_offset_deg == 3.0
     just_outside = spark.createDataFrame([(72.0, 4.0)], "lat double, lon double")
-    assert just_outside.filter(
-        c.spark_filter(F.col("lat"), F.col("lon"), offset=False)).count() == 0
-    assert just_outside.filter(
-        c.spark_filter(F.col("lat"), F.col("lon"), offset=True)).count() == 1
+    assert (
+        just_outside.filter(c.spark_filter(F.col("lat"), F.col("lon"), offset=False)).count() == 0
+    )
+    assert just_outside.filter(c.spark_filter(F.col("lat"), F.col("lon"), offset=True)).count() == 1
 
 
 def test_the_pandas_mask_agrees_with_the_spark_filter(spark):
@@ -110,15 +111,17 @@ def test_the_pandas_mask_agrees_with_the_spark_filter(spark):
     and `h3_airport_zones` in Spark, so a disagreement means the layout table
     and the zone table cover different airports -- and they join to each other."""
     import pandas as pd
+
     c = CoverageConfig()
-    pdf = pd.DataFrame({
-        "lat": [50.9, 40.6, -37.0, 72.0, 26.0],
-        "lon": [4.48, -73.8, 174.8, 4.0, 0.0],
-    })
+    pdf = pd.DataFrame(
+        {
+            "lat": [50.9, 40.6, -37.0, 72.0, 26.0],
+            "lon": [4.48, -73.8, 174.8, 4.0, 0.0],
+        }
+    )
     mask = c.pandas_mask(pdf["lat"], pdf["lon"], offset=True)
     sdf = spark.createDataFrame(pdf)
-    spark_keep = sdf.filter(
-        c.spark_filter(F.col("lat"), F.col("lon"), offset=True)).count()
+    spark_keep = sdf.filter(c.spark_filter(F.col("lat"), F.col("lon"), offset=True)).count()
     assert int(mask.sum()) == spark_keep
 
 
@@ -135,9 +138,10 @@ def test_the_zone_partition_count_scales_with_the_airport_count():
     Worldwide is 3.89x the aerodromes, so a fixed 2,000 restores exactly the
     memory profile that number exists to avoid."""
     from opdi.reference.h3_airport_zones import AirportDetectionZoneGenerator as G
-    assert G.zone_build_partitions(1357) == 2000        # Europe, unchanged
-    assert G.zone_build_partitions(5280) >= 7000        # worldwide
-    assert G.zone_build_partitions(50) == 2000          # floor, never fewer
+
+    assert G.zone_build_partitions(1357) == 2000  # Europe, unchanged
+    assert G.zone_build_partitions(5280) >= 7000  # worldwide
+    assert G.zone_build_partitions(50) == 2000  # floor, never fewer
 
 
 def test_the_cli_accepts_worldwide(monkeypatch):
@@ -168,43 +172,33 @@ def test_the_cli_accepts_worldwide(monkeypatch):
     assert captured["worldwide"] is False
 
     with pytest.raises(SystemExit):
-        main(["run", "--start", "2024-01-01", "--end", "2024-01-02",
-              "--worldwide", "--europe"])
+        main(["run", "--start", "2024-01-01", "--end", "2024-01-02", "--worldwide", "--europe"])
 
 
 def test_run_pipeline_takes_worldwide():
     import inspect
+
     from opdi.runner import run_pipeline
+
     sig = inspect.signature(run_pipeline)
     assert sig.parameters["worldwide"].default is True
 
 
 def test_run_period_takes_worldwide():
     import inspect
+
     from opdi.periodrun import run_period
+
     assert inspect.signature(run_period).parameters["worldwide"].default is True
 
 
-def test_opdi_py_script_accepts_worldwide(monkeypatch):
-    """The repo-root `opdi.py` is documented in CLAUDE.md as one of three ways
-    to run the pipeline, alongside `opdi run` (covered above) and
-    `run_period.py`. Its own argparse `main()` had no `--worldwide` and never
-    forwarded `worldwide=` to `run_pipeline` -- found by trying to actually
-    run it (progress.md), not by reading the diff.
+def test_python_dash_m_opdi_accepts_worldwide(monkeypatch):
+    """``python -m opdi`` (``src/opdi/__main__.py``) forwards the coverage.
 
-    Loaded via `importlib` from the file path rather than `import opdi`:
-    that name resolves to the *installed package* here (`src/opdi/__init__.py`
-    wins over the repo-root script under `python -m pytest`'s sys.path), so a
-    plain `import opdi` would silently test the wrong module and this
-    regression would pass even with the flag missing.
+    It is one of the ways to run the pipeline, alongside ``opdi run``
+    (covered above) and ``python -m opdi.periodrun``.
     """
-    import importlib.util
-    from pathlib import Path
-
-    script_path = Path(__file__).resolve().parent.parent / "opdi.py"
-    spec = importlib.util.spec_from_file_location("opdi_root_script", script_path)
-    opdi_script = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(opdi_script)
+    from opdi import __main__ as opdi_script
 
     captured = {}
 
@@ -222,9 +216,7 @@ def test_opdi_py_script_accepts_worldwide(monkeypatch):
     assert captured["worldwide"] is False
 
     captured.clear()
-    opdi_script.main(
-        ["--start", "2024-01-01", "--end", "2024-01-02", "--worldwide"]
-    )
+    opdi_script.main(["--start", "2024-01-01", "--end", "2024-01-02", "--worldwide"])
     assert captured["worldwide"] is True
 
     # opensky is worldwide's only real target -- the S3 warehouse and the OSN
@@ -233,8 +225,7 @@ def test_opdi_py_script_accepts_worldwide(monkeypatch):
     # argparse "invalid choice" error before --env's choices included it.
     captured.clear()
     opdi_script.main(
-        ["--env", "opensky", "--worldwide",
-         "--start", "2024-01-01", "--end", "2024-01-02"]
+        ["--env", "opensky", "--worldwide", "--start", "2024-01-01", "--end", "2024-01-02"]
     )
     assert captured["env"] == "opensky"
     assert captured["worldwide"] is True

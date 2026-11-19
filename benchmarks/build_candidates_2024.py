@@ -30,11 +30,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 sys.path.insert(0, str(REPO / "src"))
 
-from pyspark.sql import Window
-from pyspark.sql import functions as F
-
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+from pyspark.sql import Window
+from pyspark.sql import functions as F
 
 #: The second period's tracks. **Cleaned**, since v4.0.0: the flight list
 #: reads cleaned tracks, so candidates built from raw ones would give the two
@@ -42,6 +41,14 @@ from osn_sample import build_spark, load_dotenv
 TRACKS_2024 = "s3a://eurocontrol/opdi/research/tracks_clean"
 ENDS_2024 = "research/tracks_2024_ends"
 CAND_2024 = "research/cand_2024"
+
+
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
 
 
 def redirect(cand_table: str):
@@ -79,18 +86,20 @@ def redirect(cand_table: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--days", nargs="+",
-                    default=["2024-06-05", "2024-06-06", "2024-06-07"])
-    ap.add_argument("--results-dir", default=None,
-                    help="unused; accepted so the regeneration chain can call "
-                         "this like any other job")
+    ap.add_argument("--days", nargs="+", default=["2024-06-05", "2024-06-06", "2024-06-07"])
+    ap.add_argument(
+        "--results-dir",
+        default=None,
+        help="unused; accepted so the regeneration chain can call " "this like any other job",
+    )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4053)
-    ap.add_argument("--tracks", default=TRACKS_2024,
-                    help=f"track table to reduce to endpoints (default "
-                         f"{TRACKS_2024})")
-    ap.add_argument("--skip-ends", action="store_true",
-                    help="reuse an existing endpoint table")
+    ap.add_argument(
+        "--tracks",
+        default=TRACKS_2024,
+        help=f"track table to reduce to endpoints (default " f"{TRACKS_2024})",
+    )
+    ap.add_argument("--skip-ends", action="store_true", help="reuse an existing endpoint table")
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -103,37 +112,42 @@ def main() -> None:
     from opdi.config import OPDIConfig
     from opdi.pipeline.flights import FlightListProcessor
 
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
 
     if not args.skip_ends:
         import h3_pyspark
 
         print(f"reducing {args.tracks} to endpoints")
-        tr = (spark.read.parquet(args.tracks)
-              .filter(F.to_date("event_time").isin(args.days))
-              .dropna(subset=["lat", "lon", "track_id"]))
+        tr = (
+            spark.read.parquet(args.tracks)
+            .filter(F.to_date("event_time").isin(args.days))
+            .dropna(subset=["lat", "lon", "track_id"])
+        )
         w = Window.partitionBy("track_id").orderBy("event_time")
-        ends = (tr.withColumn("_rn", F.row_number().over(w))
-                .withColumn("_rr", F.row_number().over(
-                    w.orderBy(F.col("event_time").desc())))
-                .filter((F.col("_rn") == 1) | (F.col("_rr") == 1))
-                .drop("_rn", "_rr"))
+        ends = (
+            tr.withColumn("_rn", F.row_number().over(w))
+            .withColumn("_rr", F.row_number().over(w.orderBy(F.col("event_time").desc())))
+            .filter((F.col("_rn") == 1) | (F.col("_rr") == 1))
+            .drop("_rn", "_rr")
+        )
         # Index only what survives: two rows per track rather than 5.8 GB.
-        ends = (ends.withColumn("_res", F.lit(7))
-                .withColumn("h3_res_7",
-                            h3_pyspark.geo_to_h3("lat", "lon", "_res"))
-                .drop("_res"))
+        ends = (
+            ends.withColumn("_res", F.lit(7))
+            .withColumn("h3_res_7", h3_pyspark.geo_to_h3("lat", "lon", "_res"))
+            .drop("_res")
+        )
         if "on_ground" not in ends.columns:
             ends = ends.withColumn("on_ground", F.lit(False))
         n = ends.count()
         print(f"endpoint rows for {len(args.days)} days: {n:,}")
-        (ends.write.mode("overwrite")
-         .parquet(f"s3a://eurocontrol/opdi/{ENDS_2024}"))
+        (ends.write.mode("overwrite").parquet(f"s3a://eurocontrol/opdi/{ENDS_2024}"))
 
     redirect(CAND_2024)
     proc = FlightListProcessor(
-        spark, cfg, log_dir=str(REPO / "OPDI_live" / "logs" / "cand2024"),
-        tracks_table=ENDS_2024)
+        spark, cfg, log_dir=str(REPO / "OPDI_live" / "logs" / "cand2024"), tracks_table=ENDS_2024
+    )
     print(f"  reading endpoints from {proc.tracks_table}")
     proc.build_endpoint_candidates(date(2024, 6, 1), rebuild=True)
 

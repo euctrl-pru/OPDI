@@ -47,8 +47,7 @@ class ConfigurationNotOnGrid(Exception):
 
 
 def _rows(grid_csv):
-    return [r for r in csv.DictReader(open(grid_csv))
-            if r["run"].startswith("grid_")]
+    return [r for r in csv.DictReader(open(grid_csv)) if r["run"].startswith("grid_")]
 
 
 def best_cell(grid_csv) -> dict:
@@ -71,8 +70,7 @@ def config_parity(grid_csv, cfg: dict):
     best = rows[0]
 
     def matches(row):
-        return all(float(row[col]) == float(cfg[attr])
-                   for col, attr in PARAMS.items())
+        return all(float(row[col]) == float(cfg[attr]) for col, attr in PARAMS.items())
 
     rank = next((i + 1 for i, r in enumerate(rows) if matches(r)), None)
     if rank is None:
@@ -81,10 +79,10 @@ def config_parity(grid_csv, cfg: dict):
             f"main's configuration ({have}) is not among the {len(rows)} "
             f"cells of {Path(grid_csv).name}. A parity check against a grid "
             f"that does not contain the configuration under test is not a "
-            f"check -- widen the grid.")
+            f"check -- widen the grid."
+        )
 
-    diffs = [attr for col, attr in PARAMS.items()
-             if float(best[col]) != float(cfg[attr])]
+    diffs = [attr for col, attr in PARAMS.items() if float(best[col]) != float(cfg[attr])]
     report = {
         "rank": rank,
         "of": len(rows),
@@ -96,8 +94,7 @@ def config_parity(grid_csv, cfg: dict):
 
 
 def _git(*args, repo):
-    return subprocess.run(["git", "-C", str(repo), *args],
-                          capture_output=True, text=True)
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
 
 
 def _manifest_paths(manifest) -> set:
@@ -120,10 +117,8 @@ def code_on_main(manifest, ref: str, repo) -> list:
     and asking git whether those are tracked is a category error that reports
     the venv as missing from main on every single run.
     """
-    rel = [p for p in sorted(_manifest_paths(manifest))
-           if not p.startswith("/")]
-    return [p for p in rel
-            if _git("cat-file", "-e", f"{ref}:{p}", repo=repo).returncode != 0]
+    rel = [p for p in sorted(_manifest_paths(manifest)) if not p.startswith("/")]
+    return [p for p in rel if _git("cat-file", "-e", f"{ref}:{p}", repo=repo).returncode != 0]
 
 
 def shas_on_main(manifest, ref: str, repo) -> list:
@@ -137,8 +132,7 @@ def shas_on_main(manifest, ref: str, repo) -> list:
             bad.append(f"{name}: produced from a dirty tree")
             continue
         sha = entry["git_sha"]
-        if _git("merge-base", "--is-ancestor", sha, ref,
-                repo=repo).returncode != 0:
+        if _git("merge-base", "--is-ancestor", sha, ref, repo=repo).returncode != 0:
             bad.append(f"{name}: {sha} is not an ancestor of {ref}")
     return bad
 
@@ -160,7 +154,6 @@ def detection_config_from(repo) -> dict:
     So the caller names the checkout and this loads from it, evicting any
     already-imported `opdi` first.
     """
-    import importlib
 
     repo = Path(repo).resolve()
     src = str(repo / "src")
@@ -170,11 +163,13 @@ def detection_config_from(repo) -> dict:
     try:
         import opdi
         from opdi.config import DetectionConfig
+
         loaded = Path(opdi.__file__).resolve()
         if not str(loaded).startswith(src):
             raise RuntimeError(
                 f"asked for opdi from {src} but got {loaded}. Refusing to "
-                f"report on a package other than the one named.")
+                f"report on a package other than the one named."
+            )
         c = DetectionConfig()
         return {
             "_from": str(loaded),
@@ -201,12 +196,18 @@ def main() -> None:
     # which during development is the worktree holding the branch. Conflating
     # them resolves HEAD in the wrong repository and reports every commit on
     # the branch as "not an ancestor of HEAD".
-    ap.add_argument("--repo", type=Path,
-                    default=Path(__file__).resolve().parent.parent,
-                    help="checkout whose opdi package is checked")
-    ap.add_argument("--git-repo", type=Path, default=None,
-                    help="checkout whose history --ref is resolved in "
-                         "(default: this script's own)")
+    ap.add_argument(
+        "--repo",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent,
+        help="checkout whose opdi package is checked",
+    )
+    ap.add_argument(
+        "--git-repo",
+        type=Path,
+        default=None,
+        help="checkout whose history --ref is resolved in " "(default: this script's own)",
+    )
     args = ap.parse_args()
     git_repo = args.git_repo or Path(__file__).resolve().parent.parent
 
@@ -225,9 +226,11 @@ def main() -> None:
         print("\nPARITY: FAIL (grid too narrow)")
         sys.exit(2)
 
-    print(f"\nmain's cell {report['mine']} ranks {report['rank']} of "
-          f"{report['of']}, {report['gap']:,.0f} behind the best cell "
-          f"{report['best']}")
+    print(
+        f"\nmain's cell {report['mine']} ranks {report['rank']} of "
+        f"{report['of']}, {report['gap']:,.0f} behind the best cell "
+        f"{report['best']}"
+    )
     for d in diffs:
         print(f"  DIFFERS  {d}: main has {cfg[d]}")
     failed |= bool(diffs)

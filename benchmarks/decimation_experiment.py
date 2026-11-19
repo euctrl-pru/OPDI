@@ -37,11 +37,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as F
-
 import osn_sample
 from osn_sample import build_spark, load_dotenv
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
 ARCHIVE = "s3a://opensky-hdfs-backup/tables_v4/state_vectors"
 
@@ -51,12 +50,26 @@ BBOX = (-25.86653, 26.74617, 49.65699, 70.25976)
 INTERVAL = 5
 
 #: Archive column -> OPDI name. The archive is camelCase.
-RENAME = {"time": "event_time", "baroAltitude": "baro_altitude",
-          "onGround": "on_ground", "vertRate": "vert_rate",
-          "lastPosUpdate": "last_pos_update"}
+RENAME = {
+    "time": "event_time",
+    "baroAltitude": "baro_altitude",
+    "onGround": "on_ground",
+    "vertRate": "vert_rate",
+    "lastPosUpdate": "last_pos_update",
+}
 
-KEEP = ["icao24", "callsign", "event_time", "lat", "lon", "baro_altitude",
-        "velocity", "vert_rate", "on_ground", "last_pos_update"]
+KEEP = [
+    "icao24",
+    "callsign",
+    "event_time",
+    "lat",
+    "lon",
+    "baro_altitude",
+    "velocity",
+    "vert_rate",
+    "on_ground",
+    "last_pos_update",
+]
 
 ALT_BANDS = [(0, 2000), (2000, 5000), (5000, 10000), (10000, 20000), (20000, 30000)]
 
@@ -74,9 +87,12 @@ def read_hours(spark: SparkSession, start: datetime, hours: int) -> DataFrame:
         print(f"  absent from the archive schema: {missing}")
     min_lon, min_lat, max_lon, max_lat = BBOX
     return df.select(*keep).filter(
-        (F.col("lon") >= min_lon) & (F.col("lon") <= max_lon)
-        & (F.col("lat") >= min_lat) & (F.col("lat") <= max_lat)
-        & F.col("event_time").isNotNull() & F.col("icao24").isNotNull()
+        (F.col("lon") >= min_lon)
+        & (F.col("lon") <= max_lon)
+        & (F.col("lat") >= min_lat)
+        & (F.col("lat") <= max_lat)
+        & F.col("event_time").isNotNull()
+        & F.col("icao24").isNotNull()
     )
 
 
@@ -94,9 +110,11 @@ def bucket_rule(df: DataFrame) -> DataFrame:
     """
     rest = [c for c in df.columns if c != "event_time"]
     binned = df.withColumn("_bin", F.col("event_time") - (F.col("event_time") % INTERVAL))
-    return (binned.groupBy("icao24", "_bin")
-            .agg(F.max(F.struct("event_time", *rest)).alias("_s"))
-            .select("_s.*"))
+    return (
+        binned.groupBy("icao24", "_bin")
+        .agg(F.max(F.struct("event_time", *rest)).alias("_s"))
+        .select("_s.*")
+    )
 
 
 def alt_band(col_ft):
@@ -148,11 +166,13 @@ def main() -> None:
     n_base, t_base = timed("bbox only (baseline)", lambda: base.count())
     n_mod, t_mod = timed("modulo  (current)", lambda: modulo_rule(base).count())
     n_buc, t_buc = timed("bucket  (proposed)", lambda: bucket_rule(base).count())
-    spark.createDataFrame([
-        {"rule": "bbox_only", "rows": n_base, "seconds": t_base},
-        {"rule": "modulo", "rows": n_mod, "seconds": t_mod},
-        {"rule": "bucket", "rows": n_buc, "seconds": t_buc},
-    ]).toPandas().to_csv(out / "timing.csv", index=False)
+    spark.createDataFrame(
+        [
+            {"rule": "bbox_only", "rows": n_base, "seconds": t_base},
+            {"rule": "modulo", "rows": n_mod, "seconds": t_mod},
+            {"rule": "bucket", "rows": n_buc, "seconds": t_buc},
+        ]
+    ).toPandas().to_csv(out / "timing.csv", index=False)
     print(f"\n  rows   bucket / modulo = {n_buc / max(n_mod,1):.3f}x")
     print(f"  wall   bucket vs modulo = {(t_buc - t_mod)/max(t_mod,1e-9):+.0%}")
     print(f"  net of the common read: modulo {t_mod-t_base:+.1f} s, bucket {t_buc-t_base:+.1f} s")
@@ -161,33 +181,54 @@ def main() -> None:
     band = alt_band(ft)
 
     # -- 2. row retention by altitude ---------------------------------------
-    a = modulo_rule(base).withColumn("b", band).groupBy("b").count() \
+    a = (
+        modulo_rule(base)
+        .withColumn("b", band)
+        .groupBy("b")
+        .count()
         .withColumnRenamed("count", "modulo_rows")
-    c = bucket_rule(base).withColumn("b", band).groupBy("b").count() \
+    )
+    c = (
+        bucket_rule(base)
+        .withColumn("b", band)
+        .groupBy("b")
+        .count()
         .withColumnRenamed("count", "bucket_rows")
-    by_alt = (a.join(c, "b", "outer")
-              .withColumn("ratio", F.col("bucket_rows") / F.col("modulo_rows"))
-              .orderBy("b"))
+    )
+    by_alt = (
+        a.join(c, "b", "outer")
+        .withColumn("ratio", F.col("bucket_rows") / F.col("modulo_rows"))
+        .orderBy("b")
+    )
     print("\nrow retention by altitude band (ft):")
     by_alt.show(20, truncate=False)
     by_alt.toPandas().to_csv(out / "by_altitude.csv", index=False)
 
     # -- 3. row density: is the archive actually 1 Hz? ----------------------
     minute = F.col("event_time") - (F.col("event_time") % 60)
-    dens = (base.groupBy("icao24", minute.alias("_min"))
-            .agg(F.countDistinct("event_time").alias("n_sec"))
-            .withColumn("p", F.col("n_sec") / F.lit(60.0)))
-    pband = (F.when(F.col("p") >= 0.9, F.lit("6. 0.9-1.0 (dense)"))
-             .when(F.col("p") >= 0.7, F.lit("5. 0.7-0.9"))
-             .when(F.col("p") >= 0.5, F.lit("4. 0.5-0.7"))
-             .when(F.col("p") >= 0.3, F.lit("3. 0.3-0.5"))
-             .when(F.col("p") >= 0.1, F.lit("2. 0.1-0.3"))
-             .otherwise(F.lit("1. <0.1 (sparse)")))
-    by_p = (dens.withColumn("pb", pband).groupBy("pb")
-            .agg(F.count(F.lit(1)).alias("aircraft_minutes"),
-                 F.sum("n_sec").alias("source_rows"),
-                 F.avg("p").alias("mean_p"))
-            .orderBy("pb"))
+    dens = (
+        base.groupBy("icao24", minute.alias("_min"))
+        .agg(F.countDistinct("event_time").alias("n_sec"))
+        .withColumn("p", F.col("n_sec") / F.lit(60.0))
+    )
+    pband = (
+        F.when(F.col("p") >= 0.9, F.lit("6. 0.9-1.0 (dense)"))
+        .when(F.col("p") >= 0.7, F.lit("5. 0.7-0.9"))
+        .when(F.col("p") >= 0.5, F.lit("4. 0.5-0.7"))
+        .when(F.col("p") >= 0.3, F.lit("3. 0.3-0.5"))
+        .when(F.col("p") >= 0.1, F.lit("2. 0.1-0.3"))
+        .otherwise(F.lit("1. <0.1 (sparse)"))
+    )
+    by_p = (
+        dens.withColumn("pb", pband)
+        .groupBy("pb")
+        .agg(
+            F.count(F.lit(1)).alias("aircraft_minutes"),
+            F.sum("n_sec").alias("source_rows"),
+            F.avg("p").alias("mean_p"),
+        )
+        .orderBy("pb")
+    )
     print("\nrow density per aircraft-minute (is the archive really 1 Hz?):")
     by_p.show(20, truncate=False)
     by_p.toPandas().to_csv(out / "by_density.csv", index=False)
@@ -196,32 +237,41 @@ def main() -> None:
     # age = how many seconds old the position in this row is. A row carried
     # forward by the archive has a large age and contains nothing new.
     if "last_pos_update" in base.columns:
-        aged = base.withColumn(
-            "age", F.col("event_time") - F.col("last_pos_update").cast("double"))
-        binned = aged.withColumn(
-            "_bin", F.col("event_time") - (F.col("event_time") % INTERVAL))
-        per_bin = (binned.groupBy("icao24", "_bin")
-                   .agg(F.min("age").alias("age_best"),
-                        F.min(F.when((F.col("event_time") % INTERVAL) == 0,
-                                     F.col("age"))).alias("age_modulo"),
-                        F.max(F.when((F.col("event_time") % INTERVAL) == 0,
-                                     F.lit(1)).otherwise(0)).alias("has_phase0"),
-                        F.first(ft).alias("alt_ft"))
-                   .withColumn("penalty",
-                               F.col("age_modulo") - F.col("age_best")))
+        aged = base.withColumn("age", F.col("event_time") - F.col("last_pos_update").cast("double"))
+        binned = aged.withColumn("_bin", F.col("event_time") - (F.col("event_time") % INTERVAL))
+        per_bin = (
+            binned.groupBy("icao24", "_bin")
+            .agg(
+                F.min("age").alias("age_best"),
+                F.min(F.when((F.col("event_time") % INTERVAL) == 0, F.col("age"))).alias(
+                    "age_modulo"
+                ),
+                F.max(F.when((F.col("event_time") % INTERVAL) == 0, F.lit(1)).otherwise(0)).alias(
+                    "has_phase0"
+                ),
+                F.first(ft).alias("alt_ft"),
+            )
+            .withColumn("penalty", F.col("age_modulo") - F.col("age_best"))
+        )
         per_bin.cache()
         n_bins = per_bin.count()
-        by_stale = (per_bin.withColumn("b", alt_band(F.col("alt_ft")))
-                    .groupBy("b")
-                    .agg(F.count(F.lit(1)).alias("bins"),
-                         F.avg("age_best").alias("mean_age_best_s"),
-                         F.avg("age_modulo").alias("mean_age_modulo_s"),
-                         F.avg("penalty").alias("mean_penalty_s"),
-                         F.avg(F.when(F.col("has_phase0") == 0, 1.0).otherwise(0.0))
-                         .alias("share_bins_no_phase0"),
-                         F.avg(F.when(F.col("penalty") > 5, 1.0).otherwise(0.0))
-                         .alias("share_penalty_gt_5s"))
-                    .orderBy("b"))
+        by_stale = (
+            per_bin.withColumn("b", alt_band(F.col("alt_ft")))
+            .groupBy("b")
+            .agg(
+                F.count(F.lit(1)).alias("bins"),
+                F.avg("age_best").alias("mean_age_best_s"),
+                F.avg("age_modulo").alias("mean_age_modulo_s"),
+                F.avg("penalty").alias("mean_penalty_s"),
+                F.avg(F.when(F.col("has_phase0") == 0, 1.0).otherwise(0.0)).alias(
+                    "share_bins_no_phase0"
+                ),
+                F.avg(F.when(F.col("penalty") > 5, 1.0).otherwise(0.0)).alias(
+                    "share_penalty_gt_5s"
+                ),
+            )
+            .orderBy("b")
+        )
         print(f"\ninformation retention, {n_bins:,} aircraft-bins:")
         print("  age_best   = freshest position available in the 5 s bin")
         print("  age_modulo = age of the row the modulo rule actually keeps")
@@ -232,12 +282,17 @@ def main() -> None:
         print("\nlastPosUpdate absent -- staleness analysis skipped")
 
     # -- 5. endpoint lag -----------------------------------------------------
-    ends = (base.groupBy("icao24")
-            .agg(F.max("event_time").alias("t_true"),
-                 F.max(F.when((F.col("event_time") % INTERVAL) == 0,
-                              F.col("event_time"))).alias("t_mod"),
-                 F.count(F.lit(1)).alias("n_rows"))
-            .withColumn("lag_modulo_s", F.col("t_true") - F.col("t_mod")))
+    ends = (
+        base.groupBy("icao24")
+        .agg(
+            F.max("event_time").alias("t_true"),
+            F.max(F.when((F.col("event_time") % INTERVAL) == 0, F.col("event_time"))).alias(
+                "t_mod"
+            ),
+            F.count(F.lit(1)).alias("n_rows"),
+        )
+        .withColumn("lag_modulo_s", F.col("t_true") - F.col("t_mod"))
+    )
     ends.cache()
     n_ac = ends.count()
     lost = ends.filter(F.col("t_mod").isNull()).count()
@@ -246,14 +301,24 @@ def main() -> None:
     mean_lag = seen.agg(F.avg("lag_modulo_s")).first()[0] or 0.0
     print(f"\nendpoint lag, {n_ac:,} aircraft:")
     print(f"  erased entirely by modulo: {lost:,} ({lost/max(n_ac,1):.2%})")
-    print(f"  lag of modulo's last row: mean {mean_lag:.1f} s, "
-          f"median {q[0]:.0f} s, p90 {q[1]:.0f} s, p99 {q[2]:.0f} s")
-    print(f"  lag of bucket's last row: 0 s by construction")
-    spark.createDataFrame([{
-        "aircraft": n_ac, "erased_by_modulo": lost,
-        "erased_share": lost / max(n_ac, 1), "lag_mean_s": float(mean_lag),
-        "lag_p50_s": q[0], "lag_p90_s": q[1], "lag_p99_s": q[2],
-    }]).toPandas().to_csv(out / "endpoint_lag.csv", index=False)
+    print(
+        f"  lag of modulo's last row: mean {mean_lag:.1f} s, "
+        f"median {q[0]:.0f} s, p90 {q[1]:.0f} s, p99 {q[2]:.0f} s"
+    )
+    print("  lag of bucket's last row: 0 s by construction")
+    spark.createDataFrame(
+        [
+            {
+                "aircraft": n_ac,
+                "erased_by_modulo": lost,
+                "erased_share": lost / max(n_ac, 1),
+                "lag_mean_s": float(mean_lag),
+                "lag_p50_s": q[0],
+                "lag_p90_s": q[1],
+                "lag_p99_s": q[2],
+            }
+        ]
+    ).toPandas().to_csv(out / "endpoint_lag.csv", index=False)
 
     print(f"\nwritten to {out}")
     spark.stop()

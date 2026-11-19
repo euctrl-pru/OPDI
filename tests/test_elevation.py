@@ -1,7 +1,7 @@
 import pytest
+from conftest import make_track
 from pyspark.sql import functions as F
 
-from conftest import make_track
 from opdi.pipeline.elevation import height_above_field_ft
 
 FT_PER_M = 3.28084

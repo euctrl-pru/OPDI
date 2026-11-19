@@ -1,40 +1,28 @@
-"""The generic track-segmentation engine.
+"""The engine that splits position reports into tracks.
 
-Every arm of the track-construction study is this one function plus a break
-expression. The engine groups an airframe's samples, marks the samples at which a
-break occurs, numbers the runs between breaks, and builds an id.
+A track rule (:class:`BreakRule`) says how the reports are grouped (for
+example by aircraft address) and at which report a new track starts. The
+engine, :func:`assign_track_id`, sorts each group by time, marks the reports
+at which the rule starts a new track, numbers the tracks and builds their
+``track_id``. The rules themselves are in :mod:`opdi.pipeline.segmentation.methods`.
 
-``tracks.py:_add_track_id`` is frozen and is not touched by this module. What
-guarantees the two agree is ``tests/test_segmentation_base.py``, which asserts
-the engine reproduces the frozen algorithm's *partition* under production
-parameters. That test is the contract; the code below is only its implementation.
+A rule's break expression may use the names the engine computes before
+calling it:
 
-Units: parameters are aviation (minutes, feet, knots); ``osn_tracks`` is SI
-(metres, m/s). The comparison is scaled, never the stored column -- the same rule
-``cleaning/native.py`` follows, and for the same reason: a threshold 3.28x too
-large simply never fires.
+* ``_grp``: the hashed group key, built from ``BreakRule.group_cols``;
+* ``_ts``: ``event_time`` as a timestamp, the order of the reports;
+* the accessors :func:`gap_minutes`, :func:`altitude_ft` and :func:`speed_kt`;
+* :func:`segment_window`, the engine's window over one group in time order.
 
-The **arm contract**. A break expression is handed a frame on which the engine
-has already computed everything an arm is allowed to depend on, and those names
-are part of the contract, not engine internals:
+A rule that needs a window must use :func:`segment_window`, so that it
+groups the reports exactly as the engine does.
 
-* ``_grp`` -- the hashed group key, whatever ``BreakRule.group_cols`` said
-* ``_ts``  -- ``event_time`` as a timestamp, the engine's ordering column
-* the three accessors :func:`gap_minutes`, :func:`altitude_ft`, :func:`speed_kt`
-* :func:`segment_window` -- the engine's own ``partitionBy(_grp).orderBy(_ts)``
-
-An arm that needs a window **must** call :func:`segment_window` rather than
-rebuild one. A hand-built ``Window.partitionBy("icao24", "callsign")`` would
-silently disagree with the engine's grouping for any arm whose ``group_cols``
-are not those two, and nothing in the output would show it.
-
-Unit epsilon: the frozen algorithm compares ``baro_altitude < 1524.0`` (metres);
-the engine compares ``baro_altitude * FT_PER_M < 5000.0`` (feet). These are not
-bit-identical -- they differ on the interval [1524.0, 1524.00005) metres, a band
-about 0.05 mm wide, because ``FT_PER_M`` is a rounded constant. This is accepted
-deliberately: the project's standing rule is aviation units with the comparison
-scaled, never the stored value, and no real ADS-B sample lands in a 0.05 mm
-band. Do not "fix" this by comparing in metres.
+Units: the thresholds are in aviation units (minutes, feet, knots); the
+stored reports are in SI units (metres, metres per second). The stored
+column is scaled to the threshold's unit for the comparison and never
+written back. Because the conversion factor is rounded, the comparison
+``altitude * 3.28084 < 5000`` differs from ``altitude < 1524`` only for
+altitudes between 1524 m and 1524.00005 m.
 """
 
 from dataclasses import dataclass, field, fields
@@ -59,7 +47,7 @@ __all__ = [
     "FPM_PER_MPS",
 ]
 
-#: Reused from the pipeline's own conversions so the two can never drift.
+#: The pipeline's conversion factors, shared so they cannot differ.
 FT_PER_M = 3.28084
 KT_PER_MPS = 1.94384
 FPM_PER_MPS = 196.850394
@@ -71,9 +59,9 @@ _GAP_MIN = "_gap_minutes"
 _ALT_FT = "_alt_ft"
 #: Ground speed in knots. Scaled for comparison only; never written.
 _SPD_KT = "_spd_kt"
-#: The hashed group key. Part of the arm contract -- see the module docstring.
+#: The hashed group key; see the module description.
 _GRP = "_grp"
-#: ``event_time`` as a timestamp; the engine's ordering column. Arm contract.
+#: ``event_time`` as a timestamp, the order of the reports in a group.
 _TS = "_ts"
 
 _TEMP_COLS = [_GAP_MIN, _ALT_FT, _SPD_KT, _GRP, "_brk", "_offset", _TS]
@@ -81,62 +69,46 @@ _TEMP_COLS = [_GAP_MIN, _ALT_FT, _SPD_KT, _GRP, "_brk", "_offset", _TS]
 
 @dataclass(frozen=True)
 class SegmentationParams:
-    """Thresholds for the gap family. Aviation units, unit in every name.
+    """Thresholds of the track rules, in aviation units.
 
-    Defaults reproduce production: ``track_gap_threshold_minutes = 30``,
-    ``track_gap_low_altitude_minutes = 15``, ``track_gap_low_altitude_meters =
-    1524.0`` -- the last expressed here as 5,000 ft, which is what 1524 m is and
-    what the frozen code's own comment calls it.
+    The fields and defaults are those of
+    :class:`opdi.config.SegmentationConfig`, where each is described; build
+    an instance with :meth:`from_config`. The first three are the gap
+    thresholds also used by the rule of release v0.0.2 (30 minutes, and 15
+    minutes below 5,000 ft, which is 1524 m).
     """
 
     gap_minutes: float = 30.0
     low_alt_gap_minutes: float = 15.0
     low_alt_ft: float = 5000.0
-    #: Bound on A8's callsign lookback, in minutes. ``None`` means "follow
-    #: ``gap_minutes``", which is what the rule did when the bound was written
-    #: and is therefore the only default that reproduces published behaviour.
-    #:
-    #: Separate from ``gap_minutes`` because the two answer different questions.
-    #: ``gap_minutes`` asks how long a reception hole must be before it is a new
-    #: flight. This asks how long a *callsign* stays valid for comparison across
-    #: blank samples. Nothing says one number is right for both; they were the
-    #: same number because one was to hand when the other was needed.
+    #: How far back, in minutes, the last call sign is looked for when deciding
+    #: whether the call sign changed. ``None`` uses ``gap_minutes``.
     callsign_lookback_minutes: float | None = None
-    #: How long a new callsign must persist before it breaks a track, in
-    #: seconds. ``0.0`` means "break immediately", which is what `recommended`
-    #: does and therefore the only default that reproduces published ids.
-    #:
-    #: The rule it guards: a callsign that appears for one sample and reverts
-    #: is noise, not a new flight. Measured on 2026-06-01, 1,457 of 1,765
-    #: sub-minute splits had the same resolved callsign on both halves and a
-    #: median implied speed of 421 kt across the gap -- one flight, cut in two.
-    #: Shipped value 30 s (the debounced arm's default). Must equal
-    #: ``SegmentationConfig.callsign_min_persistence_seconds``;
-    #: ``test_segmentation_base.py`` asserts the two default sets are identical.
+    #: Seconds a new call sign must be kept before the change starts a new
+    #: track; a call sign garbled for a few seconds then does not split a
+    #: flight. ``0.0`` splits at once.
     callsign_min_persistence_seconds: float = 30.0
-    # A10 knobs, read only by ``cruise_linked``. Each is one test of ``linkable``
-    # in ``methods.py``. The floor, the minimum implied speed and the maximum gap
-    # were chosen by the track-construction-v4 study; the rest are starting values.
-    #: 10 h covers the longest oceanic reception holes the study measured.
+    # Thresholds that decide whether a gap in reception is linked into one
+    # track (the "standard" rule only). Each is one test of ``linkable`` in
+    # ``methods.py``.
+    #: Longest gap that can be linked: 10 hours covers the longest oceanic gaps.
     link_max_gap_minutes: float = 600.0
-    #: Where aircraft are clearly en route rather than near an airport; chosen by
-    #: the track-construction-v4 study.
+    #: Altitude above which aircraft are en route rather than near an airport.
     link_cruise_floor_ft: float = 18000.0
     link_edge_vert_rate_fpm: float = 500.0
     link_callsign_lookahead_minutes: float = 10.0
-    #: How old the callsign before a hole may be and still count. Bounded because
-    #: ``process_day`` reads this far behind the old edge, so two days' reads see
-    #: the same evidence: see ``tracks.required_lookback_hours``.
+    #: How old the call sign before a gap may be and still count. Step 02
+    #: reads this far back, so every day's run sees the same reports: see
+    #: ``tracks.required_lookback_hours``.
     link_callsign_lookback_minutes: float = 60.0
-    #: How far from each edge of a hole to read through blank samples for a
-    #: position, because a position message often arrives after altitude and speed.
-    #: None inside it means split. Also bounds the edge's altitude, vertical rate and
-    #: speed: each reads its nearest ``LINK_EDGE_SAMPLES`` values inside this span,
-    #: past any blank samples. ``process_day`` reads at least this far behind the old
-    #: edge: see ``tracks.required_lookback_hours``.
+    #: How far from each side of a gap to skip reports without a position,
+    #: because the position often arrives in a later message than altitude
+    #: and speed. No position within it means split. The side's altitude,
+    #: vertical rate and speed are read from its nearest ``LINK_EDGE_SAMPLES``
+    #: values within the same span. Step 02 reads at least this far back.
     link_edge_position_minutes: float = 5.0
-    #: 400 kt rejects nearly all hidden landings at small cost; chosen by the
-    #: track-construction-v4 study.
+    #: Lowest implied speed across a gap; a slower crossing suggests a landing
+    #: in between.
     link_min_implied_speed_kt: float = 400.0
     link_max_implied_speed_kt: float = 750.0
     #: ``0.0`` turns this test off.
@@ -144,53 +116,45 @@ class SegmentationParams:
     #: ``0.0`` turns this test off.
     link_min_stop_minutes: float = 0.0
     link_vfast_kt: float = 650.0
-    #: Let an old edge below the floor pass when it is climbing. On by default: an
-    #: aircraft lost while still climbing is outbound. Off keeps the floor as the only
-    #: test there. The study decides this apart from the new edge's setting.
+    #: Let the old side of a gap below the cruise floor be linked when it is
+    #: climbing: an aircraft lost while still climbing is outbound.
     link_old_edge_climb: bool = True
-    #: Let a new edge below the floor pass when it is descending. On by default since
-    #: the v5 study: the false joins version 4 counted against it were estimated truth
-    #: times outside Europe. Decided apart from the old edge's setting.
+    #: Let the new side of a gap below the cruise floor be linked when it is
+    #: descending; the implied speed test still leaves out hidden landings.
     link_new_edge_descent: bool = True
-    # A5-A7 knobs; unused by the gap family.
-    ground_dwell_minutes: float = 5.0
-    turnaround_max_height_ft: float = 1000.0
-    turnaround_max_speed_kt: float = 40.0
-    descent_floor_ft: float = 1500.0
 
     @classmethod
     def from_config(cls, config) -> "SegmentationParams":
-        """Build the engine's parameters from ``OPDIConfig``.
+        """The thresholds of a configuration.
 
-        ``config.SegmentationConfig`` carries every field of ``SegmentationParams``
-        with the same defaults, and this is the only thing that reads it. Without
-        this method the two were a coincidence rather than a link: someone setting
-        ``OPDIConfig().segmentation.low_alt_ft`` would have observed no effect and
-        no error. ``tests/test_segmentation_base.py`` asserts the two default
-        sets are identical field by field, so they cannot drift apart again.
+        Args:
+            config: An :class:`opdi.config.OPDIConfig` or its
+                :class:`opdi.config.SegmentationConfig`.
 
-        Accepts either an ``OPDIConfig`` or a ``SegmentationConfig`` directly.
+        Returns:
+            The parameters, with every field taken from the configuration.
         """
         seg = getattr(config, "segmentation", config)
         missing = [f.name for f in fields(cls) if not hasattr(seg, f.name)]
         if missing:
-            raise TypeError(
-                f"{type(seg).__name__} is missing segmentation fields: {missing}"
-            )
+            raise TypeError(f"{type(seg).__name__} is missing segmentation fields: {missing}")
         return cls(**{f.name: getattr(seg, f.name) for f in fields(cls)})
 
 
 @dataclass(frozen=True)
 class BreakRule:
-    """One arm: how to group, when to break, and whether to suffix the month.
+    """A track rule: how to group the reports and where a new track starts.
 
-    ``break_expr`` is required and comes second, ahead of the two fields that
-    have defaults. It used to be typed as required while defaulting to ``None``,
-    so a ``BreakRule`` built without one constructed happily and then died inside
-    :func:`assign_track_id` with ``TypeError: 'NoneType' object is not
-    callable`` -- a message that names neither the rule nor the missing field.
-    Every construction in this package is by keyword, so the order change is not
-    a breaking one.
+    Attributes:
+        name: Name of the rule.
+        break_expr: Function of :class:`SegmentationParams` that returns a
+            Boolean column, true at each report that starts a new track.
+        group_cols: Columns whose values group the reports, hashed into the
+            group key.
+        month_suffix: End each ``track_id`` with ``_{year}_{month}``, as in
+            release v0.0.2.
+        id_from_start_time: Number each track by the time of its first
+            report; see below.
     """
 
     name: str
@@ -198,22 +162,17 @@ class BreakRule:
     group_cols: List[str] = field(default_factory=lambda: ["icao24", "callsign"])
     month_suffix: bool = True
     id_from_start_time: bool = False
-    """Key ``track_id`` on the track's first sample instead of a running count.
+    """Number each track by the second of its first report rather than by
+    counting tracks from the start of the data read.
 
-    The running count (``_offset``) numbers breaks from the start of whatever
-    frame the engine was handed, which makes the id a property of the *batch*
-    rather than of the track. Two consequences, both live before this existed:
-    an airframe's first track is ``_0`` in every batch, so batches collide; and
-    the same physical track is numbered differently depending on how much
-    history happened to be loaded beside it.
-
-    ``legacy`` keeps the running count -- it reproduces released data byte for
-    byte and its ``_{year}_{month}`` suffix already disambiguates across the
-    month boundaries production batched on. Arms without that suffix need this
-    instead, or they have no disambiguator at all.
+    A running count depends on how much data was read before the track, so
+    the same track could get different ids in two runs. The time of its first
+    report does not. The rule of release v0.0.2 keeps the running count and
+    the month suffix, which reproduces its published ids.
     """
 
     def __post_init__(self):
+        """Refuse a break expression that cannot be called."""
         if not callable(self.break_expr):
             raise TypeError(
                 f"BreakRule({self.name!r}): break_expr must be callable, got "
@@ -221,20 +180,24 @@ class BreakRule:
             )
 
 
-def assign_track_id(
-    df: DataFrame, rule: BreakRule, params: SegmentationParams
-) -> DataFrame:
-    """Add ``track_id`` to state vectors according to *rule*.
+def assign_track_id(df: DataFrame, rule: BreakRule, params: SegmentationParams) -> DataFrame:
+    """Add ``track_id`` to state vectors according to ``rule``.
 
-    The frozen algorithm hashes its group key; the engine does too, so ids are
-    the same shape and the same length wherever an arm groups on the same
-    columns. Ids are never compared across arms -- partitions are.
+    Args:
+        df: State vectors with at least ``event_time`` and the columns of
+            ``rule.group_cols``.
+        rule: The track rule.
+        params: Thresholds read by the rule's break expression.
+
+    Returns:
+        The state vectors with a ``track_id`` column. The id is the first 16
+        hexadecimal characters of the SHA-256 hash of the group key, then
+        ``_`` and the track's number (or start second), and for the v0.0.2
+        rule ``_{year}_{month}``.
     """
     out = (
         df.withColumn(_TS, F.to_timestamp("event_time"))
-        .withColumn(
-            _GRP, F.substring(F.sha2(F.concat_ws("", *rule.group_cols), 256), 1, 16)
-        )
+        .withColumn(_GRP, F.substring(F.sha2(F.concat_ws("", *rule.group_cols), 256), 1, 16))
         .withColumn(_ALT_FT, F.col("baro_altitude") * FT_PER_M)
         .withColumn(_SPD_KT, F.col("velocity") * KT_PER_MPS)
     )
@@ -251,15 +214,10 @@ def assign_track_id(
     out = out.withColumn("_offset", F.sum("_brk").over(running))
 
     if rule.id_from_start_time:
-        # The track's own first sample, which no amount of surrounding data can
-        # change. ``_offset`` still delimits the track -- it is the partition
-        # key here, not the label -- so the segmentation is untouched and only
-        # the naming differs.
-        #
-        # Seconds, not milliseconds: ADS-B state vectors arrive at ~1 Hz and
-        # ``event_time`` is stored to the second, so sub-second precision would
-        # be noise in the id. Two tracks of one airframe cannot share a start
-        # second -- they would have to be the same track.
+        # The second of the track's first report, which does not depend on how
+        # much data was read. ``_offset`` still tells the tracks apart; only
+        # the label changes. Two tracks of one group cannot start in the same
+        # second.
         start = F.min(_TS).over(Window.partitionBy(_GRP, "_offset"))
         out = out.withColumn(
             "track_id",
@@ -269,8 +227,10 @@ def assign_track_id(
         parts = [F.col(_GRP), F.lit("_"), F.col("_offset")]
         if rule.month_suffix:
             parts += [
-                F.lit("_"), F.year(_TS).cast("string"),
-                F.lit("_"), F.month(_TS).cast("string"),
+                F.lit("_"),
+                F.year(_TS).cast("string"),
+                F.lit("_"),
+                F.month(_TS).cast("string"),
             ]
         out = out.withColumn("track_id", F.concat(*parts))
 
@@ -278,23 +238,18 @@ def assign_track_id(
 
 
 def segment_window() -> WindowSpec:
-    """The engine's own ordering window: ``partitionBy(_grp).orderBy(_ts)``.
+    """The engine's window over one group in time order.
 
-    Part of the arm contract. Four arms need a window and every one of them used
-    to rebuild it from the private column names by copy-paste; an arm that
-    guessed ``Window.partitionBy("icao24", "callsign")`` would have got a
-    *different* partition from the engine's for any arm grouping on something
-    else, with nothing in the output to show it.
+    It is ``partitionBy(_grp).orderBy(_ts)``. Rules that need a window use
+    this one, so that they group the reports exactly as the engine does.
     """
     return Window.partitionBy(_GRP).orderBy(_TS)
 
 
 def w_partition_cols() -> list:
-    """The columns :func:`segment_window` partitions by.
+    """The columns :func:`segment_window` is partitioned by.
 
-    Exposed because a reversed-order window must partition identically to the
-    engine's own or it answers a different question, and rebuilding it from the
-    private column name by copy-paste is how arms drifted apart before.
+    For a rule that needs the same window in reverse order.
     """
     return [F.col(_GRP)]
 
@@ -315,11 +270,10 @@ def speed_kt() -> Column:
 
 
 def lookback_minutes(p: "SegmentationParams") -> float:
-    """A8's lookback bound: the explicit value, or ``gap_minutes`` when unset.
+    """How far back, in minutes, the last call sign is looked for.
 
-    ``is None`` rather than ``or``: ``0.0`` is a meaningful setting -- it
-    disables the callsign-change break, which is the grid's ``airframe_only``
-    corner -- and ``or`` would read it as unset.
+    The explicit ``callsign_lookback_minutes``, or ``gap_minutes`` when that
+    is ``None``. ``0.0`` is a valid value, which turns the call sign test off.
     """
     if p.callsign_lookback_minutes is None:
         return p.gap_minutes

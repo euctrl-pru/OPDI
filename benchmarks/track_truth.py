@@ -59,8 +59,11 @@ REFERENCE_BASE = "s3a://eurocontrol/opdi/research/reference"
 #: overridable per call via the ``reference_base`` keyword -- see module docstring.
 
 __all__ = [
-    "load_flight_intervals", "load_apdf_times", "overlap_join",
-    "gate_buffers", "attach_gate_interval",
+    "load_flight_intervals",
+    "load_apdf_times",
+    "overlap_join",
+    "gate_buffers",
+    "attach_gate_interval",
 ]
 
 
@@ -128,9 +131,7 @@ def _estimated_atot(aobt, taxi_min):
     coalesce is a formality -- re-measure if this module is ever pointed at a
     month where that rate is not zero.
     """
-    return (F.unix_timestamp(aobt) + F.coalesce(taxi_min, F.lit(0.0)) * 60).cast(
-        "timestamp"
-    )
+    return (F.unix_timestamp(aobt) + F.coalesce(taxi_min, F.lit(0.0)) * 60).cast("timestamp")
 
 
 def load_apdf_times(
@@ -171,7 +172,8 @@ def load_apdf_times(
     # joins in load_flight_intervals are one-to-one with no disambiguation
     # needed.
     dep = ap.filter(F.col("SRC_PHASE") == "DEP").select(
-        "sam_id", "apdf_adep",
+        "sam_id",
+        "apdf_adep",
         F.col("MVT_TIME_UTC").alias("atot"),
         # Off-block. APDF has no literal AOBT column either: BLOCK_TIME_UTC is
         # off-block on a DEP row and in-block on an ARR row, which is the same
@@ -186,7 +188,8 @@ def load_apdf_times(
         F.col("BLOCK_TIME_UTC").alias("aobt"),
     )
     arr = ap.filter(F.col("SRC_PHASE") == "ARR").select(
-        "sam_id", "apdf_ades",
+        "sam_id",
+        "apdf_ades",
         F.col("MVT_TIME_UTC").alias("aldt"),
         F.col("BLOCK_TIME_UTC").alias("aibt"),  # in-block; see `aobt` above
     )
@@ -247,8 +250,9 @@ def gate_buffers(gt: DataFrame) -> tuple:
     return (float(row["b_dep"] or 0.0), float(row["b_arr"] or 0.0))
 
 
-def attach_gate_interval(gt: DataFrame, b_dep_s: float, b_arr_s: float,
-                         window: tuple = None) -> DataFrame:
+def attach_gate_interval(
+    gt: DataFrame, b_dep_s: float, b_arr_s: float, window: tuple = None
+) -> DataFrame:
     """Add the gate-to-gate interval beside the airborne one.
 
     ``least``/``greatest`` are not defensive padding. APDF is operational data
@@ -393,9 +397,7 @@ def load_flight_intervals(
         # date explicitly: `day` is a DateType and a bare string literal leaves
         # the comparison's casting to the analyser.
         lo, hi = _prefilter_days(days)
-        nm = nm.filter(
-            F.col("day").between(F.lit(lo).cast("date"), F.lit(hi).cast("date"))
-        )
+        nm = nm.filter(F.col("day").between(F.lit(lo).cast("date"), F.lit(hi).cast("date")))
     # Whole-interval containment in the sampled window -- see the docstring.
     # Expressed on t_off/t_land, not on `day`: `day` is the departure day,
     # which is exactly the thing that fails to bound a midnight-crosser's
@@ -476,15 +478,33 @@ def load_flight_intervals(
     # match, which is the same outcome the old key gave them and better than
     # matching them to the wrong flight.
     jdep = nm.join(dep, nm.sam_id == dep.sam_id, "left").select(
-        nm._nm_id, nm.icao24, nm.callsign, nm.gt_adep, nm.gt_ades,
-        nm.aobt, nm.arvt, nm.taxi_min, nm.day, nm.sam_id,
-        dep.atot, dep.aobt.alias("apdf_aobt"),
+        nm._nm_id,
+        nm.icao24,
+        nm.callsign,
+        nm.gt_adep,
+        nm.gt_ades,
+        nm.aobt,
+        nm.arvt,
+        nm.taxi_min,
+        nm.day,
+        nm.sam_id,
+        dep.atot,
+        dep.aobt.alias("apdf_aobt"),
     )
 
     j = jdep.join(arr, jdep.sam_id == arr.sam_id, "left").select(
-        jdep.icao24, jdep.callsign, jdep.gt_adep, jdep.gt_ades,
-        jdep.aobt, jdep.arvt, jdep.taxi_min, jdep.day, jdep.atot,
-        F.col("apdf_aobt"), arr.aldt, arr.aibt,
+        jdep.icao24,
+        jdep.callsign,
+        jdep.gt_adep,
+        jdep.gt_ades,
+        jdep.aobt,
+        jdep.arvt,
+        jdep.taxi_min,
+        jdep.day,
+        jdep.atot,
+        F.col("apdf_aobt"),
+        arr.aldt,
+        arr.aibt,
     )
 
     # APDF where it exists, NM inference otherwise. The inference is stated
@@ -492,9 +512,7 @@ def load_flight_intervals(
     # _estimated_atot -- the same one the departure join keys and ranks on, so
     # a flight cannot be matched against one take-off time and then have
     # another written into t_off.
-    t_off = F.coalesce(
-        F.col("atot"), _estimated_atot(F.col("aobt"), F.col("taxi_min"))
-    )
+    t_off = F.coalesce(F.col("atot"), _estimated_atot(F.col("aobt"), F.col("taxi_min")))
     t_land = F.coalesce(F.col("aldt"), F.col("arvt"))
 
     flights = (
@@ -516,8 +534,9 @@ def load_flight_intervals(
             # answer is carried *beside* it instead, as `dep_measured` and
             # `arr_measured` -- see below.
             "t_source",
-            F.when(F.col("atot").isNotNull() & F.col("aldt").isNotNull(), "apdf")
-            .otherwise("nm_inferred"),
+            F.when(F.col("atot").isNotNull() & F.col("aldt").isNotNull(), "apdf").otherwise(
+                "nm_inferred"
+            ),
         )
         .withColumn(
             "flight_key",
@@ -529,7 +548,12 @@ def load_flight_intervals(
             # look better than it is in the statistic the paper reports.
             F.sha2(
                 F.concat_ws(
-                    "|", "icao24", "callsign", "day", "gt_adep", "gt_ades",
+                    "|",
+                    "icao24",
+                    "callsign",
+                    "day",
+                    "gt_adep",
+                    "gt_ades",
                     F.col("t_off").cast("string"),
                 ),
                 256,
@@ -601,16 +625,28 @@ def load_flight_intervals(
     # see attach_gate_interval.
     b_dep_s, b_arr_s = gate_buffers(flights)
     return attach_gate_interval(flights, b_dep_s, b_arr_s, window=window).select(
-        "flight_key", "icao24", "callsign", "gt_adep", "gt_ades",
-        "t_off", "t_land", "aobt", "aibt", "t_source",
-        "dep_measured", "arr_measured", "day",
-        "t_off_block", "t_in_block", "gate_dep_measured", "gate_arr_measured",
+        "flight_key",
+        "icao24",
+        "callsign",
+        "gt_adep",
+        "gt_ades",
+        "t_off",
+        "t_land",
+        "aobt",
+        "aibt",
+        "t_source",
+        "dep_measured",
+        "arr_measured",
+        "day",
+        "t_off_block",
+        "t_in_block",
+        "gate_dep_measured",
+        "gate_arr_measured",
         "gate_in_window",
     )
 
 
-def overlap_join(assign: DataFrame, gt: DataFrame,
-                 bounds=("t_off", "t_land")) -> DataFrame:
+def overlap_join(assign: DataFrame, gt: DataFrame, bounds=("t_off", "t_land")) -> DataFrame:
     """Attach each state vector to the ground-truth flight whose interval holds it.
 
     Airframe plus containment -- no callsign. A sample landing in two touching

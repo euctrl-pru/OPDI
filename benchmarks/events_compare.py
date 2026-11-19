@@ -39,8 +39,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pyspark.sql import functions as F
-
 import events_gt
 import events_score
 from event_bench import (
@@ -53,6 +51,7 @@ from event_bench import (
     redirect_tracks,
     runway_identity_types,
 )
+from pyspark.sql import functions as F
 
 #: Ring event types, and the truth milestone each corresponds to. Kept here
 #: rather than added to `event_bench.TYPE_TO_MILESTONE`: that module's outputs
@@ -65,6 +64,14 @@ RING_TYPES = {"xing-40nm": "xing-40nm", "xing-100nm": "xing-100nm"}
 # a constant here. They are not one: which types name a runway depends on the
 # rung's vocabulary, so they are asked for per run --
 # `event_bench.runway_identity_types`.
+
+
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
 
 
 def _identity(spark, storage, period, tracks_table):
@@ -123,9 +130,9 @@ def detected(spark, table, identity, types):
             F.coalesce(F.col("_i.runway"), F.col("_i.rwy_ident")).alias("det_runway"),
         )
     )
-    return ev.join(
-        F.broadcast(identity), ev._track_id == F.col("_id"), "inner"
-    ).drop("_id", "_track_id")
+    return ev.join(F.broadcast(identity), ev._track_id == F.col("_id"), "inner").drop(
+        "_id", "_track_id"
+    )
 
 
 def write_csv(rows, path):
@@ -144,24 +151,29 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(events_gt.PERIODS), required=True)
     ap.add_argument(
-        "--ladder", choices=sorted(LADDERS), default="v3",
+        "--ladder",
+        choices=sorted(LADDERS),
+        default="v3",
         help="which ladder wrote the event table named by --rung. It decides "
-             "the rung's configuration, and the configuration decides which "
-             "event types mean which milestone.",
+        "the rung's configuration, and the configuration decides which "
+        "event types mean which milestone.",
     )
     ap.add_argument("--rung", default="L13_shipped")
     ap.add_argument(
-        "--airports", choices=("study", "all"), default="all",
+        "--airports",
+        choices=("study", "all"),
+        default="all",
         help="restrict the ground truth to events_gt.STUDY_AIRPORTS, matching "
-             "the ladder run this compares.",
+        "the ladder run this compares.",
     )
     ap.add_argument("--results-dir", required=True)
     ap.add_argument(
-        "--clean-table", default=None,
+        "--clean-table",
+        default=None,
         help="override PERIOD_TRACKS[period]['clean'] -- read the cleaned "
-             "tracks from a different table, e.g. a copy rebuilt with a "
-             "cleaning fix, without touching the period's usual mapping. "
-             "Match whatever --clean-table the event_bench run used.",
+        "tracks from a different table, e.g. a copy rebuilt with a "
+        "cleaning fix, without touching the period's usual mapping. "
+        "Match whatever --clean-table the event_bench run used.",
     )
     ap.add_argument("--executors", type=int, default=6)
     ap.add_argument("--ui-port", type=int, default=4065)
@@ -186,7 +198,10 @@ def main() -> int:
     from opdi.config import OPDIConfig
     from opdi.utils.storage import StorageManager
 
-    storage = StorageManager(spark, OPDIConfig.for_environment("opensky"))
+    storage_cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The study tables sit directly in the warehouse, not in a release folder.
+    storage_cfg.project.release = ""
+    storage = StorageManager(spark, storage_cfg)
     truth, rings, _ = events_gt.build(spark, args.period, airports=args.airports)
     truth.cache()
     rings.cache()
@@ -209,12 +224,14 @@ def main() -> int:
 
     # -- the yardstick, first: it sets what "close" can mean below -----------
     floor = [
-        {"period": args.period, **r.asDict()} for r in
-        events_score.inter_source_floor(rings).collect()
+        {"period": args.period, **r.asDict()}
+        for r in events_score.inter_source_floor(rings).collect()
     ]
     for r in floor:
-        print(f"  inter-source floor {r['milestone']}: "
-              f"p10 {r['p10_s']:+.0f}s  median {r['median_s']:+.0f}s  p90 {r['p90_s']:+.0f}s")
+        print(
+            f"  inter-source floor {r['milestone']}: "
+            f"p10 {r['p10_s']:+.0f}s  median {r['median_s']:+.0f}s  p90 {r['p90_s']:+.0f}s"
+        )
     write_csv(floor, out / f"floor_{args.period}.csv")
 
     # -- rings: time error and position error --------------------------------
@@ -227,8 +244,7 @@ def main() -> int:
     pos = events_score.score_positions(ring_aligned)
     pos_by = {r["milestone"]: r.asDict() for r in pos.collect()} if pos is not None else {}
     for r in ring_rows:
-        r.update({k: v for k, v in pos_by.get(r["milestone"], {}).items()
-                  if k != "milestone"})
+        r.update({k: v for k, v in pos_by.get(r["milestone"], {}).items() if k != "milestone"})
     write_csv(ring_rows, out / f"rings_{args.period}.csv")
 
     # -- runway identity against AP_C_RWY ------------------------------------
@@ -245,10 +261,17 @@ def main() -> int:
     # a v0.1.0 ATOT from an A-CDM airborne at all.
     det_type_for = {milestone: type_ for type_, milestone in rwy_types.items()}
     rwy_rows = (
-        [{"period": args.period, "rung": args.rung,
-          "det_type": det_type_for.get(r["milestone"], ""), **r.asDict()}
-         for r in rwy.collect()]
-        if rwy is not None else []
+        [
+            {
+                "period": args.period,
+                "rung": args.rung,
+                "det_type": det_type_for.get(r["milestone"], ""),
+                **r.asDict(),
+            }
+            for r in rwy.collect()
+        ]
+        if rwy is not None
+        else []
     )
     write_csv(rwy_rows, out / f"runway_{args.period}.csv")
 
@@ -297,10 +320,14 @@ def main() -> int:
     # departures and arrivals.
     prio_rows = []
     for name, order in (
-        ("legacy_first", ["ATOT", "ALDT", "AOBT", "AIBT", "airborne",
-                          "touchdown", "off-block", "on-block"]),
-        ("acdm_first", ["airborne", "touchdown", "off-block", "on-block",
-                        "ATOT", "ALDT", "AOBT", "AIBT"]),
+        (
+            "legacy_first",
+            ["ATOT", "ALDT", "AOBT", "AIBT", "airborne", "touchdown", "off-block", "on-block"],
+        ),
+        (
+            "acdm_first",
+            ["airborne", "touchdown", "off-block", "on-block", "ATOT", "ALDT", "AOBT", "AIBT"],
+        ),
     ):
         prio_rows += [
             {"period": args.period, "rung": args.rung, "rule": name, **r.asDict()}
@@ -311,8 +338,7 @@ def main() -> int:
         ]
     # The oracle, scored the same way, as the ceiling the rules are read against.
     prio_rows += [
-        {"period": args.period, "rung": args.rung, "rule": "oracle_nearest",
-         **r.asDict()}
+        {"period": args.period, "rung": args.rung, "rule": "oracle_nearest", **r.asDict()}
         for r in events_score.score(ms_aligned, group_cols=("milestone",)).collect()
     ]
     write_csv(prio_rows, out / f"pooling_rules_{args.period}.csv")

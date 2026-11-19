@@ -8,13 +8,19 @@ rather than trusting the aggregate delta.
 
 Read-only. Writes nothing.
 """
+
 import argparse
 
-from pyspark.sql import functions as F, Window
+from pyspark.sql import Window
+from pyspark.sql import functions as F
+from study_variants.segmentation import register_study_arms  # noqa: E402
 
 from opdi.config import OPDIConfig, SegmentationConfig
 from opdi.pipeline.segmentation import SegmentationParams, assign_track_id
 from opdi.pipeline.segmentation.methods import ARMS
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 from opdi.utils.spark_helpers import SparkSessionManager
 from opdi.utils.storage import StorageManager
 
@@ -29,6 +35,8 @@ def main() -> None:
 
     config = OPDIConfig.for_environment("opensky")
     config.project.warehouse_path = args.warehouse
+    # The prefix holds the tables directly, without a release folder.
+    config.project.release = ""
     config.spark.executor_instances = args.executors
     spark = SparkSessionManager.create_session(
         app_name="debounced 2+persist", config=config, distributed=True
@@ -38,9 +46,7 @@ def main() -> None:
     sv = (
         storage.read_table("osn_tracks_clean")
         .filter(F.col("dof").cast("date") == F.lit(args.day))
-        .select(
-            "icao24", "track_id", "event_time", "callsign", "baro_altitude", "velocity"
-        )
+        .select("icao24", "track_id", "event_time", "callsign", "baro_altitude", "velocity")
     ).cache()
 
     params = SegmentationParams.from_config(
@@ -68,20 +74,15 @@ def main() -> None:
         .filter(F.col("span_s") >= 30)
     ).cache()
 
-    track_counts = per_cs.groupBy("track_id").agg(
-        F.count(F.lit(1)).alias("n_persisted_cs")
-    )
+    track_counts = per_cs.groupBy("track_id").agg(F.count(F.lit(1)).alias("n_persisted_cs"))
     target_tracks = track_counts.filter(F.col("n_persisted_cs") >= 2)
     n_target = target_tracks.count()
     print(f"day {args.day}  hold={args.hold}s")
     print(f"  tracks with 2+ persisted (>=30s) callsigns: {n_target:,}")
 
     detail = (
-        per_cs.join(target_tracks.select("track_id"), "track_id", "inner")
-        .withColumn(
-            "rank", F.row_number().over(
-                Window.partitionBy("track_id").orderBy("first_ts")
-            )
+        per_cs.join(target_tracks.select("track_id"), "track_id", "inner").withColumn(
+            "rank", F.row_number().over(Window.partitionBy("track_id").orderBy("first_ts"))
         )
     ).cache()
 
@@ -116,26 +117,26 @@ def main() -> None:
             " callsigns; pairwise stats use only the first two by appearance."
         )
 
-    pair = pair.withColumn(
-        "lev", F.levenshtein(F.col("cs1"), F.col("cs2"))
-    ).withColumn(
-        "prefix_rel",
-        F.col("cs2").startswith(F.col("cs1")) | F.col("cs1").startswith(F.col("cs2")),
-    ).withColumn(
-        "string_similar", (F.col("lev") <= 2) | F.col("prefix_rel")
-    ).withColumn(
-        "short_span", F.least(F.col("span1"), F.col("span2"))
-    ).withColumn(
-        "long_span", F.greatest(F.col("span1"), F.col("span2"))
-    ).withColumn(
-        "brief_plus_real",
-        (F.col("short_span") < 120) & (F.col("long_span") > 300),
-    ).withColumn(
-        "both_long", (F.col("span1") > 300) & (F.col("span2") > 300)
-    ).withColumn(
-        "genuine_merge_signature",
-        F.col("both_long") & ~F.col("string_similar"),
-    ).cache()
+    pair = (
+        pair.withColumn("lev", F.levenshtein(F.col("cs1"), F.col("cs2")))
+        .withColumn(
+            "prefix_rel",
+            F.col("cs2").startswith(F.col("cs1")) | F.col("cs1").startswith(F.col("cs2")),
+        )
+        .withColumn("string_similar", (F.col("lev") <= 2) | F.col("prefix_rel"))
+        .withColumn("short_span", F.least(F.col("span1"), F.col("span2")))
+        .withColumn("long_span", F.greatest(F.col("span1"), F.col("span2")))
+        .withColumn(
+            "brief_plus_real",
+            (F.col("short_span") < 120) & (F.col("long_span") > 300),
+        )
+        .withColumn("both_long", (F.col("span1") > 300) & (F.col("span2") > 300))
+        .withColumn(
+            "genuine_merge_signature",
+            F.col("both_long") & ~F.col("string_similar"),
+        )
+        .cache()
+    )
 
     n = pair.count()
     a = pair.filter(F.col("string_similar")).count()
@@ -157,9 +158,9 @@ def main() -> None:
 
     print("\n  sample of ~30 tracks, ordered callsigns with counts/spans:")
     sample_tracks = [r["track_id"] for r in target_tracks.limit(30).collect()]
-    detail.filter(F.col("track_id").isin(sample_tracks)).orderBy(
-        "track_id", "rank"
-    ).select("track_id", "rank", "_cs", "n_samples", "span_s").show(120, False)
+    detail.filter(F.col("track_id").isin(sample_tracks)).orderBy("track_id", "rank").select(
+        "track_id", "rank", "_cs", "n_samples", "span_s"
+    ).show(120, False)
 
     spark.stop()
 

@@ -1,9 +1,8 @@
-"""
-OPDI full pipeline runner.
+"""Run the pipeline steps in order over a range of months.
 
-Executes the complete OPDI data pipeline in order, mirroring the
-sequential execution of the ``00_*`` through ``08_*`` scripts in
-``OPDI-live/python/v2.0.0/``.
+:func:`run_pipeline` runs every step (or one step) of the pipeline over a
+date range, in one Spark session. For day-by-day processing with resuming,
+use :mod:`opdi.periodrun` or :mod:`opdi.orchestration` instead.
 
 Pipeline stages
 ---------------
@@ -21,10 +20,8 @@ No.  Description                                 Module
 02a  Trajectory cleaning                         ``cleaning.cleaner``
 03   Flight list generation                      ``pipeline.flights``
 04   Flight events & measurements                ``pipeline.events``
-05   Export to parquet                            ``output.parquet_exporter``
-06   Cleanup & CSV export                        ``output.csv_exporter``
-07   Basic statistics                            ``monitoring.basic_stats``
-08   Advanced statistics & quality report        ``monitoring.advanced_stats``
+04b  Flight list milestones                      ``pipeline.flight_list_step``
+09   Published daily files                       ``output.published``
 ===  ==========================================  ================================
 
 Usage
@@ -35,20 +32,20 @@ Run the full pipeline::
     from opdi.runner import run_pipeline
 
     run_pipeline(
-        env="live",
+        env="opensky",
         start_date=date(2024, 1, 1),
         end_date=date(2024, 6, 1),
     )
 
 Run a single step::
 
-    run_pipeline(env="dev", start_date=date(2024, 1, 1),
+    run_pipeline(env="opensky", start_date=date(2024, 1, 1),
                  end_date=date(2024, 2, 1), step="02")
 
 Or from the command line::
 
-    opdi run --env live --start 2024-01-01 --end 2024-06-01
-    opdi run --step 04 --env dev --start 2024-03-01 --end 2024-04-01
+    opdi run --start 2024-01-01 --end 2024-06-01
+    opdi run --step 04 --start 2024-03-01 --end 2024-04-01
 """
 
 import os
@@ -89,28 +86,17 @@ def _step_00a_airport_zones(spark, config, **kwargs):
 
     zone_gen = AirportDetectionZoneGenerator(spark, config)
 
-    # Build zones from the ingested OurAirports table when it exists. The
-    # public CSV is not reachable from the OSN cluster, and using a different
-    # snapshot than the pipeline reads would silently decouple the two.
+    # Built from the ingested OurAirports table when it exists, so the zones
+    # use the same snapshot as the rest of the pipeline (the public CSV is not
+    # reachable from the OpenSky cluster).
     from opdi.utils.storage import StorageManager
 
     storage = StorageManager(spark, config)
-    airports_df = (
-        storage.read_table("oa_airports")
-        if storage.table_exists("oa_airports")
-        else None
-    )
+    airports_df = storage.read_table("oa_airports") if storage.table_exists("oa_airports") else None
     zone_gen.generate(airports_df=airports_df)
-    # The local raw parquet is deliberately not written here.
-    #
-    # Writing it means collecting the whole result to the driver -- 584 million
-    # cell strings for a network build -- and the driver was SIGKILLed by its
-    # container every time. `_load_airports_hex` in step 03 reads the
-    # `h3_airport_detection_zones` *table* and only falls back to a local file
-    # if the table is absent, so the table is what production actually uses and
-    # this file was a fallback that cost a driver to produce.
-    #
-    # `zone_gen.result_df` still collects on demand for anyone who wants it.
+    # No local Parquet copy is written: it would collect the whole result on
+    # the driver (hundreds of millions of cells for a network build). Step 03
+    # reads the table. `zone_gen.result_df` collects on demand.
     # Generated out to the full ring reach, not clipped to the detection
     # radius. The table carries min_c_radius_nm/max_c_radius_nm, so each
     # consumer narrows it at read time: the flight list keeps its 30 NM, and
@@ -120,12 +106,8 @@ def _step_00a_airport_zones(spark, config, **kwargs):
     airport_types = kwargs.get("airport_zone_types", None)
     table_name = kwargs.get("airport_zone_table", "h3_airport_detection_zones")
 
-    # Spark path, and written to the StorageManager table -- which is S3 in the
-    # `opensky` environment. The previous version called the pandas
-    # prepare_for_flight_list and wrote a local file, so the reference the
-    # pipeline actually reads was never produced by the pipeline. At the full
-    # ring reach that path also collects tens of millions of exploded hex rows
-    # into driver memory, which the Spark variant avoids entirely.
+    # Built with Spark and written to the warehouse table, which is S3 in the
+    # `opensky` environment.
     zone_gen.save_prepared_to_table(
         max_radius_nm=max_radius,
         airport_types=airport_types,
@@ -141,16 +123,10 @@ def _step_00a_airport_zones(spark, config, **kwargs):
             airport_types=airport_types,
             airports_df=airports_df,
         )
-    # Count what was actually written, not what was about to be.
-    #
-    # This printed len(zones) -- the pre-explode ring count, 21,712 -- which
-    # says nothing about whether the table has rows in it. That mattered: this
-    # table committed *empty*, with a _SUCCESS marker, through several runs,
-    # and the log line said "Generated 21712" every time. Reading the table
-    # back costs one count and makes the log evidence rather than narration.
+    # Count the rows written, read back from the table, so that an empty
+    # table is reported as such.
     written = storage.read_table(table_name).count()
-    print(f"  Wrote {written:,} zone rows -> table {table_name} "
-          f"(rings to {max_radius:g} NM).")
+    print(f"  Wrote {written:,} zone rows -> table {table_name} " f"(rings to {max_radius:g} NM).")
     if written == 0:
         raise RuntimeError(
             f"{table_name} was written with 0 rows. A zone table with no cells "
@@ -165,12 +141,7 @@ _AEROWAY_EXTRACT_PREFIX = "aeroway-"
 
 
 def _fmt_size(n: int) -> str:
-    """Byte count in the largest unit that keeps it readable.
-
-    The filtered extracts span five orders of magnitude -- 41 KB for Luxembourg
-    against 34.9 GB for the raw Europe file -- so a fixed unit prints either
-    ``0.0 MB`` or an unreadable row of digits.
-    """
+    """A byte count in the largest unit that keeps it readable (B to GB)."""
     for limit, unit in ((1073741824, "GB"), (1048576, "MB"), (1024, "KB")):
         if n >= limit:
             return f"{n / limit:.1f} {unit}"
@@ -178,19 +149,15 @@ def _fmt_size(n: int) -> str:
 
 
 def _prepare_layout_extract(pbf_path: str) -> str:
-    """Return an aeroway-only extract for *pbf_path*, filtering it if needed.
+    """An aeroway-only extract of ``pbf_path``, filtered first if needed.
 
-    Building airport areas from a raw continental extract requires osmium to
-    hold node locations for the **whole file**, which exceeds a 16 GB container
-    on ``europe-latest`` and is killed by the OOM reaper. Filtering first
-    removes the problem rather than working around it: the aeroway subset of
-    Europe is ~16 MB against 34.9 GB, so the default in-memory index is ample
-    and a full read takes about a second instead of six minutes.
+    Building airport areas from a raw extract of a continent needs the node
+    locations of the whole file, more than 16 GB of memory. The aeroway part
+    of Europe is about 16 MB against 34.9 GB, and reads in about a second.
 
-    Idempotent. The filtered file is written beside its source as
-    ``aeroway-<name>`` and reused unless the source is newer, so repeating
-    step 00b costs nothing. A path already carrying the prefix is returned
-    untouched.
+    The filtered file is written beside its source as ``aeroway-<name>`` and
+    reused unless the source is newer. A path already carrying the prefix is
+    returned unchanged.
     """
     src = Path(pbf_path)
     if not src.exists():
@@ -204,19 +171,22 @@ def _prepare_layout_extract(pbf_path: str) -> str:
 
     dst = src.with_name(_AEROWAY_EXTRACT_PREFIX + src.name)
     if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
-        print(f"  Using cached aeroway extract {dst.name} "
-              f"({_fmt_size(dst.stat().st_size)}).")
+        print(f"  Using cached aeroway extract {dst.name} " f"({_fmt_size(dst.stat().st_size)}).")
         return str(dst)
 
     from opdi.reference.pbf_filter import filter_aeroway_pbf
 
-    print(f"  Filtering {src.name} ({_fmt_size(src.stat().st_size)}) "
-          f"to aeroway geometry -> {dst.name} ...")
+    print(
+        f"  Filtering {src.name} ({_fmt_size(src.stat().st_size)}) "
+        f"to aeroway geometry -> {dst.name} ..."
+    )
     stats = filter_aeroway_pbf(str(src), str(dst))
-    print(f"  Filtered in {stats['seconds']:.0f} s: "
-          f"{_fmt_size(stats['bytes_in'])} -> {_fmt_size(stats['bytes_out'])} "
-          f"({stats['nodes']:,} nodes, {stats['ways']:,} ways, "
-          f"{stats['relations']:,} relations).")
+    print(
+        f"  Filtered in {stats['seconds']:.0f} s: "
+        f"{_fmt_size(stats['bytes_in'])} -> {_fmt_size(stats['bytes_out'])} "
+        f"({stats['nodes']:,} nodes, {stats['ways']:,} ways, "
+        f"{stats['relations']:,} relations)."
+    )
     return str(dst)
 
 
@@ -225,11 +195,10 @@ def _step_00b_airport_layouts(spark, config, **kwargs):
     print("\n--- 00b: Airport ground layouts (OSM -> H3) ---")
     from opdi.reference.h3_airport_layouts import AirportLayoutGenerator
 
-    # A local extract when one is configured, the public Overpass API
-    # otherwise. The extract is strongly preferred and is what the published
-    # table is built from: Overpass resolves the airport *name* through
-    # Nominatim first, so a name that does not resolve yields no data rather
-    # than an error, and at ~1,350 aerodromes the public endpoint refuses.
+    # A local extract when one is configured, else the public Overpass
+    # service. The extract is preferred: Overpass finds an airport by name and
+    # returns nothing, without an error, for a name it cannot resolve, and it
+    # refuses requests for many airports.
     pbf_path = (
         kwargs.get("pbf_path")
         or os.environ.get("OPDI_OSM_PBF")
@@ -239,17 +208,18 @@ def _step_00b_airport_layouts(spark, config, **kwargs):
         pbf_path = _prepare_layout_extract(pbf_path)
         print(f"  Source: local OSM extract {pbf_path}")
     else:
-        print("  Source: public Overpass API (no extract configured). This "
-              "cannot build the full network -- see readme.md, step 00b.")
+        print(
+            "  Source: public Overpass API (no extract configured). This "
+            "cannot build the full network -- see readme.md, step 00b."
+        )
 
     layout_gen = AirportLayoutGenerator(spark, config, pbf_path=pbf_path)
     layout_gen.create_table_if_not_exists()
     success, failed = layout_gen.process_all()
     print(f"  Processed {len(success)} airports, {len(failed)} failed.")
     if failed:
-        # Expected, and not an error: aerodromes outside the extract's
-        # geographic coverage, and aerodromes OSM has not mapped. Printed so
-        # the count is never mistaken for a silent failure.
+        # Expected: airports outside the extract, or not mapped in
+        # OpenStreetMap. Printed so the count is not mistaken for a failure.
         print(f"  Not built (no geometry in this extract): {len(failed)}")
 
 
@@ -278,22 +248,15 @@ def _step_00e_aircraft_db(spark, config, **kwargs):
     from opdi.ingestion.osn_aircraft_db import AircraftDatabaseIngestion
 
     acdb = AircraftDatabaseIngestion(spark, config)
-    # Overwrite, not the default append. The file is a full snapshot of every
-    # airframe OpenSky knows, not a delta, so appending a second run stacks a
-    # complete duplicate copy on the first -- 601,270 rows becomes 1,202,540
-    # and every join through icao24 silently doubles its matches. Nothing
-    # errors; the table simply weighs each aircraft twice.
+    # Overwrite: the file is a full snapshot of every aircraft, so appending
+    # would double every aircraft in the table.
     acdb.ingest(mode="overwrite")
 
 
 def _step_00f_runway_grid(spark, config, **kwargs):
-    """Step 00f: Runway + approach H3 grid, from oa_runways.
+    """Step 00f: the H3 grid of runways and approach corridors, from ``oa_runways``.
 
-    Runs after 00d (needs the ingested ``oa_airports``/``oa_runways`` tables)
-    and after 00a-00c (the other H3 reference layers), matching the plan's
-    ordering. Geometry-only -- no network -- so it belongs at the end of the
-    reference block rather than blocking on anything but the OurAirports
-    ingest.
+    Runs after 00d, which writes ``oa_airports`` and ``oa_runways``.
     """
     print("\n--- 00f: Runway + approach H3 grid (oa_runways) ---")
     from opdi.reference.h3_runway_grid import RunwayGridGenerator
@@ -304,21 +267,10 @@ def _step_00f_runway_grid(spark, config, **kwargs):
     print(f"  Processed {len(success)} airports, {len(failed)} failed.")
 
 
-#: Reference substeps in **dependency order, which is not id order**.
-#:
-#: 00d ingests OurAirports and is what creates ``oa_airports`` and
-#: ``oa_runways``; 00a, 00b and 00f all read one of those. Iterating this dict
-#: in id order therefore ran 00a and 00b against a warehouse where the table
-#: they need did not exist yet. On an established warehouse that was invisible
-#: -- the tables were there from a previous run, so any order worked -- but on
-#: a from-scratch build into an empty prefix, 00a fell back to downloading the
-#: public OurAirports CSV, which is unreachable from the OSN cluster and, when
-#: it is reachable, is a *different snapshot* from the one the rest of the
-#: pipeline reads.
-#:
-#: The ids are left alone because they are the operator-facing names
-#: (``--no-airport-zones`` and friends, and the labels in the run log). Only
-#: the execution order changed.
+#: Reference substeps in dependency order, which is not the order of their
+#: ids: 00d writes ``oa_airports`` and ``oa_runways``, which 00a, 00b and 00f
+#: read, so it runs first. The ids are kept because they are the names used
+#: on the command line (``--no-airport-zones`` and so on) and in the output.
 REFERENCE_SUBSTEPS = {
     "00d": ("OurAirports reference data", _step_00d_ourairports),
     "00e": ("OpenSky aircraft database", _step_00e_aircraft_db),
@@ -330,14 +282,11 @@ REFERENCE_SUBSTEPS = {
 
 
 def reference_substeps_for_coverage(config) -> dict:
-    """Per-substep run flags dictated by coverage alone, independent of what
-    the caller asked for.
+    """Which reference substeps run under this coverage.
 
-    Every substep runs under both coverages. 00c used to be forced off
-    worldwide on the premise that its sources were European; the FIR layer is
-    worldwide (336 NM volumes in AIRAC 524) and is what the ``xing-fir``
-    family reads, so it is built everywhere. The ANSP layer is European and
-    is simply absent elsewhere.
+    All of them, under both coverages. The FIR layer of 00c is worldwide and
+    is what the FIR crossings read; its ANSP layer is European and is absent
+    elsewhere.
     """
     return {substep_id: True for substep_id in REFERENCE_SUBSTEPS}
 
@@ -351,9 +300,8 @@ def _step_00_reference_data(spark, config, **kwargs):
     from opdi.utils.storage import StorageManager
 
     storage = StorageManager(spark, config)
-    # Checked first, before any substep runs: a coverage mismatch is cheaper
-    # to catch now than after minutes of reference geometry have been built
-    # into the wrong warehouse.
+    # Checked before any substep runs, so a warehouse of the other coverage
+    # is refused before anything is built.
     problem = storage.check_coverage()
     if problem is not None:
         raise RuntimeError(problem)
@@ -363,17 +311,18 @@ def _step_00_reference_data(spark, config, **kwargs):
 
     for substep_id, (label, fn) in REFERENCE_SUBSTEPS.items():
         if not coverage_ref.get(substep_id, True):
-            print(f"\n  Skipping {substep_id} ({label}): sources are "
-                  "European and nothing reads the table")
+            print(
+                f"\n  Skipping {substep_id} ({label}): sources are "
+                "European and nothing reads the table"
+            )
             continue
         if not run_ref.get(substep_id, True):
             print(f"\n  Skipping {substep_id} ({label})")
             continue
         fn(spark, config, **kwargs)
 
-    # Stamped only after every substep has run to completion. A reference
-    # build that dies halfway must not leave a marker claiming this warehouse
-    # holds a coverage it never finished populating.
+    # Stamped only after every substep has finished, so a build that stops
+    # half way does not mark the warehouse.
     storage.write_coverage_marker()
 
 
@@ -386,10 +335,8 @@ def _step_01_ingest_statevectors(spark, config, start_date, end_date, **kwargs):
     from opdi.ingestion.osn_statevectors import StateVectorIngestion
 
     sv = StateVectorIngestion(spark, config)
-    # The default ingest() shells out to the MinIO client and stages files on
-    # local disk, which suits a host with the archive mounted. In the opensky
-    # environment the archive is another bucket on the same endpoint, so
-    # reading it directly through S3A avoids the download entirely.
+    # In the opensky environment the archive is read directly over S3A,
+    # rather than downloaded with the MinIO client.
     if config.project.project_name == "opensky":
         sv.ingest_from_s3(start_date=start_date, end_date=end_date)
     else:
@@ -397,15 +344,13 @@ def _step_01_ingest_statevectors(spark, config, start_date, end_date, **kwargs):
 
 
 def _step_01b_ingest_adsc(spark, config, start_date, end_date, **kwargs):
-    """Step 01b: Ingest ADS-C state vectors from the readsb topic.
+    """Step 01b: ingest the ADS-C reports.
 
-    A no-op unless ``config.adsc.enabled``. Registered unconditionally so that
-    a full run names it and skips it out loud: a step that exists only when a
-    flag is set is a step nobody remembers to run.
+    Does nothing unless ``config.adsc.enabled``; it is always listed, so a
+    full run says that it skipped it.
     """
     if not config.adsc.enabled:
-        print("\nSTEP 01b - ADS-C ingestion: disabled "
-              "(config.adsc.enabled is False)")
+        print("\nSTEP 01b - ADS-C ingestion: disabled " "(config.adsc.enabled is False)")
         return
 
     print("\n" + "=" * 70)
@@ -414,8 +359,7 @@ def _step_01b_ingest_adsc(spark, config, start_date, end_date, **kwargs):
 
     from opdi.ingestion.osn_adsc import AdscIngestion
 
-    AdscIngestion(spark, config).ingest_from_s3(
-        start_date=start_date, end_date=end_date)
+    AdscIngestion(spark, config).ingest_from_s3(start_date=start_date, end_date=end_date)
 
 
 def _step_02_process_tracks(spark, config, start_date, end_date, **kwargs):
@@ -483,8 +427,7 @@ def _step_04_extract_events(spark, config, start_date, end_date, **kwargs):
 def _step_04b_enrich_flight_list(spark, config, start_date, end_date, **kwargs):
     """Step 04b: fold the milestones back into the flight list.
 
-    Numbered 04b rather than 05 because 05 is the published parquet export and
-    renumbering it would break every operator's muscle memory for no gain.
+    It works on the output of step 04, so it is numbered 04b.
     """
     print("\n" + "=" * 70)
     print(f"STEP 04b - Flight list milestones ({start_date} to {end_date})")
@@ -500,78 +443,15 @@ def _step_04b_enrich_flight_list(spark, config, start_date, end_date, **kwargs):
     print(f"Flight list enriched: {written:,} rows.")
 
 
-def _step_05_export_parquet(spark, config, start_date, end_date, **kwargs):
-    """Step 05: Export OPDI tables to parquet files."""
+def _step_09_publish(spark, config, start_date, end_date, **kwargs):
+    """Step 09: write the published flight list and flight events files of each day."""
     print("\n" + "=" * 70)
-    print(f"STEP 05 - Parquet export ({start_date} to {end_date})")
+    print(f"STEP 09 - Publish the day's files ({start_date} to {end_date})")
     print("=" * 70)
 
-    output_dir = kwargs.get("export_dir", "data/OPDI/v002")
+    from opdi.output.published import publish_range
 
-    from opdi.output.parquet_exporter import ParquetExporter
-
-    exporter = ParquetExporter(spark, config, output_dir=output_dir)
-    exporter.export_all(
-        start_date=start_date,
-        end_date=end_date,
-        last_n_months=kwargs.get("last_n_months", 4),
-    )
-
-
-def _step_06_cleanup(spark, config, start_date, end_date, **kwargs):
-    """Step 06: Deduplicate and export to CSV.gz."""
-    print("\n" + "=" * 70)
-    print("STEP 06 - Data cleanup & CSV export")
-    print("=" * 70)
-
-    export_dir = kwargs.get("export_dir", "data/OPDI/v002")
-
-    from opdi.output.csv_exporter import CSVExporter
-
-    for subdir in ["flight_list", "flight_events", "measurements"]:
-        import os
-
-        input_dir = os.path.join(export_dir, subdir)
-        output_dir = os.path.join(export_dir, f"{subdir}_clean")
-
-        if os.path.isdir(input_dir):
-            print(f"\n  Cleaning {subdir}...")
-            exporter = CSVExporter(input_dir, output_dir)
-            exporter.clean_and_export_all()
-
-
-def _step_07_basic_stats(spark, config, **kwargs):
-    """Step 07: Print basic table statistics."""
-    print("\n" + "=" * 70)
-    print("STEP 07 - Basic statistics")
-    print("=" * 70)
-
-    from opdi.monitoring.basic_stats import BasicStatsCollector
-
-    collector = BasicStatsCollector(spark, config)
-    collector.print_summary()
-
-
-def _step_08_advanced_stats(spark, config, **kwargs):
-    """Step 08: Generate advanced data quality report."""
-    print("\n" + "=" * 70)
-    print("STEP 08 - Advanced statistics & data quality")
-    print("=" * 70)
-
-    from datetime import datetime
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    output_csv = kwargs.get("quality_csv", f"daily_rows_counts_{today}.csv")
-    output_html = kwargs.get("quality_html", f"daily_rows_visualization_{today}.html")
-
-    from opdi.monitoring.advanced_stats import AdvancedStatsCollector
-
-    collector = AdvancedStatsCollector(spark, config)
-    collector.generate_quality_report(
-        "osn_statevectors_v2",
-        output_csv,
-        output_html,
-    )
+    publish_range(spark, config, start_date, end_date)
 
 
 # Registry mapping step names to functions
@@ -584,15 +464,12 @@ STEPS = {
     "03": _step_03_generate_flight_list,
     "04": _step_04_extract_events,
     "04b": _step_04b_enrich_flight_list,
-    "05": _step_05_export_parquet,
-    "06": _step_06_cleanup,
-    "07": _step_07_basic_stats,
-    "08": _step_08_advanced_stats,
+    "09": _step_09_publish,
 }
 
 
 def run_pipeline(
-    env: str = "dev",
+    env: str = "opensky",
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     step: Optional[str] = None,
@@ -603,43 +480,33 @@ def run_pipeline(
     run_aircraft_db: bool = True,
     run_runway_grid: bool = True,
     airports_hex_path: str = "data/airport_hex/zones_res7_processed.parquet",
-    export_dir: str = "data/OPDI/v002",
-    last_n_months: int = 4,
     adep_mode: Optional[str] = None,
     ades_mode: Optional[str] = None,
     worldwide: bool = True,
 ) -> int:
-    """
-    Run the OPDI pipeline end-to-end or a single step.
-
-    This function mirrors the sequential execution of the ``00_*`` through
-    ``08_*`` scripts in ``OPDI-live/python/v2.0.0/``.
+    """Run the OPDI pipeline end-to-end or a single step.
 
     Args:
-        env: Environment name (``"dev"``, ``"live"``, or ``"local"``).
+        env: Environment name (``"opensky"`` or ``"local"``).
         start_date: Pipeline start date (first day of first month to process).
         end_date: Pipeline end date (first day of last month to process).
-        step: Run only this step (``"00"`` through ``"08"``).
+        step: Run only this step (``"00"`` through ``"09"``).
             If ``None``, all steps run sequentially.
-        run_airport_zones: Run step 00a — Airport H3 detection zones.
-        run_airport_layouts: Run step 00b — Airport ground layouts (OSM -> H3).
-        run_airspaces: Run step 00c — Airspace boundaries (ANSP/FIR -> H3).
-        run_ourairports: Run step 00d — OurAirports reference data.
-        run_aircraft_db: Run step 00e — OpenSky aircraft database.
-        run_runway_grid: Run step 00f — Runway + approach H3 grid (oa_runways).
+        run_airport_zones: Run step 00a, the airport detection zones.
+        run_airport_layouts: Run step 00b, the airport layouts.
+        run_airspaces: Run step 00c, the airspaces.
+        run_ourairports: Run step 00d, the OurAirports data.
+        run_aircraft_db: Run step 00e, the OpenSky aircraft database.
+        run_runway_grid: Run step 00f, the runway and approach grid.
         adep_mode: Detection algorithm for departures in step 03
-            (``"trend"``, ``"endpoint"`` or ``"nearest"``). ``None`` uses the
+            (``"trend"`` or ``"endpoint"``). ``None`` uses the
             configured default.
-        ades_mode: Detection algorithm for arrivals in step 03. The two roles
-            are separate because they are not equally hard and the rules that
-            suit them differ.
+        ades_mode: Detection method for arrivals in step 03.
         airports_hex_path: Path to pre-generated airport hex zones parquet
             (produced by step 00, consumed by step 03).
-        export_dir: Base directory for parquet/CSV exports (steps 05-06).
-        last_n_months: Only export the last N months of data (step 05).
-        worldwide: Drop the published European bounding box and route output
-            to a separate worldwide warehouse. On by default; pass ``False``
-            for the European box and the European warehouse.
+        worldwide: Process the whole world (the default). Pass ``False``
+            for the European box. In the ``local`` environment this also
+            selects the European warehouse.
 
     Returns:
         Exit code: ``0`` on success, ``1`` on failure.
@@ -648,7 +515,7 @@ def run_pipeline(
         >>> from datetime import date
         >>> from opdi.runner import run_pipeline
         >>> run_pipeline(
-        ...     env="live",
+        ...     env="opensky",
         ...     start_date=date(2024, 1, 1),
         ...     end_date=date(2024, 6, 1),
         ...     run_airport_zones=False,
@@ -667,8 +534,7 @@ def run_pipeline(
     print("=" * 70)
     print(f"  Environment : {env}")
     print(f"  Project     : {config.project.project_name}")
-    print(f"  Coverage    : {config.coverage.label}")
-    print(f"  Warehouse   : {config.project.warehouse_path}")
+    print(config.describe_target())
     print(f"  Date range  : {start_date} to {end_date}")
     run_reference = {
         "00a": run_airport_zones,
@@ -680,8 +546,9 @@ def run_pipeline(
     }
     skip_all_ref = not any(run_reference.values())
 
-    step_label = step or ("ALL (01-08, incl. 01b/02a)" if skip_all_ref
-                          else "ALL (00-08, incl. 01b/02a)")
+    step_label = step or (
+        "ALL (01-09, incl. 01b/02a/04b)" if skip_all_ref else "ALL (00-09, incl. 01b/02a/04b)"
+    )
     print(f"  Step        : {step_label}")
     if step is None:
         skipped = [k for k, v in run_reference.items() if not v]
@@ -702,11 +569,8 @@ def run_pipeline(
     kwargs = dict(
         airports_hex_path=airports_hex_path,
         airports_hex_raw_path=airports_hex_path.replace("_processed", ""),
-        export_dir=export_dir,
-        last_n_months=last_n_months,
         run_reference=run_reference,
-        # None means "whatever DetectionConfig says", so a plain run is
-        # unaffected by the existence of these.
+        # None follows DetectionConfig.
         adep_mode=adep_mode,
         ades_mode=ades_mode,
     )
@@ -719,8 +583,8 @@ def run_pipeline(
                 return 1
 
             fn = STEPS[step]
-            # Steps 00, 07, 08 don't need date range
-            if step in ("00", "07", "08"):
+            # Step 00 needs no date range
+            if step == "00":
                 fn(spark, config, **kwargs)
             else:
                 fn(spark, config, start_date, end_date, **kwargs)
@@ -728,7 +592,7 @@ def run_pipeline(
             # Run all steps in order
             for step_id in sorted(STEPS.keys()):
                 fn = STEPS[step_id]
-                if step_id in ("00", "07", "08"):
+                if step_id == "00":
                     fn(spark, config, **kwargs)
                 else:
                     fn(spark, config, start_date, end_date, **kwargs)
@@ -751,7 +615,7 @@ if __name__ == "__main__":
     import sys
 
     run_pipeline(
-        env=sys.argv[1] if len(sys.argv) > 1 else "dev",
+        env=sys.argv[1] if len(sys.argv) > 1 else "opensky",
         start_date=date.fromisoformat(sys.argv[2]) if len(sys.argv) > 2 else date(2022, 1, 1),
         end_date=date.fromisoformat(sys.argv[3]) if len(sys.argv) > 3 else date.today(),
     )

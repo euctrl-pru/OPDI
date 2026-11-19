@@ -85,26 +85,33 @@ def jobs() -> list:
             name="two_days",
             script="benchmarks/track_link_grid.py",
             args=[
-                "--days", *DAYS,
-                "--grid-json", json.dumps(
-                    {**{k: [v] for k, v in SHIPPED.items()},
-                     "link_old_edge_climb": [False, True],
-                     "link_new_edge_descent": [False, True]}),
-                "--reasons-params-json", json.dumps(SHIPPED),
+                "--days",
+                *DAYS,
+                "--grid-json",
+                json.dumps(
+                    {
+                        **{k: [v] for k, v in SHIPPED.items()},
+                        "link_old_edge_climb": [False, True],
+                        "link_new_edge_descent": [False, True],
+                    }
+                ),
+                "--reasons-params-json",
+                json.dumps(SHIPPED),
             ],
             outputs={n: n for n in v4._grid_outputs(DAYS) + v4._reasons_outputs(DAYS)},
             code_paths=v4.CORE,
             data_root=DATA,
             notes="The shipped setting over two days against Network Manager "
-                  "truth, with climb and descent edges each off and on; reasons "
-                  "read at the shipped setting.",
+            "truth, with climb and descent edges each off and on; reasons "
+            "read at the shipped setting.",
         ),
         v4.Job(
             name="pipeline_day",
             script="benchmarks/track_link_pipeline_score.py",
             args=["--day", PIPELINE_DAY],
             outputs={n: n for n in PIPELINE_DAY_OUTPUTS},
-            code_paths=v4.CORE + [
+            code_paths=v4.CORE
+            + [
                 "src/opdi/pipeline/flights.py",
                 "src/opdi/pipeline/events.py",
                 "src/opdi/pipeline/holes.py",
@@ -112,8 +119,8 @@ def jobs() -> list:
             ],
             data_root=DATA,
             notes="Both rules at research/a10 through the real pipeline, one "
-                  "day, one airframe in ten. Needs run_track_link_day.py to "
-                  "have built the arms.",
+            "day, one airframe in ten. Needs run_track_link_day.py to "
+            "have built the arms.",
         ),
     ]
 

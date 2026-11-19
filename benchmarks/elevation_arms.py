@@ -28,7 +28,6 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
 import pandas as pd
-
 from elevation_bands import BANDS
 
 #: The two runs compared. Named here rather than passed, because reversing them
@@ -66,9 +65,11 @@ def per_airport_delta(per_airport: pd.DataFrame, elevations: pd.DataFrame) -> pd
     msl = per_airport[per_airport.run == ARM_MSL][keep].rename(
         columns={"n_correct": "n_correct_msl"}
     )
-    field = per_airport[per_airport.run == ARM_FIELD][keep].rename(
-        columns={"n_correct": "n_correct_field"}
-    ).drop(columns=["n_truth"])
+    field = (
+        per_airport[per_airport.run == ARM_FIELD][keep]
+        .rename(columns={"n_correct": "n_correct_field"})
+        .drop(columns=["n_truth"])
+    )
 
     out = msl.merge(field, on=["airport", "role"], how="outer")
     out["n_correct_msl"] = out["n_correct_msl"].fillna(0).astype(int)
@@ -118,21 +119,23 @@ def band_summary(per_airport: pd.DataFrame, elevations: pd.DataFrame) -> pd.Data
         # positive contributor only would hide that case.
         mover = grp.loc[grp["delta_correct"].abs().idxmax()]
         busiest = grp.loc[grp["n_truth"].fillna(0).idxmax()]
-        rows.append({
-            "band": band,
-            "role": role,
-            "aerodromes": int(grp["airport"].nunique()),
-            "n_truth": int(grp["n_truth"].fillna(0).sum()),
-            "n_correct_msl": int(grp["n_correct_msl"].sum()),
-            "n_correct_field": int(grp["n_correct_field"].sum()),
-            "delta_correct": total,
-            "largest_mover": mover["airport"],
-            "largest_mover_delta": int(mover["delta_correct"]),
-            "delta_correct_loo": total - int(mover["delta_correct"]),
-            "busiest": busiest["airport"],
-            "busiest_n_truth": int(busiest["n_truth"] or 0),
-            "delta_correct_ex_busiest": total - int(busiest["delta_correct"]),
-        })
+        rows.append(
+            {
+                "band": band,
+                "role": role,
+                "aerodromes": int(grp["airport"].nunique()),
+                "n_truth": int(grp["n_truth"].fillna(0).sum()),
+                "n_correct_msl": int(grp["n_correct_msl"].sum()),
+                "n_correct_field": int(grp["n_correct_field"].sum()),
+                "delta_correct": total,
+                "largest_mover": mover["airport"],
+                "largest_mover_delta": int(mover["delta_correct"]),
+                "delta_correct_loo": total - int(mover["delta_correct"]),
+                "busiest": busiest["airport"],
+                "busiest_n_truth": int(busiest["n_truth"] or 0),
+                "delta_correct_ex_busiest": total - int(busiest["delta_correct"]),
+            }
+        )
 
     order = [label for label, _, _ in BANDS] + ["unknown"]
     out = pd.DataFrame(rows)
@@ -142,9 +145,12 @@ def band_summary(per_airport: pd.DataFrame, elevations: pd.DataFrame) -> pd.Data
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--per-airport", type=Path, required=True,
-                    help="per_airport_v6.csv from flight_list_v62.py, carrying "
-                         "both datum arms")
+    ap.add_argument(
+        "--per-airport",
+        type=Path,
+        required=True,
+        help="per_airport_v6.csv from flight_list_v62.py, carrying " "both datum arms",
+    )
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--executors", type=int, default=2)
     ap.add_argument("--ui-port", type=int, default=4047)
@@ -155,9 +161,8 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     import osn_sample
-    from osn_sample import build_spark, load_dotenv
-
     from elevation_bands import airport_elevations
+    from osn_sample import build_spark, load_dotenv
 
     load_dotenv()
     osn_sample.UI_PORT = args.ui_port

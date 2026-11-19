@@ -53,20 +53,24 @@ import argparse
 import csv
 import dataclasses
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F
-
 import osn_sample
-from osn_sample import build_spark, load_dotenv
 from adep_ades import (
-    airport_locations, airport_types, label_ground_truth, load_ground_truth,
-    score, per_airport_counts, per_type_counts,
+    airport_locations,
+    airport_types,
+    label_ground_truth,
+    load_ground_truth,
+    per_airport_counts,
+    per_type_counts,
+    score,
 )
+from osn_sample import build_spark, load_dotenv
+from pyspark.sql import functions as F
 
 #: Where the pipeline's flight lists land. Suffixed and under research/, so the
 #: published flight list is never the target.
@@ -79,6 +83,15 @@ OUT_TMPL = "research/flight_list_v62_{run}"
 #: every published OPDI flight list was built with. Without it the report would
 #: have no measured baseline of its own to compare the tuned settings against.
 RUNS = ("legacy", "trend", "endpoint", "nearest", "combined", "recommended")
+
+
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
 
 def main_checkout(repo: Path = REPO) -> Path:
     """The real repository root, even when running from a git worktree.
@@ -153,8 +166,7 @@ def trend_ceiling_kwargs(row: dict) -> dict:
     """
     datum = row.get("datum") or "msl"
     if datum == "field":
-        return {"trend_max_datum": "field",
-                "trend_max_height_ft": float(row["fl_cap"])}
+        return {"trend_max_datum": "field", "trend_max_height_ft": float(row["fl_cap"])}
     if datum == "msl":
         return {"trend_max_datum": "msl", "trend_max_fl": int(row["fl_cap"])}
     raise ValueError(
@@ -214,7 +226,9 @@ def guard_writes(allowed_prefix: str = "research/") -> None:
 
 def build(spark, cfg, month, run, detection, adep_mode, ades_mode, log_dir):
     """Run step 03 for one configuration and return the table name."""
-    from opdi.pipeline.flights import FlightListProcessor
+    # The study processor: the package's step 03 plus the `nearest` mode and
+    # the `trend_ooa` option these runs compare.
+    from study_variants.detection import StudyFlightListProcessor as FlightListProcessor
 
     cfg.detection = detection
     # Grid cells are scored and discarded, so they share one table rather than
@@ -259,39 +273,60 @@ def load_predictions(spark, table):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--months", nargs="+", default=["202506"])
-    ap.add_argument("--days", nargs="+",
-                    default=["2025-06-05", "2025-06-06", "2025-06-07"])
-    ap.add_argument("--trend-sweep", type=Path, required=True,
-                    help="the sweep the tuned arms are built from. On the "
-                         "shipped datum this is the above-field sweep")
-    ap.add_argument("--trend-sweep-msl", type=Path, default=None,
-                    help="the sea-level sweep the path walk's rungs 0-4 use, "
-                         "so the ladder reproduces V6's and the datum moves "
-                         "only at rung 5. Defaults to --trend-sweep, which "
-                         "then has to be a sea-level sweep itself")
+    ap.add_argument("--days", nargs="+", default=["2025-06-05", "2025-06-06", "2025-06-07"])
+    ap.add_argument(
+        "--trend-sweep",
+        type=Path,
+        required=True,
+        help="the sweep the tuned arms are built from. On the "
+        "shipped datum this is the above-field sweep",
+    )
+    ap.add_argument(
+        "--trend-sweep-msl",
+        type=Path,
+        default=None,
+        help="the sea-level sweep the path walk's rungs 0-4 use, "
+        "so the ladder reproduces V6's and the datum moves "
+        "only at rung 5. Defaults to --trend-sweep, which "
+        "then has to be a sea-level sweep itself",
+    )
     ap.add_argument("--endpoint-sweep", type=Path, required=True)
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--runs", nargs="+", default=list(RUNS))
-    ap.add_argument("--k", type=float, default=2.0,
-                    help="wrong-answer penalty used to pick the argmax")
-    ap.add_argument("--pipeline-logs", type=Path,
-                    default=main_checkout() / "OPDI_live" / "logs",
-                    help="where the pipeline keeps its progress logs; the "
-                         "endpoint candidate log is read from here so the "
-                         "existing cache is reused rather than rebuilt")
+    ap.add_argument(
+        "--k", type=float, default=2.0, help="wrong-answer penalty used to pick the argmax"
+    )
+    ap.add_argument(
+        "--pipeline-logs",
+        type=Path,
+        default=main_checkout() / "OPDI_live" / "logs",
+        help="where the pipeline keeps its progress logs; the "
+        "endpoint candidate log is read from here so the "
+        "existing cache is reused rather than rebuilt",
+    )
     ap.add_argument("--executors", type=int, default=10)
-    ap.add_argument("--grid-height", nargs="+", type=int,
-                    default=list(GRID_HEIGHT_CAPS),
-                    help="trend ceilings to walk through process_dai, in feet "
-                         "above field elevation")
+    ap.add_argument(
+        "--grid-height",
+        nargs="+",
+        type=int,
+        default=list(GRID_HEIGHT_CAPS),
+        help="trend ceilings to walk through process_dai, in feet " "above field elevation",
+    )
     ap.add_argument("--grid-radius", nargs="+", type=float, default=[20.0, 30.0])
-    ap.add_argument("--grid-margin", nargs="+", type=int,
-                    default=list(GRID_MARGINS),
-                    help="vote margins to walk through process_dai")
+    ap.add_argument(
+        "--grid-margin",
+        nargs="+",
+        type=int,
+        default=list(GRID_MARGINS),
+        help="vote margins to walk through process_dai",
+    )
     ap.add_argument("--grid-penalty", type=float, default=10.0)
-    ap.add_argument("--trend-rank-by", default="haversine",
-                    choices=["haversine", "ring"],
-                    help="how trend chooses among candidate aerodromes")
+    ap.add_argument(
+        "--trend-rank-by",
+        default="haversine",
+        choices=["haversine", "ring"],
+        help="how trend chooses among candidate aerodromes",
+    )
     ap.add_argument("--cores", type=int, default=6)
     ap.add_argument("--driver-memory", default="8g")
     ap.add_argument("--ui-port", type=int, default=4044)
@@ -313,12 +348,17 @@ def main() -> None:
     if src_log.exists() and not (log_dir / cand_log).exists():
         import shutil
 
-        shutil.copytree(src_log, log_dir / cand_log) if src_log.is_dir() else \
-            shutil.copy2(src_log, log_dir / cand_log)
+        (
+            shutil.copytree(src_log, log_dir / cand_log)
+            if src_log.is_dir()
+            else shutil.copy2(src_log, log_dir / cand_log)
+        )
         print(f"reusing endpoint candidate cache per {src_log}")
     elif not src_log.exists():
-        print(f"WARNING: no candidate log at {src_log}; endpoint modes will try "
-              f"to rebuild the cache and the write guard will refuse")
+        print(
+            f"WARNING: no candidate log at {src_log}; endpoint modes will try "
+            f"to rebuild the cache and the write guard will refuse"
+        )
 
     from opdi.config import DetectionConfig
 
@@ -329,16 +369,26 @@ def main() -> None:
     e_ades = argmax(args.endpoint_sweep, "ades", args.k)
 
     print(f"=== tuned parameters, argmax at k={args.k:g} ===")
-    for name, r, kind in (("trend ADEP", t_adep, "t"), ("trend ADES", t_ades, "t"),
-                          ("endpoint ADEP", e_adep, "e"), ("endpoint ADES", e_ades, "e")):
+    for name, r, kind in (
+        ("trend ADEP", t_adep, "t"),
+        ("trend ADES", t_ades, "t"),
+        ("endpoint ADEP", e_adep, "e"),
+        ("endpoint ADES", e_ades, "e"),
+    ):
         if kind == "t":
-            desc = (f"FL{r['fl_cap']} margin {r['margin']} "
-                    f"radius {float(r['radius_nm']):g} NM pen {float(r['penalty_nm']):g} NM")
+            desc = (
+                f"FL{r['fl_cap']} margin {r['margin']} "
+                f"radius {float(r['radius_nm']):g} NM pen {float(r['penalty_nm']):g} NM"
+            )
         else:
-            desc = (f"radius {float(r['radius_nm']):g} NM "
-                    f"height {float(r['height_ft']):g} ft pen {float(r['penalty_nm']):g} NM")
-        print(f"  {name:<14} {desc:<58} "
-              f"correct={r['_correct']:>7,} wrong={r['_wrong']:>6,} score={r['_score']:>9,.0f}")
+            desc = (
+                f"radius {float(r['radius_nm']):g} NM "
+                f"height {float(r['height_ft']):g} ft pen {float(r['penalty_nm']):g} NM"
+            )
+        print(
+            f"  {name:<14} {desc:<58} "
+            f"correct={r['_correct']:>7,} wrong={r['_wrong']:>6,} score={r['_score']:>9,.0f}"
+        )
 
     # Whichever method scores higher takes that role in the combined run. This
     # is the report's headline recommendation, and it is decided by the sweeps
@@ -423,21 +473,24 @@ def main() -> None:
     m_mg = int(m_ades["margin"])
     m_rd, m_pn = float(m_ades["radius_nm"]), float(m_ades["penalty_nm"])
     path = {
-        "path0_legacy":  path_cfg(),
+        "path0_legacy": path_cfg(),
         "path1_penalty": path_cfg(trend_sched_penalty_nm=m_pn),
         "path2_ceiling": path_cfg(trend_sched_penalty_nm=m_pn, **m_ceiling),
-        "path3_margin":  path_cfg(trend_sched_penalty_nm=m_pn, **m_ceiling,
-                                  trend_vote_margin=m_mg),
-        "path4_radius":  path_cfg(trend_sched_penalty_nm=m_pn, **m_ceiling,
-                                  trend_vote_margin=m_mg, trend_radius_nm=m_rd),
+        "path3_margin": path_cfg(trend_sched_penalty_nm=m_pn, **m_ceiling, trend_vote_margin=m_mg),
+        "path4_radius": path_cfg(
+            trend_sched_penalty_nm=m_pn, **m_ceiling, trend_vote_margin=m_mg, trend_radius_nm=m_rd
+        ),
         # The fifth rung: rung 4 with the reference surface moved and nothing
         # else. The ceiling is the exact height equivalent of rung 4's flight
         # level, so the band admitted is identical and the only variable is
         # what it is measured from.
-        "path5_datum":   path_cfg(trend_sched_penalty_nm=m_pn,
-                                  trend_vote_margin=m_mg, trend_radius_nm=m_rd,
-                                  trend_max_datum="field",
-                                  trend_max_height_ft=msl_equivalent_height_ft(m_fl)),
+        "path5_datum": path_cfg(
+            trend_sched_penalty_nm=m_pn,
+            trend_vote_margin=m_mg,
+            trend_radius_nm=m_rd,
+            trend_max_datum="field",
+            trend_max_height_ft=msl_equivalent_height_ft(m_fl),
+        ),
     }
 
     # What the study actually recommends, as one flight list.
@@ -470,11 +523,10 @@ def main() -> None:
     # counts the elevation banding is read from, so the banded numbers cannot
     # disagree with the headline ones.
     datum = {
-        "datum_msl": dataclasses.replace(
-            recommended, trend_max_datum="msl", trend_max_fl=60),
+        "datum_msl": dataclasses.replace(recommended, trend_max_datum="msl", trend_max_fl=60),
         "datum_field": dataclasses.replace(
-            recommended, trend_max_datum="field",
-            trend_max_height_ft=DATUM_ARM_CEILING_FT),
+            recommended, trend_max_datum="field", trend_max_height_ft=DATUM_ARM_CEILING_FT
+        ),
     }
 
     # A grid of trend settings, run through the pipeline rather than the sweep
@@ -491,9 +543,11 @@ def main() -> None:
         for rd in args.grid_radius:
             for mg in args.grid_margin:
                 grid[f"grid_h{cap}_r{rd:g}_m{mg}"] = path_cfg(
-                    trend_max_datum="field", trend_max_height_ft=float(cap),
+                    trend_max_datum="field",
+                    trend_max_height_ft=float(cap),
                     trend_radius_nm=float(rd),
-                    trend_vote_margin=mg, trend_sched_penalty_nm=args.grid_penalty,
+                    trend_vote_margin=mg,
+                    trend_sched_penalty_nm=args.grid_penalty,
                 )
 
     plan = {
@@ -502,8 +556,7 @@ def main() -> None:
         # At the shipped modes, not forced to trend/trend: the pair is meant to
         # measure what the datum did to production, and production takes
         # departures from endpoint.
-        **{k_: (v_, recommended.adep_mode, recommended.ades_mode)
-           for k_, v_ in datum.items()},
+        **{k_: (v_, recommended.adep_mode, recommended.ades_mode) for k_, v_ in datum.items()},
         "recommended": (recommended, "endpoint", "trend"),
         "legacy": (DetectionConfig.legacy(), "trend", "trend"),
         "trend": (single("trend"), "trend", "trend"),
@@ -524,7 +577,9 @@ def main() -> None:
     # the storage backend (plain parquet over S3A, no Hive, no Iceberg), and
     # setting the field afterwards leaves the StorageManager unwired, so every
     # table looks absent.
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     month = datetime.strptime(args.months[0], "%Y%m").date().replace(day=1)
 
     # Restricted to the days actually ingested. Without this the ground truth
@@ -543,35 +598,45 @@ def main() -> None:
 
         pred, ident = load_predictions(spark, table)
         m = score(pred, ident, gt, k=args.k)
-        m.update(run=run, adep_mode=adep_mode, ades_mode=ades_mode,
-                 trend_max_fl=detection.trend_max_fl,
-                 trend_radius_nm=detection.trend_radius_nm,
-                 trend_vote_margin=detection.trend_vote_margin,
-                 trend_sched_penalty_nm=detection.trend_sched_penalty_nm,
-                 trend_rank_by=getattr(detection, "trend_rank_by", "ring"),
-                 trend_max_fl_v=detection.trend_max_fl,
-                 # The datum, and the ceiling on it. Without these two the
-                 # grid rows are indistinguishable: `trend_max_fl` is inert
-                 # while the datum is `field`, so every cell of a height grid
-                 # would report the same cap and the table would collapse.
-                 trend_max_datum=detection.trend_max_datum,
-                 trend_max_height_ft=detection.trend_max_height_ft,
-                 # One column that means the right thing on either datum, so
-                 # the report can key on it without re-deciding which field to
-                 # read at every table.
-                 trend_ceiling=(detection.trend_max_height_ft
-                                if detection.trend_max_datum == "field"
-                                else detection.trend_max_fl),
-                 endpoint_radius_nm=detection.endpoint_radius_nm,
-                 endpoint_height_ft=detection.endpoint_height_ft,
-                 endpoint_sched_penalty_nm=detection.endpoint_sched_penalty_nm)
+        m.update(
+            run=run,
+            adep_mode=adep_mode,
+            ades_mode=ades_mode,
+            trend_max_fl=detection.trend_max_fl,
+            trend_radius_nm=detection.trend_radius_nm,
+            trend_vote_margin=detection.trend_vote_margin,
+            trend_sched_penalty_nm=detection.trend_sched_penalty_nm,
+            trend_rank_by=getattr(detection, "trend_rank_by", "ring"),
+            trend_max_fl_v=detection.trend_max_fl,
+            # The datum, and the ceiling on it. Without these two the
+            # grid rows are indistinguishable: `trend_max_fl` is inert
+            # while the datum is `field`, so every cell of a height grid
+            # would report the same cap and the table would collapse.
+            trend_max_datum=detection.trend_max_datum,
+            trend_max_height_ft=detection.trend_max_height_ft,
+            # One column that means the right thing on either datum, so
+            # the report can key on it without re-deciding which field to
+            # read at every table.
+            trend_ceiling=(
+                detection.trend_max_height_ft
+                if detection.trend_max_datum == "field"
+                else detection.trend_max_fl
+            ),
+            endpoint_radius_nm=detection.endpoint_radius_nm,
+            endpoint_height_ft=detection.endpoint_height_ft,
+            endpoint_sched_penalty_nm=detection.endpoint_sched_penalty_nm,
+        )
         rows.append(m)
-        print(f"  ADEP cov={m['adep_coverage']:.2%} acc={m['adep_accuracy']:.2%} "
-              f"correct={m['adep_correct']:,} wrong={m['adep_wrong']:,} "
-              f"score={m['adep_score']:,.0f}")
-        print(f"  ADES cov={m['ades_coverage']:.2%} acc={m['ades_accuracy']:.2%} "
-              f"correct={m['ades_correct']:,} wrong={m['ades_wrong']:,} "
-              f"score={m['ades_score']:,.0f}")
+        print(
+            f"  ADEP cov={m['adep_coverage']:.2%} acc={m['adep_accuracy']:.2%} "
+            f"correct={m['adep_correct']:,} wrong={m['adep_wrong']:,} "
+            f"score={m['adep_score']:,.0f}"
+        )
+        print(
+            f"  ADES cov={m['ades_coverage']:.2%} acc={m['ades_accuracy']:.2%} "
+            f"correct={m['ades_correct']:,} wrong={m['ades_wrong']:,} "
+            f"score={m['ades_score']:,.0f}"
+        )
 
         for r in per_airport_counts(pred, ident, gt).collect():
             per_apt.append({**r.asDict(), "run": run})

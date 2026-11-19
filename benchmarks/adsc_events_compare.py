@@ -37,11 +37,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import functions as F  # noqa: E402
-
 import events_gt  # noqa: E402
 import events_score  # noqa: E402
 from event_bench import detected_events, milestone_map  # noqa: E402
+from pyspark.sql import functions as F  # noqa: E402
 
 #: The warehouse the ``opensky`` environment resolves relative table names
 #: against. Named because :func:`arm_tables` has to express one of its two
@@ -69,6 +68,8 @@ def scoring_config():
 
     cfg = OPDIConfig.for_environment("opensky", worldwide=False)
     cfg.project.warehouse_path = WAREHOUSE
+    # The prefix holds the tables directly, without a release folder.
+    cfg.project.release = ""
     return cfg
 
 
@@ -100,7 +101,7 @@ def arm_tables(prefix: str, arm: str) -> dict:
             f"is read through StorageManager, which can only resolve a name "
             f"relative to that warehouse."
         )
-    relative = prefix[len(WAREHOUSE) + 1:]
+    relative = prefix[len(WAREHOUSE) + 1 :]
     return {
         "events": f"{prefix}/{arm}/opdi_flight_events",
         "flight_list": f"{relative}/{arm}/opdi_flight_list",
@@ -111,8 +112,12 @@ def score_arm(spark, storage, truth, prefix: str, arm: str, mapping: dict):
     """``(per_milestone, per_airport)`` for one arm, each carrying ``arm``."""
     tables = arm_tables(prefix, arm)
     det = detected_events(
-        spark, tables["events"], storage=storage, identity="flight_list",
-        flight_list=tables["flight_list"], mapping=mapping,
+        spark,
+        tables["events"],
+        storage=storage,
+        identity="flight_list",
+        flight_list=tables["flight_list"],
+        mapping=mapping,
     )
     aligned = events_score.align(truth, det).cache()
     per_ms = events_score.score(aligned).withColumn("arm", F.lit(arm))
@@ -127,8 +132,7 @@ def main() -> int:
     ap.add_argument("--arms", nargs="+", default=list(ARMS), choices=list(ARMS))
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--out-name", default="adsc_events_2026.csv")
-    ap.add_argument("--by-airport-name",
-                    default="adsc_events_by_airport_2026.csv")
+    ap.add_argument("--by-airport-name", default="adsc_events_by_airport_2026.csv")
     ap.add_argument("--cores", type=int, default=4)
     ap.add_argument("--driver-memory", default="8g")
     ap.add_argument("--executors", type=int, default=6)
@@ -158,13 +162,11 @@ def main() -> int:
 
     ms_rows, ap_rows = [], []
     try:
-        truth, _rings, _report = events_gt.build(
-            spark, PERIOD, airports="study")
+        truth, _rings, _report = events_gt.build(spark, PERIOD, airports="study")
         truth.cache()
         for arm in args.arms:
             print(f"\n=== scoring arm {arm} ===", flush=True)
-            per_ms, per_ap = score_arm(
-                spark, storage, truth, args.prefix, arm, mapping)
+            per_ms, per_ap = score_arm(spark, storage, truth, args.prefix, arm, mapping)
             ms_rows += [r.asDict() for r in per_ms.collect()]
             ap_rows += [r.asDict() for r in per_ap.collect()]
     finally:
@@ -178,7 +180,8 @@ def main() -> int:
             raise SystemExit(
                 f"{name}: no rows. An empty score table is not a null result "
                 f"-- it means the identity bridge found nothing, and a paper "
-                f"must not report it as agreement.")
+                f"must not report it as agreement."
+            )
         fields = ["arm"] + sorted(set(rows[0]) - {"arm"})
         with open(out / name, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=fields)
@@ -190,15 +193,23 @@ def main() -> int:
     write(args.by_airport_name, ap_rows)
 
     import provenance
+
     for name in (args.out_name, args.by_airport_name):
         provenance.record(
-            out, name, "benchmarks/adsc_events_compare.py", sys.argv[1:],
-            ["benchmarks/adsc_events_compare.py", "benchmarks/events_gt.py",
-             "benchmarks/events_score.py", "benchmarks/event_bench.py",
-             "src/opdi/pipeline/events.py"],
+            out,
+            name,
+            "benchmarks/adsc_events_compare.py",
+            sys.argv[1:],
+            [
+                "benchmarks/adsc_events_compare.py",
+                "benchmarks/events_gt.py",
+                "benchmarks/events_score.py",
+                "benchmarks/event_bench.py",
+                "src/opdi/pipeline/events.py",
+            ],
             inputs={"period": PERIOD, "arms": args.arms, "airports": "study"},
-            input_tables=[arm_tables(args.prefix, a)["events"]
-                          for a in args.arms])
+            input_tables=[arm_tables(args.prefix, a)["events"] for a in args.arms],
+        )
     return 0
 
 

@@ -20,6 +20,13 @@ import pytest
 # suite, before any SparkSession is built.
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
+# The workers are separate Python processes: they get src/ on their path from
+# PYTHONPATH, so a UDF that refers to an opdi function imports the code under
+# test, not some other installed copy.
+_SRC = str(Path(__file__).resolve().parent.parent / "src")
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    [_SRC] + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p and p != _SRC]
+)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
@@ -72,13 +79,40 @@ def spark() -> SparkSession:
         # the room is the accumulated plans, broadcasts and cached blocks.
         # 4 GB carried four full passes; the navigation families of 2026-11
         # (holding, point merge, FIR) add window passes to every shipped-config
-        # run and the fifth pass no longer fit, so 8 GB.
-        .config("spark.driver.memory", "8g")
+        # run and the fifth pass no longer fit, so 8 GB. With the corrections
+        # of the spot checks one pass of step 04 holds plans of about 8 GB
+        # (some 700,000 plan nodes), so 10 GB.
+        .config("spark.driver.memory", "10g")
+        # Spark keeps the plan of every query it ran for its status pages.
+        # With all corrections on, step 04 runs many queries over large
+        # plans, and keeping them all filled the heap within one test file.
+        .config("spark.sql.ui.retainedExecutions", "5")
+        .config("spark.ui.retainedJobs", "50")
+        .config("spark.ui.retainedStages", "50")
+        .config("spark.ui.retainedTasks", "1000")
         .getOrCreate()
     )
     session.sparkContext.setLogLevel("ERROR")
     yield session
     session.stop()
+
+
+@pytest.fixture(autouse=True)
+def _free_cached_frames(request):
+    """Free the frames a test left cached in the shared session.
+
+    A run of step 04 caches frames it does not free itself (the session
+    ends after a day in production); over a file of whole passes they
+    filled the local driver's memory.
+    """
+    yield
+    if "spark" in request.fixturenames:
+        import gc
+
+        request.getfixturevalue("spark").catalog.clearCache()
+        # The Python frames of the test hold the plans on the Java side
+        # until Python collects them.
+        gc.collect()
 
 
 def make_track(

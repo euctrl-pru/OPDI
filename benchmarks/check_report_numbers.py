@@ -42,23 +42,22 @@ INLINE_R = re.compile(r"`r [^`]*`")
 #: separator rather than the sentence's punctuation. Without that, "in 2025,
 #: across 12 cells" parses the year as "2025," -- which is not an integer, so
 #: the year exemption never fires and every date in the paper is flagged.
-NUM = re.compile(
-    r"(?<![\w.])([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|pp|ft|NM|km|kt)?")
+NUM = re.compile(r"(?<![\w.])([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|pp|ft|NM|km|kt)?")
 
 #: Constructs that merely contain digits and are not measurements: section
 #: references, step and node identifiers, version numbers, and anything already
 #: inside backticks (a code span is naming a thing, not reporting a value).
 IDENT = re.compile(
-    r"`[^`]*`"                       # any code span
-    r"|@[\w-]+"                      # crossrefs: @sec-datum, @fig-...
-    r"|FL\d+"                        # flight levels
-    r"|\bS\d+\b|\bE\d+\b"            # diagram nodes
-    r"|path\d+"                      # ladder rungs
-    r"|step \d+"                     # pipeline steps
-    r"|res(?:olution)? \d+"          # H3 resolution
-    r"|\bv\d+(?:\.\d+)*\b"           # v6, v6.1
-    r"|[Vv]ersion \d+(?:\.\d+)*"     # version 6.2, and sentence-initial Version
-    r"|\bk\s*=\s*\d+"                # the exchange rate
+    r"`[^`]*`"  # any code span
+    r"|@[\w-]+"  # crossrefs: @sec-datum, @fig-...
+    r"|FL\d+"  # flight levels
+    r"|\bS\d+\b|\bE\d+\b"  # diagram nodes
+    r"|path\d+"  # ladder rungs
+    r"|step \d+"  # pipeline steps
+    r"|res(?:olution)? \d+"  # H3 resolution
+    r"|\bv\d+(?:\.\d+)*\b"  # v6, v6.1
+    r"|[Vv]ersion \d+(?:\.\d+)*"  # version 6.2, and sentence-initial Version
+    r"|\bk\s*=\s*\d+"  # the exchange rate
 )
 
 
@@ -76,8 +75,8 @@ def _strip_front_matter(lines):
         return list(enumerate(lines, 1))
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":
-            return list(enumerate(lines, 1))[i + 1:]
-    return list(enumerate(lines, 1))     # unterminated: treat it all as prose
+            return list(enumerate(lines, 1))[i + 1 :]
+    return list(enumerate(lines, 1))  # unterminated: treat it all as prose
 
 
 def prose_lines(text: str):
@@ -121,8 +120,8 @@ def typed_numbers(text: str):
         # definition tables; div markers carry no prose.
         if s.startswith("#") or s.startswith("|") or s.startswith(":::"):
             continue
-        s = INLINE_R.sub(" ", s)     # computed spans are not typed
-        s = IDENT.sub(" ", s)        # identifiers are not measurements
+        s = INLINE_R.sub(" ", s)  # computed spans are not typed
+        s = IDENT.sub(" ", s)  # identifiers are not measurements
         for m in NUM.finditer(s):
             value, unit = m.group(1), m.group(2)
             if _exempt(value, unit):
@@ -158,10 +157,12 @@ def load_allowlist(path) -> dict:
                 f"allowlist entry {e['value']!r} has no `why`. A bare list of "
                 f"permitted numbers becomes a place to silence this check; a "
                 f"field that must say why the number is not a result makes "
-                f"silencing it visible in review.")
+                f"silencing it visible in review."
+            )
         ctx = e.get("context")
         out.setdefault(str(e["value"]).lstrip("+"), []).append(
-            (re.compile(ctx) if ctx else None, e["why"]))
+            (re.compile(ctx) if ctx else None, e["why"])
+        )
     return out
 
 

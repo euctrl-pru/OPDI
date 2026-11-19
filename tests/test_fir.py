@@ -28,8 +28,21 @@ def _ref(spark, volumes, res=7):
     for code, lo, hi, area, x0, x1 in volumes:
         poly = h3.LatLngPoly([(LAT0, x0), (LAT1, x0), (LAT1, x1), (LAT0, x1)])
         for cell in h3.compact_cells(h3.polygon_to_cells(poly, res)):
-            rows.append(("FIR", code, code, "524", "2024-11-28", "2024-12-26", lo, hi, float(area),
-                         cell, h3.get_resolution(cell)))
+            rows.append(
+                (
+                    "FIR",
+                    code,
+                    code,
+                    "524",
+                    "2024-11-28",
+                    "2024-12-26",
+                    lo,
+                    hi,
+                    float(area),
+                    cell,
+                    h3.get_resolution(cell),
+                )
+            )
     return spark.createDataFrame(rows, AIRSPACE_SCHEMA)
 
 
@@ -47,10 +60,15 @@ TWO = [("AAAA", 0, 999, 1e4, -2.0, 0.0), ("BBBB", 0, 999, 1e4, 0.0, 2.0)]
 
 def test_h3_parent_expr_matches_the_library(spark):
     random.seed(1)
-    cells = [h3.latlng_to_cell(random.uniform(-80, 80), random.uniform(-180, 180), 7) for _ in range(20)]
+    cells = [
+        h3.latlng_to_cell(random.uniform(-80, 80), random.uniform(-180, 180), 7) for _ in range(20)
+    ]
     df = spark.createDataFrame([(c,) for c in cells], "cell string")
     for r in range(0, 8):
-        got = {row.cell: row.p for row in df.withColumn("p", h3_parent_expr(F.col("cell"), r)).collect()}
+        got = {
+            row.cell: row.p
+            for row in df.withColumn("p", h3_parent_expr(F.col("cell"), r)).collect()
+        }
         assert got == {c: h3.cell_to_parent(c, r) for c in cells}, r
 
 
@@ -60,15 +78,17 @@ def test_a_straight_flight_across_the_boundary_gives_one_crossing(spark):
     rows = calculate_fir_events(sdf, _ref(spark, TWO), EventConfig()).collect()
     assert len(rows) == 1
     row = rows[0]
-    assert row.type == "xing-fir" and row.version == FIR_VERSION == "fir_v0.1.0"
+    assert row.type == "xing-fir" and row.version == FIR_VERSION == "fir_v0.2.0"
     info = json.loads(row.info)
     assert info["fir_from"] == "AAAA" and info["fir_to"] == "BBBB"
     assert info["crossing_seq"] == 1
     assert info["airac_cfmu"] == "524"
-    assert info["airac_validity_start"] == "2024-11-28" and info["airac_validity_end"] == "2024-12-26"
+    assert (
+        info["airac_validity_start"] == "2024-11-28" and info["airac_validity_end"] == "2024-12-26"
+    )
     assert abs(info["fl"] - 330) <= 1
     assert 0 < info["bracket_s"] <= 10
-    assert abs(row.lon) < 0.05           # at the boundary
+    assert abs(row.lon) < 0.05  # at the boundary
     assert row.cumulative_distance_nm > 0
 
 
@@ -96,7 +116,9 @@ def test_no_crossing_across_a_hole(spark):
 def test_a_climb_through_the_band_boundary_is_a_crossing(spark):
     layered = [("AAAAFIR", 0, 195, 1e4, -2.0, 2.0), ("AAAAUIR", 195, 999, 1e4, -2.0, 2.0)]
     # Climb from FL150 to FL250 at 2,000 ft/min, then level: 300 s of climb.
-    sdf = _track(spark, [(300, 0, 2000.0), (300, 0, 0)], lat0=51.0, lon0=-1.0, hdg0=90.0, alt_ft=15000.0)
+    sdf = _track(
+        spark, [(300, 0, 2000.0), (300, 0, 0)], lat0=51.0, lon0=-1.0, hdg0=90.0, alt_ft=15000.0
+    )
     rows = calculate_fir_events(sdf, _ref(spark, layered), EventConfig()).collect()
     assert len(rows) == 1
     info = json.loads(rows[0].info)
@@ -132,14 +154,18 @@ def test_missing_reference_table_skips_the_family(spark):
             return True
 
         def read_table(self, name):
-            return spark.createDataFrame([("FIR", "AAAA", "x")], "airspace_type string, code string, h3_res_7 string")
+            return spark.createDataFrame(
+                [("FIR", "AAAA", "x")], "airspace_type string, code string, h3_res_7 string"
+            )
 
     assert load_fir_reference(OldTable()) is None
 
 
 def test_off_flag_returns_none(spark):
     sdf = _track(spark, [(60, 0, 0)])
-    assert calculate_fir_events(sdf, _ref(spark, TWO), EventConfig(emit_fir_crossings=False)) is None
+    assert (
+        calculate_fir_events(sdf, _ref(spark, TWO), EventConfig(emit_fir_crossings=False)) is None
+    )
 
 
 def test_a_volume_stored_at_resolution_zero_is_found(spark):
@@ -170,3 +196,89 @@ def test_a_crossing_across_a_long_blank_is_still_a_crossing(spark):
     # the last *known* long run, which is AAAA itself), so the bracket is one
     # or two samples, not the whole blank.
     assert info["bracket_s"] <= 10
+
+
+# ---------------------------------------------------------------------------
+# Work package 5: positions removed by cleaning, position jumps, vertical
+# ---------------------------------------------------------------------------
+
+
+def _cleaned_after_boundary(spark):
+    """Eastbound across the AAAA/BBBB boundary (lon 0). Cleaning removed the
+    positions of the first two minutes in BBBB, but the map cell computed
+    from them stayed (spot check xing-fir#05 and #33: the crossing was then
+    published without a position)."""
+    samples = legs_to_samples([(1500, 0, 0)], lat0=51.0, lon0=-1.5, hdg0=90.0, alt_ft=33000.0)
+    sdf = _with_cells(measured(make_track(spark, samples)))
+    lon_now = F.col("lon")
+    blank = (lon_now > 0) & (lon_now < 0.25)
+    return sdf.withColumn("lat", F.when(blank, None).otherwise(F.col("lat"))).withColumn(
+        "lon", F.when(blank, None).otherwise(lon_now)
+    )
+
+
+def test_a_fir_crossing_is_placed_on_a_report_that_kept_its_position(spark):
+    rows = calculate_fir_events(
+        _cleaned_after_boundary(spark), _ref(spark, TWO), EventConfig()
+    ).collect()
+
+    assert len(rows) == 1
+    assert rows[0].lat is not None and rows[0].lon == pytest.approx(0.25, abs=0.03)
+    assert json.loads(rows[0].info)["bracket_s"] > 60
+
+
+def test_without_the_setting_the_crossing_has_no_position(spark):
+    config = EventConfig(fir_needs_position=False)
+
+    rows = calculate_fir_events(_cleaned_after_boundary(spark), _ref(spark, TWO), config).collect()
+
+    assert len(rows) == 1 and rows[0].lat is None
+    assert EventConfig.legacy().fir_needs_position is False
+
+
+def _spoofed(spark):
+    """Spot check xing-fir#33: positions jump from the aircraft's own region
+    to a fixed point about 75 NM away within 5 s, stay there for five
+    minutes, and jump back."""
+    samples = legs_to_samples([(900, 0, 0)], lat0=51.0, lon0=-1.9, hdg0=90.0, alt_ft=33000.0)
+    for s in samples:
+        if 300 <= s["t"] < 600:
+            s["lat"], s["lon"] = 51.0, 0.5
+    return _with_cells(measured(make_track(spark, samples)))
+
+
+def test_a_jump_into_another_region_and_back_gives_no_crossing(spark):
+    rows = calculate_fir_events(_spoofed(spark), _ref(spark, TWO), EventConfig()).collect()
+
+    assert rows == []
+
+
+def test_without_the_speed_limit_the_jump_gives_two_crossings(spark):
+    config = EventConfig(crossing_max_implied_speed_kt=None)
+
+    rows = calculate_fir_events(_spoofed(spark), _ref(spark, TWO), config).collect()
+
+    assert len(rows) == 2
+
+
+def test_a_climb_from_the_lower_into_the_upper_region_is_flagged_vertical(spark):
+    layered = [("AAAAFIR", 0, 195, 1e4, -2.0, 2.0), ("AAAAUIR", 195, 999, 1e4, -2.0, 2.0)]
+    sdf = _track(
+        spark, [(300, 0, 2000.0), (300, 0, 0)], lat0=51.0, lon0=-1.0, hdg0=90.0, alt_ft=15000.0
+    )
+
+    rows = calculate_fir_events(sdf, _ref(spark, layered), EventConfig()).collect()
+
+    assert len(rows) == 1 and json.loads(rows[0].info)["vertical"] is True
+
+
+def test_a_lateral_crossing_is_not_flagged_vertical(spark):
+    sdf = _track(spark, [(1500, 0, 0)], lat0=51.0, lon0=-1.5, hdg0=90.0, alt_ft=33000.0)
+
+    rows = calculate_fir_events(sdf, _ref(spark, TWO), EventConfig()).collect()
+    off = calculate_fir_events(
+        sdf, _ref(spark, TWO), EventConfig(fir_flag_vertical=False)
+    ).collect()
+
+    assert json.loads(rows[0].info)["vertical"] is False
+    assert "vertical" not in json.loads(off[0].info)

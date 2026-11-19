@@ -3,7 +3,6 @@
 import datetime as dt
 import json
 
-import pytest
 from conftest import _EPOCH, make_track
 from navigation_fixtures import fly, legs_to_samples, measured, racetrack
 from pyspark.sql import functions as F
@@ -28,7 +27,7 @@ def test_two_racetrack_circuits_give_one_holding_pair(spark):
     assert 1.5 <= info["circuits"] <= 2.5
     assert 600 <= info["duration_s"] <= 900
     assert info["holding_seq"] == 1
-    assert all(r.version == HOLDING_VERSION == "holding_v0.1.0" for r in rows)
+    assert all(r.version == HOLDING_VERSION == "holding_v0.2.0" for r in rows)
     span = by["holding-end"].cumulative_time_s - by["holding-start"].cumulative_time_s
     assert 600 <= span <= 900
     assert by["holding-start"].lat is not None and by["holding-end"].lon is not None
@@ -36,7 +35,7 @@ def test_two_racetrack_circuits_give_one_holding_pair(spark):
 
 
 def test_a_single_left_orbit_is_an_orbit(spark):
-    sdf = fly(spark, [(300, 0, 0), (270, -1.4, 0), (300, 0, 0)])   # 378° left in 4.5 min
+    sdf = fly(spark, [(300, 0, 0), (270, -1.4, 0), (300, 0, 0)])  # 378° left in 4.5 min
     rows = calculate_holding_events(sdf, EventConfig()).collect()
     assert len(rows) == 2
     info = json.loads(rows[0].info)
@@ -87,11 +86,15 @@ def test_a_hold_split_by_a_hole_gives_two_episodes(spark):
 
 
 def test_off_flag_returns_none(spark):
-    assert calculate_holding_events(fly(spark, racetrack(2)), EventConfig(emit_holding=False)) is None
+    assert (
+        calculate_holding_events(fly(spark, racetrack(2)), EventConfig(emit_holding=False)) is None
+    )
 
 
 def test_blanked_speeds_inside_a_hold_do_not_split_it(spark):
     sdf = fly(spark, [(300, 0, 0)] + racetrack(2) + [(300, 0, 0)])
-    sdf = sdf.withColumn("velocity", F.when(F.col("cumulative_time_s") % 15 == 0, None).otherwise(F.col("velocity")))
+    sdf = sdf.withColumn(
+        "velocity", F.when(F.col("cumulative_time_s") % 15 == 0, None).otherwise(F.col("velocity"))
+    )
     rows = calculate_holding_events(sdf, EventConfig()).collect()
     assert sorted(r.type for r in rows) == ["holding-end", "holding-start"]

@@ -4,10 +4,10 @@
     export PYSPARK_DRIVER_PYTHON=$PWD/.venv310/bin/python
     unset PYSPARK_PYTHON
     .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --steps 00c 03
-    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --arm off --steps 04 \\
-        --timings-csv <paper>/data/pipeline_day/timings.csv
-    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 --arm on --steps 04 \\
-        --timings-csv <paper>/data/pipeline_day/timings.csv
+    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 \\
+        --arm off --steps 04 --timings-csv <paper>/data/pipeline_day/timings.csv
+    .venv310/bin/python -u benchmarks/run_airspace_events_day.py --day 2026-06-14 \\
+        --arm on --steps 04 --timings-csv <paper>/data/pipeline_day/timings.csv
 
 The measurement run of the holding / point merge / FIR study
 (``docs/superpowers/specs/2026-11-10-airspace-events-design.md``). The two
@@ -117,7 +117,8 @@ def arm_path(arm: str, table: str, input_source: str = "world") -> str:
         return f"{PREFIX}/{arm}/{table}"
     raise RuntimeError(
         f"unclassified table {table!r}: add it to PASSTHROUGH, INPUTS, FLIGHTS, SHARED or "
-        f"DERIVED in benchmarks/run_airspace_events_day.py.")
+        f"DERIVED in benchmarks/run_airspace_events_day.py."
+    )
 
 
 def guard_write_path(path: str) -> None:
@@ -125,7 +126,8 @@ def guard_write_path(path: str) -> None:
     if not ALLOWED_WRITE_ROOT.match(path):
         raise AssertionError(
             f"refusing to write {path!r}: every table this script writes must sit "
-            f"under {PREFIX!r}. Inputs and reference tables are read-only.")
+            f"under {PREFIX!r}. Inputs and reference tables are read-only."
+        )
 
 
 def build_config(arm: str, executors: int = 8) -> OPDIConfig:
@@ -134,6 +136,8 @@ def build_config(arm: str, executors: int = 8) -> OPDIConfig:
         raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
     cfg = OPDIConfig.for_environment("opensky", worldwide=True)
     cfg.project.warehouse_path = INPUT_WAREHOUSE
+    # The prefix holds the tables directly, without a release folder.
+    cfg.project.release = ""
     cfg.adsc.enabled = False
     cfg.spark.executor_instances = str(executors)
     for flag in NAVIGATION_FLAGS:
@@ -144,8 +148,11 @@ def build_config(arm: str, executors: int = 8) -> OPDIConfig:
 def redirect(arm: str, input_source: str) -> None:
     """Resolve tables to the study prefix or the inputs; pass reference through."""
     if not _ORIG:
-        _ORIG.update(path=StorageManager._s3_path, write=StorageManager.write_table,
-                     drop=StorageManager.drop_partitions)
+        _ORIG.update(
+            path=StorageManager._s3_path,
+            write=StorageManager.write_table,
+            drop=StorageManager.drop_partitions,
+        )
     orig_path, orig_write, orig_drop = _ORIG["path"], _ORIG["write"], _ORIG["drop"]
 
     def _s3_path(self, table_name):
@@ -180,8 +187,11 @@ def study_session(app_name: str, executors: int = 4):
     from opdi.utils.spark_helpers import SparkSessionManager
 
     return SparkSessionManager.create_session(
-        app_name=app_name, config=build_config("on", executors), distributed=True,
-        extra_configs=S3_PATIENCE)
+        app_name=app_name,
+        config=build_config("on", executors),
+        distributed=True,
+        extra_configs=S3_PATIENCE,
+    )
 
 
 def run(arm: str, day: date, executors: int, steps, input_source: str, timings_csv=None) -> None:
@@ -189,7 +199,9 @@ def run(arm: str, day: date, executors: int, steps, input_source: str, timings_c
 
     cfg = build_config(arm, executors)
     print("=" * 72)
-    print(f"  arm        : {arm}  ({', '.join(f'{f}={getattr(cfg.events, f)}' for f in NAVIGATION_FLAGS)})")
+    print(
+        f"  arm        : {arm}  ({', '.join(f'{f}={getattr(cfg.events, f)}' for f in NAVIGATION_FLAGS)})"  # noqa: E501
+    )
     print(f"  day        : {day}")
     print(f"  inputs     : {arm_path(arm, 'osn_tracks_clean', input_source)}  (read-only)")
     print(f"  outputs    : {PREFIX}/{arm}  and  {PREFIX}/ref")
@@ -199,8 +211,11 @@ def run(arm: str, day: date, executors: int, steps, input_source: str, timings_c
 
     redirect(arm, input_source)
     spark = SparkSessionManager.create_session(
-        app_name=f"airspace events {arm} {day}", config=cfg, distributed=True,
-        extra_configs=S3_PATIENCE)
+        app_name=f"airspace events {arm} {day}",
+        config=cfg,
+        distributed=True,
+        extra_configs=S3_PATIENCE,
+    )
     try:
         kwargs = {"log_dir": str(REPO / "OPDI_live" / "logs" / f"airspace-events-{arm}")}
         for step in steps:
@@ -221,7 +236,9 @@ def run(arm: str, day: date, executors: int, steps, input_source: str, timings_c
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--day", required=True, help="YYYY-MM-DD")
     ap.add_argument("--arm", choices=ARMS, default="on")
     ap.add_argument("--steps", nargs="+", default=["04"], choices=STEPS)
@@ -229,7 +246,14 @@ def main() -> int:
     ap.add_argument("--executors", type=int, default=8)
     ap.add_argument("--timings-csv", default=None)
     args = ap.parse_args()
-    run(args.arm, date.fromisoformat(args.day), args.executors, args.steps, args.input, args.timings_csv)
+    run(
+        args.arm,
+        date.fromisoformat(args.day),
+        args.executors,
+        args.steps,
+        args.input,
+        args.timings_csv,
+    )
     print(f"\nDone. arm {args.arm} for {args.day} under {PREFIX}")
     return 0
 

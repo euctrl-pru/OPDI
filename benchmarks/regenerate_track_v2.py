@@ -92,7 +92,8 @@ SEG = [
     "src/opdi/pipeline/segmentation/__init__.py",
     "src/opdi/pipeline/segmentation/base.py",
     "src/opdi/pipeline/segmentation/methods.py",
-    "src/opdi/config.py",
+    "benchmarks/study_variants/segmentation.py",
+    "src/opdi/config",
 ]
 #: V2 runs the real steps, so the steps are dependencies. V1 did not need
 #: these: it read a track table someone else had built. That difference is the
@@ -104,11 +105,13 @@ SEG = [
 #: ``<missing>`` for a path that does not exist -- silently, with no warning --
 #: so a misspelled dependency does not fail, it simply never marks anything
 #: stale again.
-STEPS = ["src/opdi/ingestion/osn_statevectors.py",
-         "src/opdi/pipeline/tracks.py",
-         "src/opdi/cleaning/cleaner.py",
-         "src/opdi/cleaning/native.py",
-         "src/opdi/pipeline/flights.py"]
+STEPS = [
+    "src/opdi/ingestion/osn_statevectors.py",
+    "src/opdi/pipeline/tracks.py",
+    "src/opdi/cleaning/cleaner.py",
+    "src/opdi/cleaning/native.py",
+    "src/opdi/pipeline/flights.py",
+]
 #: The scorers, plus `track_diagnostics`, whose `null_rates` contributes
 #: columns to the same row.
 #:
@@ -118,10 +121,15 @@ STEPS = ["src/opdi/ingestion/osn_statevectors.py",
 #: block at the end of `jobs()`) must not require remembering to add a
 #: dependency back. Over-declaring costs a spurious re-run; under-declaring
 #: costs a number nothing can account for.
-SCORE = ["benchmarks/track_truth.py", "benchmarks/track_score.py",
-         "benchmarks/osn_sample.py", "benchmarks/adep_ades.py",
-         "benchmarks/flight_list_v7.py", "benchmarks/track_diagnostics.py",
-         "benchmarks/track_continuity.py"]
+SCORE = [
+    "benchmarks/track_truth.py",
+    "benchmarks/track_score.py",
+    "benchmarks/osn_sample.py",
+    "benchmarks/adep_ades.py",
+    "benchmarks/flight_list_v7.py",
+    "benchmarks/track_diagnostics.py",
+    "benchmarks/track_continuity.py",
+]
 
 
 class Job:
@@ -157,8 +165,7 @@ class Job:
         the run can know.
         """
         with tempfile.TemporaryDirectory(prefix=f"tcv2_{self.name}_") as tmp:
-            cmd = [sys.executable, "-u", str(REPO / self.script),
-                   *self.args, "--results-dir", tmp]
+            cmd = [sys.executable, "-u", str(REPO / self.script), *self.args, "--results-dir", tmp]
             print(f"\n=== {self.name} ===\n  {' '.join(cmd[2:])}", flush=True)
             r = subprocess.run(cmd, cwd=REPO)
             if r.returncode != 0:
@@ -170,10 +177,16 @@ class Job:
                 DATA.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, DATA / staged)
                 own = provenance.load_manifest(tmp).get(produced, {})
-                provenance.record(DATA, staged, self.script, self.args,
-                                  self.code_paths, inputs=own.get("inputs"),
-                                  input_tables=list(own.get("input_tables") or {}),
-                                  notes=self.notes)
+                provenance.record(
+                    DATA,
+                    staged,
+                    self.script,
+                    self.args,
+                    self.code_paths,
+                    inputs=own.get("inputs"),
+                    input_tables=list(own.get("input_tables") or {}),
+                    notes=self.notes,
+                )
                 print(f"  staged {staged}")
 
 
@@ -194,18 +207,27 @@ def jobs() -> list:
         # continuity job below is not declared either. See the block after this
         # loop for why, and for what it would take to bring them back.
         outputs = {f"pipeline_{period}.csv": f"pipeline_{period}.csv"}
-        out.append(Job(
-            name=f"pipeline_{period}",
-            script="benchmarks/track_pipeline_v2.py",
-            args=["--period", period, "--days", day,
-                  "--methods", *METHODS,
-                  "--out-name", f"pipeline_{period}.csv"],
-            outputs=outputs,
-            code_paths=SEG + STEPS + SCORE,
-            notes="Steps 01, 02 and 02a per arm (03 for legacy/standard only), "
-                  "scored airborne and gate-to-gate against NM/APDF ground "
-                  f"truth on {day}.",
-        ))
+        out.append(
+            Job(
+                name=f"pipeline_{period}",
+                script="benchmarks/track_pipeline_v2.py",
+                args=[
+                    "--period",
+                    period,
+                    "--days",
+                    day,
+                    "--methods",
+                    *METHODS,
+                    "--out-name",
+                    f"pipeline_{period}.csv",
+                ],
+                outputs=outputs,
+                code_paths=SEG + STEPS + SCORE,
+                notes="Steps 01, 02 and 02a per arm (03 for legacy/standard only), "
+                "scored airborne and gate-to-gate against NM/APDF ground "
+                f"truth on {day}.",
+            )
+        )
 
     # --- does the id survive the change? ---------------------------------
     # **Not a declared job, and the paper answers it without one.**
@@ -244,13 +266,16 @@ def jobs() -> list:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--check", action="store_true",
-                    help="report staleness and exit; no cluster needed")
+    ap.add_argument(
+        "--check", action="store_true", help="report staleness and exit; no cluster needed"
+    )
     ap.add_argument("--force", action="store_true", help="re-run every job")
     ap.add_argument("--only", nargs="+", help="run only these jobs, by name")
-    ap.add_argument("--allow-stale", action="store_true",
-                    help="report staleness but exit 0 -- for rendering a draft "
-                         "without a cluster")
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="report staleness but exit 0 -- for rendering a draft " "without a cluster",
+    )
     args = ap.parse_args()
 
     todo = jobs()
@@ -260,8 +285,7 @@ def main() -> None:
     stale = {j.name: j.stale() for j in todo}
     any_stale = {k: v for k, v in stale.items() if v}
 
-    print(f"analysis at {provenance.git_sha()}"
-          f"{' (dirty)' if provenance.git_dirty() else ''}\n")
+    print(f"analysis at {provenance.git_sha()}" f"{' (dirty)' if provenance.git_dirty() else ''}\n")
     for j in todo:
         why = stale[j.name]
         if why:
@@ -275,9 +299,13 @@ def main() -> None:
         if any_stale and not args.allow_stale:
             raise SystemExit(
                 f"\n{len(any_stale)} job(s) stale. Run without --check to "
-                f"regenerate, or pass --allow-stale to render anyway.")
-        print("\nall outputs current" if not any_stale else
-              "\nrendering with stale outputs (--allow-stale)")
+                f"regenerate, or pass --allow-stale to render anyway."
+            )
+        print(
+            "\nall outputs current"
+            if not any_stale
+            else "\nrendering with stale outputs (--allow-stale)"
+        )
         return
 
     for j in todo:

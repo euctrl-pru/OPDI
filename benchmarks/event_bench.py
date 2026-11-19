@@ -30,10 +30,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pyspark.sql import functions as F
-
 import events_gt
 import events_score
+from pyspark.sql import functions as F
+
 from opdi.config import EventConfig, OPDIConfig
 
 #: Where a benchmark run may write. Anything else is a bug, loudly.
@@ -45,10 +45,14 @@ RESEARCH_PREFIX = "research/"
 #: to June 2024, finds nothing, and reports every rung as empty. That happened.
 #: `flight_list_v7.PERIODS` carries the same mapping for the same reason.
 PERIOD_TRACKS = {
-    "2025": {"raw": "osn_tracks", "clean": "osn_tracks_clean", "index_on_read": [],
-             # The production flight list covers this period, so identity comes
-             # from it -- the same source step 03 and the V7 study used.
-             "identity": "flight_list"},
+    "2025": {
+        "raw": "osn_tracks",
+        "clean": "osn_tracks_clean",
+        "index_on_read": [],
+        # The production flight list covers this period, so identity comes
+        # from it -- the same source step 03 and the V7 study used.
+        "identity": "flight_list",
+    },
     "2024": {
         "raw": "research/tracks",
         "clean": "research/tracks_clean",
@@ -90,9 +94,18 @@ PERIOD_TRACKS = {
 DEFAULT_FLIGHT_LIST = "opdi_flight_list"
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def flight_list_table(period: str) -> str:
     """Which flight list this period's aerodrome joins must read."""
     return PERIOD_TRACKS[period].get("flight_list", DEFAULT_FLIGHT_LIST)
+
 
 #: The ladder. Each rung is (name, {field: value}) applied cumulatively on top
 #: of `EventConfig.legacy()`, so rung 0 is the published algorithm and the last
@@ -120,7 +133,7 @@ def flight_list_table(period: str) -> str:
 #:    (emit_runway_milestones, emit_pru_tops, level_method, level_floors_above_field,
 #:    level_radius_enforced, level_anchor, airport_gate_above_field,
 #:    airport_admit_on_ground) added when
-#:    EventConfig's defaults moved to events_v0.2.0. An event-count change would be attributed to a rung that
+#:    EventConfig's defaults moved to events_v0.2.0. An event-count change would be attributed to a rung that  # noqa: E501
 #:    did multiple things at once.
 #:
 #:    ``L13_shipped`` is not a single-behaviour rung; it is the catch-all that
@@ -199,9 +212,125 @@ LADDER = [
     # The three navigation families of 2026-11 (holding, point merge, FIR
     # crossings), one rung: none of them touches a type the ladder scores, so
     # splitting them would give three rungs with identical scores.
-    ("L16_navigation_families", {
-        "emit_holding": True, "emit_point_merge": True, "emit_fir_crossings": True,
-    }),
+    (
+        "L16_navigation_families",
+        {
+            "emit_holding": True,
+            "emit_point_merge": True,
+            "emit_fir_crossings": True,
+        },
+    ),
+    # The plausibility study (2026-11): crossings placed between known values,
+    # block times from the ground part of their own leg, and the checks that
+    # remove events the track contradicts. One setting per step, as each
+    # changes different event types.
+    ("L17_crossings_over_missing_values", {"interpolate_crossings_over_missing_values": True}),
+    ("L18_block_times_on_ground", {"block_times_on_ground_only": True}),
+    ("L19_plausibility_checks", {"plausibility_checks": True}),
+    # Of overlapping layout elements of one kind, the event names the one with
+    # the smallest identifier (2026-11); changes only the info of layout events
+    # and block times.
+    ("L20_deterministic_layout_element", {"layout_deterministic_element": True}),
+    # A pass over a runway is a take-off only if it ends on a report in the
+    # air (2026-11); changes the runway milestones of a landing roll read
+    # from the far end of the runway, and what depends on them.
+    ("L21_take_off_needs_air_report", {"runway_take_off_needs_air_report": True}),
+    # The corrections decided after the spot checks of 2026-06-14, in six
+    # work packages, measured together on the sample and the whole day
+    # (benchmarks/CORRECTIONS.md): the altitude the detectors read, runway
+    # events, block times and stands, the flight list, crossings and the
+    # two measurements, surface events, holding and point merge; and the
+    # events version they are published under.
+    (
+        "L22_spot_check_corrections",
+        {
+            "ground_movement_through_reports_without_speed": True,
+            "block_time_off_the_runway": True,
+            "block_time_stand_at_same_airport": True,
+            "block_time_from_last_stand_stop": True,
+            "block_time_stand_longest_dwell": True,
+            "block_time_one_part_per_leg": True,
+            "block_time_needs_flight": True,
+            "layout_ref_missing_as_null": True,
+            "runway_height_above_track_ground": True,
+            "runway_direction_by_motion": True,
+            "runway_events_on_runway_reports": True,
+            "runway_roll_speed_from_positions": True,
+            "runway_line_up_needs_ground_report": True,
+            "runway_threshold_crossing_last_only": True,
+            "goaround_excludes_landings": True,
+            "goaround_in_approach_corridor": True,
+            "runway_crossing_ground_without_altitude": True,
+            "runway_window_times_checked": True,
+            "runway_times_position_between_reports": True,
+            "holding_pattern_by_straight_share": True,
+            "holding_trim_to_main_direction": True,
+            "holding_altitude_from_known_reports": True,
+            "holding_context": True,
+            "holding_and_go_arounds_at_corrected_airports": True,
+            "merge_milestones_per_airport": True,
+            "pms_extend_leg_exit": True,
+            "pms_join_split_legs": True,
+            "pms_leg_must_turn": True,
+            "pms_merge_point_conditions": True,
+            "crossing_max_implied_speed_kt": 1000.0,
+            "crossing_skips_position_jumps": True,
+            "ring_crossing_keeps_single_steps": True,
+            "crossing_value_max_gap_seconds": 30.0,
+            "rings_around_flight_list_airports": True,
+            "fir_needs_position": True,
+            "fir_flag_vertical": True,
+            "distance_max_implied_speed_kt": 1000.0,
+            "distance_between_positions": True,
+            "measure_every_event": True,
+            "time_passed_from_first_seen": True,
+            "altitude_from_cleaning": True,
+            "altitude_plausible_min_ft": -2000.0,
+            "altitude_plausible_max_ft": 60000.0,
+            "vertical_ignores_ground_altitude": True,
+            "level_max_sample_gap_seconds": 60.0,
+            "level_segment_min_duration_applied": True,
+            "level_segment_not_on_ground": True,
+            "tops_position_from_nearest_report": True,
+            "tops_observed_min_change_ft": 3000.0,
+            "level_offs_get_position": True,
+            "layout_element_per_passage": True,
+            "layout_nested_stands_both_published": True,
+            "layout_air_report_must_be_slow": True,
+            "layout_merge_parked_passages": True,
+            "layout_mark_track_edges": True,
+            "layout_mark_ground_only": True,
+            "keep_each_family": True,
+            "events_version": "events_v0.4.0",
+            "aerodrome_correction_checks_track": True,
+            "movement_flags_need_track_evidence": True,
+            "milestones_on_own_leg": True,
+            "seen_from_measured_reports": True,
+        },
+    ),
+    # One flight-list row per flight: a track that lands, stops on the ground
+    # and takes off again gets a row for each of its flights (step 04b), and
+    # step 04 also draws the distance circles around the airports of the
+    # stops, which adds crossing events and is why the events version changes.
+    (
+        "L23_one_row_per_flight",
+        {"flight_list_one_row_per_flight": True, "events_version": "events_v0.5.0"},
+    ),
+    # The off-block time at the start of a slow push-back, and where the
+    # aircraft was first received on the ground (benchmarks/offblock_causes.py).
+    (
+        "L24_off_block_at_push_back",
+        {
+            "off_block_at_start_of_push_back": True,
+            "off_block_names_where_first_seen": True,
+        },
+    ),
+    # The runway of the runway window method by the median distance of the
+    # reports from each centre line (two parallel runways close together).
+    ("L25_runway_by_median_distance", {"runway_window_by_median_distance": True}),
+    # A track under five minutes with no airport gets a flight-list row, so
+    # every published event has its flight.
+    ("L26_short_tracks_get_a_row", {"overflight_min_duration_s": 0.0}),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to
@@ -241,6 +370,11 @@ V4_BASE = dict(
     emit_holding=False,
     emit_point_merge=False,
     emit_fir_crossings=False,
+    # Nor did the corrections and checks of the plausibility study.
+    interpolate_crossings_over_missing_values=False,
+    block_times_on_ground_only=False,
+    plausibility_checks=False,
+    runway_take_off_needs_air_report=False,
     events_version="events_v0.1.0",
 )
 
@@ -269,20 +403,52 @@ LADDER_V4 = [
     ("V01_runway_tiebreak", {}),
     ("V02_layout_agl", {"airport_gate_above_field": True}),
     ("V03_pru_level", {"level_method": "pru"}),
-    ("V04_level_geometry",
-     {"level_floors_above_field": True, "level_radius_enforced": True}),
+    ("V04_level_geometry", {"level_floors_above_field": True, "level_radius_enforced": True}),
     ("V05_pru_tops", {"emit_pru_tops": True, "level_anchor": "pru"}),
     ("V06_runway_milestones", {"emit_runway_milestones": True}),
     ("V07_v020", {"events_version": "events_v0.2.0"}),
-    ("V08_merged", {
-        "merge_duplicate_milestones": True,
-        "ring_radii_nm": (40.0, 50.0, 60.0, 100.0, 110.0, 120.0),
-        "events_version": "events_v0.3.0",
-    }),
+    (
+        "V08_merged",
+        {
+            "merge_duplicate_milestones": True,
+            "ring_radii_nm": (40.0, 50.0, 60.0, 100.0, 110.0, 120.0),
+            "events_version": "events_v0.3.0",
+        },
+    ),
     ("V09_distance_known_position", {"distance_from_last_known_position": True}),
     ("V10_holding", {"emit_holding": True}),
     ("V11_point_merge", {"emit_point_merge": True}),
     ("V12_fir", {"emit_fir_crossings": True}),
+    # The plausibility study (2026-11): crossings placed between known values,
+    # block times from the ground part of their own leg, and the checks that
+    # remove events the track contradicts. One setting per step, as each
+    # changes different event types.
+    ("V13_crossings_over_missing_values", {"interpolate_crossings_over_missing_values": True}),
+    ("V14_block_times_on_ground", {"block_times_on_ground_only": True}),
+    ("V15_plausibility_checks", {"plausibility_checks": True}),
+    ("V16_take_off_needs_air_report", {"runway_take_off_needs_air_report": True}),
+    # The corrections decided after the spot checks of 2026-06-14, in six
+    # work packages, measured together on the sample and the whole day
+    # (benchmarks/CORRECTIONS.md): the altitude the detectors read, runway
+    # events, block times and stands, the flight list, crossings and the
+    # two measurements, surface events, holding and point merge; and the
+    # events version they are published under (as L22 of the v3 table).
+    (
+        "V17_spot_check_corrections",
+        {
+            "events_version": "events_v0.4.0",
+        },
+    ),
+    # One flight-list row per flight, with the distance circles also drawn
+    # around the airports where a track that holds several flights stopped;
+    # and the events version they are published under (as L23 of the v3
+    # table).
+    (
+        "V18_one_row_per_flight",
+        {
+            "events_version": "events_v0.5.0",
+        },
+    ),
 ]
 
 #: Rungs that are allowed to be config-identical to the rung before them,
@@ -443,9 +609,7 @@ def index_on_read(tables) -> None:
             if "h3_res_12" not in df.columns:
                 import h3_pyspark
 
-                df = df.withColumn(
-                    "h3_res_12", h3_pyspark.geo_to_h3("lat", "lon", F.lit(12))
-                )
+                df = df.withColumn("h3_res_12", h3_pyspark.geo_to_h3("lat", "lon", F.lit(12)))
             if "baro_altitude_c" not in df.columns and "baro_altitude" in df.columns:
                 df = df.withColumn("baro_altitude_c", F.col("baro_altitude"))
         return df
@@ -495,9 +659,7 @@ def verify_plan(plan: dict) -> None:
         shipped = EventConfig()
         got = plan[names[-1]]
         differing = [
-            f
-            for f in EventConfig().__dataclass_fields__
-            if getattr(got, f) != getattr(shipped, f)
+            f for f in EventConfig().__dataclass_fields__ if getattr(got, f) != getattr(shipped, f)
         ]
         assert not differing, (
             f"the last rung must equal the shipped configuration; differs on "
@@ -521,9 +683,7 @@ def verify_plan_v4(plan: dict) -> None:
     fields = list(EventConfig().__dataclass_fields__)
 
     if names and names[0] == LADDER_V4[0][0]:
-        differing = {
-            f for f in fields if getattr(plan[names[0]], f) != getattr(shipped, f)
-        }
+        differing = {f for f in fields if getattr(plan[names[0]], f) != getattr(shipped, f)}
         assert differing == set(V4_BASE), (
             f"the V4 baseline must differ from the shipped configuration in "
             f"exactly the {len(V4_BASE)} reconstructed v0.1.0 fields; it "
@@ -532,9 +692,7 @@ def verify_plan_v4(plan: dict) -> None:
             f"rung measuring it."
         )
     if names and names[-1] == LADDER_V4[-1][0]:
-        differing = [
-            f for f in fields if getattr(plan[names[-1]], f) != getattr(shipped, f)
-        ]
+        differing = [f for f in fields if getattr(plan[names[-1]], f) != getattr(shipped, f)]
         assert not differing, (
             f"the last rung must equal the shipped configuration; differs on "
             f"{', '.join(differing)}"
@@ -547,10 +705,11 @@ def verify_plan_v4(plan: dict) -> None:
     for name, cfg in plan.items():
         if cfg.emit_runway_milestones:
             assert "landing" not in milestone_map(cfg), (
-                f"{name} emits the A-CDM runway family, where `landing` is the "
-                f"ICAO T16 threshold-plane crossing -- an event APDF does not "
-                f"record. Scoring it against ALDT would report a touchdown "
-                f"error for a thing that is not a touchdown."
+                f"{name} emits the A-CDM runway family, whose stored tables "
+                f"name the threshold-plane crossing (T16 in the PRU flight diagram) "
+                f"`landing` -- an "
+                f"event APDF does not record. Scoring it against ALDT would "
+                f"report a touchdown error for a thing that is not a touchdown."
             )
 
 
@@ -583,25 +742,30 @@ TYPE_TO_MILESTONE = {
 #: against ``AP_C_RWY``. The phase pair (``take-off``/``landing``) is *not*
 #: here: it names no runway, and letting it into the runway comparison would
 #: put nulls in the denominator of an exact-match rate.
-RUNWAY_IDENTITY_TYPES = {"ATOT": "ATOT", "ALDT": "ALDT",
-                         "airborne": "ATOT", "touchdown": "ALDT"}
+RUNWAY_IDENTITY_TYPES = {"ATOT": "ATOT", "ALDT": "ALDT", "airborne": "ATOT", "touchdown": "ALDT"}
 
 
 def milestone_map(config) -> dict:
     """The type -> milestone map that is correct for *this* configuration.
 
-    One map cannot serve both vocabularies, because ``landing`` means two
-    different physical things depending on ``emit_runway_milestones``:
+    One map cannot serve both vocabularies, because in the tables this ladder
+    wrote ``landing`` means two different physical things depending on
+    ``emit_runway_milestones``:
 
     * **off** (v0.1.0 and earlier) -- the fuzzy phase transition into GND, i.e.
       ground contact. That is what ALDT is, so it is scored.
-    * **on** (v0.2.0) -- ICAO T16, the instant the aircraft crosses the runway
+    * **on** (v0.2.0) -- T16 in the PRU flight diagram, the instant the aircraft crosses the runway
       threshold plane, tens of seconds and roughly a kilometre before the
       wheels touch. ``touchdown`` is the ALDT of that vocabulary. APDF records
       no threshold crossing at all, so a ``landing`` scored against ALDT would
       report a large systematic "error" that is really a comparison between two
       different events -- and it would land in the same table as the honest
       figures, indistinguishable from them.
+
+    The ladder's tables were written before the pipeline named the threshold
+    crossing ``xing-runway-threshold``; today's default settings emit no
+    ``landing`` at all. The new name is not in the map either, so neither name
+    of the threshold crossing is scored against ALDT.
 
     So the map is narrowed per rung rather than per period or per version
     string: the ladder's own configuration is the only thing that knows which
@@ -638,10 +802,15 @@ def runway_identity_types(config) -> dict:
     return {t: m for t, m in RUNWAY_IDENTITY_TYPES.items() if t in keep}
 
 
-def detected_events(spark, table: str, storage=None, tracks=None,
-                    identity: str = "flight_list",
-                    flight_list: str = DEFAULT_FLIGHT_LIST,
-                    mapping: dict = None):
+def detected_events(
+    spark,
+    table: str,
+    storage=None,
+    tracks=None,
+    identity: str = "flight_list",
+    flight_list: str = DEFAULT_FLIGHT_LIST,
+    mapping: dict = None,
+):
     """Reshape the written event table into what the scorer expects.
 
     The event table keys on ``flight_id``, which is the ``track_id``; the
@@ -672,8 +841,7 @@ def detected_events(spark, table: str, storage=None, tracks=None,
     # wrong field".
     info = F.from_json(
         F.col("info"),
-        "runway string, rwy_ident string, apt_icao string, crossing_seq int, "
-        "direction string",
+        "runway string, rwy_ident string, apt_icao string, crossing_seq int, " "direction string",
     )
     mapping = dict(mapping or TYPE_TO_MILESTONE)
     milestone = F.create_map(*[F.lit(x) for kv in mapping.items() for x in kv])
@@ -703,11 +871,15 @@ def detected_events(spark, table: str, storage=None, tracks=None,
         # flight list is still required by the *detectors* that need ADEP/ADES
         # -- airport events, rings, runway, blocks -- so a period without one
         # yields the phase and crossing families only, and says so.
-        fl = tracks.groupBy("track_id").agg(
-            F.lower(F.first("icao24", ignorenulls=True)).alias("icao24"),
-            F.trim(F.first("callsign", ignorenulls=True)).alias("callsign"),
-            F.to_date(F.min("event_time")).alias("day"),
-        ).withColumnRenamed("track_id", "_fl_id")
+        fl = (
+            tracks.groupBy("track_id")
+            .agg(
+                F.lower(F.first("icao24", ignorenulls=True)).alias("icao24"),
+                F.trim(F.first("callsign", ignorenulls=True)).alias("callsign"),
+                F.to_date(F.min("event_time")).alias("day"),
+            )
+            .withColumnRenamed("track_id", "_fl_id")
+        )
 
     return (
         ev.filter(F.col("milestone").isNotNull())
@@ -795,26 +967,31 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(events_gt.PERIODS), required=True)
     ap.add_argument(
-        "--ladder", choices=sorted(LADDERS), default="v3",
+        "--ladder",
+        choices=sorted(LADDERS),
+        default="v3",
         help="which ladder to run: v3 is the published instrument from "
-             "events_v0.0.2 upwards; v4 starts from the reconstructed v0.1.0 "
-             "configuration. Default v3 so the V3 chain's arguments keep "
-             "meaning what they meant.",
+        "events_v0.0.2 upwards; v4 starts from the reconstructed v0.1.0 "
+        "configuration. Default v3 so the V3 chain's arguments keep "
+        "meaning what they meant.",
     )
     ap.add_argument(
-        "--airports", choices=("study", "all"), default="all",
+        "--airports",
+        choices=("study", "all"),
+        default="all",
         help="restrict the ground truth to events_gt.STUDY_AIRPORTS. The "
-             "denominator of every coverage figure, so it has to match the "
-             "bridge job's -- the V4 entrypoint passes 'study' to both.",
+        "denominator of every coverage figure, so it has to match the "
+        "bridge job's -- the V4 entrypoint passes 'study' to both.",
     )
     ap.add_argument("--runs", nargs="*", default=None, help="ladder rung names")
     ap.add_argument("--results-dir", default=None)
     ap.add_argument("--out-name", default=None)
     ap.add_argument(
-        "--clean-table", default=None,
+        "--clean-table",
+        default=None,
         help="override PERIOD_TRACKS[period]['clean'] -- read the cleaned "
-             "tracks from a different table, e.g. a copy rebuilt with a "
-             "cleaning fix, without touching the period's usual mapping.",
+        "tracks from a different table, e.g. a copy rebuilt with a "
+        "cleaning fix, without touching the period's usual mapping.",
     )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4059)
@@ -861,9 +1038,7 @@ def main() -> int:
     reuse = set(args.reuse_table)
     unknown = reuse - set(plan)
     if unknown:
-        raise SystemExit(
-            f"--reuse-table names rungs that are not in this plan: {sorted(unknown)}"
-        )
+        raise SystemExit(f"--reuse-table names rungs that are not in this plan: {sorted(unknown)}")
     if reuse and not args.reuse_newer_than:
         raise SystemExit("--reuse-table requires --reuse-newer-than")
     reuse_cutoff = None
@@ -915,7 +1090,9 @@ def main() -> int:
         target = f"research/events_{args.period}_{name}"
         redirect_event_tables(target, flight_list=flight_list_table(args.period))
 
-        config = OPDIConfig.for_environment("opensky")
+        config = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+        # The study tables sit directly in the warehouse, not in a release folder.
+        config.project.release = ""
         config.events = cfg
         # Clear the per-family progress log first. `process_month` decides what
         # to compute from those logs *independently* of skip_if_processed, so a
@@ -959,7 +1136,10 @@ def main() -> int:
             "osn_tracks_clean" if cfg.feeds_from_clean_tracks else "osn_tracks"
         ).select("track_id", "icao24", "callsign", "event_time")
         detected = detected_events(
-            spark, table, proc.storage, tracks,
+            spark,
+            table,
+            proc.storage,
+            tracks,
             identity=PERIOD_TRACKS[args.period]["identity"],
             flight_list=flight_list_table(args.period),
             # Per rung, not per run: `landing` is ground contact under v0.1.0
@@ -969,9 +1149,7 @@ def main() -> int:
         types = [r.det_type for r in detected.select("det_type").distinct().collect()]
         rung_rows = []
         for det_type in sorted(types):
-            aligned = events_score.align(
-                truth, detected.filter(F.col("det_type") == det_type)
-            )
+            aligned = events_score.align(truth, detected.filter(F.col("det_type") == det_type))
             for row in events_score.score(aligned).collect():
                 rung_rows.append({"rung": name, "det_type": det_type, **row.asDict()})
         if not rung_rows:
@@ -983,9 +1161,7 @@ def main() -> int:
                 f"contain."
             )
         else:
-            events_score.guard_not_all_zero(
-                spark.createDataFrame(rung_rows).select("n_detected")
-            )
+            events_score.guard_not_all_zero(spark.createDataFrame(rung_rows).select("n_detected"))
         scored.extend(rung_rows)
         print(f"  scored {len(scored)} rows so far")
 

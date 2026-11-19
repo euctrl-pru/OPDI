@@ -46,8 +46,10 @@ IN_SCOPE = [
 ]
 
 KNOWN_AFFECTED_ELSEWHERE = [
-    "regenerate_v6.py", "regenerate_v7.py",
-    "regenerate_events.py", "export_results.py",
+    "regenerate_v6.py",
+    "regenerate_v7.py",
+    "regenerate_events.py",
+    "export_results.py",
 ]
 
 
@@ -66,8 +68,12 @@ def _naive_portal_expr(tree) -> bool:
         if not (isinstance(right, ast.Constant) and right.value == "opdi-portal"):
             continue
         left = node.left
-        if (isinstance(left, ast.Attribute) and left.attr == "parent"
-                and isinstance(left.value, ast.Name) and left.value.id == "REPO"):
+        if (
+            isinstance(left, ast.Attribute)
+            and left.attr == "parent"
+            and isinstance(left.value, ast.Name)
+            and left.value.id == "REPO"
+        ):
             return True
     return False
 
@@ -84,7 +90,8 @@ def test_no_script_resolves_the_portal_naively(name):
     assert not _naive_portal_expr(tree), (
         f"{name} resolves the portal as REPO.parent / 'opdi-portal', which is "
         f"wrong inside a worktree. Walk up until a sibling opdi-portal "
-        f"appears -- see _find_portal() in regenerate_v62.py.")
+        f"appears -- see _find_portal() in regenerate_v62.py."
+    )
 
 
 def test_the_detector_actually_detects():
@@ -93,14 +100,17 @@ def test_the_detector_actually_detects():
     assert _naive_portal_expr(bad)
 
 
-@pytest.mark.parametrize("src", [
-    'DATA = _find_portal() / "papers"',
-    # The fix itself: a search loop over a variable, which an over-broad
-    # detector keyed on `.parent` would flag as the very bug it is fixing.
-    'for base in (REPO, *REPO.parents):\n    c = base.parent / "opdi-portal"',
-    # A docstring describing the bad pattern is not an occurrence of it.
-    '"""Never write REPO.parent / \\"opdi-portal\\" here."""',
-])
+@pytest.mark.parametrize(
+    "src",
+    [
+        'DATA = _find_portal() / "papers"',
+        # The fix itself: a search loop over a variable, which an over-broad
+        # detector keyed on `.parent` would flag as the very bug it is fixing.
+        'for base in (REPO, *REPO.parents):\n    c = base.parent / "opdi-portal"',
+        # A docstring describing the bad pattern is not an occurrence of it.
+        '"""Never write REPO.parent / \\"opdi-portal\\" here."""',
+    ],
+)
 def test_the_detector_does_not_flag_the_cure(src):
     assert not _naive_portal_expr(ast.parse(src))
 
@@ -109,6 +119,7 @@ def test_the_finders_agree_on_where_the_portal_is():
     """Several scripts carry their own `_find_portal`. They must not drift into
     disagreeing about the answer."""
     import sys
+
     sys.path.insert(0, str(BENCH))
     found = {}
     for name in ("regenerate_v62", "sampler_comparison"):

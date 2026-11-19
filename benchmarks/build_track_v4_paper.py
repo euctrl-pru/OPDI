@@ -50,16 +50,16 @@ DESCRIPTION = TITLE
 #: Numbers the prose may state without a placeholder: definitions and limits of the
 #: study and figures quoted from the literature review, never measurements.
 ALLOWED_LITERALS = {
-    "3",     # hours a day's run reads back under the other rules
-    "5",     # the 5% limit
-    "10",    # public practice, minutes
-    "30",    # the current rule's gap, minutes; public practice
-    "0.5",   # OpenSky's rejoin tolerance, degrees
+    "3",  # hours a day's run reads back under the other rules
+    "5",  # the 5% limit
+    "10",  # public practice, minutes
+    "30",  # the current rule's gap, minutes; public practice
+    "0.5",  # OpenSky's rejoin tolerance, degrees
     "2021",  # year of that paper
-    "1",     # the 1% limit; the 1 NM tolerance on distance
-    "0.1",   # the 0.1% limit
-    "300",   # labelled holes a low-edge limit wants
-    "95",    # the confidence of the upper bounds; share of holes in a percentile
+    "1",  # the 1% limit; the 1 NM tolerance on distance
+    "0.1",  # the 0.1% limit
+    "300",  # labelled holes a low-edge limit wants
+    "95",  # the confidence of the upper bounds; share of holes in a percentile
 }
 
 TEST_NAMES = {
@@ -185,8 +185,11 @@ def code_constant(name, relative):
     if not path.is_file():
         raise MissingValue(f"missing {path}")
     for node in ast.parse(path.read_text()).body:
-        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-                and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+        ):
             return node.value.value
     raise MissingValue(f"no constant {name} in {path}")
 
@@ -237,25 +240,39 @@ def edge_rows(rows):
     """The four settings of the two edge flags, each named, each required to exist."""
     return {
         name: one(rows, link_old_edge_climb=climb, link_new_edge_descent=descent)
-        for name, climb, descent in (("off", "False", "False"), ("climb", "True", "False"),
-                                     ("descent", "False", "True"), ("both", "True", "True"))
+        for name, climb, descent in (
+            ("off", "False", "False"),
+            ("climb", "True", "False"),
+            ("descent", "False", "True"),
+            ("both", "True", "True"),
+        )
     }
 
 
 def check_edge_decision(rec, edges):
     """Stop if the staged data no longer says what the prose says about the two flags."""
     if rec.get("status") != "recommended_provisional" or rec.get("provisional") != "True":
-        raise MissingValue(f"the pick is {rec.get('status')}, not provisional: the prose needs rewriting")
+        raise MissingValue(
+            f"the pick is {rec.get('status')}, not provisional: the prose needs rewriting"
+        )
     if rec.get("link_old_edge_climb") != "True" or rec.get("link_new_edge_descent") != "False":
         raise MissingValue("the pick is not climb on, descent off: the prose needs rewriting")
     verdicts = {name: r.get("within_limits") for name, r in edges.items()}
     if verdicts != {"off": "True", "climb": "True", "descent": "False", "both": "False"}:
         raise MissingValue(f"the edge settings now read {verdicts}: the prose needs rewriting")
     if edges["descent"].get("real_by_descent_status") != "over_limit":
-        raise MissingValue("descent edges no longer fail their own limit: the prose needs rewriting")
+        raise MissingValue(
+            "descent edges no longer fail their own limit: the prose needs rewriting"
+        )
     if edges["climb"].get("real_by_climb_status") != "insufficient":
-        raise MissingValue("climb edges are no longer short of labelled holes: the prose needs rewriting")
-    for column in ("crossing_flights_in_one_track", "linked_false_join", "negative_limit_false_joins"):
+        raise MissingValue(
+            "climb edges are no longer short of labelled holes: the prose needs rewriting"
+        )
+    for column in (
+        "crossing_flights_in_one_track",
+        "linked_false_join",
+        "negative_limit_false_joins",
+    ):
         if num(rec, column) != num(edges["climb"], column):
             raise MissingValue(f"final_grid and final_edges differ on {column}")
 
@@ -298,8 +315,13 @@ def build_context(data):
         edge_position_min=n(num(rec, "link_edge_position_minutes")),
         read_back_hours=n(
             math.ceil(gap / 60)
-            + math.ceil(max(num(rec, "link_callsign_lookback_minutes"),
-                            num(rec, "link_edge_position_minutes")) / 60)
+            + math.ceil(
+                max(
+                    num(rec, "link_callsign_lookback_minutes"),
+                    num(rec, "link_edge_position_minutes"),
+                )
+                / 60
+            )
         ),
     )
 
@@ -317,25 +339,48 @@ def build_context(data):
 
     def share_row(name, flights, base, new, base_tracks, new_tracks):
         return [
-            name, n(flights), f"{n(base)} ({pct(base, flights)})", f"{n(new)} ({pct(new, flights)})",
-            f"{base_tracks / flights:.2f}", f"{new_tracks / flights:.2f}",
+            name,
+            n(flights),
+            f"{n(base)} ({pct(base, flights)})",
+            f"{n(new)} ({pct(new, flights)})",
+            f"{base_tracks / flights:.2f}",
+            f"{new_tracks / flights:.2f}",
         ]
 
     c["table_one_track"] = table(
-        ["Flights", "Number", "In one track, current rule", "In one track, new rule",
-         "Tracks per flight, current", "Tracks per flight, new"],
         [
-            share_row("Crossing the European box", cf,
-                      num(rec, "base_crossing_flights_in_one_track"),
-                      num(rec, "crossing_flights_in_one_track"),
-                      num(rec, "base_crossing_tracks"), num(rec, "crossing_tracks")),
-            share_row("All others", of,
-                      num(rec, "base_other_flights_in_one_track"),
-                      num(rec, "other_flights_in_one_track"),
-                      num(rec, "base_other_tracks"), num(rec, "other_tracks")),
-            share_row("All", fl, num(rec, "base_flights_in_one_track"),
-                      num(rec, "flights_in_one_track"),
-                      num(rec, "base_tracks_on_flights"), num(rec, "tracks_on_flights")),
+            "Flights",
+            "Number",
+            "In one track, current rule",
+            "In one track, new rule",
+            "Tracks per flight, current",
+            "Tracks per flight, new",
+        ],
+        [
+            share_row(
+                "Crossing the European box",
+                cf,
+                num(rec, "base_crossing_flights_in_one_track"),
+                num(rec, "crossing_flights_in_one_track"),
+                num(rec, "base_crossing_tracks"),
+                num(rec, "crossing_tracks"),
+            ),
+            share_row(
+                "All others",
+                of,
+                num(rec, "base_other_flights_in_one_track"),
+                num(rec, "other_flights_in_one_track"),
+                num(rec, "base_other_tracks"),
+                num(rec, "other_tracks"),
+            ),
+            share_row(
+                "All",
+                fl,
+                num(rec, "base_flights_in_one_track"),
+                num(rec, "flights_in_one_track"),
+                num(rec, "base_tracks_on_flights"),
+                num(rec, "tracks_on_flights"),
+            ),
         ],
     )
 
@@ -344,8 +389,10 @@ def build_context(data):
     linked = num(rec, "real_holes_linked")
     limit_n = num(rec, "negative_limit_controls")
     same_n = num(rec, "same_callsign_controls")
-    days = {d: one(read_csv(data, f"final_grid/link_grid_{d}.csv"), point_id=rec["point_id"])
-            for d in ("2026-06-14", "2025-06-14")}
+    days = {
+        d: one(read_csv(data, f"final_grid/link_grid_{d}.csv"), point_id=rec["point_id"])
+        for d in ("2026-06-14", "2025-06-14")
+    }
     c.update(
         day_new="2026-06-14",
         day_old="2025-06-14",
@@ -375,13 +422,19 @@ def build_context(data):
         same_blank_share=pct(num(rec, "same_callsign_blank"), same_n),
         positive_tests=n(num(rec, "positive_within_gap")),
         positive_missed=n(num(rec, "positive_within_gap") - num(rec, "positive_linked")),
-        positive_missed_share=pct(num(rec, "positive_within_gap") - num(rec, "positive_linked"),
-                                  num(rec, "positive_within_gap")),
+        positive_missed_share=pct(
+            num(rec, "positive_within_gap") - num(rec, "positive_linked"),
+            num(rec, "positive_within_gap"),
+        ),
     )
 
     # Controls in the limit, by gap length: how thin the hard cases get.
-    controls = where(read_csv(data, "final_grid/link_controls_pooled.csv"),
-                     point_id=rec["point_id"], kind="negative", counts_toward_limit="True")
+    controls = where(
+        read_csv(data, "final_grid/link_controls_pooled.csv"),
+        point_id=rec["point_id"],
+        kind="negative",
+        counts_toward_limit="True",
+    )
     same_rows = where(controls, same_callsign="True")
     smallest = min(same_rows, key=lambda r: num(r, "n"))
     c.update(
@@ -399,9 +452,16 @@ def build_context(data):
 
     # --- the settings table ---
     c["table_settings"] = table(
-        ["Speed floor", "Longest hole", "Crossing flights in one track", "All flights in one track",
-         "Real false joins, of checkable", "Hidden landings joined",
-         "Cut flights not rejoined", "Within limits"],
+        [
+            "Speed floor",
+            "Longest hole",
+            "Crossing flights in one track",
+            "All flights in one track",
+            "Real false joins, of checkable",
+            "Hidden landings joined",
+            "Cut flights not rejoined",
+            "Within limits",
+        ],
         [
             [f"{n(sp)} kt", f"{n(g)} min", *settings_row("", setting(grid, sp, g))[1:]]
             for sp, g in ((400, 600), (400, 480), (400, 360), (315, 600), (315, 480), (315, 360))
@@ -411,7 +471,9 @@ def build_context(data):
     s_ratio = setting(grid, 400, 600, ratio=0.85)
     s315_ratio = setting(grid, 315, 600, ratio=0.85)
     if s315_480["within_limits"] != "False" or s315_ratio["within_limits"] != "True":
-        raise MissingValue("the nearest alternatives changed sides of the limits: the prose needs rewriting")
+        raise MissingValue(
+            "the nearest alternatives changed sides of the limits: the prose needs rewriting"
+        )
     s_stop35, s_stop20 = setting(grid, 400, 600, stop=35), setting(grid, 400, 600, stop=20)
     c.update(
         s315_600_crossing=pct(num(s315_600, "crossing_flights_in_one_track"), cf),
@@ -421,8 +483,10 @@ def build_context(data):
         s315_480_gap=n(480),
         s315_480_crossing_n=n(num(s315_480, "crossing_flights_in_one_track")),
         chosen_crossing_n=n(num(rec, "crossing_flights_in_one_track")),
-        crossing_tie_gap=n(num(rec, "crossing_flights_in_one_track")
-                           - num(s315_480, "crossing_flights_in_one_track")),
+        crossing_tie_gap=n(
+            num(rec, "crossing_flights_in_one_track")
+            - num(s315_480, "crossing_flights_in_one_track")
+        ),
         s315_480_false=n(num(s315_480, "linked_false_join")),
         s315_480_labelled=n(labelled(s315_480)),
         s315_480_rate=pct(num(s315_480, "linked_false_join"), labelled(s315_480), 3),
@@ -430,8 +494,10 @@ def build_context(data):
         ratio315_crossing_n=n(num(s315_ratio, "crossing_flights_in_one_track")),
         ratio315_false=n(num(s315_ratio, "linked_false_join")),
         ratio315_hidden=n(num(s315_ratio, "negative_limit_false_joins")),
-        ratio315_missed=pct(num(s315_ratio, "positive_within_gap") - num(s315_ratio, "positive_linked"),
-                            num(s315_ratio, "positive_within_gap")),
+        ratio315_missed=pct(
+            num(s315_ratio, "positive_within_gap") - num(s315_ratio, "positive_linked"),
+            num(s315_ratio, "positive_within_gap"),
+        ),
         s315_480_hidden=n(num(s315_480, "negative_limit_false_joins")),
         ratio_value="0.85",
         ratio_crossing=pct(num(s_ratio, "crossing_flights_in_one_track"), cf),
@@ -450,45 +516,77 @@ def build_context(data):
     reasons = read_csv(data, "final_grid/link_reasons_pooled.csv")
 
     def reason_total(population, test, column):
-        return sum(num(r, column) for r in where(reasons, population=population,
-                                                 first_failed_test=test))
+        return sum(
+            num(r, column) for r in where(reasons, population=population, first_failed_test=test)
+        )
 
     def split_total(population):
-        return sum(num(r, "holes") for r in where(reasons, population=population)
-                   if r["first_failed_test"] != "linked")
+        return sum(
+            num(r, "holes")
+            for r in where(reasons, population=population)
+            if r["first_failed_test"] != "linked"
+        )
 
     tests = sorted(
         {r["first_failed_test"] for r in reasons if r["first_failed_test"] != "linked"},
-        key=lambda t: -(reason_total("crosses_box", t, "holes") + reason_total("other", t, "holes")),
+        key=lambda t: -(
+            reason_total("crosses_box", t, "holes") + reason_total("other", t, "holes")
+        ),
     )
     unknown_tests = set(tests) - set(TEST_NAMES)
     if unknown_tests:
         raise MissingValue(f"no plain name for tests {sorted(unknown_tests)}")
     rows = [
-        [TEST_NAMES[t], n(reason_total("crosses_box", t, "holes")),
-         n(reason_total("crosses_box", t, "only_failed_test_holes")),
-         n(reason_total("other", t, "holes")), n(reason_total("other", t, "only_failed_test_holes"))]
+        [
+            TEST_NAMES[t],
+            n(reason_total("crosses_box", t, "holes")),
+            n(reason_total("crosses_box", t, "only_failed_test_holes")),
+            n(reason_total("other", t, "holes")),
+            n(reason_total("other", t, "only_failed_test_holes")),
+        ]
         for t in tests
     ]
-    rows.append(["**All holes left split**", f"**{n(split_total('crosses_box'))}**", "",
-                 f"**{n(split_total('other'))}**", ""])
+    rows.append(
+        [
+            "**All holes left split**",
+            f"**{n(split_total('crosses_box'))}**",
+            "",
+            f"**{n(split_total('other'))}**",
+            "",
+        ]
+    )
     c["table_reasons"] = table(
-        ["First test failed", "Crossing flights: holes", "of which failed nothing else",
-         "Other flights: holes", "of which failed nothing else"], rows)
+        [
+            "First test failed",
+            "Crossing flights: holes",
+            "of which failed nothing else",
+            "Other flights: holes",
+            "of which failed nothing else",
+        ],
+        rows,
+    )
     c.update(
         crossing_holes_linked=n(reason_total("crosses_box", "linked", "holes")),
         crossing_holes_split=n(split_total("crosses_box")),
         old_edge_holes=n(reason_total("crosses_box", "cruise_at_old_edge", "holes")),
-        old_edge_share=pct(reason_total("crosses_box", "cruise_at_old_edge", "holes"),
-                           split_total("crosses_box")),
+        old_edge_share=pct(
+            reason_total("crosses_box", "cruise_at_old_edge", "holes"), split_total("crosses_box")
+        ),
         speed_holes=n(reason_total("crosses_box", "implied_speed_not_too_slow", "holes")),
-        speed_share=pct(reason_total("crosses_box", "implied_speed_not_too_slow", "holes"),
-                        split_total("crosses_box")),
-        speed_only=n(reason_total("crosses_box", "implied_speed_not_too_slow", "only_failed_test_holes")),
+        speed_share=pct(
+            reason_total("crosses_box", "implied_speed_not_too_slow", "holes"),
+            split_total("crosses_box"),
+        ),
+        speed_only=n(
+            reason_total("crosses_box", "implied_speed_not_too_slow", "only_failed_test_holes")
+        ),
         new_edge_holes=n(reason_total("crosses_box", "cruise_at_new_edge", "holes")),
-        new_edge_only=n(reason_total("crosses_box", "cruise_at_new_edge", "only_failed_test_holes")),
-        new_edge_share=pct(reason_total("crosses_box", "cruise_at_new_edge", "holes"),
-                           split_total("crosses_box")),
+        new_edge_only=n(
+            reason_total("crosses_box", "cruise_at_new_edge", "only_failed_test_holes")
+        ),
+        new_edge_share=pct(
+            reason_total("crosses_box", "cruise_at_new_edge", "holes"), split_total("crosses_box")
+        ),
         too_long_holes=n(reason_total("crosses_box", "gap_not_too_long", "holes")),
     )
 
@@ -499,27 +597,48 @@ def build_context(data):
     def by_gap(req):
         return [r for r in pos_rows if same(r["requested_gap_min"], req)]
 
-    pos_controls = where(read_csv(data, "final_grid/link_controls_pooled.csv"),
-                          point_id=rec["point_id"], kind="positive", control_family="cruise_cruise")
+    pos_controls = where(
+        read_csv(data, "final_grid/link_controls_pooled.csv"),
+        point_id=rec["point_id"],
+        kind="positive",
+        control_family="cruise_cruise",
+    )
     miss = {}
     for req in (60, 120, 180, 360):
         tested = sum(num(r, "n") for r in pos_controls if same(r["requested_gap_min"], req))
         missed = sum(num(r, "positive_missed_by_test") for r in by_gap(req))
         miss[req] = pct(missed, tested)
-    c.update(miss_60=miss[60], miss_120=miss[120], miss_180=miss[180], miss_360=miss[360],
-             gap_60=n(60), gap_120=n(120), gap_180=n(180), gap_360=n(360))
-    slow_missed = sum(num(r, "positive_missed_by_test") for r in pos_rows
-                      if r["first_failed_test"] == "implied_speed_not_too_slow")
+    c.update(
+        miss_60=miss[60],
+        miss_120=miss[120],
+        miss_180=miss[180],
+        miss_360=miss[360],
+        gap_60=n(60),
+        gap_120=n(120),
+        gap_180=n(180),
+        gap_360=n(360),
+    )
+    slow_missed = sum(
+        num(r, "positive_missed_by_test")
+        for r in pos_rows
+        if r["first_failed_test"] == "implied_speed_not_too_slow"
+    )
     c.update(
         positive_too_slow=n(slow_missed),
-        positive_too_slow_share=pct(slow_missed, num(rec, "positive_within_gap")
-                                    - num(rec, "positive_linked")),
-        s315_missed=pct(num(s315_600, "positive_within_gap") - num(s315_600, "positive_linked"),
-                        num(s315_600, "positive_within_gap")),
-        real_linked_drop=pct(num(s315_600, "real_holes_linked") - linked,
-                             num(s315_600, "real_holes_linked")),
-        tests_linked_drop=pct(num(s315_600, "positive_linked") - num(rec, "positive_linked"),
-                              num(s315_600, "positive_linked")),
+        positive_too_slow_share=pct(
+            slow_missed, num(rec, "positive_within_gap") - num(rec, "positive_linked")
+        ),
+        s315_missed=pct(
+            num(s315_600, "positive_within_gap") - num(s315_600, "positive_linked"),
+            num(s315_600, "positive_within_gap"),
+        ),
+        real_linked_drop=pct(
+            num(s315_600, "real_holes_linked") - linked, num(s315_600, "real_holes_linked")
+        ),
+        tests_linked_drop=pct(
+            num(s315_600, "positive_linked") - num(rec, "positive_linked"),
+            num(s315_600, "positive_linked"),
+        ),
         other_flight_share=pct(of, fl),
     )
 
@@ -565,22 +684,31 @@ def build_context(data):
 
     # --- the two edge settings ---
     off, climb, descent, both_on = edges["off"], edges["climb"], edges["descent"], edges["both"]
-    if num(climb, "negative_low_edge_untested_controls") != num(rec, "negative_low_edge_untested_controls"):
+    if num(climb, "negative_low_edge_untested_controls") != num(
+        rec, "negative_low_edge_untested_controls"
+    ):
         raise MissingValue("final_edges and final_grid differ on the low-edge tests")
 
     def points(row):
-        return f"{100.0 * (num(row, 'crossing_flights_in_one_track') - num(off, 'crossing_flights_in_one_track')) / cf:.1f}"
+        return f"{100.0 * (num(row, 'crossing_flights_in_one_track') - num(off, 'crossing_flights_in_one_track')) / cf:.1f}"  # noqa: E501
 
-    climb_lab, descent_lab = num(climb, "linked_by_climb_labelled"), num(descent, "linked_by_descent_labelled")
+    climb_lab, descent_lab = num(climb, "linked_by_climb_labelled"), num(
+        descent, "linked_by_descent_labelled"
+    )
     climb_tests = num(climb, "negative_climb_cruise_controls")
     descent_tests = num(descent, "negative_cruise_descent_controls")
-    if num(climb, "false_joined_by_climb") != 0 or num(descent, "negative_cruise_descent_false_joins") != 0:
-        raise MissingValue("the false joins no longer all fall on one side: the prose needs rewriting")
+    if (
+        num(climb, "false_joined_by_climb") != 0
+        or num(descent, "negative_cruise_descent_false_joins") != 0
+    ):
+        raise MissingValue(
+            "the false joins no longer all fall on one side: the prose needs rewriting"
+        )
     c.update(
         low_labelled=n(climb_lab + descent_lab),
         low_hidden_tests=n(climb_tests + descent_tests),
-        chance_real=f"{chance_all_in_one_drawn(num(descent, 'false_joined_by_descent'), descent_lab, climb_lab + descent_lab):.3f}",
-        chance_hidden=f"{chance_all_in_one_repeated(num(climb, 'negative_climb_cruise_false_joins'), climb_tests, climb_tests + descent_tests):.3f}",
+        chance_real=f"{chance_all_in_one_drawn(num(descent, 'false_joined_by_descent'), descent_lab, climb_lab + descent_lab):.3f}",  # noqa: E501
+        chance_hidden=f"{chance_all_in_one_repeated(num(climb, 'negative_climb_cruise_false_joins'), climb_tests, climb_tests + descent_tests):.3f}",  # noqa: E501
         off_crossing=pct(num(off, "crossing_flights_in_one_track"), cf),
         off_linked=n(num(off, "real_holes_linked")),
         off_false=n(num(off, "linked_false_join")),
@@ -589,7 +717,9 @@ def build_context(data):
         climb_linked=n(num(climb, "linked_by_climb")),
         climb_false=n(num(climb, "false_joined_by_climb")),
         climb_labelled=n(climb_lab),
-        climb_unknown_share=pct(num(climb, "linked_by_climb") - climb_lab, num(climb, "linked_by_climb")),
+        climb_unknown_share=pct(
+            num(climb, "linked_by_climb") - climb_lab, num(climb, "linked_by_climb")
+        ),
         climb_upper=pct(upper_95(num(climb, "false_joined_by_climb"), climb_lab), 1),
         climb_hidden=n(num(climb, "negative_climb_cruise_false_joins")),
         climb_hidden_tests=n(num(climb, "negative_climb_cruise_controls")),
@@ -604,11 +734,16 @@ def build_context(data):
         descent_labelled=n(descent_lab),
         descent_rate=pct(num(descent, "false_joined_by_descent"), descent_lab),
         descent_one_rate=pct(1, descent_lab, 2),
-        descent_near_edge=n(num(descent, "false_joined_near_edge") - num(off, "false_joined_near_edge")),
+        descent_near_edge=n(
+            num(descent, "false_joined_near_edge") - num(off, "false_joined_near_edge")
+        ),
         descent_hidden=n(num(descent, "negative_cruise_descent_false_joins")),
         descent_hidden_tests=n(num(descent, "negative_cruise_descent_controls")),
         both_crossing=pct(num(both_on, "crossing_flights_in_one_track"), cf),
-        both_extra_flights=n(num(both_on, "crossing_flights_in_one_track") - num(climb, "crossing_flights_in_one_track")),
+        both_extra_flights=n(
+            num(both_on, "crossing_flights_in_one_track")
+            - num(climb, "crossing_flights_in_one_track")
+        ),
         both_false=n(num(both_on, "linked_false_join")),
         both_labelled=n(labelled(both_on)),
         both_rate=pct(num(both_on, "linked_false_join"), labelled(both_on), 3),
@@ -624,7 +759,9 @@ def build_context(data):
     )
 
     def edge_setting_row(label, row, only_false, only_labelled):
-        only = f"{n(num(row, only_false))} of {n(num(row, only_labelled))}" if only_false else "none"
+        only = (
+            f"{n(num(row, only_false))} of {n(num(row, only_labelled))}" if only_false else "none"
+        )
         return [
             label,
             pct(num(row, "crossing_flights_in_one_track"), cf),
@@ -632,22 +769,41 @@ def build_context(data):
             only,
             f"{n(num(row, 'linked_false_join'))} of {n(labelled(row))} "
             f"({pct(num(row, 'linked_false_join'), labelled(row), 3)})",
-            f"{n(num(row, 'negative_limit_false_joins'))} of {n(num(row, 'negative_limit_controls'))}",
-            "yes, provisional" if row["within_limits"] == "True" and row["provisional"] == "True"
-            else "yes" if row["within_limits"] == "True" else "no",
+            f"{n(num(row, 'negative_limit_false_joins'))} of {n(num(row, 'negative_limit_controls'))}",  # noqa: E501
+            (
+                "yes, provisional"
+                if row["within_limits"] == "True" and row["provisional"] == "True"
+                else "yes" if row["within_limits"] == "True" else "no"
+            ),
         ]
 
     c["table_edges"] = table(
-        ["Edges below the floor allowed", "Crossing flights in one track", "All flights in one track",
-         "Real false joins among holes linked only that way, of checkable",
-         "Real false joins overall, of checkable", "Hidden landings joined", "Within limits"],
+        [
+            "Edges below the floor allowed",
+            "Crossing flights in one track",
+            "All flights in one track",
+            "Real false joins among holes linked only that way, of checkable",
+            "Real false joins overall, of checkable",
+            "Hidden landings joined",
+            "Within limits",
+        ],
         [
             edge_setting_row("Neither", off, None, None),
-            edge_setting_row("**Old edge climbing (chosen)**", climb,
-                             "false_joined_by_climb", "linked_by_climb_labelled"),
-            edge_setting_row("New edge descending", descent,
-                             "false_joined_by_descent", "linked_by_descent_labelled"),
-            edge_setting_row("Both", both_on, "false_joined_by_direction", "linked_by_direction_labelled"),
+            edge_setting_row(
+                "**Old edge climbing (chosen)**",
+                climb,
+                "false_joined_by_climb",
+                "linked_by_climb_labelled",
+            ),
+            edge_setting_row(
+                "New edge descending",
+                descent,
+                "false_joined_by_descent",
+                "linked_by_descent_labelled",
+            ),
+            edge_setting_row(
+                "Both", both_on, "false_joined_by_direction", "linked_by_direction_labelled"
+            ),
         ],
     )
 
@@ -655,8 +811,13 @@ def build_context(data):
     edge_controls = read_csv(data, "final_edges/link_controls_pooled.csv")
 
     def family_row(label, row, family, total_column, joined_column, status):
-        cuts = where(edge_controls, point_id=row["point_id"], kind="negative",
-                     control_family=family, counts_toward_limit="True")
+        cuts = where(
+            edge_controls,
+            point_id=row["point_id"],
+            kind="negative",
+            control_family=family,
+            counts_toward_limit="True",
+        )
         tests = sum(num(r, "n") for r in cuts)
         joined = sum(num(r, "wrong") for r in cuts)
         hard = [r for r in cuts if r["same_callsign"] == "True"]
@@ -665,53 +826,107 @@ def build_context(data):
         if tests != num(row, total_column) or joined != num(row, joined_column):
             raise MissingValue(f"the {family} tests do not add up to the grid's count")
         return [
-            label, n(tests), n(joined), pct(upper_95(joined, tests), 1, 3),
-            n(hard_tests), n(hard_joined), pct(upper_95(hard_joined, hard_tests), 1, 2), status,
+            label,
+            n(tests),
+            n(joined),
+            pct(upper_95(joined, tests), 1, 3),
+            n(hard_tests),
+            n(hard_joined),
+            pct(upper_95(hard_joined, hard_tests), 1, 2),
+            status,
         ]
 
     c["table_hidden_families"] = table(
-        ["Edges either side of the cut", "Tests", "Joined", "At most, 95%",
-         "Same or blank callsign: tests", "Joined", "At most, 95%", "In the chosen rule"],
         [
-            family_row("Cruise, then cruise", off, "cruise_cruise", "negative_limit_controls",
-                       "negative_limit_false_joins", "yes"),
-            family_row("Climb, then cruise", climb, "climb_cruise", "negative_climb_cruise_controls",
-                       "negative_climb_cruise_false_joins", "yes"),
-            family_row("Cruise, then descent", descent, "cruise_descent", "negative_cruise_descent_controls",
-                       "negative_cruise_descent_false_joins", "no"),
-            family_row("Climb, then descent", both_on, "climb_descent", "negative_climb_descent_controls",
-                       "negative_climb_descent_false_joins", "no"),
+            "Edges either side of the cut",
+            "Tests",
+            "Joined",
+            "At most, 95%",
+            "Same or blank callsign: tests",
+            "Joined",
+            "At most, 95%",
+            "In the chosen rule",
+        ],
+        [
+            family_row(
+                "Cruise, then cruise",
+                off,
+                "cruise_cruise",
+                "negative_limit_controls",
+                "negative_limit_false_joins",
+                "yes",
+            ),
+            family_row(
+                "Climb, then cruise",
+                climb,
+                "climb_cruise",
+                "negative_climb_cruise_controls",
+                "negative_climb_cruise_false_joins",
+                "yes",
+            ),
+            family_row(
+                "Cruise, then descent",
+                descent,
+                "cruise_descent",
+                "negative_cruise_descent_controls",
+                "negative_cruise_descent_false_joins",
+                "no",
+            ),
+            family_row(
+                "Climb, then descent",
+                both_on,
+                "climb_descent",
+                "negative_climb_descent_controls",
+                "negative_climb_descent_false_joins",
+                "no",
+            ),
         ],
     )
 
     # --- the real pipeline day ---
     both = read_csv(data, "stage2/link_both_ends.csv")
-    names = (("crosses_the_box", "Crossing the European box"),
-             ("europe_to_outside", "of which Europe to outside"),
-             ("outside_to_europe", "of which outside to Europe"),
-             ("intra_europe", "Inside Europe"))
+    names = (
+        ("crosses_the_box", "Crossing the European box"),
+        ("europe_to_outside", "of which Europe to outside"),
+        ("outside_to_europe", "of which outside to Europe"),
+        ("intra_europe", "Inside Europe"),
+    )
 
     def both_row(flow, label):
         r = one(both, flow=flow)
         return [
-            label, n(num(r, "n")),
-            f"{num(r, 'debounced_rows_per_flight'):.2f}", f"{num(r, 'cruise_linked_rows_per_flight'):.2f}",
-            n(num(r, "debounced_one_row")), n(num(r, "cruise_linked_one_row")),
-            n(num(r, "debounced_both_right")), n(num(r, "cruise_linked_both_right")),
+            label,
+            n(num(r, "n")),
+            f"{num(r, 'debounced_rows_per_flight'):.2f}",
+            f"{num(r, 'cruise_linked_rows_per_flight'):.2f}",
+            n(num(r, "debounced_one_row")),
+            n(num(r, "cruise_linked_one_row")),
+            n(num(r, "debounced_both_right")),
+            n(num(r, "cruise_linked_both_right")),
         ]
 
     c["table_flight_list"] = table(
-        ["Flights", "Number", "Rows per flight, current", "Rows per flight, new",
-         "On one row, current", "On one row, new", "Both airports right on one row, current",
-         "Both airports right on one row, new"],
+        [
+            "Flights",
+            "Number",
+            "Rows per flight, current",
+            "Rows per flight, new",
+            "On one row, current",
+            "On one row, new",
+            "Both airports right on one row, current",
+            "Both airports right on one row, new",
+        ],
         [both_row(flow, label) for flow, label in names],
     )
     cross = one(both, flow="crosses_the_box")
     intra = one(both, flow="intra_europe")
     pairs = read_csv(data, "stage2/link_flight_list.csv")
     callsign = where(pairs, view="callsign")
-    far_none = sum(num(r, "debounced_none") for r in where(callsign, end="far")
-                   if r["flow"] in ("europe_to_outside", "outside_to_europe"))
+    far_none = sum(
+        num(r, "debounced_none")
+        for r in where(callsign, end="far")
+        if r["flow"] in ("europe_to_outside", "outside_to_europe")
+    )
     c.update(
         s2_crossing=n(num(cross, "n")),
         s2_both_base=n(num(cross, "debounced_both_right")),
@@ -726,12 +941,26 @@ def build_context(data):
         intra_gained=n(num(intra, "gained")),
         intra_lost=n(num(intra, "lost")),
         intra_n=n(num(intra, "n")),
-        intra_ades_right_to_wrong=n(num(one(callsign, flow="intra_europe", side="ades"), "right_to_wrong")),
-        intra_ades_wrong_to_right=n(num(one(callsign, flow="intra_europe", side="ades"), "wrong_to_right")),
-        cross_ades_right_to_wrong=n(sum(num(r, "right_to_wrong") for r in where(callsign, side="ades")
-                                        if r["flow"] in ("europe_to_outside", "outside_to_europe"))),
-        cross_ades_wrong_to_right=n(sum(num(r, "wrong_to_right") for r in where(callsign, side="ades")
-                                        if r["flow"] in ("europe_to_outside", "outside_to_europe"))),
+        intra_ades_right_to_wrong=n(
+            num(one(callsign, flow="intra_europe", side="ades"), "right_to_wrong")
+        ),
+        intra_ades_wrong_to_right=n(
+            num(one(callsign, flow="intra_europe", side="ades"), "wrong_to_right")
+        ),
+        cross_ades_right_to_wrong=n(
+            sum(
+                num(r, "right_to_wrong")
+                for r in where(callsign, side="ades")
+                if r["flow"] in ("europe_to_outside", "outside_to_europe")
+            )
+        ),
+        cross_ades_wrong_to_right=n(
+            sum(
+                num(r, "wrong_to_right")
+                for r in where(callsign, side="ades")
+                if r["flow"] in ("europe_to_outside", "outside_to_europe")
+            )
+        ),
     )
 
     part = one(read_csv(data, "stage2/link_partition_check.csv"))
@@ -756,8 +985,15 @@ def build_context(data):
     changed = [r for r in events if num(r, "change") != 0]
     c["table_events"] = table(
         ["Event type", "Current rule", "New rule", "Change"],
-        [[f"`{r['type']}`", n(num(r, "debounced_events")), n(num(r, "cruise_linked_events")),
-          f"{int(num(r, 'change')):+d}"] for r in sorted(changed, key=lambda r: num(r, "change"))],
+        [
+            [
+                f"`{r['type']}`",
+                n(num(r, "debounced_events")),
+                n(num(r, "cruise_linked_events")),
+                f"{int(num(r, 'change')):+d}",
+            ]
+            for r in sorted(changed, key=lambda r: num(r, "change"))
+        ],
     )
 
     def event_change(kind):
@@ -781,14 +1017,30 @@ def build_context(data):
     )
 
     truth = read_csv(data, "stage2/link_truth_all_flights.csv")
-    label_names = (("true_link", "True link"), ("false_join", "False join"), ("unknown", "Unknown"),
-                   ("airframe_not_in_truth", "Airframe not in Network Manager"))
+    label_names = (
+        ("true_link", "True link"),
+        ("false_join", "False join"),
+        ("unknown", "Unknown"),
+        ("airframe_not_in_truth", "Airframe not in Network Manager"),
+    )
     c["table_truth"] = table(
-        ["Label", "Holes", "With a landing or on-block event on the older piece",
-         "With a take-off or off-block event on the newer piece", "With both"],
-        [[label, *(n(num(one(truth, label=key), col))
-                   for col in ("holes", "landing_on_older", "take_off_on_newer", "both"))]
-         for key, label in label_names],
+        [
+            "Label",
+            "Holes",
+            "With a landing or on-block event on the older piece",
+            "With a take-off or off-block event on the newer piece",
+            "With both",
+        ],
+        [
+            [
+                label,
+                *(
+                    n(num(one(truth, label=key), col))
+                    for col in ("holes", "landing_on_older", "take_off_on_newer", "both")
+                ),
+            ]
+            for key, label in label_names
+        ],
     )
     t_true = one(truth, label="true_link")
     t_false = one(truth, label="false_join")
@@ -811,7 +1063,9 @@ def build_context(data):
     c.update(
         level_tracks=n(num(level, "tracks_with_a_segment_across_a_hole")),
         level_scored=n(num(level, "scored_tracks")),
-        level_share=pct(num(level, "tracks_with_a_segment_across_a_hole"), num(level, "scored_tracks")),
+        level_share=pct(
+            num(level, "tracks_with_a_segment_across_a_hole"), num(level, "scored_tracks")
+        ),
         level_segments=n(num(level, "segments_across_a_hole")),
         level_holes=n(num(level, "holes_inside_a_segment")),
         scored_holes=n(num(level, "scored_holes")),
@@ -859,6 +1113,7 @@ def literal_numbers(template_text, allowed=None):
 
 # --- a small Markdown converter: headings, paragraphs, lists, tables, code, bold, links ---
 
+
 def inline(text):
     held = []
 
@@ -868,8 +1123,9 @@ def inline(text):
 
     text = re.sub(r"`([^`]+)`", lambda m: hold(f"<code>{html.escape(m.group(1))}</code>"), text)
     text = html.escape(text)
-    text = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)",
-                  lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', text)
+    text = re.sub(
+        r"\[([^\]]+)\]\(([^)\s]+)\)", lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', text
+    )
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
     return re.sub(r"\0(\d+)\0", lambda m: held[int(m.group(1))], text)
 
@@ -907,8 +1163,9 @@ def blocks(md):
         elif re.match(r"(- |\d+\. )", line):
             ordered = not line.startswith("- ")
             items = []
-            while i < len(lines) and (re.match(r"(- |\d+\. )", lines[i])
-                                      or (items and lines[i].startswith("  "))):
+            while i < len(lines) and (
+                re.match(r"(- |\d+\. )", lines[i]) or (items and lines[i].startswith("  "))
+            ):
                 if lines[i].startswith("  "):
                     items[-1] += " " + lines[i].strip()
                 else:
@@ -917,8 +1174,10 @@ def blocks(md):
             yield "list", (ordered, items)
         else:
             para = []
-            while i < len(lines) and lines[i].strip() and not re.match(
-                r"(#{1,6} |\||```|- |\d+\. )", lines[i]
+            while (
+                i < len(lines)
+                and lines[i].strip()
+                and not re.match(r"(#{1,6} |\||```|- |\d+\. )", lines[i])
             ):
                 para.append(lines[i].strip())
                 i += 1
@@ -937,10 +1196,13 @@ def markdown_to_html(md):
             out.append(f"<h{d[0]}>{inline(d[1])}</h{d[0]}>")
         elif kind == "table":
             head = "".join(f"<th>{inline(c)}</th>" for c in d[0])
-            body = "".join("<tr>" + "".join(f"<td>{inline(c)}</td>" for c in r) + "</tr>"
-                           for r in d[1:])
-            out.append(f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead>'
-                       f"<tbody>{body}</tbody></table></div>")
+            body = "".join(
+                "<tr>" + "".join(f"<td>{inline(c)}</td>" for c in r) + "</tr>" for r in d[1:]
+            )
+            out.append(
+                f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead>'
+                f"<tbody>{body}</tbody></table></div>"
+            )
         elif kind == "list":
             tag = "ol" if d[0] else "ul"
             out.append(f"<{tag}>" + "".join(f"<li>{inline(x)}</li>" for x in d[1]) + f"</{tag}>")
@@ -982,8 +1244,18 @@ class Paper:
     Quarto front matter -- is shared.
     """
 
-    def __init__(self, version, title, subtitle, allowed_literals, context, render_default="run",
-                 builder=None, pdf_name=None, regenerate=None):
+    def __init__(
+        self,
+        version,
+        title,
+        subtitle,
+        allowed_literals,
+        context,
+        render_default="run",
+        builder=None,
+        pdf_name=None,
+        regenerate=None,
+    ):
         self.version = version
         self.title = title
         self.subtitle = subtitle
@@ -1004,7 +1276,7 @@ def to_html(md, paper=None):
         '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{html.escape(paper.title)}</title>\n<style>{CSS}</style>\n</head>\n<body>\n<main>\n"
-        f"<h1>{html.escape(paper.title)}</h1>\n<p class=\"subtitle\">{html.escape(paper.subtitle)}</p>\n"
+        f'<h1>{html.escape(paper.title)}</h1>\n<p class="subtitle">{html.escape(paper.subtitle)}</p>\n'  # noqa: E501
         '<p class="note">EUROCONTROL Performance Review Unit. Built from the staged CSVs by '
         f"<code>benchmarks/{paper.builder}</code>; not a Quarto render.</p>\n"
         f"{markdown_to_html(md)}\n</main>\n</body>\n</html>\n"
@@ -1046,38 +1318,82 @@ def to_pdf(md, out_path, paper=None):
         from reportlab.lib.units import mm
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
-        from reportlab.platypus import (ListFlowable, ListItem, Paragraph, Preformatted,
-                                        SimpleDocTemplate, Spacer, Table, TableStyle,
-                                        KeepTogether)
+        from reportlab.platypus import (
+            KeepTogether,  # noqa: F401
+            ListFlowable,
+            ListItem,
+            Paragraph,
+            Preformatted,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
     except ImportError as e:
         raise SystemExit(
             "--pdf needs reportlab, which the project does not depend on: install it into "
             f"a scratch environment (pip install reportlab) and run again ({e})"
         )
-    fonts = {"Body": "DejaVuSans.ttf", "Body-Bold": "DejaVuSans-Bold.ttf",
-             "Body-Italic": "DejaVuSans-Oblique.ttf", "Body-BoldItalic": "DejaVuSans-BoldOblique.ttf",
-             "Mono": "DejaVuSansMono.ttf", "Mono-Bold": "DejaVuSansMono-Bold.ttf"}
+    fonts = {
+        "Body": "DejaVuSans.ttf",
+        "Body-Bold": "DejaVuSans-Bold.ttf",
+        "Body-Italic": "DejaVuSans-Oblique.ttf",
+        "Body-BoldItalic": "DejaVuSans-BoldOblique.ttf",
+        "Mono": "DejaVuSansMono.ttf",
+        "Mono-Bold": "DejaVuSansMono-Bold.ttf",
+    }
     for name, fname in fonts.items():
         path = next((Path(d) / fname for d in FONT_DIRS if (Path(d) / fname).is_file()), None)
         if path is None:
             raise SystemExit(f"--pdf needs the DejaVu font {fname} (looked in {FONT_DIRS})")
         pdfmetrics.registerFont(TTFont(name, str(path)))
-    pdfmetrics.registerFontFamily("Body", normal="Body", bold="Body-Bold",
-                                  italic="Body-Italic", boldItalic="Body-BoldItalic")
-    pdfmetrics.registerFontFamily("Mono", normal="Mono", bold="Mono-Bold",
-                                  italic="Mono", boldItalic="Mono-Bold")
+    pdfmetrics.registerFontFamily(
+        "Body", normal="Body", bold="Body-Bold", italic="Body-Italic", boldItalic="Body-BoldItalic"
+    )
+    pdfmetrics.registerFontFamily(
+        "Mono", normal="Mono", bold="Mono-Bold", italic="Mono", boldItalic="Mono-Bold"
+    )
 
-    ink, muted, accent, band = (colors.HexColor(h) for h in ("#1f2328", "#57606a", "#0a3d7a", "#f0f3f6"))
-    S = lambda name, **kw: ParagraphStyle(name, fontName=kw.pop("fontName", "Body"),
-                                          textColor=kw.pop("textColor", ink), **kw)
+    ink, muted, accent, band = (
+        colors.HexColor(h) for h in ("#1f2328", "#57606a", "#0a3d7a", "#f0f3f6")
+    )
+    S = lambda name, **kw: ParagraphStyle(  # noqa: E731
+        name, fontName=kw.pop("fontName", "Body"), textColor=kw.pop("textColor", ink), **kw
+    )
     body = S("body", fontSize=9.5, leading=13.5, spaceAfter=6, alignment=TA_LEFT)
     cell = S("cell", fontSize=8, leading=10.5)
     head_cell = S("hcell", fontSize=8, leading=10.5, fontName="Body-Bold", textColor=colors.white)
-    heads = {1: S("h1", fontSize=15, leading=19, fontName="Body-Bold", textColor=accent, spaceBefore=16, spaceAfter=6),
-             2: S("h2", fontSize=12, leading=16, fontName="Body-Bold", textColor=accent, spaceBefore=12, spaceAfter=4),
-             3: S("h3", fontSize=10.5, leading=14, fontName="Body-Bold", spaceBefore=9, spaceAfter=3)}
-    code_style = S("code", fontName="Mono", fontSize=7.5, leading=10, backColor=band,
-                   borderPadding=5, spaceBefore=4, spaceAfter=10)
+    heads = {
+        1: S(
+            "h1",
+            fontSize=15,
+            leading=19,
+            fontName="Body-Bold",
+            textColor=accent,
+            spaceBefore=16,
+            spaceAfter=6,
+        ),
+        2: S(
+            "h2",
+            fontSize=12,
+            leading=16,
+            fontName="Body-Bold",
+            textColor=accent,
+            spaceBefore=12,
+            spaceAfter=4,
+        ),
+        3: S("h3", fontSize=10.5, leading=14, fontName="Body-Bold", spaceBefore=9, spaceAfter=3),
+    }
+    code_style = S(
+        "code",
+        fontName="Mono",
+        fontSize=7.5,
+        leading=10,
+        backColor=band,
+        borderPadding=5,
+        spaceBefore=4,
+        spaceAfter=10,
+    )
 
     def markup(text):  # the HTML inline() writes, in reportlab's dialect
         text = inline(text)
@@ -1097,12 +1413,34 @@ def to_pdf(md, out_path, paper=None):
         canvas.line(20 * mm, 15 * mm, A4[0] - 20 * mm, 15 * mm)
         canvas.restoreState()
 
-    story = [Paragraph(html.escape(paper.title), S("title", fontSize=22, leading=27, fontName="Body-Bold", textColor=accent, spaceAfter=6)),
-             Paragraph(html.escape(paper.subtitle), S("sub", fontSize=11, leading=15, textColor=muted, spaceAfter=8)),
-             Paragraph(f"EUROCONTROL Performance Review Unit  \u00b7  {date.today():%d %B %Y}",
-                       S("meta", fontSize=9, leading=12, textColor=muted, spaceAfter=4)),
-             Table([[""]], colWidths=[width], rowHeights=[2],
-                   style=[("LINEABOVE", (0, 0), (-1, 0), 1.2, accent)]), Spacer(1, 6)]
+    story = [
+        Paragraph(
+            html.escape(paper.title),
+            S(
+                "title",
+                fontSize=22,
+                leading=27,
+                fontName="Body-Bold",
+                textColor=accent,
+                spaceAfter=6,
+            ),
+        ),
+        Paragraph(
+            html.escape(paper.subtitle),
+            S("sub", fontSize=11, leading=15, textColor=muted, spaceAfter=8),
+        ),
+        Paragraph(
+            f"EUROCONTROL Performance Review Unit  \u00b7  {date.today():%d %B %Y}",
+            S("meta", fontSize=9, leading=12, textColor=muted, spaceAfter=4),
+        ),
+        Table(
+            [[""]],
+            colWidths=[width],
+            rowHeights=[2],
+            style=[("LINEABOVE", (0, 0), (-1, 0), 1.2, accent)],
+        ),
+        Spacer(1, 6),
+    ]
     for kind, d in blocks(md):
         if kind == "heading":
             story.append(Paragraph(markup(d[1]), heads[min(d[0], 3)]))
@@ -1112,26 +1450,57 @@ def to_pdf(md, out_path, paper=None):
             story.append(Preformatted(d, code_style))
         elif kind == "list":
             items = [ListItem(Paragraph(markup(x), body), leftIndent=14) for x in d[1]]
-            story.append(ListFlowable(items, bulletType="1" if d[0] else "bullet",
-                                      start=1 if d[0] else "\u2022", bulletFontName="Body",
-                                      bulletFontSize=9, leftIndent=14))
+            story.append(
+                ListFlowable(
+                    items,
+                    bulletType="1" if d[0] else "bullet",
+                    start=1 if d[0] else "\u2022",
+                    bulletFontName="Body",
+                    bulletFontSize=9,
+                    leftIndent=14,
+                )
+            )
         else:
             plain = [[re.sub(r"[`*]", "", c) for c in r] for r in d]
-            widths = col_widths(plain, width - 8, lambda t: pdfmetrics.stringWidth(t, "Body-Bold", 8) + 9)
-            data = [[Paragraph(markup(c), head_cell if r == 0 else cell) for c in row]
-                    for r, row in enumerate(d)]
-            story.append(Table(data, colWidths=widths, repeatRows=1, splitByRow=1, hAlign="LEFT", style=TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), accent),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, band]),
-                ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#d0d7de")),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)])))
+            widths = col_widths(
+                plain, width - 8, lambda t: pdfmetrics.stringWidth(t, "Body-Bold", 8) + 9
+            )
+            data = [
+                [Paragraph(markup(c), head_cell if r == 0 else cell) for c in row]
+                for r, row in enumerate(d)
+            ]
+            story.append(
+                Table(
+                    data,
+                    colWidths=widths,
+                    repeatRows=1,
+                    splitByRow=1,
+                    hAlign="LEFT",
+                    style=TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), accent),
+                            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, band]),
+                            ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#d0d7de")),
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                            ("TOPPADDING", (0, 0), (-1, -1), 3),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                        ]
+                    ),
+                )
+            )
             story.append(Spacer(1, 8))
-    SimpleDocTemplate(str(out_path), pagesize=A4, leftMargin=20 * mm, rightMargin=20 * mm,
-                      topMargin=18 * mm, bottomMargin=22 * mm, title=paper.title,
-                      author="EUROCONTROL Performance Review Unit",
-                      ).build(story, onFirstPage=footer, onLaterPages=footer)
+    SimpleDocTemplate(
+        str(out_path),
+        pagesize=A4,
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=18 * mm,
+        bottomMargin=22 * mm,
+        title=paper.title,
+        author="EUROCONTROL Performance Review Unit",
+    ).build(story, onFirstPage=footer, onLaterPages=footer)
 
 
 REGENERATE_CHUNK = r"""```{r regenerate}
@@ -1236,8 +1605,12 @@ def main(argv=None, paper=None, paper_dir=PAPER, description=__doc__):
     paper = paper or V4
     ap = argparse.ArgumentParser(description=description)
     ap.add_argument("--paper-dir", default=str(paper_dir))
-    ap.add_argument("--check", action="store_true", help="fail if index.qmd is out of date; write nothing")
-    ap.add_argument("--pdf", action="store_true", help=f"also write {paper.pdf_name} (needs reportlab)")
+    ap.add_argument(
+        "--check", action="store_true", help="fail if index.qmd is out of date; write nothing"
+    )
+    ap.add_argument(
+        "--pdf", action="store_true", help=f"also write {paper.pdf_name} (needs reportlab)"
+    )
     args = ap.parse_args(argv)
     paper_dir = Path(args.paper_dir)
     qmd, page, md = build(paper_dir, paper)

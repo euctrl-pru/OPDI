@@ -3,16 +3,36 @@
 import pytest
 from pyspark.sql import Row
 from pyspark.sql.types import (
-    BooleanType, DoubleType, IntegerType, StringType, StructField, StructType,
+    BooleanType,
+    DoubleType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
 )
 
 from opdi.ingestion.osn_adsc import ADSC_SOURCE, to_opdi_schema
 
 #: Every column `osn_statevectors_v2` carries, plus `source`.
 EXPECTED = {
-    "event_time", "icao24", "lat", "lon", "velocity", "heading", "vert_rate",
-    "callsign", "on_ground", "alert", "spi", "squawk", "baro_altitude",
-    "geo_altitude", "last_pos_update", "last_contact", "serials", "source",
+    "event_time",
+    "icao24",
+    "lat",
+    "lon",
+    "velocity",
+    "heading",
+    "vert_rate",
+    "callsign",
+    "on_ground",
+    "alert",
+    "spi",
+    "squawk",
+    "baro_altitude",
+    "geo_altitude",
+    "last_pos_update",
+    "last_contact",
+    "serials",
+    "source",
 }
 
 #: The subset of `org.opensky.avro.readsb.Aircraft` this mapping reads, with
@@ -23,34 +43,53 @@ EXPECTED = {
 #: `createDataFrame` cannot infer a type for an all-NULL column, so an inferred
 #: schema would make the test fail on exactly the data shape it exists to
 #: cover. The real feed is typed by its footer and never has this problem.
-RAW_SCHEMA = StructType([
-    StructField("time", DoubleType()),
-    StructField("hex", StringType()),
-    StructField("lat", DoubleType()),
-    StructField("lon", DoubleType()),
-    StructField("alt_baro_ft", IntegerType()),
-    StructField("alt_geom", IntegerType()),
-    StructField("track", DoubleType()),
-    StructField("gs", DoubleType()),
-    StructField("baro_rate", IntegerType()),
-    StructField("flight", StringType()),
-    StructField("squawk", StringType()),
-    StructField("on_ground", BooleanType()),
-    StructField("seen", DoubleType()),
-    StructField("seen_pos", DoubleType()),
-    StructField("alert", IntegerType()),
-    StructField("spi", IntegerType()),
-])
+RAW_SCHEMA = StructType(
+    [
+        StructField("time", DoubleType()),
+        StructField("hex", StringType()),
+        StructField("lat", DoubleType()),
+        StructField("lon", DoubleType()),
+        StructField("alt_baro_ft", IntegerType()),
+        StructField("alt_geom", IntegerType()),
+        StructField("track", DoubleType()),
+        StructField("gs", DoubleType()),
+        StructField("baro_rate", IntegerType()),
+        StructField("flight", StringType()),
+        StructField("squawk", StringType()),
+        StructField("on_ground", BooleanType()),
+        StructField("seen", DoubleType()),
+        StructField("seen_pos", DoubleType()),
+        StructField("alert", IntegerType()),
+        StructField("spi", IntegerType()),
+    ]
+)
 
 
 @pytest.fixture
 def raw(spark):
-    return spark.createDataFrame([
-        Row(time=1780000000.0, hex="4ACB41", lat=52.0, lon=-5.0,
-            alt_baro_ft=35000, alt_geom=None, track=270.0, gs=480.0,
-            baro_rate=-1200, flight="SK4414", squawk="2000",
-            on_ground=False, seen=0.0, seen_pos=0.0, alert=0, spi=0),
-    ], schema=RAW_SCHEMA)
+    return spark.createDataFrame(
+        [
+            Row(
+                time=1780000000.0,
+                hex="4ACB41",
+                lat=52.0,
+                lon=-5.0,
+                alt_baro_ft=35000,
+                alt_geom=None,
+                track=270.0,
+                gs=480.0,
+                baro_rate=-1200,
+                flight="SK4414",
+                squawk="2000",
+                on_ground=False,
+                seen=0.0,
+                seen_pos=0.0,
+                alert=0,
+                spi=0,
+            ),
+        ],
+        schema=RAW_SCHEMA,
+    )
 
 
 def test_column_set_matches_the_statevector_schema(spark, raw):
@@ -127,12 +166,29 @@ def test_a_historical_row_without_the_newer_columns_still_maps(spark):
     # The feed's schema grew: `track`, `gs` and `baro_rate` are empty before
     # roughly 2025-09 and `flight`, `squawk`, `on_ground` before roughly
     # 2026-06. A 2024 day must map to NULL velocity rather than fail.
-    old = spark.createDataFrame([
-        Row(time=1709300000.0, hex="4acb41", lat=52.0, lon=-5.0,
-            alt_baro_ft=38000, alt_geom=None, track=None, gs=None,
-            baro_rate=None, flight=None, squawk=None, on_ground=None,
-            seen=0.0, seen_pos=0.0, alert=None, spi=None),
-    ], schema=RAW_SCHEMA)
+    old = spark.createDataFrame(
+        [
+            Row(
+                time=1709300000.0,
+                hex="4acb41",
+                lat=52.0,
+                lon=-5.0,
+                alt_baro_ft=38000,
+                alt_geom=None,
+                track=None,
+                gs=None,
+                baro_rate=None,
+                flight=None,
+                squawk=None,
+                on_ground=None,
+                seen=0.0,
+                seen_pos=0.0,
+                alert=None,
+                spi=None,
+            ),
+        ],
+        schema=RAW_SCHEMA,
+    )
     r = to_opdi_schema(old).collect()[0]
     assert r["velocity"] is None and r["vert_rate"] is None
     assert r["heading"] is None

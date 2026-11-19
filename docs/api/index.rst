@@ -13,7 +13,6 @@ All modules use Google-style docstrings.
    reference
    pipeline
    output
-   monitoring
    utils
 
 Package-Level Exports

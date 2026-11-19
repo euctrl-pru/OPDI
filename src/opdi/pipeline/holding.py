@@ -24,9 +24,10 @@ from pyspark.sql.functions import col, lit
 
 from opdi.config import EventConfig
 from opdi.pipeline.holes import PIECE
-
-#: Version stamped on the two events and on their measurements.
-HOLDING_VERSION = "holding_v0.1.0"
+from opdi.versions import (  # stamped on the events and measurements
+    HOLDING_VERSION,
+    LEGACY_HOLDING_VERSION,
+)
 
 #: The measurements read off ``holding-end``'s info (see ``events.EXTRA_MEASURES``).
 HOLDING_MEASURES = [
@@ -34,6 +35,26 @@ HOLDING_MEASURES = [
     ("holding-end", "distance_nm", "Holding distance (NM)", HOLDING_VERSION),
     ("holding-end", "circuits", "Holding circuits", HOLDING_VERSION),
 ]
+
+#: The settings that change the holding patterns: with all of them at their
+#: values of release v0.0.2 the events carry :data:`LEGACY_HOLDING_VERSION`.
+HOLDING_SETTINGS = (
+    "holding_pattern_by_straight_share",
+    "holding_trim_to_main_direction",
+    "holding_altitude_from_known_reports",
+    "holding_context",
+    "altitude_from_cleaning",
+    "altitude_plausible_min_ft",
+    "altitude_plausible_max_ft",
+)
+
+
+def holding_version(config: EventConfig) -> str:
+    """The ``version`` of the holding events and measurements under ``config``."""
+    if config.differs_from_release(HOLDING_SETTINGS):
+        return HOLDING_VERSION
+    return LEGACY_HOLDING_VERSION
+
 
 FT_PER_M = 3.28084
 KT_PER_MS = 1.94384
@@ -72,8 +93,10 @@ def _turn_series(df: DataFrame, config: EventConfig) -> DataFrame:
     raw = _wrap_deg(col("heading") - col("_prev_hdg"))
     rate = F.abs(raw) / dt
     d_hdg = F.when(
-        col("heading").isNotNull() & col("_prev_hdg").isNotNull()
-        & (dt > 0) & (dt <= config.holding_max_sample_gap_seconds)
+        col("heading").isNotNull()
+        & col("_prev_hdg").isNotNull()
+        & (dt > 0)
+        & (dt <= config.holding_max_sample_gap_seconds)
         & (rate <= config.holding_turn_rate_spike_deg),
         raw,
     )
@@ -86,8 +109,10 @@ def _turn_series(df: DataFrame, config: EventConfig) -> DataFrame:
 
 
 def _window_flag(df: DataFrame, config: EventConfig, placement: str, name: str) -> DataFrame:
-    """``name`` = the window test over the ``trailing``, ``leading`` or
-    ``centred`` window of ``holding_window_seconds``.
+    """The holding test over one window, as a column named ``name``.
+
+    The window is the ``trailing``, ``leading`` or ``centred`` window of
+    ``holding_window_seconds``.
 
     Three placements, not two: a single orbit shorter than the window is
     seen whole by the trailing window only near its end and by the leading
@@ -114,7 +139,12 @@ def _window_flag(df: DataFrame, config: EventConfig, placement: str, name: str) 
         df = (
             df.withColumn("_cum_turn", F.sum(F.coalesce(col("d_hdg"), lit(0.0))).over(run))
             .withColumn("_cum_gross", F.sum(F.coalesce(F.abs(col("d_hdg")), lit(0.0))).over(run))
-            .withColumn("_cum_alt", F.sum(F.coalesce(F.abs(col("_alt_ft") - F.lag("_alt_ft").over(w)), lit(0.0))).over(run))
+            .withColumn(
+                "_cum_alt",
+                F.sum(F.coalesce(F.abs(col("_alt_ft") - F.lag("_alt_ft").over(w)), lit(0.0))).over(
+                    run
+                ),
+            )
             .withColumn("_cum_turning", F.sum(col("turning").cast("int")).over(run))
             .withColumn("_row", F.row_number().over(w))
         )
@@ -144,30 +174,95 @@ def _window_flag(df: DataFrame, config: EventConfig, placement: str, name: str) 
     return df.withColumn(name, F.coalesce(flag, lit(False)))
 
 
+def _one_row_per_time(df: DataFrame) -> DataFrame:
+    """One row per ``(track_id, piece, _ts)``.
+
+    The windows of this family look a number of rows ahead or behind, and
+    two reports at one time would make "the next row" depend on the order
+    Spark reads them in. Cleaning (step 02a) removes repeated times, but
+    step 04 can also read tracks that kept them. At a repeated time the row
+    kept is the first in the order of every other column (by name, NULLs
+    last), so the choice is the same on every run.
+    """
+    keys = {"track_id", PIECE, "_ts"}
+    rest = [
+        col(f.name).asc_nulls_last()
+        for f in sorted(df.schema.fields, key=lambda f: f.name)
+        if f.name not in keys and f.dataType.typeName() not in ("array", "map", "struct")
+    ]
+    w = Window.partitionBy("track_id", PIECE).orderBy(col("_ts").asc(), *rest)
+    repeated = F.coalesce(F.lag("_ts").over(w) == col("_ts"), lit(False))
+    return df.withColumn("_repeated", repeated).filter(~col("_repeated")).drop("_repeated")
+
+
 def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
-    """One row per episode, trimmed to its first and last turning sample."""
+    """One row per episode, trimmed to its first and last turning sample.
+
+    The times must be unique within a track and piece (see
+    :func:`_one_row_per_time`).
+    """
     w = Window.partitionBy("track_id", PIECE).orderBy("_ts")
     before = w.rowsBetween(Window.unboundedPreceding, -1)
-    after = w.rowsBetween(1, Window.unboundedFollowing)
+    # The rows after this one, as the rows before it in the reversed order.
+    # Spark answers a frame that ends at the last row (``rowsBetween(1,
+    # unboundedFollowing)``) by scanning to the end of the track for every
+    # row, which is quadratic in the track's length; a frame that starts at
+    # the first row grows and is kept up to date row by row. The times are
+    # unique within a track and piece (``_one_row_per_time``), so both
+    # frames hold the same rows.
+    after = (
+        Window.partitionBy("track_id", PIECE)
+        .orderBy(col("_ts").desc())
+        .rowsBetween(Window.unboundedPreceding, -1)
+    )
     hold_ts = F.when(col("_in_hold"), col("_ts"))
     # Bridge a short unflagged stretch between two flagged ones.
     prev_hold = F.last(hold_ts, ignorenulls=True).over(before)
-    next_hold = F.first(hold_ts, ignorenulls=True).over(after)
+    # The next flagged time is the smallest flagged time after this row.
+    next_hold = F.min(hold_ts).over(after)
     bridged = col("_in_hold") | (
         ((col("_ts") - prev_hold) <= config.holding_bridge_gap_seconds)
         & ((next_hold - col("_ts")) <= config.holding_bridge_gap_seconds)
     )
     df = df.withColumn("_hold", F.coalesce(bridged, lit(False)))
     starts = col("_hold") & ~F.coalesce(F.lag("_hold").over(w), lit(False))
-    df = df.withColumn("_ep", F.sum(starts.cast("int")).over(w.rowsBetween(Window.unboundedPreceding, 0)))
+    df = df.withColumn(
+        "_ep", F.sum(starts.cast("int")).over(w.rowsBetween(Window.unboundedPreceding, 0))
+    )
     flagged = df.filter(col("_hold"))
     we = Window.partitionBy("track_id", PIECE, "_ep")
-    core_start = F.min(F.when(col("turning"), col("_ts"))).over(we)
-    core_end = F.max(F.when(col("turning"), col("_ts"))).over(we)
-    core = flagged.withColumn("_core_start", core_start).withColumn("_core_end", core_end).filter(
-        col("_core_start").isNotNull() & col("_ts").between(col("_core_start"), col("_core_end"))
+    turning = col("turning")
+    if config.holding_trim_to_main_direction:
+        # Only reports turning the way the episode turns overall bound it, so
+        # a turn the other way before or after the hold is left out.
+        net = F.sum(F.coalesce(col("d_hdg"), lit(0.0))).over(we)
+        turning = turning & (F.signum(col("d_hdg")) == F.signum(net))
+    core_start = F.min(F.when(turning, col("_ts"))).over(we)
+    core_end = F.max(F.when(turning, col("_ts"))).over(we)
+    core = (
+        flagged.withColumn("_core_start", core_start)
+        .withColumn("_core_end", core_end)
+        .filter(
+            col("_core_start").isNotNull()
+            & col("_ts").between(col("_core_start"), col("_core_end"))
+        )
     )
+    # The altitude of the first and last report that has one: ``min_by``
+    # skips the rows whose ordering value is NULL.
+    alt_order = (
+        F.when(col("_alt_ft").isNotNull(), col("_ts"))
+        if config.holding_altitude_from_known_reports
+        else col("_ts")
+    )
+    # The flight's airports, the same on every report of a track, for the
+    # context of the hold (``holding_context``).
+    airport_cols = [
+        F.first(c, ignorenulls=True).alias(c)
+        for c in ("adep", "ades", "ades_lat", "ades_lon")
+        if config.holding_context and c in core.columns
+    ]
     agg = core.groupBy("track_id", PIECE, "_ep").agg(
+        *airport_cols,
         F.min("_ts").alias("start_ts"),
         F.max("_ts").alias("end_ts"),
         F.min_by("event_time", "_ts").alias("start_time"),
@@ -176,8 +271,8 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
         F.min_by("lon", "_ts").alias("start_lon"),
         F.max_by("lat", "_ts").alias("end_lat"),
         F.max_by("lon", "_ts").alias("end_lon"),
-        F.min_by("_alt_ft", "_ts").alias("start_alt_ft"),
-        F.max_by("_alt_ft", "_ts").alias("end_alt_ft"),
+        F.min_by("_alt_ft", alt_order).alias("start_alt_ft"),
+        F.max_by("_alt_ft", alt_order).alias("end_alt_ft"),
         F.min_by("cumulative_distance_nm", "_ts").alias("start_dist_nm"),
         F.max_by("cumulative_distance_nm", "_ts").alias("end_dist_nm"),
         F.min_by("cumulative_time_s", "_ts").alias("start_cum_s"),
@@ -194,7 +289,10 @@ def _episodes(df: DataFrame, config: EventConfig) -> DataFrame:
 
 
 def calculate_holding_events(
-    geo: DataFrame, config: EventConfig, go_arounds: Optional[DataFrame] = None
+    geo: DataFrame,
+    config: EventConfig,
+    go_arounds: Optional[DataFrame] = None,
+    runway_events: Optional[DataFrame] = None,
 ) -> Optional[DataFrame]:
     """``holding-start``/``holding-end`` pairs for every track in ``geo``.
 
@@ -203,10 +301,115 @@ def calculate_holding_events(
     the nine milestone columns plus ``version``, or None when the family is
     off. ``go_arounds`` (``track_id, type, event_time``) drops episodes that
     start or end within ``holding_goaround_exclusion_seconds`` of a
-    ``go-around`` on the same track.
+    ``go-around`` on the same track. ``runway_events`` (``track_id, type,
+    event_time, info``), the take-off and landing times of the step, give
+    ``info.context`` (:attr:`~opdi.config.EventConfig.holding_context`);
+    without them the context is not written.
     """
     if not config.emit_holding:
         return None
+    # Only the columns the family reads: every other column of the step's
+    # frame would be carried through each of its windows and sorts.
+    geo = geo.select(*[c for c in HOLDING_INPUT_COLUMNS if c in geo.columns])
+    return _pair_rows(
+        _holding_episodes(geo, config, go_arounds, runway_events), holding_version(config)
+    )
+
+
+#: The columns of the step's frame that the holding family reads.
+HOLDING_INPUT_COLUMNS = (
+    "track_id",
+    PIECE,
+    "event_time",
+    "lat",
+    "lon",
+    "baro_altitude_c",
+    "heading",
+    "velocity",
+    "cumulative_distance_nm",
+    "cumulative_time_s",
+    "elev_ades_ft",
+    "elev_adep_ft",
+    "adep",
+    "ades",
+    "ades_lat",
+    "ades_lon",
+)
+
+
+#: Event types that mark a landing or a take-off, from either detector.
+LANDING_TYPES = ("ALDT", "touchdown")
+TAKE_OFF_TYPES = ("ATOT", "airborne")
+
+
+def _context(episodes: DataFrame, runway_events: DataFrame, config: EventConfig) -> DataFrame:
+    """``_context`` of each episode: ``arrival``, ``en-route`` or ``other``.
+
+    See :attr:`~opdi.config.EventConfig.holding_context`. The episodes are
+    few (hundreds a day), so they are joined with the take-off and landing
+    times of their tracks, and the rules read off the result.
+    """
+    rwy = runway_events.filter(col("type").isin(*LANDING_TYPES, *TAKE_OFF_TYPES)).select(
+        col("track_id").alias("_r_track"),
+        col("type").isin(*LANDING_TYPES).alias("_r_landing"),
+        col("event_time").cast("double").alias("_r_ts"),
+        F.get_json_object(col("info"), "$.apt_icao").alias("_r_apt"),
+    )
+    tracks = Window.partitionBy("track_id")
+    eps = (
+        episodes.withColumn("_n_ep", F.count(lit(1)).over(tracks))
+        .withColumn("_hold_s", F.sum("duration_s").over(tracks))
+        .withColumn("_first_start", F.min("start_ts").over(tracks))
+        .withColumn("_last_end", F.max("end_ts").over(tracks))
+    )
+    keys = [c for c in eps.columns]
+    landing_after = lambda ref: col("_r_landing") & (col("_r_ts") > ref)  # noqa: E731
+    take_off_before = ~col("_r_landing") & (col("_r_ts") < col("_first_start"))
+    joined = (
+        eps.join(rwy, eps.track_id == rwy._r_track, "left")
+        .groupBy(*keys)
+        .agg(
+            F.min(F.when(landing_after(col("end_ts")), col("_r_ts"))).alias("_land_ts"),
+            F.min_by(col("_r_apt"), F.when(landing_after(col("end_ts")), col("_r_ts"))).alias(
+                "_land_apt"
+            ),
+            F.min(F.when(landing_after(col("_last_end")), col("_r_ts"))).alias("_air_end"),
+            F.max(F.when(take_off_before, col("_r_ts"))).alias("_take_off_ts"),
+        )
+    )
+    ades = col("ades") if "ades" in joined.columns else lit(None).cast("string")
+    adep = col("adep") if "adep" in joined.columns else lit(None).cast("string")
+    if "ades_lat" in joined.columns:
+        to_ades_nm = _haversine_nm(col("end_lat"), col("end_lon"), col("ades_lat"), col("ades_lon"))
+    else:
+        to_ades_nm = lit(None).cast("double")
+    # The time in the air runs from the take-off: a track that starts in the
+    # air (reception gained on the way) says nothing of the flight's length.
+    air_s = col("_air_end") - col("_take_off_ts")
+    local = ades.isNull() | (ades == "") | (adep == ades)
+    busy = (col("_n_ep") >= config.holding_other_min_episodes) | (
+        col("_hold_s") > air_s * (config.holding_other_max_share_pct / 100.0)
+    )
+    arrival = (
+        (col("_land_apt") == ades)
+        & ((col("_land_ts") - col("end_ts")) <= config.holding_arrival_max_seconds)
+        & (to_ades_nm <= config.holding_arrival_max_distance_nm)
+    )
+    context = (
+        F.when(local | col("_land_ts").isNull() | F.coalesce(busy, lit(False)), lit("other"))
+        .when(F.coalesce(arrival, lit(False)), lit("arrival"))
+        .otherwise(lit("en-route"))
+    )
+    return joined.withColumn("_context", context)
+
+
+def _holding_episodes(
+    geo: DataFrame,
+    config: EventConfig,
+    go_arounds: Optional[DataFrame] = None,
+    runway_events: Optional[DataFrame] = None,
+) -> DataFrame:
+    """One row per kept episode, with its ``info``; see :func:`calculate_holding_events`."""
     elev_cols = [c for c in ("elev_ades_ft", "elev_adep_ft") if c in geo.columns]
     elev = F.coalesce(*[col(c) for c in elev_cols], lit(0.0)) if elev_cols else lit(0.0)
     df = (
@@ -217,6 +420,7 @@ def calculate_holding_events(
     )
     if PIECE not in df.columns:
         df = df.withColumn(PIECE, lit(0))
+    df = _one_row_per_time(df)
     df = _turn_series(df, config)
     df = _window_flag(df, config, "trailing", "_hold_bwd")
     df = _window_flag(df, config, "leading", "_hold_fwd")
@@ -224,11 +428,14 @@ def calculate_holding_events(
     # Speed from the last sample that had one: cleaning blanks velocity
     # together with heading on a repeated broadcast, and a NULL speed must
     # not punch a hole in an episode.
-    known = Window.partitionBy("track_id", PIECE).orderBy("_ts").rowsBetween(Window.unboundedPreceding, 0)
+    known = (
+        Window.partitionBy("track_id", PIECE)
+        .orderBy("_ts")
+        .rowsBetween(Window.unboundedPreceding, 0)
+    )
     speed_kt = F.last("velocity", ignorenulls=True).over(known) * KT_PER_MS
-    gates = (
-        ((col("_alt_ft") - col("_elev_ft")) >= config.holding_min_height_ft)
-        & (speed_kt >= config.holding_min_speed_kt)
+    gates = ((col("_alt_ft") - col("_elev_ft")) >= config.holding_min_height_ft) & (
+        speed_kt >= config.holding_min_speed_kt
     )
     df = df.withColumn(
         "_in_hold",
@@ -237,9 +444,8 @@ def calculate_holding_events(
     episodes = _episodes(df, config)
 
     if go_arounds is not None:
-        ga = (
-            go_arounds.filter(col("type") == "go-around")
-            .select(col("track_id").alias("_ga_track"), col("event_time").cast("double").alias("_ga_ts"))
+        ga = go_arounds.filter(col("type") == "go-around").select(
+            col("track_id").alias("_ga_track"), col("event_time").cast("double").alias("_ga_ts")
         )
         near = (col("track_id") == col("_ga_track")) & (
             (F.abs(col("start_ts") - col("_ga_ts")) <= config.holding_goaround_exclusion_seconds)
@@ -250,27 +456,36 @@ def calculate_holding_events(
     seq = Window.partitionBy("track_id").orderBy("start_ts")
     episodes = episodes.withColumn("holding_seq", F.row_number().over(seq))
     straight_pct = F.round(100.0 * (1.0 - col("n_turning") / col("n_rows")), 1)
-    pattern = F.when(
-        (straight_pct < config.holding_orbit_max_straight_pct)
-        & (F.abs(col("turn_deg")) < config.holding_orbit_max_turn_deg),
-        lit("orbit"),
-    ).otherwise(lit("racetrack"))
-    info = F.to_json(F.struct(
-        col("holding_seq"),
-        pattern.alias("pattern"),
-        F.when(col("turn_deg") > 0, lit("R")).otherwise(lit("L")).alias("direction"),
-        F.round(F.abs(col("turn_deg")) / 360.0, 1).alias("circuits"),
-        col("duration_s"),
-        F.round(col("end_dist_nm") - col("start_dist_nm"), 2).alias("distance_nm"),
-        F.round(col("start_alt_ft"), 0).alias("altitude_start_ft"),
-        F.round(col("end_alt_ft"), 0).alias("altitude_end_ft"),
-        straight_pct.alias("straight_pct"),
-    ))
-    episodes = episodes.withColumn("info", info)
+    is_orbit = straight_pct < config.holding_orbit_max_straight_pct
+    if not config.holding_pattern_by_straight_share:
+        is_orbit = is_orbit & (F.abs(col("turn_deg")) < config.holding_orbit_max_turn_deg)
+    pattern = F.when(is_orbit, lit("orbit")).otherwise(lit("racetrack"))
+    context = []
+    if config.holding_context and runway_events is not None:
+        episodes = _context(episodes, runway_events, config)
+        context = [col("_context").alias("context")]
+    info = F.to_json(
+        F.struct(
+            col("holding_seq"),
+            pattern.alias("pattern"),
+            F.when(col("turn_deg") > 0, lit("R")).otherwise(lit("L")).alias("direction"),
+            F.round(F.abs(col("turn_deg")) / 360.0, 1).alias("circuits"),
+            col("duration_s"),
+            F.round(col("end_dist_nm") - col("start_dist_nm"), 2).alias("distance_nm"),
+            F.round(col("start_alt_ft"), 0).alias("altitude_start_ft"),
+            F.round(col("end_alt_ft"), 0).alias("altitude_end_ft"),
+            straight_pct.alias("straight_pct"),
+            *context,
+        )
+    )
+    return episodes.withColumn("info", info)
 
-    def _row(kind: str) -> DataFrame:
-        return episodes.select(
-            col("track_id"),
+
+def _pair_rows(episodes: DataFrame, version: str = HOLDING_VERSION) -> DataFrame:
+    """The ``holding-start`` and ``holding-end`` events of each episode."""
+
+    def _row(kind: str):
+        return F.struct(
             lit(f"holding-{kind}").alias("type"),
             col(f"{kind}_time").alias("event_time"),
             col(f"{kind}_lon").alias("lon"),
@@ -278,8 +493,23 @@ def calculate_holding_events(
             col(f"{kind}_alt_ft").alias("altitude_ft"),
             col(f"{kind}_dist_nm").alias("cumulative_distance_nm"),
             col(f"{kind}_cum_s").cast("long").alias("cumulative_time_s"),
-            col("info"),
-            lit(HOLDING_VERSION).alias("version"),
         )
 
-    return _row("start").unionByName(_row("end"))
+    # Both events of an episode come from one row, so the episodes are
+    # computed once. (A union of a start frame and an end frame computed the
+    # whole family twice, as Spark does not share the work of two branches.)
+    pair = episodes.select(
+        col("track_id"), col("info"), F.explode(F.array(_row("start"), _row("end"))).alias("_e")
+    )
+    return pair.select(
+        col("track_id"),
+        col("_e.type").alias("type"),
+        col("_e.event_time").alias("event_time"),
+        col("_e.lon").alias("lon"),
+        col("_e.lat").alias("lat"),
+        col("_e.altitude_ft").alias("altitude_ft"),
+        col("_e.cumulative_distance_nm").alias("cumulative_distance_nm"),
+        col("_e.cumulative_time_s").alias("cumulative_time_s"),
+        col("info"),
+        lit(version).alias("version"),
+    )

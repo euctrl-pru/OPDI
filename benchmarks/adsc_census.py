@@ -44,11 +44,38 @@ ADSC_BASE = "s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro"
 #: report: an absent row and a zero mean different things and only one of them
 #: is a measurement.
 TRACKED = (
-    "time", "hex", "lat", "lon", "alt_baro_ft", "alt_geom", "track", "gs",
-    "baro_rate", "flight", "squawk", "ias", "tas", "mach", "mag_heading",
-    "true_heading", "roll", "track_rate", "geom_rate", "oat", "tat", "wd",
-    "ws", "nav_qnh", "nav_altitude_mcp", "nav_altitude_fms", "nav_heading",
-    "registration", "ac_type", "ac_desc", "category", "on_ground",
+    "time",
+    "hex",
+    "lat",
+    "lon",
+    "alt_baro_ft",
+    "alt_geom",
+    "track",
+    "gs",
+    "baro_rate",
+    "flight",
+    "squawk",
+    "ias",
+    "tas",
+    "mach",
+    "mag_heading",
+    "true_heading",
+    "roll",
+    "track_rate",
+    "geom_rate",
+    "oat",
+    "tat",
+    "wd",
+    "ws",
+    "nav_qnh",
+    "nav_altitude_mcp",
+    "nav_altitude_fms",
+    "nav_heading",
+    "registration",
+    "ac_type",
+    "ac_desc",
+    "category",
+    "on_ground",
 )
 
 
@@ -63,8 +90,10 @@ def census(df: DataFrame, bbox) -> DataFrame:
 
     min_lon, min_lat, max_lon, max_lat = bbox
     in_box = (
-        (F.col("lon") >= min_lon) & (F.col("lon") <= max_lon)
-        & (F.col("lat") >= min_lat) & (F.col("lat") <= max_lat)
+        (F.col("lon") >= min_lon)
+        & (F.col("lon") <= max_lon)
+        & (F.col("lat") >= min_lat)
+        & (F.col("lat") <= max_lat)
     )
 
     w = Window.partitionBy("hex").orderBy("time")
@@ -79,16 +108,13 @@ def census(df: DataFrame, bbox) -> DataFrame:
         .groupBy("hex")
         .agg(F.expr("percentile_approx(_gap, 0.5)").alias("_median"))
     )
-    cadence = gaps.agg(
-        F.expr("percentile_approx(_median, 0.5)").alias("median_cadence_s")
-    )
+    cadence = gaps.agg(F.expr("percentile_approx(_median, 0.5)").alias("median_cadence_s"))
 
     # An exact duplicate is the same airframe, instant and position twice --
     # Kafka at-least-once delivery, not a second observation.
     dupes = df.groupBy("hex", "time", "lat", "lon").count()
     dupe_rows = dupes.agg(
-        F.coalesce(F.sum(F.col("count") - 1), F.lit(0))
-        .cast("long").alias("exact_duplicate_rows")
+        F.coalesce(F.sum(F.col("count") - 1), F.lit(0)).cast("long").alias("exact_duplicate_rows")
     )
 
     fills = [
@@ -111,15 +137,14 @@ def census(df: DataFrame, bbox) -> DataFrame:
         F.sum(in_box.cast("long")).alias("rows_in_box"),
         F.countDistinct("hex").alias("airframes"),
         F.countDistinct(F.when(in_box, F.col("hex"))).alias("airframes_in_box"),
-        F.sum((in_box & (F.col("alt_baro_ft") > 30000)).cast("long"))
-        .alias("in_box_above_fl300"),
-        F.sum((in_box & (F.col("alt_baro_ft") < 10000)).cast("long"))
-        .alias("in_box_below_10000ft"),
-        F.sum((in_box & (F.col("lon") < -10.0)).cast("long"))
-        .alias("in_box_west_of_10w"),
-        F.sum((in_box & F.col("on_ground")).cast("long"))
-        .alias("in_box_on_ground")
-        if "on_ground" in df.columns else F.lit(0).cast("long").alias("in_box_on_ground"),
+        F.sum((in_box & (F.col("alt_baro_ft") > 30000)).cast("long")).alias("in_box_above_fl300"),
+        F.sum((in_box & (F.col("alt_baro_ft") < 10000)).cast("long")).alias("in_box_below_10000ft"),
+        F.sum((in_box & (F.col("lon") < -10.0)).cast("long")).alias("in_box_west_of_10w"),
+        (
+            F.sum((in_box & F.col("on_ground")).cast("long")).alias("in_box_on_ground")
+            if "on_ground" in df.columns
+            else F.lit(0).cast("long").alias("in_box_on_ground")
+        ),
         *fills,
     )
     return base.crossJoin(cadence).crossJoin(dupe_rows)
@@ -138,8 +163,7 @@ def hour_paths(base: str, day) -> list:
     import datetime as dt
 
     start = dt.datetime(day.year, day.month, day.day, tzinfo=dt.timezone.utc)
-    return [f"{base}/hour={int((start + dt.timedelta(hours=h)).timestamp())}"
-            for h in range(24)]
+    return [f"{base}/hour={int((start + dt.timedelta(hours=h)).timestamp())}" for h in range(24)]
 
 
 def existing(spark, paths: list) -> list:
@@ -180,30 +204,31 @@ def main() -> int:
     import datetime as dt
 
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--days", nargs="+", required=True,
-                    help="YYYY-MM-DD, one census row each")
+    ap.add_argument("--days", nargs="+", required=True, help="YYYY-MM-DD, one census row each")
     ap.add_argument("--base", default=ADSC_BASE)
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--out-name", default="adsc_census.csv")
     ap.add_argument("--cores", type=int, default=4)
     ap.add_argument("--driver-memory", default="6g")
     ap.add_argument(
-        "--local", action="store_true",
+        "--local",
+        action="store_true",
         help="Local Spark instead of the OSN cluster. The default for this "
-             "job: the whole topic is ~5 MB per day, so a distributed session "
-             "costs minutes of executor startup to read what fits in a "
-             "driver's heap several times over. Every other benchmark here "
-             "reads pipeline tables and genuinely needs the cluster.")
-    ap.add_argument("--distributed", dest="local", action="store_false",
-                    help="Force the cluster session.")
+        "job: the whole topic is ~5 MB per day, so a distributed session "
+        "costs minutes of executor startup to read what fits in a "
+        "driver's heap several times over. Every other benchmark here "
+        "reads pipeline tables and genuinely needs the cluster.",
+    )
+    ap.add_argument(
+        "--distributed", dest="local", action="store_false", help="Force the cluster session."
+    )
     ap.set_defaults(local=True)
     args = ap.parse_args()
 
     from osn_sample import build_spark, load_dotenv
 
     load_dotenv()
-    spark = build_spark(args.cores, args.driver_memory,
-                        distributed=not args.local)
+    spark = build_spark(args.cores, args.driver_memory, distributed=not args.local)
     rows, partitions = [], {}
     try:
         for d in args.days:
@@ -247,11 +272,16 @@ def main() -> int:
     # measured from eighteen of its twenty-four hours", and it is already
     # known from the listing the read had to do anyway.
     import provenance
-    provenance.record(out, args.out_name, "benchmarks/adsc_census.py",
-                      sys.argv[1:], ["benchmarks/adsc_census.py"],
-                      inputs={"days": args.days, "base": args.base,
-                              "hour_partitions_per_day": partitions},
-                      input_tables=[])
+
+    provenance.record(
+        out,
+        args.out_name,
+        "benchmarks/adsc_census.py",
+        sys.argv[1:],
+        ["benchmarks/adsc_census.py"],
+        inputs={"days": args.days, "base": args.base, "hour_partitions_per_day": partitions},
+        input_tables=[],
+    )
     print(f"wrote {out / args.out_name} ({len(rows)} day(s))")
     return 0
 

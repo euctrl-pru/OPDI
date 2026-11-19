@@ -1,14 +1,17 @@
-"""Airport layout events -- entry/exit of runway, taxiway, apron via H3
-matching against ``hexaero_airport_layouts``.
+"""Airport layout events: entry and exit of runways, taxiways, aprons and stands.
 
-Moved out of ``events.py`` (Task 4) so the gate that decides which samples are
-"low enough to be near the ground" can be expressed against height above field
-elevation rather than uncorrected pressure altitude, using the shared helpers
-in ``elevation.py`` (Task 2) instead of a second copy of that arithmetic.
+Part of step 04. Low reports of a flight are matched to the H3 cells
+(resolution 12, about 20 m) of the layouts of its airports
+(``hexaero_airport_layouts``, built from OpenStreetMap by step 00b), and
+each passage through a part of the airport gives an ``entry-<part>`` and an
+``exit-<part>`` event (for example ``entry-parking_position``). A report is
+low enough when it is within a set height of the airport's elevation, or
+flagged on the ground.
+See https://www.opdi.aero/content/methods/surface-events.html.
 """
 
 from datetime import date
-from typing import Optional
+from typing import Optional, Sequence
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -17,66 +20,68 @@ from pyspark.sql.functions import (
     concat_ws,
     lag,
     lit,
-    max as f_max,
-    min as f_min,
     split,
     struct,
-    sum as f_sum,
     to_json,
     to_timestamp,
     when,
+)
+from pyspark.sql.functions import (
+    max as f_max,
+)
+from pyspark.sql.functions import (
+    min as f_min,
+)
+from pyspark.sql.functions import (
+    sum as f_sum,
 )
 from pyspark.sql.window import Window
 
 from opdi.config import EventConfig
 from opdi.pipeline.elevation import attach_field_elevation, height_above_field_ft
-from opdi.pipeline.flights import resolve_flight_id
+from opdi.pipeline.flights import resolve_flight_id, with_endpoint_candidates
+from opdi.pipeline.runways import FT_PER_NM, KT_PER_MPS
 from opdi.utils.datetime_helpers import get_start_end_of_month
+from opdi.utils.geometry import haversine_nm
 from opdi.utils.storage import StorageManager
 
-#: The events version every published dataset up to 2026-08 carries.
-#:
-#: Named here because this module has to *test* for it -- a run stamping a
-#: released string has to reproduce that release, so the callsign-resolution
-#: behaviour change below is skipped for it. ``EventConfig.legacy()`` sets it;
-#: the two are asserted equal in ``tests/test_events_labelling.py`` so a rename
-#: cannot make the guard quietly stop firing.
-LEGACY_EVENTS_VERSION = "events_v0.0.2"
+# The events version of release v0.0.2. A run that writes it reproduces that
+# release, so the call sign of the track is not resolved for it (see
+# below). ``EventConfig.legacy()`` sets it; ``tests/test_events_labelling.py``
+# checks that the two agree.
+from opdi.versions import LEGACY_EVENTS_VERSION
 
 
-def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:
-    """``id`` and ``apt``: the aerodromes each flight of *month* may be at.
+def flight_aerodrome_sets(
+    month: date, storage: "StorageManager", endpoint_roles: Sequence[str] = ()
+) -> DataFrame:
+    """``id`` and ``apt``: the airports each flight of ``month`` may be at.
 
-    The array is ``adep``, ``ades`` and the two proximity lists, with the empty
-    strings a missing aerodrome leaves removed -- because that is what the
-    layout join tests with ``array_contains``, and a flight whose ADES is
-    unknown must not match every aerodrome whose ``hexaero_apt_icao`` happens
-    to be blank.
+    The array holds ``adep``, ``ades`` and the two lists of other candidate
+    airports, without the empty strings a missing airport leaves, so that a
+    flight with an unknown ADES does not match every layout row with a blank
+    airport code. Shared with the runway milestones, so both use the same
+    airports for a flight.
 
-    Extracted from :func:`calculate_airport_events` rather than copied into the
-    runway family: the two must agree about which aerodromes a flight is
-    allowed to be at, or one crossing gets published by one family and dropped
-    by the other, and nothing in the output would say which rule each used.
+    ``endpoint_roles`` (``"adep"``, ``"ades"``) adds every airport of the
+    table ``opdi_endpoint_candidates`` for that end of the track (110 NM),
+    for a flight list whose lists hold only the nearer airports
+    (:func:`opdi.pipeline.flights.wide_search_roles`).
 
-    No ``table_exists`` guard: the caller decides what a missing flight list
-    means -- fatal here, "skip the family" for the runway milestones -- and a
-    guard returning ``None`` would turn the first case into an
-    ``AttributeError`` several frames away from its cause.
+    A missing flight list raises an error; the caller decides what that
+    means.
     """
     start_ts, end_ts = get_start_end_of_month(month)
     flight_list = (
         storage.read_table("opdi_flight_list")
         .filter(
-            (col("dof") >= to_timestamp(lit(start_ts)))
-            & (col("dof") < to_timestamp(lit(end_ts)))
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
         )
         .select("id", "adep", "ades", "adep_p", "ades_p")
     )
 
     for c in ["adep", "ades", "adep_p", "ades_p"]:
-        flight_list = flight_list.withColumn(
-            c, when(col(c).isNull(), lit("")).otherwise(col(c))
-        )
+        flight_list = flight_list.withColumn(c, when(col(c).isNull(), lit("")).otherwise(col(c)))
 
     return (
         flight_list.withColumn(
@@ -89,88 +94,53 @@ def flight_aerodrome_sets(month: date, storage: "StorageManager") -> DataFrame:
         )
         .withColumn("apt", F.array_remove(col("apt"), ""))
         .select("id", "apt")
+        .transform(lambda fl: with_endpoint_candidates(fl, storage, endpoint_roles))
     )
 
 
 def calculate_airport_events(
-    sv: DataFrame, month: date, storage: "StorageManager",
+    sv: DataFrame,
+    month: date,
+    storage: "StorageManager",
     config: Optional[EventConfig] = None,
+    endpoint_roles: Sequence[str] = (),
 ) -> DataFrame:
-    """
-    Detect airport infrastructure entry/exit events using H3 layout matching.
-
-    Matches low-altitude track points against airport layout H3 hexagons
-    (resolution 12) to detect when aircraft enter and exit runways,
-    taxiways, aprons, and other ground infrastructure.
+    """Entry and exit events of the parts of an airport, by H3 layout matching.
 
     Args:
-        sv: Input tracks DataFrame.
-        month: Month being processed (for flight list lookup).
-        storage: StorageManager instance.
+        sv: Track reports.
+        month: Month (or day) being processed, to read the flight list.
+        storage: :class:`~opdi.utils.storage.StorageManager`.
+        config: Event settings; the defaults when omitted.
+        endpoint_roles: Ends of the track whose 110 NM candidate airports are
+            searched too (see :func:`flight_aerodrome_sets`).
 
     Returns:
-        DataFrame of airport entry/exit events.
+        The entry and exit events.
     """
     config = config or EventConfig()
 
-    # Built by the shared helper, because the runway family needs the identical
-    # array and two constructions of it would be two definitions of "which
-    # aerodromes may this flight be at".
-    flight_list = flight_aerodrome_sets(month, storage)
+    # The same airports as the runway milestones use.
+    flight_list = flight_aerodrome_sets(month, storage, endpoint_roles)
 
     sv_f = sv.withColumnRenamed("callsign", "flight_id")
     sv_f = sv_f.fillna({"flight_id": ""})
-    # One callsign per track, before flight_id becomes a grouping key below.
+    # One call sign per track, before flight_id is used as a grouping key: a
+    # track that broadcast two call signs while crossing one runway would
+    # otherwise give two events for one crossing. The same rule as step 03
+    # (``resolve_flight_id``), applied before reports are dropped below, so
+    # both steps give a track the same call sign.
     #
-    # The groupBy that aggregates entry and exit times carries flight_id
-    # without aggregating it. That is sound only while a track holds one
-    # callsign, which legacy segmentation guarantees by construction -- the
-    # callsign is part of the track's group key -- and which a segmentation
-    # grouping on the airframe alone does not. Without this, a track that
-    # broadcast two callsigns while crossing one runway becomes two groups and
-    # emits two entry-runway events for one crossing, and the ``info`` JSON
-    # below publishes flight_id as ``osn_flight_id``, so the duplication
-    # reaches the milestone table rather than staying an internal artefact.
-    #
-    # Same helper as step 03, imported rather than copied: two copies of this
-    # rule is how the production flight list and its benchmark came to disagree
-    # about it in the first place.
-    #
-    # **Before the dropna, deliberately -- the vote is over the unfiltered
-    # frame.** ``resolve_flight_id`` documents that as its contract, and it is
-    # the contract because the population a mode is taken over *is* the rule: a
-    # different population is a different rule wearing the same name. Step 03
-    # votes over the whole month of the track table. If step 04 voted only over
-    # samples carrying position and barometric altitude, the two would diverge
-    # on exactly the tracks that matter -- ADS-B sends position and velocity in
-    # separate message types, so a velocity-only sample carries a callsign and
-    # no position, and step 02a's cleaning NULLs the baro_altitude_c it
-    # rejects. A track whose real callsign appears mostly in such samples would
-    # be named SAS123 in opdi_flight_list and "" in the same track's
-    # info.osn_flight_id, from one aircraft on one day. That is the divergence
-    # step 03 refactored away within itself; it must not reappear across steps.
-    #
-    # **Not applied when the run is reproducing a release.** ``events_v0.0.2``
-    # exists so that re-processing a past month reproduces it, and changing
-    # what a run publishes while it stamps an old version is the one thing a
-    # version string must prevent. Resolution would be a no-op on legacy tracks
-    # anyway -- they are callsign-homogeneous by construction -- with one
-    # exception it must not make: OpenSky pads callsigns to eight characters,
-    # so an aircraft that set none broadcasts spaces, which ``fillna`` keeps
-    # verbatim but ``dominant_flight_id`` trims and reads as blank. The
-    # released events carry the spaces. Hence the test is on the version stamp
-    # rather than on an argument about homogeneity.
+    # Not applied when the run reproduces release v0.0.2: its tracks carry one
+    # call sign each, and its events keep call signs padded with spaces, which
+    # the resolution would trim.
     if config.events_version != LEGACY_EVENTS_VERSION:
         sv_f = resolve_flight_id(sv_f)
-    # Position is required; altitude is not, when the message says the aircraft
-    # is on the ground. Dropping every null ``baro_altitude_c`` here deleted the
-    # surface samples before the gate below ever saw them -- a surface position
-    # report carries no altitude at all, so this one line discarded 99.9% of the
-    # state vectors inside a stand polygon at EBBR and is why ``off-block`` and
-    # ``on-block`` answered ~1% of movements at every aerodrome but one.
-    # ``altitude_ft`` and ``flight_level`` are then null for those rows, which is
-    # the honest reading: the aircraft's altitude at the stand is unknown, not
-    # zero, and the events built from them carry that null through.
+    # A position is required; an altitude is not when the report says the
+    # aircraft is on the ground. A surface position report carries no
+    # altitude at all, so requiring one would remove almost every report at a
+    # stand. ``altitude_ft`` and ``flight_level`` are then NULL for those rows:
+    # the altitude at the stand is unknown, not zero.
     keep_altitude = col("baro_altitude_c").isNotNull()
     if config.airport_admit_on_ground and "on_ground" in sv_f.columns:
         keep_altitude = keep_altitude | col("on_ground")
@@ -178,33 +148,49 @@ def calculate_airport_events(
     sv_f = sv_f.withColumn("altitude_ft", col("baro_altitude_c") * 3.28084)
     sv_f = sv_f.withColumn("flight_level", col("altitude_ft") / 100)
 
-    # The gate is measured above the field, not above the 1013.25 hPa datum,
-    # unless the caller asks for the legacy behaviour. It has to run before
-    # the projection below narrows the columns: ``height_above_field_ft``
-    # needs ``baro_altitude_c`` and the two ``elev_*_ft`` columns
-    # ``attach_field_elevation`` joins on, none of which survive the select.
+    # The height test is measured above the airport, not from standard
+    # pressure, except with the v0.0.2 settings. It runs before the select
+    # below, which drops the columns it needs.
     if config.airport_gate_above_field:
         sv_f = attach_field_elevation(sv_f, month, storage)
         gate = height_above_field_ft(sv_f) <= F.lit(config.airport_max_height_agl_ft)
     else:
         gate = col("flight_level") <= lit(config.airport_max_fl)
-    # A surface position message carries no altitude -- neither barometric nor
-    # geometric -- so the gate above is NULL for it, and `NULL <= x` is dropped
-    # by a filter. That silently discarded the samples this family is *for*:
-    # at EBBR 99.9% of the state vectors inside a stand polygon have a null
-    # altitude, and the gate passed 57 aircraft out of 2,013. `on_ground` is
-    # the message's own statement that the aircraft is on the surface, so it
-    # answers the gate's question -- "is this near the ground, or merely over
-    # the airport" -- without going through an altitude that is not there.
+    # A surface position report has no altitude, so the height test is NULL
+    # for it and a filter would drop it. The on-ground flag answers the same
+    # question ("near the ground, or only over the airport?") directly.
     if config.airport_admit_on_ground and "on_ground" in sv_f.columns:
+        if config.layout_air_report_must_be_slow:
+            # A report not flagged on the ground must also be close to the
+            # ground; its speed is tested after the layout join, below.
+            height = (
+                height_above_field_ft(sv_f)
+                if config.airport_gate_above_field
+                else col("altitude_ft")
+            )
+            gate = gate & (height <= F.lit(config.layout_air_report_max_height_ft))
         gate = col("on_ground") | gate
     sv_f = sv_f.filter(gate)
 
     columns = [
-        "track_id", "icao24", "flight_id", "event_time", "lat", "lon",
-        "altitude_ft", "flight_level", "heading", "vert_rate",
-        "h3_res_12", "cumulative_distance_nm", "cumulative_time_s",
+        "track_id",
+        "icao24",
+        "flight_id",
+        "event_time",
+        "lat",
+        "lon",
+        "altitude_ft",
+        "flight_level",
+        "heading",
+        "vert_rate",
+        "h3_res_12",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
     ]
+    slow_test = config.layout_air_report_must_be_slow and "on_ground" in sv_f.columns
+    if slow_test:
+        columns = columns + ["on_ground"]
+        columns = columns + (["velocity"] if "velocity" in sv_f.columns else [])
     sv_f = sv_f.select(columns)
 
     sv_low_alt = sv_f.cache()
@@ -212,32 +198,10 @@ def calculate_airport_events(
 
     apt_sdf = storage.read_table("hexaero_airport_layouts")
 
-    # Restrict the layout grid to the aerodromes this month's flights name,
-    # before joining on the H3 cell.
-    #
-    # This changes no result. The join below already requires
-    # ``array_contains(apt, hexaero_apt_icao)``, so a reference row for an
-    # aerodrome no flight names cannot survive it. The semi-join only moves
-    # that elimination earlier, so the unmatched remainder is dropped before
-    # the shuffle on ``h3_res_12`` rather than carried through it.
-    #
-    # Taken from ``flight_list`` rather than from ``sv_nearby_apt``: the
-    # aerodrome set lives on the flight list, which is already filtered to the
-    # month, and reading it from the joined frame would recompute that join
-    # just to learn something the smaller side already knows.
-    #
-    # **How much this saves depends on the batch, and it is not uniform.** The
-    # 2026-09-07 PBF rebuild took this table from 15 aerodromes to 1,036 and
-    # from ~140k rows to 2,900,230. A study-scoped run touching twenty
-    # aerodromes now discards ~98% of it before the shuffle. A network-wide
-    # month touches most of Europe's large and medium fields, so it discards
-    # little -- the pruning is real there but modest, and the reason to keep
-    # it is that the cost is one broadcast of a few thousand short strings
-    # either way.
-    #
-    # Broadcasting *this* side is safe precisely because it is small.
-    # Broadcasting the grid is not: doing that to the comparable
-    # ``h3_runway_zones`` OOM'd the driver JVM outright (see runway_ops.py).
+    # Keep only the layout rows of airports this batch's flights name, before
+    # the join on the H3 cell. The join requires the airport anyway, so no
+    # result changes; the rows are only dropped before the shuffle instead of
+    # after it. The list of airports is small, so it is broadcast.
     batch_apts = flight_list.select(F.explode("apt").alias("_batch_apt")).distinct()
     apt_sdf = apt_sdf.join(
         F.broadcast(batch_apts),
@@ -252,48 +216,51 @@ def calculate_airport_events(
         "inner",
     )
 
-    # The runway family (runway_ops.py) publishes line-up, runway-vacated and
-    # the two crossing types from the same physical runway occupancy this
-    # layout match would otherwise report as entry-runway/exit-runway. Drop
-    # the runway rows here so one crossing is not published under two
-    # vocabularies.
+    # The runway milestones (runway_ops.py) publish line-up, runway-vacated
+    # and the runway crossings from the same runway occupancy, so the runway
+    # rows are dropped here, and one passage is not published twice.
     if config.emit_runway_milestones:
         df_labelled = df_labelled.filter(F.col("hexaero_aeroway") != "runway")
 
-    # Detect separate traces (gap > 5 min = new trace)
+    # A gap of more than ``airport_trace_gap_seconds`` starts a new passage.
     window_spec = Window.partitionBy("track_id", "hexaero_osm_id").orderBy("event_time")
+    if slow_test:
+        df_labelled = _keep_slow_reports(df_labelled, window_spec, config)
     df_labelled = df_labelled.withColumn(
         "time_diff",
         col("event_time").cast("long") - lag(col("event_time").cast("long"), 1).over(window_spec),
     )
     df_labelled = df_labelled.withColumn(
-        "new_trace", when(col("time_diff") > config.airport_trace_gap_seconds, lit(1)).otherwise(lit(0))
+        "new_trace",
+        when(col("time_diff") > config.airport_trace_gap_seconds, lit(1)).otherwise(lit(0)),
     )
-    df_labelled = df_labelled.withColumn(
-        "trace_id", f_sum(col("new_trace")).over(window_spec)
-    )
+    df_labelled = df_labelled.withColumn("trace_id", f_sum(col("new_trace")).over(window_spec))
     df_labelled = df_labelled.drop("time_diff", "new_trace")
 
-    # Aggregate entry/exit times.
-    #
-    # ``F.first``/``F.last`` inside a groupBy take *partition* order, not
-    # event_time order, so the reported entry position, altitude and cumulative
-    # measures were not guaranteed to be the values at the reported entry time
-    # -- a row could describe one instant and be stamped with another, with
-    # nothing to indicate it. ``min_by``/``max_by`` pick the value at the
-    # extreme of an explicit ordering column, which is what was meant.
+    # Entry and exit. ``F.first``/``F.last`` would take the rows in the order
+    # Spark reads them, not in time order; ``min_by``/``max_by`` take the
+    # values of the report at the entry and exit time (with
+    # ``airport_events_ordered``).
     if config.airport_events_ordered:
+
         def at_entry(c):
             return F.min_by(c, "event_time")
 
         def at_exit(c):
             return F.max_by(c, "event_time")
+
     else:
         at_entry, at_exit = F.first, F.last
 
     result = df_labelled.groupBy(
-        "track_id", "icao24", "flight_id",
-        "hexaero_apt_icao", "hexaero_osm_id", "hexaero_aeroway", "hexaero_ref", "trace_id",
+        "track_id",
+        "icao24",
+        "flight_id",
+        "hexaero_apt_icao",
+        "hexaero_osm_id",
+        "hexaero_aeroway",
+        "hexaero_ref",
+        "trace_id",
     ).agg(
         f_min("event_time").alias("entry_time"),
         f_max("event_time").alias("exit_time"),
@@ -316,19 +283,66 @@ def calculate_airport_events(
     result = result.filter(col("time_in_use_seconds") != 0)
 
     result = (
-        result
-        .withColumnRenamed("hexaero_osm_id", "osm_id")
+        result.withColumnRenamed("hexaero_osm_id", "osm_id")
         .withColumnRenamed("hexaero_aeroway", "osm_aeroway")
         .withColumnRenamed("hexaero_ref", "osm_ref")
         .withColumnRenamed("hexaero_apt_icao", "osm_airport")
     )
+    # Work package 3 of the 2026-06-14 corrections: a missing element name
+    # ("None", "nan", empty) is written as no value.
+    if config.layout_ref_missing_as_null:
+        from opdi.pipeline.ground import missing_ref_as_null
 
-    result = result.withColumn("info", to_json(struct(
-        col("osm_id"), col("osm_aeroway"), col("osm_ref"), col("osm_airport"),
+        result = result.withColumn("osm_ref", missing_ref_as_null(col("osm_ref")))
+
+    if config.layout_element_per_passage or config.layout_merge_parked_passages:
+        # Every step below works on the passages of one track; one exchange
+        # by track serves them all.
+        result = result.repartition("track_id")
+    if config.layout_element_per_passage:
+        result = _one_element_per_shared_report(
+            result, keep_nested_stands=config.layout_nested_stands_both_published
+        )
+    if config.layout_merge_parked_passages:
+        result = _merge_parked_passages(result, config)
+        result = result.withColumn(
+            "time_in_use_seconds",
+            col("exit_time").cast("long") - col("entry_time").cast("long"),
+        )
+
+    info_fields = [
+        col("osm_id"),
+        col("osm_aeroway"),
+        col("osm_ref"),
+        col("osm_airport"),
         col("time_in_use_seconds").alias("opdi_time_in_use_s"),
         col("icao24").alias("osn_icao24"),
         col("flight_id").alias("osn_flight_id"),
-    )))
+    ]
+    if ENCLOSES_STAND in result.columns:
+        info_fields.append(F.when(col(ENCLOSES_STAND), lit(True)).alias("encloses_stand"))
+    result = result.withColumn("info", to_json(struct(*info_fields)))
+    # The facts that differ between the entry and the exit of one passage
+    # (``at_track_start``, ``at_track_end``) give each its own ``info``. A
+    # fact that is false is left out of ``info`` (``to_json`` drops NULLs).
+    entry_info = exit_info = col("info")
+    if config.layout_mark_track_edges or config.layout_mark_ground_only:
+        result = _with_track_facts(result, sv, month, storage, config)
+        common = []
+        if config.layout_mark_ground_only:
+            common.append(F.when(col("_ground_only"), lit(True)).alias("ground_only"))
+        entry_extra, exit_extra = list(common), list(common)
+        if config.layout_mark_track_edges:
+            entry_extra.append(
+                F.when(col("entry_time") == col("_first_pos_time"), lit(True)).alias(
+                    "at_track_start"
+                )
+            )
+            exit_extra.append(
+                F.when(col("exit_time") == col("_last_pos_time"), lit(True)).alias("at_track_end")
+            )
+        entry_info = to_json(struct(*info_fields, *entry_extra))
+        exit_info = to_json(struct(*info_fields, *exit_extra))
 
     result = result.withColumn("entry_type", concat_ws("-", lit("entry"), col("osm_aeroway")))
     result = result.withColumn("exit_type", concat_ws("-", lit("exit"), col("osm_aeroway")))
@@ -343,7 +357,8 @@ def calculate_airport_events(
         col("entry_cumulative_distance_nm").alias("cumulative_distance_nm"),
         col("entry_cumulative_time_s").alias("cumulative_time_s"),
         col("entry_type").alias("type"),
-        col("info"),
+        entry_info.alias("info"),
+        col("osm_id").alias("_osm_id"),
     )
     exit_events = result.select(
         col("track_id"),
@@ -354,17 +369,284 @@ def calculate_airport_events(
         col("exit_cumulative_distance_nm").alias("cumulative_distance_nm"),
         col("exit_cumulative_time_s").alias("cumulative_time_s"),
         col("exit_type").alias("type"),
-        col("info"),
+        exit_info.alias("info"),
+        col("osm_id").alias("_osm_id"),
     )
 
     apt_events = entry_events.unionByName(exit_events)
     apt_events = apt_events.select(
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s", "info",
+        "track_id",
+        "type",
+        "event_time",
+        "lon",
+        "lat",
+        "altitude_ft",
+        "cumulative_distance_nm",
+        "cumulative_time_s",
+        "info",
+        "_osm_id",
     )
-    apt_events = apt_events.dropDuplicates([
-        "track_id", "type", "event_time", "lon", "lat",
-        "altitude_ft", "cumulative_distance_nm", "cumulative_time_s",
-    ])
+    if config.layout_element_per_passage:
+        # The element was chosen per passage above: at one report there is
+        # at most one entry and one exit of each kind.
+        return apt_events.drop("_osm_id")
+    return one_element_per_passage(apt_events, config)
 
-    return apt_events
+
+def _keep_slow_reports(labelled: DataFrame, window_spec, config: EventConfig) -> DataFrame:
+    """Drop the reports not flagged on the ground that move faster than taxiing.
+
+    See :attr:`~opdi.config.EventConfig.layout_air_report_must_be_slow`. The
+    speed between two reports comes from their positions, as reports on the
+    surface rarely carry a speed. It is read between consecutive reports in
+    the same element (the window of the passages), which costs no further
+    exchange of the data.
+    """
+    t = col("event_time").cast("double")
+    max_gap = float(config.layout_position_speed_max_gap_seconds)
+
+    def speed_to(offset_fn):
+        dt = F.abs(offset_fn(t) - t)
+        dist_nm = haversine_nm(col("lat"), col("lon"), offset_fn(col("lat")), offset_fn(col("lon")))
+        return F.when((dt > 0) & (dt <= max_gap), dist_nm / dt * 3600.0)
+
+    prev_kt = speed_to(lambda c: lag(c, 1).over(window_spec))
+    next_kt = speed_to(lambda c: F.lead(c, 1).over(window_spec))
+    reported_kt = (
+        col("velocity") * KT_PER_MPS if "velocity" in labelled.columns else lit(None).cast("double")
+    )
+    speed_kt = F.greatest(prev_kt, next_kt, reported_kt)
+    slow = speed_kt.isNull() | (speed_kt <= F.lit(config.layout_air_report_max_speed_kt))
+    on_ground = F.coalesce(col("on_ground"), lit(False))
+    return labelled.withColumn("_slow", on_ground | slow).filter(col("_slow")).drop("_slow")
+
+
+#: Column of a stand passage that contains in time the passage of a smaller
+#: stand drawn inside it (``info.encloses_stand``), see
+#: :attr:`~opdi.config.EventConfig.layout_nested_stands_both_published`.
+ENCLOSES_STAND = "_encloses_stand"
+
+
+def _one_element_per_shared_report(
+    passages: DataFrame, keep_nested_stands: bool = False
+) -> DataFrame:
+    """Of the passages of one kind that share a report, keep one.
+
+    See :attr:`~opdi.config.EventConfig.layout_element_per_passage`. First,
+    of the passages of one track and one kind (``osm_aeroway``) that start at
+    the same report, one is kept; then, of those left that end at the same
+    report, one is kept: the longest, which contains the others, except
+    for stands, where the shortest is kept. Overlapping stand polygons nest
+    a stand inside a larger area drawn as a stand; the aircraft enters the
+    smaller one when it stops and leaves it when it pushes back, which are
+    the moments of the in-block and off-block times. Between passages of
+    equal length the element with the smallest identifier is kept, then the
+    first in the order of the reference, so the choice is the same on every
+    run.
+
+    With ``keep_nested_stands``, the stand passages that would be left out
+    are kept and marked in the column :data:`ENCLOSES_STAND`; the choice
+    among the others is the same.
+    """
+    by_track = Window.partitionBy("track_id")
+    tie = [col("osm_id").asc_nulls_last(), col("osm_ref").asc_nulls_last()]
+    stand = col("osm_aeroway") == "parking_position"
+    exit_s, entry_s = col("exit_time").cast("double"), col("entry_time").cast("double")
+    if keep_nested_stands:
+        # The passages marked are left out of the comparisons that follow,
+        # so the stands kept unmarked are those the choice keeps without
+        # the setting.
+        def mark_or_drop(df, group_col, order):
+            w = Window.partitionBy("track_id", ENCLOSES_STAND).orderBy(
+                col("osm_aeroway"), col(group_col), *order, *tie
+            )
+            same = (lag("osm_aeroway", 1).over(w) == col("osm_aeroway")) & (
+                lag(group_col, 1).over(w) == col(group_col)
+            )
+            same = F.coalesce(same, lit(False)) & ~col(ENCLOSES_STAND)
+            return (
+                df.withColumn("_same", same)
+                .filter(~col("_same") | stand)
+                .withColumn(ENCLOSES_STAND, col(ENCLOSES_STAND) | col("_same"))
+                .drop("_same")
+            )
+
+        passages = passages.withColumn(ENCLOSES_STAND, lit(False))
+        passages = mark_or_drop(passages, "entry_time", [F.when(stand, exit_s).otherwise(-exit_s)])
+        return mark_or_drop(passages, "exit_time", [F.when(stand, -entry_s).otherwise(entry_s)])
+
+    def first_of_group(df, group_col, order):
+        w = by_track.orderBy(col("osm_aeroway"), col(group_col), *order, *tie)
+        same = (lag("osm_aeroway", 1).over(w) == col("osm_aeroway")) & (
+            lag(group_col, 1).over(w) == col(group_col)
+        )
+        return (
+            df.withColumn("_same", F.coalesce(same, lit(False))).filter(~col("_same")).drop("_same")
+        )
+
+    passages = first_of_group(passages, "entry_time", [F.when(stand, exit_s).otherwise(-exit_s)])
+    return first_of_group(passages, "exit_time", [F.when(stand, -entry_s).otherwise(entry_s)])
+
+
+def _merge_parked_passages(passages: DataFrame, config: EventConfig) -> DataFrame:
+    """Join consecutive passages of one element of an aircraft that stayed put.
+
+    See :attr:`~opdi.config.EventConfig.layout_merge_parked_passages`. A
+    passage is joined to the previous passage of the same element when the
+    distance between that one's exit and this one's entry is under
+    :attr:`~opdi.config.EventConfig.layout_merge_max_move_ft` and no passage
+    of another element of the track started in between. Stand passages are
+    not joined.
+    """
+    by_element = Window.partitionBy("track_id", "osm_id").orderBy("entry_time")
+    by_entry = Window.partitionBy("track_id").orderBy("entry_time", "osm_id")
+    passages = passages.withColumn(
+        "_last_entry_before",
+        F.max("entry_time").over(by_entry.rowsBetween(Window.unboundedPreceding, -1)),
+    )
+    prev_exit = lag("exit_time", 1).over(by_element)
+    moved_ft = (
+        haversine_nm(
+            lag("exit_lat", 1).over(by_element),
+            lag("exit_lon", 1).over(by_element),
+            col("entry_lat"),
+            col("entry_lon"),
+        )
+        * FT_PER_NM
+    )
+    # ``_last_entry_before`` is the latest entry of any passage before this
+    # one; the previous passage of this element started before its own exit,
+    # so a later entry is that of another element.
+    # Stands are not joined: an aircraft pushing back often sends no
+    # position until it is clear of the stand, so the exit before such a gap
+    # is the off-block time even when the next position is again at the
+    # stand's edge (the airport records confirm it).
+    joined = (
+        (moved_ft < F.lit(config.layout_merge_max_move_ft))
+        & (col("_last_entry_before") <= prev_exit)
+        & (col("osm_aeroway") != "parking_position")
+    )
+    passages = passages.withColumn("_new_stay", ~F.coalesce(joined, lit(False)))
+    passages = passages.withColumn(
+        "_stay",
+        f_sum(col("_new_stay").cast("int")).over(
+            by_element.rowsBetween(Window.unboundedPreceding, 0)
+        ),
+    )
+    keys = [
+        "track_id",
+        "icao24",
+        "flight_id",
+        "osm_airport",
+        "osm_id",
+        "osm_aeroway",
+        "osm_ref",
+        "_stay",
+    ]
+    if ENCLOSES_STAND in passages.columns:
+        keys.append(ENCLOSES_STAND)
+    entry_cols = [c for c in passages.columns if c.startswith("entry_")]
+    exit_cols = [c for c in passages.columns if c.startswith("exit_")]
+    return (
+        passages.groupBy(*keys)
+        .agg(
+            *[F.min_by(c, "entry_time").alias(c) for c in entry_cols],
+            *[F.max_by(c, "exit_time").alias(c) for c in exit_cols],
+            f_min("trace_id").alias("trace_id"),
+        )
+        .drop("_stay")
+    )
+
+
+def _with_track_facts(
+    passages: DataFrame,
+    sv: DataFrame,
+    month: date,
+    storage: "StorageManager",
+    config: EventConfig,
+) -> DataFrame:
+    """Add the facts of each passage's track used in the events' ``info``.
+
+    ``_first_pos_time`` and ``_last_pos_time``: the first and last report of
+    the track that has a position. ``_ground_only``: the track has no report
+    that is not flagged on the ground and has an altitude, and the flight
+    list gives it no aircraft type or a vehicle type
+    (:attr:`~opdi.config.EventConfig.layout_vehicle_typecodes`). One pass
+    over the reports, grouped by track as they are already split.
+    """
+    has_pos = col("lat").isNotNull() & col("lon").isNotNull()
+    aggs = [
+        f_min(when(has_pos, col("event_time"))).alias("_first_pos_time"),
+        f_max(when(has_pos, col("event_time"))).alias("_last_pos_time"),
+    ]
+    if "on_ground" in sv.columns:
+        airborne = (~F.coalesce(col("on_ground"), lit(False))) & col("baro_altitude_c").isNotNull()
+        aggs.append(f_max(airborne.cast("int")).alias("_any_air"))
+    else:
+        aggs.append(f_max(col("baro_altitude_c").isNotNull().cast("int")).alias("_any_air"))
+    facts = sv.groupBy("track_id").agg(*aggs)
+    passages = passages.join(facts, on="track_id", how="left")
+
+    ground_only = lit(False)
+    if config.layout_mark_ground_only and storage.table_exists("opdi_flight_list"):
+        start_ts, end_ts = get_start_end_of_month(month)
+        fl = storage.read_table("opdi_flight_list").filter(
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
+        )
+        if "typecode" in [c.lower() for c in fl.columns]:
+            code = F.upper(F.trim(col("typecode")))
+            vehicle = (
+                code.isNull()
+                | (code == "")
+                | code.isin(*[t.upper() for t in config.layout_vehicle_typecodes])
+            )
+            types = (
+                fl.select(col("id").alias("track_id"), vehicle.alias("_vehicle_type"))
+                .groupBy("track_id")
+                .agg(f_max(col("_vehicle_type").cast("int")).alias("_vehicle_type"))
+            )
+            passages = passages.join(F.broadcast(types), on="track_id", how="left")
+            ground_only = (F.coalesce(col("_any_air"), lit(0)) == 0) & (
+                F.coalesce(col("_vehicle_type"), lit(1)) == 1
+            )
+    return passages.withColumn("_ground_only", ground_only)
+
+
+#: The columns that make two layout events the same passage; ``info`` names
+#: the element.
+_PASSAGE_KEY = [
+    "track_id",
+    "type",
+    "event_time",
+    "lon",
+    "lat",
+    "altitude_ft",
+    "cumulative_distance_nm",
+    "cumulative_time_s",
+]
+
+
+def one_element_per_passage(events: DataFrame, config: EventConfig) -> DataFrame:
+    """One event per passage when overlapping layout elements give several.
+
+    Elements of one kind can share an H3 cell (a taxiway crossing an apron's
+    edge, stands drawn over an apron), and a passage through the cell then
+    gives the same event once per element, differing only in ``info``. With
+    :attr:`~opdi.config.EventConfig.layout_deterministic_element` the event
+    kept names the element with the smallest identifier (``_osm_id``), then
+    the first in the order of ``info``; otherwise any one is kept.
+
+    Args:
+        events: Layout events with an ``_osm_id`` column, dropped here.
+        config: Event settings.
+    """
+    if not config.layout_deterministic_element:
+        return events.dropDuplicates(_PASSAGE_KEY).drop("_osm_id")
+    w = Window.partitionBy(*_PASSAGE_KEY).orderBy(
+        col("_osm_id").asc_nulls_last(), col("info").asc_nulls_last()
+    )
+    return (
+        events.withColumn("_rank", F.row_number().over(w))
+        .filter(col("_rank") == 1)
+        .drop("_rank", "_osm_id")
+    )

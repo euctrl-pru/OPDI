@@ -46,6 +46,7 @@ Downstream: ``benchmarks/movement_counts.py --days 2026-06-03
 --warehouse opdi/research/a9`` against the debounced result, and
 ``--warehouse opdi-prod`` against the shipped baseline.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -56,9 +57,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
+from study_variants.segmentation import register_study_arms  # noqa: E402
+
 from opdi.config import OPDIConfig  # noqa: E402
 from opdi.periodrun import run_day_step  # noqa: E402
 from opdi.utils.spark_helpers import SparkSessionManager  # noqa: E402
+
+# The study rules (debounced, recommended, ...) are selectable by name.
+register_study_arms()
 
 RESEARCH_WAREHOUSE = "s3a://eurocontrol/opdi/research/a9"
 
@@ -68,14 +74,20 @@ STEPS = ("02", "02a", "03", "04", "04b")
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--day", default="2026-06-03", help="YYYY-MM-DD")
-    ap.add_argument("--persistence-seconds", type=float, default=30.0,
-                     help="callsign_min_persistence_seconds for the debounced arm")
+    ap.add_argument(
+        "--persistence-seconds",
+        type=float,
+        default=30.0,
+        help="callsign_min_persistence_seconds for the debounced arm",
+    )
     ap.add_argument("--executors", type=int, default=8)
     args = ap.parse_args()
     day = date.fromisoformat(args.day)
 
     cfg = OPDIConfig.for_environment("opensky")
     cfg.project.warehouse_path = RESEARCH_WAREHOUSE
+    # The prefix holds the tables directly, without a release folder.
+    cfg.project.release = ""
     cfg.segmentation.method = "debounced"
     cfg.segmentation.callsign_min_persistence_seconds = args.persistence_seconds
     cfg.spark.executor_instances = str(args.executors)
@@ -91,13 +103,17 @@ def main() -> int:
     print("=" * 72)
     print(f"  day       : {day}")
     print(f"  warehouse : {cfg.project.warehouse_path}  (reads AND writes)")
-    print(f"  arm       : {cfg.segmentation.method}"
-          f"  (persistence={cfg.segmentation.callsign_min_persistence_seconds}s)")
+    print(
+        f"  arm       : {cfg.segmentation.method}"
+        f"  (persistence={cfg.segmentation.callsign_min_persistence_seconds}s)"
+    )
     print(f"  executors : {cfg.spark.executor_instances}")
     print("=" * 72)
 
     spark = SparkSessionManager.create_session(
-        app_name="debounced day run (research/a9)", config=cfg, distributed=True,
+        app_name="debounced day run (research/a9)",
+        config=cfg,
+        distributed=True,
     )
     try:
         kwargs = {

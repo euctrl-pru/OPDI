@@ -1,49 +1,20 @@
-"""One function per arm of the track-construction study.
+"""The track segmentation rules of the package.
 
-Each returns a :class:`~opdi.pipeline.segmentation.base.BreakRule`. No Spark
-session logic lives here -- an arm is a grouping, a predicate and a flag.
+Each rule is a function that returns a
+:class:`~opdi.pipeline.segmentation.base.BreakRule`: how samples are grouped,
+when a new track starts, and how the id is built. There are two:
 
-**Every domain arm (A5-A7) ORs a legacy gap rule in as a floor.** Two reasons,
-and they are the standing rule for any arm added later, with the one exception
-recorded at the end of this docstring:
+* :func:`cruise_linked`, the default (``method="standard"``): grouped on the
+  airframe, a new track at a lasting callsign change, at a short gap at low
+  altitude, and at a long gap unless its two edges fit one continuous flight.
+* :func:`legacy`, the rule of the v0.0.2 release: grouped on airframe and
+  callsign, a new track at a gap over 30 min, or over 15 min below 5,000 ft.
 
-1. *The ladder measures one change at a time.* Each domain arm is "legacy plus
-   one idea", so its delta from A0 is attributable to that idea alone. An arm
-   that also silently *removed* legacy's splits would report a delta that mixes
-   two changes, and the study could not say which one moved the number.
-2. *An arm whose inputs are missing must not degrade to one track a month.* A6
-   depends on ``near_airport`` and ``field_elev_ft``, which Task 6 supplies by a
-   left join -- so every sample away from a covered aerodrome gets NULL. With no
-   floor, an airframe that never gets a reception gap at a covered aerodrome
-   would have its entire month assigned to a single track, and A6 would score as
-   a catastrophic merger for reasons having nothing to do with its idea.
-
-**Which floor: the part of legacy the arm is not replacing.** Legacy is two
-rules, and this module names them separately -- :func:`legacy_general_gap` (any
-gap over ``gap_minutes``, at any altitude) and :func:`legacy_low_altitude_gap` (a
-shorter gap, below ``low_alt_ft``). A5 and A7 take **both**, because neither
-replaces anything: A5 adds the continuous-turnaround split, A7 adds the
-descent-climb split, and a full floor costs a purely additive arm nothing.
-
-A6 takes **only the general gap rule**, and that is the one exception. A6's whole
-thesis is that legacy's ``altitude < 5,000 ft`` test is a *crude proxy* for "at an
-aerodrome" and that real airport geometry is better -- so inheriting the
-low-altitude rule would make the arm floor itself on the very rule it exists to
-replace, and reason 1 above would forbid measuring the replacement at all. Reason
-2 is still satisfied without it: an airframe with NULL inputs still splits on any
-gap over 30 minutes, so no month-long track can form. See
-:func:`airport_anchored`, which among A5-A7 is the only arm claiming to *remove* a
-legacy split and therefore the only one there where a full floor conflicts.
-
-**A10 is a conditional exception.** :func:`cruise_linked` builds on A9 rather than
-on legacy, and keeps :func:`legacy_low_altitude_gap` whole, but it makes
-:func:`legacy_general_gap` conditional: a long gap does not split when the two
-edges can be one flight. That is the arm's whole idea, so a full floor would make
-it unmeasurable, as it would for A6. Reason 1 survives, because the arm is A9 plus
-this one change. Reason 2 survives for two reasons of its own: a NULL in any input
-:func:`linkable` requires fails closed, so an airframe with missing inputs splits
-on every long gap, as it would under the floor; and a gap over
-``link_max_gap_minutes`` always breaks, whatever the edges look like.
+:data:`ARMS` is the registry of rules: it maps a configuration's
+``segmentation.method`` to its rule. (The name is kept for the study scripts,
+which add further rules to it with :func:`register_arm`; those rules live in
+``benchmarks/study_variants/segmentation.py``.)
+See https://www.opdi.aero/content/methods/track-identity.html.
 """
 
 from functools import reduce
@@ -54,7 +25,7 @@ from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 from pyspark.sql.window import WindowSpec
 
-from opdi.pipeline.flights import haversine_nm
+from opdi.config import STUDY_SEGMENTATION_METHODS
 from opdi.pipeline.segmentation.base import (
     FPM_PER_MPS,
     BreakRule,
@@ -64,19 +35,12 @@ from opdi.pipeline.segmentation.base import (
     segment_window,
     speed_kt,
 )
+from opdi.utils.geometry import haversine_nm
 
 __all__ = [
     "legacy",
     "legacy_general_gap",
     "legacy_low_altitude_gap",
-    "no_month_suffix",
-    "traffic_style",
-    "airframe_only",
-    "ground_anchored",
-    "airport_anchored",
-    "vertical_profile",
-    "recommended",
-    "debounced",
     "callsign_memory_minutes",
     "stable_callsign",
     "debounced_callsign_change",
@@ -88,13 +52,9 @@ __all__ = [
     "LINK_EDGE_SAMPLES",
     "LINK_DIRECTION_MIN_RATES",
     "PLACEHOLDER_ICAO24",
-    "TRAFFIC_DEFAULT_GAP_MINUTES",
     "ARMS",
+    "register_arm",
 ]
-
-#: ``traffic``'s documented default for :meth:`Flight.split`. Defined here, above
-#: its only use, because it is the one number an A3 sweep would want to vary.
-TRAFFIC_DEFAULT_GAP_MINUTES = 10.0
 
 #: Values of each field on each side of a hole that :func:`link_feature_columns`
 #: summarises, at most: the nearest that carry one, within ``link_edge_position_minutes``.
@@ -111,417 +71,38 @@ PLACEHOLDER_ICAO24 = ("000000", "000001", "ffffff")
 
 
 def legacy_general_gap(p):
-    """Legacy's altitude-independent half: any gap over ``gap_minutes`` splits.
+    """The first half of the v0.0.2 rule: any gap over ``gap_minutes`` splits.
 
-    Named separately from :func:`legacy_low_altitude_gap` because the two halves
-    are not interchangeable as an arm's floor -- see the module docstring. This
-    half asserts only "a long enough silence is a new track", which no arm in the
-    study disputes, so it is safe for every arm to inherit.
+    A separate function because the default rule uses only the other half
+    unchanged; it does not split at a long gap whose two sides fit one
+    flight.
     """
     return gap_minutes() > p.gap_minutes
 
 
 def legacy_low_altitude_gap(p):
-    """Legacy's other half: a *shorter* gap counts, when below ``low_alt_ft``.
+    """The second half of the v0.0.2 rule: a shorter gap splits at low altitude.
 
-    This is production's proxy for "the aircraft is on the ground somewhere" --
-    it uses barometric altitude because that is all it has. It is exactly the
-    rule :func:`airport_anchored` exists to replace with real airport geometry,
-    which is why A6 is the one arm that does not inherit it as a floor.
+    A gap over ``low_alt_gap_minutes`` splits when the aircraft is below
+    ``low_alt_ft``. A low barometric altitude stands in for "the aircraft may have landed".
     """
     return (gap_minutes() > p.low_alt_gap_minutes) & (altitude_ft() < p.low_alt_ft)
 
 
 def legacy() -> BreakRule:
-    """A0 -- the production algorithm, as parameters of the engine.
+    """The track rule of release v0.0.2.
 
-    Split when the gap exceeds ``gap_minutes``, or exceeds
-    ``low_alt_gap_minutes`` below ``low_alt_ft``. The month suffix is kept: it is
-    what production does, and A2 exists to measure removing it.
-
-    The two disjuncts are :func:`legacy_general_gap` and
-    :func:`legacy_low_altitude_gap`; A0's behaviour is their OR and is unchanged
-    by having been given names.
+    Groups the reports by aircraft address and call sign. A new track starts
+    at a gap longer than ``gap_minutes``, or longer than
+    ``low_alt_gap_minutes`` below ``low_alt_ft`` (the OR of
+    :func:`legacy_general_gap` and :func:`legacy_low_altitude_gap`). Each id
+    ends with ``_{year}_{month}``.
     """
     return BreakRule(
         name="legacy",
         group_cols=["icao24", "callsign"],
         break_expr=lambda p: legacy_general_gap(p) | legacy_low_altitude_gap(p),
         month_suffix=True,
-    )
-
-
-def no_month_suffix() -> BreakRule:
-    """A2 -- legacy without the ``_{year}_{month}`` id suffix.
-
-    The suffix splits any flight airborne at midnight on the 1st of a month, by
-    construction and regardless of the data. That is a correctness defect, not a
-    threshold, which is why this arm is separate from the A1 sweep: sweeping
-    parameters cannot reach it.
-    """
-    rule = legacy()
-    return BreakRule(
-        name="no_month_suffix",
-        group_cols=rule.group_cols,
-        break_expr=rule.break_expr,
-        month_suffix=False,
-    )
-
-
-def traffic_style() -> BreakRule:
-    """A3 -- ``traffic``'s ``Flight.split`` semantics.
-
-    A single gap threshold (traffic's default is 10 minutes) with a *predicate*
-    deciding whether a candidate gap is really a break, rather than a second
-    hard-coded threshold. traffic's own documented example is "do not split below
-    5,000 ft"; the aviation-sensible inverse is used here -- do not split when
-    both sides of the gap are above ``low_alt_ft``, because a reception hole in
-    the cruise is a coverage gap, not a landing.
-    """
-
-    def expr(p):
-        w = segment_window()
-        prev_alt = F.lag(altitude_ft()).over(w)
-        both_airborne = (altitude_ft() >= p.low_alt_ft) & (prev_alt >= p.low_alt_ft)
-        return (gap_minutes() > TRAFFIC_DEFAULT_GAP_MINUTES) & ~both_airborne
-
-    return BreakRule(
-        name="traffic_style",
-        group_cols=["icao24", "callsign"],
-        break_expr=expr,
-        month_suffix=False,
-    )
-
-
-def airframe_only() -> BreakRule:
-    """A4 -- group on ``icao24`` alone; callsign becomes an attribute.
-
-    A callsign change mid-flight splits a track under legacy, and a missing
-    callsign collapses an airframe's segments into one group. Identity belongs to
-    the airframe; the callsign is something the airframe was broadcasting at the
-    time.
-    """
-    rule = legacy()
-    return BreakRule(
-        name="airframe_only",
-        group_cols=["icao24"],
-        break_expr=rule.break_expr,
-        month_suffix=False,
-    )
-
-
-def ground_anchored() -> BreakRule:
-    """A5 -- a break is a ground contact long enough to be a turnaround.
-
-    ``on_ground`` is in the OSN schema and step 02 reads none of it. A break is
-    declared at the *first airborne sample after* a run of on-ground samples
-    lasting at least ``ground_dwell_minutes`` -- so the departing leg starts at
-    the rotation, not at the arrival's last airborne point.
-
-    The dwell test is what separates a turnaround from a touch-and-go. The legacy
-    gap rules are kept as a fallback, because an aircraft that stops broadcasting
-    entirely still has to be split somehow.
-    """
-
-    def expr(p):
-        w = segment_window()
-        # A ground run's length: time from the first to the last of the
-        # consecutive on-ground samples immediately preceding this one.
-        ground_start = F.last(
-            F.when(~F.col("on_ground"), F.col("_ts")), ignorenulls=True
-        ).over(w.rowsBetween(Window.unboundedPreceding, -1))
-        prev_ts = F.lag("_ts").over(w)
-        prev_ground = F.lag("on_ground").over(w)
-        ground_run_min = (
-            F.unix_timestamp(prev_ts) - F.unix_timestamp(ground_start)
-        ) / 60.0
-        turnaround = (
-            ~F.col("on_ground")
-            & prev_ground
-            & (ground_run_min >= p.ground_dwell_minutes)
-        )
-        return turnaround | legacy().break_expr(p)
-
-    return BreakRule(
-        name="ground_anchored",
-        group_cols=["icao24"],
-        break_expr=expr,
-        month_suffix=False,
-    )
-
-
-def airport_anchored() -> BreakRule:
-    """A6 -- a break must happen *at an aerodrome*.
-
-    Requires ``near_airport`` and ``field_elev_ft`` on the input; Task 6's runner
-    joins them from ``h3_airport_detection_zones`` and ``oa_airports`` before
-    calling the engine.
-
-    **Two things this fixes that no altitude threshold can**, and the arm is
-    measured on both:
-
-    1. *A split legacy misses.* An aircraft parked at a 6,000 ft aerodrome never
-       satisfies ``baro_altitude < 1524 m``, so legacy misses the turnaround and
-       merges two flights -- the case ``track_quality.py`` names. Height above
-       field, not barometric altitude, is the test.
-    2. *A split legacy invents.* A long, slow, low dwell in the middle of nowhere
-       satisfies legacy's low-altitude rule and is split, when it is not a
-       turnaround at all. A6 does not split it, because it is not at an
-       aerodrome.
-
-    A turnaround is recognised two ways, and the arm fires on either:
-
-    * *a reception gap* -- the previous sample was stationary at an aerodrome and
-      at least ``ground_dwell_minutes`` passed before the next one arrived;
-    * *a run of parked samples* -- a continuous stationary-at-aerodrome run
-      lasting at least ``ground_dwell_minutes``, broken at the first sample that
-      moves again. This is the same accumulation :func:`ground_anchored` does,
-      and it is what makes the arm comparable with A5. Before it existed the arm
-      used the previous-sample gap as its dwell, which for a run of parked
-      samples is the *sampling period* -- seconds -- so A6 fired only on
-      reception gaps, and an A5-vs-A6 comparison conflated "on-ground flag versus
-      airport geometry" with "continuous coverage versus gap-only".
-
-    **Missing inputs.** ``near_airport`` is coalesced to ``False`` and
-    ``field_elev_ft`` to ``0.0``, so the predicate is a real boolean rather than
-    NULL wherever the join found nothing. A sample with no ``near_airport`` can
-    never trigger A6's own rule, so the arm degrades to the legacy floor there. A
-    sample that *is* near a known aerodrome but whose elevation is unknown is
-    tested at sea level -- i.e. on barometric altitude, exactly as legacy would,
-    which is the conservative direction: it can miss a high-field turnaround, it
-    cannot invent a low-field one.
-
-    **Its floor is deliberately only half of legacy.** A6 ORs in
-    :func:`legacy_general_gap` -- any gap over ``gap_minutes`` -- and pointedly
-    **not** :func:`legacy_low_altitude_gap`. Every other domain arm takes both.
-
-    The reason is that A6's thesis *is* that legacy's ``altitude < 5,000 ft`` test
-    is a crude proxy for "at an aerodrome" and that real airport geometry is
-    better. An arm cannot measure the replacement of a rule while also inheriting
-    that rule as its own floor: property 2 above would be unreachable by
-    construction, because A6 would then only ever *add* splits to legacy's. The
-    general gap rule carries no such claim -- "a long enough silence is a new
-    track" is not what this arm disputes -- so keeping it costs property 2
-    nothing while still guaranteeing that an airframe whose ``near_airport`` is
-    NULL for a whole month cannot end up in a single track.
-    """
-
-    def expr(p):
-        w = segment_window()
-        height_ft = altitude_ft() - F.coalesce(F.col("field_elev_ft"), F.lit(0.0))
-        stationary = (
-            F.coalesce(F.col("near_airport"), F.lit(False))
-            & (height_ft < p.turnaround_max_height_ft)
-            & (F.coalesce(speed_kt(), F.lit(0.0)) < p.turnaround_max_speed_kt)
-        )
-        prev_stationary = F.lag(stationary).over(w)
-        prev_ts = F.lag("_ts").over(w)
-        # Start of the stationary run: the last sample before this one at which
-        # the aircraft was *not* stationary at an aerodrome. NULL when the group
-        # has never moved, in which case the group's own first sample anchors it.
-        run_start = F.coalesce(
-            F.last(
-                F.when(~stationary, F.col("_ts")), ignorenulls=True
-            ).over(w.rowsBetween(Window.unboundedPreceding, -1)),
-            F.first(F.col("_ts")).over(w.rowsBetween(Window.unboundedPreceding, 0)),
-        )
-        parked_run_min = (
-            F.unix_timestamp(prev_ts) - F.unix_timestamp(run_start)
-        ) / 60.0
-
-        # Gap arm: fires once, at the sample that ends the silence.
-        gap_turnaround = prev_stationary & (gap_minutes() >= p.ground_dwell_minutes)
-        # Parked-run arm: fires once, at the first sample that moves again.
-        parked_turnaround = (
-            ~stationary
-            & prev_stationary
-            & (parked_run_min >= p.ground_dwell_minutes)
-        )
-        # Floor: the general gap rule only. NOT legacy_low_altitude_gap -- that
-        # is the rule this arm exists to replace, and an arm cannot measure a
-        # replacement while flooring itself on the thing replaced. See the
-        # module docstring and this function's own.
-        return gap_turnaround | parked_turnaround | legacy_general_gap(p)
-
-    return BreakRule(
-        name="airport_anchored",
-        group_cols=["icao24"],
-        break_expr=expr,
-        month_suffix=False,
-    )
-
-
-def vertical_profile() -> BreakRule:
-    """A7 -- a flight is one climb-cruise-descent cycle.
-
-    A descent reaching ``descent_floor_ft`` **above the field**, followed by a
-    climb back through it, is a new sortie -- whether or not there was a gap and
-    whether or not ground contact was broadcast. This catches merges that no gap
-    rule can reach, and it is the only arm that works when the transponder never
-    reports ``on_ground``.
-
-    Both halves of that sentence are conditions, and the arm is worthless
-    without either:
-
-    * *the descent* -- some earlier sample crossed the floor **downwards**
-      (previous sample above it, this one at or below). Without this the rule
-      fires on any upward crossing of the floor, including the very first
-      departure of a cold track, which is not a new sortie at all and is the
-      opposite of what the arm claims to detect. A track split there also
-      carries the *next* leg's ``ATOT -> floor`` samples, so it scores as a
-      merger for a reason that has nothing to do with the arm's thesis.
-    * *the climb back through it* -- this row is above the floor and the
-      previous one was not. This is where the break is placed, so the departing
-      leg begins at the crossing.
-
-    The downward-crossing flag is a running max over
-    ``rowsBetween(unboundedPreceding, -1)``, so it is monotone within a group:
-    once the aircraft has come down through the floor, every later climb through
-    it splits. That is the intended reading -- any upward crossing after a
-    descent *is* preceded by a descent -- and it costs one more window
-    aggregation than the incorrect version did.
-
-    **Height above field, not barometric MSL.** ``field_elev_ft`` is joined onto
-    the frame by Task 6's runner, exactly as for :func:`airport_anchored`, and
-    is coalesced to 0.0 where the join found nothing (sea level -- the same
-    conservative direction A6 documents). Comparing MSL made the arm degenerate
-    to bare legacy at any aerodrome above 1,500 ft elevation: a parked aircraft
-    there already reads above the floor, the lag row is never at or below it,
-    and no crossing is ever seen. That is precisely the blindness A6's docstring
-    argues legacy suffers from, and there is no reason for A7 to inherit it.
-
-    Per this repo's unit rule the comparison is scaled, never the stored column:
-    ``altitude_ft()`` is the engine's aviation-unit accessor over the SI
-    ``baro_altitude``, and ``descent_floor_ft`` is aviation with the unit in its
-    name. See ``base.py``'s module docstring.
-
-    The floor test is what keeps a cruise step-descent (FL350 -> FL310) from
-    counting: that never approaches the floor.
-
-    The legacy gap rule is ORed in as a floor, as for A5 and A6 -- see the module
-    docstring for why.
-    """
-
-    def expr(p):
-        w = segment_window()
-        height_ft = altitude_ft() - F.coalesce(F.col("field_elev_ft"), F.lit(0.0))
-        prev_height_ft = F.lag(height_ft).over(w)
-        # The descent half: a downward crossing of the floor, anywhere earlier
-        # in the group. NULL-safe -- the group's first row has no lag, so the
-        # when/otherwise makes it a 0 rather than propagating a NULL through
-        # the running max.
-        descended_to_floor = (height_ft <= p.descent_floor_ft) & (
-            prev_height_ft > p.descent_floor_ft
-        )
-        reached_floor_before = (
-            F.max(F.when(descended_to_floor, 1).otherwise(0)).over(
-                w.rowsBetween(Window.unboundedPreceding, -1)
-            )
-            == 1
-        )
-        # The climb half: back up through the floor. This is where the break
-        # goes, so the departing leg starts at the crossing.
-        climbing_away = (height_ft > p.descent_floor_ft) & (
-            prev_height_ft <= p.descent_floor_ft
-        )
-        return (climbing_away & reached_floor_before) | legacy().break_expr(p)
-
-    return BreakRule(
-        name="vertical_profile",
-        group_cols=["icao24"],
-        break_expr=expr,
-        month_suffix=False,
-    )
-
-
-def recommended() -> BreakRule:
-    """A8 -- the combination the study recommends.
-
-    Group on the airframe; split when the callsign really changes. Derived from
-    the measured ladder, not chosen in advance. The evidence, both periods
-    agreeing throughout:
-
-    * **Dropping callsign from the group key is the single largest gain in the
-      study.** ``airframe_only`` takes clean matching from 49.64% to 88.55%
-      (2025) and 52.33% to 89.79% (2024), cutting fragmentation from ~50% to
-      ~7%. Nothing else is close: the whole A1 parameter sweep -- 262 cells,
-      every axis extended until it turned over -- spans 0.95 points and beats
-      production by 0.21.
-    * **But it is not free.** 4,314 of ``airframe_only``'s 131,498 tracks (3.3%)
-      contain more than one *real* callsign: two flights of one airframe joined
-      into a single track.
-    * **Legacy fragments because of blanks, not because of callsign changes.**
-      With callsign in the group key, samples whose callsign is null form tracks
-      of their own -- 42.4% of legacy's tracks are blank-labelled. That is the
-      fragmentation, and it is an artefact of the key rather than of the flight.
-
-    The two failures have different causes, so they can be fixed independently:
-    group on ``icao24`` alone, so a blank or flickering callsign no longer starts
-    a track, and break when the last *non-blank* callsign differs from the
-    current one, so two genuinely different flights still separate.
-
-    ``F.last(..., ignorenulls=True)`` carries the last real callsign across the
-    blanks, which is precisely the property the group key used to supply and that
-    ``airframe_only`` gave up. Comparing raw ``callsign`` would break on every
-    blank sample and reproduce legacy's fragmentation.
-
-    **Shipping this changes ``track_id`` for all data from that release forward**,
-    in shape as well as value -- there is no ``_{year}_{month}`` suffix. The study
-    recommends; it does not schedule.
-    """
-
-    def expr(p):
-        w = segment_window()
-        back = w.rowsBetween(Window.unboundedPreceding, -1)
-        # Trimmed for comparison: ADS-B pads callsigns to eight characters, so
-        # "ABC123  " and "ABC123" are the same callsign and must not read as a
-        # change.
-        real = F.when(
-            F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
-            F.trim(F.col("callsign")),
-        )
-        prev_real = F.last(real, ignorenulls=True).over(back)
-        prev_real_ts = F.last(
-            F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
-        ).over(back)
-
-        # **The lookback must be bounded, and that is the whole subtlety here.**
-        # `break_expr` is evaluated over the group window, which spans every
-        # sample of the airframe -- it has no notion of the track boundaries it
-        # is in the middle of deciding. An unbounded `F.last` therefore reaches
-        # back past a gap break into the *previous* flight, so a track whose
-        # callsign starts blank and resolves later gets compared against the
-        # callsign before the gap and splits in its own middle. Measured, that
-        # bug cost 31 points of fragmentation (37.75% against airframe_only's
-        # 6.92%) while only 3.2% of tracks contain a real-to-real transition at
-        # all -- the mismatch between those two numbers is what exposed it.
-        #
-        # Requiring the previous real callsign to be no older than the general
-        # gap threshold keeps the comparison inside one track: a longer silence
-        # is itself a break, so there is nothing to carry across.
-        recent = (
-            F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
-        ) / 60.0 < lookback_minutes(p)
-
-        callsign_change = (
-            real.isNotNull()
-            & prev_real.isNotNull()
-            & recent
-            & (real != prev_real)
-        )
-        return F.coalesce(callsign_change, F.lit(False)) | legacy().break_expr(p)
-
-    return BreakRule(
-        name="recommended",
-        group_cols=["icao24"],
-        break_expr=expr,
-        month_suffix=False,
-        # Dropping the month suffix left this arm with no disambiguator across
-        # batches, and production batches (month today, day under the day-by-day
-        # runner). Keying on the track's own start restores uniqueness without
-        # reintroducing a suffix that encodes how the data happened to be
-        # sliced.
-        id_from_start_time=True,
     )
 
 
@@ -534,39 +115,34 @@ def _real_callsign() -> Column:
 
 
 def callsign_memory_minutes(p) -> float:
-    """How long A10 remembers a callsign it has not heard again.
+    """How long, in minutes, the default rule remembers a call sign not heard again.
 
-    A9 remembers one without limit, and that is a read-window dependence: a day's
-    run reads a bounded stretch before the day, so one day can still hold a
-    callsign the next day's read begins after, and the two then judge the same
-    flicker differently -- a piece written twice, or by no day. Under A9 that
-    takes three hours of samples with no callsign; under A10 a linked hole hides
-    the callsign for hours, so A10 forgets a callsign older than the longest hole
-    it can link. Every day reads at least that far back plus the callsign
-    lookback (``tracks.required_lookback_hours``), so both reads hold whatever
-    counts. ``debounced`` by name keeps its published behaviour.
+    A day's run reads only a bounded stretch before the day. If a call sign
+    were remembered without limit, one day's run could still see a call sign
+    that the next day's run does not, and the two would judge the same
+    change differently. So a call sign older than the longest gap that can
+    be linked is forgotten, and every day's run reads at least that far back
+    plus the call sign lookback (``tracks.required_lookback_hours``).
     """
     return float(p.link_max_gap_minutes)
 
 
 def stable_callsign(p, memory_minutes: float | None = None) -> Column:
-    """The debounced callsign: the last value that persisted, carried forward.
+    """The stable call sign: the last value kept long enough, carried forward.
 
-    NULL until a group's first real callsign. With ``memory_minutes``, a previous
-    callsign heard longer ago than that counts as none, so the next one is a
-    group's first run again: see :func:`callsign_memory_minutes`.
+    NULL until a group's first real call sign. With ``memory_minutes``, a
+    previous call sign heard longer ago than that counts as none, so the
+    next one starts afresh: see :func:`callsign_memory_minutes`.
     """
     w = segment_window()
     back = w.rowsBetween(Window.unboundedPreceding, -1)
     real = _real_callsign()
-    # The previous real callsign. Used here to find where a new run of a real
-    # value *starts* -- it is deliberately not used as the comparison value
-    # itself; see the block in `debounced_callsign_change`.
+    # The previous real call sign, used to find where a run of a new value
+    # starts; the comparison itself uses the stable value (see
+    # `debounced_callsign_change`).
     prev_real = F.last(real, ignorenulls=True).over(back)
     if memory_minutes is not None:
-        prev_real_ts = F.last(
-            F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
-        ).over(back)
+        prev_real_ts = F.last(F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True).over(back)
         remembered = (
             F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
         ) / 60.0 <= float(memory_minutes)
@@ -576,158 +152,73 @@ def stable_callsign(p, memory_minutes: float | None = None) -> Column:
     if hold <= 0.0:
         return real
 
-    # A run is a maximal stretch of consecutive samples carrying the
-    # same real callsign, blanks bridged over exactly as `recommended`
-    # bridges them. `is_new_value` marks the one row that starts a
-    # run: its real callsign differs from the last real one seen (or
-    # there is no previous real value at all -- the track's very
-    # first run, which is never checked, because "does it persist"
-    # presupposes something it might be reverting *from*).
-    is_new_value = real.isNotNull() & (
-        prev_real.isNull() | (real != prev_real)
-    )
+    # A run is a longest stretch of reports carrying the same real call
+    # sign, blanks skipped over. `is_new_value` marks the row that starts
+    # a run: its call sign differs from the last real one seen, or there
+    # is none before it (the group's first run, which is never checked,
+    # because there is nothing it could revert to).
+    is_new_value = real.isNotNull() & (prev_real.isNull() | (real != prev_real))
 
-    # How long this run lasts before the *next* run starts --
-    # measured as a timestamp difference, not a row count, so an
-    # irregular sampling rate cannot skew it. `next_transition_ts` is
-    # the nearest future row where a new run begins, found by the
-    # same reversed-growing-frame technique `cleaning/native.py`
-    # documents (there for `_next_valid`): `F.first(...)` over
-    # `rowsBetween(1, unboundedFollowing)` is a shrinking frame,
-    # re-scanned per row and quadratic in track length; `F.last(...,
-    # ignorenulls=True)` over the reversed ordering's `rowsBetween(
-    # unboundedPreceding, -1)` asks the same question of a frame that
-    # grows, which Spark maintains incrementally. This search is
-    # genuinely unbounded -- unlike a fixed persistence horizon, the
-    # next transition could be arbitrarily far away -- so this is
-    # the one place in this arm where that transformation actually
-    # earns its keep.
-    next_transition_ts = F.last(
-        F.when(is_new_value, F.col("_ts")), ignorenulls=True
-    ).over(
+    # How long this run lasts before the next run starts, as a time
+    # difference so that an irregular report rate cannot change it.
+    # `next_transition_ts` is the nearest later row where a new run
+    # begins. It is found with `F.last(..., ignorenulls=True)` over the
+    # reversed order's growing frame, which Spark keeps up incrementally;
+    # a forward `F.first` over a shrinking frame would be rescanned for
+    # every row. The next change can be arbitrarily far away.
+    next_transition_ts = F.last(F.when(is_new_value, F.col("_ts")), ignorenulls=True).over(
         w.orderBy(F.col("_ts").desc()).rowsBetween(Window.unboundedPreceding, -1)
     )
 
-    # Persisted if: this is the track's first run (nothing to revert
-    # from, so nothing to check); or there is no next run at all (the
-    # track ends inside this one, and a value with no later data has
-    # not been shown to revert); or the run lasted at least `hold`
-    # seconds before it was replaced. The boundary is inclusive --
-    # exactly `hold` seconds counts.
+    # The run is kept if it is the group's first run (nothing to revert
+    # from), if no run follows it (the data end inside it), or if it
+    # lasted at least `hold` seconds before it was replaced; exactly
+    # `hold` seconds counts.
     #
-    # This is a run-level verdict, not a per-row one, and that
-    # distinction is load-bearing. An earlier version asked whether
-    # *this row's own* forward horizon still showed its own value --
-    # which nulled every sample within `hold` seconds *before* a
-    # genuine change, because a row deep inside an established run
-    # can have a real, later transition inside its own horizon. With
-    # every sample ahead of a genuine change nulled, the arm had no
-    # earlier stable value left to compare the change against, and
-    # reported no break at all. Asking instead "how long did *the
-    # run this row belongs to* last" is answered once per run and
-    # inherited by every row in it, so a run's own impending genuine
-    # replacement cannot retroactively undermine it.
+    # The decision is made once per run and shared by all its rows. A
+    # decision per row, from that row's own look ahead, would also drop
+    # the rows of an established run just before a real change, leaving
+    # nothing to compare the change with.
     persisted_run = (
         prev_real.isNull()
         | next_transition_ts.isNull()
-        | (
-            (
-                F.unix_timestamp(next_transition_ts)
-                - F.unix_timestamp(F.col("_ts"))
-            )
-            >= hold
-        )
+        | ((F.unix_timestamp(next_transition_ts) - F.unix_timestamp(F.col("_ts"))) >= hold)
     )
 
-    # The verdict is planted only at the row that starts a run --
-    # NULL everywhere else -- then carried forward across every
-    # continuation sample of that run by the same ignorenulls
-    # forward-fill `recommended` uses to carry a real callsign
-    # across blanks. A run whose start failed the persistence check
-    # leaves no seed, so the forward-fill keeps supplying the
-    # *previous* successful run's value straight through it --
-    # "a flicker is invisible", applied per run instead of per row.
+    # The decision is written only at the row that starts a run and then
+    # carried forward over the rest of the run. A run that was not kept
+    # writes nothing, so the previous kept value carries on through it:
+    # a short flicker is invisible.
     run_seed = F.when(is_new_value & persisted_run, real)
-    return F.last(run_seed, ignorenulls=True).over(
-        w.rowsBetween(Window.unboundedPreceding, 0)
-    )
+    return F.last(run_seed, ignorenulls=True).over(w.rowsBetween(Window.unboundedPreceding, 0))
 
 
 def debounced_callsign_change(p, memory_minutes: float | None = None) -> Column:
-    """A9's callsign break: the stable callsign changed, recently. Never NULL.
+    """True where the stable call sign changes, within the lookback. Never NULL.
 
-    ``memory_minutes`` is passed on to :func:`stable_callsign`; A9 passes none.
+    ``memory_minutes`` is passed on to :func:`stable_callsign`.
     """
     w = segment_window()
     back = w.rowsBetween(Window.unboundedPreceding, -1)
     real = _real_callsign()
     # The previous real callsign's timestamp, for the lookback bound.
-    prev_real_ts = F.last(
-        F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True
-    ).over(back)
+    prev_real_ts = F.last(F.when(real.isNotNull(), F.col("_ts")), ignorenulls=True).over(back)
     recent = (
         F.unix_timestamp(F.col("_ts")) - F.unix_timestamp(prev_real_ts)
     ) / 60.0 < lookback_minutes(p)
 
     stable = stable_callsign(p, memory_minutes)
 
-    # **Persisted against persisted, not persisted against previous-real.**
-    # A flicker trips the rule twice -- once on the X->Y excursion and again
-    # on the Y->X revert -- and measured on 2026-06-01 both legs are there:
-    # 5,241 revert boundaries and 5,000 excursion boundaries, 23.1% of all
-    # 44,406 boundaries between them.
-    #
-    # Comparing the new value against the previous *real* one suppresses
-    # only the excursion: at the first X after the flicker, the previous
-    # real callsign is Y, the current is X, and X does persist -- so it
-    # breaks. The flight still splits, in two instead of three, and the
-    # fragmentation measurement would show a real but halved improvement,
-    # plausible enough to be accepted.
-    #
-    # Carrying the last *stable* callsign forward instead leaves the
-    # transient invisible: stable is X,X,X,X,NULL,X,X,X,X across a flicker,
-    # so every comparison is X against X and nothing breaks. A genuine
-    # change gives X,X,X,X,Y,Y,Y,Y and breaks once, at the first Y.
+    # Stable compared with stable, not with the previous real value. A
+    # flicker X -> Y -> X changes the real value twice. Compared with the
+    # previous real value, the return to X would still split the flight.
+    # The stable value reads X, X, X, NULL, X, X across the flicker, so
+    # nothing splits; a real change X -> Y splits once, at the first Y.
     prev_stable = F.last(stable, ignorenulls=True).over(back)
     callsign_change = (
-        stable.isNotNull()
-        & prev_stable.isNotNull()
-        & recent
-        & (stable != prev_stable)
+        stable.isNotNull() & prev_stable.isNotNull() & recent & (stable != prev_stable)
     )
     return F.coalesce(callsign_change, F.lit(False))
-
-
-def debounced() -> BreakRule:
-    """A9 -- A8, but a callsign must persist before it breaks a track.
-
-    `recommended` breaks on the first sample whose real callsign differs from
-    the previous real one. A value that appears once and reverts therefore cuts
-    a flight in half. Measured on 2026-06-01: of 1,765 track splits with a
-    sub-minute gap -- which neither gap rule can produce, so all of them are
-    callsign breaks -- **1,457 had the same resolved callsign on both halves**,
-    at cruise, with a median implied speed of 421 kt across the gap. One flight,
-    cut in two.
-
-    The extra condition is that the new value is still in force
-    ``callsign_min_persistence_seconds`` later. A flicker fails it because the
-    value has already reverted; a genuine change passes because the new
-    callsign is still there.
-
-    ``callsign_min_persistence_seconds = 0`` reproduces `recommended` exactly,
-    which is what makes this safe to add beside a published arm.
-    """
-
-    def expr(p):
-        return debounced_callsign_change(p) | legacy().break_expr(p)
-
-    return BreakRule(
-        name="debounced",
-        group_cols=["icao24"],
-        break_expr=expr,
-        month_suffix=False,
-        id_from_start_time=True,
-    )
 
 
 def _once(value: Column, fn: Callable[[Column], Column]) -> Column:
@@ -786,9 +277,9 @@ def _edge_summary(frame: Column, latest_first: bool) -> Column:
                 _mean(v.getField("vr_fpm")).alias("mean_vr_fpm"),
                 F.size(v.getField("vr_fpm")).cast("long").alias("vr_samples"),
                 _mean(v.getField("spd_kt")).alias("mean_spd_kt"),
-                (
-                    (F.size(v.getField("alt_ft")) > 0) & ~v.getField("altitude_at_the_edge")
-                ).alias("alt_read_past_blank"),
+                ((F.size(v.getField("alt_ft")) > 0) & ~v.getField("altitude_at_the_edge")).alias(
+                    "alt_read_past_blank"
+                ),
             )
 
         return _once(
@@ -800,13 +291,13 @@ def _edge_summary(frame: Column, latest_first: bool) -> Column:
 
 
 def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Column]:
-    """What :func:`linkable` sees of a hole, evaluated at the first sample after it.
+    """What :func:`linkable` sees of a gap, at the first report after it.
 
-    Every value is computed on every row, gap or no gap, and carries no verdict:
-    the study applies many parameter sets to one cached frame, so nothing here may
-    read a threshold the grid varies. The only parameters reached are the callsign
-    lookahead and lookback, the edge position window and, through
-    :func:`stable_callsign`, the debounce it shares with A9.
+    Every value is computed on every row, gap or no gap, and none applies a
+    threshold of the link tests, so the same features can be judged under
+    many settings. The only settings read are the call sign lookahead and
+    lookback, the edge position window and, through
+    :func:`stable_callsign`, the call sign persistence.
 
     ``gap_min`` is the silence between samples, which is what the 30 minute split
     sees. ``position_gap_min`` and ``gc_nm`` are the time and distance between the
@@ -815,15 +306,16 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
 
     The altitude, vertical rate, speed and rate-count features read each field's
     nearest :data:`LINK_EDGE_SAMPLES` values within ``link_edge_position_minutes`` of
-    the edge, past any blank samples. A row count alone has no bound in time, so at a
-    sparse edge it reaches across an earlier break into another flight, and a row can
-    fall inside one day's read and outside the next day's. The bound makes two days'
-    reads of a hole agree: on the lookback side this is prevented, since
-    ``process_day`` reads at least that far behind the old edge. Past the new edge it
-    is detected, not prevented: see the truncation warning in ``process_day``.
+    the edge, past any blank samples. A row count alone has no bound in time,
+    so at a sparse edge it could reach into another flight, and a row could
+    fall inside one day's read and outside the next day's. With the bound,
+    two days' runs read a gap the same way: behind the old side because step
+    02 reads at least that far back, and past the new side it is detected
+    instead (see the truncation warning in ``process_day``).
 
-    ``window`` defaults to the engine's :func:`segment_window`. Whichever is used,
-    the frame needs the arm contract's ``_ts`` and the ``_alt_ft`` and ``_spd_kt``
+    ``window`` defaults to the engine's :func:`segment_window`. Whichever is
+    used, the frame needs the engine's ``_ts`` and the ``_alt_ft`` and
+    ``_spd_kt``
     behind the accessors. A frame near a group's edge just holds fewer rows, and
     the edge is decided from those.
 
@@ -838,11 +330,10 @@ def link_feature_columns(p, window: WindowSpec | None = None) -> Dict[str, Colum
 def select_link_features(
     frame: DataFrame, p, window: WindowSpec | None = None, keep: Sequence = ()
 ) -> DataFrame:
-    """*frame* reduced to *keep* and :func:`link_feature_columns`, with each read done once.
+    """``frame`` reduced to ``keep`` and :func:`link_feature_columns`, read once.
 
-    The same values, at about a third of the cost on a local run: selected column by
-    column, every feature taken from an edge's read is that read again. A study that keeps
-    the features of a day wants this.
+    The same values at about a third of the cost: selected column by column,
+    every feature taken from one read repeats that read.
 
     Raises:
         ValueError: see :func:`link_feature_columns`.
@@ -884,12 +375,9 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     vert_rate_fpm = F.col("vert_rate") * FPM_PER_MPS
     span_s = int(p.link_edge_position_minutes * 60)
 
-    # The callsign before the hole, and whether it is recent enough to count. The
-    # bound is measured back from the old edge, and `process_day` reads at least
-    # that far behind it, so two days' reads of one hole see the same evidence behind
-    # it. Unbounded, one read could see an old callsign and split where the next day's
-    # read could not and link, and the piece after the hole would be published by
-    # neither day.
+    # The call sign before the gap, and whether it is recent enough to count.
+    # The age is measured back from the old side, and step 02 reads at least
+    # that far back, so every day's run sees the same evidence.
     back = w.rowsBetween(Window.unboundedPreceding, -1)
     real = _real_callsign()
     old_edge_ts = F.lag(F.col("_ts")).over(w)
@@ -912,11 +400,11 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     # read these positions many times over. So the frames are read once into one
     # struct, and a lambda over a one-element array is what lets the rest refer to it.
     position = F.when(
-        F.col("lat").isNotNull() & F.col("lon").isNotNull()
-        & ~F.isnan(F.col("lat")) & ~F.isnan(F.col("lon")),
-        F.struct(
-            F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")
-        ),
+        F.col("lat").isNotNull()
+        & F.col("lon").isNotNull()
+        & ~F.isnan(F.col("lat"))
+        & ~F.isnan(F.col("lon")),
+        F.struct(F.col("_ts").alias("ts"), F.col("lat").alias("lat"), F.col("lon").alias("lon")),
     )
     edges = F.struct(
         old_edge_ts.alias("old_edge_ts"),
@@ -934,8 +422,7 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
         )
         return F.struct(
             (
-                (F.unix_timestamp(new.getField("ts")) - F.unix_timestamp(old.getField("ts")))
-                / 60.0
+                (F.unix_timestamp(new.getField("ts")) - F.unix_timestamp(old.getField("ts"))) / 60.0
             ).alias("position_gap_min"),
             haversine_nm(
                 old.getField("lat"), old.getField("lon"), new.getField("lat"), new.getField("lon")
@@ -945,7 +432,7 @@ def _link_reads(p, window: WindowSpec | None = None) -> Dict[str, Column]:
     positions = _once(edges, between_positions)
 
     # The instant at full resolution comes first, so the nearest samples are the
-    # nearest in time, as for every `lag` in the arm. Ordered on `s` alone, two
+    # nearest in time, as for every `lag` in the rule. Ordered on `s` alone, two
     # samples inside one second -- ADS-C can report so -- would be ordered by the
     # altitude being judged.
     edge_sample = F.struct(
@@ -1015,11 +502,12 @@ def _features_from(reads: Mapping[str, Column]) -> Dict[str, Column]:
 def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     """One named verdict per test of the rule, in the spec's order. Never NULL.
 
-    A pure function of the features and the thresholds, so the study can score a
-    parameter set without re-segmenting, and can say which test stopped a hole.
-    A wrongly glued flight is worse than a split one, so a NULL in a required input
-    fails its test; the ``coalesce`` on every entry is what enforces that. So a hole
-    with no position inside the window on either side splits.
+    A function of the features and the thresholds only, so a set of
+    thresholds can be judged without building the tracks again, and the test
+    that stopped a link can be named. Joining two flights by mistake is worse
+    than splitting one, so a NULL in a required input fails its test (the
+    ``coalesce`` on every entry). A gap with no position near either side
+    therefore splits.
 
     Speed and time budget divide the distance by ``position_gap_min``, the time
     between the samples the positions came from: using the sample gap would credit
@@ -1036,12 +524,14 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     With ``link_old_edge_climb``, a flight that left coverage still climbing can pass
     the old edge's test below the floor, and with ``link_new_edge_descent`` one that
     reappears on approach to its destination can pass the new edge's. They are separate
-    settings because the study decides them separately. The direction is the evidence
+    settings because they can be chosen independently. The direction is the
+    evidence
     there, so a NULL vertical rate does not pass, unlike in the descend-then-climb test,
     and the mean must rest on at least :data:`LINK_DIRECTION_MIN_RATES` rates in that
     edge's values. A new edge the low-altitude gap can break at does not pass either: the
-    rule splits there whatever this says, and the study, which reads this verdict
-    instead of re-segmenting, must not count it as a link. That reads the lowest of the
+    rule splits there whatever this says, and a caller that reads this
+    verdict instead of building the tracks must not count it as a link. That
+    reads the lowest of the
     edge's values, not the first sample's, so a blank first sample cannot slip past a low
     value right behind it: the rule then splits too, on this test.
 
@@ -1050,13 +540,11 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
     cruise. So where the old edge passed only by direction the ratio is not read, and
     ``not_slow_for_this_flight`` falls back to ``link_min_implied_speed_kt`` alone. That
     adds no evidence, since ``implied_speed_not_too_slow`` requires the same: such a
-    hole has no per-flight speed test at all, and the study should read it so.
+    gap has no per-flight speed test at all.
     """
-    # Guarded because two samples can share a second, and a Spark 4 session raises
-    # on a zero divisor. A plain division here would fail the whole job on them.
-    implied_kt = F.when(
-        f["position_gap_min"] > 0.0, f["gc_nm"] / (f["position_gap_min"] / 60.0)
-    )
+    # Two reports can share a second, and Spark 4 raises on division by zero,
+    # so the divisor is checked first.
+    implied_kt = F.when(f["position_gap_min"] > 0.0, f["gc_nm"] / (f["position_gap_min"] / 60.0))
 
     descend_then_climb = (f["vr_before_fpm"] < -p.link_edge_vert_rate_fpm) & (
         f["vr_after_fpm"] > p.link_edge_vert_rate_fpm
@@ -1102,8 +590,7 @@ def link_checks(f: Mapping[str, Column], p) -> Dict[str, Column]:
         "implied_speed_not_impossible": implied_kt <= p.link_max_implied_speed_kt,
         "not_slow_for_this_flight": slow_for_this_flight_passes,
         "no_time_for_a_stop": (
-            f["position_gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0
-            < p.link_min_stop_minutes
+            f["position_gap_min"] - f["gc_nm"] / p.link_vfast_kt * 60.0 < p.link_min_stop_minutes
             if p.link_min_stop_minutes > 0.0
             else F.lit(True)
         ),
@@ -1118,22 +605,24 @@ def linkable(f: Mapping[str, Column], p) -> Column:
 
 
 def cruise_linked() -> BreakRule:
-    """A10 -- A9, but a gap whose two edges can be one flight does not break.
+    """The default track rule (``method="standard"``).
 
-    A flight crossing the Atlantic loses ADS-B reception for hours, and A9 turns
-    it into two tracks, neither with both ends. Measured on 2026-06-05, among
-    airframes with ADS-C: 1,204 of 1,334 flights crossing the European box have a
-    gap over 30 min, median 191 min. Only the general gap rule changes. A short
-    gap at low altitude still breaks, and a callsign change still breaks.
-    ``link_old_edge_climb`` and ``link_new_edge_descent`` widen what counts as an edge:
-    see :func:`link_checks`.
+    Groups the reports by aircraft address alone. A new track starts:
 
-    The default since the track-construction-v5 study: ``standard`` resolves to
-    it. That is a ``track_id`` boundary like A8's and A9's before it, silent to a
-    joiner. ``process_day`` reads further back under this arm, or a piece after
-    midnight would be claimed twice: see ``tracks.required_lookback_hours``. The
-    callsign guard it shares with A9 forgets a callsign older than the longest
-    linkable hole, for the same reason: see :func:`callsign_memory_minutes`.
+    * where the stable call sign changes (:func:`debounced_callsign_change`,
+      with ``callsign_min_persistence_seconds``);
+    * at a gap longer than ``low_alt_gap_minutes`` below ``low_alt_ft``;
+    * at a gap longer than ``gap_minutes``, unless the two sides of the gap
+      fit one continuous flight (:func:`linkable`), as when a flight crosses
+      an ocean out of ADS-B reception.
+
+    ``link_old_edge_climb`` and ``link_new_edge_descent`` let a side below the
+    cruise floor be linked when it climbs or descends: see
+    :func:`link_checks`. Because a track can span a long gap, step 02 reads
+    further back under this rule (see ``tracks.required_lookback_hours``),
+    and the call sign memory is bounded for the same reason (see
+    :func:`callsign_memory_minutes`). Each id is the group hash and the
+    second of the track's first report.
     """
 
     def expr(p):
@@ -1143,9 +632,7 @@ def cruise_linked() -> BreakRule:
         reads = _link_reads(p)
         linked = _once(
             F.struct(*[column.alias(name) for name, column in reads.items()]),
-            lambda row: linkable(
-                _features_from({name: row.getField(name) for name in reads}), p
-            ),
+            lambda row: linkable(_features_from({name: row.getField(name) for name in reads}), p),
         )
         return F.coalesce(
             debounced_callsign_change(p, callsign_memory_minutes(p))
@@ -1163,15 +650,46 @@ def cruise_linked() -> BreakRule:
     )
 
 
-ARMS = {
-    "legacy": legacy,
-    "no_month_suffix": no_month_suffix,
-    "traffic_style": traffic_style,
-    "airframe_only": airframe_only,
-    "ground_anchored": ground_anchored,
-    "airport_anchored": airport_anchored,
-    "vertical_profile": vertical_profile,
-    "recommended": recommended,
-    "debounced": debounced,
-    "cruise_linked": cruise_linked,
-}
+#: Names of the study rules kept with the study scripts, for the messages below.
+STUDY_ARMS = STUDY_SEGMENTATION_METHODS
+
+#: Where the study rules live, named in every error about one.
+STUDY_HOME = (
+    "benchmarks/study_variants/segmentation.py; a study script calls "
+    "study_variants.segmentation.register_study_arms() to select one"
+)
+
+
+class _Rules(dict):
+    """The rule registry: a ``dict`` that says where a missing study rule lives."""
+
+    def __missing__(self, name):
+        if name in STUDY_ARMS:
+            raise KeyError(f"segmentation rule {name!r} is a study rule; it lives in {STUDY_HOME}")
+        raise KeyError(name)
+
+
+#: The registry of track rules the pipeline can select, by name. ``standard``
+#: is not in it: it is another name of the default rule, ``cruise_linked``.
+#: Study scripts add their rules with :func:`register_arm`; it must stay a
+#: plain module-level dictionary for that.
+ARMS = _Rules(
+    legacy=legacy,
+    cruise_linked=cruise_linked,
+)
+
+
+def register_arm(name: str, rule: Callable[[], BreakRule]) -> None:
+    """Add a rule to the registry :data:`ARMS`, to be selected by name.
+
+    Args:
+        name: Name of the rule, as written in ``segmentation.method``.
+        rule: Function that returns the rule's :class:`BreakRule`.
+    """
+    ARMS[name] = rule
+
+
+def __getattr__(name):
+    if name in STUDY_ARMS or name == "TRAFFIC_DEFAULT_GAP_MINUTES":
+        raise ImportError(f"{name!r} is no longer part of opdi; it lives in {STUDY_HOME}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

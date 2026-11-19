@@ -6,20 +6,16 @@ Output -- :mod:`opdi.output`
    :undoc-members:
    :show-inheritance:
 
-Parquet Exporter -- :mod:`opdi.output.parquet_exporter`
---------------------------------------------------------
+Published columns -- :mod:`opdi.output.schema`
+------------------------------------------------
 
-.. automodule:: opdi.output.parquet_exporter
+.. automodule:: opdi.output.schema
    :members:
    :undoc-members:
-   :show-inheritance:
-   :special-members: __init__
 
-CSV Exporter -- :mod:`opdi.output.csv_exporter`
+Published files -- :mod:`opdi.output.published`
 -------------------------------------------------
 
-.. automodule:: opdi.output.csv_exporter
+.. automodule:: opdi.output.published
    :members:
    :undoc-members:
-   :show-inheritance:
-   :special-members: __init__

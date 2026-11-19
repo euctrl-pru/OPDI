@@ -36,15 +36,20 @@ def main(argv=None) -> int:
         ax.plot(t["lon"], t["lat"], "-", lw=0.8, color="tab:blue")
         ax.scatter(mps["lon"], mps["lat"], marker="x", c="red", zorder=3)
         for _, r in mps.iterrows():
-            ax.annotate(f"{r['merge_point']} ({r['legs_mp_min_nm']:.0f}-{r['legs_mp_max_nm']:.0f} NM)",
-                        (r["lon"], r["lat"]), fontsize=7)
+            ax.annotate(
+                f"{r['merge_point']} ({r['legs_mp_min_nm']:.0f}-{r['legs_mp_max_nm']:.0f} NM)",
+                (r["lon"], r["lat"]),
+                fontsize=7,
+            )
         ev = events[events["flight_id"] == tid]
         for _, e in ev.iterrows():
             c = "orange" if e["type"] == "pms-merge-point" else "green"
             ax.scatter([e["longitude"]], [e["latitude"]], c=c, s=30, zorder=4)
             if e["type"] == "pms-leg-exit":
                 info = json.loads(e["info"])
-                ax.set_xlabel(f"leg {info['leg_distance_nm']} NM, {info['leg_level_ft']:.0f} ft, {info['duration_s']:.0f} s, {info['direction']}")
+                ax.set_xlabel(
+                    f"leg {info['leg_distance_nm']} NM, {info['leg_level_ft']:.0f} ft, {info['duration_s']:.0f} s, {info['direction']}"  # noqa: E501
+                )
         ax.set_xlim(lon0 - 1.6, lon0 + 1.6)
         ax.set_ylim(lat0 - 1.0, lat0 + 1.0)
         ax.set_aspect(1 / 0.6)

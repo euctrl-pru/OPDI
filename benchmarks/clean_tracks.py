@@ -68,15 +68,24 @@ PERIODS = {
 }
 
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
+
 def add_h3_index(df, resolution: int = 7):
     """Attach ``h3_res_7``, for tracks built before step 02 computed it."""
     import h3_pyspark
     from pyspark.sql import functions as F
 
-    return (df.withColumn("_res", F.lit(resolution))
-              .withColumn(f"h3_res_{resolution}",
-                          h3_pyspark.geo_to_h3("lat", "lon", "_res"))
-              .drop("_res"))
+    return (
+        df.withColumn("_res", F.lit(resolution))
+        .withColumn(f"h3_res_{resolution}", h3_pyspark.geo_to_h3("lat", "lon", "_res"))
+        .drop("_res")
+    )
 
 
 def redirect(source: str, target: str) -> None:
@@ -101,8 +110,8 @@ def redirect(source: str, target: str) -> None:
     reads it. Only the first write, so a multi-month loop still extends rather
     than keeping only the last month.
     """
-    from opdi.utils.storage import StorageManager
     from opdi.cleaning import cleaner as cl
+    from opdi.utils.storage import StorageManager
 
     if getattr(StorageManager, "_v7_clean_redirect", False):
         return
@@ -126,24 +135,28 @@ def redirect(source: str, target: str) -> None:
     StorageManager.write_table = write_table
     StorageManager._v7_clean_redirect = True
     if mapping[cl.SOURCE_TABLE] != cl.SOURCE_TABLE:
-        print(f"  redirect: {cl.SOURCE_TABLE} -> {source}, "
-              f"{cl.TARGET_TABLE} -> {target}")
+        print(f"  redirect: {cl.SOURCE_TABLE} -> {source}, " f"{cl.TARGET_TABLE} -> {target}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", choices=sorted(PERIODS), default="2025")
-    ap.add_argument("--target", default=None,
-                    help="override PERIODS[period]['target'] -- write the "
-                         "cleaned tracks to a different table, e.g. a "
-                         "research copy, without touching the period's usual "
-                         "output. Source and log path are unaffected.")
-    ap.add_argument("--results-dir", default=None,
-                    help="unused; accepted so the chain can call this like a job")
+    ap.add_argument(
+        "--target",
+        default=None,
+        help="override PERIODS[period]['target'] -- write the "
+        "cleaned tracks to a different table, e.g. a "
+        "research copy, without touching the period's usual "
+        "output. Source and log path are unaffected.",
+    )
+    ap.add_argument(
+        "--results-dir", default=None, help="unused; accepted so the chain can call this like a job"
+    )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4056)
-    ap.add_argument("--dry-run", action="store_true",
-                    help="report sizes and the tables involved, then exit")
+    ap.add_argument(
+        "--dry-run", action="store_true", help="report sizes and the tables involved, then exit"
+    )
     args = ap.parse_args()
 
     sys.stdout.reconfigure(line_buffering=True)
@@ -157,14 +170,18 @@ def main() -> None:
     print(f"period {args.period}: {period['source']} -> {period['target']}")
     for t in (period["source"], period["target"]):
         i = pv.s3_identity(f"s3a://eurocontrol/opdi/{t}")
-        print(f"  before  {t:<24}{i.get('objects', 0):>6} objects  "
-              f"{i.get('bytes', 0) / 1e9:>7.2f} GB")
+        print(
+            f"  before  {t:<24}{i.get('objects', 0):>6} objects  "
+            f"{i.get('bytes', 0) / 1e9:>7.2f} GB"
+        )
 
     # Cleaning adds a second copy of the tracks. Said out loud before the write
     # rather than discovered as a failure partway through it.
     total = pv.s3_identity("s3a://eurocontrol/opdi")
-    print(f"  bucket  {total.get('objects', 0):,} objects, "
-          f"{total.get('bytes', 0) / 1e9:.2f} GB before this stage")
+    print(
+        f"  bucket  {total.get('objects', 0):,} objects, "
+        f"{total.get('bytes', 0) / 1e9:.2f} GB before this stage"
+    )
     if args.dry_run:
         print("\ndry run: nothing written")
         return
@@ -174,16 +191,18 @@ def main() -> None:
     spark = build_spark(6, "10g", distributed=True)
     spark.sparkContext.setLogLevel("ERROR")
 
-    from opdi.config import OPDIConfig
     from opdi.cleaning.cleaner import TrackCleaner
+    from opdi.config import OPDIConfig
 
-    cfg = OPDIConfig.for_environment("opensky")
-    print(f"\ncleaning enabled={cfg.cleaning.enabled} "
-          f"pandas_stage={cfg.cleaning.enable_pandas_stage}")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
+    print(f"\ncleaning enabled={cfg.cleaning.enabled}")
     if not cfg.cleaning.enabled:
         raise SystemExit(
             "cleaning is disabled in the config, so this stage would write "
-            "nothing and report success. Enable it or drop the stage.")
+            "nothing and report success. Enable it or drop the stage."
+        )
 
     redirect(period["source"], period["target"])
 
@@ -201,8 +220,10 @@ def main() -> None:
             return add_h3_index(inner(df, conf))
 
         cl.clean_tracks = clean_and_index
-        print("  attaching h3_res_7: these tracks pre-date step 02's index, "
-              "and the flight list's trend path joins aerodrome zones on it")
+        print(
+            "  attaching h3_res_7: these tracks pre-date step 02's index, "
+            "and the flight list's trend path joins aerodrome zones on it"
+        )
 
     c = TrackCleaner(spark, cfg, log_file_path=period["log"])
     c.create_table_if_not_exists()
@@ -212,11 +233,15 @@ def main() -> None:
 
     for t in (period["source"], period["target"]):
         i = pv.s3_identity(f"s3a://eurocontrol/opdi/{t}")
-        print(f"  after   {t:<24}{i.get('objects', 0):>6} objects  "
-              f"{i.get('bytes', 0) / 1e9:>7.2f} GB")
+        print(
+            f"  after   {t:<24}{i.get('objects', 0):>6} objects  "
+            f"{i.get('bytes', 0) / 1e9:>7.2f} GB"
+        )
     total = pv.s3_identity("s3a://eurocontrol/opdi")
-    print(f"  bucket  {total.get('objects', 0):,} objects, "
-          f"{total.get('bytes', 0) / 1e9:.2f} GB after")
+    print(
+        f"  bucket  {total.get('objects', 0):,} objects, "
+        f"{total.get('bytes', 0) / 1e9:.2f} GB after"
+    )
     spark.stop()
 
 

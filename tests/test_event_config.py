@@ -19,9 +19,7 @@ def test_events_config_is_reachable_from_the_container():
     assert isinstance(OPDIConfig().events, EventConfig)
 
 
-@pytest.mark.parametrize(
-    "field_name,field", list(EventConfig().__dataclass_fields__.items())
-)
+@pytest.mark.parametrize("field_name,field", list(EventConfig().__dataclass_fields__.items()))
 def test_every_measurement_carries_its_unit(field_name, field):
     """Units live in field names so a threshold cannot be read in the wrong one.
 
@@ -40,16 +38,16 @@ def test_every_measurement_carries_its_unit(field_name, field):
     # from it.
     declared = field.type
     if typing.get_origin(declared) is typing.Union:
-        declared = next(
-            (a for a in typing.get_args(declared) if a is not type(None)), declared
-        )
+        declared = next((a for a in typing.get_args(declared) if a is not type(None)), declared)
     if declared in (bool, str, "bool", "str"):
         return
     # Two numeric exceptions, both carrying their unit in the name already:
     # a set of flight levels and a flight level ceiling.
     counts = {"crossing_levels_fl", "airport_max_fl"}
+    # A number of holds (a count) and a list of aircraft type codes.
+    counts |= {"holding_other_min_episodes", "layout_vehicle_typecodes"}
     assert field_name in counts or field_name.endswith(
-        ("_nm", "_ft", "_kt", "_ftmin", "_seconds", "_pct", "_deg")
+        ("_nm", "_ft", "_kt", "_ftmin", "_seconds", "_s", "_pct", "_deg")
     )
 
 
@@ -71,7 +69,6 @@ def test_every_new_behaviour_is_off_under_legacy():
     assert legacy.airport_events_ordered is False
     assert legacy.feeds_from_clean_tracks is False
     assert legacy.deterministic_event_ids is False
-    assert legacy.enable_pandas_stage is False
     # The families that did not exist in events_v0.0.2 must not be emitted.
     # The first ladder run shipped a contaminated baseline precisely because
     # these were wired in unconditionally: rung 0 emitted 48,134 ATOT and
@@ -101,9 +98,6 @@ def test_the_shipped_new_behaviours_are_on():
     assert e.airport_events_ordered is True
     assert e.feeds_from_clean_tracks is True
     assert e.deterministic_event_ids is True
-    # The escape hatch stays shut: it needs the fatter executor image, and
-    # nothing in the current vocabulary requires it.
-    assert e.enable_pandas_stage is False
     assert e.emit_runway_events is True
     assert e.emit_block_events is True
     assert e.emit_level_offs is True
@@ -118,7 +112,7 @@ def test_version_string_is_new_and_the_published_one_is_untouched():
     ``events_v0.0.2`` must remain reachable, because a legacy run has to stamp
     it for a re-processed month to match the release it reproduces.
     """
-    assert EventConfig().events_version == "events_v0.3.0"
+    assert EventConfig().events_version == "events_v0.5.0"
     assert EventConfig.legacy().events_version == "events_v0.0.2"
 
 
@@ -137,24 +131,6 @@ def test_the_dead_bands_are_non_zero():
     e = EventConfig()
     assert e.crossing_hysteresis_ft > 0
     assert e.ring_hysteresis_nm > 0
-
-
-def test_unimplemented_behaviour_ships_inert():
-    """A flag that defaults on and does nothing is worse than no flag.
-
-    Each of these describes a behaviour whose detector does not exist yet.
-    Shipping them on would mean anyone reading ``EventConfig`` -- or trusting
-    this test file -- would conclude that ground membership is measured above
-    field elevation and that ring events are emitted. Neither is true. Each
-    default flips in the commit that implements it, which is also what makes
-    that commit's diff say what it changed.
-    """
-    e = EventConfig()
-
-    # Nothing is inert any more: D1 landed in 098a11d and the rings in the
-    # commit after it. The test is kept because the *mechanism* is the point --
-    # the next unimplemented flag belongs here, shipped off, until it works.
-    assert e.enable_pandas_stage is False
 
 
 def test_the_rings_are_the_ones_icao_defines():
@@ -212,7 +188,7 @@ def test_cruise_speed_membership_is_left_at_openaps_values():
 
 def test_v4_defaults_are_the_shipped_configuration():
     c = EventConfig()
-    assert c.events_version == "events_v0.3.0"
+    assert c.events_version == "events_v0.5.0"
     assert c.emit_runway_milestones is True
     assert c.emit_pru_tops is True
     assert c.level_method == "pru"
@@ -269,3 +245,19 @@ def test_merging_without_the_acdm_family_is_refused():
     take-off/landing pair beside a vocabulary that has no place for it."""
     with pytest.raises(ValueError, match="merge_duplicate_milestones"):
         EventConfig(merge_duplicate_milestones=True, emit_runway_milestones=False)
+
+
+def test_the_events_version_of_the_study_tables_follows_the_two_new_settings():
+    """One version, ``events_v0.5.0``, covers the flight list with one row per
+    flight (circles around the airports of stops) and the off-block time at
+    the push-back start. Every entry of the study table with either setting
+    on carries it; an entry with both off carries an earlier version."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
+    import event_bench
+
+    for name, config in event_bench.build_plan().items():
+        either = config.flight_list_one_row_per_flight or config.off_block_at_start_of_push_back
+        assert (config.events_version == "events_v0.5.0") == either, name

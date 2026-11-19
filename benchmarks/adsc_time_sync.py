@@ -121,8 +121,7 @@ def bracket(adsc: DataFrame, adsb: DataFrame, max_gap_s: int = 60) -> DataFrame:
     j = (
         samples.join(
             F.broadcast(keys),
-            (F.col("_icao24") == F.col("icao24"))
-            & (samples["_bin"] == keys["_bin"]),
+            (F.col("_icao24") == F.col("icao24")) & (samples["_bin"] == keys["_bin"]),
             "inner",
         )
         .withColumn("_dt", F.col("t_b") - F.col("t_c"))
@@ -133,9 +132,19 @@ def bracket(adsc: DataFrame, adsb: DataFrame, max_gap_s: int = 60) -> DataFrame:
     # gap picks the nearest sample on each side: the largest negative gap
     # before, the smallest positive gap after.
     def _side(pred, agg):
-        return agg(F.when(pred, F.struct(
-            F.col("_dt").alias("dt"), F.col("t_b"), F.col("lat_b"),
-            F.col("lon_b"), F.col("v_b"), F.col("lpu_b"))))
+        return agg(
+            F.when(
+                pred,
+                F.struct(
+                    F.col("_dt").alias("dt"),
+                    F.col("t_b"),
+                    F.col("lat_b"),
+                    F.col("lon_b"),
+                    F.col("v_b"),
+                    F.col("lpu_b"),
+                ),
+            )
+        )
 
     before = _side(F.col("_dt") <= 0, F.max)
     after = _side(F.col("_dt") >= 0, F.min)
@@ -148,7 +157,11 @@ def bracket(adsc: DataFrame, adsb: DataFrame, max_gap_s: int = 60) -> DataFrame:
         # the whole test.
         .where(F.col("_p").isNotNull() & F.col("_n").isNotNull())
         .select(
-            "icao24", "t_c_ts", "t_c", "lat_c", "lon_c",
+            "icao24",
+            "t_c_ts",
+            "t_c",
+            "lat_c",
+            "lon_c",
             F.col("_p.t_b").alias("t_prev"),
             F.col("_p.lat_b").alias("lat_prev"),
             F.col("_p.lon_b").alias("lon_prev"),
@@ -165,45 +178,36 @@ def bracket(adsc: DataFrame, adsb: DataFrame, max_gap_s: int = 60) -> DataFrame:
     # across more than the instrument can justify: at 250 m/s a 120 s bracket
     # is 30 km of assumed straight line, against the hundreds of metres being
     # measured.
-    return out.where((F.col("bracket_s") > 0)
-                     & (F.col("bracket_s") <= F.lit(2.0 * w)))
+    return out.where((F.col("bracket_s") > 0) & (F.col("bracket_s") <= F.lit(2.0 * w)))
 
 
 def decompose(bracketed: DataFrame) -> DataFrame:
     """Add the along/cross decomposition and the implied time offset."""
-    w = ((F.col("t_c") - F.col("t_prev"))
-         / (F.col("t_next") - F.col("t_prev")))
+    w = (F.col("t_c") - F.col("t_prev")) / (F.col("t_next") - F.col("t_prev"))
     lat_i = F.col("lat_prev") + w * (F.col("lat_next") - F.col("lat_prev"))
     lon_i = F.col("lon_prev") + w * (F.col("lon_next") - F.col("lon_prev"))
 
-    df = (bracketed
-          .withColumn("_w", w)
-          .withColumn("lat_i", lat_i)
-          .withColumn("lon_i", lon_i))
+    df = bracketed.withColumn("_w", w).withColumn("lat_i", lat_i).withColumn("lon_i", lon_i)
 
     # Track direction from the ADS-B pair itself, not from the broadcast
     # `heading`: heading is what the aircraft says it is pointing at, which in
     # wind is not where it is going, and the decomposition needs the direction
     # it actually moved.
-    dx, dy = _east_north(F.col("lat_next"), F.col("lon_next"),
-                         F.col("lat_prev"), F.col("lon_prev"))
+    dx, dy = _east_north(F.col("lat_next"), F.col("lon_next"), F.col("lat_prev"), F.col("lon_prev"))
     df = df.withColumn("_dx", dx).withColumn("_dy", dy)
     norm = F.sqrt(F.col("_dx") * F.col("_dx") + F.col("_dy") * F.col("_dy"))
     df = df.withColumn("_norm", norm).where(F.col("_norm") > F.lit(1.0))
-    df = (df.withColumn("_ux", F.col("_dx") / F.col("_norm"))
-            .withColumn("_uy", F.col("_dy") / F.col("_norm")))
+    df = df.withColumn("_ux", F.col("_dx") / F.col("_norm")).withColumn(
+        "_uy", F.col("_dy") / F.col("_norm")
+    )
 
-    ox, oy = _east_north(F.col("lat_c"), F.col("lon_c"),
-                         F.col("lat_i"), F.col("lon_i"))
+    ox, oy = _east_north(F.col("lat_c"), F.col("lon_c"), F.col("lat_i"), F.col("lon_i"))
     df = df.withColumn("_ox", ox).withColumn("_oy", oy)
 
     df = (
-        df.withColumn("along_m",
-                      F.col("_ox") * F.col("_ux") + F.col("_oy") * F.col("_uy"))
-        .withColumn("cross_m",
-                    -F.col("_ox") * F.col("_uy") + F.col("_oy") * F.col("_ux"))
-        .withColumn("dist_m", F.sqrt(F.col("_ox") * F.col("_ox")
-                                     + F.col("_oy") * F.col("_oy")))
+        df.withColumn("along_m", F.col("_ox") * F.col("_ux") + F.col("_oy") * F.col("_uy"))
+        .withColumn("cross_m", -F.col("_ox") * F.col("_uy") + F.col("_oy") * F.col("_ux"))
+        .withColumn("dist_m", F.sqrt(F.col("_ox") * F.col("_ox") + F.col("_oy") * F.col("_oy")))
         .withColumn("v_ms", (F.col("v_prev") + F.col("v_next")) / F.lit(2.0))
         # ADS-B's own position age at the bracketing sample. Reported because
         # the archive carries positions forward, which would bias the result
@@ -214,9 +218,17 @@ def decompose(bracketed: DataFrame) -> DataFrame:
         .withColumn("implied_dt_s", F.col("along_m") / F.col("v_ms"))
     )
 
-    return df.select("icao24", F.col("t_c_ts").alias("event_time"),
-                     "along_m", "cross_m", "dist_m", "implied_dt_s",
-                     "v_ms", "bracket_s", "adsb_pos_age_s")
+    return df.select(
+        "icao24",
+        F.col("t_c_ts").alias("event_time"),
+        "along_m",
+        "cross_m",
+        "dist_m",
+        "implied_dt_s",
+        "v_ms",
+        "bracket_s",
+        "adsb_pos_age_s",
+    )
 
 
 def per_airframe(decomposed: DataFrame) -> DataFrame:
@@ -228,16 +240,17 @@ def per_airframe(decomposed: DataFrame) -> DataFrame:
     would have hidden the only thing that decides whether a correction is
     possible.
     """
-    return (decomposed.groupBy("icao24").agg(
-        F.count(F.lit(1)).alias("n"),
-        F.expr("percentile_approx(implied_dt_s, 0.5)")
-        .alias("median_implied_dt_s"),
-        F.stddev("implied_dt_s").alias("std_implied_dt_s"),
-        F.expr("percentile_approx(abs(cross_m), 0.5)")
-        .alias("median_abs_cross_m"),
-        F.expr("percentile_approx(abs(along_m), 0.5)")
-        .alias("median_abs_along_m"),
-    ).orderBy("icao24"))
+    return (
+        decomposed.groupBy("icao24")
+        .agg(
+            F.count(F.lit(1)).alias("n"),
+            F.expr("percentile_approx(implied_dt_s, 0.5)").alias("median_implied_dt_s"),
+            F.stddev("implied_dt_s").alias("std_implied_dt_s"),
+            F.expr("percentile_approx(abs(cross_m), 0.5)").alias("median_abs_cross_m"),
+            F.expr("percentile_approx(abs(along_m), 0.5)").alias("median_abs_along_m"),
+        )
+        .orderBy("icao24")
+    )
 
 
 def main() -> int:
@@ -263,28 +276,32 @@ def main() -> int:
 
     days = F.array(*[F.lit(d) for d in args.days])
     try:
-        adsc = (spark.read.parquet(f"{args.prefix}/osn_adsc_statevectors")
-                .where(F.array_contains(
-                    days, F.col("event_time_day").cast("string"))))
-        adsb = (spark.read.parquet(f"{args.prefix}/osn_statevectors_v2")
-                .where(F.array_contains(
-                    days, F.col("event_time_day").cast("string"))))
+        adsc = spark.read.parquet(f"{args.prefix}/osn_adsc_statevectors").where(
+            F.array_contains(days, F.col("event_time_day").cast("string"))
+        )
+        adsb = spark.read.parquet(f"{args.prefix}/osn_statevectors_v2").where(
+            F.array_contains(days, F.col("event_time_day").cast("string"))
+        )
         n_adsc = adsc.count()
         pairs = decompose(bracket(adsc, adsb, args.max_gap_s)).cache()
         pair_rows = [r.asDict() for r in pairs.collect()]
-        print(f"bracketed {len(pair_rows)} of {n_adsc} ADS-C reports "
-              f"({len({r['icao24'] for r in pair_rows})} airframes)", flush=True)
+        print(
+            f"bracketed {len(pair_rows)} of {n_adsc} ADS-C reports "
+            f"({len({r['icao24'] for r in pair_rows})} airframes)",
+            flush=True,
+        )
         summary = [r.asDict() for r in per_airframe(pairs).collect()]
-        overall = pairs.agg(
-            F.count(F.lit(1)).alias("n"),
-            F.expr("percentile_approx(implied_dt_s, 0.5)")
-            .alias("median_implied_dt_s"),
-            F.stddev("implied_dt_s").alias("std_implied_dt_s"),
-            F.expr("percentile_approx(abs(cross_m), 0.5)")
-            .alias("median_abs_cross_m"),
-            F.expr("percentile_approx(abs(along_m), 0.5)")
-            .alias("median_abs_along_m"),
-        ).collect()[0].asDict()
+        overall = (
+            pairs.agg(
+                F.count(F.lit(1)).alias("n"),
+                F.expr("percentile_approx(implied_dt_s, 0.5)").alias("median_implied_dt_s"),
+                F.stddev("implied_dt_s").alias("std_implied_dt_s"),
+                F.expr("percentile_approx(abs(cross_m), 0.5)").alias("median_abs_cross_m"),
+                F.expr("percentile_approx(abs(along_m), 0.5)").alias("median_abs_along_m"),
+            )
+            .collect()[0]
+            .asDict()
+        )
         overall["icao24"] = "ALL"
         summary.append(overall)
     finally:
@@ -299,7 +316,8 @@ def main() -> int:
                 f"{name}: no bracketed pairs at all. That is not a null "
                 f"result -- it means the two tables share no airframe-minute, "
                 f"so either the ADS-C ingest or the state-vector window is "
-                f"wrong for these days.")
+                f"wrong for these days."
+            )
         fields = sorted({k for r in rows for k in r}) or ["icao24"]
         with open(out / name, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=fields)
@@ -311,14 +329,20 @@ def main() -> int:
     write(args.out_name, summary, required=True)
 
     import provenance
+
     for name in (args.pairs_name, args.out_name):
         provenance.record(
-            out, name, "benchmarks/adsc_time_sync.py", sys.argv[1:],
+            out,
+            name,
+            "benchmarks/adsc_time_sync.py",
+            sys.argv[1:],
             ["benchmarks/adsc_time_sync.py", "src/opdi/ingestion/osn_adsc.py"],
-            inputs={"days": args.days, "max_gap_s": args.max_gap_s,
-                    "min_speed_ms": MIN_SPEED_MS},
-            input_tables=[f"{args.prefix}/osn_adsc_statevectors",
-                          f"{args.prefix}/osn_statevectors_v2"])
+            inputs={"days": args.days, "max_gap_s": args.max_gap_s, "min_speed_ms": MIN_SPEED_MS},
+            input_tables=[
+                f"{args.prefix}/osn_adsc_statevectors",
+                f"{args.prefix}/osn_statevectors_v2",
+            ],
+        )
     return 0
 
 

@@ -15,9 +15,9 @@ collision every *day*, which is what these tests pin shut.
 The fix keys the id on the track's own first sample. Same track, same id, no
 matter who computes it or what else is in the frame.
 """
+
 import datetime as dt
 
-import pytest
 from conftest import make_track
 
 from opdi.config import SegmentationConfig
@@ -42,7 +42,7 @@ def _ids(df):
     return {v: k for k, v in first.items()}
 
 
-def _segment(spark, samples, arm="recommended"):
+def _segment(spark, samples, arm="cruise_linked"):
     sv = make_track(spark, samples)
     return assign_track_id(sv, ARMS[arm](), _params())
 
@@ -114,5 +114,5 @@ def test_legacy_identity_is_untouched(spark):
     out = _segment(spark, [{"t": 0}, {"t": 60}], arm="legacy")
     tid = out.select("track_id").first()["track_id"]
     parts = tid.split("_")
-    assert len(parts) == 4, tid          # hash _ offset _ year _ month
-    assert parts[1] == "0"               # the running counter, still counting
+    assert len(parts) == 4, tid  # hash _ offset _ year _ month
+    assert parts[1] == "0"  # the running counter, still counting

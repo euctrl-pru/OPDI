@@ -55,22 +55,23 @@ this sweep and the code that ships.
 
 import argparse
 import sys
-from datetime import date
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
-from pyspark.sql import DataFrame, Window
-from pyspark.sql import functions as F
-
 import osn_sample
-from tables import table, fixed
-from osn_sample import build_spark, load_dotenv
 from adep_ades import (
-    airport_locations, label_ground_truth, load_ground_truth, score,
+    airport_locations,
+    label_ground_truth,
+    load_ground_truth,
+    score,
 )
 from elevation_bands import airport_elevations
+from osn_sample import build_spark, load_dotenv
+from pyspark.sql import DataFrame, Window
+from pyspark.sql import functions as F
+from tables import fixed, table
 
 TRACKS = table("osn_tracks")
 ZONES = table("h3_airport_detection_zones")
@@ -138,8 +139,10 @@ EARTH_R_NM = 3440.065
 
 def haversine_nm(lat1, lon1, lat2, lon2):
     dlat, dlon = F.radians(lat2 - lat1), F.radians(lon2 - lon1)
-    a = (F.sin(dlat / 2) ** 2
-         + F.cos(F.radians(lat1)) * F.cos(F.radians(lat2)) * F.sin(dlon / 2) ** 2)
+    a = (
+        F.sin(dlat / 2) ** 2
+        + F.cos(F.radians(lat1)) * F.cos(F.radians(lat2)) * F.sin(dlon / 2) ** 2
+    )
     return F.lit(2 * EARTH_R_NM) * F.asin(F.sqrt(F.least(a, F.lit(1.0))))
 
 
@@ -160,16 +163,22 @@ def build_cache(spark, days, tracks: str = TRACKS, add_h3: bool = False) -> Data
     latc = next((c for c in ("apt_latitude_deg", "latitude_deg") if c in z.columns))
     lonc = next((c for c in ("apt_longitude_deg", "longitude_deg") if c in z.columns))
     schc = next((c for c in ("apt_scheduled", "scheduled_service") if c in z.columns))
-    z = (z.filter(F.col(rc) <= CACHE_RADIUS_NM)
-         .select(F.col(hexc).alias("_hex"), F.col(idc).alias("apt_ident"),
-                 F.col(latc).alias("apt_lat"), F.col(lonc).alias("apt_lon"),
-                 F.col(schc).alias("apt_scheduled")))
+    z = z.filter(F.col(rc) <= CACHE_RADIUS_NM).select(
+        F.col(hexc).alias("_hex"),
+        F.col(idc).alias("apt_ident"),
+        F.col(latc).alias("apt_lat"),
+        F.col(lonc).alias("apt_lon"),
+        F.col(schc).alias("apt_scheduled"),
+    )
 
     # Field elevation, joined onto the zone table rather than onto the state
     # vectors: small against small, once, instead of once per sample.
     elev = airport_elevations(spark)
-    z = (z.join(F.broadcast(elev), z.apt_ident == elev._apt, "left")
-         .drop("_apt").withColumnRenamed("_elev_ft", "apt_elev_ft"))
+    z = (
+        z.join(F.broadcast(elev), z.apt_ident == elev._apt, "left")
+        .drop("_apt")
+        .withColumnRenamed("_elev_ft", "apt_elev_ft")
+    )
 
     # Wide enough for both families. The above-field caps reach higher in
     # *pressure* altitude than the flight-level caps do -- 20,000 ft above a
@@ -185,31 +194,44 @@ def build_cache(spark, days, tracks: str = TRACKS, add_h3: bool = False) -> Data
     max_elev = z.select(F.max("apt_elev_ft")).first()[0] or 0.0
     ceiling_fl = int((max(HEIGHT_CAPS) + max_elev) / 100) + 1
     prefilter_fl = max(max(FL_CAPS), ceiling_fl)
-    print(f"vote-cache pre-filter: FL{prefilter_fl} "
-          f"(highest matchable field {max_elev:,.0f} ft)")
+    print(
+        f"vote-cache pre-filter: FL{prefilter_fl} " f"(highest matchable field {max_elev:,.0f} ft)"
+    )
 
-    sv = (spark.read.parquet(tracks)
-          .filter(F.to_date("event_time").isin(days))
-          .dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
-          .withColumnRenamed("callsign", "flight_id")
-          .fillna({"flight_id": ""})
-          .withColumn("flight_level",
-                      (F.col("baro_altitude") * 3.28084 / 100).cast("int"))
-          .filter(F.col("flight_level") <= prefilter_fl))
+    sv = (
+        spark.read.parquet(tracks)
+        .filter(F.to_date("event_time").isin(days))
+        .dropna(subset=["lat", "lon", "baro_altitude", "track_id"])
+        .withColumnRenamed("callsign", "flight_id")
+        .fillna({"flight_id": ""})
+        .withColumn("flight_level", (F.col("baro_altitude") * 3.28084 / 100).cast("int"))
+        .filter(F.col("flight_level") <= prefilter_fl)
+    )
 
     if add_h3:
         import h3_pyspark
 
-        sv = (sv.withColumn("_res", F.lit(7))
-                .withColumn("h3_res_7", h3_pyspark.geo_to_h3("lat", "lon", "_res"))
-                .drop("_res"))
+        sv = (
+            sv.withColumn("_res", F.lit(7))
+            .withColumn("h3_res_7", h3_pyspark.geo_to_h3("lat", "lon", "_res"))
+            .drop("_res")
+        )
 
-    sv = sv.select("track_id", "icao24", "flight_id", "event_time", "lat", "lon",
-                   "flight_level", "baro_altitude", "h3_res_7")
+    sv = sv.select(
+        "track_id",
+        "icao24",
+        "flight_id",
+        "event_time",
+        "lat",
+        "lon",
+        "flight_level",
+        "baro_altitude",
+        "h3_res_7",
+    )
 
-    j = (sv.join(z, sv.h3_res_7 == z._hex, "inner")
-         .withColumn("dist_nm", haversine_nm(F.col("lat"), F.col("lon"),
-                                             F.col("apt_lat"), F.col("apt_lon"))))
+    j = sv.join(z, sv.h3_res_7 == z._hex, "inner").withColumn(
+        "dist_nm", haversine_nm(F.col("lat"), F.col("lon"), F.col("apt_lat"), F.col("apt_lon"))
+    )
 
     return add_height_votes(j)
 
@@ -230,14 +252,18 @@ def add_height_votes(j: DataFrame) -> DataFrame:
     part = ["icao24", "flight_id", "track_id", "apt_ident"]
     w_avg = Window.partitionBy(part).orderBy("event_time").rowsBetween(-2, 2)
     w_lag = Window.partitionBy(part).orderBy("event_time")
-    j = (j.withColumn("_sm", F.avg("baro_altitude").over(w_avg))
-         .withColumn("_d", F.col("_sm") - F.lag("_sm").over(w_lag))
-         # Mirrors `flights.height_above_field` exactly, coalesce included: the
-         # sweep must admit the same samples production does, or a tuned cap
-         # would not transfer to the pipeline.
-         .withColumn("_agl_ft",
-                     F.col("baro_altitude") * F.lit(3.28084)
-                     - F.coalesce(F.col("apt_elev_ft"), F.lit(0.0))))
+    j = (
+        j.withColumn("_sm", F.avg("baro_altitude").over(w_avg)).withColumn(
+            "_d", F.col("_sm") - F.lag("_sm").over(w_lag)
+        )
+        # Mirrors `flights.height_above_field` exactly, coalesce included: the
+        # sweep must admit the same samples production does, or a tuned cap
+        # would not transfer to the pipeline.
+        .withColumn(
+            "_agl_ft",
+            F.col("baro_altitude") * F.lit(3.28084) - F.coalesce(F.col("apt_elev_ft"), F.lit(0.0)),
+        )
+    )
 
     aggs = []
     for cap in FL_CAPS:
@@ -254,14 +280,18 @@ def add_height_votes(j: DataFrame) -> DataFrame:
             F.sum(F.when(inc & (F.col("_d") < 0), 1).otherwise(0)).alias(f"dn_agl_{cap}"),
             F.min(F.when(inc, F.col("dist_nm"))).alias(f"dist_agl_{cap}"),
         ]
-    aggs += [F.first("apt_scheduled", ignorenulls=True).alias("apt_scheduled"),
-             F.first("apt_elev_ft", ignorenulls=True).alias("apt_elev_ft"),
-             F.min("event_time").alias("t_first"), F.max("event_time").alias("t_last")]
+    aggs += [
+        F.first("apt_scheduled", ignorenulls=True).alias("apt_scheduled"),
+        F.first("apt_elev_ft", ignorenulls=True).alias("apt_elev_ft"),
+        F.min("event_time").alias("t_first"),
+        F.max("event_time").alias("t_last"),
+    ]
     return j.groupBy(*part).agg(*aggs)
 
 
-def predictions(votes: DataFrame, cap: int, margin: int, radius: float,
-                penalty_nm: float, datum: str = "field") -> DataFrame:
+def predictions(
+    votes: DataFrame, cap: int, margin: int, radius: float, penalty_nm: float, datum: str = "field"
+) -> DataFrame:
     """Apply the trend rule at one parameter setting, on one datum.
 
     ``datum`` selects the column family, and *cap* is read in that family's
@@ -276,65 +306,89 @@ def predictions(votes: DataFrame, cap: int, margin: int, radius: float,
             f"would score one datum and label it the other."
         )
     suffix = f"agl_{cap}" if datum == "field" else f"{cap}"
-    up, dn, dist = (F.col(f"up_{suffix}"), F.col(f"dn_{suffix}"),
-                    F.col(f"dist_{suffix}"))
+    up, dn, dist = (F.col(f"up_{suffix}"), F.col(f"dn_{suffix}"), F.col(f"dist_{suffix}"))
     v = votes.filter(dist.isNotNull() & (dist <= radius))
-    v = v.withColumn("status",
-                     F.when(up > dn + margin, F.lit("adep"))
-                     .when(dn > up + margin, F.lit("ades")))
+    v = v.withColumn(
+        "status", F.when(up > dn + margin, F.lit("adep")).when(dn > up + margin, F.lit("ades"))
+    )
     v = v.filter(F.col("status").isNotNull())
     # Aerodrome choice: nearest surviving candidate, optionally with the
     # scheduled-service preference the endpoint rule uses and trend does not.
-    pen = F.when(F.col("apt_scheduled") == "yes", F.lit(0.0)).otherwise(
-        F.lit(float(penalty_nm)))
+    pen = F.when(F.col("apt_scheduled") == "yes", F.lit(0.0)).otherwise(F.lit(float(penalty_nm)))
     v = v.withColumn("_eff", dist + pen)
     w = Window.partitionBy("track_id", "status").orderBy(F.col("_eff").asc_nulls_last())
     best = v.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1)
-    return (best.groupBy("track_id").pivot("status", ["adep", "ades"])
-            .agg(F.first("apt_ident")))
+    return best.groupBy("track_id").pivot("status", ["adep", "ades"]).agg(F.first("apt_ident"))
 
 
 def identities(votes: DataFrame) -> DataFrame:
     w = Window.partitionBy("track_id").orderBy("t_first")
-    return (votes.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1)
-            .select("track_id", F.lower("icao24").alias("icao24"),
-                    F.trim("flight_id").alias("callsign"),
-                    F.to_date("t_first").alias("day"),
-                    F.col("t_first").alias("t_start")))
+    return (
+        votes.withColumn("_r", F.row_number().over(w))
+        .filter(F.col("_r") == 1)
+        .select(
+            "track_id",
+            F.lower("icao24").alias("icao24"),
+            F.trim("flight_id").alias("callsign"),
+            F.to_date("t_first").alias("day"),
+            F.col("t_first").alias("t_start"),
+        )
+    )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--months", nargs="+", default=["202506"])
-    ap.add_argument("--days", nargs="+",
-                    default=["2025-06-05", "2025-06-06", "2025-06-07"])
+    ap.add_argument("--days", nargs="+", default=["2025-06-05", "2025-06-06", "2025-06-07"])
     ap.add_argument("--results-dir", required=True)
     ap.add_argument("--build", action="store_true", help="rebuild the vote cache")
-    ap.add_argument("--build-only", action="store_true",
-                    help="build the vote cache and stop, without sweeping. The "
-                         "cache is an input several jobs share, so building it "
-                         "is a separate step from scoring 371 cells over it.")
-    ap.add_argument("--tracks", default=TRACKS,
-                    help=f"track table to build the cache from (default {TRACKS}; "
-                         f"use {TRACKS_2024} for the 2024 period)")
-    ap.add_argument("--add-h3", action="store_true",
-                    help="compute h3_res_7 rather than read it, for tracks that "
-                         "pre-date H3 indexing")
+    ap.add_argument(
+        "--build-only",
+        action="store_true",
+        help="build the vote cache and stop, without sweeping. The "
+        "cache is an input several jobs share, so building it "
+        "is a separate step from scoring 371 cells over it.",
+    )
+    ap.add_argument(
+        "--tracks",
+        default=TRACKS,
+        help=f"track table to build the cache from (default {TRACKS}; "
+        f"use {TRACKS_2024} for the 2024 period)",
+    )
+    ap.add_argument(
+        "--add-h3",
+        action="store_true",
+        help="compute h3_res_7 rather than read it, for tracks that " "pre-date H3 indexing",
+    )
     ap.add_argument("--cache", default=CACHE, help="where the vote cache lives")
     ap.add_argument("--out-name", default="trend_sweep.csv")
-    ap.add_argument("--fl-caps", nargs="+", type=int, default=None,
-                    help="flight-level caps to cache and sweep. The cache is "
-                         "built for exactly these, so a sweep asking for a cap "
-                         "the cache was not built with has no column to read "
-                         "-- pass the same list to both.")
-    ap.add_argument("--height-caps", nargs="+", type=int, default=None,
-                    help="above-field ceilings in feet to cache and sweep. Same "
-                         "contract as --fl-caps: the cache is built for exactly "
-                         "these, so pass the same list to builder and sweep.")
-    ap.add_argument("--datum", choices=("field", "msl"), default="field",
-                    help="which datum to sweep. 'field' sweeps --height-caps in "
-                         "feet above field elevation; 'msl' sweeps --fl-caps as "
-                         "flight levels, reproducing trend_sweep.py's arm.")
+    ap.add_argument(
+        "--fl-caps",
+        nargs="+",
+        type=int,
+        default=None,
+        help="flight-level caps to cache and sweep. The cache is "
+        "built for exactly these, so a sweep asking for a cap "
+        "the cache was not built with has no column to read "
+        "-- pass the same list to both.",
+    )
+    ap.add_argument(
+        "--height-caps",
+        nargs="+",
+        type=int,
+        default=None,
+        help="above-field ceilings in feet to cache and sweep. Same "
+        "contract as --fl-caps: the cache is built for exactly "
+        "these, so pass the same list to builder and sweep.",
+    )
+    ap.add_argument(
+        "--datum",
+        choices=("field", "msl"),
+        default="field",
+        help="which datum to sweep. 'field' sweeps --height-caps in "
+        "feet above field elevation; 'msl' sweeps --fl-caps as "
+        "flight levels, reproducing trend_sweep.py's arm.",
+    )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4041)
     args = ap.parse_args()
@@ -372,8 +426,11 @@ def main() -> None:
 
     if args.build:
         print("building the vote cache (one pass over the tracks)...")
-        (build_cache(spark, args.days, tracks=args.tracks, add_h3=args.add_h3)
-         .write.mode("overwrite").parquet(args.cache))
+        (
+            build_cache(spark, args.days, tracks=args.tracks, add_h3=args.add_h3)
+            .write.mode("overwrite")
+            .parquet(args.cache)
+        )
     if args.build_only:
         print("vote cache built; stopping before the sweep (--build-only)")
         spark.stop()
@@ -383,8 +440,9 @@ def main() -> None:
     print(f"vote cache: {votes.count():,} (track, aerodrome) pairs")
 
     ident = identities(votes)
-    gt = label_ground_truth(load_ground_truth(spark, args.months, args.days),
-                            airport_locations(spark)).cache()
+    gt = label_ground_truth(
+        load_ground_truth(spark, args.months, args.days), airport_locations(spark)
+    ).cache()
     N = gt.count()
     print(f"ground-truth flights: {N:,}\n")
 
@@ -414,23 +472,25 @@ def main() -> None:
         # `score` returns the counts exactly; they used to be reconstructed
         # here as round(ratio * n), which is off by up to a flight either way
         # and made two settings a few flights apart impossible to rank.
-        m = score(predictions(votes, cap, margin, radius, pen, datum=args.datum),
-                  ident, gt)
-        m.update(fl_cap=cap, margin=margin, radius_nm=radius, penalty_nm=pen,
-                 datum=args.datum)
+        m = score(predictions(votes, cap, margin, radius, pen, datum=args.datum), ident, gt)
+        m.update(fl_cap=cap, margin=margin, radius_nm=radius, penalty_nm=pen, datum=args.datum)
         return m
 
     def show(m):
-        print(f"{m['fl_cap']:>7}{m['margin']:>8}{m['radius_nm']:>8.0f}"
-              f"{m['penalty_nm']:>9.0f}"
-              f"{m['adep_coverage']:>10.2%}{m['adep_accuracy']:>10.2%}"
-              f"{m['adep_score']:>11,}"
-              f"{m['ades_coverage']:>10.2%}{m['ades_accuracy']:>10.2%}"
-              f"{m['ades_score']:>11,}")
+        print(
+            f"{m['fl_cap']:>7}{m['margin']:>8}{m['radius_nm']:>8.0f}"
+            f"{m['penalty_nm']:>9.0f}"
+            f"{m['adep_coverage']:>10.2%}{m['adep_accuracy']:>10.2%}"
+            f"{m['adep_score']:>11,}"
+            f"{m['ades_coverage']:>10.2%}{m['ades_accuracy']:>10.2%}"
+            f"{m['ades_score']:>11,}"
+        )
 
-    HDR = (f"{'FL cap':>7}{'margin':>8}{'radius':>8}{'penalty':>9}"
-           f"{'ADEP cov':>10}{'ADEP acc':>10}{'ADEP s@2':>11}"
-           f"{'ADES cov':>10}{'ADES acc':>10}{'ADES s@2':>11}")
+    HDR = (
+        f"{'FL cap':>7}{'margin':>8}{'radius':>8}{'penalty':>9}"
+        f"{'ADEP cov':>10}{'ADEP acc':>10}{'ADEP s@2':>11}"
+        f"{'ADES cov':>10}{'ADES acc':>10}{'ADES s@2':>11}"
+    )
 
     # Stage 0: the legacy setting exactly as production ran it -- FL40,
     # margin 4, 30 NM and *no* penalty. Stage 1 sweeps at a fixed penalty of
@@ -465,8 +525,7 @@ def main() -> None:
     # Stage 2: the penalty, at whichever cell won for each role.
     print(f"\nstage 2: penalty sweep at each role's best cell\n{HDR}")
     for role in ("adep", "ades"):
-        best = max((m for m in rows if m["stage"] == 1),
-                   key=lambda m: m[f"{role}_score"])
+        best = max((m for m in rows if m["stage"] == 1), key=lambda m: m[f"{role}_score"])
         for pen in PENALTIES_NM:
             if pen == PENALTY_STAGE1:
                 continue

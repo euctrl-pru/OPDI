@@ -10,12 +10,12 @@ The other half of the contract is what keeps released data reproducible: a
 track without a hole gives exactly the events it gave before.
 """
 
+import dataclasses
 import datetime as dt
 
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig, SegmentationConfig
 from opdi.pipeline.events import (
@@ -36,8 +36,15 @@ HOLE_S = 3 * 3600
 def _cruise(t0, n=120, step=5, alt_ft=35000.0, lat=50.0, lon0=0.0, **extra):
     """``n`` level samples at cruise speed, heading east from ``lon0``."""
     return [
-        {"t": t0 + i * step, "baro_altitude": alt_ft / FT_PER_M, "velocity": 240.0,
-         "vert_rate": 0.0, "lat": lat, "lon": lon0 + 0.01 * i, **extra}
+        {
+            "t": t0 + i * step,
+            "baro_altitude": alt_ft / FT_PER_M,
+            "velocity": 240.0,
+            "vert_rate": 0.0,
+            "lat": lat,
+            "lon": lon0 + 0.01 * i,
+            **extra,
+        }
         for i in range(n)
     ]
 
@@ -58,6 +65,7 @@ def _types(events):
 # The piece index
 # ---------------------------------------------------------------------------
 
+
 def test_piece_counts_holes_per_track(spark):
     df = make_track(spark, [{"t": t} for t in (0, 600, 600 + 31 * 60, 600 + 76 * 60)])
     got = [r["piece"] for r in add_piece(df, 1800.0).orderBy("event_time").collect()]
@@ -71,8 +79,15 @@ def test_a_gap_of_exactly_the_threshold_is_not_a_hole(spark):
 
 
 def test_pieces_are_counted_per_track(spark):
-    df = make_track(spark, [{"t": 0, "track_id": "a"}, {"t": 4000, "track_id": "a"},
-                            {"t": 10, "track_id": "b"}, {"t": 20, "track_id": "b"}])
+    df = make_track(
+        spark,
+        [
+            {"t": 0, "track_id": "a"},
+            {"t": 4000, "track_id": "a"},
+            {"t": 10, "track_id": "b"},
+            {"t": 20, "track_id": "b"},
+        ],
+    )
     got = {(r["track_id"], r["piece"]) for r in add_piece(df, 1800.0).collect()}
     assert got == {("a", 0), ("a", 1), ("b", 0)}
 
@@ -87,6 +102,7 @@ def test_hole_threshold_equals_the_segmentation_gap():
 # Level events from the phase classifier
 # ---------------------------------------------------------------------------
 
+
 def _cruise_hole_cruise(spark):
     first = _cruise(0)
     second = _cruise(first[-1]["t"] + HOLE_S, lon0=20.0)
@@ -97,12 +113,16 @@ def test_level_events_do_not_span_a_hole(spark):
     sdf, first, second = _cruise_hole_cruise(spark)
     events = calculate_horizontal_segment_events(add_piece(sdf, 1800.0), EventConfig())
     epoch = sdf.agg(F.min("event_time")).first()[0]
-    at = lambda s: epoch + dt.timedelta(seconds=s)
+    at = lambda s: epoch + dt.timedelta(seconds=s)  # noqa: E731
     got = _types(events.filter(F.col("type").isin("level-start", "level-end")))
-    assert got == sorted([
-        ("level-start", at(first[0]["t"])), ("level-end", at(first[-1]["t"])),
-        ("level-start", at(second[0]["t"])), ("level-end", at(second[-1]["t"])),
-    ])
+    assert got == sorted(
+        [
+            ("level-start", at(first[0]["t"])),
+            ("level-end", at(first[-1]["t"])),
+            ("level-start", at(second[0]["t"])),
+            ("level-end", at(second[-1]["t"])),
+        ]
+    )
 
 
 def test_without_the_piece_column_the_detector_is_unchanged(spark):
@@ -115,17 +135,32 @@ def test_without_the_piece_column_the_detector_is_unchanged(spark):
 
 def test_a_track_without_a_hole_gives_the_same_events(spark):
     profile = (
-        [{"t": i * 5, "baro_altitude": (2000 + 400 * i) / FT_PER_M, "velocity": 150.0,
-          "vert_rate": 10.0} for i in range(40)]
+        [
+            {
+                "t": i * 5,
+                "baro_altitude": (2000 + 400 * i) / FT_PER_M,
+                "velocity": 150.0,
+                "vert_rate": 10.0,
+            }
+            for i in range(40)
+        ]
         + _cruise(200, n=60, alt_ft=18000.0)
-        + [{"t": 500 + i * 5, "baro_altitude": (18000 - 400 * i) / FT_PER_M,
-            "velocity": 150.0, "vert_rate": -10.0} for i in range(40)]
+        + [
+            {
+                "t": 500 + i * 5,
+                "baro_altitude": (18000 - 400 * i) / FT_PER_M,
+                "velocity": 150.0,
+                "vert_rate": -10.0,
+            }
+            for i in range(40)
+        ]
     )
     sdf = _measured(make_track(spark, profile))
     cols = ["track_id", "type", "event_time", "lon", "lat", "altitude_ft", "info"]
     plain = calculate_horizontal_segment_events(sdf, EventConfig()).select(*cols)
-    pieced = calculate_horizontal_segment_events(
-        add_piece(sdf, 1800.0), EventConfig()).select(*cols)
+    pieced = calculate_horizontal_segment_events(add_piece(sdf, 1800.0), EventConfig()).select(
+        *cols
+    )
     assert plain.count() > 0
     assert sorted(map(tuple, plain.collect())) == sorted(map(tuple, pieced.collect()))
 
@@ -134,11 +169,13 @@ def test_a_track_without_a_hole_gives_the_same_events(spark):
 # Level segments (ICAO and PRU)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("arm", sorted(LEVEL_ARMS))
 def test_level_segments_do_not_span_a_hole(spark, arm):
     sdf, first, second = _cruise_hole_cruise(spark)
     segs = LEVEL_ARMS[arm](
-        add_piece(sdf, 1800.0), EventConfig(), partition_cols=("track_id", "piece"))
+        add_piece(sdf, 1800.0), EventConfig(), partition_cols=("track_id", "piece")
+    )
     rows = segs.collect()
     assert rows, "level flight either side of the hole should still be found"
     assert max(r["duration_seconds"] for r in rows) <= len(first) * 5 + 60
@@ -149,9 +186,12 @@ def test_level_segments_do_not_span_a_hole(spark, arm):
 # Flight-level crossings
 # ---------------------------------------------------------------------------
 
+
 def _climb_through_fl245(spark, hole):
-    before = [{"t": i * 5, "baro_altitude": 23000.0 / FT_PER_M, "velocity": 200.0,
-               "vert_rate": 5.0} for i in range(30)]
+    before = [
+        {"t": i * 5, "baro_altitude": 23000.0 / FT_PER_M, "velocity": 200.0, "vert_rate": 5.0}
+        for i in range(30)
+    ]
     gap = HOLE_S if hole else 5
     after = _cruise(before[-1]["t"] + gap, n=30, alt_ft=35000.0, lon0=20.0)
     return _measured(make_track(spark, before + after))
@@ -165,13 +205,18 @@ def test_a_crossing_inside_a_hole_is_not_emitted(spark):
 
 def test_a_crossing_between_ordinary_samples_is_still_emitted(spark):
     sdf = add_piece(_climb_through_fl245(spark, hole=False), 1800.0)
-    events = calculate_threshold_crossing_events(sdf, EventConfig())
+    # The two halves of the fixture are 16 degrees of longitude apart, which
+    # without the hole is a jump; the speed limit is off to test the hole only.
+    events = calculate_threshold_crossing_events(
+        sdf, EventConfig(crossing_max_implied_speed_kt=None)
+    )
     assert events.filter(F.col("type") == "xing-fl245").count() == 1
 
 
 # ---------------------------------------------------------------------------
 # Cumulative distance
 # ---------------------------------------------------------------------------
+
 
 def _total(df, **kw):
     return add_distance_measure(df, **kw).agg(F.max("cumulative_distance_nm")).first()[0]
@@ -216,12 +261,67 @@ def test_distance_is_unchanged_where_every_position_is_known(spark):
 
 
 def test_distance_version_follows_the_method():
-    assert DISTANCE_VERSION == "distance_v0.0.3"
-    assert distance_version(EventConfig()) == "distance_v0.0.3"
+    assert DISTANCE_VERSION == "distance_v0.0.4"
+    assert distance_version(EventConfig()) == "distance_v0.0.4"
+    # From the last known position, without the speed limit and the
+    # distance between positions.
+    without = EventConfig(
+        distance_max_implied_speed_kt=None,
+        distance_between_positions=False,
+        measure_every_event=False,
+    )
+    assert distance_version(without) == "distance_v0.0.3"
     # Reprocessing a released month reproduces its measurement, defect and all.
     assert LEGACY_DISTANCE_VERSION == "distance_v0.0.2"
     assert distance_version(EventConfig.legacy()) == "distance_v0.0.2"
     assert EventConfig.legacy().distance_from_last_known_position is False
+
+
+def test_each_measurement_version_is_old_only_when_its_settings_are_off():
+    """A measurement carries its new version when a setting that changes it
+    is on, and the old one only when all are off."""
+    from opdi.pipeline.events import time_version
+
+    legacy = EventConfig.legacy()
+    # Measuring every event changes both measurements of the events that
+    # had none (interpolated distance, time from first_seen).
+    every = dataclasses.replace(legacy, measure_every_event=True)
+    assert distance_version(every) == "distance_v0.0.4"
+    assert time_version(every) == "time_v0.0.2"
+    assert time_version(legacy) == "time_v0.0.1"
+    assert time_version(EventConfig()) == "time_v0.0.2"
+    last_known = dataclasses.replace(legacy, distance_from_last_known_position=True)
+    assert distance_version(last_known) == "distance_v0.0.3"
+    assert distance_version(dataclasses.replace(last_known, measure_every_event=True)) == (
+        "distance_v0.0.4"
+    )
+
+
+def test_each_family_version_is_old_only_when_its_settings_are_off():
+    """Holding, point merge and FIR crossings: the new version when one of
+    the settings that change the family is on, the old one when all are
+    off."""
+    from opdi.pipeline.fir import FIR_SETTINGS, fir_version
+    from opdi.pipeline.holding import HOLDING_SETTINGS, holding_version
+    from opdi.pipeline.point_merge import PMS_SETTINGS, pms_version
+
+    default, legacy = EventConfig(), EventConfig.legacy()
+    for version, settings, new, old in (
+        (holding_version, HOLDING_SETTINGS, "holding_v0.2.0", "holding_v0.1.0"),
+        (pms_version, PMS_SETTINGS, "pms_v0.2.0", "pms_v0.1.0"),
+        (fir_version, FIR_SETTINGS, "fir_v0.2.0", "fir_v0.1.0"),
+    ):
+        assert version(default) == new
+        assert version(legacy) == old
+        off = dataclasses.replace(default, **{name: legacy_value(name) for name in settings})
+        assert version(off) == old, settings
+        for name in settings:
+            one_on = dataclasses.replace(off, **{name: getattr(default, name)})
+            assert version(one_on) == new, name
+
+
+def legacy_value(name):
+    return getattr(EventConfig.legacy(), name)
 
 
 def test_level_segment_distance_follows_the_distance_version(spark):
@@ -231,7 +331,7 @@ def test_level_segment_distance_follows_the_distance_version(spark):
     not move; the figure in ``info`` does, and the paper says so."""
     samples = _cruise(0, n=40, lat=0.0)
     for s in samples[10:30:2]:
-        s["lat"] = s["lon"] = None          # every other position blanked mid-cruise
+        s["lat"] = s["lon"] = None  # every other position blanked mid-cruise
     df = make_track(spark, samples)
 
     def total_distance(last_known_position):

@@ -23,8 +23,7 @@ from pathlib import Path
 #: The grid coordinates that identify a cell. `datum` is deliberately absent:
 #: it is the column the new frame adds, and the whole point is to compare a
 #: frame that has it against one that does not.
-KEY = ("stage", "stage2_role", "fl_cap", "radius_nm", "penalty_nm",
-       "margin", "k", "legacy")
+KEY = ("stage", "stage2_role", "fl_cap", "radius_nm", "penalty_nm", "margin", "k", "legacy")
 
 #: Compared as floats where possible, so 0.5 and 0.50 agree. The tolerance is
 #: relative and tiny: these are the same computation, not two estimates of it.
@@ -76,9 +75,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--out-name", default="sweep_equivalence.csv")
-    ap.add_argument("--pairs", nargs="+", required=True,
-                    help="one per period, as "
-                         "label=<old csv>,<new csv>")
+    ap.add_argument(
+        "--pairs", nargs="+", required=True, help="one per period, as " "label=<old csv>,<new csv>"
+    )
     args = ap.parse_args()
 
     out = []
@@ -90,9 +89,11 @@ def main() -> None:
         row = {"period": label}
         row.update(compare(Path(old_s), Path(new_s)))
         out.append(row)
-        print(f"{label}: {row['shared_cells']} shared cells, "
-              f"{row['differing_values']} differing values"
-              + (f" -- e.g. {row['example']}" if row["example"] else ""))
+        print(
+            f"{label}: {row['shared_cells']} shared cells, "
+            f"{row['differing_values']} differing values"
+            + (f" -- e.g. {row['example']}" if row["example"] else "")
+        )
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     dest = args.results_dir / args.out_name

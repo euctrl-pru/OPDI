@@ -1,8 +1,8 @@
-"""PRU's vertical profile: the tops of climb and descent, and where they move to.
+"""Top of climb and top of descent, as the vertical flight efficiency method defines them.
 
-EUROCONTROL's Performance Review Unit defines the vertical-efficiency tops
-differently from OPDI's published fuzzy phase classifier, and the difference is
-not a tuning choice:
+Part of step 04. The Performance Review Unit (PRU) of EUROCONTROL defines the
+tops of climb and descent for its vertical flight efficiency indicators
+differently from the phase method of :mod:`opdi.pipeline.events`:
 
 * The analysis is **bounded by a 200 NM radius** around the flight's own
   aerodromes. ``D200`` is the first crossing of that radius outbound, ``A200``
@@ -18,12 +18,12 @@ not a tuning choice:
   start of the first such segment, **ToD-CDO** to the end of the last. With no
   such segment the CCO top is the D200 top.
 
-Both definitions are published. No reference data records a top of climb --
-APDF has none and neither does anything else OPDI can reach -- so neither can
-be shown better than the other, and the honest publication is both, each saying
-which algorithm produced it. That is what the ``method`` key in ``info`` is
-for: the PRU pair stamps ``"pru"`` here, the fuzzy pair stamps ``"phase"``
-where it is built.
+No reference data records a top of climb, so neither definition can be shown
+to be better. By default these tops are published as ``top-of-climb`` and
+``top-of-descent``; with the merge off, they are ``top-of-climb-cco`` and
+``top-of-descent-cdo`` beside the tops of the phase method, and the ``method``
+key in ``info`` says which method gave each (``"pru"`` or ``"phase"``).
+See https://www.opdi.aero/content/methods/vertical-events.html.
 
 Only :func:`attach_aerodrome_geometry` reads storage. :func:`pru_tops` and
 :func:`pru_top_events` take DataFrames, so the algorithm is testable on a
@@ -38,11 +38,11 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import col, lit, to_timestamp
 from pyspark.sql.window import Window
 
-from opdi.pipeline.flights import haversine_nm
 from opdi.pipeline.runway_ops import MILESTONE_SCHEMA
 from opdi.utils.datetime_helpers import get_start_end_of_month
+from opdi.utils.geometry import haversine_nm
 
-if TYPE_CHECKING:  # pragma: no cover - import cycle guard
+if TYPE_CHECKING:  # pragma: no cover - avoids an import cycle
     from opdi.config import EventConfig
     from opdi.utils.storage import StorageManager
 
@@ -64,9 +64,7 @@ ATTACHED_GEOMETRY_COLS = (
 )
 
 
-def attach_aerodrome_geometry(
-    sdf: DataFrame, month: date, storage: "StorageManager"
-) -> DataFrame:
+def attach_aerodrome_geometry(sdf: DataFrame, month: date, storage: "StorageManager") -> DataFrame:
     """Attach each track's ADEP and ADES with their position and elevation.
 
     The same join as :func:`opdi.pipeline.elevation.attach_field_elevation`,
@@ -101,8 +99,7 @@ def attach_aerodrome_geometry(
     fl = (
         storage.read_table("opdi_flight_list")
         .filter(
-            (col("dof") >= to_timestamp(lit(start_ts)))
-            & (col("dof") < to_timestamp(lit(end_ts)))
+            (col("dof") >= to_timestamp(lit(start_ts))) & (col("dof") < to_timestamp(lit(end_ts)))
         )
         .select(col("id").alias("_fl_id"), col("adep"), col("ades"))
     )
@@ -141,18 +138,16 @@ def _assert_unique_flight_ids(fl: DataFrame, month: date) -> None:
     list id does not error: it multiplies every state vector of that track by
     the number of rows carrying the id. Nothing downstream would say so. The
     level segments would be detected over a trajectory sampled twice, the
-    runway traversals would emit two of every milestone, and the event counts
-    the ladder reports would be inflated for exactly the flights whose flight
-    list entry was ambiguous.
+    runway passages would give two of every milestone, and the event counts
+    would be too high for exactly the flights whose flight list entry was
+    ambiguous.
 
     Cheap, and paid once per step: one aggregation over the month's flight
     list, which is a few hundred thousand rows and is about to be broadcast
     anyway. The alternative is a silent fan-out that only shows up as a
     benchmark that will not reconcile.
     """
-    n, distinct = fl.select(
-        F.count(col("_fl_id")), F.countDistinct(col("_fl_id"))
-    ).first()
+    n, distinct = fl.select(F.count(col("_fl_id")), F.countDistinct(col("_fl_id"))).first()
     if n != distinct:
         raise ValueError(
             f"the flight list for {month:%Y-%m} has {n} rows but only "
@@ -168,7 +163,7 @@ def aerodrome_distances(sdf: DataFrame) -> DataFrame:
     """Per-sample haversine distances to the flight's own ADEP and ADES.
 
     Idempotent, and a no-op when the caller has already attached them: the
-    level arms and :func:`pru_tops` both need these columns, and computing them
+    level segment methods and :func:`pru_tops` both need these columns, and computing them
     once at the top of the family is cheaper than twice and cannot produce two
     answers.
     """
@@ -180,9 +175,7 @@ def aerodrome_distances(sdf: DataFrame) -> DataFrame:
             continue
         sdf = sdf.withColumn(
             out,
-            haversine_nm(
-                col("lat"), col("lon"), col(f"{prefix}_lat"), col(f"{prefix}_lon")
-            ),
+            haversine_nm(col("lat"), col("lon"), col(f"{prefix}_lat"), col(f"{prefix}_lon")),
         )
     return sdf
 
@@ -199,7 +192,7 @@ def pru_tops(
 
     ``sdf`` is the state-vector frame carrying either ``dist_adep_nm`` /
     ``dist_ades_nm`` or the aerodrome coordinates to compute them from;
-    ``segments`` is the output of either level arm, and is consulted only for
+    ``segments`` is the output of either level segment method, and is used only for
     the relocation. Returns ``toc_d200_time``, ``toc_d200_alt_ft``,
     ``toc_cco_time``, ``toc_cco_alt_ft``, ``toc_relocated`` and the four
     ``tod_`` equivalents.
@@ -242,22 +235,38 @@ def pru_tops(
     in_descent = F.col("_t") >= F.col("_t_a200")
     work = work.withColumn(
         "_toc_alt", F.max(F.when(in_climb, F.col("_alt_ft"))).over(whole)
-    ).withColumn(
-        "_tod_alt", F.max(F.when(in_descent, F.col("_alt_ft"))).over(whole)
-    )
+    ).withColumn("_tod_alt", F.max(F.when(in_descent, F.col("_alt_ft"))).over(whole))
 
+    at_toc = in_climb & (F.col("_alt_ft") == F.col("_toc_alt"))
+    at_tod = in_descent & (F.col("_alt_ft") == F.col("_tod_alt"))
     # First and last: a plateau at the top of the climb is entered once and
     # left once, and PRU names the entry in climb and the exit in descent.
-    tops = work.groupBy("track_id").agg(
+    aggregations = [
         F.first("_toc_alt").alias("toc_d200_alt_ft"),
         F.first("_tod_alt").alias("tod_a200_alt_ft"),
-        F.min(
-            F.when(in_climb & (F.col("_alt_ft") == F.col("_toc_alt")), F.col("_t"))
-        ).alias("toc_d200_time"),
-        F.max(
-            F.when(in_descent & (F.col("_alt_ft") == F.col("_tod_alt")), F.col("_t"))
-        ).alias("tod_a200_time"),
-    )
+        F.min(F.when(at_toc, F.col("_t"))).alias("toc_d200_time"),
+        F.max(F.when(at_tod, F.col("_t"))).alias("tod_a200_time"),
+    ]
+    if config.tops_observed_min_change_ft is not None:
+        # The lowest altitude of the track up to each report, and from each
+        # report to the end, read at the top: they say whether a climb (a
+        # descent) was received before (after) it. The reversed order gives a
+        # frame that grows rather than one that shrinks.
+        ordered = Window.partitionBy("track_id").orderBy("_t")
+        reverse = Window.partitionBy("track_id").orderBy(F.col("_t").desc())
+        so_far = Window.unboundedPreceding, Window.currentRow
+        work = work.withColumn(
+            "_min_before", F.min("_alt_ft").over(ordered.rowsBetween(*so_far))
+        ).withColumn("_min_after", F.min("_alt_ft").over(reverse.rowsBetween(*so_far)))
+        aggregations += [
+            F.min(F.when(at_toc, F.struct("_t", "_min_before")))["_min_before"].alias(
+                "toc_lowest_before_ft"
+            ),
+            F.max(F.when(at_tod, F.struct("_t", "_min_after")))["_min_after"].alias(
+                "tod_lowest_after_ft"
+            ),
+        ]
+    tops = work.groupBy("track_id").agg(*aggregations)
 
     return _relocate(tops, segments, config)
 
@@ -285,6 +294,8 @@ def _relocate(tops: DataFrame, segments: DataFrame, config: "EventConfig") -> Da
         "tod_a200_time",
         "tod_a200_alt_ft",
     ]
+    lowest = [c for c in ("toc_lowest_before_ft", "tod_lowest_after_ft") if c in tops.columns]
+    keys += lowest
     seg = segments.select("track_id", "start_time", "end_time", "duration_seconds", "level_ft")
     joined = tops.join(seg, "track_id", "left")
 
@@ -319,6 +330,7 @@ def _relocate(tops: DataFrame, segments: DataFrame, config: "EventConfig") -> Da
         F.coalesce(F.col("_cdo.end_time"), F.col("tod_a200_time")).alias("tod_cdo_time"),
         F.coalesce(F.col("_cdo.level_ft"), F.col("tod_a200_alt_ft")).alias("tod_cdo_alt_ft"),
         F.col("_cdo").isNotNull().alias("tod_relocated"),
+        *lowest,
     )
 
 
@@ -353,18 +365,33 @@ def pru_top_events(
         return session.createDataFrame([], MILESTONE_SCHEMA)
 
     if tops is None:
-        tops = pru_tops(
-            sdf, segments, config, altitude_col=altitude_col, time_col=time_col
-        )
+        tops = pru_tops(sdf, segments, config, altitude_col=altitude_col, time_col=time_col)
 
-    # Under the merge the PRU arm is the only top published, so it takes the
-    # plain names; the fuzzy arm is dropped in
-    # ``calculate_horizontal_segment_events``. Without the merge both arms run
-    # and this one wears the suffix that tells them apart.
+    # With the merge these are the only tops published, under the plain
+    # names; the tops of the phase method are dropped in
+    # ``calculate_horizontal_segment_events``. Without the merge both are
+    # published and these carry the suffix that tells them apart.
     _merged = config.merge_duplicate_milestones
     toc_type = "top-of-climb" if _merged else "top-of-climb-cco"
     tod_type = "top-of-descent" if _merged else "top-of-descent-cdo"
 
+    # Whether a climb (descent) of at least ``tops_observed_min_change_ft``
+    # was received before (after) the top; see that setting.
+    change_ft = config.tops_observed_min_change_ft
+    observed = []
+    if change_ft is not None and "toc_lowest_before_ft" in tops.columns:
+        observed = [
+            (
+                F.coalesce(
+                    col("toc_cco_alt_ft") - col("toc_lowest_before_ft") >= lit(float(change_ft)),
+                    lit(False),
+                ),
+                F.coalesce(
+                    col("tod_cdo_alt_ft") - col("tod_lowest_after_ft") >= lit(float(change_ft)),
+                    lit(False),
+                ),
+            )
+        ]
     climb = tops.select(
         "track_id",
         lit(toc_type).alias("type"),
@@ -373,6 +400,7 @@ def pru_top_events(
         col("toc_d200_time").alias("_d200_time"),
         col("toc_d200_alt_ft").alias("_d200_alt"),
         col("toc_relocated").alias("_relocated"),
+        *[pair[0].alias("_observed") for pair in observed],
     )
     descent = tops.select(
         "track_id",
@@ -382,10 +410,14 @@ def pru_top_events(
         col("tod_a200_time").alias("_d200_time"),
         col("tod_a200_alt_ft").alias("_d200_alt"),
         col("tod_relocated").alias("_relocated"),
+        *[pair[1].alias("_observed") for pair in observed],
     )
     events = climb.unionByName(descent).filter(col("event_time").isNotNull())
 
-    events = _attach_position(events, sdf, time_col)
+    if config.tops_position_from_nearest_report:
+        events = attach_nearest_position(events, sdf, config.vertical_position_window_s, time_col)
+    else:
+        events = _attach_position(events, sdf, time_col)
     return events.select(
         col("track_id"),
         col("type"),
@@ -402,6 +434,7 @@ def pru_top_events(
                 col("_relocated").alias("relocated"),
                 lit(config.level_analysis_radius_nm).alias("analysis_radius_nm"),
                 lit("pru").alias("method"),
+                *([col("_observed").alias("observed")] if observed else []),
             )
         ).alias("info"),
     )
@@ -411,7 +444,7 @@ def _attach_position(events: DataFrame, sdf: DataFrame, time_col: str) -> DataFr
     """Place each top at the last sample at or before its time.
 
     Not an equality join: a relocated top sits at a level segment's boundary,
-    which the PRU arm reports on an interpolated grid and so need not be an
+    which the ``pru`` level method reports on an interpolated grid and so need not be an
     instant the track was sampled at. An equality join would silently null the
     position of exactly the events the relocation moved.
     """
@@ -449,4 +482,105 @@ def _attach_position(events: DataFrame, sdf: DataFrame, time_col: str) -> DataFr
         col("_s.lat").alias("lat"),
         col("_s.cumulative_distance_nm").alias("cumulative_distance_nm"),
         col("_s.cumulative_time_s").alias("cumulative_time_s"),
+    )
+
+
+def attach_nearest_position(
+    events: DataFrame, sdf: DataFrame, window_s: float, time_col: str = "event_time"
+) -> DataFrame:
+    """Place each event at the report with a position nearest in time to it.
+
+    For events that need not fall on a report: the tops of climb and descent
+    and the level-offs, whose times are those of a level segment's boundary
+    on a regular time grid, or of a report that carried only an altitude.
+
+    * ``lon`` and ``lat``: those of the report with a position nearest in
+      time to the event, within ``window_s`` seconds before or after it (the
+      earlier one on a tie); NULL when there is none.
+    * ``cumulative_distance_nm``: the distance flown at that report; with no
+      such report, at the report of any kind nearest in time.
+    * ``cumulative_time_s``: counted to the event's own time, from the report
+      nearest in time.
+
+    The reports are looked up in time buckets of ``window_s`` seconds, so each
+    event meets only the reports of its own minute and the two beside it,
+    not every report of its track.
+
+    Args:
+        events: Rows with ``track_id``, ``type`` and ``event_time``; one row
+            per ``(track_id, type, event_time)``.
+        sdf: The track reports, with ``lon``, ``lat`` and, if present,
+            ``cumulative_distance_nm`` and ``cumulative_time_s``.
+        window_s: Seconds within which a report is searched.
+        time_col: The reports' time column.
+
+    Returns:
+        ``events`` with ``lon``, ``lat``, ``cumulative_distance_nm`` and
+        ``cumulative_time_s`` (any existing columns of those names replaced).
+    """
+    w = float(window_s)
+    carried = [c for c in ("cumulative_distance_nm", "cumulative_time_s") if c in sdf.columns]
+    samples = sdf.select(
+        col("track_id").alias("_sid"),
+        col(time_col).cast("double").alias("_st"),
+        col("lon").cast("double").alias("_lon"),
+        col("lat").cast("double").alias("_lat"),
+        *[col(c).cast("double").alias(f"_{c}") for c in carried],
+    ).withColumn("_bucket", F.floor(col("_st") / lit(w)))
+    for missing in ("cumulative_distance_nm", "cumulative_time_s"):
+        if missing not in carried:
+            samples = samples.withColumn(f"_{missing}", lit(None).cast("double"))
+
+    keys = (
+        events.select("track_id", "type", "event_time")
+        .distinct()
+        .withColumn("_et", col("event_time").cast("double"))
+    )
+    keys = keys.withColumn(
+        "_bucket",
+        F.explode(
+            F.array(*[F.floor(col("_et") / lit(w)) + lit(k) for k in (-1, 0, 1)]),
+        ),
+    )
+    joined = keys.join(
+        samples,
+        (keys.track_id == samples._sid) & (keys._bucket == samples._bucket),
+        "inner",
+    ).filter(F.abs(col("_st") - col("_et")) <= lit(w))
+
+    dt_s = F.abs(col("_st") - col("_et"))
+    positioned = col("_lat").isNotNull() & col("_lon").isNotNull()
+    picked = joined.groupBy("track_id", "type", "event_time").agg(
+        F.min(
+            F.when(
+                positioned,
+                F.struct(
+                    dt_s.alias("dt"),
+                    col("_st").alias("st"),
+                    col("_lon").alias("lon"),
+                    col("_lat").alias("lat"),
+                    col("_cumulative_distance_nm").alias("dist"),
+                ),
+            )
+        ).alias("_p"),
+        F.min(
+            F.struct(
+                dt_s.alias("dt"),
+                col("_st").alias("st"),
+                col("_cumulative_distance_nm").alias("dist"),
+                col("_cumulative_time_s").alias("time"),
+            )
+        ).alias("_a"),
+    )
+    replaced = ("lon", "lat", "cumulative_distance_nm", "cumulative_time_s")
+    out = events.drop(*[c for c in replaced if c in events.columns]).join(
+        picked, ["track_id", "type", "event_time"], "left"
+    )
+    own_time = col("_a.time") + (col("event_time").cast("double") - col("_a.st"))
+    return out.select(
+        *[col(c) for c in events.columns if c not in replaced],
+        col("_p.lon").alias("lon"),
+        col("_p.lat").alias("lat"),
+        F.coalesce(col("_p.dist"), col("_a.dist")).alias("cumulative_distance_nm"),
+        own_time.alias("cumulative_time_s"),
     )

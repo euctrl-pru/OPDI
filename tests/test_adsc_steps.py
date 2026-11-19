@@ -54,6 +54,7 @@ def test_the_per_day_window_is_the_one_step_01_uses(capsys, monkeypatch):
             return 0
 
     import opdi.ingestion.osn_adsc as mod
+
     monkeypatch.setattr(mod, "AdscIngestion", _Fake)
 
     cfg = OPDIConfig.for_environment("local")

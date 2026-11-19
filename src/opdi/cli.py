@@ -1,15 +1,15 @@
-"""
-Command-line interface for the OPDI pipeline.
+"""The ``opdi`` command.
 
-Provides an ``opdi`` CLI command (registered via pyproject.toml
-``[project.scripts]``) that dispatches to individual pipeline stages
-or runs the full pipeline end-to-end.
+Installed with the package. ``opdi run`` runs the pipeline steps over a range
+of dates in one local Spark session (see :func:`opdi.runner.run_pipeline`).
+To process days on the OpenSky cluster, use ``run_period.py`` or
+``python -m opdi.orchestration``.
 
 Usage::
 
     opdi --help
-    opdi run --env live --start 2024-01-01 --end 2024-06-01
-    opdi run --step 02 --env dev --start 2024-01-01 --end 2024-02-01
+    opdi run --start 2024-01-01 --end 2024-06-01
+    opdi run --step 02 --env local --start 2024-01-01 --end 2024-02-01
 """
 
 import argparse
@@ -20,21 +20,19 @@ def main(argv=None):
     """Entry point for the ``opdi`` command."""
     parser = argparse.ArgumentParser(
         prog="opdi",
-        description="OPDI - Open Performance Data Initiative pipeline runner",
+        description="OPDI, the Open Performance Data Initiative: run the pipeline.",
     )
-    parser.add_argument(
-        "--version", action="store_true", help="Show package version and exit."
-    )
+    parser.add_argument("--version", action="store_true", help="Show package version and exit.")
 
     subparsers = parser.add_subparsers(dest="command")
 
     # --- run sub-command ---
-    run_parser = subparsers.add_parser("run", help="Run pipeline stages.")
+    run_parser = subparsers.add_parser("run", help="Run the pipeline steps over a range of dates.")
     run_parser.add_argument(
         "--env",
-        choices=["dev", "live", "local", "opensky"],
-        default="dev",
-        help="Environment (default: dev).",
+        choices=["local", "opensky"],
+        default="opensky",
+        help="Environment (default: opensky).",
     )
     run_parser.add_argument(
         "--start",
@@ -49,9 +47,9 @@ def main(argv=None):
     run_parser.add_argument(
         "--step",
         default=None,
-        help="Run only this step, 00-08 -- including the lettered ones, "
-             "01b (ADS-C ingestion) and 02a (trajectory cleaning). "
-             "Omit to run all steps.",
+        help="Run only this step: 00, 01, 01b (ADS-C ingestion), 02, "
+        "02a (trajectory cleaning), 03, 04, 04b (flight list milestones) "
+        "or 09 (published daily files). Omit to run all steps.",
     )
     run_parser.add_argument(
         "--no-airport-zones",
@@ -85,22 +83,23 @@ def main(argv=None):
     )
     run_parser.add_argument(
         "--adep-mode",
-        choices=["trend", "endpoint", "nearest"],
+        choices=["trend", "endpoint"],
         default=None,
-        help="Detection algorithm for departures (step 03). Defaults to the "
-             "value in DetectionConfig.",
+        help="Method that names the departure airport in step 03 "
+        "(default: DetectionConfig.adep_mode, endpoint).",
     )
     run_parser.add_argument(
         "--ades-mode",
-        choices=["trend", "endpoint", "nearest"],
+        choices=["trend", "endpoint"],
         default=None,
-        help="Detection algorithm for arrivals (step 03). The two roles take "
-             "different rules because they are not equally hard.",
+        help="Method that names the destination airport in step 03 "
+        "(default: DetectionConfig.ades_mode, trend).",
     )
     run_parser.add_argument(
         "--airports-hex-path",
         default="data/airport_hex/zones_res7_processed.parquet",
-        help="Path to pre-generated airport hex zones parquet.",
+        help="Local Parquet file of the airport zones, used when the table "
+        "h3_airport_detection_zones does not exist.",
     )
     coverage = run_parser.add_mutually_exclusive_group()
     coverage.add_argument(
@@ -108,29 +107,29 @@ def main(argv=None):
         dest="worldwide",
         action="store_true",
         default=True,
-        help="Run worldwide (the default; kept so existing commands still "
-             "parse). No coverage filter is applied to ingest, detection or "
-             "reference geometry, and output goes to the worldwide warehouse, "
-             "so the two coverages can never mix in one warehouse.",
+        help="Process the whole world (the default). A warehouse built with "
+        "the other coverage is refused at step 00.",
     )
     coverage.add_argument(
         "--europe",
         dest="worldwide",
         action="store_false",
-        help="Apply the published European bounding box and write to the "
-             "European warehouse instead of the worldwide one.",
+        help="Keep only positions inside the European box. In the local "
+        "environment this also selects the European warehouse.",
     )
 
     args = parser.parse_args(argv)
 
     if args.version:
         from opdi import __version__
+
         print(f"opdi {__version__}")
         return 0
 
     if args.command == "run":
-        from opdi.runner import run_pipeline
         from datetime import date
+
+        from opdi.runner import run_pipeline
 
         start = date.fromisoformat(args.start)
         end = date.fromisoformat(args.end)

@@ -17,8 +17,8 @@ from pyspark.sql import functions as F
 from opdi.config import EventConfig
 from opdi.pipeline.flight_list_milestones import (
     ADDED_COLUMNS,
-    MOVEMENT_COLUMNS,
     FLIGHT_LIST_RING_RADII_NM,
+    MOVEMENT_COLUMNS,
     enrich_flight_list,
 )
 
@@ -55,8 +55,7 @@ def _t(seconds: float) -> dt.datetime:
 
 def _flights(spark, rows=None):
     rows = rows or [
-        ("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2",
-         _T0, _t(5400)),
+        ("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400)),
     ]
     return spark.createDataFrame(rows, FLIGHT_SCHEMA)
 
@@ -77,21 +76,64 @@ def _full_set(track_id="trk-1", adep="EBBR", ades="EHAM"):
     """One flight with every event the flight list reads."""
     rows = [
         _event(track_id, "AOBT", 0, stand_exit=str(_t(0))),
-        _event(track_id, "ATOT", 600, runway="25R", runway_bearing_deg=247.4,
-               apt_icao=adep, role="departure"),
-        _event(track_id, "ALDT", 3600, rwy_ident="06", runway_bearing_deg=58.1,
-               apt_icao=ades, traversal_class="arrival", milestone="T17"),
+        _event(
+            track_id,
+            "ATOT",
+            600,
+            runway="25R",
+            runway_bearing_deg=247.4,
+            apt_icao=adep,
+            role="departure",
+        ),
+        _event(
+            track_id,
+            "ALDT",
+            3600,
+            rwy_ident="06",
+            runway_bearing_deg=58.1,
+            apt_icao=ades,
+            traversal_class="arrival",
+            milestone="T17",
+        ),
         _event(track_id, "AIBT", 4200, stand_entry=str(_t(4200))),
-        _event(track_id, "exit-parking_position", -60, osm_ref="A12",
-               osm_aeroway="parking_position", osm_airport=adep),
-        _event(track_id, "entry-parking_position", 4300, osm_ref="D45",
-               osm_aeroway="parking_position", osm_airport=ades),
+        _event(
+            track_id,
+            "exit-parking_position",
+            -60,
+            osm_ref="A12",
+            osm_aeroway="parking_position",
+            osm_airport=adep,
+        ),
+        _event(
+            track_id,
+            "entry-parking_position",
+            4300,
+            osm_ref="D45",
+            osm_aeroway="parking_position",
+            osm_airport=ades,
+        ),
     ]
     for i, nm in enumerate(FLIGHT_LIST_RING_RADII_NM):
-        rows.append(_event(track_id, f"xing-{nm}nm", 700 + i,
-                           direction="outbound", apt_icao=adep, crossing_seq=1))
-        rows.append(_event(track_id, f"xing-{nm}nm", 3000 + i,
-                           direction="inbound", apt_icao=ades, crossing_seq=1))
+        rows.append(
+            _event(
+                track_id,
+                f"xing-{nm}nm",
+                700 + i,
+                direction="outbound",
+                apt_icao=adep,
+                crossing_seq=1,
+            )
+        )
+        rows.append(
+            _event(
+                track_id,
+                f"xing-{nm}nm",
+                3000 + i,
+                direction="inbound",
+                apt_icao=ades,
+                crossing_seq=1,
+            )
+        )
     return rows
 
 
@@ -116,10 +158,13 @@ def test_every_column_populated_for_a_complete_flight(spark):
 
 
 def test_flight_with_no_events_survives_with_nulls(spark):
-    flights = _flights(spark, [
-        ("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "v", _T0, _t(5400)),
-        ("trk-2", "def456", "KLM99", _T0, "EHAM", "EBBR", "v", _T0, _t(5400)),
-    ])
+    flights = _flights(
+        spark,
+        [
+            ("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "v", _T0, _t(5400)),
+            ("trk-2", "def456", "KLM99", _T0, "EHAM", "EBBR", "v", _T0, _t(5400)),
+        ],
+    )
     out = enrich_flight_list(flights, _events(spark, _full_set()), EventConfig())
 
     assert out.count() == 2
@@ -249,7 +294,7 @@ def test_a_radius_the_config_does_not_emit_is_a_null_column(spark):
     row = _row(out)
 
     # The shape does not move with the configuration.
-    assert out.columns[-len(ADDED_COLUMNS):] == list(ADDED_COLUMNS)
+    assert out.columns[-len(ADDED_COLUMNS) :] == list(ADDED_COLUMNS)
     assert row["C40_ARR"] is not None and row["C100_ARR"] is not None
     for nm in (50, 60, 110, 120):
         assert row[f"C{nm}_ARR"] is None, nm
@@ -380,10 +425,18 @@ def _two_tracks(spark, dep_gap_s=1800, first_has_atot=False):
     the flight.
     """
     rows = [
-        ("frag", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2",
-         _T0, _t(600)),
-        ("real", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2",
-         _t(dep_gap_s), _t(dep_gap_s + 5400)),
+        ("frag", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2", _T0, _t(600)),
+        (
+            "real",
+            "abc123",
+            "BEL123",
+            _T0,
+            "EBBR",
+            "EHAM",
+            "flight_list_v0.0.2",
+            _t(dep_gap_s),
+            _t(dep_gap_s + 5400),
+        ),
     ]
     ev_rows = [_event("real", "ATOT", dep_gap_s + 300, runway="25R")]
     if first_has_atot:
@@ -467,12 +520,10 @@ def test_a_ghost_track_does_not_count_as_a_movement(spark):
     has none. At EBBR they were 338 of a 342-departure excess.
     """
     rows = [
-        ("ghost", "abc123", "BEL123", _T0, "EBBR", None,
-         "flight_list_v0.0.2", _T0, _t(900)),
+        ("ghost", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2", _T0, _t(900)),
         # A second flight that did fly, so the day reads as processed and the
         # ghost rule is actually in force rather than abstaining.
-        ("flew", "def456", "KLM99", _T0, "EBBR", "EHAM",
-         "flight_list_v0.0.2", _T0, _t(5400)),
+        ("flew", "def456", "KLM99", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400)),
     ]
     fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
     ev = _events(spark, [_event("flew", "ATOT", 300, runway="25R")])
@@ -490,8 +541,7 @@ def test_a_ghost_track_does_not_count_as_a_movement(spark):
 
 def test_a_departure_that_flew_counts_even_with_no_destination(spark):
     """Leaving the coverage area is normal. A take-off is evidence enough."""
-    rows = [("flew", "abc123", "BEL123", _T0, "EBBR", None,
-             "flight_list_v0.0.2", _T0, _t(5400))]
+    rows = [("flew", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2", _T0, _t(5400))]
     fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
     ev = _events(spark, [_event("flew", "ATOT", 300, runway="25R")])
 
@@ -512,8 +562,7 @@ def test_a_superseded_departure_can_still_be_a_real_arrival(spark):
 def test_an_unprocessed_day_counts_every_leg_it_has(spark):
     """Before step 04 every ATOT is null, so an unguarded ghost rule would
     condemn every destination-less departure. The flags abstain instead."""
-    rows = [("a", "abc123", "BEL123", _T0, "EBBR", None,
-             "flight_list_v0.0.2", _T0, _t(5400))]
+    rows = [("a", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2", _T0, _t(5400))]
     fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
     empty = spark.createDataFrame([], EVENT_SCHEMA)
 
@@ -533,17 +582,18 @@ def test_a_departure_seen_at_forty_miles_counts_even_with_nothing_else(spark):
     reception that loses the take-off.
     """
     rows = [
-        ("edge", "abc123", "BEL123", _T0, "LTFM", None,
-         "flight_list_v0.0.2", _T0, _t(4000)),
-        ("flew", "def456", "KLM99", _T0, "LTFM", "EHAM",
-         "flight_list_v0.0.2", _T0, _t(5400)),
+        ("edge", "abc123", "BEL123", _T0, "LTFM", None, "flight_list_v0.0.2", _T0, _t(4000)),
+        ("flew", "def456", "KLM99", _T0, "LTFM", "EHAM", "flight_list_v0.0.2", _T0, _t(5400)),
     ]
     fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
-    ev = _events(spark, [
-        _event("flew", "ATOT", 300, runway="25R"),
-        # no take-off for `edge`, no destination -- but it reached 40 NM out
-        _event("edge", "xing-40nm", 900, direction="outbound", apt_icao="LTFM"),
-    ])
+    ev = _events(
+        spark,
+        [
+            _event("flew", "ATOT", 300, runway="25R"),
+            # no take-off for `edge`, no destination -- but it reached 40 NM out
+            _event("edge", "xing-40nm", 900, direction="outbound", apt_icao="LTFM"),
+        ],
+    )
 
     out = {r["id"]: r for r in enrich_flight_list(fl, ev, EventConfig()).collect()}
 
@@ -555,10 +605,8 @@ def test_a_ramp_ghost_that_never_left_still_does_not_count(spark):
     """The rule must still reach the thing it was built for: no take-off, no
     destination, and never seen away from the field."""
     rows = [
-        ("ghost", "abc123", "BEL123", _T0, "EBBR", None,
-         "flight_list_v0.0.2", _T0, _t(900)),
-        ("flew", "def456", "KLM99", _T0, "EBBR", "EHAM",
-         "flight_list_v0.0.2", _T0, _t(5400)),
+        ("ghost", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2", _T0, _t(900)),
+        ("flew", "def456", "KLM99", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400)),
     ]
     fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
     ev = _events(spark, [_event("flew", "ATOT", 300, runway="25R")])
@@ -582,17 +630,21 @@ def test_a_runway_event_overrules_an_inferred_adep(spark):
     ADEP/ADES come from trajectory geometry relative to aerodrome zones, which
     is inference. A surface event is evidence, so it wins.
     """
-    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM",
-             "flight_list_v0.0.2", _T0, _t(5400))]
-    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
-        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = (
+        spark.createDataFrame(rows, FLIGHT_SCHEMA)
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome"))
         .withColumn("ADES_SOURCE", F.lit("aerodrome"))
-    ev = _events(spark, [
-        _event("trk-1", "exit-parking_position", 0, osm_airport="EBBR", osm_ref="A12"),
-        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
-        _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
-        _event("trk-1", "entry-parking_position", 3900, osm_airport="EHAM", osm_ref="D8"),
-    ])
+    )
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "exit-parking_position", 0, osm_airport="EBBR", osm_ref="A12"),
+            _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+            _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
+            _event("trk-1", "entry-parking_position", 3900, osm_airport="EHAM", osm_ref="D8"),
+        ],
+    )
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
 
@@ -605,23 +657,27 @@ def test_a_corrected_aerodrome_leaves_the_alternatives_and_the_old_one_joins_the
     """ADEP_P/ADES_P list the aerodromes that were *not* chosen. When the pavement
     overrules the choice, the new aerodrome leaves that list and the overruled one
     joins it, so the list never names the row's own answer."""
-    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM",
-             "flight_list_v0.0.2", _T0, _t(5400))]
-    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
-        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
-        .withColumn("ADES_SOURCE", F.lit("aerodrome")) \
-        .withColumn("ADEP_P", F.lit("EBBR, LFPO")) \
+    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = (
+        spark.createDataFrame(rows, FLIGHT_SCHEMA)
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome"))
+        .withColumn("ADES_SOURCE", F.lit("aerodrome"))
+        .withColumn("ADEP_P", F.lit("EBBR, LFPO"))
         .withColumn("ADES_P", F.lit(""))
-    ev = _events(spark, [
-        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
-        _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
-    ])
+    )
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+            _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
+        ],
+    )
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
 
     assert row["ADEP"] == "EBBR"
     assert row["ADEP_P"] == "LFPO, LFPG"
-    assert row["ADES"] == "EHAM" and row["ADES_P"] == ""   # unchanged: nothing moved
+    assert row["ADES"] == "EHAM" and row["ADES_P"] == ""  # unchanged: nothing moved
 
 
 def test_a_second_enrichment_pass_still_removes_the_named_aerodrome_from_its_list(spark):
@@ -629,13 +685,14 @@ def test_a_second_enrichment_pass_still_removes_the_named_aerodrome_from_its_lis
     before. A list left naming the row's own aerodrome is cleaned whether or not
     anything moves this time; the overruled aerodrome it once held cannot be
     recovered and is not invented."""
-    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM",
-             "flight_list_v0.0.2", _T0, _t(5400))]
-    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
-        .withColumn("ADEP_SOURCE", F.lit("runway_event")) \
-        .withColumn("ADES_SOURCE", F.lit("aerodrome")) \
-        .withColumn("ADEP_P", F.lit("EBBR, LFPO")) \
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = (
+        spark.createDataFrame(rows, FLIGHT_SCHEMA)
+        .withColumn("ADEP_SOURCE", F.lit("runway_event"))
+        .withColumn("ADES_SOURCE", F.lit("aerodrome"))
+        .withColumn("ADEP_P", F.lit("EBBR, LFPO"))
         .withColumn("ADES_P", F.lit("EHAM"))
+    )
     ev = _events(spark, [_event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R")])
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
@@ -648,13 +705,14 @@ def test_a_null_alternatives_list_stays_null_where_nothing_moved(spark):
     """NULL is the published value of ADEP_P/ADES_P on overflight rows and on the
     empty side of the flight table's join. Enrichment must not turn it into "" on
     rows it does not correct; a published column would change on every such row."""
-    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None,
-             "flight_list_v0.0.2", _T0, _t(5400))]
-    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
-        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
-        .withColumn("ADES_SOURCE", F.lit("undetermined")) \
-        .withColumn("ADEP_P", F.lit(None).cast("string")) \
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = (
+        spark.createDataFrame(rows, FLIGHT_SCHEMA)
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome"))
+        .withColumn("ADES_SOURCE", F.lit("undetermined"))
+        .withColumn("ADEP_P", F.lit(None).cast("string"))
         .withColumn("ADES_P", F.lit(None).cast("string"))
+    )
     ev = _events(spark, [_event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R")])
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
@@ -667,15 +725,19 @@ def test_a_track_still_airborne_gets_no_arrival_aerodrome(spark):
     """No landing, no ADES. Leg-specific evidence needs no guard: a departure
     aerodrome is where the take-off happened, an arrival aerodrome where the
     landing did, and this track never landed."""
-    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None,
-             "flight_list_v0.0.2", _T0, _t(5400))]
-    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
-        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = (
+        spark.createDataFrame(rows, FLIGHT_SCHEMA)
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome"))
         .withColumn("ADES_SOURCE", F.lit("undetermined"))
-    ev = _events(spark, [
-        _event("trk-1", "exit-parking_position", 0, osm_airport="EBBR", osm_ref="A12"),
-        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
-    ])
+    )
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "exit-parking_position", 0, osm_airport="EBBR", osm_ref="A12"),
+            _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+        ],
+    )
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
 
@@ -686,15 +748,19 @@ def test_a_track_still_airborne_gets_no_arrival_aerodrome(spark):
 def test_a_circuit_may_land_where_it_departed(spark):
     """Departing and landing at one aerodrome needs no special case: the
     take-off names ADEP and the landing names ADES, and they agree."""
-    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None,
-             "flight_list_v0.0.2", _T0, _t(3600))]
-    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
-        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", None, "flight_list_v0.0.2", _T0, _t(3600))]
+    fl = (
+        spark.createDataFrame(rows, FLIGHT_SCHEMA)
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome"))
         .withColumn("ADES_SOURCE", F.lit("undetermined"))
-    ev = _events(spark, [
-        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
-        _event("trk-1", "ALDT", 2400, apt_icao="EBBR", runway="25R"),
-    ])
+    )
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+            _event("trk-1", "ALDT", 2400, apt_icao="EBBR", runway="25R"),
+        ],
+    )
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
 
@@ -703,11 +769,12 @@ def test_a_circuit_may_land_where_it_departed(spark):
 
 def test_a_flight_with_no_runway_evidence_keeps_what_it_had(spark):
     """Nothing to overrule with: the inference stands, and says so."""
-    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM",
-             "flight_list_v0.0.2", _T0, _t(5400))]
-    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA) \
-        .withColumn("ADEP_SOURCE", F.lit("aerodrome")) \
+    rows = [("trk-1", "abc123", "BEL123", _T0, "LFPG", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = (
+        spark.createDataFrame(rows, FLIGHT_SCHEMA)
+        .withColumn("ADEP_SOURCE", F.lit("aerodrome"))
         .withColumn("ADES_SOURCE", F.lit("aerodrome"))
+    )
     ev = spark.createDataFrame([], EVENT_SCHEMA)
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
@@ -724,17 +791,19 @@ def test_a_stand_at_the_wrong_aerodrome_is_not_published(spark):
     last night. Published as STND_ARR that is simply a different airport's
     stand number -- which is what 52% of them were.
     """
-    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM",
-             "flight_list_v0.0.2", _T0, _t(5400))]
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
     fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
-    ev = _events(spark, [
-        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
-        _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
-        # the previous leg's arrival stand, at the departure aerodrome
-        _event("trk-1", "entry-parking_position", 60, osm_airport="EBBR", osm_ref="WRONG"),
-        # this flight's own arrival stand
-        _event("trk-1", "entry-parking_position", 4000, osm_airport="EHAM", osm_ref="D8"),
-    ])
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+            _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
+            # the previous leg's arrival stand, at the departure aerodrome
+            _event("trk-1", "entry-parking_position", 60, osm_airport="EBBR", osm_ref="WRONG"),
+            # this flight's own arrival stand
+            _event("trk-1", "entry-parking_position", 4000, osm_airport="EHAM", osm_ref="D8"),
+        ],
+    )
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
 
@@ -743,15 +812,62 @@ def test_a_stand_at_the_wrong_aerodrome_is_not_published(spark):
 
 def test_a_stand_with_no_aerodrome_match_yields_null_not_a_guess(spark):
     """Better an honest null than another aerodrome's stand number."""
-    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM",
-             "flight_list_v0.0.2", _T0, _t(5400))]
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
     fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
-    ev = _events(spark, [
-        _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
-        _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
-        _event("trk-1", "entry-parking_position", 60, osm_airport="EBBR", osm_ref="WRONG"),
-    ])
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+            _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
+            _event("trk-1", "entry-parking_position", 60, osm_airport="EBBR", osm_ref="WRONG"),
+        ],
+    )
 
     row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
 
     assert row["STND_ARR"] is None
+
+
+def test_the_stand_columns_name_the_stand_of_the_block_times(spark):
+    """The off-block and in-block times name the stand they were read from.
+    STND_DEP and STND_ARR are those stands, so the time and the stand of one
+    flight-list row come from the same stand passage. A stand exit seen
+    earlier at the same airport (a stand the aircraft was towed from) does not
+    replace it."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "exit-parking_position", -900, osm_airport="EBBR", osm_ref="Z9"),
+            _event("trk-1", "exit-parking_position", 30, osm_airport="EBBR", osm_ref="A1"),
+            _event("trk-1", "AOBT", 0, stand_exit=str(_t(30)), stand="A1", apt_icao="EBBR"),
+            _event("trk-1", "ATOT", 300, apt_icao="EBBR", runway="25R"),
+            _event("trk-1", "ALDT", 3600, apt_icao="EHAM", runway="06"),
+            _event("trk-1", "AIBT", 4000, stand_entry=str(_t(3950)), stand="D8", apt_icao="EHAM"),
+            _event("trk-1", "entry-parking_position", 3950, osm_airport="EHAM", osm_ref="D8"),
+            _event("trk-1", "entry-parking_position", 4500, osm_airport="EHAM", osm_ref="F2"),
+        ],
+    )
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert (row["STND_DEP"], row["STND_ARR"]) == ("A1", "D8")
+
+
+def test_a_block_time_at_another_airport_does_not_name_the_stand(spark):
+    """An off-block time whose stand is at another airport than ADEP leaves
+    STND_DEP to the stand exits at ADEP, as before."""
+    rows = [("trk-1", "abc123", "BEL123", _T0, "EBBR", "EHAM", "flight_list_v0.0.2", _T0, _t(5400))]
+    fl = spark.createDataFrame(rows, FLIGHT_SCHEMA)
+    ev = _events(
+        spark,
+        [
+            _event("trk-1", "AOBT", 0, stand_exit=str(_t(30)), stand="K7", apt_icao="LFPG"),
+            _event("trk-1", "exit-parking_position", 40, osm_airport="EBBR", osm_ref="A1"),
+        ],
+    )
+
+    row = enrich_flight_list(fl, ev, EventConfig()).collect()[0]
+
+    assert row["STND_DEP"] == "A1"

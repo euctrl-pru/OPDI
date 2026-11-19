@@ -16,10 +16,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "benchmarks"))
 
+from adep_ades import AIRPORTS
 from pyspark.sql import Column, DataFrame, SparkSession
 from pyspark.sql import functions as F
-
-from adep_ades import AIRPORTS
 
 #: (label, lo_ft inclusive, hi_ft exclusive). Contiguous and total.
 #:

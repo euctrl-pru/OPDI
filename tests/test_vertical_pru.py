@@ -22,9 +22,8 @@ import datetime as dt
 import json
 
 import pytest
-from pyspark.sql import functions as F
-
 from conftest import _EPOCH, make_track
+from pyspark.sql import functions as F
 
 from opdi.config import EventConfig
 from opdi.pipeline.elevation import attach_field_elevation
@@ -99,8 +98,7 @@ def _climb_crossing_200nm(spark):
     """
     return _outbound(
         spark,
-        [(1000 * i, 5.0 * i) for i in range(31)]
-        + [(30000, 5.0 * i) for i in range(31, 61)],
+        [(1000 * i, 5.0 * i) for i in range(31)] + [(30000, 5.0 * i) for i in range(31, 61)],
     )
 
 
@@ -122,14 +120,16 @@ def _hold(spark, level_ft, seconds):
     """One level segment starting 600 s into the climb."""
     start = _EPOCH + dt.timedelta(seconds=600)
     return spark.createDataFrame(
-        [(
-            "trk-1",
-            start,
-            start + dt.timedelta(seconds=seconds),
-            float(seconds),
-            float(level_ft),
-            None,
-        )],
+        [
+            (
+                "trk-1",
+                start,
+                start + dt.timedelta(seconds=seconds),
+                float(seconds),
+                float(level_ft),
+                None,
+            )
+        ],
         schema=SEGMENT_SCHEMA,
     )
 
@@ -147,15 +147,17 @@ def test_a_long_level_high_in_the_box_moves_the_top_back(spark):
     """27,500 ft is 91.7% of 30,000, so it is inside the 90% box; 360 s exceeds
     the 300 s limit. Both conditions hold, so this hold is cruise and the top
     moves back to where it started."""
-    tops = pru_tops(_climb(spark), _hold(spark, level_ft=27500, seconds=360),
-                    EventConfig()).collect()[0]
+    tops = pru_tops(
+        _climb(spark), _hold(spark, level_ft=27500, seconds=360), EventConfig()
+    ).collect()[0]
     assert tops["toc_relocated"] is True
     assert tops["toc_cco_time"] < tops["toc_d200_time"]
 
 
 def test_a_short_level_in_the_box_does_not_move_the_top(spark):
-    tops = pru_tops(_climb(spark), _hold(spark, level_ft=27500, seconds=240),
-                    EventConfig()).collect()[0]
+    tops = pru_tops(
+        _climb(spark), _hold(spark, level_ft=27500, seconds=240), EventConfig()
+    ).collect()[0]
     assert tops["toc_relocated"] is False
     assert tops["toc_cco_time"] == tops["toc_d200_time"]
 
@@ -163,16 +165,18 @@ def test_a_short_level_in_the_box_does_not_move_the_top(spark):
 def test_a_long_level_below_the_box_does_not_move_the_top(spark):
     """20,000 ft is 67% of 30,000, below the 90% floor: that is a level-off,
     not cruise, and it must be reported as one rather than relocating the top."""
-    tops = pru_tops(_climb(spark), _hold(spark, level_ft=20000, seconds=600),
-                    EventConfig()).collect()[0]
+    tops = pru_tops(
+        _climb(spark), _hold(spark, level_ft=20000, seconds=600), EventConfig()
+    ).collect()[0]
     assert tops["toc_relocated"] is False
 
 
 def test_the_analysis_stops_at_the_200nm_ring(spark):
     """A step climb 250 NM out is cruise-altitude optimisation, not a top of
     climb, and PRU's radius exists precisely to exclude it."""
-    tops = pru_tops(_climb_then_step_climb_at_250nm(spark), _no_segments(spark),
-                    EventConfig()).collect()[0]
+    tops = pru_tops(
+        _climb_then_step_climb_at_250nm(spark), _no_segments(spark), EventConfig()
+    ).collect()[0]
     assert tops["toc_d200_alt_ft"] == pytest.approx(30000, abs=50)
 
 
@@ -180,8 +184,7 @@ def test_the_events_name_the_algorithm_that_produced_them(spark):
     """Both tops are published, so every row has to say which one it is. The
     PRU pair carries ``method: "pru"`` and the D200 position it was relocated
     from; the fuzzy pair is stamped where it is built."""
-    events = pru_top_events(_climb(spark), _hold(spark, level_ft=27500, seconds=360),
-                            EventConfig())
+    events = pru_top_events(_climb(spark), _hold(spark, level_ft=27500, seconds=360), EventConfig())
     by_type = {r["type"]: r for r in events.collect()}
 
     assert set(by_type) == {"top-of-climb", "top-of-descent"}
@@ -213,17 +216,18 @@ class StubStorage:
 
 def _airport_storage(spark):
     """One flight, EHAM to LSZH, with both aerodromes in OurAirports."""
-    return StubStorage({
-        "opdi_flight_list": spark.createDataFrame(
-            [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH")],
-            "id string, dof timestamp, adep string, ades string",
-        ),
-        "oa_airports": spark.createDataFrame(
-            [("EHAM", 52.309, 4.764, -11.0), ("LSZH", 47.458, 8.548, 1416.0)],
-            "ident string, latitude_deg double, longitude_deg double, "
-            "elevation_ft double",
-        ),
-    })
+    return StubStorage(
+        {
+            "opdi_flight_list": spark.createDataFrame(
+                [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH")],
+                "id string, dof timestamp, adep string, ades string",
+            ),
+            "oa_airports": spark.createDataFrame(
+                [("EHAM", 52.309, 4.764, -11.0), ("LSZH", 47.458, 8.548, 1416.0)],
+                "ident string, latitude_deg double, longitude_deg double, " "elevation_ft double",
+            ),
+        }
+    )
 
 
 def _bare(spark):
@@ -235,9 +239,7 @@ def test_aerodrome_geometry_attaches_both_ends(spark):
     """Both ends, and coordinates as well as elevation: the PRU radius is
     measured from the departure aerodrome in climb and the arrival one in
     descent, so one end is never enough."""
-    row = attach_aerodrome_geometry(
-        _bare(spark), MONTH, _airport_storage(spark)
-    ).collect()[0]
+    row = attach_aerodrome_geometry(_bare(spark), MONTH, _airport_storage(spark)).collect()[0]
 
     assert row["adep"] == "EHAM"
     assert row["adep_lat"] == pytest.approx(52.309)
@@ -256,13 +258,17 @@ def test_a_duplicated_flight_list_id_fails_loudly(spark):
     inflated counts in exactly the ladder the study reports. Nothing in the
     output would say so, which is why this is an error and not a warning.
     """
-    duplicated = StubStorage({
-        "opdi_flight_list": spark.createDataFrame(
-            [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH"),
-             ("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "EDDF")],
-            "id string, dof timestamp, adep string, ades string",
-        ),
-    })
+    duplicated = StubStorage(
+        {
+            "opdi_flight_list": spark.createDataFrame(
+                [
+                    ("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "LSZH"),
+                    ("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EHAM", "EDDF"),
+                ],
+                "id string, dof timestamp, adep string, ades string",
+            ),
+        }
+    )
 
     with pytest.raises(ValueError, match="distinct ids"):
         attach_aerodrome_geometry(_bare(spark), MONTH, duplicated)
@@ -292,3 +298,136 @@ def test_the_geometry_join_survives_the_elevation_join(spark):
     # tolerant of the one collision it was found with.
     thrice = attach_aerodrome_geometry(twice, MONTH, storage)
     assert thrice.columns == twice.columns
+
+
+# --- where a top is placed, and whether its climb or descent was received ---
+
+
+def _cruise_start(spark):
+    """Shape of top-of-climb#16 (ea2bdce569d29342_1781460544): the track starts
+    in cruise at 32,950 ft (no departure airport known) and descends at the
+    end. No climb was received."""
+    return _outbound(spark, [(32950, 5.0 * i) for i in range(20)] + [(20000, 100.0)])
+
+
+def _by_type(events):
+    return {r["type"]: r for r in events.collect()}
+
+
+def test_a_top_of_climb_at_the_start_of_reception_is_not_observed(spark):
+    tops = _by_type(pru_top_events(_cruise_start(spark), _no_segments(spark), EventConfig()))
+    assert json.loads(tops["top-of-climb"]["info"])["observed"] is False
+
+
+def test_a_received_climb_and_descent_are_observed(spark):
+    """Climb to 30,000 ft, cruise, and descend to 5,000 ft 10 NM before the
+    destination (600 NM out)."""
+    profile = (
+        [(1000 * i, 5.0 * i) for i in range(31)]
+        + [(30000, 5.0 * i) for i in range(31, 93)]
+        + [(30000 - 1000 * (i - 92), 5.0 * i) for i in range(93, 118)]
+    )
+    tops = _by_type(pru_top_events(_outbound(spark, profile), _no_segments(spark), EventConfig()))
+    assert json.loads(tops["top-of-climb"]["info"])["observed"] is True
+    assert json.loads(tops["top-of-descent"]["info"])["observed"] is True
+
+
+def test_a_top_of_descent_at_the_end_of_reception_is_not_observed(spark):
+    """Shape of top-of-descent#07: the track ends in cruise (reception lost)."""
+    sdf = _outbound(spark, [(1000 * i, 5.0 * i) for i in range(31)] + [(30000, 155.0)])
+    tops = _by_type(pru_top_events(sdf, _no_segments(spark), EventConfig()))
+    assert json.loads(tops["top-of-descent"]["info"])["observed"] is False
+
+
+def test_the_release_settings_write_no_observed_flag(spark):
+    config = EventConfig(tops_observed_min_change_ft=None)
+    tops = _by_type(pru_top_events(_cruise_start(spark), _no_segments(spark), config))
+    assert "observed" not in json.loads(tops["top-of-climb"]["info"])
+
+
+def _top_on_a_report_without_position(spark):
+    """Shape of top-of-climb#05 (827bd881efd89cb4_1781440424): the top falls on
+    a report that carries only an altitude; the report 10 s before it has a
+    position, and so has the one 15 s after it."""
+    rows = [
+        {"t": 0, "alt": 1000, "pos": True},
+        {"t": 600, "alt": 9000, "pos": True},
+        {"t": 610, "alt": 9900, "pos": False},
+        {"t": 625, "alt": 9800, "pos": True},
+        {"t": 900, "alt": 3000, "pos": True},
+    ]
+    sdf = make_track(
+        spark,
+        [
+            {
+                "t": r["t"],
+                "baro_altitude": r["alt"] / FT_PER_M,
+                "lat": ADEP_LAT + r["t"] / 6000.0 if r["pos"] else None,
+                "lon": ADEP_LON if r["pos"] else None,
+            }
+            for r in rows
+        ],
+    )
+    return (
+        sdf.withColumn("baro_altitude_c", F.col("baro_altitude"))
+        .withColumn("adep_lat", F.lit(ADEP_LAT))
+        .withColumn("adep_lon", F.lit(ADEP_LON))
+        .withColumn("ades_lat", F.lit(ADES_LAT))
+        .withColumn("ades_lon", F.lit(ADES_LON))
+        # One NM every 6 s, so the distance names the report it comes from.
+        .withColumn(
+            "cumulative_distance_nm",
+            (F.col("event_time").cast("double") - F.lit(_EPOCH.timestamp())) / 6.0,
+        )
+        .withColumn(
+            "cumulative_time_s",
+            F.col("event_time").cast("double") - F.lit(_EPOCH.timestamp()),
+        )
+    )
+
+
+def test_a_top_takes_the_position_of_the_nearest_report_that_has_one(spark):
+    sdf = _top_on_a_report_without_position(spark)
+    top = _by_type(pru_top_events(sdf, _no_segments(spark), EventConfig()))["top-of-climb"]
+    assert top["event_time"] == _EPOCH + dt.timedelta(seconds=610)
+    assert top["lat"] == pytest.approx(ADEP_LAT + 600 / 6000.0)
+    assert top["cumulative_distance_nm"] == pytest.approx(100.0)
+    assert top["cumulative_time_s"] == pytest.approx(610.0)
+
+    old = _by_type(
+        pru_top_events(
+            sdf, _no_segments(spark), EventConfig(tops_position_from_nearest_report=False)
+        )
+    )["top-of-climb"]
+    assert old["lat"] is None
+
+
+def test_level_offs_get_a_position_a_distance_and_a_time(spark):
+    """A climb with a 120 s level-off at 10,000 ft, 10 s reports. The
+    level-off's start and end lie on the level method's time grid; each takes
+    the position of the nearest report that has one."""
+    from opdi.pipeline.events import calculate_level_off_events
+
+    profile = (
+        [(4000 + 500 * i, 0.5 * i) for i in range(13)]  # to 10,000 ft
+        + [(10000, 6 + 0.5 * i) for i in range(1, 13)]  # 120 s level
+        + [(10000 + 500 * i, 12 + 0.5 * i) for i in range(1, 41)]  # to 30,000 ft
+        + [(30000, 32 + 0.5 * i) for i in range(1, 10)]
+    )
+    sdf = _outbound(spark, profile, step_s=10)
+    sdf = sdf.withColumn(
+        "cumulative_distance_nm", (F.col("lat") - F.lit(ADEP_LAT)) * F.lit(60.0)
+    ).withColumn("cumulative_time_s", F.col("event_time").cast("long") - F.lit(0))
+    t0 = sdf.agg(F.min(F.col("event_time").cast("double"))).first()[0]
+    sdf = sdf.withColumn("cumulative_time_s", F.col("event_time").cast("double") - F.lit(t0))
+
+    rows = {r["type"]: r for r in calculate_level_off_events(sdf, None, EventConfig()).collect()}
+    start, end = rows["level-off-climb-start"], rows["level-off-climb-end"]
+    assert start["event_time"] == _EPOCH + dt.timedelta(seconds=120)
+    assert start["lat"] == pytest.approx(ADEP_LAT + 6.0 / 60.0)
+    assert start["cumulative_distance_nm"] == pytest.approx(6.0)
+    assert start["cumulative_time_s"] == pytest.approx(120.0)
+    assert end["cumulative_time_s"] == pytest.approx(240.0)
+
+    old = calculate_level_off_events(sdf, None, EventConfig(level_offs_get_position=False))
+    assert all(r["lat"] is None for r in old.collect())

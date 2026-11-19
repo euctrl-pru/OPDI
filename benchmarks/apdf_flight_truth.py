@@ -15,6 +15,7 @@ only that needs the work laptop.
 so ``C50``, ``C60``, ``C110`` and ``C120`` in the flight list have no ground
 truth whatsoever and must never be reported as validated.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -46,9 +47,7 @@ ARRIVAL_COLUMNS = {
 
 #: Flight-list columns with no APDF counterpart. Named so a comparison can
 #: exclude them deliberately rather than silently scoring them as all-missing.
-UNCHECKABLE = tuple(
-    f"C{n}_{leg}" for leg in ("ARR", "DEP") for n in (50, 60, 110, 120)
-)
+UNCHECKABLE = tuple(f"C{n}_{leg}" for leg in ("ARR", "DEP") for n in (50, 60, 110, 120))
 
 
 def _phase(apdf: pd.DataFrame, phase: str, mapping: dict, extra: dict) -> pd.DataFrame:
@@ -87,10 +86,18 @@ def flight_truth(month: str = "202606", reference: Path | None = None) -> pd.Dat
     keyed = apdf[apdf["ID"].notna()]
     dropped = len(apdf) - len(keyed)
 
-    dep = _phase(keyed, "DEP", DEPARTURE_COLUMNS, {
-        "ADEP": "ADEP_ICAO", "ADES": "ADES_ICAO",
-        "FLTID": "AP_C_FLTID", "REG": "AP_C_REG", "ARCTYP": "ARCTYP",
-    })
+    dep = _phase(
+        keyed,
+        "DEP",
+        DEPARTURE_COLUMNS,
+        {
+            "ADEP": "ADEP_ICAO",
+            "ADES": "ADES_ICAO",
+            "FLTID": "AP_C_FLTID",
+            "REG": "AP_C_REG",
+            "ARCTYP": "ARCTYP",
+        },
+    )
     arr = _phase(keyed, "ARR", ARRIVAL_COLUMNS, {})
 
     # A duplicated ID within one phase is ambiguous truth: two movement rows
@@ -118,9 +125,7 @@ def flight_truth(month: str = "202606", reference: Path | None = None) -> pd.Dat
     truth = dep.merge(arr, on="ID", how="outer")
 
     bridge = flights[flights["ID"].notna()].drop_duplicates("ID")
-    truth = truth.merge(
-        bridge.rename(columns={"AIRCRAFT_ADDRESS": "ICAO24"}), on="ID", how="left"
-    )
+    truth = truth.merge(bridge.rename(columns={"AIRCRAFT_ADDRESS": "ICAO24"}), on="ID", how="left")
 
     truth.attrs["dropped_no_id"] = dropped
     truth.attrs["duplicate_ids"] = fanout
@@ -132,27 +137,32 @@ def flight_truth(month: str = "202606", reference: Path | None = None) -> pd.Dat
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--month", default="202606", help="YYYYMM, default 202606")
-    ap.add_argument("--write", type=Path, default=None,
-                    help="optional parquet output path")
+    ap.add_argument("--write", type=Path, default=None, help="optional parquet output path")
     args = ap.parse_args()
 
     truth = flight_truth(args.month)
     n = len(truth)
     print(f"APDF flight-shaped truth for {args.month}: {n:,} flights")
     print(f"  movement rows with no ID, dropped: {truth.attrs['dropped_no_id']:,}")
-    print(f"  duplicate IDs within a phase     : {truth.attrs['duplicate_ids']}"
-          f" -> {truth.attrs['dropped_ambiguous']} flight(s) removed as ambiguous")
+    print(
+        f"  duplicate IDs within a phase     : {truth.attrs['duplicate_ids']}"
+        f" -> {truth.attrs['dropped_ambiguous']} flight(s) removed as ambiguous"
+    )
     icao = truth["ICAO24"].notna().mean() * 100
     print(f"  ICAO24 present (the ADS-B join key): {icao:.1f}%")
 
     both = (truth["ATOT"].notna() & truth["ALDT"].notna()).mean() * 100
     dep_only = (truth["ATOT"].notna() & truth["ALDT"].isna()).mean() * 100
     arr_only = (truth["ATOT"].isna() & truth["ALDT"].notna()).mean() * 100
-    print(f"\n  both ends {both:.1f}%   departure only {dep_only:.1f}%   "
-          f"arrival only {arr_only:.1f}%")
-    print("  APDF is airport-reported, so a flight leaving the reporting area "
-          "has\n  a departure row and no arrival row. That is the shape of the "
-          "truth,\n  not a gap in it.")
+    print(
+        f"\n  both ends {both:.1f}%   departure only {dep_only:.1f}%   "
+        f"arrival only {arr_only:.1f}%"
+    )
+    print(
+        "  APDF is airport-reported, so a flight leaving the reporting area "
+        "has\n  a departure row and no arrival row. That is the shape of the "
+        "truth,\n  not a gap in it."
+    )
 
     print("\n  column coverage -- the ceiling on what can be validated:")
     for col in list(DEPARTURE_COLUMNS) + list(ARRIVAL_COLUMNS):

@@ -1,0 +1,905 @@
+#!/usr/bin/env python
+"""Why an off-block (or in-block) time is missing or wrong: one cause per airport record.
+
+    export PYSPARK_DRIVER_PYTHON=$PWD/.venv310/bin/python
+    unset PYSPARK_PYTHON
+    # 1. One day (Spark, takes the machine's Spark lock): one row per airport
+    #    record of an off-block or in-block time, with what OPDI has for it.
+    .venv310/bin/python -u benchmarks/offblock_causes.py extract --day 2026-06-14 \\
+        --root s3a://eurocontrol/opdi-world/research/spot/runs/cur \\
+        --tracks s3a://eurocontrol/opdi-world/research/spot/d0614c
+    .venv310/bin/python -u benchmarks/offblock_causes.py extract --day 2026-06-10 \\
+        --root s3a://eurocontrol/opdi-world/research/spot/d0610
+    # 2. The tables (pandas only), with a manifest entry beside them.
+    .venv310/bin/python -u benchmarks/offblock_causes.py tables --out <folder>
+
+``extract`` writes to ``benchmarks/out/offblock/<day>/`` (or to the folder
+named in the environment variable ``OPDI_OFFBLOCK_EXTRACT``) and ``tables``
+reads from there. ``tables --before <folder>`` adds the rows of a second
+extract of the same day, made from a run without the off-block time at the
+start of the push-back (``method`` = ``without push-back start``).
+
+``tables`` also writes ``offblock_first_seen_on.csv``, the accuracy of the
+off-block times by where the aircraft was first received on the ground
+(``info.first_seen_on``), and ``tracks_divided.csv``, the number of tracks
+of each day that hold several flights.
+
+**The question.** Airport records give an off-block time for many more
+departures than OPDI does, while the in-block time is found more often. Is
+the aircraft simply not received at the stand (the transponder is switched
+on late, or the stand is out of reach of the receivers), or does OPDI miss
+or mistime a push-back that its reports show?
+
+**One cause per record.** Each record of an off-block time (``AOBT``) of
+the day is given the first cause that applies, in this order:
+
+* ``f``: OPDI has an off-block time within 60 s of the record.
+* ``a1``: no OPDI flight of that aircraft and call sign (no track at all).
+* ``a2``: the flight's track starts after the recorded take-off time.
+* ``b``: the track's first report comes after the recorded off-block time.
+  Split by how late (0 to 1, 1 to 3, 3 to 10, more than 10 minutes) and by
+  the state of the first report with a position: on a runway, on a taxiway,
+  moving elsewhere (ground speed above 2 kt), or standing.
+* ``c``: reports exist before the recorded time, but in the 5 minutes
+  around it (150 s either side) none has a position (``c_none``) or fewer
+  than 10 do (``c_sparse``, sparser than one per 30 s).
+* ``d``: positions exist around the recorded time and OPDI gives no time.
+* ``e``: positions exist and the OPDI time is more than 60 s away
+  (``e_early``: before the record, ``e_late``: after it).
+
+Causes a, b and c describe data that is not there; d and e are what a rule
+could improve. The in-block time (``AIBT``) is the mirror image: ``a2`` is a
+track that ends before the recorded landing, ``b`` a last report before the
+recorded in-block time (how early, and the state of the last report).
+
+A day processed without its cleaned tracks (``--tracks`` not given) only
+has the flight list: ``b`` is then read from the flight's first (last) seen
+time, which is its first (last) position, its state is unknown, and c and d
+are given together (``cd``).
+
+**Received, not repeated.** OpenSky's state vectors repeat the last state of
+an aircraft, without position, for about 300 s after its last message. A
+report counts as received only when a message came at most 15 s before it
+(``last_contact``); the first and last report of a track above are the first
+and last received ones.
+
+**Matching.** As in ``benchmarks/corrections_scorecard.py``: an OPDI event is
+matched to the nearest record of the same aircraft address, call sign and
+airport within 6 h, and a record keeps its nearest event. The flight of a
+record is the flight-list row of the same aircraft and call sign within 6 h
+whose airport is the record's (else any), nearest in time.
+
+**Other tracks of the aircraft.** For each record the extract also counts
+the reports of the same aircraft at the airport (within 3 NM, below 1,500 ft
+above it or flagged on the ground) that lie in another track in the 20
+minutes before the off-block time (after the in-block time). These show
+where a track was split at the stand rather than not received.
+
+**What is never published.** ``tables`` writes counts and shares only: no
+flight, track id or call sign. The extract (local, not published) holds the
+records and their flights, so that cases can be read.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+REPO = Path(__file__).resolve().parent.parent
+BENCH = REPO / "benchmarks"
+if str(BENCH) not in sys.path:
+    sys.path.insert(0, str(BENCH))
+if str(REPO / "src") not in sys.path:
+    sys.path.insert(0, str(REPO / "src"))
+
+MONTH = "202606"
+WORLD = "s3a://eurocontrol/opdi-world"
+#: Where ``extract`` writes and ``tables`` reads (not published: it holds flights).
+EXTRACT = Path(os.environ.get("OPDI_OFFBLOCK_EXTRACT", REPO / "benchmarks" / "out" / "offblock"))
+#: The 100 busiest European airports, by Network Manager movements.
+AIRPORTS_CSV = Path(
+    "/home/jupyter/work/opdi-workspace/opdi-portal/.claude/worktrees/publication/"
+    "assets/accuracy/airport_accuracy_europe.csv"
+)
+
+SEARCH_S = 6 * 3600
+#: Seconds either side of the recorded time in which positions are counted.
+AROUND_S = 150.0
+#: Fewer positions than this in those 300 s is sparser than one per 30 s.
+MIN_POSITIONS = 10
+#: Seconds before the off-block time (after the in-block time) in which reports
+#: of the same aircraft in another track are counted.
+OTHER_TRACK_S = 20 * 60
+OTHER_TRACK_NM = 3.0
+OTHER_TRACK_MAX_FT = 1500.0
+MOVING_KT = 2.0
+#: A report counts as received when a message came at most this many seconds before it.
+FRESH_S = 15.0
+FT_PER_M = 3.28084
+KT_PER_MPS = 1.94384
+
+#: Record kind -> (runway record of the same movement, side, airport column).
+BLOCK_KINDS = {"AOBT": ("ATOT", "dep", "adep"), "AIBT": ("ALDT", "arr", "ades")}
+#: Lateness bins (minutes) of cause b.
+LATE_BINS = [0, 1, 3, 10, np.inf]
+LATE_LABELS = ["0-1 min", "1-3 min", "3-10 min", ">10 min"]
+#: Aeroway priority when one H3 cell holds several parts of the airport.
+AEROWAY_ORDER = ["runway", "taxiway", "parking_position", "apron"]
+
+
+# --------------------------------------------------------------------------
+# extract (Spark)
+# --------------------------------------------------------------------------
+
+
+def _records(spark, day: str):
+    """Block-time records of the day, each with the runway time of the same movement."""
+    import corrections_scorecard as cs
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    cs.DAY, cs.MONTH = day, MONTH
+    recs = cs.airport_records(spark).filter(F.col("kind").isin("AOBT", "AIBT", "ATOT", "ALDT"))
+    blk = recs.filter(F.col("kind").isin(*BLOCK_KINDS))
+    rwy = recs.filter(F.col("kind").isin("ATOT", "ALDT")).select(
+        F.when(F.col("kind") == "ATOT", "AOBT").otherwise("AIBT").alias("kind"),
+        "_a",
+        "_c",
+        "rec_apt",
+        F.col("rec_s").alias("rwy_s"),
+    )
+    keys = ["kind", "_a", "_c", "rec_apt", "rec_s"]
+    blk = blk.dropDuplicates(keys)
+    j = blk.join(rwy, ["kind", "_a", "_c", "rec_apt"], "left").filter(
+        F.col("rwy_s").isNull() | (F.abs(F.col("rwy_s") - F.col("rec_s")) <= 3 * 3600)
+    )
+    w = Window.partitionBy(*keys).orderBy(F.abs(F.col("rwy_s") - F.col("rec_s")).asc_nulls_last())
+    j = j.withColumn("_r", F.row_number().over(w)).filter(F.col("_r") == 1).drop("_r")
+    # Records whose only runway records lie more than 3 h away were dropped by
+    # the filter: add them back without a runway time.
+    lost = blk.join(j.select(*keys), keys, "left_anti").withColumn(
+        "rwy_s", F.lit(None).cast("double")
+    )
+    return j.unionByName(lost).withColumn(
+        "rec_key", F.sha2(F.concat_ws("|", *[F.col(k).cast("string") for k in keys]), 256)
+    )
+
+
+def _matched_events(E, FLX, blk):
+    """Per record: the nearest OPDI block event of the same aircraft, call sign and airport."""
+    import corrections_scorecard as cs
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    c = F.col
+    # The events are stored under their track. The flight row of an event is
+    # the row of that track whose division times lie around the event.
+    ev = (
+        E.filter(c("type").isin(*BLOCK_KINDS))
+        .withColumnRenamed("flight_id", "_ev_track")
+        .join(
+            FLX.select(
+                c("flight_id"),
+                c("track_id").alias("_fl_track"),
+                "_lo",
+                "_hi",
+                c("icao24").alias("_a"),
+                c("cs").alias("_c"),
+                "adep",
+                "ades",
+            ),
+            cs._on_row("_ev_track", "ts"),
+        )
+        .drop("_fl_track", "_lo", "_hi")
+        .withColumn(
+            "_apt",
+            F.coalesce(c("apt"), F.when(c("type") == "AOBT", c("adep")).otherwise(c("ades"))),
+        )
+    )
+    j = ev.join(blk.withColumnRenamed("kind", "type"), ["type", "_a", "_c"]).filter(
+        (c("rec_apt") == c("_apt")) & (F.abs(c("ts") - c("rec_s")) <= SEARCH_S)
+    )
+    j = j.withColumn("diff_s", c("ts") - c("rec_s"))
+    w = Window.partitionBy("_eid").orderBy(F.abs("diff_s"), "rec_s")
+    j = j.withColumn("_r", F.row_number().over(w)).filter(c("_r") == 1).drop("_r")
+    wr = Window.partitionBy("rec_key").orderBy(F.abs("diff_s"), "ts", "id")
+    j = j.withColumn("_r", F.row_number().over(wr)).filter(c("_r") == 1)
+    return j.select(
+        "rec_key",
+        c("ts").alias("opdi_s"),
+        c("flight_id").alias("ev_flight"),
+        c("info").alias("opdi_info"),
+    )
+
+
+def _flights(FLX, blk, ev):
+    """Per record: its OPDI flight (or none) and the number of candidate flights.
+
+    A flight is one row of the flight list with one row per flight. The
+    record keeps the row's ``flight_id``, the ``track_id`` its reports are
+    stored under, and the division times ``_lo`` and ``_hi`` (seconds; NULL:
+    no limit) between which the flight lies in that track.
+    """
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    c = F.col
+    f = blk.join(ev, "rec_key", "left").join(
+        FLX.select(
+            c("icao24").alias("_a"),
+            c("cs").alias("_c"),
+            "flight_id",
+            "track_id",
+            "_lo",
+            "_hi",
+            "adep",
+            "ades",
+            "fs",
+            "ls",
+        ),
+        ["_a", "_c"],
+        "left",
+    )
+    f = f.filter(
+        c("flight_id").isNull() | c("rec_s").between(c("fs") - SEARCH_S, c("ls") + SEARCH_S)
+    )
+    side_apt = F.when(c("kind") == "AOBT", c("adep")).otherwise(c("ades"))
+    dist = F.greatest(c("fs") - c("rec_s"), c("rec_s") - c("ls"), F.lit(0.0))
+    w = Window.partitionBy("rec_key").orderBy(
+        (c("flight_id") == c("ev_flight")).desc_nulls_last(),
+        (side_apt == c("rec_apt")).desc_nulls_last(),
+        dist.asc_nulls_last(),
+        "flight_id",
+    )
+    n = Window.partitionBy("rec_key")
+    f = f.withColumn("n_flights", F.count("flight_id").over(n))
+    f = f.withColumn("_r", F.row_number().over(w)).filter(c("_r") == 1).drop("_r")
+    kept = blk.join(f.select("rec_key"), "rec_key", "left_anti")
+    f = f.unionByName(kept.join(ev, "rec_key", "left"), allowMissingColumns=True)
+    return f.withColumn("airport_matches", side_apt == c("rec_apt"))
+
+
+def _reports_of_flights(reports, recs):
+    """The reports of each record's own flight: one row per record and report.
+
+    ``reports`` holds ``track_id`` and ``t`` (seconds); ``recs`` the rows of
+    :func:`_flights`. A report belongs to the flight when it is of the
+    flight's track and lies after ``_lo`` and up to ``_hi`` (as the events
+    do, ``opdi.pipeline.flight_legs.event_in_leg``).
+    """
+    from pyspark.sql import functions as F
+
+    c = F.col
+    own = recs.filter(c("flight_id").isNotNull()).select(
+        "rec_key", "kind", "rec_s", "rec_apt", "track_id", "_lo", "_hi"
+    )
+    ids = F.broadcast(own.select("track_id").distinct())
+    rep = reports.join(ids, "track_id", "left_semi").join(own, "track_id")
+    return rep.filter(
+        (c("_lo").isNull() | (c("t") > c("_lo"))) & (c("_hi").isNull() | (c("t") <= c("_hi")))
+    ).drop("_lo", "_hi")
+
+
+def _track_facts(spark, tracks_root: str, day: str, recs):
+    """Per record: the reports of its own flight and of the aircraft's other tracks."""
+    from pyspark.sql import functions as F
+
+    c = F.col
+    tr = spark.read.parquet(f"{tracks_root}/osn_tracks_clean").filter(
+        c("dof") == F.lit(day).cast("date")
+    )
+    tr = tr.select(
+        "track_id",
+        F.lower("icao24").alias("_a"),
+        c("event_time").cast("double").alias("t"),
+        "lat",
+        "lon",
+        (c("velocity") * KT_PER_MPS).alias("kt"),
+        "on_ground",
+        (c("baro_altitude_c") * FT_PER_M).alias("alt_ft"),
+        "h3_res_12",
+        c("last_contact").cast("double").alias("last_contact"),
+    )
+    rep = _reports_of_flights(tr, recs)
+    t, T = c("t"), c("rec_s")
+    pos = c("lat").isNotNull() & c("lon").isNotNull()
+    near = F.abs(t - T) <= AROUND_S
+    # A report is received when a message came within FRESH_S of it: the
+    # state vectors repeat the last state for up to 300 s after the last
+    # message, without position.
+    rx = c("last_contact").isNotNull() & (t - c("last_contact") <= FRESH_S)
+    state = F.struct("kt", "on_ground", "alt_ft", "h3_res_12", "lat", "lon")
+    facts = rep.groupBy("rec_key").agg(
+        F.min("t").alias("t_first"),
+        F.max("t").alias("t_last"),
+        F.min(F.when(pos, t)).alias("t_first_pos"),
+        F.max(F.when(pos, t)).alias("t_last_pos"),
+        F.min_by(F.when(pos, state), F.when(pos, t)).alias("first_pos"),
+        F.max_by(F.when(pos, state), F.when(pos, t)).alias("last_pos"),
+        F.min(F.when(rx, t)).alias("t_first_rx"),
+        F.max(F.when(rx, t)).alias("t_last_rx"),
+        F.count(F.when(near & rx, 1)).alias("n_rx_around"),
+        F.count(F.when((t < T) & rx, 1)).alias("n_rx_before"),
+        F.count(F.when((t > T) & rx, 1)).alias("n_rx_after"),
+        F.count(F.when(near, 1)).alias("n_rep_around"),
+        F.count(F.when(near & pos, 1)).alias("n_pos_around"),
+        F.count(F.when(t < T, 1)).alias("n_rep_before"),
+        F.count(F.when((t < T) & pos, 1)).alias("n_pos_before"),
+        F.count(F.when(t > T, 1)).alias("n_rep_after"),
+        F.count(F.when((t > T) & pos, 1)).alias("n_pos_after"),
+    )
+    # The part of the airport at the first and last position.
+    lay = spark.read.parquet(f"{WORLD}/hexaero_airport_layouts").select(
+        c("hexaero_apt_icao").alias("rec_apt"),
+        c("hexaero_h3_id").alias("h3"),
+        c("hexaero_aeroway").alias("aeroway"),
+    )
+    prio = F.coalesce(
+        F.array_position(F.array(*[F.lit(a) for a in AEROWAY_ORDER]), c("aeroway")),
+        F.lit(99),
+    )
+    lay = (
+        lay.groupBy("rec_apt", "h3")
+        .agg(F.min(F.struct(prio.alias("p"), c("aeroway").alias("a"))).alias("_m"))
+        .select("rec_apt", "h3", c("_m.a").alias("aeroway"))
+    )
+    keys = recs.select("rec_key", "rec_apt")
+    for which in ("first_pos", "last_pos"):
+        cells = facts.select("rec_key", c(f"{which}.h3_res_12").alias("h3")).join(keys, "rec_key")
+        named = cells.join(lay, ["rec_apt", "h3"]).select(
+            "rec_key", c("aeroway").alias(f"{which}_aeroway")
+        )
+        facts = facts.join(named, "rec_key", "left")
+
+    # Reports of the same aircraft at the airport, in another track.
+    apts = (
+        spark.read.parquet(f"{WORLD}/oa_airports")
+        .select(
+            c("ident").alias("rec_apt"),
+            c("latitude_deg").cast("double").alias("apt_lat"),
+            c("longitude_deg").cast("double").alias("apt_lon"),
+            c("elevation_ft").cast("double").alias("apt_ft"),
+        )
+        .dropDuplicates(["rec_apt"])
+    )
+    rk = recs.select("rec_key", "kind", "rec_s", "rec_apt", "_a", c("track_id").alias("own")).join(
+        apts, "rec_apt", "left"
+    )
+    who = F.broadcast(rk.select("_a").distinct())
+    other = tr.join(who, "_a", "left_semi").join(rk, "_a")
+    from opdi.utils.geometry import haversine_nm
+
+    lo = F.when(c("kind") == "AOBT", T - OTHER_TRACK_S).otherwise(T)
+    hi = F.when(c("kind") == "AOBT", T).otherwise(T + OTHER_TRACK_S)
+    other = other.filter(
+        (c("track_id") != F.coalesce(c("own"), F.lit("")))
+        & t.between(lo, hi)
+        & pos
+        & (haversine_nm(c("lat"), c("lon"), c("apt_lat"), c("apt_lon")) <= OTHER_TRACK_NM)
+        & (
+            F.coalesce(c("on_ground"), F.lit(False))
+            | c("alt_ft").isNull()
+            | (c("alt_ft") - F.coalesce(c("apt_ft"), F.lit(0.0)) <= OTHER_TRACK_MAX_FT)
+        )
+    )
+    other = other.groupBy("rec_key").agg(
+        F.count("*").alias("n_other"),
+        F.countDistinct("track_id").alias("n_other_tracks"),
+        F.max("t").alias("t_other_last"),
+        F.min("t").alias("t_other_first"),
+    )
+    return facts.join(other, "rec_key", "left")
+
+
+def extract(args) -> int:
+    """Write the day's records with their OPDI facts to ``EXTRACT/<day>/records.parquet``."""
+    import airport_accuracy as aa
+    import corrections_scorecard as cs
+
+    day = args.day
+    out = EXTRACT / day
+    out.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    with cs.spark_lock(f"offblock_causes extract {day}"):
+        spark = cs.spark_session(f"offblock-causes-{day}", executors=args.executors)
+        from pyspark import StorageLevel
+        from pyspark.sql import functions as F
+
+        keep = StorageLevel.MEMORY_AND_DISK
+        try:
+            E = aa._events(spark, args.root, day).filter(F.col("type").isin(*BLOCK_KINDS))
+            FLX = aa._flight_list(spark, args.root, day).drop("_present").persist(keep)
+            blk = _records(spark, day).persist(keep)
+            ev = _matched_events(E, FLX, blk)
+            recs = _flights(FLX, blk, ev).persist(keep)
+            meta = {
+                "day": day,
+                "root": args.root,
+                "tracks_root": args.tracks,
+                "records": recs.count(),
+                **_flight_counts(FLX),
+            }
+            if args.tracks:
+                facts = _track_facts(spark, args.tracks, day, recs)
+                recs = recs.join(facts, "rec_key", "left")
+            pdf = recs.toPandas()
+        finally:
+            spark.stop()
+    for col in ("first_pos", "last_pos"):
+        if col in pdf.columns:
+            for f in ("kt", "on_ground", "alt_ft", "lat", "lon"):
+                pdf[f"{col}_{f}"] = pdf[col].map(lambda r, f=f: None if r is None else r[f])
+            pdf = pdf.drop(columns=[col])
+    pdf.to_parquet(out / "records.parquet", index=False)
+    meta["seconds"] = round(time.time() - started)
+    (out / "meta.json").write_text(json.dumps(meta, indent=1, default=str))
+    print(json.dumps(meta), flush=True)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# tables (pandas)
+# --------------------------------------------------------------------------
+
+CAUSES = ["a1", "a2", "b", "c_none", "c_sparse", "cd", "d", "e_early", "e_late", "f"]
+CAUSE_TEXT = {
+    "a1": "no OPDI track of the flight",
+    "a2": "track starts after the take-off (ends before the landing)",
+    "b": "first report after the off-block time (last report before the in-block time)",
+    "c_none": "reports before (after) the time, none with a position within 150 s",
+    "c_sparse": "fewer than 10 positions within 150 s of the time",
+    "cd": "reports before (after) the time, no OPDI time (positions not read)",
+    "d": "positions around the time, no OPDI time",
+    "e_early": "OPDI time more than 60 s before the record",
+    "e_late": "OPDI time more than 60 s after the record",
+    "f": "OPDI time within 60 s of the record",
+}
+#: Groups of causes: data that does not exist, and what a rule could improve.
+GROUPS = {
+    "data_missing": ["a1", "a2", "b", "c_none", "c_sparse"],
+    "rule_could_reach": ["d", "e_early", "e_late"],
+}
+
+
+def classify(df: pd.DataFrame, with_tracks: bool) -> pd.DataFrame:
+    """Add ``cause``, ``late_min`` (cause b), ``state`` (cause b) and ``lead_s``.
+
+    ``lead_s`` is the time from the first report to the recorded off-block
+    time (from the recorded in-block time to the last report): positive when
+    the aircraft was received at the stand before it left (after it arrived).
+    """
+    d = df.copy()
+    dep = d["kind"] == "AOBT"
+    diff = d["opdi_s"] - d["rec_s"]
+    # The first (last) report received; from the flight list, the first (last) position.
+    first = d["t_first_rx"].fillna(d["fs"]) if with_tracks else d["fs"]
+    last = d["t_last_rx"].fillna(d["ls"]) if with_tracks else d["ls"]
+    d["lead_s"] = np.where(dep, d["rec_s"] - first, last - d["rec_s"])
+    no_flight = d["flight_id"].isna()
+    rwy = d["rwy_s"]
+    beyond_runway = np.where(dep, first > rwy, last < rwy) & rwy.notna()
+    late = d["lead_s"] < 0
+    cause = pd.Series("", index=d.index, dtype=object)
+
+    def put(mask, name):
+        m = mask & (cause == "")
+        cause[m] = name
+
+    put(diff.abs() <= 60, "f")
+    put(no_flight, "a1")
+    put(pd.Series(beyond_runway, index=d.index), "a2")
+    put(late, "b")
+    if with_tracks:
+        put(d["n_pos_around"].fillna(0) == 0, "c_none")
+        put(d["n_pos_around"].fillna(0) < MIN_POSITIONS, "c_sparse")
+        put(d["opdi_s"].isna(), "d")
+    else:
+        put(d["opdi_s"].isna(), "cd")
+    put(diff < 0, "e_early")
+    put(diff > 0, "e_late")
+    d["cause"] = cause
+    d["late_min"] = pd.cut(-d["lead_s"] / 60.0, LATE_BINS, labels=LATE_LABELS, right=False)
+    d.loc[d["cause"] != "b", "late_min"] = np.nan
+    if with_tracks:
+        side = np.where(dep, "first_pos", "last_pos")
+        aero = np.where(dep, d.get("first_pos_aeroway"), d.get("last_pos_aeroway"))
+        kt = np.where(dep, d.get("first_pos_kt"), d.get("last_pos_kt")).astype(float)
+        state = np.select(
+            [aero == "runway", aero == "taxiway", kt > MOVING_KT, pd.isna(kt)],
+            ["on runway", "on taxiway", "moving elsewhere", "speed unknown"],
+            "standing",
+        )
+        state = np.where(pd.isna(d["t_first_pos"]), "no position", state)
+        d["state"] = np.where(d["cause"] == "b", state, None)
+        del side
+    else:
+        d["state"] = None
+    d["diff_s"] = diff
+    return d
+
+
+#: Column of the published table for each cause.
+COLUMNS = {
+    "a1": "no_track",
+    "a2": "track_beyond_runway_time",
+    "b": "not_received_at_the_time",
+    "c_none": "no_position_around_the_time",
+    "c_sparse": "few_positions_around_the_time",
+    "cd": "received_but_no_opdi_time",
+    "d": "positions_but_no_opdi_time",
+    "e_early": "opdi_time_early",
+    "e_late": "opdi_time_late",
+    "f": "opdi_time_within_60s",
+}
+ITEM = {"AOBT": "off-block", "AIBT": "in-block"}
+#: Values of ``method``: the default settings (the off-block time at the start
+#: of the push-back), and the same without that setting.
+METHOD_NOW = "current"
+METHOD_BEFORE = "without push-back start"
+#: Share of arrivals still received after the recorded in-block time from
+#: which the stands of an airport count as received, and under which as not.
+STANDS_RECEIVED_PCT = 50.0
+STANDS_NOT_RECEIVED_PCT = 10.0
+
+
+def _shares(g: pd.DataFrame) -> dict:
+    """Counts and shares of one group of records; the shares of the causes add up to 100."""
+    n = len(g)
+    out = {"records": n}
+    counts = g["cause"].value_counts()
+    for k in CAUSES:
+        out[f"n_{COLUMNS[k]}"] = int(counts.get(k, 0))
+        out[f"pct_{COLUMNS[k]}"] = round(100.0 * counts.get(k, 0) / n, 1) if n else np.nan
+    for name, ks in GROUPS.items():
+        out[f"pct_{name}"] = (
+            round(100.0 * sum(counts.get(k, 0) for k in ks) / n, 1) if n else np.nan
+        )
+    has = g["opdi_s"].notna()
+    close = g["diff_s"].abs() <= 60
+    out["n_opdi_time"] = int(has.sum())
+    out["pct_opdi_time"] = round(100.0 * has.mean(), 1) if n else np.nan
+    out["pct_of_opdi_times_within_60s"] = (
+        round(100.0 * close.sum() / has.sum(), 1) if has.sum() else np.nan
+    )
+    out["median_abs_diff_s"] = (
+        round(float(g.loc[has, "diff_s"].abs().median()), 0) if has.sum() else np.nan
+    )
+    # Received at the stand: a report before the recorded off-block time
+    # (after the recorded in-block time).
+    lead = g["lead_s"]
+    at_stand = g["flight_id"].notna() & (lead > 0)
+    out["n_received_at_stand"] = int(at_stand.sum())
+    out["pct_received_at_stand"] = round(100.0 * at_stand.mean(), 1) if n else np.nan
+    sub = g[at_stand]
+    sub_has = sub["opdi_s"].notna()
+    out["pct_opdi_time_when_received_at_stand"] = (
+        round(100.0 * sub_has.mean(), 1) if len(sub) else np.nan
+    )
+    out["pct_within_60s_when_received_at_stand"] = (
+        round(100.0 * (sub["diff_s"].abs() <= 60).sum() / sub_has.sum(), 1)
+        if sub_has.sum()
+        else np.nan
+    )
+    out["median_abs_diff_s_when_received_at_stand"] = (
+        round(float(sub.loc[sub_has, "diff_s"].abs().median()), 0) if sub_has.sum() else np.nan
+    )
+    return out
+
+
+#: Value of ``first_seen_on`` in the table for an off-block time without one.
+NOT_GIVEN = "not given"
+
+
+def first_seen_table(by_day: dict) -> pd.DataFrame:
+    """The accuracy of the off-block times by ``info.first_seen_on``.
+
+    ``by_day`` maps a day to its classified records (:func:`classify`). One
+    row per day and value of ``first_seen_on`` (``stand``, ``apron``,
+    ``taxiway``, ``other``; :data:`NOT_GIVEN` when the event has none: the
+    track holds the landing before the departure, or passes no part of an
+    airport layout), one row ``all`` per day, and the same for the days
+    together. Counted are the off-block times that have an airport record:
+    their number, the share within 60 s of the record and the median
+    difference, and the same for those received at the stand (a report
+    before the recorded off-block time).
+    """
+
+    def value(info):
+        if not isinstance(info, str):
+            return NOT_GIVEN
+        return json.loads(info).get("first_seen_on") or NOT_GIVEN
+
+    def row(day, name, g):
+        close = g["diff_s"].abs() <= 60
+        at_stand = g["lead_s"] > 0
+        sub = g[at_stand]
+        return {
+            "day": day,
+            "first_seen_on": name,
+            "off_block_times": len(g),
+            "pct_within_60s": round(100.0 * close.mean(), 1) if len(g) else np.nan,
+            "median_abs_diff_s": round(float(g["diff_s"].abs().median()), 0) if len(g) else np.nan,
+            "n_received_at_stand": int(at_stand.sum()),
+            "pct_within_60s_when_received_at_stand": (
+                round(100.0 * (sub["diff_s"].abs() <= 60).mean(), 1) if len(sub) else np.nan
+            ),
+            "median_abs_diff_s_when_received_at_stand": (
+                round(float(sub["diff_s"].abs().median()), 0) if len(sub) else np.nan
+            ),
+        }
+
+    frames = {
+        day: d[(d["kind"] == "AOBT") & d["opdi_s"].notna()].assign(
+            _where=lambda x: x["opdi_info"].map(value)
+        )
+        for day, d in by_day.items()
+    }
+    if len(frames) > 1:
+        frames[f"{len(frames)} days"] = pd.concat(frames.values(), ignore_index=True)
+    order = ["stand", "apron", "taxiway", "other", NOT_GIVEN]
+    rows = []
+    for day, g in frames.items():
+        rows.append(row(day, "all", g))
+        for name in order:
+            if (g["_where"] == name).any():
+                rows.append(row(day, name, g[g["_where"] == name]))
+    return pd.DataFrame(rows)
+
+
+def tracks_divided(days, folder: Path = None) -> pd.DataFrame:
+    """Per day: the tracks, those divided into several flights, and the flight rows.
+
+    Read from the ``meta.json`` of each day's extract (``extract`` counts
+    them in the flight list with one row per flight).
+    """
+    rows = []
+    for day in days:
+        p = (folder or EXTRACT) / day / "meta.json"
+        if not p.exists():
+            continue
+        m = json.loads(p.read_text())
+        if "tracks_divided" not in m:
+            continue
+        rows.append(
+            {
+                "day": day,
+                "tracks": m["tracks"],
+                "tracks_divided_into_flights": m["tracks_divided"],
+                "flights_of_divided_tracks": m["flights_of_divided_tracks"],
+                "flight_rows": m["flight_rows"],
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "day",
+            "tracks",
+            "tracks_divided_into_flights",
+            "flights_of_divided_tracks",
+            "flight_rows",
+        ],
+    )
+
+
+def _flight_counts(FLX) -> dict:
+    """Tracks, tracks divided into several flights, and flight rows of ``FLX``."""
+    from pyspark.sql import functions as F
+
+    per_track = FLX.groupBy("track_id").agg(F.count(F.lit(1)).alias("n"))
+    r = per_track.agg(
+        F.count(F.lit(1)).alias("tracks"),
+        F.count(F.when(F.col("n") > 1, 1)).alias("tracks_divided"),
+        F.coalesce(F.sum(F.when(F.col("n") > 1, F.col("n"))), F.lit(0)).alias("of_divided"),
+        F.coalesce(F.sum("n"), F.lit(0)).alias("rows"),
+    ).collect()[0]
+    return {
+        "tracks": int(r["tracks"]),
+        "tracks_divided": int(r["tracks_divided"]),
+        "flights_of_divided_tracks": int(r["of_divided"]),
+        "flight_rows": int(r["rows"]),
+    }
+
+
+def load(days, folder: Path = None) -> tuple[dict, dict]:
+    """Per day: the records classified from the reports (with tracks) and from the flight list."""
+    full, coarse = {}, {}
+    for day in days:
+        p = (folder or EXTRACT) / day / "records.parquet"
+        if p.exists():
+            df = pd.read_parquet(p)
+            coarse[day] = classify(df, False)
+            if "t_first_rx" in df.columns:
+                full[day] = classify(df, True)
+    return full, coarse
+
+
+def stand_reception(d: pd.DataFrame) -> pd.Series:
+    """Per airport: whether its stands are received, from the arrivals.
+
+    The share of the recorded in-block times after which the aircraft was
+    still received. An arriving aircraft keeps its transponder on until it
+    is parked, so this share says what the receivers see of the stands,
+    whatever the crews do before departure: ``received`` from
+    :data:`STANDS_RECEIVED_PCT`, ``not received`` under
+    :data:`STANDS_NOT_RECEIVED_PCT`, ``partly`` between, and ``too few
+    records`` under 30 in-block records.
+    """
+    arr = d[d["kind"] == "AIBT"]
+    seen = arr["flight_id"].notna() & (arr["lead_s"] > 0)
+    by = seen.groupby(arr["rec_apt"]).agg(["mean", "size"])
+    pct = 100.0 * by["mean"]
+    label = np.select(
+        [by["size"] < 30, pct >= STANDS_RECEIVED_PCT, pct < STANDS_NOT_RECEIVED_PCT],
+        ["too few records", "received", "not received"],
+        "partly",
+    )
+    return pd.Series(label, index=by.index, name="stands")
+
+
+def _rows(scope_day: str, detail: str, d: pd.DataFrame, busiest, stands) -> list[dict]:
+    """The rows of one day (or of the days together): all airports, each
+    class of stand reception, and each of the busiest airports."""
+    rows = []
+    d = d.assign(stands=d["rec_apt"].map(stands).fillna("too few records"))
+    for kind, g in d.groupby("kind"):
+        head = {"day": scope_day, "read_from": detail, "item": ITEM[kind]}
+        rows.append({**head, "scope": "all airports", "airport": "", **_shares(g)})
+        for label, gs in g.groupby("stands"):
+            rows.append({**head, "scope": f"airports whose stands are {label}", **_shares(gs)})
+        for apt, ga in g[g["rec_apt"].isin(busiest)].groupby("rec_apt"):
+            rows.append(
+                {
+                    **head,
+                    "scope": "airport",
+                    "airport": apt,
+                    "stands": stands.get(apt, "too few records"),
+                    **_shares(ga),
+                }
+            )
+    return rows
+
+
+def build(days, before: Path = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """The table of causes, the detail of cause ``b``, and the record counts per day.
+
+    ``before`` is the extract folder of the same days processed with the
+    setting ``off_block_at_start_of_push_back`` off; its rows (the days read
+    from the reports) carry :data:`METHOD_BEFORE` in ``method``, the others
+    :data:`METHOD_NOW`.
+    """
+    full, coarse = load(days)
+    busiest = pd.read_csv(AIRPORTS_CSV, usecols=["rank", "airport", "name"]).drop_duplicates(
+        "airport"
+    )
+    busiest = busiest[busiest["rank"] <= 100]
+    apts = set(busiest["airport"])
+    rows, inputs = [], {}
+    # Stand reception is read from the days with reports where there is one,
+    # else from the flight list of all days together.
+    basis = pd.concat((full or coarse).values(), ignore_index=True)
+    stands = stand_reception(basis).to_dict()
+    for day, d in full.items():
+        rows += _rows(day, "reports", d, apts, stands)
+        inputs[f"{day} records (reports)"] = len(d)
+    for day, d in coarse.items():
+        rows += _rows(day, "flight list", d, apts, stands)
+        inputs[f"{day} records"] = len(d)
+    if len(coarse) > 1:
+        pooled = pd.concat(coarse.values(), ignore_index=True)
+        rows += _rows(f"{len(coarse)} days", "flight list", pooled, apts, stands)
+    for row in rows:
+        row["method"] = METHOD_NOW
+    if before is not None:
+        for day, d in load(days, before)[0].items():
+            earlier = _rows(day, "reports", d, apts, stands)
+            for row in earlier:
+                row["method"] = METHOD_BEFORE
+            rows += earlier
+            inputs[f"{day} records ({METHOD_BEFORE})"] = len(d)
+    res = pd.DataFrame(rows).merge(
+        busiest.rename(columns={"rank": "airport_rank"}), on="airport", how="left"
+    )
+    front = [
+        "day",
+        "read_from",
+        "method",
+        "item",
+        "scope",
+        "airport",
+        "airport_rank",
+        "name",
+        "stands",
+    ]
+    res = res[front + [c for c in res.columns if c not in front]]
+    cause_cols = [f"pct_{COLUMNS[k]}" for k in CAUSES]
+    off = (res[cause_cols].sum(axis=1) - 100.0).abs().max()
+    if off > 0.35:
+        raise SystemExit(f"the shares of the causes do not add up to 100 (off by {off:.2f})")
+    # Cause b on the days with reports: how late, and the state of the first (last) position.
+    det = []
+    for day, d in full.items():
+        for kind, g in d[d["cause"] == "b"].groupby("kind"):
+            tot = int((d["kind"] == kind).sum())
+            for (lm, st), gg in g.groupby(["late_min", "state"], observed=True):
+                det.append(
+                    {
+                        "day": day,
+                        "item": ITEM[kind],
+                        "late": lm,
+                        "state": st,
+                        "n": len(gg),
+                        "pct_of_records": round(100 * len(gg) / tot, 2),
+                    }
+                )
+    return res, pd.DataFrame(det), inputs
+
+
+def tables(args) -> int:
+    import provenance
+
+    res, det, inputs = build(args.days, Path(args.before) if args.before else None)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    full, coarse = load(args.days)
+    built = {
+        "offblock_causes.csv": res,
+        "offblock_first_seen_on.csv": first_seen_table(full or coarse),
+        "tracks_divided.csv": tracks_divided(args.days),
+    }
+    if args.detail:
+        built["offblock_causes_b_detail.csv"] = det
+    for name, frame in built.items():
+        frame.to_csv(out / name, index=False)
+        provenance.record(
+            out,
+            name,
+            script="benchmarks/offblock_causes.py",
+            argv=sys.argv[1:],
+            code_paths=[
+                BENCH / "offblock_causes.py",
+                BENCH / "airport_accuracy.py",
+                BENCH / "corrections_scorecard.py",
+            ],
+            inputs=dict(inputs, rows=len(frame)),
+            notes=args.notes,
+        )
+    show = res[res["scope"] != "airport"].set_index(["day", "read_from", "method", "item", "scope"])
+    print(show.drop(columns=["airport", "airport_rank", "name", "stands"]).T.to_string())
+    return 0
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+    e = sub.add_parser("extract")
+    e.add_argument("--day", required=True)
+    e.add_argument(
+        "--root", required=True, help="folder with opdi_flight_events and opdi_flight_list"
+    )
+    e.add_argument("--tracks", default=None, help="folder with osn_tracks_clean")
+    e.add_argument("--executors", type=int, default=13)
+    t = sub.add_parser("tables")
+    t.add_argument("--out", required=True)
+    t.add_argument("--days", nargs="+", default=["2026-06-10", "2026-06-14", "2026-06-17"])
+    t.add_argument("--detail", action="store_true", help="also write the detail of cause b")
+    t.add_argument(
+        "--before",
+        default=None,
+        help="extract folder of the same days without the push-back start (a second method)",
+    )
+    t.add_argument("--notes", default="", help="text for the manifest entry")
+    args = p.parse_args(argv)
+    return {"extract": extract, "tables": tables}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

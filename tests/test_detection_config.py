@@ -83,14 +83,13 @@ def test_unknown_mode_is_rejected():
     """`process_dai` used to branch on `mode == "trend"` versus *everything
     else*, so a typo silently ran the endpoint path. The mode set is now
     closed."""
-    modes = {"trend", "endpoint", "nearest"}
-    for bad in ("Trend", "endpoints", "", "traffic"):
+    modes = set(FlightListProcessor.DETECTION_MODES)
+    assert modes == {"trend", "endpoint"}
+    for bad in ("Trend", "endpoints", "", "traffic", "nearest"):
         assert bad not in modes
 
 
-@pytest.mark.parametrize(
-    "field_name,field", list(DetectionConfig().__dataclass_fields__.items())
-)
+@pytest.mark.parametrize("field_name,field", list(DetectionConfig().__dataclass_fields__.items()))
 def test_every_measurement_carries_its_unit(field_name, field):
     """The package convention: units live in field names so a threshold cannot
     be read in the wrong one.
@@ -109,7 +108,8 @@ def test_every_measurement_carries_its_unit(field_name, field):
     # The two numeric exceptions: a count of samples and a flight level, both
     # of which carry their unit in the name already ("fl", "window", "margin").
     counts = {"trend_max_fl", "trend_smooth_half_window", "trend_vote_margin"}
-    assert field_name in counts or field_name.endswith(("_nm", "_ft"))
+    # Durations carry seconds ("_s").
+    assert field_name in counts or field_name.endswith(("_nm", "_ft", "_s"))
 
 
 def test_shipped_defaults_are_the_values_the_study_supports():
@@ -153,7 +153,7 @@ def test_the_recommended_configuration_is_what_a_caller_gets_by_default():
     d = DetectionConfig()
     assert d.adep_mode == "endpoint"
     assert d.ades_mode == "trend"
-    assert {d.adep_mode, d.ades_mode} <= {"trend", "endpoint", "nearest"}
+    assert {d.adep_mode, d.ades_mode} <= {"trend", "endpoint"}
 
     # Published lists were built from `trend` alone; `endpoint` served nothing.
     legacy = DetectionConfig.legacy()
@@ -182,7 +182,6 @@ def test_every_new_behaviour_is_off_under_legacy():
     prevent -- and it would do so without failing anything.
     """
     legacy = DetectionConfig.legacy()
-    assert legacy.trend_ooa is False
     assert legacy.trend_bearing_tiebreak_nm == 0.0
     assert legacy.trend_smooth_before_cut is False
     assert legacy.trend_radius_exact is False
@@ -197,21 +196,6 @@ def test_the_shipped_new_behaviours_are_on():
     assert d.trend_bearing_tiebreak_nm == 2.0
     assert d.trend_smooth_before_cut is True
     assert d.trend_radius_exact is True
-
-
-def test_trend_out_of_area_is_implemented_but_not_enabled():
-    """Built, measured, and deliberately off -- which is not the same as absent.
-
-    The switch exists and works; the geometry does not support it for the role
-    that matters. Departures ship from `endpoint`, so this only reaches
-    arrivals, where the label is right 50.35% of the time against `endpoint`'s
-    89.20%. Every label replaces a silence, so at k = 2 that is a losing trade.
-
-    Pinned so that "the feature is implemented, why is it off?" has to be
-    answered against the measurement rather than switched on by assumption.
-    """
-    assert DetectionConfig().trend_ooa is False
-    assert DetectionConfig.legacy().trend_ooa is False
 
 
 def test_version_string_is_new_and_the_published_ones_are_untouched():
@@ -232,7 +216,7 @@ def test_version_string_is_new_and_the_published_ones_are_untouched():
         LEGACY_TREND_VERSION,
     )
 
-    assert FLIGHT_LIST_VERSION == "v5.0.0"
+    assert FLIGHT_LIST_VERSION == "v6.0.0"
     assert LEGACY_TREND_VERSION == "v2.0.0"
     assert LEGACY_ENDPOINT_VERSION == "v3.0.0"
     assert FLIGHT_LIST_VERSION not in (LEGACY_TREND_VERSION, LEGACY_ENDPOINT_VERSION)
@@ -281,7 +265,7 @@ def test_defaults_differ_from_legacy_so_the_preset_is_load_bearing():
     assert DetectionConfig.legacy().endpoint_radius_nm == 40.0
 
 
-@pytest.mark.parametrize("env", ["opensky", "local", "dev", "live"])
+@pytest.mark.parametrize("env", ["opensky", "local"])
 def test_the_pipeline_gets_the_field_datum_in_every_environment(env):
     """The datum has to reach the *pipeline*, not just the benchmarks.
 

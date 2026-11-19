@@ -37,6 +37,7 @@ H3_CELL = "8c1f05a3280a1ff"
 
 # --- the invariant, at the level of the key itself --------------------------
 
+
 def test_a_track_with_two_callsigns_yields_one_group_per_zone(spark):
     """The fan-out, stated as the thing a reader would notice in the data.
 
@@ -44,16 +45,17 @@ def test_a_track_with_two_callsigns_yields_one_group_per_zone(spark):
     unresolved ``flight_id`` makes it two.
     """
     df = spark.createDataFrame(
-        [("t1", "abc123", "SAS123", "EKCH", "rwy04L"),
-         ("t1", "abc123", "", "EKCH", "rwy04L"),
-         ("t1", "abc123", "SAS123", "EKCH", "rwy04L")],
+        [
+            ("t1", "abc123", "SAS123", "EKCH", "rwy04L"),
+            ("t1", "abc123", "", "EKCH", "rwy04L"),
+            ("t1", "abc123", "SAS123", "EKCH", "rwy04L"),
+        ],
         "track_id string, icao24 string, flight_id string, "
         "hexaero_apt_icao string, hexaero_ref string",
     )
     grouped = (
         resolve_flight_id(df)
-        .groupBy("track_id", "icao24", "flight_id",
-                 "hexaero_apt_icao", "hexaero_ref")
+        .groupBy("track_id", "icao24", "flight_id", "hexaero_apt_icao", "hexaero_ref")
         .agg(F.count(F.lit(1)).alias("n"))
     )
     rows = grouped.collect()
@@ -76,6 +78,7 @@ def test_events_imports_the_helper_rather_than_owning_a_copy(spark):
 
 # --- the same invariant, through the function that publishes the events -----
 
+
 class _StubStorage:
     """Just enough StorageManager for the airport detector."""
 
@@ -94,18 +97,19 @@ def storage(spark):
     """One flight bound for EKCH, and one EKCH taxiway hexagon."""
     flight_list = spark.createDataFrame(
         [("trk-1", dt.datetime(2024, 6, 1, 12, 0), "EKCH", "EDDF", None, None)],
-        "id string, dof timestamp, adep string, ades string, "
-        "adep_p string, ades_p string",
+        "id string, dof timestamp, adep string, ades string, " "adep_p string, ades_p string",
     )
     layouts = spark.createDataFrame(
         [(H3_CELL, "EKCH", "osm-1", "taxiway", "04L")],
         "hexaero_h3_id string, hexaero_apt_icao string, hexaero_osm_id string, "
         "hexaero_aeroway string, hexaero_ref string",
     )
-    return _StubStorage({
-        "opdi_flight_list": flight_list,
-        "hexaero_airport_layouts": layouts,
-    })
+    return _StubStorage(
+        {
+            "opdi_flight_list": flight_list,
+            "hexaero_airport_layouts": layouts,
+        }
+    )
 
 
 def _crossing(spark, samples):
@@ -165,9 +169,10 @@ def test_one_taxiway_crossing_is_one_event_not_one_per_callsign(spark, storage):
     this returns four milestones for one crossing; resolved it returns two.
     """
     rows = _events(spark, storage, ["SAS123", "SAS123", "SAS123", "", ""])
-    assert sorted(r["type"] for r in rows) == ["entry-taxiway", "exit-taxiway"], (
-        f"expected one entry/exit pair, got {[r['type'] for r in rows]}"
-    )
+    assert sorted(r["type"] for r in rows) == [
+        "entry-taxiway",
+        "exit-taxiway",
+    ], f"expected one entry/exit pair, got {[r['type'] for r in rows]}"
     assert _published_callsigns(rows) == {"SAS123"}
 
 
@@ -212,18 +217,23 @@ def test_the_vote_counts_samples_the_dropna_would_later_remove(spark, storage):
     which is what makes this test sensitive to the ordering rather than merely
     compatible with it.
     """
-    rows = _events(spark, storage, [
-        ("SAS123", False),
-        ("SAS123", False),
-        ("SAS123", False),
-        ("AAA111", True),
-        ("AAA111", True),
-    ])
+    rows = _events(
+        spark,
+        storage,
+        [
+            ("SAS123", False),
+            ("SAS123", False),
+            ("SAS123", False),
+            ("AAA111", True),
+            ("AAA111", True),
+        ],
+    )
     assert sorted(r["type"] for r in rows) == ["entry-taxiway", "exit-taxiway"]
     assert _published_callsigns(rows) == {"SAS123"}
 
 
 # --- the exemption for runs that reproduce a release ------------------------
+
 
 def test_a_legacy_run_publishes_the_padded_blank_its_release_published(spark, storage):
     """``events_v0.0.2`` is a released string; a run stamping it must reproduce.

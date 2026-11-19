@@ -1,178 +1,156 @@
 Pipeline Overview
 =================
 
-The OPDI pipeline transforms raw ADS-B surveillance data into structured
-aviation performance datasets through a sequence of numbered stages. Each stage
-corresponds to one or more modules in the ``opdi`` package.
+The OPDI pipeline turns the position reports that aircraft broadcast (ADS-B,
+collected by the OpenSky Network) into a daily flight list and daily flight
+events. It runs as numbered steps; each step reads the tables of the steps
+before it and writes its own. Each method, its thresholds and its validation
+are described on the OPDI website, https://www.opdi.aero/content/methods/;
+this page gives the order of the steps and the module of each.
 
-Stage 00 -- Reference Data & Ingestion Setup
----------------------------------------------
+Step 00 -- Reference tables
+---------------------------
 
-Before processing flight data, several reference datasets must be prepared.
+Built once per warehouse; a later run reuses the tables that are complete.
 
-**Airport detection zones** (:mod:`opdi.reference.h3_airport_zones`)
-   Generate H3 hexagonal zones around airport reference points at resolution 7
-   (~5.2 km per hexagon). These zones are later used to detect departures and
-   arrivals.
+**Airport detection zones** (:mod:`opdi.reference.h3_airport_zones`, 00a)
+   Rings of H3 cells at resolution 7 (about 5 km across) around every airport,
+   every 5 NM out to 110 NM. Step 03 matches reports to them.
 
-**Airport ground layouts** (:mod:`opdi.reference.h3_airport_layouts`)
-   Build H3 representations of runways, taxiways, aprons, stands, hangars,
-   thresholds and de-icing pads at resolution 12 (~307 m) from a **local
-   OpenStreetMap extract**, configured through ``h3.airport_layout_pbf_path``
-   or ``OPDI_OSM_PBF``. The extract is reduced to aeroway geometry once by
-   :func:`opdi.reference.pbf_filter.filter_aeroway_pbf` and the result cached
-   beside it. Features are assigned to the aerodrome whose OSM boundary
-   (``aeroway=aerodrome``, matched on its ``icao`` tag) contains them, falling
-   back to a runway-extent bounding box where OSM maps the aerodrome as a bare
-   node. With no extract configured the step falls back to the ``osmnx`` /
-   Overpass path, which works for a single airport but cannot build the
-   network. See ``readme.md``, step 00b.
+**Airport layouts** (:mod:`opdi.reference.h3_airport_layouts`, 00b)
+   Runways, taxiways, aprons, stands and other parts of each airport, from a
+   local OpenStreetMap extract (``OPDI_OSM_PBF``), as H3 cells at resolution 12
+   (about 20 m across). Step 04 matches reports to them.
 
-**Airspace boundaries** (:mod:`opdi.reference.h3_airspaces`)
-   Encode FIR / UIR / TMA airspace polygons into H3 hexagons for efficient
-   spatial joins.
+**Airspaces** (:mod:`opdi.reference.h3_airspaces`, 00c)
+   Flight information regions (FIRs) and other airspaces as compact H3 cells,
+   for the FIR crossings of step 04.
 
-**OurAirports** (:mod:`opdi.ingestion.ourairports`)
-   Download and ingest airport metadata (ICAO codes, coordinates, runway info)
-   from the OurAirports open dataset.
+**OurAirports** (:mod:`opdi.ingestion.ourairports`, 00d)
+   Airport positions and elevations, and runway thresholds.
 
-**Aircraft database** (:mod:`opdi.ingestion.osn_aircraft_db`)
-   Download the OpenSky Network aircraft database containing registration,
-   model, and operator information keyed by ICAO 24-bit transponder address.
+**Aircraft database** (:mod:`opdi.ingestion.osn_aircraft_db`, 00e)
+   Registration, model, type and operator by ICAO 24-bit address.
 
-Stage 01 -- State Vector Ingestion
-------------------------------------
+**Runway grid** (:mod:`opdi.reference.h3_runway_grid`, 00f)
+   Runways and approach corridors as H3 cells, for the runway milestones.
+
+Step 01 -- Position reports
+---------------------------
 
 :mod:`opdi.ingestion.osn_statevectors`
 
-Raw ADS-B state vectors are downloaded from the OpenSky Network MinIO server in
-batched Parquet files. The ingestion module:
+The state vectors of the day before, the day and the day after are read from
+the OpenSky archive, limited to the coverage (worldwide by default), thinned
+to one report per aircraft every 5 seconds and written per day. Altitudes are
+in metres and speeds in metres per second, as OpenSky delivers them.
 
-- Authenticates via MinIO using ``OSN_USERNAME`` / ``OSN_KEY``.
-- Downloads files in configurable batches (default 250).
-- Normalises column names from camelCase to snake_case.
-- Writes to an Iceberg table partitioned by date.
-- Tracks progress so that re-runs skip already-processed files.
+Step 02 -- Tracks
+-----------------
 
-Stage 02 -- Track Creation
---------------------------
+:mod:`opdi.pipeline.tracks`, :mod:`opdi.pipeline.segmentation`
 
-:mod:`opdi.pipeline.tracks`
+The reports are split into tracks, one per flight. The default rule groups the
+reports by aircraft address and starts a new track when the call sign changes
+for longer than 30 seconds, at a gap of more than 15 minutes at low altitude,
+or at a gap of more than 30 minutes unless both sides of the gap fit one
+continuous flight at cruise level. The ``track_id`` is the hash of the group
+key and the second of the track's first report. Each report also gets its H3
+cells, the distance flown since the start of the track and checked altitudes.
 
-State vectors are grouped into flight tracks by:
+Step 02a -- Cleaning
+--------------------
 
-1. Sorting by ``(icao24, event_time)``.
-2. Splitting where the time gap exceeds a configurable threshold (default
-   30 minutes).
-3. Assigning a deterministic ``track_id`` via SHA-256 hashing.
-4. Encoding each position into H3 hexagons at resolutions 7 and 12.
-5. Computing segment and cumulative distances using the Haversine formula.
-6. Cleaning altitude outliers using a configurable maximum vertical rate.
+:mod:`opdi.cleaning`
 
-Stage 03 -- Flight List Generation
-------------------------------------
+Values that cannot be trusted (repeated values, spikes, isolated values) are
+set to NULL, keeping the rows, and every gap of 5 minutes or more starts a new
+segment.
+
+Step 03 -- Flight list
+----------------------
 
 :mod:`opdi.pipeline.flights`
 
-Tracks are classified into flights:
+For every track, the departure airport is named from its first report near an
+airport (the ``endpoint`` method) and the destination airport from the
+altitude trend of its reports near an airport (the ``trend`` method). The
+tracks that cannot be placed near any airport and last at least 5 minutes are
+added as overflights. Each row gets the aircraft's data.
 
-- **Departures** -- the first track point falls inside an airport H3 zone.
-- **Arrivals** -- the last track point falls inside an airport H3 zone.
-- **Overflights** -- no match with any airport zone.
+Step 04 -- Flight events and measurements
+-----------------------------------------
 
-Each flight record is enriched with aircraft metadata from the aircraft
-database (registration, model, operator) and written to the OPDI flight list
-table.
+:mod:`opdi.pipeline.events` and one module per event family
 
-Stage 04 -- Flight Event Detection
--------------------------------------
+**Flight phases** by fuzzy logic (the membership functions of OpenAP) on
+altitude, vertical rate and speed, giving level-start and level-end; the top of
+climb and top of descent of the vertical flight efficiency method; level-offs
+in climb and descent.
 
-:mod:`opdi.pipeline.events`
+**Crossings** of flight levels (FL050, FL070, FL100, FL245) and of distance
+circles around the departure and destination airports (40 NM to 120 NM).
 
-Detailed events are extracted from each track:
+**Runway milestones** (line-up, take-off roll, airborne, threshold crossing,
+touchdown, runway vacated, go-around, runway crossings), take-off and landing
+times, and off-block and in-block times.
 
-**Horizontal segment events**
-   Flight phase classification (ground, climb, descent, cruise, level) using
-   vertical-rate thresholds. Key milestones such as top-of-climb and
-   top-of-descent are identified.
+**Airport layout events**: entry and exit of runways, taxiways, aprons and
+stands.
 
-**Vertical crossing events**
-   Detection of flight-level crossings at FL50, FL70, FL100, and FL245 --
-   important thresholds for performance analysis.
+**Holding patterns, point merge legs and FIR crossings.**
 
-**Airport surface events**
-   Entry and exit of runway, taxiway, and apron areas detected by matching H3
-   positions against the airport layout reference.
+**Measurements**: every event carries the distance flown and the time passed
+since the start of its track (cumulative, not since the previous event), and
+some families add their own (holding duration and circuits, point merge leg
+time and distance).
 
-**Measurement records**
-   Distance flown and time elapsed are computed between consecutive events.
+Step 04b -- Milestones on the flight list
+-----------------------------------------
 
-Stage 05 -- Data Extraction
-----------------------------
+:mod:`opdi.pipeline.flight_list_step`
 
-:mod:`opdi.output.parquet_exporter`
+The main times, runways, stands and circle crossings of each flight are copied
+from its events onto the flight list, and the departure and destination
+airports are corrected where a runway event names them.
 
-The flight list, events, and measurements tables are exported to Parquet files
-with configurable time intervals (typically 10-day windows). This stage
-produces the files that are published as the OPDI open dataset.
+Step 09 -- Published daily files
+--------------------------------
 
-Stage 06 -- Cleanup
---------------------
+:mod:`opdi.output.published`
 
-:mod:`opdi.output.csv_exporter`
+Each day's flight list and flight events (with their measurements as columns)
+are written as one Parquet file each, under ``<release root>/published``,
+together with a monthly flight index and a catalogue of the published days.
+:mod:`opdi.published` reads them without Spark.
 
-Exported Parquet files are deduplicated and converted to compressed CSV for
-distribution. The :func:`~opdi.output.csv_exporter.clean_and_save_data`
-function removes duplicate rows and saves the result as gzip-compressed CSV.
-
-Stage 07 -- Basic Statistics
------------------------------
-
-:mod:`opdi.monitoring.basic_stats`
-
-Row counts and basic summary statistics are collected across all OPDI tables
-to monitor pipeline health and data completeness.
-
-Stage 08 -- Advanced Statistics
----------------------------------
-
-:mod:`opdi.monitoring.advanced_stats`
-
-In-depth data quality analysis:
-
-- Daily row-count trend analysis
-- Anomaly detection (suspiciously low counts)
-- Known outage tracking
-- MinIO bucket availability monitoring
-- Interactive Plotly visualisations for exploration
-
-Data Flow Diagram
------------------
+Data flow
+---------
 
 .. code-block:: text
 
    OpenSky Network              OurAirports         OpenStreetMap
         |                           |                     |
         v                           v                     v
-   [01] State Vectors          [00] Airports         [00] Layouts
+   [01] State vectors          [00] Airports         [00] Layouts
         |                           |                     |
         v                           v                     v
-   [02] Tracks  <--------  [00] H3 Airport Zones / Airspaces
+   [02] Tracks  <--------  [00] Airport zones, runway grid, airspaces
         |
         v
-   [03] Flight List  <----  Aircraft Database
+   [02a] Cleaned tracks
         |
         v
-   [04] Flight Events
+   [03] Flight list  <----  Aircraft database
         |
         v
-   [05] Parquet Export  -->  [06] CSV Export
+   [04] Flight events  -->  [04b] Milestones on the flight list
         |
         v
-   [07] Basic Stats  -->  [08] Advanced Stats
+   [09] Published daily files
 
-See Also
+See also
 --------
 
-- :doc:`getting_started` for installation instructions.
-- :doc:`api/index` for detailed module-level documentation.
+- :doc:`getting_started` for installation.
+- :doc:`api/index` for the modules.

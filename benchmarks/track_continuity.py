@@ -45,8 +45,14 @@ __all__ = ["compare", "read_extents", "extents_name", "COMPARISONS", "FIELDS"]
 #: Column order of the CSV, fixed here so the file the paper reads and the
 #: interface this module promises cannot drift apart.
 FIELDS = [
-    "period", "before", "after", "n_before", "n_after", "identical_ids",
-    "identical_pct", "mean_tracks_per_airframe_before",
+    "period",
+    "before",
+    "after",
+    "n_before",
+    "n_after",
+    "identical_ids",
+    "identical_pct",
+    "mean_tracks_per_airframe_before",
     "mean_tracks_per_airframe_after",
 ]
 
@@ -122,8 +128,12 @@ def compare(before, after) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--period", required=True)
-    ap.add_argument("--extents-dir", type=Path, required=True,
-                    help="where the pipeline run staged its extents CSVs")
+    ap.add_argument(
+        "--extents-dir",
+        type=Path,
+        required=True,
+        help="where the pipeline run staged its extents CSVs",
+    )
     ap.add_argument("--results-dir", type=Path, required=True)
     ap.add_argument("--out-name", default=None)
     args = ap.parse_args()
@@ -140,15 +150,18 @@ def main() -> None:
                     raise SystemExit(
                         f"missing {path}; run the pipeline job for "
                         f"{args.period} first -- it writes the extents this "
-                        f"comparison is the only consumer of")
+                        f"comparison is the only consumer of"
+                    )
                 cache[method] = read_extents(path)
                 print(f"  {path.name}: {len(cache[method])} tracks")
 
         row = {"period": args.period, "before": before, "after": after}
         row.update(compare(cache[before], cache[after]))
         rows.append(row)
-        print(f"  {before} -> {after}: {row['identical_pct']:.2f}% of "
-              f"{row['n_before']} ids survive")
+        print(
+            f"  {before} -> {after}: {row['identical_pct']:.2f}% of "
+            f"{row['n_before']} ids survive"
+        )
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     out = args.results_dir / out_name
@@ -158,12 +171,14 @@ def main() -> None:
         writer.writerows(rows)
 
     provenance.record(
-        args.results_dir, out_name,
-        script="benchmarks/track_continuity.py", argv=sys.argv[1:],
+        args.results_dir,
+        out_name,
+        script="benchmarks/track_continuity.py",
+        argv=sys.argv[1:],
         code_paths=["benchmarks/track_continuity.py"],
         inputs={f"tracks_{m}": len(v) for m, v in sorted(cache.items())},
         notes=f"track_id survival between arms, period {args.period}, "
-              f"measured on the id string.",
+        f"measured on the id string.",
     )
     print(f"\n-> {out}")
 

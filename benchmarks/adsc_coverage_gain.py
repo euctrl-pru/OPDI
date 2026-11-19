@@ -60,7 +60,7 @@ def _source_col(df: DataFrame):
 def arm_summary(tracks: DataFrame) -> DataFrame:
     """One row describing one arm."""
     src = _source_col(tracks)
-    is_adsc = (src == F.lit("ADS-C"))
+    is_adsc = src == F.lit("ADS-C")
     df = tracks.withColumn("_adsc", is_adsc.cast("long"))
 
     per_track = df.groupBy("track_id").agg(
@@ -70,8 +70,9 @@ def arm_summary(tracks: DataFrame) -> DataFrame:
         F.min("event_time").alias("_first"),
         F.max("event_time").alias("_last"),
         F.countDistinct(
-            F.when(F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "",
-                   F.trim(F.col("callsign")))
+            F.when(
+                F.trim(F.coalesce(F.col("callsign"), F.lit(""))) != "", F.trim(F.col("callsign"))
+            )
         ).alias("_callsigns"),
     )
 
@@ -87,10 +88,10 @@ def arm_summary(tracks: DataFrame) -> DataFrame:
         F.count(F.lit(1)).alias("tracks"),
         F.sum("_has_adsc").alias("tracks_with_adsc"),
         F.expr("percentile_approx(_n, 0.5)").alias("median_samples_per_track"),
-        (F.sum(F.unix_timestamp("_last") - F.unix_timestamp("_first"))
-         / F.lit(3600.0)).alias("track_hours"),
-        F.sum((F.col("_callsigns") >= 2).cast("long"))
-        .alias("tracks_with_two_callsigns"),
+        (F.sum(F.unix_timestamp("_last") - F.unix_timestamp("_first")) / F.lit(3600.0)).alias(
+            "track_hours"
+        ),
+        F.sum((F.col("_callsigns") >= 2).cast("long")).alias("tracks_with_two_callsigns"),
         # Tracks made of nothing but ADS-C.
         #
         # This is what separates the two reasons the merged arm can hold more
@@ -102,8 +103,9 @@ def arm_summary(tracks: DataFrame) -> DataFrame:
         # that would be harm. Without this column the two are
         # indistinguishable, and the first reading of this study made exactly
         # that mistake.
-        F.sum(((F.col("_n_adsc") == F.col("_n")) & (F.col("_n") > 0))
-              .cast("long")).alias("tracks_all_adsc"),
+        F.sum(((F.col("_n_adsc") == F.col("_n")) & (F.col("_n") > 0)).cast("long")).alias(
+            "tracks_all_adsc"
+        ),
     )
     return totals.crossJoin(per_track_totals)
 
@@ -118,22 +120,21 @@ def bridged_holes(tracks: DataFrame, hole_seconds: int = HOLE_SECONDS) -> DataFr
     twice and six hundred seconds narrower than it is.
     """
     src = _source_col(tracks)
-    t = (tracks
-         .withColumn("_t", F.unix_timestamp("event_time").cast("double"))
-         .withColumn("_src", src))
+    t = tracks.withColumn("_t", F.unix_timestamp("event_time").cast("double")).withColumn(
+        "_src", src
+    )
     adsb_t = F.when(F.col("_src") == F.lit("ADS-B"), F.col("_t"))
 
-    before = Window.partitionBy("track_id").orderBy("_t").rowsBetween(
-        Window.unboundedPreceding, -1)
-    after = Window.partitionBy("track_id").orderBy("_t").rowsBetween(
-        1, Window.unboundedFollowing)
+    before = Window.partitionBy("track_id").orderBy("_t").rowsBetween(Window.unboundedPreceding, -1)
+    after = Window.partitionBy("track_id").orderBy("_t").rowsBetween(1, Window.unboundedFollowing)
 
-    out = (t
-           .withColumn("_prev_adsb", F.max(adsb_t).over(before))
-           .withColumn("_next_adsb", F.min(adsb_t).over(after))
-           .where(F.col("_src") == F.lit("ADS-C"))
-           .withColumn("gap_before_s", F.col("_t") - F.col("_prev_adsb"))
-           .withColumn("gap_after_s", F.col("_next_adsb") - F.col("_t")))
+    out = (
+        t.withColumn("_prev_adsb", F.max(adsb_t).over(before))
+        .withColumn("_next_adsb", F.min(adsb_t).over(after))
+        .where(F.col("_src") == F.lit("ADS-C"))
+        .withColumn("gap_before_s", F.col("_t") - F.col("_prev_adsb"))
+        .withColumn("gap_after_s", F.col("_next_adsb") - F.col("_t"))
+    )
 
     # Both sides, not either: a sample `hole_seconds` after the last ADS-B
     # report and five seconds before the next one is inside a dense stretch
@@ -143,13 +144,15 @@ def bridged_holes(tracks: DataFrame, hole_seconds: int = HOLE_SECONDS) -> DataFr
     # report -- counts as an infinite gap. That is the clearest case of added
     # coverage, and treating NULL as "not a hole" would discard exactly it.
     inf = F.lit(1.0e9)
-    return (out
-            .withColumn("gap_before_s", F.coalesce(F.col("gap_before_s"), inf))
-            .withColumn("gap_after_s", F.coalesce(F.col("gap_after_s"), inf))
-            .where((F.col("gap_before_s") >= F.lit(float(hole_seconds)))
-                   & (F.col("gap_after_s") >= F.lit(float(hole_seconds))))
-            .select("track_id", "icao24", "event_time",
-                    "gap_before_s", "gap_after_s"))
+    return (
+        out.withColumn("gap_before_s", F.coalesce(F.col("gap_before_s"), inf))
+        .withColumn("gap_after_s", F.coalesce(F.col("gap_after_s"), inf))
+        .where(
+            (F.col("gap_before_s") >= F.lit(float(hole_seconds)))
+            & (F.col("gap_after_s") >= F.lit(float(hole_seconds)))
+        )
+        .select("track_id", "icao24", "event_time", "gap_before_s", "gap_after_s")
+    )
 
 
 def extension_by_airframe(base: DataFrame, merged: DataFrame) -> DataFrame:
@@ -160,24 +163,27 @@ def extension_by_airframe(base: DataFrame, merged: DataFrame) -> DataFrame:
     regression -- the merge somehow losing an end -- is visible rather than
     clipped to zero.
     """
+
     def ends(df, tag):
-        return (df
-                .withColumn("day", F.to_date("event_time"))
-                .groupBy("icao24", "day")
-                .agg(F.min("event_time").alias(f"first_{tag}"),
-                     F.max("event_time").alias(f"last_{tag}")))
+        return (
+            df.withColumn("day", F.to_date("event_time"))
+            .groupBy("icao24", "day")
+            .agg(
+                F.min("event_time").alias(f"first_{tag}"), F.max("event_time").alias(f"last_{tag}")
+            )
+        )
 
     b, m = ends(base, "base"), ends(merged, "merged")
-    return (b.join(m, ["icao24", "day"], "inner")
-            .select(
-                "icao24", "day",
-                (F.unix_timestamp("first_merged")
-                 - F.unix_timestamp("first_base")).cast("double")
-                .alias("first_shift_s"),
-                (F.unix_timestamp("last_merged")
-                 - F.unix_timestamp("last_base")).cast("double")
-                .alias("last_shift_s"),
-            ))
+    return b.join(m, ["icao24", "day"], "inner").select(
+        "icao24",
+        "day",
+        (F.unix_timestamp("first_merged") - F.unix_timestamp("first_base"))
+        .cast("double")
+        .alias("first_shift_s"),
+        (F.unix_timestamp("last_merged") - F.unix_timestamp("last_base"))
+        .cast("double")
+        .alias("last_shift_s"),
+    )
 
 
 def main() -> int:
@@ -206,33 +212,36 @@ def main() -> int:
         days = F.array(*[F.lit(d) for d in args.days])
         arms = {}
         for arm in ("base", "merged"):
-            df = (spark.read.parquet(f"{args.prefix}/{arm}/osn_tracks_clean")
-                  .where(F.array_contains(days, F.col("dof").cast("string"))))
+            df = spark.read.parquet(f"{args.prefix}/{arm}/osn_tracks_clean").where(
+                F.array_contains(days, F.col("dof").cast("string"))
+            )
             arms[arm] = df.cache()
             r = arm_summary(arms[arm]).collect()[0].asDict()
             r["arm"] = arm
             r["days"] = " ".join(args.days)
             gain_rows.append(r)
-            print(f"  {arm}: {r['rows']:,} rows, {r['tracks']:,} tracks, "
-                  f"{r['rows_adsc']:,} ADS-C", flush=True)
+            print(
+                f"  {arm}: {r['rows']:,} rows, {r['tracks']:,} tracks, "
+                f"{r['rows_adsc']:,} ADS-C",
+                flush=True,
+            )
 
-        hole_rows = [r.asDict()
-                     for r in bridged_holes(arms["merged"],
-                                            args.hole_seconds).collect()]
+        hole_rows = [r.asDict() for r in bridged_holes(arms["merged"], args.hole_seconds).collect()]
         print(f"  bridged holes: {len(hole_rows):,}", flush=True)
 
         ext = extension_by_airframe(arms["base"], arms["merged"])
-        shifts = ext.agg(
-            F.count(F.lit(1)).alias("airframe_days"),
-            F.expr("percentile_approx(first_shift_s, 0.5)")
-            .alias("first_shift_median_s"),
-            F.expr("percentile_approx(last_shift_s, 0.5)")
-            .alias("last_shift_median_s"),
-            F.sum((F.col("first_shift_s") < 0).cast("long")).alias("seen_earlier"),
-            F.sum((F.col("last_shift_s") > 0).cast("long")).alias("seen_later"),
-        ).collect()[0].asDict()
-        gain_rows.append({"arm": "extension", "days": " ".join(args.days),
-                          **shifts})
+        shifts = (
+            ext.agg(
+                F.count(F.lit(1)).alias("airframe_days"),
+                F.expr("percentile_approx(first_shift_s, 0.5)").alias("first_shift_median_s"),
+                F.expr("percentile_approx(last_shift_s, 0.5)").alias("last_shift_median_s"),
+                F.sum((F.col("first_shift_s") < 0).cast("long")).alias("seen_earlier"),
+                F.sum((F.col("last_shift_s") > 0).cast("long")).alias("seen_later"),
+            )
+            .collect()[0]
+            .asDict()
+        )
+        gain_rows.append({"arm": "extension", "days": " ".join(args.days), **shifts})
     finally:
         spark.stop()
 
@@ -241,8 +250,10 @@ def main() -> int:
 
     def write(name, rows):
         if not rows:
-            print(f"  {name}: no rows -- writing a header-only file, which is "
-                  f"a result and not a missing output")
+            print(
+                f"  {name}: no rows -- writing a header-only file, which is "
+                f"a result and not a missing output"
+            )
         fields = sorted({k for r in rows for k in r}) or ["arm"]
         with open(out / name, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=fields)
@@ -254,16 +265,25 @@ def main() -> int:
     write(args.holes_name, hole_rows)
 
     import provenance
+
     for name in (args.gain_name, args.holes_name):
         provenance.record(
-            out, name, "benchmarks/adsc_coverage_gain.py", sys.argv[1:],
-            ["benchmarks/adsc_coverage_gain.py",
-             "src/opdi/ingestion/osn_adsc.py",
-             "src/opdi/pipeline/tracks.py",
-             "src/opdi/cleaning/native.py"],
+            out,
+            name,
+            "benchmarks/adsc_coverage_gain.py",
+            sys.argv[1:],
+            [
+                "benchmarks/adsc_coverage_gain.py",
+                "src/opdi/ingestion/osn_adsc.py",
+                "src/opdi/pipeline/tracks.py",
+                "src/opdi/cleaning/native.py",
+            ],
             inputs={"days": args.days, "hole_seconds": args.hole_seconds},
-            input_tables=[f"{args.prefix}/base/osn_tracks_clean",
-                          f"{args.prefix}/merged/osn_tracks_clean"])
+            input_tables=[
+                f"{args.prefix}/base/osn_tracks_clean",
+                f"{args.prefix}/merged/osn_tracks_clean",
+            ],
+        )
     return 0
 
 

@@ -22,13 +22,21 @@ sys.path.insert(0, str(REPO / "src"))
 import osn_sample
 from osn_sample import build_spark, load_dotenv
 
+#: The warehouse and coverage this study reads and writes, named here rather
+#: than taken from the OPDI_WAREHOUSE environment variable (which points at
+#: the production warehouse on the cluster). Its tables are the European ones
+#: under s3a://eurocontrol/opdi, outside any release folder.
+WAREHOUSE = "s3a://eurocontrol/opdi"
+WORLDWIDE = False
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--month", default="202506")
     ap.add_argument("--max-radius-nm", type=float, default=110.0)
-    ap.add_argument("--results-dir", default=None,
-                    help="unused; accepted so the chain can call this like a job")
+    ap.add_argument(
+        "--results-dir", default=None, help="unused; accepted so the chain can call this like a job"
+    )
     ap.add_argument("--executors", type=int, default=10)
     ap.add_argument("--ui-port", type=int, default=4055)
     ap.add_argument("--rebuild", action="store_true", default=True)
@@ -45,10 +53,11 @@ def main() -> None:
     from opdi.pipeline.flights import FlightListProcessor
 
     month = datetime.strptime(args.month, "%Y%m").date().replace(day=1)
-    cfg = OPDIConfig.for_environment("opensky")
+    cfg = OPDIConfig.for_environment("opensky", worldwide=WORLDWIDE, warehouse=WAREHOUSE)
+    # The study tables sit directly in the warehouse, not in a release folder.
+    cfg.project.release = ""
     proc = FlightListProcessor(spark, cfg)
-    proc.build_endpoint_candidates(
-        month, max_radius_nm=args.max_radius_nm, rebuild=args.rebuild)
+    proc.build_endpoint_candidates(month, max_radius_nm=args.max_radius_nm, rebuild=args.rebuild)
     print(f"endpoint candidates built for {month:%Y-%m}")
     spark.stop()
 

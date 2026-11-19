@@ -25,32 +25,56 @@ from pyspark.sql.types import (
 
 PMS_CSV = str(files("opdi.reference") / "data" / "point_merge_systems.csv")
 
-PMS_SCHEMA = StructType([
-    StructField("apt_icao", StringType(), False),
-    StructField("pms_id", StringType(), False),
-    StructField("merge_point", StringType(), True),
-    StructField("lat", DoubleType(), True),
-    StructField("lon", DoubleType(), True),
-    StructField("legs_mp_min_nm", DoubleType(), True),
-    StructField("legs_mp_max_nm", DoubleType(), True),
-    StructField("leg_level_min_ft", DoubleType(), True),
-    StructField("leg_level_max_ft", DoubleType(), True),
-    StructField("valid_from", DateType(), True),
-    StructField("valid_to", DateType(), True),
-    StructField("source", StringType(), True),
-    StructField("confidence", StringType(), False),
-])
+PMS_SCHEMA = StructType(
+    [
+        StructField("apt_icao", StringType(), False),
+        StructField("pms_id", StringType(), False),
+        StructField("merge_point", StringType(), True),
+        StructField("lat", DoubleType(), True),
+        StructField("lon", DoubleType(), True),
+        StructField("legs_mp_min_nm", DoubleType(), True),
+        StructField("legs_mp_max_nm", DoubleType(), True),
+        StructField("leg_level_min_ft", DoubleType(), True),
+        StructField("leg_level_max_ft", DoubleType(), True),
+        StructField("valid_from", DateType(), True),
+        StructField("valid_to", DateType(), True),
+        StructField("source", StringType(), True),
+        StructField("confidence", StringType(), False),
+    ]
+)
 
 
 def _read(path: Optional[str]) -> pd.DataFrame:
-    df = pd.read_csv(path or PMS_CSV, dtype={"apt_icao": str, "pms_id": str, "merge_point": str,
-                                             "source": str, "confidence": str})
-    for c in ("lat", "lon", "legs_mp_min_nm", "legs_mp_max_nm", "leg_level_min_ft", "leg_level_max_ft"):
+    df = pd.read_csv(
+        path or PMS_CSV,
+        dtype={
+            "apt_icao": str,
+            "pms_id": str,
+            "merge_point": str,
+            "source": str,
+            "confidence": str,
+        },
+    )
+    for c in (
+        "lat",
+        "lon",
+        "legs_mp_min_nm",
+        "legs_mp_max_nm",
+        "leg_level_min_ft",
+        "leg_level_max_ft",
+    ):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     for c in ("valid_from", "valid_to"):
         df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
     df = df.astype(object).where(df.notna(), None)
-    for c in ("lat", "lon", "legs_mp_min_nm", "legs_mp_max_nm", "leg_level_min_ft", "leg_level_max_ft"):
+    for c in (
+        "lat",
+        "lon",
+        "legs_mp_min_nm",
+        "legs_mp_max_nm",
+        "leg_level_min_ft",
+        "leg_level_max_ft",
+    ):
         df[c] = df[c].map(lambda v: None if v is None else float(v))
     return df
 
@@ -63,7 +87,9 @@ def load_point_merge_systems(spark: SparkSession, path: Optional[str] = None) ->
     return spark.createDataFrame(rows, PMS_SCHEMA)
 
 
-def point_merge_systems_for_day(spark: SparkSession, day: dt.date, path: Optional[str] = None) -> DataFrame:
+def point_merge_systems_for_day(
+    spark: SparkSession, day: dt.date, path: Optional[str] = None
+) -> DataFrame:
     """The merge points in operation on ``day``."""
     ref = load_point_merge_systems(spark, path)
     d = F.lit(day)

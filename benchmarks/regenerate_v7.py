@@ -56,26 +56,30 @@ FL_CAPS = sorted({40, 60} | set(range(25, 301, 25)))
 #: Source files whose contents define each job's result. Named explicitly: a
 #: dependency worth re-running for is a dependency worth writing down.
 CORE = ["benchmarks/adep_ades.py", "benchmarks/osn_sample.py"]
-PIPE = CORE + ["src/opdi/pipeline/flights.py", "src/opdi/config.py",
-               "benchmarks/flight_list_v7.py"]
+PIPE = CORE + [
+    "src/opdi/pipeline/flights.py",
+    "src/opdi/config",
+    "benchmarks/flight_list_v7.py",
+    "benchmarks/study_variants/detection.py",
+]
 
 #: S3 prefixes the analysis reads.
-T_TRACKS      = "s3a://eurocontrol/opdi/osn_tracks"
-T_TRACKS_CLN  = "s3a://eurocontrol/opdi/osn_tracks_clean"
-T_TRACKS24    = "s3a://eurocontrol/opdi/research/tracks"
+T_TRACKS = "s3a://eurocontrol/opdi/osn_tracks"
+T_TRACKS_CLN = "s3a://eurocontrol/opdi/osn_tracks_clean"
+T_TRACKS24 = "s3a://eurocontrol/opdi/research/tracks"
 T_TRACKS24_CL = "s3a://eurocontrol/opdi/research/tracks_clean"
-T_ZONES       = "s3a://eurocontrol/opdi/h3_airport_detection_zones"
-T_CAND        = "s3a://eurocontrol/opdi/opdi_endpoint_candidates"
-T_CAND24      = "s3a://eurocontrol/opdi/research/cand_2024"
-T_VOTES       = "s3a://eurocontrol/opdi/research/trend_votes"
-T_VOTES24     = "s3a://eurocontrol/opdi/research/trend_votes_2024"
-T_REF         = "s3a://eurocontrol/opdi/research/reference"
+T_ZONES = "s3a://eurocontrol/opdi/h3_airport_detection_zones"
+T_CAND = "s3a://eurocontrol/opdi/opdi_endpoint_candidates"
+T_CAND24 = "s3a://eurocontrol/opdi/research/cand_2024"
+T_VOTES = "s3a://eurocontrol/opdi/research/trend_votes"
+T_VOTES24 = "s3a://eurocontrol/opdi/research/trend_votes_2024"
+T_REF = "s3a://eurocontrol/opdi/research/reference"
 
 #: The installed console script, not ``python -m opdi.cli``: a module
 #: invocation resolves `opdi` to ``opdi.py`` at the repo root, which shadows the
 #: package in ``src/`` and fails with a bare ModuleNotFoundError.
 OPDI = [str(REPO / ".venv310" / "bin" / "opdi"), "run", "--env", "opensky"]
-PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config.py"]
+PIPELINE_SRC = ["src/opdi/runner.py", "src/opdi/config"]
 
 
 class Stage:
@@ -125,10 +129,11 @@ class Stage:
         if not ident.get("objects"):
             return {self.produces: "table absent or empty"}
         if ident.get("bytes", 0) < self.MIN_BYTES:
-            return {self.produces:
-                    f"only {ident['bytes'] / 1e6:.2f} MB across "
-                    f"{ident['objects']} objects -- committer scaffolding from "
-                    f"an interrupted write, not a table"}
+            return {
+                self.produces: f"only {ident['bytes'] / 1e6:.2f} MB across "
+                f"{ident['objects']} objects -- committer scaffolding from "
+                f"an interrupted write, not a table"
+            }
         entry = provenance.load_manifest(DATA).get(self.key)
         if entry is None:
             return {self.produces: "present, but no provenance recorded"}
@@ -160,11 +165,15 @@ class Stage:
         if stale_input:
             print(f"  {stale_input} -- rebuilding rather than recording")
         if present:
-            print(f"  {self.produces}\n  present: {ident['objects']:,} objects, "
-                  f"{ident['bytes'] / 1e9:.2f} GB -- recording, not rebuilding")
-            note = (note + " | PRE-EXISTING: identity recorded without a "
-                    "rebuild, so the command below is how it is built, not "
-                    "necessarily how this copy was built.").strip(" |")
+            print(
+                f"  {self.produces}\n  present: {ident['objects']:,} objects, "
+                f"{ident['bytes'] / 1e9:.2f} GB -- recording, not rebuilding"
+            )
+            note = (
+                note + " | PRE-EXISTING: identity recorded without a "
+                "rebuild, so the command below is how it is built, not "
+                "necessarily how this copy was built."
+            ).strip(" |")
         else:
             cmd = [str(x) for x in self.cmd]
             print(f"  absent -- building\n  {' '.join(cmd)}", flush=True)
@@ -173,8 +182,13 @@ class Stage:
                 raise SystemExit(f"{self.name} failed with exit {r.returncode}")
         DATA.mkdir(parents=True, exist_ok=True)
         provenance.record(
-            DATA, self.key, self.script, self.args, self.code_paths,
-            notes=note, input_tables=[self.produces] + self.inputs,
+            DATA,
+            self.key,
+            self.script,
+            self.args,
+            self.code_paths,
+            notes=note,
+            input_tables=[self.produces] + self.inputs,
         )
         print(f"  recorded {self.key}")
 
@@ -182,8 +196,7 @@ class Stage:
 class Job:
     """One analysis step: a command, its outputs, and what it depends on."""
 
-    def __init__(self, name, script, args, outputs, code_paths, notes="",
-                 inputs=()):
+    def __init__(self, name, script, args, outputs, code_paths, notes="", inputs=()):
         self.name = name
         self.script = script
         self.args = args
@@ -195,8 +208,7 @@ class Job:
     def stale(self):
         reasons = {}
         for staged in self.outputs.values():
-            bad, why = provenance.is_stale(
-                DATA, staged, self.code_paths, self.inputs)
+            bad, why = provenance.is_stale(DATA, staged, self.code_paths, self.inputs)
             if bad:
                 reasons[staged] = why
         return reasons
@@ -209,8 +221,15 @@ class Job:
         that renders but is wrong.
         """
         with tempfile.TemporaryDirectory(prefix=f"v7_{self.name}_") as tmp:
-            cmd = [sys.executable, "-u", str(REPO / self.script),
-                   *self.args, "--results-dir", tmp, *extra]
+            cmd = [
+                sys.executable,
+                "-u",
+                str(REPO / self.script),
+                *self.args,
+                "--results-dir",
+                tmp,
+                *extra,
+            ]
             print(f"\n=== {self.name} ===\n  {' '.join(cmd[2:])}", flush=True)
             r = subprocess.run(cmd, cwd=REPO)
             if r.returncode != 0:
@@ -222,8 +241,13 @@ class Job:
                 DATA.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, DATA / staged)
                 provenance.record(
-                    DATA, staged, self.script, self.args,
-                    self.code_paths, notes=self.notes, input_tables=self.inputs,
+                    DATA,
+                    staged,
+                    self.script,
+                    self.args,
+                    self.code_paths,
+                    notes=self.notes,
+                    input_tables=self.inputs,
                 )
                 print(f"  staged {staged}")
 
@@ -238,86 +262,178 @@ def stages() -> list:
     committed parquet would be worse than saying so.
     """
     return [
-        Stage("00_reference_data",
-              OPDI + ["--step", "00", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
-              T_ZONES, PIPELINE_SRC + ["src/opdi/reference/h3_airport_zones.py"],
-              "H3 detection zones and the OurAirports reference the candidate "
-              "builder reads field elevations from. Step ids are 00/01/02/... "
-              "-- there is no 00a at this level, the substeps live inside 00"),
-
-        Stage("01_02_sample",
-              [sys.executable, "-u", "benchmarks/rebuild_sample.py",
-               "--start", DAYS_2025[0], "--end", DAYS_2025[-1],
-               "--executors", "10"],
-              T_TRACKS,
-              ["benchmarks/rebuild_sample.py",
-               "src/opdi/ingestion/osn_statevectors.py",
-               "src/opdi/pipeline/tracks.py", "src/opdi/config.py"],
-              "ingest and track building with the bin-based sampler. Replaces "
-              "rather than appends, because the rows being replaced were made "
-              "by a different rule"),
-
-        Stage("02a_clean_tracks",
-              [sys.executable, "-u", "benchmarks/clean_tracks.py",
-               "--period", "2025", "--executors", "10"],
-              T_TRACKS_CLN,
-              ["benchmarks/clean_tracks.py", "src/opdi/cleaning/cleaner.py",
-               "src/opdi/cleaning/native.py", "src/opdi/config.py"],
-              "trajectory cleaning -- the step the flight list now reads. In "
-              "V6 this table existed and nothing read it",
-              inputs=[T_TRACKS]),
-
-        Stage("02a_clean_tracks_2024",
-              [sys.executable, "-u", "benchmarks/clean_tracks.py",
-               "--period", "2024", "--executors", "10"],
-              T_TRACKS24_CL,
-              ["benchmarks/clean_tracks.py", "src/opdi/cleaning/cleaner.py",
-               "src/opdi/cleaning/native.py", "src/opdi/config.py"],
-              "the same for the second period, so both are measured on the "
-              "same input treatment",
-              inputs=[T_TRACKS24]),
-
-        Stage("03_endpoint_candidates",
-              [sys.executable, "-u", "benchmarks/build_candidates.py",
-               "--month", "202506", "--executors", "10"],
-              T_CAND,
-              ["benchmarks/build_candidates.py", "src/opdi/pipeline/flights.py",
-               "src/opdi/config.py"],
-              "first/last fix per track against every aerodrome within 110 NM; "
-              "the cache the endpoint sweeps filter",
-              inputs=[T_TRACKS_CLN, T_ZONES]),
-
-        Stage("03_endpoint_candidates_2024",
-              [sys.executable, "-u", "benchmarks/build_candidates_2024.py",
-               "--days", *DAYS_2024, "--executors", "10"],
-              T_CAND24,
-              ["benchmarks/build_candidates_2024.py",
-               "src/opdi/pipeline/flights.py"],
-              "endpoint candidates for the second period, built by the "
-              "pipeline's own builder over a pre-reduced endpoint table",
-              inputs=[T_TRACKS24_CL]),
-
-        Stage("03_trend_votes_2025",
-              [sys.executable, "-u", "benchmarks/trend_sweep.py",
-               "--months", "202506", "--days", *DAYS_2025, "--build",
-               "--build-only", "--tracks", T_TRACKS_CLN,
-               "--fl-caps", *[str(f) for f in FL_CAPS],
-               "--executors", "10", "--results-dir", "/tmp/v7_votecache_2025"],
-              T_VOTES, ["benchmarks/trend_sweep.py"],
-              "vote counts per (track, aerodrome) at every flight-level cap, "
-              "in one pass -- which is what makes a 14-cap grid affordable",
-              inputs=[T_TRACKS_CLN, T_ZONES]),
-
-        Stage("03_trend_votes_2024",
-              [sys.executable, "-u", "benchmarks/trend_sweep.py",
-               "--months", "202406", "--days", *DAYS_2024, "--build",
-               "--tracks", T_TRACKS24_CL, "--add-h3", "--cache", T_VOTES24,
-               "--out-name", "trend_sweep_2024.csv", "--build-only",
-               "--fl-caps", *[str(f) for f in FL_CAPS],
-               "--executors", "10", "--results-dir", "/tmp/v7_votecache_2024"],
-              T_VOTES24, ["benchmarks/trend_sweep.py"],
-              "second period; its tracks pre-date H3 so the index is computed",
-              inputs=[T_TRACKS24_CL]),
+        Stage(
+            "00_reference_data",
+            OPDI + ["--step", "00", "--start", DAYS_2025[0], "--end", DAYS_2025[-1]],
+            T_ZONES,
+            PIPELINE_SRC + ["src/opdi/reference/h3_airport_zones.py"],
+            "H3 detection zones and the OurAirports reference the candidate "
+            "builder reads field elevations from. Step ids are 00/01/02/... "
+            "-- there is no 00a at this level, the substeps live inside 00",
+        ),
+        Stage(
+            "01_02_sample",
+            [
+                sys.executable,
+                "-u",
+                "benchmarks/rebuild_sample.py",
+                "--start",
+                DAYS_2025[0],
+                "--end",
+                DAYS_2025[-1],
+                "--executors",
+                "10",
+            ],
+            T_TRACKS,
+            [
+                "benchmarks/rebuild_sample.py",
+                "src/opdi/ingestion/osn_statevectors.py",
+                "src/opdi/pipeline/tracks.py",
+                "src/opdi/config",
+            ],
+            "ingest and track building with the bin-based sampler. Replaces "
+            "rather than appends, because the rows being replaced were made "
+            "by a different rule",
+        ),
+        Stage(
+            "02a_clean_tracks",
+            [
+                sys.executable,
+                "-u",
+                "benchmarks/clean_tracks.py",
+                "--period",
+                "2025",
+                "--executors",
+                "10",
+            ],
+            T_TRACKS_CLN,
+            [
+                "benchmarks/clean_tracks.py",
+                "src/opdi/cleaning/cleaner.py",
+                "src/opdi/cleaning/native.py",
+                "src/opdi/config",
+            ],
+            "trajectory cleaning -- the step the flight list now reads. In "
+            "V6 this table existed and nothing read it",
+            inputs=[T_TRACKS],
+        ),
+        Stage(
+            "02a_clean_tracks_2024",
+            [
+                sys.executable,
+                "-u",
+                "benchmarks/clean_tracks.py",
+                "--period",
+                "2024",
+                "--executors",
+                "10",
+            ],
+            T_TRACKS24_CL,
+            [
+                "benchmarks/clean_tracks.py",
+                "src/opdi/cleaning/cleaner.py",
+                "src/opdi/cleaning/native.py",
+                "src/opdi/config",
+            ],
+            "the same for the second period, so both are measured on the " "same input treatment",
+            inputs=[T_TRACKS24],
+        ),
+        Stage(
+            "03_endpoint_candidates",
+            [
+                sys.executable,
+                "-u",
+                "benchmarks/build_candidates.py",
+                "--month",
+                "202506",
+                "--executors",
+                "10",
+            ],
+            T_CAND,
+            [
+                "benchmarks/build_candidates.py",
+                "src/opdi/pipeline/flights.py",
+                "src/opdi/config",
+            ],
+            "first/last fix per track against every aerodrome within 110 NM; "
+            "the cache the endpoint sweeps filter",
+            inputs=[T_TRACKS_CLN, T_ZONES],
+        ),
+        Stage(
+            "03_endpoint_candidates_2024",
+            [
+                sys.executable,
+                "-u",
+                "benchmarks/build_candidates_2024.py",
+                "--days",
+                *DAYS_2024,
+                "--executors",
+                "10",
+            ],
+            T_CAND24,
+            ["benchmarks/build_candidates_2024.py", "src/opdi/pipeline/flights.py"],
+            "endpoint candidates for the second period, built by the "
+            "pipeline's own builder over a pre-reduced endpoint table",
+            inputs=[T_TRACKS24_CL],
+        ),
+        Stage(
+            "03_trend_votes_2025",
+            [
+                sys.executable,
+                "-u",
+                "benchmarks/trend_sweep.py",
+                "--months",
+                "202506",
+                "--days",
+                *DAYS_2025,
+                "--build",
+                "--build-only",
+                "--tracks",
+                T_TRACKS_CLN,
+                "--fl-caps",
+                *[str(f) for f in FL_CAPS],
+                "--executors",
+                "10",
+                "--results-dir",
+                "/tmp/v7_votecache_2025",
+            ],
+            T_VOTES,
+            ["benchmarks/trend_sweep.py"],
+            "vote counts per (track, aerodrome) at every flight-level cap, "
+            "in one pass -- which is what makes a 14-cap grid affordable",
+            inputs=[T_TRACKS_CLN, T_ZONES],
+        ),
+        Stage(
+            "03_trend_votes_2024",
+            [
+                sys.executable,
+                "-u",
+                "benchmarks/trend_sweep.py",
+                "--months",
+                "202406",
+                "--days",
+                *DAYS_2024,
+                "--build",
+                "--tracks",
+                T_TRACKS24_CL,
+                "--add-h3",
+                "--cache",
+                T_VOTES24,
+                "--out-name",
+                "trend_sweep_2024.csv",
+                "--build-only",
+                "--fl-caps",
+                *[str(f) for f in FL_CAPS],
+                "--executors",
+                "10",
+                "--results-dir",
+                "/tmp/v7_votecache_2024",
+            ],
+            T_VOTES24,
+            ["benchmarks/trend_sweep.py"],
+            "second period; its tracks pre-date H3 so the index is computed",
+            inputs=[T_TRACKS24_CL],
+        ),
     ]
 
 
@@ -326,100 +442,213 @@ def jobs() -> list:
     v7 = "benchmarks/flight_list_v7.py"
     return [
         # --- research sweeps, both periods, identical grids ---------------
-        Job("trend_sweep_2025", "benchmarks/trend_sweep.py",
-            ["--months", "202506", "--days", *DAYS_2025,
-             "--tracks", T_TRACKS_CLN,
-             "--fl-caps", *[str(f) for f in FL_CAPS], "--executors", "10"],
-            {"trend_sweep.csv": "trend_sweep_2025.csv"}, CORE,
+        Job(
+            "trend_sweep_2025",
+            "benchmarks/trend_sweep.py",
+            [
+                "--months",
+                "202506",
+                "--days",
+                *DAYS_2025,
+                "--tracks",
+                T_TRACKS_CLN,
+                "--fl-caps",
+                *[str(f) for f in FL_CAPS],
+                "--executors",
+                "10",
+            ],
+            {"trend_sweep.csv": "trend_sweep_2025.csv"},
+            CORE,
             "the full trend grid over the cached vote table",
-            inputs=[T_VOTES, T_ZONES, T_REF]),
-
-        Job("trend_sweep_2024", "benchmarks/trend_sweep.py",
-            ["--months", "202406", "--days", *DAYS_2024,
-             "--tracks", T_TRACKS24_CL, "--add-h3", "--cache", T_VOTES24,
-             "--out-name", "trend_sweep_2024.csv",
-             "--fl-caps", *[str(f) for f in FL_CAPS], "--executors", "10"],
-            {"trend_sweep_2024.csv": "trend_sweep_2024.csv"}, CORE,
+            inputs=[T_VOTES, T_ZONES, T_REF],
+        ),
+        Job(
+            "trend_sweep_2024",
+            "benchmarks/trend_sweep.py",
+            [
+                "--months",
+                "202406",
+                "--days",
+                *DAYS_2024,
+                "--tracks",
+                T_TRACKS24_CL,
+                "--add-h3",
+                "--cache",
+                T_VOTES24,
+                "--out-name",
+                "trend_sweep_2024.csv",
+                "--fl-caps",
+                *[str(f) for f in FL_CAPS],
+                "--executors",
+                "10",
+            ],
+            {"trend_sweep_2024.csv": "trend_sweep_2024.csv"},
+            CORE,
             "the identical grid on the second period, so the two can be ranked "
             "jointly rather than compared as two argmaxes",
-            inputs=[T_VOTES24, T_ZONES, T_REF]),
-
-        Job("endpoint_sweep_2025", "benchmarks/benchmark_modes.py",
+            inputs=[T_VOTES24, T_ZONES, T_REF],
+        ),
+        Job(
+            "endpoint_sweep_2025",
+            "benchmarks/benchmark_modes.py",
             ["--months", "202506", "--days", *DAYS_2025, "--sweeps-only"],
-            {"sweep_radius_height.csv": "sweep_radius_height_2025.csv",
-             "sweep_penalty.csv": "sweep_penalty_2025.csv"}, CORE,
+            {
+                "sweep_radius_height.csv": "sweep_radius_height_2025.csv",
+                "sweep_penalty.csv": "sweep_penalty_2025.csv",
+            },
+            CORE,
             "--sweeps-only: this script can also score pipeline output written "
             "by another run, which the report does not use",
-            inputs=[T_CAND, T_REF]),
-
-        Job("endpoint_sweep_2024", "benchmarks/benchmark_modes.py",
-            ["--months", "202406", "--days", *DAYS_2024, "--sweeps-only",
-             "--candidates", T_CAND24],
-            {"sweep_radius_height.csv": "sweep_radius_height_2024.csv"}, CORE,
+            inputs=[T_CAND, T_REF],
+        ),
+        Job(
+            "endpoint_sweep_2024",
+            "benchmarks/benchmark_modes.py",
+            ["--months", "202406", "--days", *DAYS_2024, "--sweeps-only", "--candidates", T_CAND24],
+            {"sweep_radius_height.csv": "sweep_radius_height_2024.csv"},
+            CORE,
             "the endpoint grid on the second period",
-            inputs=[T_CAND24, T_REF]),
-
+            inputs=[T_CAND24, T_REF],
+        ),
         # --- the pipeline itself, both periods ----------------------------
-        Job("ladder_2025", v7,
-            ["--period", "2025", "--runs", "ladder",
-             "--out-name", "ladder_2025.csv", "--executors", "10"],
-            {"ladder_2025.csv": "ladder_2025.csv"}, PIPE,
+        Job(
+            "ladder_2025",
+            v7,
+            [
+                "--period",
+                "2025",
+                "--runs",
+                "ladder",
+                "--out-name",
+                "ladder_2025.csv",
+                "--executors",
+                "10",
+            ],
+            {"ladder_2025.csv": "ladder_2025.csv"},
+            PIPE,
             "thirteen cumulative steps from the legacy algorithm on raw "
             "tracks to the shipped pipeline on cleaned ones, each run through "
             "process_dai itself. verify_plan asserts the last rung IS the "
             "shipped configuration before any of it runs",
-            inputs=[T_TRACKS_CLN, T_TRACKS, T_ZONES, T_CAND, T_REF]),
-
-        Job("ladder_2024", v7,
-            ["--period", "2024", "--runs", "ladder",
-             "--out-name", "ladder_2024.csv", "--executors", "10"],
-            {"ladder_2024.csv": "ladder_2024.csv"}, PIPE,
+            inputs=[T_TRACKS_CLN, T_TRACKS, T_ZONES, T_CAND, T_REF],
+        ),
+        Job(
+            "ladder_2024",
+            v7,
+            [
+                "--period",
+                "2024",
+                "--runs",
+                "ladder",
+                "--out-name",
+                "ladder_2024.csv",
+                "--executors",
+                "10",
+            ],
+            {"ladder_2024.csv": "ladder_2024.csv"},
+            PIPE,
             "the same ladder on the second period: which steps hold and which "
             "were one sample's noise",
-            inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF]),
-
-        Job("modes_2025", v7,
-            ["--period", "2025", "--runs", "modes", "rejected",
-             "--per-airport", "--out-name", "modes_2025.csv", "--executors", "10"],
-            {"modes_2025.csv": "modes_2025.csv",
-             "per_airport_v7.csv": "per_airport_2025.csv",
-             "per_type_v7.csv": "per_type_2025.csv"}, PIPE,
+            inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF],
+        ),
+        Job(
+            "modes_2025",
+            v7,
+            [
+                "--period",
+                "2025",
+                "--runs",
+                "modes",
+                "rejected",
+                "--per-airport",
+                "--out-name",
+                "modes_2025.csv",
+                "--executors",
+                "10",
+            ],
+            {
+                "modes_2025.csv": "modes_2025.csv",
+                "per_airport_v7.csv": "per_airport_2025.csv",
+                "per_type_v7.csv": "per_type_2025.csv",
+            },
+            PIPE,
             "the whole configurations the verdict chooses between, plus the "
             "three changes measured and NOT adopted -- each applied to the "
             "shipped configuration alone, which is the comparison that answers "
             "'should this be on?' rather than 'what would it have done at this "
             "point in a sequence?'",
-            inputs=[T_TRACKS_CLN, T_ZONES, T_CAND, T_REF]),
-
-        Job("modes_2024", v7,
-            ["--period", "2024", "--runs", "modes", "rejected",
-             "--per-airport", "--out-name", "modes_2024.csv", "--executors", "10"],
-            {"modes_2024.csv": "modes_2024.csv",
-             "per_airport_v7.csv": "per_airport_2024.csv",
-             "per_type_v7.csv": "per_type_2024.csv"}, PIPE,
+            inputs=[T_TRACKS_CLN, T_ZONES, T_CAND, T_REF],
+        ),
+        Job(
+            "modes_2024",
+            v7,
+            [
+                "--period",
+                "2024",
+                "--runs",
+                "modes",
+                "rejected",
+                "--per-airport",
+                "--out-name",
+                "modes_2024.csv",
+                "--executors",
+                "10",
+            ],
+            {
+                "modes_2024.csv": "modes_2024.csv",
+                "per_airport_v7.csv": "per_airport_2024.csv",
+                "per_type_v7.csv": "per_type_2024.csv",
+            },
+            PIPE,
             "the same configurations on the second period",
-            inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF]),
-
+            inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF],
+        ),
         # One radius, and it must be the **shipped** one. Fourteen caps at two
         # radii is fifty-six full `process_dai` runs across the two periods, so
         # the grid varies the cap alone -- but a curve swept at a radius the
         # pipeline does not use answers a question nobody asked. It ran at
         # 20 NM until the radius reverted to 30; the two move together.
-        Job("grid_2025", v7,
-            ["--period", "2025", "--runs", "grid", "--grid-radius", "30",
-             "--out-name", "trend_grid_2025.csv", "--executors", "10"],
-            {"trend_grid_2025.csv": "trend_grid_2025.csv"}, PIPE,
+        Job(
+            "grid_2025",
+            v7,
+            [
+                "--period",
+                "2025",
+                "--runs",
+                "grid",
+                "--grid-radius",
+                "30",
+                "--out-name",
+                "trend_grid_2025.csv",
+                "--executors",
+                "10",
+            ],
+            {"trend_grid_2025.csv": "trend_grid_2025.csv"},
+            PIPE,
             "the flight-level cap swept through the pipeline to FL300, so the "
             "departure side of the curve closes rather than running out",
-            inputs=[T_TRACKS_CLN, T_ZONES, T_CAND, T_REF]),
-
-        Job("grid_2024", v7,
-            ["--period", "2024", "--runs", "grid", "--grid-radius", "30",
-             "--out-name", "trend_grid_2024.csv", "--executors", "10"],
-            {"trend_grid_2024.csv": "trend_grid_2024.csv"}, PIPE,
+            inputs=[T_TRACKS_CLN, T_ZONES, T_CAND, T_REF],
+        ),
+        Job(
+            "grid_2024",
+            v7,
+            [
+                "--period",
+                "2024",
+                "--runs",
+                "grid",
+                "--grid-radius",
+                "30",
+                "--out-name",
+                "trend_grid_2024.csv",
+                "--executors",
+                "10",
+            ],
+            {"trend_grid_2024.csv": "trend_grid_2024.csv"},
+            PIPE,
             "the same grid on the second period, so the cap is chosen on both",
-            inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF]),
-
+            inputs=[T_TRACKS24_CL, T_ZONES, T_CAND24, T_REF],
+        ),
         # The sampler is deliberately NOT re-measured here.
         #
         # V6 compared the two samplers across every parameter cell of two
@@ -438,23 +667,32 @@ def jobs() -> list:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--check", action="store_true",
-                    help="report staleness and exit; no cluster needed")
+    ap.add_argument(
+        "--check", action="store_true", help="report staleness and exit; no cluster needed"
+    )
     ap.add_argument("--force", action="store_true", help="re-run every job")
     ap.add_argument("--only", nargs="+", help="run only these jobs, by name")
-    ap.add_argument("--with-stages", action="store_true",
-                    help="include the upstream pipeline steps -- reference "
-                         "zones, ingestion, tracks, cleaning and the caches. "
-                         "Off by default because they are idempotent and slow")
-    ap.add_argument("--stages-only", action="store_true",
-                    help="run the upstream steps and stop")
-    ap.add_argument("--rebuild-stage", nargs="+", default=[],
-                    help="force these stages to rebuild their table rather "
-                         "than record it. Downstream stages then follow "
-                         "automatically, because their inputs will have moved.")
-    ap.add_argument("--allow-stale", action="store_true",
-                    help="report staleness but exit 0 -- for rendering a draft "
-                         "without a cluster")
+    ap.add_argument(
+        "--with-stages",
+        action="store_true",
+        help="include the upstream pipeline steps -- reference "
+        "zones, ingestion, tracks, cleaning and the caches. "
+        "Off by default because they are idempotent and slow",
+    )
+    ap.add_argument("--stages-only", action="store_true", help="run the upstream steps and stop")
+    ap.add_argument(
+        "--rebuild-stage",
+        nargs="+",
+        default=[],
+        help="force these stages to rebuild their table rather "
+        "than record it. Downstream stages then follow "
+        "automatically, because their inputs will have moved.",
+    )
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="report staleness but exit 0 -- for rendering a draft " "without a cluster",
+    )
     args = ap.parse_args()
 
     todo = []
@@ -468,8 +706,7 @@ def main() -> None:
     stale = {j.name: j.stale() for j in todo}
     any_stale = {k: v for k, v in stale.items() if v}
 
-    print(f"analysis at {provenance.git_sha()}"
-          f"{' (dirty)' if provenance.git_dirty() else ''}\n")
+    print(f"analysis at {provenance.git_sha()}" f"{' (dirty)' if provenance.git_dirty() else ''}\n")
     for j in todo:
         why = stale[j.name]
         if why:
@@ -483,9 +720,13 @@ def main() -> None:
         if any_stale and not args.allow_stale:
             raise SystemExit(
                 f"\n{len(any_stale)} job(s) stale. Run without --check to "
-                f"regenerate, or pass --allow-stale to render anyway.")
-        print("\nall outputs current" if not any_stale else
-              "\nrendering with stale outputs (--allow-stale)")
+                f"regenerate, or pass --allow-stale to render anyway."
+            )
+        print(
+            "\nall outputs current"
+            if not any_stale
+            else "\nrendering with stale outputs (--allow-stale)"
+        )
         return
 
     rebuild = set(args.rebuild_stage)

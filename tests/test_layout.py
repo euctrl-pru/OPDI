@@ -56,9 +56,7 @@ class StubStorage:
             "hexaero_airport_layouts": (
                 layouts if layouts is not None else _default_layouts(spark)
             ),
-            "oa_airports": (
-                airports if airports is not None else _default_airports(spark)
-            ),
+            "oa_airports": (airports if airports is not None else _default_airports(spark)),
         }
 
     def table_exists(self, name):
@@ -79,8 +77,7 @@ def _default_flight_list(spark):
     """
     return spark.createDataFrame(
         [("trk-1", dt.datetime(2024, 6, 1, 12, 0), ADEP, "ZZZZ", None, None)],
-        "id string, dof timestamp, adep string, ades string, "
-        "adep_p string, ades_p string",
+        "id string, dof timestamp, adep string, ades string, " "adep_p string, ades_p string",
     )
 
 
@@ -139,10 +136,18 @@ def _sample_at(spark, height_above_field_ft, field_elev_ft, h3_cell=H3_CELL_TAXI
     baro_altitude_c = altitude_ft / FT_PER_M
     rows = [
         (
-            "trk-1", "abc123", "SAS123",
+            "trk-1",
+            "abc123",
+            "SAS123",
             dt.datetime(2024, 6, 1, 12, 0, i * 10),
-            55.618, 12.656, baro_altitude_c, 90.0, 0.0,
-            h3_cell, float(i) * 0.01, float(i * 10),
+            55.618,
+            12.656,
+            baro_altitude_c,
+            90.0,
+            0.0,
+            h3_cell,
+            float(i) * 0.01,
+            float(i * 10),
         )
         for i in range(2)
     ]
@@ -172,15 +177,17 @@ def _track_over_a_runway(spark, field_elev_ft=FIELD_ELEV_FT):
     ``FIELD_ELEV_FT`` (3,000 ft) does not -- it exists to demonstrate the
     fix, not to survive the config it fixes -- so a legacy-config caller
     must pass a low ``field_elev_ft`` (e.g. ``0.0``) explicitly."""
-    return _sample_at(spark, height_above_field_ft=0.0, field_elev_ft=field_elev_ft,
-                       h3_cell=H3_CELL_RUNWAY)
+    return _sample_at(
+        spark, height_above_field_ft=0.0, field_elev_ft=field_elev_ft, h3_cell=H3_CELL_RUNWAY
+    )
 
 
 def _track_over_a_taxiway(spark):
     """Same geometry as ``_track_over_a_runway``, on the taxiway hexagon
     instead -- the only variable between the two fixtures is aeroway type."""
-    return _sample_at(spark, height_above_field_ft=0.0, field_elev_ft=FIELD_ELEV_FT,
-                       h3_cell=H3_CELL_TAXIWAY)
+    return _sample_at(
+        spark, height_above_field_ft=0.0, field_elev_ft=FIELD_ELEV_FT, h3_cell=H3_CELL_TAXIWAY
+    )
 
 
 def test_the_gate_is_measured_above_the_field_not_above_the_datum(spark):
@@ -199,14 +206,16 @@ def test_the_gate_is_measured_above_the_field_not_above_the_datum(spark):
 def test_runway_features_are_not_emitted_as_entry_runway_in_v4(spark):
     """`entry-runway`/`exit-runway` are retired: the runway family replaces them
     with line-up, runway-vacated and the two crossing types."""
-    out = calculate_airport_events(_track_over_a_runway(spark), MONTH,
-                                   StubStorage(spark), EventConfig())
+    out = calculate_airport_events(
+        _track_over_a_runway(spark), MONTH, StubStorage(spark), EventConfig()
+    )
     assert out.filter(F.col("type").rlike("runway")).count() == 0
 
 
 def test_taxiway_and_stand_events_are_unchanged(spark):
-    out = calculate_airport_events(_track_over_a_taxiway(spark), MONTH,
-                                   StubStorage(spark), EventConfig())
+    out = calculate_airport_events(
+        _track_over_a_taxiway(spark), MONTH, StubStorage(spark), EventConfig()
+    )
     assert sorted({r["type"] for r in out.collect()}) == ["entry-taxiway", "exit-taxiway"]
 
 
@@ -232,13 +241,16 @@ def test_a_legacy_run_still_emits_entry_and_exit_runway(spark):
     is about the runway-retirement condition alone, not the gate.
     """
     out = calculate_airport_events(
-        _track_over_a_runway(spark, field_elev_ft=0.0), MONTH,
-        StubStorage(spark), EventConfig.legacy(),
+        _track_over_a_runway(spark, field_elev_ft=0.0),
+        MONTH,
+        StubStorage(spark),
+        EventConfig.legacy(),
     )
     types = {r["type"] for r in out.collect()}
-    assert {"entry-runway", "exit-runway"} <= types, (
-        f"expected entry-runway and exit-runway in {sorted(types)}"
-    )
+    assert {
+        "entry-runway",
+        "exit-runway",
+    } <= types, f"expected entry-runway and exit-runway in {sorted(types)}"
 
 
 _GROUND_SCHEMA = (
@@ -259,10 +271,19 @@ def _surface_samples(spark, on_ground=True, h3_cell=H3_CELL_TAXIWAY):
     """
     rows = [
         (
-            "trk-1", "abc123", "SAS123",
+            "trk-1",
+            "abc123",
+            "SAS123",
             dt.datetime(2024, 6, 1, 12, 0, i * 10),
-            55.618, 12.656, None, 90.0, 0.0,
-            h3_cell, float(i) * 0.01, float(i * 10), on_ground,
+            55.618,
+            12.656,
+            None,
+            90.0,
+            0.0,
+            h3_cell,
+            float(i) * 0.01,
+            float(i * 10),
+            on_ground,
         )
         for i in range(2)
     ]
@@ -299,3 +320,96 @@ def test_legacy_keeps_the_altitude_only_gate(spark):
     must stay dropped now."""
     sv = _surface_samples(spark)
     assert _passes_gate(sv, EventConfig.legacy()) is False
+
+
+def _overlapping_layouts(spark, order):
+    """Three taxiway elements sharing one cell, listed in ``order``."""
+    rows = {
+        "b": (H3_CELL_TAXIWAY, ADEP, "osm-twy-b", "taxiway", "TWY-B"),
+        "a": (H3_CELL_TAXIWAY, ADEP, "osm-twy-a", "taxiway", "TWY-A"),
+        "c": (H3_CELL_TAXIWAY, ADEP, "osm-twy-c", "taxiway", "TWY-C"),
+    }
+    return spark.createDataFrame(
+        [rows[k] for k in order],
+        "hexaero_h3_id string, hexaero_apt_icao string, hexaero_osm_id string, "
+        "hexaero_aeroway string, hexaero_ref string",
+    )
+
+
+def _events_with_layouts(spark, layouts, config):
+    import json
+
+    out = calculate_airport_events(
+        _track_over_a_taxiway(spark), MONTH, StubStorage(spark, layouts=layouts), config
+    )
+    rows = sorted(
+        (r.type, r.event_time, r.lon, r.lat, r.altitude_ft, r.info) for r in out.collect()
+    )
+    return rows, {json.loads(r[-1])["osm_id"] for r in rows}
+
+
+def test_of_overlapping_elements_the_event_names_the_smallest_identifier(spark):
+    """Several taxiway, apron or stand elements can share one cell. The event
+    names one of them, the same on every run: the smallest element identifier."""
+    for order in ("bac", "cba", "abc"):
+        rows, named = _events_with_layouts(
+            spark, _overlapping_layouts(spark, order).repartition(3), EventConfig()
+        )
+        assert named == {"osm-twy-a"}, order
+        assert [r[0] for r in rows] == ["entry-taxiway", "exit-taxiway"]
+
+
+def test_two_runs_over_shuffled_layouts_give_the_same_events(spark):
+    first, _ = _events_with_layouts(spark, _overlapping_layouts(spark, "cab"), EventConfig())
+    again, _ = _events_with_layouts(
+        spark, _overlapping_layouts(spark, "bca").orderBy(F.rand(3)).repartition(2), EventConfig()
+    )
+    assert first == again
+
+
+def test_the_v002_settings_keep_one_event_per_passage_without_the_rule(spark):
+    """``EventConfig.legacy()`` keeps the release v0.0.2 choice (any one of the
+    overlapping elements), so its output is unchanged."""
+    assert EventConfig.legacy().layout_deterministic_element is False
+    assert EventConfig().layout_deterministic_element is True
+    rows, named = _events_with_layouts(
+        spark, _overlapping_layouts(spark, "bac"), EventConfig(layout_deterministic_element=False)
+    )
+    assert len(rows) == 2 and len(named) == 1
+
+
+def test_the_element_kept_does_not_depend_on_the_row_order(spark):
+    """The choice itself, on events that differ only in the element they name."""
+    import json
+
+    from opdi.pipeline.layout import one_element_per_passage
+
+    t = dt.datetime(2024, 6, 1, 12, 0)
+
+    def events(order):
+        rows = [
+            (
+                "trk-1",
+                "entry-apron",
+                t,
+                12.6,
+                55.6,
+                10.0,
+                0.1,
+                5,
+                json.dumps({"osm_id": k, "osm_ref": f"A{k}"}),
+                k,
+            )
+            for k in order
+        ]
+        return spark.createDataFrame(
+            rows,
+            "track_id string, type string, event_time timestamp, lon double, lat double, "
+            "altitude_ft double, cumulative_distance_nm double, cumulative_time_s long, "
+            "info string, _osm_id long",
+        )
+
+    for order in ([30, 20, 10], [10, 30, 20], [20, 10, 30]):
+        kept = one_element_per_passage(events(order).coalesce(1), EventConfig()).collect()
+        assert [json.loads(r.info)["osm_id"] for r in kept] == [10], order
+        assert "_osm_id" not in kept[0].asDict()
