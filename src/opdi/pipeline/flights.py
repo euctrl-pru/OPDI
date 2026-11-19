@@ -8,7 +8,8 @@ from the OpenSky aircraft database.
 
 The rows are written in two passes into the same day folder: first the
 tracks whose departure or destination could be placed near an airport, then
-the remaining tracks of at least 5 minutes as overflights. The methods and
+the remaining tracks as overflights (in release v0.0.2, only those of at
+least 5 minutes). The methods and
 thresholds are those of :class:`opdi.config.DetectionConfig`.
 See https://www.opdi.aero/content/methods/airports.html.
 """
@@ -357,8 +358,8 @@ class FlightListProcessor:
     * **Departures and arrivals** (:meth:`process_dai`): the departure and
       destination airports of every track that can be placed near an
       airport, by the methods of :class:`~opdi.config.DetectionConfig`.
-    * **Overflights** (:meth:`process_overflights`): every other track of at
-      least 5 minutes, with no airport.
+    * **Overflights** (:meth:`process_overflights`): every other track, with no
+      airport (``EventConfig.overflight_min_duration_s``).
 
     Each row gets the aircraft's registration, model, type code and operator
     from the OpenSky aircraft database.
@@ -1860,7 +1861,7 @@ class FlightListProcessor:
                 f_min("event_time").alias("_t0"),
                 f_max("event_time").alias("_t1"),
             )
-            # The five-minute rule reads the time between the first and last
+            # The minimum duration reads the time between the first and last
             # report of any kind, as without the setting, so the same tracks
             # become overflight rows.
             sv_f = (
