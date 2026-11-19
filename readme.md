@@ -205,6 +205,7 @@ space first and skips the steps already finished:
 ```bash
 python -m opdi.orchestration reference                 # step 00, once
 python -m opdi.orchestration day --day 2026-06-14      # steps 01 to 09
+python -m opdi.orchestration day --day 2026-06-14 --adsc   # the same, with ADS-C as a second source
 python -m opdi.orchestration step --step 04 --day 2026-06-14 --force   # one step again
 ```
 
@@ -371,6 +372,7 @@ linting: `black .` and `ruff check src airflow tools`.
 |----------|---------|
 | `OPDI_WAREHOUSE` | The warehouse of the `opensky` environment (default `s3a://eurocontrol/opdi`) |
 | `OPDI_OSM_PBF` | Local OpenStreetMap extract for step 00b |
+| `OPDI_ADSC` | `1` merges ADS-C reports into the tracks (the same as `--adsc` of `opdi.orchestration`) |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Credentials for the OpenSky S3 storage (also read from a `.env` file) |
 | `OSN_USERNAME`, `OSN_KEY` | OpenSky credentials for the MinIO download path of step 01 |
 | `OPDI_BUCKET_QUOTA_GB` | Storage quota of the bucket, for the free-space check (default 200) |

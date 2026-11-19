@@ -1,6 +1,7 @@
 """Tests for running the pipeline one step and one day at a time."""
 
 import json
+import os
 from datetime import date
 
 import pytest
@@ -379,3 +380,45 @@ def test_working_events_stay_while_a_neighbouring_day_is_not_published():
     # neighbour May 11 are not published (the edges of the published days).
     # May 4 and May 6 are kept for May 5.
     assert removed == ["2026-05-02", "2026-05-03", "2026-05-07", "2026-05-08", "2026-05-09"]
+
+
+# --- ADS-C as a second source -------------------------------------------------
+
+
+def test_config_has_adsc_off_unless_asked(monkeypatch):
+    from opdi import orchestration
+
+    monkeypatch.delenv("OPDI_ADSC", raising=False)
+    assert orchestration.make_config("s3a://bucket/w").adsc.enabled is False
+
+
+def test_config_has_adsc_on_when_the_variable_is_set(monkeypatch):
+    from opdi import orchestration
+
+    monkeypatch.setenv("OPDI_ADSC", "1")
+    assert orchestration.make_config("s3a://bucket/w").adsc.enabled is True
+
+
+def test_adsc_option_sets_the_variable_for_every_step(monkeypatch):
+    from opdi import orchestration
+
+    monkeypatch.delenv("OPDI_ADSC", raising=False)
+    seen = {}
+    monkeypatch.setattr(
+        orchestration, "run_day", lambda *a, **k: seen.update(adsc=os.environ.get("OPDI_ADSC")) or 0
+    )
+    assert orchestration.main(["day", "--day", "2026-06-14", "--adsc"]) == 0
+    assert seen["adsc"] == "1"
+
+
+def test_steps_after_ingestion_list_the_adsc_step_only_when_on(monkeypatch):
+    from opdi import orchestration
+
+    monkeypatch.delenv("OPDI_ADSC", raising=False)
+    assert orchestration.steps_run_with("01", orchestration.make_config("s3a://bucket/w")) == (
+        "01",
+    )
+    monkeypatch.setenv("OPDI_ADSC", "1")
+    config = orchestration.make_config("s3a://bucket/w")
+    assert orchestration.steps_run_with("01", config) == ("01", "01b")
+    assert orchestration.steps_run_with("02", config) == ("02",)
