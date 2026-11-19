@@ -42,3 +42,28 @@ def test_an_address_given_by_the_caller_has_no_fallback(monkeypatch):
     monkeypatch.setattr(oa.pd, "read_csv", read)
     with pytest.raises(urllib.error.URLError):
         oa.read_dataset_csv("airports", url="https://example.org/airports.csv")
+
+
+def test_the_whole_step_reads_the_mirror_when_the_site_fails(monkeypatch):
+    """ingest_all passes each site address on; that must still fall back."""
+    seen = []
+
+    def read(url):
+        seen.append(url)
+        if url in oa.DEFAULT_URLS.values():
+            raise urllib.error.URLError("certificate has expired")
+        return pd.DataFrame({"a": [1]})
+
+    class Step(oa.OurAirportsIngestion):
+        def __init__(self):
+            pass
+
+        def create_tables(self):
+            pass
+
+        def ingest_dataset(self, name, url=None):
+            return len(oa.read_dataset_csv(name, url))
+
+    monkeypatch.setattr(oa.pd, "read_csv", read)
+    assert set(Step().ingest_all().values()) == {1}
+    assert seen.count(oa.MIRROR_URLS["airports"]) == 1

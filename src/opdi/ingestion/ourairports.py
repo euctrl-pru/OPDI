@@ -47,13 +47,13 @@ def read_dataset_csv(name: str, url: Optional[str] = None) -> pd.DataFrame:
 
     Args:
         name: Dataset name, a key of :data:`DEFAULT_URLS`.
-        url: Address to read instead. It is read as given, with no fallback.
+        url: Another address to read instead. It is read as given, with no fallback.
 
     Returns:
         The file's rows. Without ``url`` the site is read first and, when it
         cannot be reached (for example an expired certificate), the mirror.
     """
-    if url is not None:
+    if url is not None and url != DEFAULT_URLS[name]:
         print(f"Reading {name} from {url}...")
         return pd.read_csv(url)
     print(f"Reading {name} from {DEFAULT_URLS[name]}...")
