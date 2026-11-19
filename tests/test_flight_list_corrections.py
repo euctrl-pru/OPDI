@@ -942,3 +942,56 @@ def test_the_endpoint_candidates_carry_the_climb_and_the_track_times(spark, tmp_
     assert round(got["adep"]["climb_ft"]) == round((2010.0 - 2956.0) * 3.28084)
     assert got["ades"]["climb_ft"] is None
     assert got["ades"]["track_first_seen"] == _t(0) and got["adep"]["track_last_seen"] == _t(600)
+
+
+# ---------------------------------------------------------------------------
+# Step 03: how short a track may be and still get a flight-list row
+# ---------------------------------------------------------------------------
+
+
+def _short_track_rows(span_s, callsign="TST1 "):
+    """Reports of one track every 60 s over ``span_s`` seconds (one report if 0)."""
+    times = range(0, int(span_s) + 1, 60) if span_s else [0]
+    rows = [("s1", "aa0001", callsign, _t(s), 40.0 + s * 1e-4, 5.0, 11000.0) for s in times]
+    if span_s and span_s % 60:
+        rows.append(("s1", "aa0001", callsign, _t(span_s), 41.0, 5.0, 11000.0))
+    return rows
+
+
+def _overflights(spark, rows, events_config):
+    sv = spark.createDataFrame(rows, _OF_SCHEMA)
+    fl = spark.createDataFrame([], "id string, first_seen timestamp")
+    proc = _overflight_processor({"osn_tracks": sv, "opdi_flight_list": fl})
+    proc.config.events = events_config
+    return proc._fetch_overflights(_T0.date()).collect()
+
+
+def test_overflight_min_duration_defaults():
+    assert EventConfig().overflight_min_duration_s == 0.0
+    assert EventConfig.legacy().overflight_min_duration_s == 300.0
+
+
+def test_short_track_gets_an_overflight_row(spark):
+    rows = _overflights(spark, _short_track_rows(120), EventConfig())
+    assert len(rows) == 1
+    (row,) = rows
+    assert row["id"] == "s1"
+    assert row["ADEP"] is None and row["ADES"] is None
+    assert row["adep_source"] == "undetermined"
+    assert row["ades_source"] == "undetermined"
+
+
+def test_single_report_track_gets_a_row(spark):
+    (row,) = _overflights(spark, _short_track_rows(0, callsign=None), EventConfig())
+    assert row["first_seen"] == row["last_seen"]
+    assert not row["FLT_ID"]
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("measured", [True, False])
+def test_legacy_keeps_the_five_minute_rule(spark, measured):
+    cfg = replace(EventConfig.legacy(), seen_from_measured_reports=measured)
+    assert _overflights(spark, _short_track_rows(120), cfg) == []
+    assert len(_overflights(spark, _short_track_rows(300), cfg)) == 1

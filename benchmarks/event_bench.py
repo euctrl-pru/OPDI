@@ -328,6 +328,9 @@ LADDER = [
     # The runway of the runway window method by the median distance of the
     # reports from each centre line (two parallel runways close together).
     ("L25_runway_by_median_distance", {"runway_window_by_median_distance": True}),
+    # A track under five minutes with no airport gets a flight-list row, so
+    # every published event has its flight.
+    ("L26_short_tracks_get_a_row", {"overflight_min_duration_s": 0.0}),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to

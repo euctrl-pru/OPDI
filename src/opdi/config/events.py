@@ -1710,6 +1710,12 @@ class EventConfig:
     a go-around climbs away within well under a minute; a turnaround or a
     full-stop circuit that taxis back takes several minutes."""
 
+    overflight_min_duration_s: float = 0.0
+    """Shortest time, in seconds, between the first and last report of a
+    track with no departure and no destination for it to get a flight-list
+    row. At 0 every track with reports gets one, so every published event
+    has its flight. 300 in release v0.0.2."""
+
     seen_from_measured_reports: bool = True
     """Define ``first_seen`` and ``last_seen`` as the first and last report
     of the track with a measured position, in the flight list (step 03) and
@@ -1887,6 +1893,7 @@ class EventConfig:
             milestones_on_own_leg=False,
             seen_from_measured_reports=False,
             flight_list_one_row_per_flight=False,
+            overflight_min_duration_s=300.0,
             keep_each_family=False,
             events_version=LEGACY_EVENTS_VERSION,
         )

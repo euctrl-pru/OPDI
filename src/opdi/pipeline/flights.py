@@ -1788,7 +1788,11 @@ class FlightListProcessor:
     # ------------------------------------------------------------------
 
     def _fetch_overflights(self, month: date) -> DataFrame:
-        """Overflights: tracks of at least 5 minutes not yet in the flight list.
+        """Overflights: tracks without an airport not yet in the flight list.
+
+        A track needs at least ``EventConfig.overflight_min_duration_s``
+        seconds between its first and last report (300 in release v0.0.2;
+        by default 0, so a track of one report also gets a row).
 
         Args:
             month: Month to process.
@@ -1797,6 +1801,11 @@ class FlightListProcessor:
             One row per overflight, without airports, and with both source
             columns ``undetermined``.
         """
+        min_duration = getattr(
+            getattr(getattr(self, "config", None), "events", None),
+            "overflight_min_duration_s",
+            300.0,
+        )
         prepare = None
         if FlightListProcessor._seen_from_measured_reports(self):
             # The rank of each report for first and last seen, computed before
@@ -1855,7 +1864,7 @@ class FlightListProcessor:
             # report of any kind, as without the setting, so the same tracks
             # become overflight rows.
             sv_f = (
-                per_track.filter(unix_timestamp("_t1") - unix_timestamp("_t0") >= 300)
+                per_track.filter(unix_timestamp("_t1") - unix_timestamp("_t0") >= min_duration)
                 .select(
                     col("track_id"),
                     col("_first.icao24").alias("icao24"),
@@ -1905,10 +1914,12 @@ class FlightListProcessor:
         fl_broadcast = broadcast(fl)
         sv_f = sv_f.join(fl_broadcast, sv_f.id == fl.id, "left_anti")
 
-        # Filter out short ADS-B signals (< 5 min); with measured first and last
+        # Filter out short ADS-B signals (see min_duration); with measured first and last
         # seen this was done above, on all reports.
         if not FlightListProcessor._seen_from_measured_reports(self):
-            sv_f = sv_f.filter((unix_timestamp("last_seen") - unix_timestamp("first_seen")) >= 300)
+            sv_f = sv_f.filter(
+                (unix_timestamp("last_seen") - unix_timestamp("first_seen")) >= min_duration
+            )
 
         return sv_f
 
