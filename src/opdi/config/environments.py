@@ -226,6 +226,14 @@ class OPDIConfig:
                     k8s_executor_cores_limit="2",
                     cluster_settings=dict(OPENSKY_CLUSTER_SETTINGS),
                     step_settings={k: dict(v) for k, v in OPENSKY_STEP_SETTINGS.items()},
+                    # Step 00a builds the airport zones in Python workers that
+                    # hold about 4.4 GiB per executor (measured worldwide). With
+                    # the usual 11g of heap the container reached its limit and
+                    # executors were killed while the zones were written; 6g of
+                    # heap leaves the workers 7.5 GiB in the same container.
+                    step_executor_sizes={
+                        "00": {"executor_memory": "6g", "executor_memory_overhead": "7680m"}
+                    },
                 ),
             )
         else:

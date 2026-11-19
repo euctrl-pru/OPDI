@@ -112,6 +112,28 @@ class SparkConfig:
     Only settings Spark accepts while a session runs (``spark.sql.*``) can be
     given here."""
 
+    step_executor_sizes: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    """Executor heap and memory outside the heap for one step only, by step id:
+    ``{"00": {"executor_memory": "6g", "executor_memory_overhead": "7680m"}}``.
+    A step whose work runs in Python workers needs less heap and more memory
+    outside it. Applied by :meth:`size_executors_for_step` before the step's
+    session is created, so it needs a session of its own
+    (``python -m opdi.orchestration``)."""
+
+    def size_executors_for_step(self, step: str) -> None:
+        """Set the executor memory of :attr:`step_executor_sizes` for ``step``.
+
+        Does nothing without executors on Kubernetes or for a step with no
+        entry. Call it before creating the step's session.
+        """
+        if not self.k8s_master:
+            return
+        size = self.step_executor_sizes.get(step, {})
+        self.executor_memory = size.get("executor_memory", self.executor_memory)
+        self.executor_memory_overhead = size.get(
+            "executor_memory_overhead", self.executor_memory_overhead
+        )
+
     def settings_for_step(self, step: str) -> Dict[str, str]:
         """The settings of :attr:`step_settings` for ``step``.
 

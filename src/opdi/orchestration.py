@@ -555,6 +555,7 @@ def _attempt_unit(
     print(f"OPDI {label}")
     print(config.describe_target())
 
+    config.spark.size_executors_for_step(step)
     spark = _session(config, f"OPDI {label}")
     started = time.time()
     try:
