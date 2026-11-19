@@ -26,15 +26,19 @@ The columns are declared in :mod:`opdi.output.schema`.
 
 What the values look like:
 
-* ``event_id`` is ``<flight_id>-E<n>``, where ``n`` counts the events of the
-  flight in time order (ties are ordered by event type, then by the
+* ``event_id`` is ``<flight_id>-E<nnnn>``, where ``nnnn`` counts the events of the
+  flight in time order, with at least four digits (``-E0001``), so the ids of a
+  flight sort in time order as text (ties are ordered by event type, then by the
   pipeline's own event id). The id identifies an event within one release.
+  An event whose flight is in no flight list keeps the pipeline's own event
+  id.
   The measurement ids of the classic views are the event id followed by a
   suffix, so they follow it. The pipeline's working tables keep their own
   hash ids.
 * Positions are rounded to 5 decimals (about 1 m), altitudes to whole feet,
   and columns in nautical miles or degrees to 3 decimals. The numbers inside
-  ``info`` have at most 3 decimals. The flight columns repeated on each event
+  ``info`` are cut to three decimals (not rounded), except numbers with a
+  positive exponent. The flight columns repeated on each event
   are rounded the same way as in the flight list. The rule is
   :func:`opdi.output.schema.published_decimals`.
 * The two settings ``EventConfig.published_event_id_by_flight`` and
@@ -73,8 +77,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Sequence
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import Window
+from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 from opdi.output.schema import (
@@ -106,7 +109,7 @@ ROW_GROUP_ROWS = 100_000
 _ROW_GROUP_MAX_BYTES = 1024 * 1024 * 1024
 
 #: Level of the zstd compression of the published files (1 is fastest, 22
-#: smallest). Level 9 gives smaller files than the default level 1 for a
+#: smallest). Level 9 gives smaller files than the default level 3 for a
 #: moderate cost in writing time.
 ZSTD_LEVEL = 9
 
@@ -267,12 +270,13 @@ def build_flight_events(
             same events.
         flight_list: Rows of the working table ``opdi_flight_list`` that
             contain the events' flights. Extra flights do no harm.
-        event_id_by_flight: Publish the id ``<flight_id>-E<n>``, with ``n``
-            counting the events of the flight by time, then type, then working
-            id. Otherwise the working id.
+        event_id_by_flight: Publish the id ``<flight_id>-E<nnnn>``, with ``nnnn``
+            (at least four digits) counting the events of the flight by time,
+            then type, then working id. Events without a flight in
+            ``flight_list`` and the case of ``False`` keep the working id.
         values_rounded: Round the values as
-            :func:`~opdi.output.schema.published_decimals` says, and the
-            numbers in ``info`` to 3 decimals.
+            :func:`~opdi.output.schema.published_decimals` says, and cut the
+            numbers in ``info`` to three decimals.
 
     Returns:
         The rows with the columns of :data:`~opdi.output.schema.FLIGHT_EVENTS`.
@@ -341,15 +345,25 @@ def build_flight_events(
         .withColumn("release", F.lit(RELEASE))
     )
     if event_id_by_flight:
-        # The measurements were joined by the working id above. A flight
-        # always has an id here: an event without a flight in the list keeps
-        # the id of its track.
-        by_flight = Window.partitionBy("flight_id").orderBy("event_time", "type", "event_id")
+        # The measurements were joined by the working id above. Only an event
+        # matched to a flight-list row is numbered under its flight. An event
+        # without a flight keeps its working id: it is numbered within one
+        # file, and the same track can have such events in the files of
+        # several days, which would repeat an id.
+        matched = F.col("_flight_id").isNotNull()
+        by_flight = Window.partitionBy("flight_id", matched).orderBy(
+            "event_time", "type", "event_id"
+        )
         joined = joined.withColumn(
             "event_id",
-            F.concat(
-                F.col("flight_id"), F.lit("-E"), F.row_number().over(by_flight).cast("string")
-            ),
+            F.when(
+                matched,
+                F.concat(
+                    F.col("flight_id"),
+                    F.lit("-E"),
+                    F.format_string("%04d", F.row_number().over(by_flight)),
+                ),
+            ).otherwise(F.col("event_id")),
         )
     built = joined.select(*[F.col(c.name).cast(c.dtype).alias(c.name) for c in FLIGHT_EVENTS])
     return _rounded(built, info=True) if values_rounded else built
@@ -888,7 +902,7 @@ def publish_day(
         row_group_rows: Number of rows per row group.
         allow_empty: Replace a published file that has rows with an empty
             one. Without it, that is refused.
-        event_id_by_flight: Publish the event ids as ``<flight_id>-E<n>``
+        event_id_by_flight: Publish the event ids as ``<flight_id>-E<nnnn>``
             (:attr:`opdi.config.EventConfig.published_event_id_by_flight`).
         values_rounded: Round the published values
             (:attr:`opdi.config.EventConfig.published_values_rounded`).

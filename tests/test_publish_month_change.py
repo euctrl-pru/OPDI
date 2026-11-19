@@ -82,7 +82,10 @@ def test_each_month_gets_its_own_index_and_a_quiet_flight_is_kept(spark, tmp_pat
     assert flights == {"trk_jun", "trk_quiet"}
     assert {e["flight_id"] for e in events} == {"trk_jun"}
     # The event after midnight is in the June file, under the June day.
-    assert {e["event_id"]: e["dof"] for e in events} == {"trk_jun-E1": JUNE, "trk_jun-E2": JUNE}
+    assert {e["event_id"]: e["dof"] for e in events} == {
+        "trk_jun-E0001": JUNE,
+        "trk_jun-E0002": JUNE,
+    }
 
     catalogue = {r["day"]: r for r in spark.read.parquet(layout.catalogue).collect()}
     assert sorted(catalogue) == [JUNE, JULY]

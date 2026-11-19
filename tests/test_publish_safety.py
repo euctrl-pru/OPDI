@@ -262,4 +262,4 @@ def test_a_measurement_written_twice_gives_the_largest_value(spark, tables):
         rows = build_flight_events(
             tables["opdi_flight_events"], measurements.coalesce(1), tables["opdi_flight_list"]
         ).collect()
-        assert {r["event_id"]: r["distance_flown_nm"] for r in rows}["trk_1-E1"] == 7.0
+        assert {r["event_id"]: r["distance_flown_nm"] for r in rows}["trk_1-E0001"] == 7.0

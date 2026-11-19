@@ -61,11 +61,12 @@ The files are Parquet files, one per table and day:
 <release>/catalogue.parquet                   # one row per published day
 ```
 
-Event ids have the form `<flight_id>-E<n>`, where `n` counts the events of the
-flight in time order, so an id identifies an event within one release. Positions
+Event ids have the form `<flight_id>-E<nnnn>`, where `nnnn` counts the events
+of the flight in time order (at least four digits, so ids sort in time order as
+text). An id identifies an event within one release. An event whose flight is
+in no flight list keeps the pipeline's own event id. Positions
 have 5 decimals (about 1 m), altitudes are whole feet, columns in nautical
-miles or degrees have 3 decimals, and the numbers inside `info` have at most 3
-decimals. The files are compressed with zstd (level 9). The settings
+miles or degrees have 3 decimals, and the numbers inside `info` are cut to three decimals. The files are compressed with zstd (level 9). The settings
 `published_event_id_by_flight` and `published_values_rounded` of `EventConfig`
 turn the ids and the rounding off.
 

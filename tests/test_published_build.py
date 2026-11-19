@@ -170,31 +170,31 @@ def test_flight_events_has_the_declared_columns_in_order(tables):
 
 def test_post_midnight_event_is_in_the_start_day(tables):
     rows = {r["event_id"]: r for r in _day_events(tables).collect()}
-    assert set(rows) == {"trk_1-E1", "trk_1-E2", "trk_1-E3", "trk_2-E1", "trk_2-E2"}
-    assert rows["trk_1-E3"]["event_time"].date() == NEXT
-    assert rows["trk_1-E3"]["dof"] == DAY
-    assert rows["trk_1-E3"]["adep"] == "LFPG"
+    assert set(rows) == {"trk_1-E0001", "trk_1-E0002", "trk_1-E0003", "trk_2-E0001", "trk_2-E0002"}
+    assert rows["trk_1-E0003"]["event_time"].date() == NEXT
+    assert rows["trk_1-E0003"]["dof"] == DAY
+    assert rows["trk_1-E0003"]["adep"] == "LFPG"
 
 
 def test_missing_measurement_is_null_never_zero(tables):
     rows = {r["event_id"]: r for r in _day_events(tables).collect()}
-    assert rows["trk_1-E1"]["holding_duration_s"] is None
-    assert rows["trk_1-E2"]["holding_duration_s"] == 720.0
+    assert rows["trk_1-E0001"]["holding_duration_s"] is None
+    assert rows["trk_1-E0002"]["holding_duration_s"] == 720.0
     # A real zero stays a zero.
-    assert rows["trk_1-E1"]["distance_flown_nm"] == 0.0
+    assert rows["trk_1-E0001"]["distance_flown_nm"] == 0.0
     # No measurement row at all: every measurement column is NULL.
     for c in MEASUREMENT_COLUMNS:
-        assert rows["trk_2-E2"][c.name] is None
-    assert rows["trk_1-E3"]["time_passed_s"] is None
+        assert rows["trk_2-E0002"][c.name] is None
+    assert rows["trk_1-E0003"]["time_passed_s"] is None
 
 
 def test_flight_columns_are_repeated_on_every_event(tables):
     rows = {r["event_id"]: r for r in _day_events(tables).collect()}
-    assert rows["trk_2-E1"]["flt_id"] == "TST2"
-    assert rows["trk_2-E1"]["flight_version"] == "v5.0.0"
-    assert rows["trk_2-E1"]["version"] == "events_v0.3.0"
-    assert rows["trk_2-E1"]["release"] == RELEASE
-    assert rows["trk_2-E1"]["h3_res_5"] is not None
+    assert rows["trk_2-E0001"]["flt_id"] == "TST2"
+    assert rows["trk_2-E0001"]["flight_version"] == "v5.0.0"
+    assert rows["trk_2-E0001"]["version"] == "events_v0.3.0"
+    assert rows["trk_2-E0001"]["release"] == RELEASE
+    assert rows["trk_2-E0001"]["h3_res_5"] is not None
 
 
 # --- publishing -------------------------------------------------------------
@@ -235,11 +235,11 @@ def test_publish_day_writes_one_file_per_table_and_no_temporary_files(spark, tab
     ev = pq.read_table(layout.flight_events(DAY))
     assert ev.column_names == [c.name for c in FLIGHT_EVENTS]
     assert sorted(ev.column("event_id").to_pylist()) == [
-        "trk_1-E1",
-        "trk_1-E2",
-        "trk_1-E3",
-        "trk_2-E1",
-        "trk_2-E2",
+        "trk_1-E0001",
+        "trk_1-E0002",
+        "trk_1-E0003",
+        "trk_2-E0001",
+        "trk_2-E0002",
     ]
 
 
@@ -382,21 +382,21 @@ def test_events_follow_their_flight_into_its_day(spark, tmp_path):
 
     day = {r["event_id"]: r for r in pq.read_table(layout.flight_events(DAY)).to_pylist()}
     nxt = {r["event_id"]: r for r in pq.read_table(layout.flight_events(NEXT)).to_pylist()}
-    assert sorted(day) == ["orphan_1-E1", "trk_a-E1", "trk_a-E2"]
-    assert sorted(nxt) == ["orphan_2-E1", "trk_b-E1", "trk_b-E2"]
+    assert sorted(day) == ["o1", "trk_a-E0001", "trk_a-E0002"]
+    assert sorted(nxt) == ["o2", "trk_b-E0001", "trk_b-E0002"]
 
     # The flight's own columns, and its date, are on the events stored under
     # the other day.
-    assert day["trk_a-E1"]["dof"] == DAY and day["trk_a-E1"]["adep"] == "LFPG"
-    assert day["trk_a-E1"]["distance_flown_nm"] == 3.0
-    assert nxt["trk_b-E1"]["dof"] == NEXT and nxt["trk_b-E1"]["adep"] == "EDDF"
-    assert nxt["trk_b-E1"]["distance_flown_nm"] == 0.0
+    assert day["trk_a-E0001"]["dof"] == DAY and day["trk_a-E0001"]["adep"] == "LFPG"
+    assert day["trk_a-E0001"]["distance_flown_nm"] == 3.0
+    assert nxt["trk_b-E0001"]["dof"] == NEXT and nxt["trk_b-E0001"]["adep"] == "EDDF"
+    assert nxt["trk_b-E0001"]["distance_flown_nm"] == 0.0
 
     # An event without a flight-list row keeps its own date and has NULL
     # flight columns.
-    assert day["orphan_1-E1"]["dof"] == DAY and day["orphan_1-E1"]["adep"] is None
-    assert day["orphan_1-E1"]["distance_flown_nm"] == 99.0
-    assert nxt["orphan_2-E1"]["dof"] == NEXT and nxt["orphan_2-E1"]["flight_version"] is None
+    assert day["o1"]["dof"] == DAY and day["o1"]["adep"] is None
+    assert day["o1"]["distance_flown_nm"] == 99.0
+    assert nxt["o2"]["dof"] == NEXT and nxt["o2"]["flight_version"] is None
 
     # A flight and its events are in the same day's files.
     for d in (DAY, NEXT):
@@ -499,17 +499,20 @@ def test_the_flights_of_a_track_are_published_in_the_day_of_their_track(spark, t
     assert flights["trk_a-L2"]["first_seen"] == divided
     day = {r["event_id"]: r for r in pq.read_table(layout.flight_events(DAY)).to_pylist()}
     assert {k: v["flight_id"] for k, v in day.items()} == {
-        "trk_a-L1-E1": "trk_a-L1",
-        "trk_a-L1-E2": "trk_a-L1",
-        "trk_a-L2-E1": "trk_a-L2",
-        "trk_a-L2-E2": "trk_a-L2",
+        "trk_a-L1-E0001": "trk_a-L1",
+        "trk_a-L1-E0002": "trk_a-L1",
+        "trk_a-L2-E0001": "trk_a-L2",
+        "trk_a-L2-E0002": "trk_a-L2",
     }
     assert {r["dof"] for r in day.values()} == {DAY}
-    assert (day["trk_a-L2-E1"]["adep"], day["trk_a-L2-E1"]["distance_flown_nm"]) == ("EDDF", 250.0)
+    assert (day["trk_a-L2-E0001"]["adep"], day["trk_a-L2-E0001"]["distance_flown_nm"]) == (
+        "EDDF",
+        250.0,
+    )
 
     nxt_flights = pq.read_table(layout.flight_list(NEXT)).column("flight_id").to_pylist()
     nxt_events = pq.read_table(layout.flight_events(NEXT)).column("event_id").to_pylist()
-    assert (nxt_flights, nxt_events) == (["trk_b"], ["trk_b-E1"])
+    assert (nxt_flights, nxt_events) == (["trk_b"], ["trk_b-E0001"])
 
     index = {r["flight_id"]: r for r in pq.read_table(layout.flight_index(DAY)).to_pylist()}
     assert sorted(index) == ["trk_a-L1", "trk_a-L2", "trk_b"]
@@ -553,8 +556,8 @@ def test_event_id_is_the_flight_id_and_the_place_in_time(tables):
     for r in sorted(rows, key=lambda r: r["event_time"]):
         by_flight.setdefault(r["flight_id"], []).append(r["event_id"])
     assert by_flight == {
-        "trk_1": ["trk_1-E1", "trk_1-E2", "trk_1-E3"],
-        "trk_2": ["trk_2-E1", "trk_2-E2"],
+        "trk_1": ["trk_1-E0001", "trk_1-E0002", "trk_1-E0003"],
+        "trk_2": ["trk_2-E0001", "trk_2-E0002"],
     }
 
 
@@ -572,26 +575,26 @@ def test_event_id_order_is_time_then_type_then_working_id(spark):
     rows = build_flight_events(ev, ms, fl).collect()
     order = {r["event_id"]: r["type"] for r in rows}
     assert order == {
-        "trk_x-E1": "c-type",
-        "trk_x-E2": "a-type",
-        "trk_x-E3": "b-type",
-        "trk_x-E4": "b-type",
+        "trk_x-E0001": "c-type",
+        "trk_x-E0002": "a-type",
+        "trk_x-E0003": "b-type",
+        "trk_x-E0004": "b-type",
     }
     # The two events of equal time and type: the working id decides ("a1" first).
     by_id = {r["event_id"]: r for r in rows}
     again = build_flight_events(ev.orderBy(F.col("id").desc()), ms, fl).collect()
     assert {r["event_id"]: r["type"] for r in again} == order
-    assert by_id["trk_x-E3"]["type"] == "b-type"
+    assert by_id["trk_x-E0003"]["type"] == "b-type"
 
 
 def test_measurements_stay_with_their_event_after_the_id_changes(tables):
     rows = {r["event_id"]: r for r in _day_events(tables).collect()}
-    assert rows["trk_1-E2"]["type"] == "holding-end"
-    assert rows["trk_1-E2"]["holding_duration_s"] == 720.0
-    assert rows["trk_1-E2"]["distance_flown_nm"] == 250.0
-    assert rows["trk_1-E1"]["holding_duration_s"] is None
-    assert rows["trk_1-E3"]["distance_flown_nm"] == 300.0
-    assert rows["trk_2-E2"]["distance_flown_nm"] is None
+    assert rows["trk_1-E0002"]["type"] == "holding-end"
+    assert rows["trk_1-E0002"]["holding_duration_s"] == 720.0
+    assert rows["trk_1-E0002"]["distance_flown_nm"] == 250.0
+    assert rows["trk_1-E0001"]["holding_duration_s"] is None
+    assert rows["trk_1-E0003"]["distance_flown_nm"] == 300.0
+    assert rows["trk_2-E0002"]["distance_flown_nm"] is None
 
 
 def test_the_flights_of_one_track_number_their_events_on_their_own(spark, tmp_path):
@@ -637,20 +640,20 @@ def test_the_flights_of_one_track_number_their_events_on_their_own(spark, tmp_pa
     )
     rows = build_flight_events(events, ms, legs).collect()
     assert {(r["flight_id"], r["event_id"]) for r in rows} == {
-        ("trk_a-L1", "trk_a-L1-E1"),
-        ("trk_a-L1", "trk_a-L1-E2"),
-        ("trk_a-L2", "trk_a-L2-E1"),
-        ("trk_a-L2", "trk_a-L2-E2"),
+        ("trk_a-L1", "trk_a-L1-E0001"),
+        ("trk_a-L1", "trk_a-L1-E0002"),
+        ("trk_a-L2", "trk_a-L2-E0001"),
+        ("trk_a-L2", "trk_a-L2-E0002"),
     }
     by_id = {r["event_id"]: r for r in rows}
-    assert by_id["trk_a-L2-E1"]["distance_flown_nm"] == 250.0
+    assert by_id["trk_a-L2-E0001"]["distance_flown_nm"] == 250.0
 
 
-def test_an_event_without_a_flight_in_the_list_is_numbered_under_its_track(spark):
+def test_an_event_without_a_flight_in_the_list_keeps_its_working_id(spark):
     ev, ms, fl = _mini(spark, [("o1", "ATOT", _ts(DAY, 9, 0), 1.0, 1.0, 0.0, "{}")])
     ev = ev.withColumn("flight_id", F.lit("lost"))
     rows = build_flight_events(ev, ms, fl).collect()
-    assert [(r["flight_id"], r["event_id"], r["adep"]) for r in rows] == [("lost", "lost-E1", None)]
+    assert [(r["flight_id"], r["event_id"], r["adep"]) for r in rows] == [("lost", "o1", None)]
 
 
 LONG = 1.123456789012345
@@ -712,6 +715,9 @@ INFO_CASES = [
     ('{"a":[1.23456789,2.0,-3.98765]}', '{"a":[1.234,2.0,-3.987]}'),
     ('{"n":12,"s":1.5,"t":0.125}', '{"n":12,"s":1.5,"t":0.125}'),
     ('{"a":1.1234,"b":22.98765}', '{"a":1.123,"b":22.987}'),
+    # A positive exponent is a large number: left as it is.
+    ('{"x":1.2345678901234567E10}', '{"x":1.2345678901234567E10}'),
+    ('{"x":-1.2345678E-5}', '{"x":-1.234E-5}'),
     ("{}", "{}"),
     ("", ""),
     (None, None),
@@ -719,7 +725,7 @@ INFO_CASES = [
 
 
 @pytest.mark.parametrize("raw,expected", INFO_CASES)
-def test_info_numbers_are_cut_to_three_decimals(spark, raw, expected):
+def test_info_numbers_are_cut_to_three_decimals_unless_large(spark, raw, expected):
     ev, ms, fl = _mini(spark, [("e1", "ATOT", _ts(DAY, 9, 0), 1.0, 1.0, 0.0, raw)])
     [r] = build_flight_events(ev, ms, fl).collect()
     assert r["info"] == expected
@@ -772,11 +778,11 @@ def test_publish_day_follows_the_two_settings(spark, tables, tmp_path):
         values_rounded=False,
     )
     assert set(pq.read_table(on.flight_events(DAY)).column("event_id").to_pylist()) == {
-        "trk_1-E1",
-        "trk_1-E2",
-        "trk_1-E3",
-        "trk_2-E1",
-        "trk_2-E2",
+        "trk_1-E0001",
+        "trk_1-E0002",
+        "trk_1-E0003",
+        "trk_2-E0001",
+        "trk_2-E0002",
     }
     assert set(pq.read_table(off.flight_events(DAY)).column("event_id").to_pylist()) == {
         "e1",
@@ -836,3 +842,60 @@ def test_the_default_zstd_level_is_nine():
     from opdi.output import published
 
     assert published.ZSTD_LEVEL == 9
+
+
+def test_events_without_a_flight_do_not_repeat_an_id_across_days(spark):
+    """One track with no flight-list row has events in the files of two days."""
+    ev, ms, fl = _mini(
+        spark,
+        [
+            ("o1", "ATOT", _ts(DAY, 23, 0), 1.0, 1.0, 0.0, "{}"),
+            ("o2", "ALDT", _ts(NEXT, 1, 0), 1.0, 1.0, 0.0, "{}"),
+        ],
+    )
+    ev = ev.withColumn("flight_id", F.lit("lost"))
+    first = build_flight_events(ev.filter("id = 'o1'"), ms, fl).collect()
+    second = build_flight_events(ev.filter("id = 'o2'"), ms, fl).collect()
+    ids = [r["event_id"] for r in first + second]
+    assert len(set(ids)) == 2
+    assert {r["flight_id"] for r in first + second} == {"lost"}
+
+
+def test_matched_and_unmatched_events_in_one_file_never_share_an_id(spark):
+    ev, ms, fl = _mini(
+        spark,
+        [
+            ("m1", "ATOT", _ts(DAY, 9, 0), 1.0, 1.0, 0.0, "{}"),
+            ("m2", "ALDT", _ts(DAY, 10, 0), 1.0, 1.0, 0.0, "{}"),
+            ("u1", "ATOT", _ts(DAY, 9, 0), 1.0, 1.0, 0.0, "{}"),
+        ],
+    )
+    ev = ev.withColumn(
+        "flight_id", F.when(F.col("id") == "u1", "lost").otherwise(F.col("flight_id"))
+    )
+    rows = build_flight_events(ev, ms, fl).collect()
+    ids = {r["event_id"]: r["flight_id"] for r in rows}
+    assert ids == {"trk_x-E0001": "trk_x", "trk_x-E0002": "trk_x", "u1": "lost"}
+
+
+def test_ids_of_a_flight_sort_in_time_order_as_text_and_are_not_cut(spark):
+    ev, ms, fl = _mini(
+        spark,
+        [
+            (f"w{i}", "ATOT", _ts(DAY, 9, 0) + dt.timedelta(seconds=i), 1.0, 1.0, 0.0, "{}")
+            for i in range(12)
+        ],
+    )
+    rows = build_flight_events(ev, ms, fl).collect()
+    by_text = [r["event_time"] for r in sorted(rows, key=lambda r: r["event_id"])]
+    assert by_text == sorted(by_text)
+    assert "trk_x-E0012" in {r["event_id"] for r in rows}
+
+
+def test_the_catalogue_keeps_its_file_sizes(spark, tables, layout):
+    publish_day(spark, _Storage(tables), DAY, layout, commit="abc")
+    cat = spark.read.parquet(layout.catalogue)
+    types = dict(cat.dtypes)
+    assert types["flight_list_bytes"] == "bigint" and types["flight_events_bytes"] == "bigint"
+    row = cat.collect()[0]
+    assert row["flight_list_bytes"] > 0 and row["flight_events_bytes"] > 0
