@@ -88,3 +88,65 @@ def test_sizes_print_in_a_unit_that_reads(n, expected):
     ``0.0 MB`` for the small ones or an unreadable row of digits for the
     large."""
     assert _fmt_size(n) == expected
+
+
+class _FakeStorage:
+    """Stands in for StorageManager: a dict of warehouse paths to bytes."""
+
+    files: dict = {}
+
+    def __init__(self, spark, config):
+        self.state_path = "s3a://bucket/opdi/v2.0.0/_state"
+
+    def fetch_file(self, path, local_path):
+        if path not in self.files:
+            return False
+        with open(local_path, "wb") as f:
+            f.write(self.files[path])
+        return True
+
+    def store_file(self, local_path, path):
+        with open(local_path, "rb") as f:
+            self.files[path] = f.read()
+
+
+_KEPT = "s3a://bucket/opdi/v2.0.0/_state/osm/aeroway-world.osm.pbf"
+
+
+def _patch_world(monkeypatch, tmp_path, kept):
+    from opdi.reference import osm_world
+    from opdi.utils import storage
+
+    _FakeStorage.files = dict(kept)
+    built = []
+
+    def fake_build(work_dir, **kwargs):
+        built.append(work_dir)
+        out = tmp_path / "work" / "aeroway-world.osm.pbf"
+        out.write_bytes(b"new world")
+        return str(out)
+
+    monkeypatch.setattr(storage, "StorageManager", _FakeStorage)
+    monkeypatch.setattr(osm_world, "build_world_extract", fake_build)
+    monkeypatch.setenv("OPDI_OSM_WORK_DIR", str(tmp_path / "work"))
+    (tmp_path / "work").mkdir()
+    return built
+
+
+def test_the_world_extract_kept_in_the_warehouse_is_reused(monkeypatch, tmp_path):
+    from opdi.runner import _world_layout_extract
+
+    built = _patch_world(monkeypatch, tmp_path, {_KEPT: b"kept world"})
+    path = _world_layout_extract(None, None)
+    assert open(path, "rb").read() == b"kept world"
+    assert built == []
+
+
+def test_without_a_kept_extract_it_is_built_and_kept(monkeypatch, tmp_path):
+    from opdi.runner import _world_layout_extract
+
+    built = _patch_world(monkeypatch, tmp_path, {})
+    path = _world_layout_extract(None, None)
+    assert built == [str(tmp_path / "work")]
+    assert open(path, "rb").read() == b"new world"
+    assert _FakeStorage.files[_KEPT] == b"new world"

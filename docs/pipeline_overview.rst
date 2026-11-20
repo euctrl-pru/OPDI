@@ -19,7 +19,8 @@ Built once per warehouse; a later run reuses the tables that are complete.
 
 **Airport layouts** (:mod:`opdi.reference.h3_airport_layouts`, 00b)
    Runways, taxiways, aprons, stands and other parts of each airport, from a
-   local OpenStreetMap extract (``OPDI_OSM_PBF``), as H3 cells at resolution 12
+   worldwide OpenStreetMap extract built from Geofabrik
+   (:mod:`opdi.reference.osm_world`) or a local one (``OPDI_OSM_PBF``), as H3 cells at resolution 12
    (about 20 m across). Step 04 matches reports to them.
 
 **Airspaces** (:mod:`opdi.reference.h3_airspaces`, 00c)

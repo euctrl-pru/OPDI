@@ -3,7 +3,7 @@ FROM --platform=linux/amd64 docker.io/idlefella/spark:v4.1.1
 USER root
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git && \
+    apt-get install -y --no-install-recommends git osmium-tool && \
     rm -rf /var/lib/apt/lists/* && \
     pip install --no-cache-dir \
         "opdi @ git+https://github.com/euctrl-pru/OPDI.git" \
@@ -32,5 +32,10 @@ RUN apt-get update && \
 # public Overpass API, which rate-limits hard enough to make a 1,353-airport
 # build impossible. Executors never import this.
 RUN pip install --no-cache-dir osmium
+#
+# Also driver-side only: osmium-tool, the osmium command-line tool, filters
+# each regional Geofabrik extract down to its aeroway objects and merges them
+# into the worldwide extract that step 00b builds when no extract is given
+# (opdi.reference.osm_world).
 
 USER 185

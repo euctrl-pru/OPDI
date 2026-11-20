@@ -174,12 +174,25 @@ def _prepare_layout_extract(pbf_path: str) -> str:
         print(f"  Using cached aeroway extract {dst.name} " f"({_fmt_size(dst.stat().st_size)}).")
         return str(dst)
 
-    from opdi.reference.pbf_filter import filter_aeroway_pbf
+    from opdi.reference.osm_world import osmium_tool, tags_filter
 
     print(
         f"  Filtering {src.name} ({_fmt_size(src.stat().st_size)}) "
         f"to aeroway geometry -> {dst.name} ..."
     )
+    # The osmium command-line tool keeps the same objects as the Python
+    # filter and is several times faster on a large file.
+    if osmium_tool() is not None:
+        started = time.time()
+        tags_filter(str(src), str(dst))
+        print(
+            f"  Filtered in {time.time() - started:.0f} s with osmium tags-filter: "
+            f"{_fmt_size(src.stat().st_size)} -> {_fmt_size(dst.stat().st_size)}."
+        )
+        return str(dst)
+
+    from opdi.reference.pbf_filter import filter_aeroway_pbf
+
     stats = filter_aeroway_pbf(str(src), str(dst))
     print(
         f"  Filtered in {stats['seconds']:.0f} s: "
@@ -190,15 +203,59 @@ def _prepare_layout_extract(pbf_path: str) -> str:
     return str(dst)
 
 
+#: Environment variable naming the local folder where the worldwide extract
+#: is built and kept. Default: ``opdi-osm`` in the temporary folder.
+OSM_WORK_DIR_VARIABLE = "OPDI_OSM_WORK_DIR"
+
+
+def world_extract_path(storage) -> str:
+    """Where the warehouse keeps the worldwide aeroway extract step 00b builds."""
+    from opdi.reference.osm_world import WORLD_EXTRACT_NAME
+
+    return f"{storage.state_path}/osm/{WORLD_EXTRACT_NAME}"
+
+
+def _world_layout_extract(spark, config) -> str:
+    """A local copy of the worldwide aeroway extract, built when the warehouse has none.
+
+    The extract is kept in the warehouse (:func:`world_extract_path`), so it
+    is downloaded and built from Geofabrik once per warehouse, about 90 GB of
+    downloads; later builds of step 00b copy it from there. Delete that file
+    to build it again from the latest OpenStreetMap data.
+    """
+    import tempfile
+
+    from opdi.reference.osm_world import WORLD_EXTRACT_NAME, build_world_extract
+    from opdi.utils.storage import StorageManager
+
+    storage = StorageManager(spark, config)
+    remote = world_extract_path(storage)
+    work_dir = os.environ.get(OSM_WORK_DIR_VARIABLE) or os.path.join(
+        tempfile.gettempdir(), "opdi-osm"
+    )
+    local = os.path.join(work_dir, WORLD_EXTRACT_NAME)
+    if storage.fetch_file(remote, local):
+        print(f"  Using the worldwide extract kept in the warehouse: {remote}")
+        return local
+    print(
+        f"  No worldwide extract in the warehouse ({remote}); building it from "
+        f"Geofabrik in {work_dir}"
+    )
+    build_world_extract(work_dir)
+    storage.store_file(local, remote)
+    print(f"  Kept the worldwide extract in the warehouse: {remote}")
+    return local
+
+
 def _step_00b_airport_layouts(spark, config, **kwargs):
     """Step 00b: Airport ground layouts (OSM -> H3)."""
     print("\n--- 00b: Airport ground layouts (OSM -> H3) ---")
     from opdi.reference.h3_airport_layouts import AirportLayoutGenerator
 
-    # A local extract when one is configured, else the public Overpass
-    # service. The extract is preferred: Overpass finds an airport by name and
-    # returns nothing, without an error, for a name it cannot resolve, and it
-    # refuses requests for many airports.
+    # A local extract when one is configured, else the worldwide extract
+    # built from Geofabrik. The public Overpass service is not used: it finds
+    # an airport by name and returns nothing, without an error, for a name it
+    # cannot resolve, and it refuses requests for many airports.
     pbf_path = (
         kwargs.get("pbf_path")
         or os.environ.get("OPDI_OSM_PBF")
@@ -206,12 +263,9 @@ def _step_00b_airport_layouts(spark, config, **kwargs):
     )
     if pbf_path:
         pbf_path = _prepare_layout_extract(pbf_path)
-        print(f"  Source: local OSM extract {pbf_path}")
     else:
-        print(
-            "  Source: public Overpass API (no extract configured). This "
-            "cannot build the full network -- see readme.md, step 00b."
-        )
+        pbf_path = _world_layout_extract(spark, config)
+    print(f"  Source: local OSM extract {pbf_path}")
 
     layout_gen = AirportLayoutGenerator(spark, config, pbf_path=pbf_path)
     layout_gen.create_table_if_not_exists()
