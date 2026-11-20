@@ -186,14 +186,19 @@ def test_merged_rows_get_the_partition_column(spark, sv, adsc, monkeypatch):
     assert out.where("event_time_day IS NULL").count() == 0
 
 
-def test_merge_on_with_no_adsc_table_raises(spark, sv, monkeypatch):
-    # Silently falling back to ADS-B only would publish the baseline arm under
-    # the merged arm's name -- the one failure mode that cannot be detected
-    # after the fact, because the two arms' tables are schema-identical.
+def test_merge_on_with_no_adsc_table_says_so_and_keeps_the_adsb_rows(
+    spark, sv, monkeypatch, capsys
+):
+    # Days without ADS-C reports (an ADS-C archive with no hours for them) are
+    # built from ADS-B alone, and the log says so. The `source` column stays,
+    # so these days have the columns of the days with ADS-C.
     p = _processor(spark, True)
     monkeypatch.setattr(p.storage, "table_exists", lambda t: False)
-    with pytest.raises(RuntimeError, match="01b"):
-        p._merge_adsc(sv, "2026-06-05", "2026-06-06")
+    out = p._merge_adsc(sv, "2026-06-05", "2026-06-06")
+    assert "built from ADS-B alone" in capsys.readouterr().out
+    assert out.columns == sv.columns + ["source"]
+    assert {r["source"] for r in out.collect()} == {"ADS-B"}
+    assert out.count() == sv.count()
 
 
 def test_segmentation_sees_one_track_across_the_merge(spark, sv, adsc, monkeypatch):
