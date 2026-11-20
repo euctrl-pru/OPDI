@@ -314,15 +314,27 @@ def test_the_configured_extract_is_used_when_the_environment_is_silent(monkeypat
     assert resolve_pbf_path(_Cfg("/from/config.pbf")) == "/from/config.pbf"
 
 
-def test_no_extract_at_all_is_a_preflight_problem(monkeypatch):
-    """Falling through to Overpass is worse than failing: it returns empty
-    results without erroring, so the run completes and reports no stands."""
+def test_no_extract_is_fine_when_step_00b_can_build_the_world_extract(monkeypatch):
+    """Step 00b then uses the copy in the warehouse or builds it from Geofabrik."""
     from opdi.periodrun import preflight_fresh_build
+    from opdi.reference import osm_world
 
     monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    monkeypatch.setattr(osm_world, "osmium_tool", lambda: "/usr/bin/osmium")
+    assert preflight_fresh_build(_Cfg(None)) == []
+
+
+def test_no_extract_and_no_osmium_tool_is_a_preflight_problem(monkeypatch):
+    """Without the tool the world extract cannot be built; this is said before
+    a session starts rather than after the other reference tables."""
+    from opdi.periodrun import preflight_fresh_build
+    from opdi.reference import osm_world
+
+    monkeypatch.delenv("OPDI_OSM_PBF", raising=False)
+    monkeypatch.setattr(osm_world, "osmium_tool", lambda: None)
     problems = preflight_fresh_build(_Cfg(None))
     assert len(problems) == 1
-    assert "Overpass" in problems[0]
+    assert "osmium-tool" in problems[0]
 
 
 def test_an_extract_path_that_does_not_exist_is_caught(monkeypatch, tmp_path):

@@ -93,10 +93,13 @@ The commands need a machine (or container) that has:
 5. **At least 16 GB of memory** for the driver, and only one OPDI command at
    a time on that machine. The driver's memory is sized from what the machine
    has free when the command starts.
-6. **For the first reference build only:** an OpenStreetMap extract of the
-   world's aerodromes, named by the environment variable `OPDI_OSM_PBF`, and
-   the `osmium` package that reads it (`pip install "/path/to/opdi[reference]"`).
-   The reference task refuses to start without the extract.
+6. **For the first reference build only:** the `osmium` package
+   (`pip install "/path/to/opdi[reference]"`) and the `osmium` command-line
+   tool (Ubuntu package `osmium-tool`), about 40 GB of free local disk and
+   access to download.geofabrik.de. Step 00b then builds the worldwide
+   OpenStreetMap extract of the airports itself and keeps it in the
+   warehouse (see "Step 00b" in `readme.md`). `OPDI_OSM_PBF` names an
+   extract to use instead.
 
 Airflow itself needs nothing beyond its core: the DAG file uses only
 `BashOperator`, `PythonOperator` and `EmptyOperator`.

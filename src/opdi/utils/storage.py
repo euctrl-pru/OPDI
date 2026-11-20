@@ -423,6 +423,29 @@ class StorageManager:
         p = jvm.org.apache.hadoop.fs.Path(path)
         return p.getFileSystem(self.spark._jsc.hadoopConfiguration()), p
 
+    def fetch_file(self, path: str, local_path: str) -> bool:
+        """Copy the file at ``path`` (in the warehouse) to ``local_path``.
+
+        Returns:
+            ``False`` when there is no file at ``path``; nothing is copied.
+        """
+        fs, p = self._hadoop_path(path)
+        if not fs.exists(p):
+            return False
+        os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
+        if os.path.exists(local_path):
+            os.remove(local_path)
+        target = self.spark._jvm.org.apache.hadoop.fs.Path("file://" + os.path.abspath(local_path))
+        fs.copyToLocalFile(False, p, target, True)
+        return True
+
+    def store_file(self, local_path: str, path: str) -> None:
+        """Copy the local file ``local_path`` to ``path`` in the warehouse, replacing it."""
+        fs, p = self._hadoop_path(path)
+        fs.mkdirs(p.getParent())
+        source = self.spark._jvm.org.apache.hadoop.fs.Path("file://" + os.path.abspath(local_path))
+        fs.copyFromLocalFile(False, True, source, p)
+
     def _done_path(self, key: str) -> str:
         if "/" in key or not key:
             raise ValueError(f"a progress key must be a non-empty name without '/': {key!r}")

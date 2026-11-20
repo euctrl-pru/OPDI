@@ -61,6 +61,7 @@ MODULES = (
     "opdi.reference.h3_airport_zones",
     "opdi.reference.h3_airspaces",
     "opdi.reference.h3_runway_grid",
+    "opdi.reference.osm_world",
     "opdi.reference.pbf_filter",
     "opdi.reference.pbf_source",
     "opdi.reference.point_merge",
@@ -438,6 +439,15 @@ NAMES = {
         "RunwayGridGenerator",
         "_strip_cells",
         "runway_cells",
+    ),
+    "opdi.reference.osm_world": (
+        "WORLD_EXTRACT_NAME",
+        "WORLD_REGIONS",
+        "build_world_extract",
+        "download",
+        "merge",
+        "osmium_tool",
+        "tags_filter",
     ),
     "opdi.reference.pbf_filter": ("filter_aeroway_pbf",),
     "opdi.reference.pbf_source": (

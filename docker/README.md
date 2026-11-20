@@ -18,6 +18,9 @@ carry h3 version 4; the `opensky` environment uses the tag
 - python-dateutil
 - plotly
 
+And the `osmium` command-line tool (Ubuntu package `osmium-tool`), with
+which step 00b builds the worldwide OpenStreetMap extract of the airports.
+
 ## Build
 
 ```bash

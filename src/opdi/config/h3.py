@@ -25,10 +25,10 @@ class H3Config:
     """Local OpenStreetMap extract (``.pbf`` file) that step 00b reads the
     airport layouts (runways, taxiways, stands) from.
 
-    When ``None``, step 00b queries the public Overpass service instead,
-    which is slow for many airports and can return nothing for an airport
-    whose name it cannot resolve. The environment variable ``OPDI_OSM_PBF``
-    replaces this setting.
+    When ``None``, step 00b uses the worldwide extract kept in the
+    warehouse, and builds it from Geofabrik when there is none
+    (:mod:`opdi.reference.osm_world`). The environment variable
+    ``OPDI_OSM_PBF`` replaces this setting.
 
     A file filtered to aeroway features is much smaller and faster to read
     than a raw regional extract, and a raw extract of a whole continent needs

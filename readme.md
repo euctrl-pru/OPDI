@@ -220,9 +220,19 @@ executors; step 02 (the tracks) and step 04 (the events) take most of it. The
 reference tables of step 00 are built once per warehouse and take about 2.5
 hours. See [Run time and resources](#run-time-and-resources).
 
-Step 00b needs a local OpenStreetMap extract of the airports (set
-`OPDI_OSM_PBF`); see `opdi.reference.pbf_filter` to reduce a regional or
-planet extract to the aeroway features it needs.
+Step 00b reads the airport ground layouts from an OpenStreetMap extract
+that keeps only the `aeroway` objects. Without `OPDI_OSM_PBF`, it builds a
+worldwide one from Geofabrik (`opdi.reference.osm_world`): it downloads the
+nine regions of the world one after the other (about 90 GB), filters each
+with the `osmium` command-line tool (Ubuntu package `osmium-tool`, in the
+image) while the next one downloads, and merges them into one file of a
+few tens of MB. The download takes most of the time. The disk holds at most
+two regions at a time, about 37 GB; `OPDI_OSM_WORK_DIR` names the folder
+(default `opdi-osm` in the temporary folder). The file is kept in the
+warehouse at `<release root>/_state/osm/aeroway-world.osm.pbf`, and later
+builds of step 00b copy it from there; delete it to build it again from
+newer OpenStreetMap data. `OPDI_OSM_PBF` names a local extract to use
+instead, filtered first when its name does not start with `aeroway-`.
 
 ## Run time and resources
 
@@ -454,7 +464,8 @@ linting: `black .` and `ruff check src airflow tools`.
 | Variable | Meaning |
 |----------|---------|
 | `OPDI_WAREHOUSE` | The warehouse of the `opensky` environment (default `s3a://eurocontrol/opdi`) |
-| `OPDI_OSM_PBF` | Local OpenStreetMap extract for step 00b |
+| `OPDI_OSM_PBF` | Local OpenStreetMap extract for step 00b (default: the worldwide extract kept in the warehouse, or built from Geofabrik) |
+| `OPDI_OSM_WORK_DIR` | Local folder where step 00b builds the worldwide extract (default `opdi-osm` in the temporary folder; needs about 40 GB free) |
 | `OPDI_ADSC` | `1` merges ADS-C reports into the tracks (the same as `--adsc` of `opdi.orchestration`) |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Credentials for the OpenSky S3 storage (also read from a `.env` file) |
 | `OSN_USERNAME`, `OSN_KEY` | OpenSky credentials for the MinIO download path of step 01 |

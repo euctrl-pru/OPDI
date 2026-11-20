@@ -337,10 +337,9 @@ def resolve_pbf_path(config) -> str | None:
     """The OpenStreetMap extract step 00b will read.
 
     ``OPDI_OSM_PBF`` takes precedence over the configured value, as in
-    ``runner._step_00b_airport_layouts``. ``None`` means no extract: step 00b
-    would then query the public Overpass service, which cannot serve many
-    airports and returns nothing, without an error, for an airport whose
-    name it cannot resolve.
+    ``runner._step_00b_airport_layouts``. ``None`` means no extract is given:
+    step 00b then uses the worldwide extract kept in the warehouse, or builds
+    it from Geofabrik (:mod:`opdi.reference.osm_world`).
     """
     return os.environ.get("OPDI_OSM_PBF") or getattr(config.h3, "airport_layout_pbf_path", None)
 
@@ -364,11 +363,18 @@ def preflight_fresh_build(config) -> list[str]:
     problems: list[str] = []
     pbf = resolve_pbf_path(config)
     if not pbf:
-        problems.append(
-            "no OSM extract configured for step 00b: set OPDI_OSM_PBF or "
-            "h3.airport_layout_pbf_path. Without it the build falls back to "
-            "the public Overpass API, which returns empty results silently."
-        )
+        from opdi.reference.osm_world import osmium_tool
+
+        # Step 00b will build the worldwide extract, which needs the tool;
+        # reusing the copy in the warehouse does not, but whether there is
+        # one is only known once a session has started.
+        if osmium_tool() is None:
+            problems.append(
+                "no OSM extract configured for step 00b (OPDI_OSM_PBF or "
+                "h3.airport_layout_pbf_path), and the osmium command-line tool "
+                "that builds the worldwide extract from Geofabrik is not "
+                "installed (Ubuntu package osmium-tool)"
+            )
     elif not Path(pbf).exists():
         problems.append(f"the configured OSM extract does not exist: {pbf}")
     elif getattr(getattr(config, "coverage", None), "is_worldwide", False):
@@ -924,7 +930,10 @@ def run_period(
             for prob in problems:
                 print(f"  - {prob}")
             return 1
-        print(f"  preflight   : OSM extract {resolve_pbf_path(config)}")
+        print(
+            f"  preflight   : OSM extract "
+            f"{resolve_pbf_path(config) or 'kept in the warehouse, or built from Geofabrik'}"
+        )
 
     if not todo:
         print("Nothing to do. Pass --force to re-run completed steps.")
