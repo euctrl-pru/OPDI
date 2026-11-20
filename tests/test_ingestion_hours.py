@@ -123,3 +123,72 @@ def test_a_report_outside_the_hours_read_is_left_out(spark, tmp_path):
         ("2026-06-14", "a"),
         ("2026-06-14", "a"),
     ]
+
+
+def test_the_missing_hours_are_named_in_utc():
+    from opdi.ingestion.osn_statevectors import missing_hours
+
+    wanted = hour_paths(date(2026, 1, 1), date(2026, 1, 2), base="s3a://b/sv")
+    present = [p for p in wanted if not p.endswith("hour=1767276000")]
+    assert missing_hours(present, wanted) == [datetime(2026, 1, 1, 14)]
+
+
+def test_a_few_missing_hours_a_day_are_accepted_more_are_refused():
+    import pytest
+
+    from opdi.ingestion.osn_statevectors import (
+        MAX_MISSING_HOURS_PER_DAY,
+        ArchiveHoursMissingError,
+        check_missing_hours,
+    )
+
+    few = [datetime(2026, 1, 1, h) for h in range(MAX_MISSING_HOURS_PER_DAY)]
+    check_missing_hours(few)
+    # The limit is per day: the same number again on the next day is fine.
+    check_missing_hours(few + [datetime(2026, 1, 2, h) for h in range(MAX_MISSING_HOURS_PER_DAY)])
+    with pytest.raises(ArchiveHoursMissingError, match="2026-01-01: 4 of 24"):
+        check_missing_hours(few + [datetime(2026, 1, 1, 20)])
+
+
+def test_too_many_missing_hours_is_a_permanent_failure():
+    """Running the step again cannot add the hours to the archive."""
+    from opdi.ingestion.osn_statevectors import ArchiveHoursMissingError
+    from opdi.orchestration import classify_failure
+
+    assert classify_failure(ArchiveHoursMissingError("archive incomplete")) == "permanent"
+
+
+def _local_ingest(spark, tmp_path):
+    from opdi.config import OPDIConfig
+    from opdi.ingestion.osn_statevectors import StateVectorIngestion
+    from opdi.utils.storage import StorageManager
+
+    config = OPDIConfig.for_environment("local", worldwide=True, warehouse=str(tmp_path / "wh"))
+    config.spark.enable_iceberg = False
+    config.spark.enable_hive = False
+    return StateVectorIngestion(spark, config, bbox=None), StorageManager(spark, config)
+
+
+def test_a_missing_hour_is_left_out_and_the_others_are_ingested(spark, tmp_path, capsys):
+    ingest, storage = _local_ingest(spark, tmp_path)
+    base = str(tmp_path / "archive")
+    # 00:00 and 02:00 are in the archive, 01:00 is not.
+    _hour_folder(spark, base, datetime(2026, 6, 14, 0), [(0, "a")])
+    _hour_folder(spark, base, datetime(2026, 6, 14, 2), [(0, "b")])
+
+    assert ingest.ingest_from_s3(datetime(2026, 6, 14, 0), datetime(2026, 6, 14, 3), base) == 2
+    assert "left out: 1 hour(s) (UTC): 2026-06-14 01:00" in capsys.readouterr().out
+    rows = storage.read_table("osn_statevectors_v2").collect()
+    assert sorted(r.icao24 for r in rows) == ["a", "b"]
+
+
+def test_a_window_with_no_hour_in_the_archive_is_refused(spark, tmp_path):
+    import pytest
+
+    from opdi.ingestion.osn_statevectors import ArchiveHoursMissingError
+
+    ingest, _ = _local_ingest(spark, tmp_path)
+    with pytest.raises(ArchiveHoursMissingError, match="none of the 2 hourly folders"):
+        ingest.ingest_from_s3(
+            datetime(2026, 6, 14, 0), datetime(2026, 6, 14, 2), str(tmp_path / "archive")
+        )

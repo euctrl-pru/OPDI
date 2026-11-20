@@ -66,6 +66,37 @@ def _days_of_hours(start: Union[date, datetime], end: Union[date, datetime]) -> 
     return sorted({datetime.utcfromtimestamp(t).date() for t in stamps})
 
 
+#: Most hourly folders a day may lack in the archive before step 01 refuses
+#: the day. A missing hour loses the reports of that hour only; many missing
+#: hours mean the archive of that day is incomplete (not yet written, or lost),
+#: and the day would be built with most of its flights cut.
+MAX_MISSING_HOURS_PER_DAY = 3
+
+
+class ArchiveHoursMissingError(ValueError):
+    """Too many hourly folders of a day are missing from the archive."""
+
+
+def missing_hours(present: List[str], wanted: List[str]) -> List[datetime]:
+    """The hours (UTC) of the folders of ``wanted`` that are not in ``present``."""
+    have = set(present)
+    return [datetime.utcfromtimestamp(int(p.rsplit("=", 1)[1])) for p in wanted if p not in have]
+
+
+def check_missing_hours(gone: List[datetime], limit: int = MAX_MISSING_HOURS_PER_DAY) -> None:
+    """Raise :class:`ArchiveHoursMissingError` when a day lacks more than ``limit`` hours."""
+    per_day: dict = {}
+    for hour in gone:
+        per_day.setdefault(hour.date(), []).append(hour)
+    too_many = {d: hs for d, hs in per_day.items() if len(hs) > limit}
+    if too_many:
+        described = "; ".join(f"{d}: {len(hs)} of 24 hours" for d, hs in sorted(too_many.items()))
+        raise ArchiveHoursMissingError(
+            f"the OpenSky archive lacks too many hourly folders ({described}; at most "
+            f"{limit} per day are accepted). The archive of that day is incomplete."
+        )
+
+
 #: Thinning rules for :meth:`StateVectorIngestion._apply_filters`. ``bucket``
 #: is the default of release v2.0.0; ``modulo`` the rule of release v0.0.2.
 DECIMATION_MODULO = "modulo"
@@ -526,6 +557,17 @@ class StateVectorIngestion:
             "files_skipped": len(files_to_download) - len(pending_files),
         }
 
+    def _existing(self, paths: List[str]) -> List[str]:
+        """The folders of ``paths`` that exist, in order (one check per folder)."""
+        jvm = self.spark._jvm
+        hconf = self.spark._jsc.hadoopConfiguration()
+        out = []
+        for p in paths:
+            path = jvm.org.apache.hadoop.fs.Path(p)
+            if path.getFileSystem(hconf).exists(path):
+                out.append(p)
+        return out
+
     def ingest_from_s3(
         self,
         start_date: Union[date, datetime],
@@ -546,6 +588,11 @@ class StateVectorIngestion:
         next run fetches the days again. Reports outside the hours read are
         left out, so no other day folder changes.
 
+        An hourly folder missing from the archive is left out and named in
+        the output, up to :data:`MAX_MISSING_HOURS_PER_DAY` per day; the
+        reports of that hour are then absent from the day. More missing hours
+        raise :class:`ArchiveHoursMissingError`.
+
         Args:
             start_date: First day to ingest (inclusive), or a time to start
                 at that hour. Times without a time zone are in UTC.
@@ -556,11 +603,26 @@ class StateVectorIngestion:
         Returns:
             Number of rows ingested.
 
+        Raises:
+            ArchiveHoursMissingError: A day lacks more than
+                :data:`MAX_MISSING_HOURS_PER_DAY` hourly folders.
+
         Example:
             >>> ingestion = StateVectorIngestion(spark, config)
             >>> rows = ingestion.ingest_from_s3(date(2025, 8, 1), date(2025, 8, 2))
         """
-        paths = hour_paths(start_date, end_date, s3_base_path)
+        wanted = hour_paths(start_date, end_date, s3_base_path)
+        paths = self._existing(wanted)
+        gone = missing_hours(paths, wanted)
+        if gone:
+            listed = ", ".join(h.strftime("%Y-%m-%d %H:00") for h in gone)
+            print(f"  missing from the archive, left out: {len(gone)} hour(s) (UTC): {listed}")
+        check_missing_hours(gone)
+        if not paths:
+            raise ArchiveHoursMissingError(
+                f"none of the {len(wanted)} hourly folders from {start_date} to {end_date} "
+                f"is in the archive ({s3_base_path})"
+            )
 
         print(f"Reading {len(paths)} hourly partitions from S3 ({start_date} to {end_date})...")
         df = self.spark.read.option("mergeSchema", "true").parquet(*paths)
