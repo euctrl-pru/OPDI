@@ -413,8 +413,9 @@ The reference step (step 00) runs its executors with 6 GiB of heap and
 computed in Python, which holds about 4 GiB per executor. A run of the same
 day with ADS-C merged in, from an empty warehouse, with the time, executor
 time and memory of every step and of each part of step 00, is in "Run time
-and resources" in `readme.md`. To merge ADS-C in the Airflow runs, put
-`OPDI_ADSC=1` in the Airflow variable `opdi_command_prefix`.
+and resources" in `readme.md`. To merge ADS-C in the Airflow runs, set the
+environment variable `OPDI_ADSC=1` where the commands run, for example by
+ending the Airflow variable `opdi_command_prefix` with `env OPDI_ADSC=1`.
 
 | Step | What it does | Time | Second run | With 416 parts for step 02 |
 |---|---|---|---|---|
