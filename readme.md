@@ -40,6 +40,7 @@ reproduced (see [Reproducing release v0.0.2](#reproducing-release-v002)).
 - [Installing the pipeline](#installing-the-pipeline)
 - [How the pipeline works](#how-the-pipeline-works)
 - [Running one day](#running-one-day)
+- [Run time and resources](#run-time-and-resources)
 - [Running a period](#running-a-period)
 - [Where the output goes](#where-the-output-goes)
 - [Coverage: worldwide or Europe](#coverage-worldwide-or-europe)
@@ -214,14 +215,96 @@ continues where it stopped, on any machine. `python -m opdi.orchestration
 --help` lists every command, including `check-space` and `prune` (removing the
 working tables that are no longer needed).
 
-A worldwide day takes about 1.7 hours on the OpenSky cluster with its 12
-executors; step 02 (the tracks) and step 04 (the events) take most of it.
-The time of each step, and how it was measured, is in "What a day costs" in
-`airflow/README.md`.
+A worldwide day takes about 1.7 hours on the OpenSky cluster with its 13
+executors; step 02 (the tracks) and step 04 (the events) take most of it. The
+reference tables of step 00 are built once per warehouse and take about 2.5
+hours. See [Run time and resources](#run-time-and-resources).
 
 Step 00b needs a local OpenStreetMap extract of the airports (set
 `OPDI_OSM_PBF`); see `opdi.reference.pbf_filter` to reduce a regional or
 planet extract to the aeroway features it needs.
+
+## Run time and resources
+
+Measured on the OpenSky cluster on 19 and 20 November 2026: one worldwide day,
+14 June 2026, with ADS-C merged in (`--adsc`), from an empty warehouse to the
+published files, through `python -m opdi.orchestration`. The numbers come from
+the Spark event log of each step (set `OPDI_EVENTLOG_DIR` to write them).
+
+### The cluster
+
+| | |
+|---|---|
+| Executors | 13, each with 2 CPU cores: 26 tasks at a time |
+| Executor memory, steps 01 to 09 | 11 GiB Java heap and 2.5 GiB outside it |
+| Executor memory, step 00 | 6 GiB Java heap and 7.5 GiB outside it (the airport zones are computed in Python) |
+| Executor container | 13.5 GiB in both cases (limit 13,824 MiB) |
+| Driver | on the machine that starts the command, a pod of 4 CPUs and 16 GiB; Java heap 6 GiB (10 GiB is asked for and reduced to what the pod has free) |
+| Shuffle partitions | 104; 416 for step 02 |
+| Spark, executor image | 4.1.1, `quintengs/opdi-spark:v4.1.1-6` |
+
+The values are in `src/opdi/config/environments.py`, each with the measurement
+behind it. Every step runs in its own Spark session, which is how step 00 gets
+a different executor memory.
+
+### The day
+
+| Step | What it does | Time | Executor time | Highest executor memory (Java + Python) | Written |
+|---|---|---|---|---|---|
+| 01 | fetch and thin the reports; fetch ADS-C | 1,182 s | 26,875 s | 11.7 GiB | 25.7 GB (494 million reports of three days, 75,646 ADS-C reports) |
+| 02 | build the tracks, ADS-C merged in | 1,572 s | 37,771 s | 10.7 + 0.9 GiB | 9.4 GB (158 million track points) |
+| 02a | clean the tracks | 789 s | 18,711 s | 11.0 GiB | 9.2 GB |
+| 03 | flight list | 469 s | 9,245 s | 11.4 GiB | 0.25 GB |
+| 04 | events and measurements | 1,571 s | 31,651 s | 12.0 + 0.2 GiB | 1.3 GB |
+| 04b | milestones in the flight list | 122 s | 892 s | 8.4 GiB | 0.04 GB |
+| 09 | published files | 256 s | 1,125 s | 11.7 + 0.9 GiB | 0.24 GB |
+| **all** | | **5,961 s (1 h 39 min)** | 126,270 s | | |
+
+"Time" is the wall time of the step, with the start of its Spark session.
+"Executor time" is the time the tasks ran, added over all executors; divided
+by the time of the step it says how many of the 26 task slots were busy.
+
+- The day published 163,831 flights and 6,067,193 events: a flight list file
+  of 15 MB and a flight events file of 222 MB.
+- Step 01 fetched three days of reports, because the day was the first one in
+  the warehouse. On a daily run it fetches one new day and takes about a
+  third of this (384 s was measured for one day).
+- Step 02a ran twice. Its first attempt failed after 1,138 s when the storage
+  lost an upload at the end of the write ("NoSuchUpload"); the command ran the
+  step again by itself and the second attempt is the one in the table. With
+  that attempt and the pause before the next one, the day took 2 h 01 min
+  from start to end.
+- No executor was lost during the day.
+
+### The reference tables (step 00, once per warehouse)
+
+| Part | What it builds | Time | Where the work runs |
+|---|---|---|---|
+| 00d, 00e | OurAirports tables, aircraft database | about 1 min | driver |
+| 00a | airport detection zones (136 million rows) | 31 min | executors: 45,452 s of executor time, at most 6.6 GiB Java and 3.9 GiB Python per executor |
+| 00b | airport layouts from OpenStreetMap (15.7 million rows, 5,129 airports) | 73 min | driver, one CPU core |
+| 00f | runway and approach grid (26.7 million rows, 5,277 airports) | 14 min | driver, one CPU core |
+| 00c | airspace boundaries (FIR, ANSP, countries) | 31 min | driver for 6 min, then the writes (one took 23 min) |
+| **all** | | **about 2 h 30 min** | |
+
+- Parts 00b and 00f work through the airports one after the other on the
+  driver; the executors wait. The driver's Python process stayed at 1.5 GiB,
+  because the rows are written in batches.
+- A build that stops continues where it stopped: tables already built are
+  skipped, and 00b and 00f continue after the airports already written.
+- The time of 00b leaves out two waits of 24 and 7 minutes in which the
+  storage did not answer one small write; with them the part took 104 min.
+  Such waits come and go: a request is given up after 120 s and tried again,
+  up to ten times.
+
+### Space
+
+The day left 47 GB in the warehouse with `--keep-internal`: 25.7 GB of
+reports (three days), 9.4 GB of tracks, 9.2 GB of cleaned tracks, 1.6 GB of
+working events, measurements and airport candidates, 1.3 GB of reference
+tables and 0.24 GB of published files. Without `--keep-internal` the tracks of the day are removed
+after publishing. `airflow/README.md` explains how the free space is checked
+and which tables a day needs.
 
 ## Running a period
 

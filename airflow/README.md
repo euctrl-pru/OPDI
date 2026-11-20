@@ -408,6 +408,14 @@ them (`src/opdi/config/environments.py`), the most the namespace quota holds:
 30 CPUs and 192 GiB in all, of which the pod that runs the driver takes 4 CPUs
 and 16 GiB.
 
+The reference step (step 00) runs its executors with 6 GiB of heap and
+7.5 GiB outside it, in a container of the same size: its airport zones are
+computed in Python, which holds about 4 GiB per executor. A run of the same
+day with ADS-C merged in, from an empty warehouse, with the time, executor
+time and memory of every step and of each part of step 00, is in "Run time
+and resources" in `readme.md`. To merge ADS-C in the Airflow runs, put
+`OPDI_ADSC=1` in the Airflow variable `opdi_command_prefix`.
+
 | Step | What it does | Time | Second run | With 416 parts for step 02 |
 |---|---|---|---|---|
 | 01 | fetch and thin one day of reports | 384 s | 396 s | 383 s |
