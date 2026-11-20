@@ -283,6 +283,13 @@ class TrackProcessor:
         is added then: a column present in new day folders and absent from
         older ones would appear and disappear depending on which file a
         Parquet reader takes the schema from.
+
+        When ``config.adsc.enabled`` is true but the ADS-C table does not
+        exist (step 01b found no ADS-C reports to write, for example where
+        the ADS-C archive has no hours for these days), a message says so and
+        the tracks are built from the ADS-B reports alone. They keep the
+        ``source`` column, ``"ADS-B"`` on every row, so their columns are
+        those of the days with ADS-C.
         """
         cfg = self.config.adsc
         if not cfg.enabled:
@@ -291,14 +298,13 @@ class TrackProcessor:
         from opdi.ingestion.osn_adsc import ADSB_SOURCE, shadow_filter
 
         if not self.storage.table_exists(cfg.table):
-            raise RuntimeError(
-                f"config.adsc.enabled is True but {cfg.table!r} is absent from "
-                f"{self.config.project.warehouse_path!r}. Run step 01b for this "
-                f"window first. Without it, these tracks would be built from "
-                f"ADS-B alone but stored as if they held ADS-C as well, and the "
-                f"two kinds of tables have the same columns, so nothing later "
-                f"could tell them apart."
+            print(
+                f"  ADS-C: no table {cfg.table!r} in "
+                f"{self.config.project.warehouse_path!r} (step 01b found no ADS-C "
+                f"reports to write); tracks from {start_time_str} to "
+                f"{end_time_str} are built from ADS-B alone"
             )
+            return df_sv.withColumn("source", lit(ADSB_SOURCE))
 
         df_adsc = self._read_adsc(start_time_str, end_time_str)
         kept = shadow_filter(df_adsc, df_sv, cfg.shadow_before_seconds, cfg.shadow_after_seconds)
