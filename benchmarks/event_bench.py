@@ -331,6 +331,11 @@ LADDER = [
     # A track under five minutes with no airport gets a flight-list row, so
     # every published event has its flight.
     ("L26_short_tracks_get_a_row", {"overflight_min_duration_s": 0.0}),
+    # Step 09 publishes event ids built from the flight id and rounded values.
+    (
+        "L27_published_ids_and_rounding",
+        {"published_event_id_by_flight": True, "published_values_rounded": True},
+    ),
 ]
 
 #: The v0.2.0 shipped configuration, reconstructed. ``EventConfig()`` moved to

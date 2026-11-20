@@ -21,7 +21,7 @@ feet, ``_min`` for minutes, ``_deg`` for degrees). All times are in UTC.
 import csv
 import hashlib
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Iterable, Tuple
 
 # RELEASE, the name of the data release, is part of the published path and is
@@ -453,9 +453,47 @@ FLIGHT_LIST: Tuple[Column, ...] = (
     ),
 )
 
+
+def published_decimals(name: str):
+    """How many decimals the published column ``name`` is rounded to.
+
+    This is the one place that holds the rule. ``None`` means the column keeps
+    its value as computed.
+
+    * ``longitude`` and ``latitude``: 5 decimals (about 1 m).
+    * columns ending ``_nm`` and ``_deg``: 3 decimals.
+    * ``altitude_ft``: whole feet.
+    """
+    if name in ("longitude", "latitude"):
+        return 5
+    if name.endswith(("_nm", "_deg")):
+        return 3
+    if name == "altitude_ft":
+        return 0
+    return None
+
+
+#: Matches a JSON number with more than 3 decimals inside ``info``, after the
+#: separator that precedes a value (``:``, ``[`` or ``,``) and before the one
+#: that follows it (``,``, ``}``, ``]`` or a negative exponent). A number with
+#: a positive exponent, which is large, is left as it is. Text values do not
+#: match unless they hold a separator followed by a long decimal. Used with
+#: the replacement ``$1``, which keeps the first 3 decimals (cut, not rounded).
+INFO_LONG_NUMBER = r"(?<=[:\[,])(-?\d+\.\d{3})\d+(?=[,}\]]|[Ee]-)"
+
 #: The columns describing the event itself, first in the flight events file.
 EVENT_COLUMNS: Tuple[Column, ...] = (
-    Column("event_id", "string", "", "Unique identifier of the event.", "id", "event"),
+    Column(
+        "event_id",
+        "string",
+        "",
+        "Identifier of the event, written <flight_id>-E<nnnn>: nnnn counts the events of "
+        "the flight in time order, with at least four digits, so the ids of a flight sort "
+        "in time order. An event whose flight is not in the flight list keeps the "
+        "pipeline's own identifier. It identifies the event within one release.",
+        "id",
+        "event",
+    ),
     Column(
         "flight_id",
         "string",
@@ -543,7 +581,8 @@ EVENT_COLUMNS: Tuple[Column, ...] = (
         "",
         "Extra details about the event, as JSON text, for example the runway or the "
         "airport. The keys depend on the event type and are listed in the data "
-        "dictionary.",
+        "dictionary. Numbers in it with more than three decimals are cut to three "
+        "decimals.",
         "info",
         "event",
     ),
@@ -636,6 +675,24 @@ MEASUREMENT_COLUMNS: Tuple[Column, ...] = (
         "measurement",
     ),
 )
+
+
+def _precise(columns: Tuple[Column, ...]) -> Tuple[Column, ...]:
+    """``columns`` with the precision of the rounded ones added to the description."""
+    out = []
+    for c in columns:
+        places = published_decimals(c.name)
+        if places is None:
+            out.append(c)
+            continue
+        note = "Rounded to whole feet." if places == 0 else f"Rounded to {places} decimals."
+        out.append(replace(c, description=f"{c.description} {note}"))
+    return tuple(out)
+
+
+FLIGHT_LIST = _precise(FLIGHT_LIST)
+EVENT_COLUMNS = _precise(EVENT_COLUMNS)
+MEASUREMENT_COLUMNS = _precise(MEASUREMENT_COLUMNS)
 
 _FLIGHT_VERSION = Column(
     "flight_version",

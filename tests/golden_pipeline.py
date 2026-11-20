@@ -620,7 +620,10 @@ OUTPUT_TABLES = (
     "opdi_measurements",
 )
 PUBLISHED_FILES = ("flight_list", "flight_events", "index", "catalogue")
-UNSTABLE_COLUMNS = {"published_at"}
+#: Columns whose value depends on how a file is written, not on the data: the
+#: publishing time, and the sizes of the published files (they change with the
+#: compression level and the Bloom filter sizes).
+UNSTABLE_COLUMNS = {"published_at", "flight_list_bytes", "flight_events_bytes"}
 
 
 def configuration(name: str, warehouse: str):

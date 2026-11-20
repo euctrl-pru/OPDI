@@ -289,8 +289,15 @@ class StorageManager:
     def table_exists(self, table_name: str) -> bool:
         """Whether the table exists and can be read."""
         if self.use_s3:
+            path = self._s3_path(table_name)
             try:
-                self.spark.read.parquet(self._s3_path(table_name)).schema  # noqa: B018
+                # Asked of the file system first: reading a folder that is not
+                # there makes Spark log a warning with a full stack trace, once
+                # per table on an empty warehouse.
+                fs, hadoop_path = self._hadoop_path(path)
+                if not fs.exists(hadoop_path):
+                    return False
+                self.spark.read.parquet(path).schema  # noqa: B018
                 return True
             except Exception:
                 return False
@@ -299,6 +306,16 @@ class StorageManager:
             return True
         except Exception:
             return False
+
+    def delete_table(self, table_name: str) -> None:
+        """Remove ``table_name`` with all its data; nothing happens if it is absent."""
+        if self.use_s3:
+            fs, hadoop_path = self._hadoop_path(self._s3_path(table_name))
+            if fs.exists(hadoop_path):
+                fs.delete(hadoop_path, True)
+            self._registered_views.discard(table_name)
+        else:
+            self.spark.sql(f"DROP TABLE IF EXISTS `{self.project}`.`{table_name}`")
 
     COVERAGE_MARKER = "coverage_marker"
     """Name of the one-row table that records which coverage wrote a warehouse.

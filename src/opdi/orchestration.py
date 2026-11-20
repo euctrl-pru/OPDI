@@ -391,17 +391,67 @@ def days(start: date, end: date, order: str = "newest_first") -> list[date]:
 # --- configuration and sessions ----------------------------------------------
 
 
+#: Environment variable that adds ADS-C as a second source of positions
+#: (``AdscConfig.enabled``). The option ``--adsc`` sets it, so every step of
+#: the command, each in its own session, sees the same choice.
+ADSC_VARIABLE = "OPDI_ADSC"
+
+
 def make_config(warehouse: str | None = None, worldwide: bool = True):
-    """The ``opensky`` configuration for ``warehouse`` and the coverage."""
+    """The ``opensky`` configuration for ``warehouse`` and the coverage.
+
+    ADS-C is merged into the tracks when the environment variable
+    ``OPDI_ADSC`` is ``1``; see :class:`opdi.config.AdscConfig`.
+    """
     from opdi.config import OPDIConfig
 
-    return OPDIConfig.for_environment("opensky", worldwide=worldwide, warehouse=warehouse)
+    config = OPDIConfig.for_environment("opensky", worldwide=worldwide, warehouse=warehouse)
+    if os.environ.get(ADSC_VARIABLE, "").strip().lower() in ("1", "true", "yes"):
+        config.adsc.enabled = True
+    return config
+
+
+def steps_run_with(step: str, config) -> tuple[str, ...]:
+    """The pipeline steps one unit runs: step 01 also fetches ADS-C when it is on."""
+    if step == "01" and config.adsc.enabled:
+        return ("01", "01b")
+    return (step,)
+
+
+def forget_dead_java_process() -> bool:
+    """Drop PySpark's link to its Java process when that process has ended.
+
+    PySpark keeps one Java process for the life of the Python process and
+    connects every new session to it. When it has died (killed for memory, for
+    example), the next session fails at once with "Connection refused", so a
+    second attempt in the same command could never work. With the link
+    dropped, the next session starts a new Java process.
+
+    Returns:
+        True when a dead process was forgotten.
+    """
+    from pyspark import SparkContext
+    from pyspark.sql import SparkSession
+
+    gateway = getattr(SparkContext, "_gateway", None)
+    process = getattr(gateway, "proc", None)
+    if process is None or process.poll() is None:
+        return False
+    SparkContext._gateway = None
+    SparkContext._jvm = None
+    SparkContext._active_spark_context = None
+    SparkSession._instantiatedSession = None
+    SparkSession._activeSession = None
+    return True
 
 
 def _session(config, name: str, distributed: bool | None = None):
     """A Spark session for one unit, with a driver heap that fits the machine."""
     from opdi import periodrun
     from opdi.utils.spark_helpers import SparkSessionManager
+
+    if forget_dead_java_process():
+        print("  the Java process of the last session has ended; starting a new one")
 
     mem = periodrun._cgroup_v2_limit()
     limit_bytes, used_bytes = mem if mem else (None, 0)
@@ -535,6 +585,7 @@ def _attempt_unit(
     print(f"OPDI {label}")
     print(config.describe_target())
 
+    config.spark.size_executors_for_step(step)
     spark = _session(config, f"OPDI {label}")
     started = time.time()
     try:
@@ -589,7 +640,8 @@ def _attempt_unit(
                 )
                 return 1
             kwargs["allow_empty"] = allow_empty
-            periodrun.run_day_step(spark, config, step, day, kwargs)
+            for part in steps_run_with(step, config):
+                periodrun.run_day_step(spark, config, part, day, kwargs)
 
         elapsed = time.time() - started
         storage.mark_done(key, elapsed)
@@ -1053,6 +1105,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Warehouse to use (default: OPDI_WAREHOUSE if set, else " "s3a://eurocontrol/opdi).",
     )
     common.add_argument(
+        "--adsc",
+        action="store_true",
+        default=False,
+        help="Merge ADS-C reports into the tracks (a second source of positions, "
+        "mainly over oceans). It changes the track identifiers of aircraft that "
+        "have ADS-C reports, so use one warehouse with it or without it, not both.",
+    )
+    common.add_argument(
         "--europe",
         dest="worldwide",
         action="store_false",
@@ -1138,6 +1198,16 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one command; see the module description. Returns the exit code."""
     args = _parser().parse_args(argv)
+    # Written line by line, so that a log file shows each message when it is
+    # printed. Python otherwise holds output back when it does not go to a
+    # terminal, and a long step looks silent until it ends.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+    if getattr(args, "adsc", False):
+        os.environ[ADSC_VARIABLE] = "1"
     try:
         if args.command == "plan":
             print(json.dumps([d.isoformat() for d in days(args.start, args.end, args.order)]))

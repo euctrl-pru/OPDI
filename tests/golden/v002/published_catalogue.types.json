@@ -20,14 +20,6 @@
   "timestamp"
  ],
  [
-  "flight_list_bytes",
-  "bigint"
- ],
- [
-  "flight_events_bytes",
-  "bigint"
- ],
- [
   "release",
   "string"
  ],

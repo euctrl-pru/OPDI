@@ -40,6 +40,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StringType, StructField, StructType
 
 from opdi.config import OPDIConfig
+from opdi.reference.staged import StagedTable
 from opdi.utils.geospatial import calculate_bearing, destination_point
 from opdi.utils.storage import StorageManager
 
@@ -513,7 +514,19 @@ class RunwayGridGenerator:
             troublesome_airports = []
 
         airports_df = self.fetch_airport_list(airport_types)
-        processed_success = self._load_processed_airports()
+        # With Parquet folders the rows are written in batches to a building
+        # table and moved to the final table at the end; see `StagedTable` and
+        # `AirportLayoutGenerator.process_all`.
+        staged = None
+        if getattr(self.storage, "use_s3", False):
+            staged = StagedTable(
+                self.spark, self.storage, self.table_name, RUNWAY_GRID_SCHEMA, key="apt_icao"
+            )
+            processed_success = staged.done_keys()
+            if processed_success:
+                print(f"  Continuing a build: {len(processed_success)} airports already written.")
+        else:
+            processed_success = self._load_processed_airports()
         processed_failed: List[str] = []
         processed_errors: List[str] = []
         frames: List[pd.DataFrame] = []
@@ -548,6 +561,11 @@ class RunwayGridGenerator:
                 self._mark_failed(apt_icao, str(e), processed_failed, processed_errors)
                 continue
 
+            if staged is not None:
+                staged.add(pdf)
+                processed_success.append(apt_icao)
+                continue
+
             if not pdf.empty:
                 frames.append(pdf)
 
@@ -562,7 +580,9 @@ class RunwayGridGenerator:
         # createDataFrame is handed the concatenated pandas frame directly, not
         # pdf.to_dict("records") -- materialising millions of Row dicts through
         # Py4J was the second stall this path hit at 1,300-airport scale.
-        if frames:
+        if staged is not None:
+            staged.finish()
+        elif frames:
             big = pd.concat(frames, ignore_index=True)
             sdf = self.spark.createDataFrame(big, RUNWAY_GRID_SCHEMA)
             mode = "overwrite" if first_write else "append"

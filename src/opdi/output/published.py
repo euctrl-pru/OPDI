@@ -24,16 +24,40 @@ and the catalogue (``catalogue.parquet``), with one row per published day.
 
 The columns are declared in :mod:`opdi.output.schema`.
 
+What the values look like:
+
+* ``event_id`` is ``<flight_id>-E<nnnn>``, where ``nnnn`` counts the events of the
+  flight in time order, with at least four digits (``-E0001``), so the ids of a
+  flight sort in time order as text (ties are ordered by event type, then by the
+  pipeline's own event id). The id identifies an event within one release.
+  An event whose flight is in no flight list keeps the pipeline's own event
+  id.
+  The measurement ids of the classic views are the event id followed by a
+  suffix, so they follow it. The pipeline's working tables keep their own
+  hash ids.
+* Positions are rounded to 5 decimals (about 1 m), altitudes to whole feet,
+  and columns in nautical miles or degrees to 3 decimals. The numbers inside
+  ``info`` are cut to three decimals (not rounded), except numbers with a
+  positive exponent. The flight columns repeated on each event
+  are rounded the same way as in the flight list. The rule is
+  :func:`opdi.output.schema.published_decimals`.
+* The two settings ``EventConfig.published_event_id_by_flight`` and
+  ``EventConfig.published_values_rounded`` turn the first two points off;
+  ``EventConfig.legacy()`` has both off.
+
 How the files are written, so that readers can find rows quickly:
 
-* Each file is a single Parquet file compressed with zstd.
+* Each file is a single Parquet file compressed with zstd at level 9.
 * Rows are sorted: the flight list by departure airport and first-seen time,
   the events by flight and time. Each row group (a block of rows that a reader
   can skip as a whole) holds about 100,000 rows, and its minimum and maximum
   values let a reader skip the blocks it does not need.
 * Bloom filters (a compact test that tells a reader a value is certainly not in
   a block) are stored for the three identifiers a reader looks up one value
-  of: the flight identifier, the aircraft address and the call sign. Columns
+  of: the flight identifier, the aircraft address and the call sign. A filter
+  is sized for the number of distinct values its block can hold: as many as
+  the rows of a block in the flight list, and a tenth of that in the events
+  file, where a flight has about ten events or more in a block. Columns
   with few distinct values, such as the airports and the event type, are
   stored with a dictionary (a list of the distinct values, which each row then
   refers to), and the dictionary already tells a reader which values a block
@@ -53,7 +77,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Sequence
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 from opdi.output.schema import (
@@ -62,9 +86,11 @@ from opdi.output.schema import (
     FLIGHT_EVENTS,
     FLIGHT_INDEX,
     FLIGHT_LIST,
+    INFO_LONG_NUMBER,
     MEASUREMENT_COLUMNS,
     RELEASE,
     Column,
+    published_decimals,
 )
 
 FLIGHT_LIST_TABLE = "opdi_flight_list"
@@ -81,6 +107,26 @@ ROW_GROUP_ROWS = 100_000
 #: Upper limit on the size of a row group, in bytes. It is set high so that the
 #: row count above decides where a row group ends.
 _ROW_GROUP_MAX_BYTES = 1024 * 1024 * 1024
+
+#: Level of the zstd compression of the published files (1 is fastest, 22
+#: smallest). Level 9 gives smaller files than the default level 3 for a
+#: moderate cost in writing time.
+ZSTD_LEVEL = 9
+
+#: The Parquet writer option that sets the zstd level.
+_ZSTD_LEVEL_OPTION = "parquet.compression.codec.zstd.level"
+
+#: A row group of the events file holds the events of about this many rows per
+#: distinct flight, so a Bloom filter sized for ``rows // EVENTS_PER_FLIGHT``
+#: distinct values is large enough. About 2,500 flights share a row group of
+#: 100,000 events.
+EVENTS_PER_FLIGHT = 10
+
+
+def events_bloom_ndv(row_group_rows: int) -> int:
+    """Distinct values to size the Bloom filters of the events file for."""
+    return max(1, int(row_group_rows) // EVENTS_PER_FLIGHT)
+
 
 FLIGHT_LIST_SORT = ("adep", "first_seen")
 FLIGHT_EVENTS_SORT = ("flight_id", "event_time")
@@ -147,7 +193,24 @@ class PublishedLayout:
 # --- building the tables ----------------------------------------------------
 
 
-def build_flight_list(flight_list: DataFrame) -> DataFrame:
+def _rounded(df: DataFrame, info: bool = False) -> DataFrame:
+    """``df`` with the columns of :func:`~opdi.output.schema.published_decimals` rounded.
+
+    Args:
+        df: Rows with published column names.
+        info: Also cut the numbers in the ``info`` column to 3 decimals.
+    """
+    out = df
+    for name in df.columns:
+        places = published_decimals(name)
+        if places is not None:
+            out = out.withColumn(name, F.round(F.col(name), places))
+    if info and "info" in df.columns:
+        out = out.withColumn("info", F.regexp_replace(F.col("info"), INFO_LONG_NUMBER, "$1"))
+    return out
+
+
+def build_flight_list(flight_list: DataFrame, values_rounded: bool = True) -> DataFrame:
     """The published flight list from the pipeline's working flight list.
 
     Renames the columns to their published names, gives them their declared
@@ -155,6 +218,8 @@ def build_flight_list(flight_list: DataFrame) -> DataFrame:
 
     Args:
         flight_list: Rows of the working table ``opdi_flight_list``.
+        values_rounded: Round the values as
+            :func:`~opdi.output.schema.published_decimals` says.
 
     Returns:
         The rows with the columns of :data:`~opdi.output.schema.FLIGHT_LIST`.
@@ -171,10 +236,11 @@ def build_flight_list(flight_list: DataFrame) -> DataFrame:
             f"the flight list is missing the column(s) {missing}; run steps 03 and "
             "04b for this day before publishing it."
         )
-    return flight_list.select(
+    built = flight_list.select(
         *[F.col(c.source).cast(c.dtype).alias(c.name) for c in wanted],
         F.lit(RELEASE).alias("release"),
     )
+    return _rounded(built) if values_rounded else built
 
 
 def _h3_res_5() -> F.Column:
@@ -184,7 +250,11 @@ def _h3_res_5() -> F.Column:
 
 
 def build_flight_events(
-    events: DataFrame, measurements: DataFrame, flight_list: DataFrame
+    events: DataFrame,
+    measurements: DataFrame,
+    flight_list: DataFrame,
+    event_id_by_flight: bool = True,
+    values_rounded: bool = True,
 ) -> DataFrame:
     """The published flight events from the pipeline's working tables.
 
@@ -200,6 +270,13 @@ def build_flight_events(
             same events.
         flight_list: Rows of the working table ``opdi_flight_list`` that
             contain the events' flights. Extra flights do no harm.
+        event_id_by_flight: Publish the id ``<flight_id>-E<nnnn>``, with ``nnnn``
+            (at least four digits) counting the events of the flight by time,
+            then type, then working id. Events without a flight in
+            ``flight_list`` and the case of ``False`` keep the working id.
+        values_rounded: Round the values as
+            :func:`~opdi.output.schema.published_decimals` says, and cut the
+            numbers in ``info`` to three decimals.
 
     Returns:
         The rows with the columns of :data:`~opdi.output.schema.FLIGHT_EVENTS`.
@@ -222,7 +299,7 @@ def build_flight_events(
     )
 
     flights = (
-        build_flight_list(flight_list)
+        build_flight_list(flight_list, values_rounded)
         .drop("release")
         .withColumnRenamed("dof", "_flight_dof")
         .withColumnRenamed("version", "flight_version")
@@ -267,7 +344,29 @@ def build_flight_events(
         .withColumn("dof", F.coalesce(F.col("_flight_dof"), F.col("_event_dof")))
         .withColumn("release", F.lit(RELEASE))
     )
-    return joined.select(*[F.col(c.name).cast(c.dtype).alias(c.name) for c in FLIGHT_EVENTS])
+    if event_id_by_flight:
+        # The measurements were joined by the working id above. Only an event
+        # matched to a flight-list row is numbered under its flight. An event
+        # without a flight keeps its working id: it is numbered within one
+        # file, and the same track can have such events in the files of
+        # several days, which would repeat an id.
+        matched = F.col("_flight_id").isNotNull()
+        by_flight = Window.partitionBy("flight_id", matched).orderBy(
+            "event_time", "type", "event_id"
+        )
+        joined = joined.withColumn(
+            "event_id",
+            F.when(
+                matched,
+                F.concat(
+                    F.col("flight_id"),
+                    F.lit("-E"),
+                    F.format_string("%04d", F.row_number().over(by_flight)),
+                ),
+            ).otherwise(F.col("event_id")),
+        )
+    built = joined.select(*[F.col(c.name).cast(c.dtype).alias(c.name) for c in FLIGHT_EVENTS])
+    return _rounded(built, info=True) if values_rounded else built
 
 
 # --- writing ------------------------------------------------------------------
@@ -333,6 +432,8 @@ def write_temporary_file(
     sort_by: Sequence[str] = (),
     bloom_filters: Sequence[str] = (),
     row_group_rows: int = ROW_GROUP_ROWS,
+    bloom_expected_ndv: Optional[int] = None,
+    zstd_level: int = ZSTD_LEVEL,
 ) -> str:
     """Write ``df`` as exactly one Parquet file into the new folder ``folder``.
 
@@ -343,6 +444,11 @@ def write_temporary_file(
         bloom_filters: Columns to store a Bloom filter for. These columns are
             stored without a dictionary; every other column keeps one.
         row_group_rows: Number of rows per row group.
+        bloom_expected_ndv: Distinct values per row group to size each Bloom
+            filter for. The default is ``row_group_rows``, the most a row
+            group can hold. A filter sized for fewer values is smaller and
+            has a higher chance of a false positive when the group holds more.
+        zstd_level: Level of the zstd compression.
 
     Returns:
         The path of the file written.
@@ -351,12 +457,14 @@ def write_temporary_file(
         RuntimeError: If the folder does not end up holding exactly one file.
     """
     spark = df.sparkSession
+    ndv = row_group_rows if bloom_expected_ndv is None else bloom_expected_ndv
     out = df.coalesce(1)
     if sort_by:
         out = out.sortWithinPartitions(*sort_by)
     writer = (
         out.write.mode("overwrite")
         .option("compression", "zstd")
+        .option(_ZSTD_LEVEL_OPTION, str(int(zstd_level)))
         .option("parquet.block.row.count.limit", str(int(row_group_rows)))
         .option("parquet.block.size", str(_ROW_GROUP_MAX_BYTES))
     )
@@ -365,9 +473,9 @@ def write_temporary_file(
         # stored with a dictionary, so the dictionary is turned off for these
         # columns to make sure every row group has its filter. The expected
         # number of distinct values sizes the filter: a row group cannot hold
-        # more distinct values than rows.
+        # more distinct values than rows, which is the default.
         writer = writer.option(f"parquet.bloom.filter.enabled#{c}", "true")
-        writer = writer.option(f"parquet.bloom.filter.expected.ndv#{c}", str(int(row_group_rows)))
+        writer = writer.option(f"parquet.bloom.filter.expected.ndv#{c}", str(int(ndv)))
         writer = writer.option(f"parquet.enable.dictionary#{c}", "false")
     writer.parquet(folder)
 
@@ -435,6 +543,8 @@ def write_single_file(
     bloom_filters: Sequence[str] = (),
     row_group_rows: int = ROW_GROUP_ROWS,
     tmp_root: Optional[str] = None,
+    bloom_expected_ndv: Optional[int] = None,
+    zstd_level: int = ZSTD_LEVEL,
 ) -> None:
     """Write ``df`` as exactly one Parquet file at ``path``.
 
@@ -452,6 +562,8 @@ def write_single_file(
         bloom_filters: Columns to store a Bloom filter for.
         row_group_rows: Number of rows per row group.
         tmp_root: Folder for the temporary files.
+        bloom_expected_ndv: See :func:`write_temporary_file`.
+        zstd_level: Level of the zstd compression.
 
     Raises:
         RuntimeError: If the temporary folder does not hold exactly one file.
@@ -461,7 +573,9 @@ def write_single_file(
         tmp_root = path.rsplit("/", 1)[0] + "/_tmp"
     folder = _tmp_folder(tmp_root, path.rsplit("/", 1)[1])
     try:
-        part = write_temporary_file(df, folder, sort_by, bloom_filters, row_group_rows)
+        part = write_temporary_file(
+            df, folder, sort_by, bloom_filters, row_group_rows, bloom_expected_ndv, zstd_level
+        )
         replace_file(files, part, path, tmp_root)
     finally:
         files.delete(folder, True)
@@ -757,6 +871,8 @@ def publish_day(
     commit: str,
     row_group_rows: int = ROW_GROUP_ROWS,
     allow_empty: bool = False,
+    event_id_by_flight: bool = True,
+    values_rounded: bool = True,
 ) -> Dict:
     """Publish the flights of the tracks that started on ``day``.
 
@@ -786,6 +902,10 @@ def publish_day(
         row_group_rows: Number of rows per row group.
         allow_empty: Replace a published file that has rows with an empty
             one. Without it, that is refused.
+        event_id_by_flight: Publish the event ids as ``<flight_id>-E<nnnn>``
+            (:attr:`opdi.config.EventConfig.published_event_id_by_flight`).
+        values_rounded: Round the published values
+            (:attr:`opdi.config.EventConfig.published_values_rounded`).
 
     Returns:
         The day's figures: ``flights``, ``events``, ``first_event``,
@@ -811,10 +931,30 @@ def publish_day(
             "spark.sql.session.timeZone to UTC."
         )
     with PublishLock(spark, layout):
-        return _publish_day(spark, storage, day, layout, commit, row_group_rows, allow_empty)
+        return _publish_day(
+            spark,
+            storage,
+            day,
+            layout,
+            commit,
+            row_group_rows,
+            allow_empty,
+            event_id_by_flight,
+            values_rounded,
+        )
 
 
-def _publish_day(spark, storage, day, layout, commit, row_group_rows, allow_empty) -> Dict:
+def _publish_day(
+    spark,
+    storage,
+    day,
+    layout,
+    commit,
+    row_group_rows,
+    allow_empty,
+    event_id_by_flight=True,
+    values_rounded=True,
+) -> Dict:
     files = _Files(spark)
     flight_rows = _with_flight_rows(
         storage, _day_rows(storage, FLIGHT_LIST_TABLE, "DOF", day, day), day, day
@@ -841,18 +981,25 @@ def _publish_day(spark, storage, day, layout, commit, row_group_rows, allow_empt
     try:
         new = {
             "flight_list": write_temporary_file(
-                build_flight_list(flight_rows),
+                build_flight_list(flight_rows, values_rounded),
                 f"{folder}/flight_list",
                 sort_by=FLIGHT_LIST_SORT,
                 bloom_filters=FLIGHT_LIST_BLOOM,
                 row_group_rows=row_group_rows,
             ),
             "flight_events": write_temporary_file(
-                build_flight_events(event_rows, measurement_rows, nearby_flights),
+                build_flight_events(
+                    event_rows,
+                    measurement_rows,
+                    nearby_flights,
+                    event_id_by_flight,
+                    values_rounded,
+                ),
                 f"{folder}/flight_events",
                 sort_by=FLIGHT_EVENTS_SORT,
                 bloom_filters=FLIGHT_EVENTS_BLOOM,
                 row_group_rows=row_group_rows,
+                bloom_expected_ndv=events_bloom_ndv(row_group_rows),
             ),
         }
         if not allow_empty:
@@ -948,7 +1095,15 @@ def publish_range(
     commit = pipeline_commit()
     day = start
     while day <= end:
-        counts = publish_day(spark, storage, day, layout, commit)
+        counts = publish_day(
+            spark,
+            storage,
+            day,
+            layout,
+            commit,
+            event_id_by_flight=config.events.published_event_id_by_flight,
+            values_rounded=config.events.published_values_rounded,
+        )
         print(
             f"  published {day}: {counts['flights']:,} flights, "
             f"{counts['events']:,} events -> {layout.root}"

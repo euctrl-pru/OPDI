@@ -408,6 +408,15 @@ them (`src/opdi/config/environments.py`), the most the namespace quota holds:
 30 CPUs and 192 GiB in all, of which the pod that runs the driver takes 4 CPUs
 and 16 GiB.
 
+The reference step (step 00) runs its executors with 6 GiB of heap and
+7.5 GiB outside it, in a container of the same size: its airport zones are
+computed in Python, which holds about 4 GiB per executor. A run of the same
+day with ADS-C merged in, from an empty warehouse, with the time, executor
+time and memory of every step and of each part of step 00, is in "Run time
+and resources" in `readme.md`. To merge ADS-C in the Airflow runs, set the
+environment variable `OPDI_ADSC=1` where the commands run, for example by
+ending the Airflow variable `opdi_command_prefix` with `env OPDI_ADSC=1`.
+
 | Step | What it does | Time | Second run | With 416 parts for step 02 |
 |---|---|---|---|---|
 | 01 | fetch and thin one day of reports | 384 s | 396 s | 383 s |
@@ -461,6 +470,12 @@ tracks still open from one day to the next, would remove most of that work.
 `benchmarks/day_compare.py` compares the outputs of two runs of a day.
 
 ### Space
+
+The sizes below were measured with 32-character hash event ids, unrounded
+values, zstd at its default level and Bloom filters sized for 100,000 values
+per row group. Files published with the current settings (flight-based event
+ids, rounded values, zstd level 9, Bloom filters sized for a tenth of the rows
+of a row group) are smaller; the table has not been measured again.
 
 Measured by publishing one worldwide day (14 June 2026) from existing working
 tables on the OpenSky cluster with six executors:

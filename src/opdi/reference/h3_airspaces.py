@@ -149,10 +149,69 @@ def split_antimeridian(geom):
     return MultiPolygon(out) if len(out) != 1 else out[0]
 
 
+#: Width, in degrees of longitude, of the sectors a polygon around a pole is cut into.
+#: Sectors of 90 degrees still fail in h3 for some shapes and resolutions (40 of
+#: 448 trial pieces); sectors of 60 degrees and less filled in every trial.
+POLAR_SECTOR_DEG = 30
+
+#: How many times a polygon h3 cannot fill is halved by longitude before giving up.
+MAX_FILL_HALVINGS = 4
+
+
+def _surrounds_pole(poly: Polygon) -> bool:
+    """Whether the ring runs all the way round the globe and reaches a pole."""
+    west, south, east, north = poly.bounds
+    return (east - west) >= 359.0 and (south <= -89.9 or north >= 89.9)
+
+
+def split_polar(geom):
+    """Cut every polygon that surrounds a pole into sectors of longitude.
+
+    Such a polygon (Antarctica in the countries file) is drawn as a band from
+    180 W to 180 E whose far edge lies on the pole. ``h3.polygon_to_cells``
+    fails on it. Cut along meridians, each sector is an ordinary polygon with
+    the pole on its edge, and the sectors together fill the same ground.
+    """
+    out = []
+    for poly in _polygons(geom):
+        if not _surrounds_pole(poly):
+            out.append(poly)
+            continue
+        for west in range(-180, 180, POLAR_SECTOR_DEG):
+            sector = poly.intersection(box(west, -90, west + POLAR_SECTOR_DEG, 90))
+            out.extend(_polygons(sector))
+    if not out:
+        return Polygon()
+    return MultiPolygon(out) if len(out) != 1 else out[0]
+
+
 def _latlng_poly(poly: Polygon) -> "h3.LatLngPoly":
     outer = [(y, x) for x, y, *_ in poly.exterior.coords]
     holes = [[(y, x) for x, y, *_ in r.coords] for r in poly.interiors]
     return h3.LatLngPoly(outer, *holes)
+
+
+def _fill_polygon(poly: Polygon, res: int, halvings: int = 0) -> list:
+    """The cells of one polygon, as a list of integer arrays.
+
+    ``h3.polygon_to_cells`` fails on some large polygons near a pole or the
+    180th meridian. A polygon it cannot fill is halved by longitude and each
+    half filled on its own; the halves together cover the same ground.
+    """
+    from h3.api import numpy_int as h3n
+
+    try:
+        return [h3n.polygon_to_cells(_latlng_poly(poly), res)]
+    except Exception:  # noqa: BLE001 - h3 raises its own error classes
+        west, south, east, north = poly.bounds
+        if halvings >= MAX_FILL_HALVINGS or (east - west) < 1e-6:
+            raise
+        middle = (west + east) / 2.0
+        out = []
+        for part in (box(west, south, middle, north), box(middle, south, east, north)):
+            for piece in _polygons(poly.intersection(part)):
+                out.extend(_fill_polygon(piece, res, halvings + 1))
+        return out
 
 
 def compact_cells(geometry_wkt: str, res: int) -> List[Tuple[str, int]]:
@@ -166,8 +225,10 @@ def compact_cells(geometry_wkt: str, res: int) -> List[Tuple[str, int]]:
     import numpy as np
     from h3.api import numpy_int as h3n
 
-    geom = split_antimeridian(shapely.from_wkt(geometry_wkt))
-    parts = [h3n.polygon_to_cells(_latlng_poly(p), res) for p in _polygons(geom)]
+    # The polar cut first: a ring round a pole runs from 180 E to 180 W along the
+    # pole, which the antimeridian split would take for a crossing.
+    geom = split_antimeridian(split_polar(shapely.from_wkt(geometry_wkt)))
+    parts = [cells for p in _polygons(geom) for cells in _fill_polygon(p, res)]
     if not parts:
         return []
     cells = np.unique(np.concatenate(parts))
@@ -325,42 +386,70 @@ def overlap_report(cells: pd.DataFrame) -> pd.DataFrame:
     Columns ``code_a``, ``code_b`` and ``cells`` (the number of shared cells
     at full resolution).
 
-    Computed at the finest resolution present by uncompacting every volume to
-    integer cell arrays, so a coarse interior cell of one volume is compared
-    against the fine boundary cells of another. Only cells claimed more than
-    once are looked at further.
+    Worked out on the compact cells, without filling any volume at full
+    resolution: two volumes share ground where a cell of one is a cell of the
+    other or one of its ancestors. The shared part is then the finer of the
+    two cells, counted as its number of cells at the finest resolution
+    present. Filling the volumes instead takes one row per full-resolution
+    cell, 108 million for the FIRs of the world, which no driver holds.
     """
     import numpy as np
-    from h3.api import numpy_int as h3n
 
+    empty = pd.DataFrame(columns=["code_a", "code_b", "cells"])
     if cells.empty:
-        return pd.DataFrame(columns=["code_a", "code_b", "cells"])
+        return empty
     res = int(cells["h3_res"].max())
     volumes = []
-    arrays = []
+    own = []  # (cell, volume, resolution)
+    up = (
+        []
+    )  # (ancestor or the cell itself, volume, resolution of the cell, its full-resolution cells)
     for i, ((code, lo, hi), g) in enumerate(cells.groupby(["code", "min_fl", "max_fl"])):
-        ints = np.array([h3.str_to_int(c) for c in g["h3_cell"]], dtype=np.uint64)
-        full = h3n.uncompact_cells(ints, res)
-        arrays.append(np.stack([full, np.full(len(full), i, dtype=np.uint64)], axis=1))
         volumes.append((code, int(lo), int(hi)))
-    both = np.concatenate(arrays)
-    cell_ids, counts = np.unique(both[:, 0], return_counts=True)
-    shared = cell_ids[counts > 1]
-    if len(shared) == 0:
-        return pd.DataFrame(columns=["code_a", "code_b", "cells"])
-    hit = both[np.isin(both[:, 0], shared)]
+        for cell in g["h3_cell"].unique():
+            number = h3.str_to_int(cell)
+            cell_res = h3.get_resolution(cell)
+            size = h3.cell_to_children_size(cell, res)
+            own.append((number, i, cell_res))
+            up.append((number, i, cell_res, size))
+            for parent_res in range(cell_res):
+                parent = h3.str_to_int(h3.cell_to_parent(cell, parent_res))
+                up.append((parent, i, cell_res, size))
     # pandas cannot factorise unsigned 64-bit keys; the same bits as signed do.
-    df = pd.DataFrame({"cell": hit[:, 0].view(np.int64), "vol": hit[:, 1].astype(int)})
-    joined = df.merge(df, on="cell", suffixes=("_a", "_b"))
-    joined = joined[joined["vol_a"] < joined["vol_b"]]
+    own_a = np.array(own, dtype=np.uint64)
+    up_a = np.array(up, dtype=np.uint64)
+    coarse = pd.DataFrame(
+        {
+            "cell": own_a[:, 0].view(np.int64),
+            "vol_a": own_a[:, 1].astype(int),
+            "res_a": own_a[:, 2].astype(int),
+        }
+    )
+    fine = pd.DataFrame(
+        {
+            "cell": up_a[:, 0].view(np.int64),
+            "vol_b": up_a[:, 1].astype(int),
+            "res_b": up_a[:, 2].astype(int),
+            "size": up_a[:, 3].astype(np.int64),
+        }
+    )
+    # Each row: a cell of volume a that holds (or is) a cell of volume b.
+    joined = coarse.merge(fine, on="cell")
+    joined = joined[joined["vol_a"] != joined["vol_b"]]
+    # Two volumes holding the very same cell meet twice, once from each side.
+    joined = joined[(joined["res_b"] > joined["res_a"]) | (joined["vol_a"] < joined["vol_b"])]
+    if joined.empty:
+        return empty
     rows = []
-    for (va, vb), g in joined.groupby(["vol_a", "vol_b"]):
+    for (va, vb), shared in joined.groupby(["vol_a", "vol_b"])["size"].sum().items():
         code_a, lo_a, hi_a = volumes[va]
         code_b, lo_b, hi_b = volumes[vb]
         if code_a == code_b or not (lo_a < hi_b and lo_b < hi_a):
             continue
         a, b = sorted((code_a, code_b))
-        rows.append((a, b, int(len(g))))
+        rows.append((a, b, int(shared)))
+    if not rows:
+        return empty
     report = pd.DataFrame(rows, columns=["code_a", "code_b", "cells"])
     report = report.groupby(["code_a", "code_b"], as_index=False)["cells"].sum()
     return report.sort_values("cells", ascending=False).reset_index(drop=True)

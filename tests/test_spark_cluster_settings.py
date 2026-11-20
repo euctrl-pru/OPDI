@@ -131,3 +131,49 @@ def test_run_day_step_sets_the_step_value_and_puts_the_session_value_back(monkey
     assert seen == {"02": ["416", "416"], "04": ["104"], "03": ["104"]}
     # Back to the session's value after each step, a failed one included.
     assert spark.conf.values == {"spark.sql.shuffle.partitions": "104"}
+
+
+# --- executor size of the reference step ---------------------------------------
+
+
+def _mib(size: str) -> int:
+    return int(size[:-1]) * (1024 if size.endswith("g") else 1)
+
+
+def test_the_reference_step_gives_the_python_workers_more_room():
+    """Step 00a builds the zones in Python workers of about 4.4 GiB per executor."""
+    spark = OPDIConfig.for_environment("opensky").spark
+    usual = (spark.executor_memory, spark.executor_memory_overhead)
+    spark.size_executors_for_step("00")
+    assert (spark.executor_memory, spark.executor_memory_overhead) == ("6g", "7680m")
+    # The container stays the size the namespace quota was planned for.
+    assert _mib(spark.executor_memory) + _mib(spark.executor_memory_overhead) == _mib(
+        spark.k8s_executor_memory_limit
+    )
+    assert _mib(usual[0]) + _mib(usual[1]) == _mib(spark.k8s_executor_memory_limit)
+
+
+def test_the_day_steps_keep_the_usual_executor_size():
+    spark = OPDIConfig.for_environment("opensky").spark
+    usual = (spark.executor_memory, spark.executor_memory_overhead)
+    for step in ("01", "02", "02a", "03", "04", "04b", "09"):
+        spark.size_executors_for_step(step)
+        assert (spark.executor_memory, spark.executor_memory_overhead) == usual
+
+
+def test_a_session_on_one_machine_keeps_its_executor_size():
+    spark = OPDIConfig.for_environment("local").spark
+    usual = (spark.executor_memory, spark.executor_memory_overhead)
+    spark.size_executors_for_step("00")
+    assert (spark.executor_memory, spark.executor_memory_overhead) == usual
+
+
+def test_a_day_step_after_the_reference_step_gets_the_usual_size_back():
+    """One configuration serves all steps of a period run, each in its own session."""
+    spark = OPDIConfig.for_environment("opensky").spark
+    usual = (spark.executor_memory, spark.executor_memory_overhead)
+    spark.size_executors_for_step("00")
+    spark.size_executors_for_step("01")
+    assert (spark.executor_memory, spark.executor_memory_overhead) == usual
+    spark.size_executors_for_step("00")
+    assert (spark.executor_memory, spark.executor_memory_overhead) == ("6g", "7680m")

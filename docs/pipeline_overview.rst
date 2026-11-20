@@ -122,6 +122,11 @@ Step 09 -- Published daily files
 Each day's flight list and flight events (with their measurements as columns)
 are written as one Parquet file each, under ``<release root>/published``,
 together with a monthly flight index and a catalogue of the published days.
+Event ids are ``<flight_id>-E<nnnn>`` and values are rounded (positions to 5
+decimals, altitude to whole feet, nautical-mile and degree columns to 3
+decimals, numbers in ``info`` cut to three decimals); both follow settings of ``EventConfig``. The files are compressed
+with zstd level 9, and the Bloom filters of the events file are sized for a
+tenth of the rows of a row group.
 :mod:`opdi.published` reads them without Spark.
 
 Data flow
