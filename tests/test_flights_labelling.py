@@ -378,3 +378,45 @@ def test_a_short_overflight_is_still_dropped(spark):
     """Under five minutes of reception is not a flight. Unchanged by the fix."""
     rows = _overflights(spark, [_sv_row("t1", "RYR456", 0), _sv_row("t1", "RYR456", 2)])
     assert rows == []
+
+
+def test_a_day_run_on_a_months_last_day_skips_flights_filed_around_midnight(spark):
+    """The flights a day run filed in the last second, or under the next day.
+
+    On 2026-07-31 the skip list was read through the month window, which ends
+    at 23:59:59. The flights first seen in that second or after midnight were
+    missed and written again as overflights; step 04 then refused the flight
+    list for its repeated ids.
+    """
+    from datetime import date, datetime
+
+    day = date(2025, 6, 30)
+
+    def report(track, hour, minute):
+        return (track, "abc123", "RYR456", datetime(2025, 6, 30, hour, minute, 0), day)
+
+    sv = spark.createDataFrame(
+        [
+            report("last_second", 23, 50),
+            report("last_second", 23, 58),
+            report("after_midnight", 23, 51),
+            report("after_midnight", 23, 59),
+            report("overflight", 23, 52),
+            report("overflight", 23, 59),
+        ],
+        _OF_SCHEMA + ", dof date",
+    )
+    fl = spark.createDataFrame(
+        [
+            ("last_second", datetime(2025, 6, 30, 23, 59, 59), date(2025, 6, 30)),
+            ("after_midnight", datetime(2025, 7, 1, 0, 10, 0), date(2025, 7, 1)),
+            # Another day's flight that happens to carry the same id is not
+            # in reach of this run and must not hide the overflight.
+            ("overflight", datetime(2025, 7, 2, 8, 0, 0), date(2025, 7, 2)),
+        ],
+        "id string, first_seen timestamp, DOF date",
+    )
+    proc = _processor({"osn_tracks": sv, "opdi_flight_list": fl})
+    proc._batch_day = day
+    rows = proc._fetch_overflights(day).collect()
+    assert [r["id"] for r in rows] == ["overflight"]
