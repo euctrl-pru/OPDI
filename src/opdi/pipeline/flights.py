@@ -16,7 +16,7 @@ See https://www.opdi.aero/content/methods/airports.html.
 
 import functools
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
@@ -1788,6 +1788,33 @@ class FlightListProcessor:
     # Overflight processing
     # ------------------------------------------------------------------
 
+    def _flight_list_ids(self, month: date) -> DataFrame:
+        """The ids already in the flight list that an overflight pass must skip.
+
+        For a day run these are the rows of the day's folder and of the next
+        day's: ``DOF`` is the date of a flight's first measured report, so a
+        track that starts just before midnight can be filed under the next
+        day. The reports of a day run end with the next day, so no row lies
+        further on.
+
+        The month window is not used for a day run. It ends at 23:59:59 of
+        the month's last day, so on that day it missed the flights first seen
+        in the last second or after midnight, and the overflight pass wrote
+        them a second time.
+
+        A monthly run keeps the month window on ``first_seen``.
+        """
+        day = getattr(self, "_batch_day", None)
+        fl = self.storage.read_table("opdi_flight_list")
+        dof = next((c for c in fl.columns if c.lower() == "dof"), None)
+        if day is not None and dof is not None:
+            return fl.filter(
+                (col(dof) >= lit(day)) & (col(dof) <= lit(day + timedelta(days=1)))
+            ).select("id")
+        return self._get_data_within_timeframe(
+            "opdi_flight_list", month, time_col="first_seen"
+        ).select("id")
+
     def _fetch_overflights(self, month: date) -> DataFrame:
         """Overflights: tracks without an airport not yet in the flight list.
 
@@ -1822,11 +1849,7 @@ class FlightListProcessor:
                 )
 
         sv = self._get_data_within_timeframe(self.tracks_table, month, prepare=prepare)
-        fl = self._get_data_within_timeframe(
-            "opdi_flight_list",
-            month,
-            time_col="first_seen",
-        ).select("id")
+        fl = FlightListProcessor._flight_list_ids(self, month)
 
         # No fillna here: FLT_ID is written as it comes. In a default run it
         # is already the track's call sign, blank-filled; in a v0.0.2 run it
